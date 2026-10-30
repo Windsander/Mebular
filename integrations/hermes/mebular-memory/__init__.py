@@ -23,8 +23,10 @@ Design rules
   per-profile spool and retried by a daemon worker.  Checkpoints are
   best-effort and stay pending when the sidecar cannot commit them.
 * Hermes' ``MemoryProvider`` API v1 does not expose a compaction summary.  The
-  pre-compress checkpoint therefore always sends ``summary: null`` with
-  state-only metadata; it never invents a summary.
+  pre-compress checkpoint therefore falls back to ``contentMode=summary_only``
+  with ``summary: null`` and a warning; it never invents structured fields.  A
+  host-supplied summary is parsed into schema 2 only when the structured
+  headings are present.
 
 The provider intentionally does **not** claim to know the host's current
 conversation model.  The Hermes ``MemoryProvider`` interface does not expose
@@ -207,6 +209,278 @@ def _clean_text(value: Any, limit: int = _MAX_CHUNK_CHARS) -> str:
             text = str(value)
     text = text.replace("\x00", "")
     return text[:limit]
+
+
+_CHECKPOINT_HEADINGS = {
+    "objective": "goal",
+    "goal": "goal",
+    "aim": "goal",
+    "requirements": "constraints",
+    "constraints": "constraints",
+    "decisions": "decisions",
+    "decision log": "decisions",
+    "work state": "progress",
+    "progress": "progress",
+    "status": "progress",
+    "next move": "next",
+    "next steps": "next",
+    "next step": "next",
+    "relevant files": "files",
+    "files": "files",
+    "important context": "context",
+    "open questions": "questions",
+    "questions": "questions",
+}
+
+
+def _checkpoint_heading_key(line: str) -> Optional[str]:
+    raw = str(line or "").strip()
+    if not raw or len(raw) > 80:
+        return None
+    title = ""
+    match = re.match(r"^#{1,6}\s+(.+?)\s*#*\s*$", raw)
+    if match:
+        title = match.group(1)
+    else:
+        match = re.match(r"^\*\*(.+?)\*\*\s*:?\s*$", raw)
+        if match:
+            title = match.group(1)
+        else:
+            match = re.match(r"^([A-Za-z][A-Za-z /&_-]{1,60}):\s*$", raw)
+            if match:
+                title = match.group(1)
+    if not title:
+        return None
+    return _CHECKPOINT_HEADINGS.get(re.sub(r"\s+", " ", title.lower()).strip())
+
+
+def _checkpoint_placeholder(text: str) -> bool:
+    return bool(re.match(r"^\(?\s*(?:none|n/a|no blockers?|无)\s*\)?$", str(text or "").strip(), re.IGNORECASE))
+
+
+def _checkpoint_bullet_text(line: str) -> str:
+    match = re.match(r"^(?:[-*•]|\d+[.)])\s+(.+)$", str(line or "").strip())
+    return match.group(1).strip() if match else ""
+
+
+def _checkpoint_summary_sections(text: str) -> Dict[str, List[str]]:
+    sections: Dict[str, List[str]] = {}
+    current: Optional[str] = None
+    for line in str(text or "").splitlines():
+        key = _checkpoint_heading_key(line)
+        if key:
+            current = key
+            sections.setdefault(current, [])
+            continue
+        if current:
+            sections[current].append(line)
+    return sections
+
+
+def _checkpoint_section_items(lines: Iterable[str]) -> List[str]:
+    out: List[str] = []
+    current = ""
+    for line in lines or []:
+        bullet = _checkpoint_bullet_text(line)
+        if bullet:
+            if current:
+                out.append(current)
+            current = bullet
+        elif str(line or "").strip():
+            text = str(line).strip()
+            current = f"{current} {text}" if current else text
+        elif current:
+            out.append(current)
+            current = ""
+    if current:
+        out.append(current)
+    return [item for item in out if item and not _checkpoint_placeholder(item)]
+
+
+def _checkpoint_work_state(lines: Iterable[str]) -> Dict[str, List[Dict[str, str]]]:
+    progress: Dict[str, List[Dict[str, str]]] = {"done": [], "doing": [], "blocked": []}
+    bucket = "doing"
+    current = ""
+
+    def flush() -> None:
+        nonlocal current
+        if current:
+            progress[bucket].append({"text": current})
+        current = ""
+
+    for line in lines or []:
+        raw = str(line or "").strip()
+        subheading = (
+            re.match(r"^#{1,6}\s*(.+?)\s*#*$", raw)
+            or re.match(r"^\*\*(.+?)\*\*\s*:?\s*$", raw)
+            or re.match(r"^([A-Za-z][A-Za-z /&_-]{1,40}):\s*$", raw)
+        )
+        if subheading:
+            flush()
+            label = subheading.group(1).lower()
+            if re.match(r"^(?:completed|done|finished|已完成)$", label):
+                bucket = "done"
+            elif re.match(r"^(?:blocked|blocker|waiting|阻塞|等待)$", label):
+                bucket = "blocked"
+            elif re.match(r"^(?:active|doing|in progress|current|进行中)$", label):
+                bucket = "doing"
+            continue
+        bullet = _checkpoint_bullet_text(line)
+        if bullet:
+            flush()
+            normalized = bullet.lower()
+            if re.match(r"^(?:done|completed|finished|已完成)\b", normalized) or re.match(r"^\[[xX]\]", bullet):
+                bucket = "done"
+            elif re.match(r"^(?:blocked|blocker|waiting|阻塞|等待)\b", normalized):
+                bucket = "blocked"
+            elif re.match(r"^(?:doing|in progress|current|进行中)\b", normalized):
+                bucket = "doing"
+            text = re.sub(r"^(?:done|completed|finished|doing|in progress|current|blocked|blocker|waiting)\s*[:：-]\s*",
+                          "", re.sub(r"^\[[ xX]\]\s*", "", bullet), flags=re.IGNORECASE).strip()
+            if text and not _checkpoint_placeholder(text):
+                current = text
+            continue
+        if raw:
+            text = re.sub(r"^(?:done|completed|finished|doing|in progress|current|blocked|blocker|waiting)\s*[:：-]\s*",
+                          "", raw, flags=re.IGNORECASE).strip()
+            if not text or _checkpoint_placeholder(text):
+                flush()
+                continue
+            current = f"{current} {text}" if current else text
+        else:
+            flush()
+    flush()
+    return {
+        "done": progress["done"][:50],
+        "doing": progress["doing"][:50],
+        "blocked": progress["blocked"][:50],
+    }
+
+
+def _split_checkpoint_decision(text: str) -> Dict[str, str]:
+    parts = re.split(r"\s+(?:—|–|-|because|reason:)\s+", str(text or "").strip(), flags=re.IGNORECASE)
+    if len(parts) < 2:
+        return {"text": str(text or "").strip()}
+    return {"text": parts[0].strip(), "reason": " ".join(parts[1:]).strip()}
+
+
+def _checkpoint_file_item(text: str) -> Dict[str, str]:
+    value = str(text or "").strip()
+    match = re.match(r"^(.+?)(?:\s+[（(]([^）)]+)[）)])?$", value)
+    path = (match.group(1) if match else value).replace("`", "").strip()
+    meta = (match.group(2) if match and match.group(2) else "").lower()
+    item: Dict[str, str] = {"path": path}
+    if re.search(r"write|edit|modify", meta):
+        item["role"] = "write"
+    elif re.search(r"read|reference", meta):
+        item["role"] = "read"
+    if "in_progress" in meta or "in progress" in meta:
+        item["status"] = "in_progress"
+    return item
+
+
+def _parse_compaction_checkpoint(
+    summary: str,
+    *,
+    thread_id: str,
+    domain: str,
+    fleet_task_id: Optional[str] = None,
+    record_ids: Optional[List[str]] = None,
+    detail_ids: Optional[List[str]] = None,
+    message_ids: Optional[List[str]] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Parse a compaction summary into structured schema 2, or return None.
+
+    A checkpoint is structured only when both Objective/Goal and
+    Next Move/Next Steps are present.  Callers must otherwise write
+    ``summary_only`` and must never invent missing fields.
+    """
+    sections = _checkpoint_summary_sections(summary)
+    goal = "\n".join(_checkpoint_section_items(sections.get("goal", []))).strip()
+    next_steps = _checkpoint_section_items(sections.get("next", []))
+    if not goal or not next_steps:
+        return None
+    constraints = [
+        {"text": item, "source": "compaction_summary"}
+        for item in _checkpoint_section_items(sections.get("constraints", []))
+    ]
+    decisions = [_split_checkpoint_decision(item) for item in _checkpoint_section_items(sections.get("decisions", []))]
+    progress = _checkpoint_work_state(sections.get("progress", []))
+    files = [_checkpoint_file_item(item) for item in _checkpoint_section_items(sections.get("files", []))]
+    questions = [
+        {"text": item, "blocking": ("?" in item or "？" in item or "blocking" in item.lower())}
+        for item in _checkpoint_section_items(sections.get("questions", []))
+    ]
+    context = _checkpoint_section_items(sections.get("context", []))
+    state: Dict[str, Any] = {
+        "schema": 2,
+        "contentMode": "structured",
+        "task": {"key": domain, "threadId": thread_id, "fleetTaskId": fleet_task_id or None},
+        "goal": goal[:2048],
+        "constraints": [
+            {"id": f"c{index + 1}", **item}
+            for index, item in enumerate(constraints[:32])
+        ],
+        "decisions": [
+            {"id": f"d{index + 1}", **item}
+            for index, item in enumerate(decisions[:50])
+        ],
+        "progress": {
+            "done": [{"id": f"p{index + 1}", **item} for index, item in enumerate(progress["done"][:50])],
+            "doing": [{"id": f"p{len(progress['done']) + index + 1}", **item} for index, item in enumerate(progress["doing"][:50])],
+            "blocked": [{"id": f"p{len(progress['done']) + len(progress['doing']) + index + 1}", **item} for index, item in enumerate(progress["blocked"][:50])],
+        },
+        "nextSteps": [{"id": f"n{index + 1}", "text": item} for index, item in enumerate(next_steps[:32])],
+        "files": files[:100],
+        "openQuestions": [{"id": f"q{index + 1}", **item} for index, item in enumerate(questions[:32])],
+        "references": {
+            "recordIds": list(record_ids or [])[:200],
+            "detailIds": list(detail_ids or [])[:200],
+            "messageIds": list(message_ids or [])[:200],
+            "fleetTaskId": fleet_task_id or None,
+            "urls": [],
+        },
+    }
+    if context:
+        state["context"] = context[:16]
+    if metadata:
+        state["host"] = metadata
+    return state
+
+
+def _summary_only_checkpoint_state(
+    *,
+    thread_id: str,
+    domain: str,
+    fleet_task_id: Optional[str] = None,
+    record_ids: Optional[List[str]] = None,
+    detail_ids: Optional[List[str]] = None,
+    message_ids: Optional[List[str]] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    state: Dict[str, Any] = {
+        "schema": 2,
+        "contentMode": "summary_only",
+        "task": {"key": domain, "threadId": thread_id, "fleetTaskId": fleet_task_id or None},
+        "goal": None,
+        "constraints": [],
+        "decisions": [],
+        "progress": {"done": [], "doing": [], "blocked": []},
+        "nextSteps": [],
+        "files": [],
+        "openQuestions": [],
+        "references": {
+            "recordIds": list(record_ids or [])[:200],
+            "detailIds": list(detail_ids or [])[:200],
+            "messageIds": list(message_ids or [])[:200],
+            "fleetTaskId": fleet_task_id or None,
+            "urls": [],
+        },
+    }
+    if metadata:
+        state["host"] = metadata
+    return state
 
 
 def _content_text(content: Any) -> str:
@@ -1775,9 +2049,10 @@ class MebularMemoryProvider(MemoryProvider):
         """Best-effort archive + state-only checkpoint before compression.
 
         Hermes' ``MemoryProvider`` API v1 does not expose a compaction summary.
-        The checkpoint therefore always has ``summary: null`` and state-only
-        metadata; it is never filled with archive text or model output.  Any
-        failure leaves the checkpoint pending and never blocks compression.
+        The checkpoint therefore falls back to ``contentMode=summary_only``
+        with ``summary: null`` and a warning; when a host supplies a summary it
+        is parsed into schema 2 only if the structured headings are present.
+        Any failure leaves the checkpoint pending and never blocks compression.
         """
         try:
             self._archive(messages, label="compress")
@@ -1785,7 +2060,8 @@ class MebularMemoryProvider(MemoryProvider):
                 self.flush(timeout=self._archive_flush_timeout)
             if (self._ready() and self._writes_enabled
                     and self._capability_enabled("checkpoint")):
-                self._submit_checkpoint(messages, kind="pre_compress")
+                summary = kwargs.get("summary") or kwargs.get("compaction_summary")
+                self._submit_checkpoint(messages, kind="pre_compress", summary=summary)
         except Exception as error:
             logger.debug("Mebular pre-compress archive skipped: %s", type(error).__name__)
         return ""
@@ -1886,7 +2162,7 @@ class MebularMemoryProvider(MemoryProvider):
     # Checkpoints (state-only; no fabricated summary)
     # ------------------------------------------------------------------
 
-    def _checkpoint_payload(self, messages: Any, *, kind: str) -> Dict[str, Any]:
+    def _checkpoint_payload(self, messages: Any, *, kind: str, summary: Any = None) -> Dict[str, Any]:
         sid = self._session_id
         thread_id = self._thread_id(sid)
         now = _now_ms()
@@ -1899,22 +2175,46 @@ class MebularMemoryProvider(MemoryProvider):
         compaction_id = _sha256_text(f"{kind}\x00{thread_id}\x00{transcript_hash}")[:32]
         domain = self._domain or f"task:{thread_id}"
         request_id = f"hermes_{kind}_{thread_id}_{compaction_id}"[:200]
+        summary_text = _clean_text(summary, 64 * 1024).strip()
+        metadata = {
+            "host": "hermes",
+            "kind": kind,
+            "messageCount": len(source),
+            "lastMessageId": last_message_id,
+            "transcriptHash": f"sha256:{transcript_hash}",
+            "sessionId": sid,
+            "at": now,
+        }
+        options = {
+            "thread_id": thread_id,
+            "domain": domain,
+            "record_ids": [],
+            "detail_ids": [],
+            "message_ids": [str(chunk.get("messageId") or "") for chunk in chunks if chunk.get("messageId")][:200],
+            "metadata": metadata,
+        }
+        state = _parse_compaction_checkpoint(summary_text, **options) if summary_text else None
+        structured = state is not None
+        if state is None:
+            state = _summary_only_checkpoint_state(**options)
+        state.update({
+            "kind": kind,
+            "messageCount": len(source),
+            "lastMessageId": last_message_id,
+            "transcriptHash": f"sha256:{transcript_hash}",
+            "sessionId": sid,
+        })
         return {
             "requestId": request_id,
             "agentId": self._agent_id,
             "actor": {"type": "agent", "agentId": self._agent_id},
             "threadId": thread_id,
             "domain": domain,
-            "summary": None,
-            "warning": "summary_unavailable",
-            "state": {
-                "kind": kind,
-                "messageCount": len(source),
-                "lastMessageId": last_message_id,
-                "transcriptHash": f"sha256:{transcript_hash}",
-                "sessionId": sid,
-            },
+            "summary": summary_text or None,
+            "warning": None if structured or summary_text else "summary_unavailable",
+            "state": state,
             "recordIds": [],
+            "detailIds": [],
             "provenance": {"adapter": ADAPTER_HEADER, "at": now},
         }
 
@@ -1925,8 +2225,8 @@ class MebularMemoryProvider(MemoryProvider):
         agent = urlparse.quote(self._agent_id, safe="")
         return f"/checkpoints/{quoted}?agentId={agent}"
 
-    def _submit_checkpoint(self, messages: Any, *, kind: str) -> None:
-        payload = self._checkpoint_payload(messages, kind=kind)
+    def _submit_checkpoint(self, messages: Any, *, kind: str, summary: Any = None) -> None:
+        payload = self._checkpoint_payload(messages, kind=kind, summary=summary)
         try:
             self._send_checkpoint(payload)
             return

@@ -443,7 +443,10 @@ async function main() {
       && checkpoint.agentId === 'opencode'
       && checkpoint.threadId === sessionID
       && String(checkpoint.domain).startsWith('task:')
-      && checkpoint.state?.kind === 'compaction', JSON.stringify(checkpoint));
+      && checkpoint.state?.kind === 'compaction'
+      && checkpoint.state?.schema === 2
+      && (checkpoint.state?.contentMode === 'structured' || checkpoint.state?.contentMode === 'summary_only'),
+    JSON.stringify(checkpoint));
     check('checkpoint 无旧 sync 字段', checkpoint?.sync === undefined);
 
     check('sidecar 请求记录不包含 host token', !JSON.stringify(await runtime.sidecarStatus()).includes(hostToken));

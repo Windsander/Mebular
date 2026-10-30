@@ -172,6 +172,20 @@ export class SettlementRuntime {
       ...(options.now ? { now: options.now } : {}),
     };
     this.ingest = new IngestService(ingestOptions);
+    this.objects = new MemoryObjectService({
+      config: options.config,
+      local: options.local,
+      client: options.client,
+      identity: {
+        cloudId: options.identity.cloudId,
+        profileId: options.identity.profileId,
+        hostId: options.identity.hostId,
+        ...(options.identity.userId !== undefined ? { userId: options.identity.userId } : {}),
+      },
+      policy: this.policy,
+      ...(this.modelRuntime ? { modelRuntime: this.modelRuntime } : {}),
+      ...(options.now ? { now: options.now } : {}),
+    });
     this.recall = new RecallService({
       config: options.config,
       local: options.local,
@@ -184,20 +198,7 @@ export class SettlementRuntime {
       },
       policy: this.policy,
       getPolicy: () => this.policy,
-      ...(this.modelRuntime ? { modelRuntime: this.modelRuntime } : {}),
-      ...(options.now ? { now: options.now } : {}),
-    });
-    this.objects = new MemoryObjectService({
-      config: options.config,
-      local: options.local,
-      client: options.client,
-      identity: {
-        cloudId: options.identity.cloudId,
-        profileId: options.identity.profileId,
-        hostId: options.identity.hostId,
-        ...(options.identity.userId !== undefined ? { userId: options.identity.userId } : {}),
-      },
-      policy: this.policy,
+      checkpointSource: this.objects,
       ...(this.modelRuntime ? { modelRuntime: this.modelRuntime } : {}),
       ...(options.now ? { now: options.now } : {}),
     });

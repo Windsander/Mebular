@@ -401,7 +401,14 @@ describe('版本与详情写入', () => {
       agentId: 'opencode',
       threadId: 'th_detail_ref',
       domain: 'default',
-      state: { goal: 'detail link' },
+      state: {
+        schema: 2,
+        contentMode: 'structured',
+        task: { key: 'default', threadId: 'th_detail_ref', fleetTaskId: null },
+        goal: 'detail link',
+        nextSteps: [{ id: 'n1', text: 'link detail' }],
+        references: { recordIds: [], detailIds: [], messageIds: [], fleetTaskId: null, urls: [] },
+      },
     }, { token });
     expect(checkpoint.status).toBe(200);
     const checkpointId = checkpoint.body.data.object.id;

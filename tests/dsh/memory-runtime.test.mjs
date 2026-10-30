@@ -984,12 +984,12 @@ describe('@mebular/dsh-plugin memory runtime：session/event 摄取', () => {
 });
 
 describe('@mebular/dsh-plugin memory runtime：compaction checkpoint', () => {
-  function compactionEvents(compactionId = 'c1') {
+  function compactionEvents(compactionId = 'c1', summaryText = 'the summary') {
     return [
       event('compaction/start', 10, { compactionId, turn: 1 }),
       event('compaction/summary', 11, {
         compactionId,
-        summary: [{ type: 'text', text: 'the summary' }],
+        summary: [{ type: 'text', text: summaryText }],
         shadowedRange: { start: 1, end: 9 },
         shadowedSeqs: [1, 2, 3],
         shadowedTokenCount: 120,
@@ -1033,6 +1033,8 @@ describe('@mebular/dsh-plugin memory runtime：compaction checkpoint', () => {
     expect(fetch.calls[0].body.domain).toBe('task:dsh_s1');
     expect(fetch.calls[0].body).not.toHaveProperty('sync');
     expect(fetch.calls[0].body.state).toMatchObject({
+      schema: 2,
+      contentMode: 'summary_only',
       kind: 'dsh-compaction',
       compactionId: 'c1',
       threadId: 'dsh_s1',
@@ -1041,6 +1043,60 @@ describe('@mebular/dsh-plugin memory runtime：compaction checkpoint', () => {
     });
     expect(adapter.getState().checkpoints.committed).toBe(1);
     expect(adapter.getState().compactions[0]).toMatchObject({ compactionId: 'c1', committed: true });
+  });
+
+  it('compaction summary 含标题结构时写入 schema 2 结构化 checkpoint', async () => {
+    const ctx = fakeContext();
+    const fetch = installFetch(() => jsonOk({ checkpoint: { revision: 1 } }));
+    const session = makeSession();
+    const { adapter } = adapterFor({
+      ctx,
+      config: {
+        enabled: true,
+        recall: false,
+        ingest: false,
+        checkpoints: true,
+        hideMemoryTools: false,
+        checkpointTimeoutMs: 100,
+      },
+      fetchImpl: fetch.fetchImpl,
+    });
+    const listener = handlerFor(ctx, 'session/event');
+    const summary = [
+      '## Objective',
+      'Ship structured checkpoints.',
+      '## Requirements',
+      '- Do not add public MCP tools',
+      '## Decisions',
+      '- Reuse graph storage — no second store',
+      '## Work State',
+      '- Done: contract frozen',
+      '- Doing: host parser',
+      '- Blocked: waiting for assets',
+      '## Next Move',
+      '- Run the DSH journey',
+      '## Relevant Files',
+      '- packages/dsh-plugin/memory-runtime.js (write, in_progress)',
+    ].join('\n');
+    for (const entry of compactionEvents('c_structured', summary)) listener(session, entry);
+    await adapter.flush();
+    const body = fetch.calls[0].body;
+    expect(body.summary).toBe(summary);
+    expect(body.state).toMatchObject({
+      schema: 2,
+      contentMode: 'structured',
+      task: { key: 'task:dsh_s1', threadId: 'dsh_s1', fleetTaskId: null },
+      goal: 'Ship structured checkpoints.',
+      progress: {
+        done: [{ text: 'contract frozen' }],
+        doing: [{ text: 'host parser' }],
+        blocked: [{ text: 'waiting for assets' }],
+      },
+      nextSteps: [{ text: 'Run the DSH journey' }],
+      files: [{ path: 'packages/dsh-plugin/memory-runtime.js', role: 'write', status: 'in_progress' }],
+    });
+    expect(body.state.constraints[0]).toMatchObject({ text: 'Do not add public MCP tools', source: 'compaction_summary' });
+    expect(body.state.decisions[0]).toMatchObject({ text: 'Reuse graph storage', reason: 'no second store' });
   });
 
   it('HTTP 失败不伪装 committed', async () => {

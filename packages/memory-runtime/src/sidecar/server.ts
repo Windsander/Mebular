@@ -999,8 +999,9 @@ export class SidecarServer {
         }
         const agentId = url.searchParams.get('agentId') ?? url.searchParams.get('agent');
         const sync = url.searchParams.get('sync');
+        const domain = url.searchParams.get('domain');
         if (isGet) {
-          const result = await this.objects.getCheckpoint(threadId, { agentId, sync });
+          const result = await this.objects.getCheckpoint(threadId, { agentId, sync, domain });
           this.send(res, result.status, this.envelope(requestId, result.data, result.warnings, result.degraded));
           return;
         }
@@ -1010,7 +1011,7 @@ export class SidecarServer {
             this.sendError(res, 503, requestId, 'stopping', 'sidecar 正在停止', undefined, true);
             return;
           }
-          const result = await this.objects.deleteCheckpoint(threadId, { agentId, sync });
+          const result = await this.objects.deleteCheckpoint(threadId, { agentId, sync, domain });
           this.send(res, result.status, this.envelope(requestId, result.data, result.warnings, result.degraded));
           return;
         }

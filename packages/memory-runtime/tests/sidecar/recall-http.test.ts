@@ -415,4 +415,149 @@ describe('sidecar recall/context HTTP', () => {
     expect(response.body.data.warnings.length).toBeGreaterThan(0);
     expect(JSON.stringify(response.body)).not.toContain('cap-token');
   });
+
+  it('/context 注入结构化 checkpoint：顺序、预算、summary_only 降级、过期沉默', async () => {
+    const { server, fake } = await setup();
+    fake.setRecords([]);
+    const checkpoint = (overrides: Record<string, unknown> = {}) => ({
+      id: '01JCHECKPOINT',
+      domain: 'task:th_ckpt_ctx',
+      agentId: 'opencode',
+      threadId: 'th_ckpt_ctx',
+      revision: 3,
+      state: {
+        schema: 2,
+        contentMode: 'structured',
+        task: { key: 'task:th_ckpt_ctx', threadId: 'th_ckpt_ctx', fleetTaskId: null },
+        goal: '完成结构化 checkpoint 注入',
+        constraints: [{ id: 'c1', text: '不新增公共工具' }],
+        decisions: [{ id: 'd1', text: '复用图存储', reason: '不建第二套存储' }],
+        progress: {
+          done: [{ id: 'p1', text: '契约冻结' }],
+          doing: [{ id: 'p2', text: 'sidecar 注入' }],
+          blocked: [{ id: 'p3', text: '等待真实旅程', reason: '发布未闭环' }],
+        },
+        nextSteps: [{ id: 'n1', text: '跑 DSH 真实旅程' }],
+        files: [{ path: 'packages/memory-runtime/src/sidecar/recall.ts', role: 'write' }],
+        openQuestions: [{ id: 'q1', text: '预算如何分配？', blocking: true }],
+        references: { recordIds: ['01JREF'], detailIds: [], messageIds: [], fleetTaskId: null, urls: [] },
+      },
+      summary: null,
+      recordIds: ['01JREF'],
+      lease: null,
+      expiresAt: 0,
+      ...overrides,
+    });
+    fake.checkpoints.push(checkpoint() as any);
+    const context = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_ckpt_ctx',
+      turnId: 'turn_ckpt_1',
+      query: '继续上次任务',
+    });
+    expect(context.status).toBe(200);
+    expect(context.body.data.blocks[0]).toMatchObject({
+      kind: 'checkpoint',
+      trust: 'untrusted',
+      domain: 'task:th_ckpt_ctx',
+      contentMode: 'structured',
+    });
+    expect(context.body.data.blocks[0].content).toContain('Goal:');
+    expect(context.body.data.blocks[0].content).toContain('完成结构化 checkpoint 注入');
+    expect(context.body.data.blocks[0].content).toContain('Next steps:');
+    expect(context.body.data.blocks[0].content).toContain('跑 DSH 真实旅程');
+    expect(context.body.data.blocks[0].content).toContain('Blocked:');
+    expect(context.body.data.blocks[0].citations.map((entry: any) => entry.id)).toContain('01JREF');
+    expect(context.body.data.degraded).toBe(false);
+
+    fake.checkpoints[0]!.state.decisions = Array.from({ length: 50 }, (_, index) => ({
+      id: `d${index}`,
+      text: `decision ${index} ${'x'.repeat(120)}`,
+    }));
+    const budgeted = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_ckpt_ctx',
+      turnId: 'turn_ckpt_budget',
+      query: '继续上次任务',
+      maxBytes: 520,
+      maxTokens: 220,
+    });
+    expect(budgeted.status).toBe(200);
+    expect(budgeted.body.data.blocks[0].bytes).toBeLessThanOrEqual(520);
+    expect(budgeted.body.data.blocks[0].content).toContain('完成结构化 checkpoint 注入');
+    expect(budgeted.body.data.blocks[0].content).toContain('跑 DSH 真实旅程');
+    expect(budgeted.body.data.blocks[0].content).toContain('Blocked:');
+    expect(budgeted.body.data.blocks[0].content).not.toContain('decision 49');
+
+    fake.checkpoints[0]!.state.decisions = [];
+    const noCheckpoint = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_ckpt_ctx',
+      turnId: 'turn_ckpt_2',
+      query: '继续上次任务',
+      includeCheckpoint: false,
+    });
+    expect(noCheckpoint.body.data.blocks).toEqual([]);
+    expect(noCheckpoint.body.data.silenceReason).toBe('no_hits');
+
+    fake.checkpoints.length = 0;
+    fake.checkpoints.push(checkpoint({
+      id: '01JCHECKPOINT2',
+      revision: 4,
+      state: {
+        schema: 2,
+        contentMode: 'summary_only',
+        task: { key: 'task:th_ckpt_ctx', threadId: 'th_ckpt_ctx', fleetTaskId: null },
+        goal: null,
+        constraints: [],
+        decisions: [],
+        progress: { done: [], doing: [], blocked: [] },
+        nextSteps: [],
+        files: [],
+        openQuestions: [],
+        references: { recordIds: [], detailIds: [], messageIds: [], fleetTaskId: null, urls: [] },
+      },
+      summary: '只有摘要，没有结构化任务状态',
+      recordIds: [],
+    }) as any);
+    const summaryOnly = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_ckpt_ctx',
+      turnId: 'turn_ckpt_3',
+      query: '继续上次任务',
+    });
+    expect(summaryOnly.body.data.blocks[0]).toMatchObject({
+      kind: 'checkpoint',
+      degraded: true,
+      reason: 'checkpoint_summary_only',
+      contentMode: 'summary_only',
+    });
+    expect(summaryOnly.body.data.blocks[0].content).toContain('只有摘要');
+    expect(summaryOnly.body.data.degraded).toBe(true);
+    expect(summaryOnly.body.data.warnings).toContain('checkpoint_summary_only');
+
+    const expiredCheckpoint = fake.checkpoints[0];
+    if (!expiredCheckpoint) throw new Error('missing checkpoint');
+    expiredCheckpoint.expiresAt = NOW - 1;
+    const expired = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_ckpt_ctx',
+      turnId: 'turn_ckpt_4',
+      query: '继续上次任务',
+    });
+    expect(expired.body.data.blocks).toEqual([]);
+    expect(expired.body.data.silenceReason).toBe('no_hits');
+
+    fake.checkpoints[0]!.expiresAt = 0;
+    fake.checkpoints[0]!.summary = null;
+    const noSummary = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_ckpt_ctx',
+      turnId: 'turn_ckpt_5',
+      query: '继续上次任务',
+    });
+    expect(noSummary.body.data.blocks).toEqual([]);
+    expect(noSummary.body.data.degraded).toBe(true);
+    expect(noSummary.body.data.warnings).toContain('summary_unavailable');
+  });
 });

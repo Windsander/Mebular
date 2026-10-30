@@ -197,12 +197,17 @@ export interface RecallRequestView {
   turnKind?: 'human' | 'tool' | 'system';
   mute?: boolean;
   recallMode?: 'fragmented' | 'records';
+  /** /context 是否读取当前 checkpoint；沉浸式默认 true。 */
+  includeCheckpoint?: boolean;
+  /** 可选显式任务域（task:<taskId>）；缺省按 threadId/task 域/default 读取。 */
+  checkpointDomain?: string;
+  taskDomain?: string;
   /** API 模型请求级逐次允许；缺省 false。 */
   allowRemote?: boolean;
 }
 
 export interface ContextBlock {
-  kind: 'fragment' | 'compact';
+  kind: 'fragment' | 'compact' | 'checkpoint';
   content: string;
   citations: FragmentCitation[];
   tokens: number;
@@ -217,6 +222,11 @@ export interface ContextBlock {
   format?: FragmentDetail['format'];
   truncated?: boolean;
   redacted?: boolean;
+  degraded?: boolean;
+  reason?: string;
+  checkpointId?: string | null;
+  revision?: number | null;
+  contentMode?: string | null;
 }
 
 export interface RecallResponse {
@@ -293,6 +303,18 @@ export interface RecallServiceOptions {
   policy?: SidecarPolicy | null;
   getPolicy?: () => SidecarPolicy | null;
   modelRuntime?: SidecarModelRuntime | null;
+  checkpointSource?: {
+    getCheckpoint(threadId: string, options?: {
+      agentId?: string | null;
+      sync?: string | null;
+      domain?: string | null;
+    }): Promise<{
+      status: number;
+      data: unknown;
+      warnings?: string[];
+      degraded?: boolean;
+    }>;
+  } | null;
   now?: () => number;
 }
 
@@ -325,6 +347,8 @@ interface NormalizedRequest {
   mute: boolean;
   recallMode: 'fragmented' | 'records';
   allowRemote: boolean;
+  includeCheckpoint: boolean;
+  checkpointDomain: string | null;
 }
 
 interface RawCandidate {
@@ -359,6 +383,7 @@ interface RecallRun {
   candidates: Candidate[];
   selected: Candidate[];
   blocks: ContextBlock[];
+  checkpointBlock: ContextBlock | null;
   silenceReason: string | null;
   truncated: boolean;
   estimatedTokens: number;
@@ -1049,6 +1074,7 @@ export class RecallService {
 
   private readonly client: CapabilityClient | null;
   private readonly models: SidecarModelRuntime | null;
+  private readonly checkpointSource: RecallServiceOptions['checkpointSource'];
   private readonly getPolicy?: () => SidecarPolicy | null;
   private policy: SidecarPolicy | null;
   private readonly now: () => number;
@@ -1068,6 +1094,7 @@ export class RecallService {
     this.local = options.local;
     this.client = options.client;
     this.models = options.modelRuntime ?? null;
+    this.checkpointSource = options.checkpointSource ?? null;
     this.identity = options.identity;
     this.policy = options.policy ?? null;
     this.getPolicy = options.getPolicy;
@@ -1471,6 +1498,18 @@ export class RecallService {
         ? turnKindRaw
         : invalid('turnKind 必须是 human/tool/system');
     const recallMode = request.recallMode === 'records' ? 'records' : 'fragmented';
+    const checkpointDomainRaw = request.checkpointDomain ?? request.taskDomain
+      ?? (typeof request.fleetTaskId === 'string' && request.fleetTaskId.length > 0
+        ? `task:${request.fleetTaskId}`
+        : undefined);
+    let checkpointDomain: string | null = null;
+    if (checkpointDomainRaw !== undefined && checkpointDomainRaw !== null) {
+      const normalized = normalizeDomain(checkpointDomainRaw);
+      if (!normalized || (normalized !== 'default' && !isTaskDomain(normalized))) {
+        invalid('checkpointDomain 必须是 task:<taskId|threadId> 或 default');
+      }
+      checkpointDomain = normalized;
+    }
     const fragmentCap = context
       ? Math.max(1, Math.min(MAX_FRAGMENTS, Math.floor(this.config.context.maxFragments)))
       : MAX_FRAGMENTS;
@@ -1512,6 +1551,8 @@ export class RecallService {
       mute: request.mute === true,
       recallMode,
       allowRemote: request.allowRemote === true,
+      includeCheckpoint: context && request.includeCheckpoint !== false,
+      checkpointDomain,
     };
   }
 
@@ -1535,6 +1576,229 @@ export class RecallService {
       });
     }
     return value;
+  }
+
+  private checkpointCandidates(request: NormalizedRequest): string[] {
+    if (request.checkpointDomain) return [request.checkpointDomain];
+    const taskDomains = (request.domains ?? []).filter((domain) => isTaskDomain(domain));
+    return [...new Set([
+      ...taskDomains,
+      ...(request.threadId ? [`task:${request.threadId}`] : []),
+      'default',
+    ])];
+  }
+
+  private checkpointCitations(view: Record<string, unknown>, state: Record<string, unknown>): FragmentCitation[] {
+    const references = isObject(state.references) ? state.references : {};
+    const ids = [
+      ...asStringArray(references.recordIds, 200),
+      ...asStringArray(references.detailIds, 200),
+      ...asStringArray(view.recordIds, 200),
+      ...asStringArray(view.detailIds, 200),
+    ];
+    const seen = new Set<string>();
+    const citations: FragmentCitation[] = [];
+    for (const id of ids) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      citations.push({
+        id,
+        type: id.startsWith('01') ? 'record' : 'reference',
+        ...(typeof view.domain === 'string' ? { domain: view.domain } : {}),
+      });
+    }
+    return citations.slice(0, 12);
+  }
+
+  private renderCheckpointText(view: Record<string, unknown>, maxBytes: number): { text: string; truncated: boolean } {
+    const state = isObject(view.state) ? view.state : {};
+    const contentMode = typeof view.contentMode === 'string'
+      ? view.contentMode
+      : (state.schema === 2 && state.contentMode === 'structured' ? 'structured' : 'summary_only');
+    if (contentMode !== 'structured') {
+      const summary = typeof view.summary === 'string' ? view.summary.trim() : '';
+      if (summary.length === 0) return { text: '', truncated: false };
+      const escaped = escapeContextTags(summary);
+      const text = [
+        `[mebular_checkpoint trust="untrusted" kind="checkpoint" domain="${String(view.domain ?? 'default')}" content_mode="summary_only"]`,
+        '任务摘要（降级：仅有 summary，不是完整任务状态）：',
+        escaped,
+      ].join('\n');
+      return truncateText(text, Math.max(32, maxBytes));
+    }
+
+    const linesOf = (value: unknown): string[] => asStringArray(value, 100);
+    const itemText = (value: unknown): string => {
+      if (typeof value === 'string') return value;
+      if (!isObject(value)) return '';
+      return typeof value.text === 'string' ? value.text : '';
+    };
+    const renderItems = (title: string, items: unknown[], prefix = '- '): string[] => {
+      if (items.length === 0) return [];
+      return [title, ...items.map((item) => `${prefix}${itemText(item)}`).filter((line) => line.length > 2)];
+    };
+    const goal = typeof state.goal === 'string' ? state.goal.trim() : '';
+    const constraints = Array.isArray(state.constraints) ? state.constraints : [];
+    const decisions = Array.isArray(state.decisions) ? state.decisions : [];
+    const progress = isObject(state.progress) ? state.progress : {};
+    const nextSteps = Array.isArray(state.nextSteps) ? state.nextSteps : [];
+    const files = Array.isArray(state.files) ? state.files : [];
+    const questions = Array.isArray(state.openQuestions) ? state.openQuestions : [];
+    const references = isObject(state.references) ? state.references : {};
+    const done = Array.isArray(progress.done) ? progress.done : [];
+    const doing = Array.isArray(progress.doing) ? progress.doing : [];
+    const blocked = Array.isArray(progress.blocked) ? progress.blocked : [];
+    const sections: Array<{ key: string; lines: string[]; required?: boolean }> = [
+      {
+        key: 'header',
+        required: true,
+        lines: [`[mebular_checkpoint trust="untrusted" kind="checkpoint" domain="${String(view.domain ?? 'default')}" revision="${String(view.revision ?? '')}" content_mode="structured"]`],
+      },
+      { key: 'goal', required: true, lines: goal ? ['Goal:', escapeContextTags(goal)] : [] },
+      {
+        key: 'nextSteps',
+        required: true,
+        lines: renderItems('Next steps:', nextSteps),
+      },
+      {
+        key: 'blocked',
+        required: true,
+        lines: renderItems('Blocked:', blocked),
+      },
+      { key: 'constraints', lines: renderItems('Constraints:', constraints) },
+      { key: 'decisions', lines: renderItems('Decisions:', decisions) },
+      { key: 'doing', lines: renderItems('Doing:', doing) },
+      { key: 'done', lines: renderItems('Done:', done) },
+      { key: 'files', lines: renderItems('Files:', files) },
+      { key: 'questions', lines: renderItems('Open questions:', questions) },
+      {
+        key: 'references',
+        lines: (() => {
+          const values = [
+            ...linesOf(references.recordIds),
+            ...linesOf(references.detailIds),
+            ...linesOf(references.messageIds),
+            ...linesOf(references.urls),
+          ];
+          return values.length > 0 ? ['References:', ...values.map((value) => `- ${value}`)] : [];
+        })(),
+      },
+      { key: 'summary', lines: typeof view.summary === 'string' && view.summary.trim() ? ['Summary:', escapeContextTags(view.summary.trim())] : [] },
+    ];
+    const build = (included: Set<string>): string => sections
+      .filter((section) => included.has(section.key))
+      .flatMap((section) => section.lines)
+      .join('\n');
+    const included = new Set(sections.map((section) => section.key));
+    let text = build(included);
+    let truncated = false;
+    const optionalOrder = ['references', 'files', 'questions', 'decisions', 'constraints', 'done', 'doing', 'summary'];
+    for (const key of optionalOrder) {
+      if (byteLength(text) <= maxBytes) break;
+      included.delete(key);
+      truncated = true;
+      text = build(included);
+    }
+    if (byteLength(text) > maxBytes) {
+      const sliced = truncateText(text, Math.max(32, maxBytes));
+      text = sliced.text;
+      truncated = truncated || sliced.truncated;
+    }
+    return { text: escapeContextTags(text), truncated };
+  }
+
+  private checkpointBlockFromView(view: Record<string, unknown>, maxBytes: number): ContextBlock | null {
+    const domain = typeof view.domain === 'string' ? view.domain : 'default';
+    const contentMode = typeof view.contentMode === 'string' ? view.contentMode : null;
+    const summaryOnly = contentMode === 'summary_only' || view.legacy === true;
+    const rendered = this.renderCheckpointText(view, maxBytes);
+    if (rendered.text.trim().length === 0) return null;
+    const ownerInfo = deriveOwner(domain, { userId: this.identity.userId ?? undefined });
+    const owner: RecallOwner = {
+      role: domain === 'user' ? 'user' : domain.startsWith('agent:') ? 'agent' : 'other',
+      domain,
+      ownerId: ownerInfo.ownerId,
+      ...(domain.startsWith('agent:') ? { agentId: domain.slice('agent:'.length) } : {}),
+    };
+    const state = isObject(view.state) ? view.state : {};
+    const degraded = summaryOnly || view.degraded === true;
+    return {
+      kind: 'checkpoint',
+      content: rendered.text,
+      citations: this.checkpointCitations(view, state),
+      tokens: estimateTokens(rendered.text),
+      bytes: byteLength(rendered.text),
+      trust: 'untrusted',
+      fragments: [],
+      confidence: degraded ? 0.6 : 1,
+      owner,
+      domain,
+      provenance: {
+        source: 'runtime',
+        threadId: typeof view.threadId === 'string' ? view.threadId : undefined,
+        at: typeof view.updatedAt === 'number' ? view.updatedAt : undefined,
+      },
+      ...(rendered.truncated ? { truncated: true } : {}),
+      ...(degraded ? { degraded: true, reason: 'checkpoint_summary_only' } : {}),
+      checkpointId: typeof view.id === 'string' ? view.id : null,
+      revision: typeof view.revision === 'number' ? view.revision : null,
+      contentMode,
+    };
+  }
+
+  private async loadCheckpoint(
+    request: NormalizedRequest,
+    warnings: string[],
+    budget: { bytes: number; tokens: number },
+  ): Promise<{ block: ContextBlock | null; degraded: boolean }> {
+    if (!request.includeCheckpoint || !request.threadId || !this.checkpointSource) {
+      return { block: null, degraded: false };
+    }
+    let degraded = false;
+    let sawSummaryOnly = false;
+    for (const domain of this.checkpointCandidates(request)) {
+      let result;
+      try {
+        result = await this.checkpointSource.getCheckpoint(request.threadId, {
+          agentId: request.agentId,
+          domain,
+        });
+      } catch {
+        pushWarning(warnings, 'checkpoint_read_failed');
+        return { block: null, degraded: true };
+      }
+      for (const warning of result.warnings ?? []) pushWarning(warnings, warning);
+      degraded = degraded || result.degraded === true;
+      const data = isObject(result.data) ? result.data : {};
+      const view = isObject(data.checkpoint) ? data.checkpoint : null;
+      if (!view) continue;
+      const expiresAt = typeof view.expiresAt === 'number' ? view.expiresAt : 0;
+      if (expiresAt > 0 && expiresAt < this.now()) {
+        pushWarning(warnings, 'checkpoint_expired');
+        continue;
+      }
+      const contentMode = typeof view.contentMode === 'string' ? view.contentMode : null;
+      if (contentMode === 'summary_only' || view.legacy === true) {
+        sawSummaryOnly = true;
+        const summary = typeof view.summary === 'string' ? view.summary.trim() : '';
+        if (summary.length === 0) {
+          pushWarning(warnings, 'summary_unavailable');
+          return { block: null, degraded: true };
+        }
+      }
+      const block = this.checkpointBlockFromView(view, budget.bytes);
+      if (!block) return { block: null, degraded: degraded || sawSummaryOnly };
+      if (block.degraded) {
+        degraded = true;
+        pushWarning(warnings, 'checkpoint_summary_only');
+      }
+      if (block.tokens > budget.tokens) {
+        pushWarning(warnings, 'budget_truncated');
+        degraded = true;
+      }
+      return { block, degraded };
+    }
+    return { block: null, degraded: degraded || sawSummaryOnly };
   }
 
   private async execute(request: NormalizedRequest, mode: 'recall' | 'context'): Promise<RecallResponse & { blocks?: ContextBlock[] }> {
@@ -1620,6 +1884,7 @@ export class RecallService {
       candidates: [],
       selected: [],
       blocks: [],
+      checkpointBlock: null,
       silenceReason: null,
       truncated: false,
       estimatedTokens: 0,
@@ -1648,13 +1913,25 @@ export class RecallService {
       return this.finish(run, mode);
     }
 
+    const checkpointBudget = {
+      bytes: Math.max(64, Math.min(4096, cue.budget.maxBytes)),
+      tokens: Math.max(32, Math.min(1000, cue.budget.maxTokens)),
+    };
+    const checkpointResult = mode === 'context'
+      ? await this.loadCheckpoint(request, warnings, checkpointBudget)
+      : { block: null, degraded: false };
+    run.checkpointBlock = checkpointResult.block;
+    degraded = degraded || checkpointResult.degraded;
+
     if (!this.client) {
       degraded = true;
       pushWarning(warnings, 'capability_unavailable');
       run.degraded = true;
-      run.silenceReason = 'capability_unavailable';
-      this.noteError({ code: 'capability_unavailable', message: 'capability API 不可用' });
-      return this.finish(run, mode);
+      if (!run.checkpointBlock) {
+        run.silenceReason = 'capability_unavailable';
+        this.noteError({ code: 'capability_unavailable', message: 'capability API 不可用' });
+      }
+      return this.finish(run, mode, degraded);
     }
 
     const fuzzyStart = this.now();
@@ -1668,15 +1945,15 @@ export class RecallService {
       degraded = true;
       pushWarning(warnings, 'fuzzy_failed');
       run.degraded = true;
-      run.silenceReason = 'runtime_unavailable';
+      if (!run.checkpointBlock) run.silenceReason = 'runtime_unavailable';
       this.noteError(error);
-      return this.finish(run, mode);
+      return this.finish(run, mode, degraded);
     }
     run.timing.fuzzyMs = elapsed(fuzzyStart, this.now());
 
     if (rawRecords.length === 0) {
-      run.silenceReason = 'no_hits';
-      return this.finish(run, mode);
+      if (!run.checkpointBlock) run.silenceReason = 'no_hits';
+      return this.finish(run, mode, degraded);
     }
 
     const candidates = await this.buildCandidates(rawRecords, cue, request, warnings);
@@ -1684,14 +1961,14 @@ export class RecallService {
     const eligible = candidates.filter((candidate) => !candidate.filteredReason);
 
     if (eligible.length === 0) {
-      run.silenceReason = this.silenceReasonFor(candidates);
+      if (!run.checkpointBlock) run.silenceReason = this.silenceReasonFor(candidates);
       return this.finish(run, mode, degraded);
     }
 
     const selected = this.selectCandidates(eligible, cue, warnings);
     run.selected = selected;
     if (selected.length === 0) {
-      run.silenceReason = this.silenceReasonFor(candidates);
+      if (!run.checkpointBlock) run.silenceReason = this.silenceReasonFor(candidates);
       return this.finish(run, mode, degraded);
     }
 
@@ -1701,15 +1978,20 @@ export class RecallService {
 
     if (mode === 'context') {
       const assembleStart = this.now();
-      const assembled = this.assembleBlocks(selected, cue, warnings);
+      const assembled = this.assembleBlocks(selected, cue, warnings, {
+        bytes: run.checkpointBlock?.bytes ?? 0,
+        tokens: run.checkpointBlock?.tokens ?? 0,
+      });
       run.blocks = assembled.blocks;
       run.selected = assembled.selected;
-      run.truncated = assembled.truncated
-        || assembled.selected.some((candidate) => candidate.detail?.truncated === true);
-      run.estimatedBytes = assembled.bytes;
-      run.estimatedTokens = assembled.tokens;
+      run.truncated = run.truncated
+        || assembled.truncated
+        || assembled.selected.some((candidate) => candidate.detail?.truncated === true)
+        || run.checkpointBlock?.truncated === true;
+      run.estimatedBytes = assembled.bytes + (run.checkpointBlock?.bytes ?? 0);
+      run.estimatedTokens = assembled.tokens + (run.checkpointBlock?.tokens ?? 0);
       run.timing.assembleMs = elapsed(assembleStart, this.now());
-      if (assembled.blocks.length === 0) {
+      if (assembled.blocks.length === 0 && !run.checkpointBlock) {
         run.silenceReason = assembled.silenceReason ?? 'budget_too_small';
         if (assembled.truncated) pushWarning(warnings, 'budget_truncated');
       }
@@ -2632,6 +2914,7 @@ export class RecallService {
     selected: Candidate[],
     cue: Cue,
     warnings: string[],
+    reserved: { bytes: number; tokens: number } = { bytes: 0, tokens: 0 },
   ): { blocks: ContextBlock[]; selected: Candidate[]; bytes: number; tokens: number; truncated: boolean; silenceReason?: string } {
     let working = this.orderWithConflictGroups([...selected], (candidate) => candidate.fragment.conflictGroup);
     // 固定顺序：compact 背景在前，其余片段保持分数/冲突组顺序。
@@ -2678,7 +2961,8 @@ export class RecallService {
     };
 
     let result = build();
-    while ((result.bytes > cue.budget.maxBytes || result.tokens > cue.budget.maxTokens) && working.length > 0) {
+    while ((result.bytes + reserved.bytes > cue.budget.maxBytes
+      || result.tokens + reserved.tokens > cue.budget.maxTokens) && working.length > 0) {
       const withDetail = [...working].reverse().find((candidate) => candidate.fragment.detail);
       if (withDetail) {
         delete withDetail.fragment.detail;
@@ -2814,13 +3098,17 @@ export class RecallService {
       ...run.timing,
       totalMs: elapsed(run.cue.at, this.now()),
     };
-    const silenceReason = mode === 'context' && run.blocks.length === 0
+    const contextBlocks = mode === 'context'
+      ? [...(run.checkpointBlock ? [run.checkpointBlock] : []), ...run.blocks]
+      : [];
+    const silenceReason = mode === 'context' && contextBlocks.length === 0
       ? run.silenceReason ?? 'no_blocks'
       : run.silenceReason;
+    if (mode === 'context' && contextBlocks.length > 0) run.silenceReason = null;
 
     if (degraded && warnings.length === 0) warnings.push('degraded');
     if (silenceReason) this.silent += 1;
-    if (mode === 'recall' ? run.selected.length > 0 : run.blocks.length > 0) {
+    if (mode === 'recall' ? run.selected.length > 0 : contextBlocks.length > 0) {
       this.markAnchor(run.request);
     }
 
@@ -2859,7 +3147,7 @@ export class RecallService {
           : {}),
       }));
     } else {
-      response.blocks = run.blocks;
+      response.blocks = contextBlocks;
     }
     return response;
   }

@@ -72,6 +72,23 @@ function compactRecords(): FakeMemoryRecord[] {
   ];
 }
 
+function checkpointState(threadId: string, goal: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    schema: 2,
+    contentMode: 'structured',
+    task: { key: `task:${threadId}`, threadId, fleetTaskId: null },
+    goal,
+    constraints: [],
+    decisions: [],
+    progress: { done: [], doing: [], blocked: [] },
+    nextSteps: [{ id: 'n1', text: 'next' }],
+    files: [],
+    openQuestions: [],
+    references: { recordIds: [], detailIds: [], messageIds: [], fleetTaskId: null, urls: [] },
+    ...extra,
+  };
+}
+
 async function setup(records: FakeMemoryRecord[] = compactRecords()): Promise<Harness> {
   const home = await mkdtemp(join(tmpdir(), 'mebular-objects-http-'));
   const local = new SidecarLocalLayer({ root: join(home, 'memory-runtime'), now: () => NOW });
@@ -279,7 +296,7 @@ describe('sidecar compact / self / checkpoint HTTP', () => {
     const conflict = await request(url, 'PUT', {
       agentId: 'opencode',
       expectedRevision: 0,
-      state: { secretState: 'do-not-leak', cursor: 1 },
+      state: checkpointState('th_alpha', 'step 1', { secretState: 'do-not-leak', cursor: 1 }),
       sync: 'local',
     });
     expect(conflict.status).toBe(400);
@@ -289,7 +306,7 @@ describe('sidecar compact / self / checkpoint HTTP', () => {
     const first = await request(url, 'PUT', {
       agentId: 'opencode',
       expectedRevision: 0,
-      state: { secretState: 'do-not-leak', cursor: 1 },
+      state: checkpointState('th_alpha', 'step 1', { secretState: 'do-not-leak', cursor: 1 }),
       summary: '已完成第 1 步',
       recordIds: ['01JSRC1'],
     });
@@ -311,7 +328,7 @@ describe('sidecar compact / self / checkpoint HTTP', () => {
     const second = await request(url, 'PUT', {
       agentId: 'opencode',
       expectedRevision: 1,
-      state: { cursor: 2 },
+      state: checkpointState('th_alpha', 'step 2', { cursor: 2 }),
     });
     expect(second.status).toBe(200);
     expect(second.body.data.checkpoint.revision).toBe(2);
@@ -319,7 +336,7 @@ describe('sidecar compact / self / checkpoint HTTP', () => {
     const staleRevision = await request(url, 'PUT', {
       agentId: 'opencode',
       expectedRevision: 1,
-      state: { cursor: 3 },
+      state: checkpointState('th_alpha', 'step 3', { cursor: 3 }),
     });
     expect(staleRevision.status).toBe(409);
     expect(staleRevision.body.error.code).toBe('revision_mismatch');
@@ -360,7 +377,7 @@ describe('sidecar compact / self / checkpoint HTTP', () => {
 
     const first = await request(url, 'PUT', {
       agentId: 'opencode',
-      state: { cursor: 1 },
+      state: checkpointState('th_lease', 'lease 1', { cursor: 1 }),
     });
     expect(first.status).toBe(200);
     expect(first.body.data.checkpoint.lease.hostId).toBe('h_fake');
@@ -369,7 +386,7 @@ describe('sidecar compact / self / checkpoint HTTP', () => {
     const lease = await request(url, 'PUT', {
       agentId: 'opencode',
       expectedRevision: 1,
-      state: { cursor: 2 },
+      state: checkpointState('th_lease', 'lease 2', { cursor: 2 }),
     });
     expect(lease.status).toBe(409);
     expect(lease.body.error.code).toBe('checkpoint_lease_held');
@@ -378,7 +395,7 @@ describe('sidecar compact / self / checkpoint HTTP', () => {
     fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
     const pending = await request(`${server.url}/checkpoints/th_offline?agentId=opencode`, 'PUT', {
       agentId: 'opencode',
-      state: { cursor: 9 },
+      state: checkpointState('th_offline', 'offline', { cursor: 9 }),
       summary: 'offline pending',
     });
     expect(pending.status).toBe(202);
@@ -417,7 +434,7 @@ describe('sidecar compact / self / checkpoint HTTP', () => {
     const agentDomain = await request(`${server.url}/checkpoints/th_alpha?agentId=opencode`, 'PUT', {
       agentId: 'opencode',
       domain: 'agent:opencode',
-      state: { cursor: 1 },
+      state: checkpointState('th_alpha', 'agent domain', { cursor: 1 }),
     });
     expect(agentDomain.status).toBe(400);
     expect(agentDomain.body.error.code).toBe('domain_mismatch');
@@ -425,7 +442,7 @@ describe('sidecar compact / self / checkpoint HTTP', () => {
     const otherAgent = await request(`${server.url}/checkpoints/th_alpha`, 'PUT', {
       agentId: 'hermes',
       actor: { type: 'agent', agentId: 'opencode' },
-      state: { cursor: 1 },
+      state: checkpointState('th_alpha', 'other agent', { cursor: 1 }),
     });
     expect(otherAgent.status).toBe(403);
     expect(otherAgent.body.error.code).toBe('forbidden_scope');
@@ -434,6 +451,33 @@ describe('sidecar compact / self / checkpoint HTTP', () => {
     const missingAgent = await request(`${server.url}/checkpoints/th_alpha`, 'GET');
     expect(missingAgent.status).toBe(400);
     expect(missingAgent.body.error.code).toBe('invalid_agent_id');
+  });
+
+  it('checkpoint：task:<taskId> 域与跨 Agent 参与者读共享 revision', async () => {
+    const { server } = await setup();
+    const state = checkpointState('th_shared', 'shared task');
+    state.task = { key: 'task:fleet_shared', threadId: 'th_shared', fleetTaskId: 'fleet_shared' };
+    const written = await request(`${server.url}/checkpoints/th_shared?agentId=opencode`, 'PUT', {
+      agentId: 'opencode',
+      domain: 'task:fleet_shared',
+      state,
+      summary: 'shared',
+    });
+    expect(written.status).toBe(200);
+    expect(written.body.data.checkpoint).toMatchObject({
+      domain: 'task:fleet_shared',
+      threadId: 'th_shared',
+      revision: 1,
+      contentMode: 'structured',
+    });
+
+    const hermes = await request(`${server.url}/checkpoints/th_shared?agentId=hermes&domain=task:fleet_shared`, 'GET');
+    expect(hermes.status).toBe(200);
+    expect(hermes.body.data.checkpoint).toMatchObject({
+      agentId: 'opencode',
+      domain: 'task:fleet_shared',
+      revision: 1,
+    });
   });
 
   it('self：upsert/get/revision 取最大、agent 域隔离、无 sync、outbox 恢复', async () => {
@@ -575,7 +619,7 @@ describe('sidecar compact / self / checkpoint HTTP', () => {
     expect(compact.status).toBe(200);
     const checkpoint = await request(`${server.url}/checkpoints/th_status?agentId=opencode`, 'PUT', {
       agentId: 'opencode',
-      state: { cursor: 1 },
+      state: checkpointState('th_status', 'status checkpoint', { cursor: 1 }),
       summary: 'status checkpoint body',
     });
     expect(checkpoint.status).toBe(200);

@@ -285,6 +285,14 @@ async function main() {
       JSON.stringify(checkpointResult.data));
     check('checkpoint 无伪造 summary', checkpoint?.summary === null,
       JSON.stringify({ summary: checkpoint?.summary }));
+    check('checkpoint schema 2 summary_only（无结构化字段、不冒充）',
+      checkpoint?.state?.schema === 2
+      && checkpoint?.state?.contentMode === 'summary_only'
+      && checkpoint?.state?.goal === null
+      && Array.isArray(checkpoint?.state?.nextSteps)
+      && checkpoint.state.nextSteps.length === 0
+      && checkpoint?.state?.task?.key === 'task:hermes-s1',
+    JSON.stringify(checkpoint?.state));
     check('checkpoint state-only 元数据', checkpoint?.state?.kind === 'pre_compress'
       && checkpoint?.state?.messageCount >= 2, JSON.stringify(checkpoint?.state));
 

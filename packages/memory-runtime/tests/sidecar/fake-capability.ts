@@ -370,8 +370,10 @@ export async function startFakeCapability(options: FakeCapabilityOptions = {}): 
     updatedAt: record.updatedAt ?? record.createdAt ?? 0,
   });
 
-  const currentCheckpoint = (agentId: string, threadId: string): FakeCheckpoint | null => checkpoints
-    .filter((checkpoint) => checkpoint.agentId === agentId && checkpoint.threadId === threadId)
+  const currentCheckpoint = (agentId: string, threadId: string, domain?: string | null): FakeCheckpoint | null => checkpoints
+    .filter((checkpoint) => checkpoint.threadId === threadId)
+    .filter((checkpoint) => !domain || checkpoint.domain === domain)
+    .filter((checkpoint) => checkpoint.domain.startsWith('task:') || checkpoint.agentId === agentId)
     .sort((a, b) => b.revision - a.revision
       || (b.updatedAt ?? 0) - (a.updatedAt ?? 0)
       || b.id.localeCompare(a.id))[0] ?? null;
@@ -826,20 +828,24 @@ export async function startFakeCapability(options: FakeCapabilityOptions = {}): 
             return;
           }
           const agentId = body.agentId;
-          if (!actorCanTouchAgent(actor, agentId)) {
+          const taskRead = (body.op === 'get' || body.op === 'list')
+            && typeof body.domain === 'string'
+            && body.domain.startsWith('task:');
+          if (!taskRead && !actorCanTouchAgent(actor, agentId)) {
             fail(403, 'forbidden_scope', '当前 actor 不能读写该 Agent 的内部对象');
             return;
           }
           if (body.op === 'get') {
             const threadId = body.threadId;
-            const current = currentCheckpoint(agentId, threadId);
+            const current = currentCheckpoint(agentId, threadId, body.domain);
             const visible = current && !(current.expiresAt > 0 && current.expiresAt < Date.now()) ? current : null;
             send(200, envelope({ object: visible ? checkpointView(visible) : null, replayed: false }));
             return;
           }
           if (body.op === 'list') {
             const objects = checkpoints
-              .filter((checkpoint) => checkpoint.agentId === agentId)
+              .filter((checkpoint) => (checkpoint.domain.startsWith('task:') || checkpoint.agentId === agentId))
+              .filter((checkpoint) => !body.domain || checkpoint.domain === body.domain)
               .filter((checkpoint) => !body.threadId || checkpoint.threadId === body.threadId)
               .filter((checkpoint) => !(checkpoint.expiresAt > 0 && checkpoint.expiresAt < Date.now()))
               .sort((a, b) => b.revision - a.revision)
@@ -857,7 +863,8 @@ export async function startFakeCapability(options: FakeCapabilityOptions = {}): 
               const checkpoint = checkpoints[index]!;
               const matches = body.id
                 ? checkpoint.id === body.id
-                : checkpoint.agentId === agentId && checkpoint.threadId === body.threadId;
+                : checkpoint.threadId === body.threadId
+                  && (checkpoint.domain.startsWith('task:') || checkpoint.agentId === agentId);
               if (matches) checkpoints.splice(index, 1);
             }
             send(200, envelope({ deleted: checkpoints.length < before, count: before - checkpoints.length, replayed: false }));
@@ -877,16 +884,21 @@ export async function startFakeCapability(options: FakeCapabilityOptions = {}): 
             return;
           }
           const domain = body.domain ?? 'default';
+          const task = isObjectLike(body.state) && isObjectLike((body.state as any).task)
+            ? (body.state as any).task
+            : {};
           const validTask = typeof domain === 'string' && domain.startsWith('task:')
-            && domain.slice('task:'.length) === threadId;
+            && (domain.slice('task:'.length) === threadId
+              || domain.slice('task:'.length) === task.fleetTaskId
+              || domain.slice('task:'.length) === body.fleetTaskId);
           if (domain !== 'default' && !validTask) {
-            fail(400, 'domain_mismatch', 'Checkpoint 只能位于 task:<threadId> 或 default 域', {
+            fail(400, 'domain_mismatch', 'Checkpoint 只能位于 task:<threadId|taskId> 或 default 域', {
               domain,
               threadId,
             });
             return;
           }
-          const current = currentCheckpoint(agentId, threadId);
+          const current = currentCheckpoint(agentId, threadId, String(domain));
           const currentRevision = current?.revision ?? 0;
           if (body.expectedRevision !== undefined && body.expectedRevision !== currentRevision) {
             fail(409, 'revision_mismatch', 'checkpoint revision 冲突', {

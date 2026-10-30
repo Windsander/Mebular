@@ -40,7 +40,7 @@ node tests/integration/host-e2e/dsh-real-runtime.mjs --scenario fail-open
 
 | 宿主 | 真实部分 | 已覆盖 | 未覆盖 / 边界 |
 |---|---|---|---|
-| DSH | 真实 `@deepseek-ai/dsh` 0.2.1-rc.2 Web profile、真实 `@mebular/dsh-plugin`、真实 Cordis `agent/pre-step` / `session/event` / `agent/created` / `tools/change`、真实 MCP daemon（`manageMemoryRuntime` + capability）、真实 sidecar、真实 Runtime | 无 `memoryRuntime` 配置的自动 discovery / host token、首轮 `/ingest`、第二轮 `/context` 注入、同 turn 去重、source-tagged `UserMessage`、sidecar detail block、无命中沉默、工具遮蔽与 `tools/change` 重放、compaction checkpoint PUT 与 sidecar/Runtime 持久化、无 capture 字段、轻量/无 discovery 零 sidecar 请求、sidecar 不可达失败开放；`auto-discovery` 用 tap 观测生产 discovery 请求 | 不跑真实 DeepSeek 模型对话；不验证 DSH 浏览器/侧边栏；probe 使用 synthetic agent/session 与 synthetic tool registry，不是真实 MCP 工具调用 |
+| DSH | 真实 `@deepseek-ai/dsh` 0.2.1-rc.2 Web profile、真实 `@mebular/dsh-plugin`、真实 Cordis `agent/pre-step` / `session/event` / `agent/created` / `tools/change`、真实 MCP daemon（`manageMemoryRuntime` + capability）、真实 sidecar、真实 Runtime | 无 `memoryRuntime` 配置的自动 discovery / host token、首轮 `/ingest`、第二轮 `/context` 注入、同 turn 去重、source-tagged `UserMessage`、sidecar detail block、无命中沉默、工具遮蔽与 `tools/change` 重放、compaction checkpoint PUT 与 sidecar/Runtime 持久化、结构化 schema 2 checkpoint、compaction 后新 turn 注入 checkpoint、无 capture 字段、轻量/无 discovery 零 sidecar 请求、sidecar 不可达失败开放；`auto-discovery` 用 tap 观测生产 discovery 请求 | 不跑真实 DeepSeek 模型对话；不验证 DSH 浏览器/侧边栏；probe 使用 synthetic agent/session 与 synthetic tool registry，不是真实 MCP 工具调用 |
 | Hermes | 真实 `integrations/hermes/mebular-memory/__init__.py`、真实 Hermes `MemoryProvider` 方法、真实 sidecar、真实 MCP capability + Runtime | discovery + host token 文件、`prefetch` `/context`、`sync_turn` `/ingest`、`on_pre_compress` 归档 + state-only checkpoint、`on_session_switch`、队列 flush/shutdown、有界 spool、system prompt 不归档、profile/status 不泄漏 token、heuristic 记录可召回、checkpoint 可读、capability 详情可读、请求无 capture | 本机未安装 Hermes gateway，使用仓库测试同款 `agent.memory_provider` stub；不启动真实 Hermes 进程/LLM，不验证原生 `MEMORY.md` / `USER.md` 双写（插件显式不双写），不验证 Hermes 多 profile 进程隔离 |
 | OpenCode / OpenChamber | 真实 `opencode v2.2.0` `serve` + `run`、真实 `@mebular/opencode-plugin`（由 OpenCode 按 `opencode.json` 加载）、真实 sidecar、真实 MCP capability + Runtime、fake OpenAI-compatible provider（不跑真实 LLM） | 插件从 `<MEBULAR_HOME>/memory-runtime.json` 自动发现真实 sidecar、host token 认证、`context` hook 召回并注入真实 outgoing model request、request-only `<mebular_memory version="1" trust="untrusted">` 块、host 事件走 `/memory-runtime/v1/ingest` 并沉降为真实 capability 详情、compaction 后 checkpoint PUT 并由 sidecar/capability 持久化、请求无 capture、token 不进入 OpenCode state/log/session、OpenChamber 原生 `memory.json` / `settings.json` 前后 hash 不变且内容不进入 sidecar 详情/trace/Runtime | 不跑真实模型；fake provider 必须返回 OpenCode 的完整 summary 模板；不验证 OpenChamber Desktop UI、真实 MCP 工具调用、用户真实 `~/.config/opencode`；若 opencode 不可用，`--controller-fallback` 只验证 plugin controller + 真实 sidecar（会明确打印边界） |
 
@@ -55,8 +55,8 @@ node tests/integration/host-e2e/dsh-real-runtime.mjs --scenario fail-open
 ## 结果（本机 2026-10-30）
 
 ```text
-DSH host E2E：82 passed, 0 failed（auto-discovery / no-discovery / fail-open）
-Hermes host E2E：36 passed, 0 failed
+DSH host E2E：83 passed, 0 failed（auto-discovery / no-discovery / fail-open）
+Hermes host E2E：37 passed, 0 failed
 OpenCode host E2E：38 passed, 0 failed, 0 skipped
 verify-host-e2e：三个宿主全部 exit 0
 ```

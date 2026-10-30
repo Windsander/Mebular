@@ -212,11 +212,27 @@ export function apply(ctx, config = {}) {
     }));
     state.session = { emitted: 5 };
 
+    const compactionSummary = [
+      '## Objective',
+      'Continue the memory e2e task.',
+      '## Requirements',
+      '- Keep checkpoint schema 2',
+      '## Decisions',
+      '- Reuse graph storage — no second store',
+      '## Work State',
+      '- Done: compaction summary emitted',
+      '- Doing: real host checkpoint',
+      '- Blocked: none',
+      '## Next Move',
+      '- Verify the next turn injects the checkpoint',
+      '## Relevant Files',
+      '- packages/dsh-plugin/memory-runtime.js (write, in_progress)',
+    ].join('\n');
     for (const event of [
       sessionEvent('compaction/start', 10, { compactionId: 'memory-e2e-compaction', turn: 1 }),
       sessionEvent('compaction/summary', 11, {
         compactionId: 'memory-e2e-compaction',
-        summary: [{ type: 'text', text: 'memory e2e compacted summary' }],
+        summary: [{ type: 'text', text: compactionSummary }],
         shadowedRange: { start: 1, end: 9 },
         shadowedSeqs: [1, 2, 3],
         shadowedTokenCount: 42,
@@ -234,6 +250,13 @@ export function apply(ctx, config = {}) {
       emit('session/event', session, event);
     }
     state.compaction = { emitted: true };
+
+    await sleep(900);
+    const checkpointStep = step('继续上次任务', 'memory-e2e-human-5', 5);
+    const checkpointTurn = await waterfall('agent/pre-step', checkpointStep.payload, checkpointStep.fallback);
+    state.preStep.checkpointInjected = Array.isArray(checkpointTurn?.messages) && checkpointTurn.messages.length > 1;
+    state.preStep.checkpointSource = checkpointTurn?.messages?.at(-1)?.source?.kind ?? null;
+    state.preStep.checkpointText = textOf(checkpointTurn);
 
     await sleep(500);
     state.done = true;

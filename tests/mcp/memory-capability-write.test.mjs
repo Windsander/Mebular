@@ -1302,7 +1302,14 @@ describe('POST /internal-object', () => {
       threadId: 'th_ckpt',
       domain: 'task:th_ckpt',
       expectedRevision: 0,
-      state: { plan: ['a'], cursor: 1 },
+      state: {
+        schema: 2,
+        contentMode: 'structured',
+        task: { key: 'task:th_ckpt', threadId: 'th_ckpt', fleetTaskId: null },
+        goal: 'test checkpoint',
+        nextSteps: [{ id: 'n1', text: 'verify' }],
+        references: { recordIds: [], detailIds: [], messageIds: [], fleetTaskId: null, urls: [] },
+      },
       summary: 'step 1',
       leaseMs: 60_000,
     }, { token });
@@ -1318,8 +1325,15 @@ describe('POST /internal-object', () => {
       agentId: 'opencode',
       threadId: 'th_ckpt',
       revision: 1,
-      state: { plan: ['a'], cursor: 1 },
+      state: {
+        schema: 2,
+        contentMode: 'structured',
+        task: { key: 'task:th_ckpt', threadId: 'th_ckpt', fleetTaskId: null },
+        goal: 'test checkpoint',
+      },
       summary: 'step 1',
+      contentMode: 'structured',
+      structured: true,
       expiresAt: 0,
     });
     expect(object.lease.hostId).toMatch(/^h_[0-9a-f]{16}$/);
@@ -1333,7 +1347,13 @@ describe('POST /internal-object', () => {
       threadId: 'th_ckpt',
       domain: 'task:th_ckpt',
       expectedRevision: 1,
-      state: { plan: ['a', 'b'], cursor: 2 },
+      state: {
+        schema: 2,
+        contentMode: 'structured',
+        task: { key: 'task:th_ckpt', threadId: 'th_ckpt', fleetTaskId: null },
+        goal: 'test checkpoint 2',
+        nextSteps: [{ id: 'n1', text: 'verify more' }],
+      },
     }, { token });
     expect(second.status).toBe(200);
     expect(second.body.data.object.revision).toBe(2);
@@ -1355,7 +1375,12 @@ describe('POST /internal-object', () => {
       agentId: 'opencode',
       threadId: 'th_ckpt',
       domain: 'user',
-      state: {},
+      state: {
+        schema: 2,
+        contentMode: 'summary_only',
+        task: { key: 'task:th_ckpt', threadId: 'th_ckpt', fleetTaskId: null },
+        summary: null,
+      },
     }, { token });
     expect(wrongDomain.status).toBe(400);
     expect(wrongDomain.body.error.code).toBe('domain_mismatch');
@@ -1367,7 +1392,11 @@ describe('POST /internal-object', () => {
       agentId: 'opencode',
       threadId: 'th_ckpt',
       domain: 'task:th_other',
-      state: {},
+      state: {
+        schema: 2,
+        contentMode: 'summary_only',
+        task: { key: 'task:th_other', threadId: 'th_ckpt', fleetTaskId: null },
+      },
     }, { token });
     expect(wrongThread.status).toBe(400);
     expect(wrongThread.body.error.code).toBe('domain_mismatch');
@@ -1379,7 +1408,11 @@ describe('POST /internal-object', () => {
       agentId: 'opencode',
       threadId: 'th_ckpt',
       domain: 'task:th_ckpt',
-      state: {},
+      state: {
+        schema: 2,
+        contentMode: 'summary_only',
+        task: { key: 'task:th_ckpt', threadId: 'th_ckpt', fleetTaskId: null },
+      },
     }, { token });
     expect(otherAgent.status).toBe(403);
 
@@ -1391,7 +1424,11 @@ describe('POST /internal-object', () => {
       threadId: 'th_ckpt',
       domain: 'task:th_ckpt',
       force: true,
-      state: {},
+      state: {
+        schema: 2,
+        contentMode: 'summary_only',
+        task: { key: 'task:th_ckpt', threadId: 'th_ckpt', fleetTaskId: null },
+      },
     }, { token });
     expect(forced.status).toBe(403);
     expect(forced.body.error.code).toBe('forbidden_scope');
@@ -1421,7 +1458,11 @@ describe('POST /internal-object', () => {
       threadId: 'th_ckpt',
       domain: 'task:th_ckpt',
       expectedRevision: 5,
-      state: {},
+      state: {
+        schema: 2,
+        contentMode: 'summary_only',
+        task: { key: 'task:th_ckpt', threadId: 'th_ckpt', fleetTaskId: null },
+      },
     }, { token });
     expect(leaseHeld.status).toBe(409);
     expect(leaseHeld.body.error.code).toBe('checkpoint_lease_held');
@@ -1435,7 +1476,12 @@ describe('POST /internal-object', () => {
       domain: 'task:th_ckpt',
       expectedRevision: 5,
       force: true,
-      state: { plan: ['forced'] },
+      state: {
+        schema: 2,
+        contentMode: 'summary_only',
+        task: { key: 'task:th_ckpt', threadId: 'th_ckpt', fleetTaskId: null },
+        summary: 'forced',
+      },
     }, { token });
     expect(forcedByUser.status).toBe(200);
     expect(forcedByUser.body.data.object.revision).toBe(6);
@@ -1467,6 +1513,219 @@ describe('POST /internal-object', () => {
       threadId: 'th_ckpt',
     }, { token });
     expect(afterDelete.body.data.object).toBeNull();
+  });
+
+  it('context_checkpoint schema 2：结构化字段、task 共享 revision、跨 Agent 读、summary_only 降级', async () => {
+    const taskState = (revisionText) => ({
+      schema: 2,
+      contentMode: 'structured',
+      task: { key: 'task:fleet_ckpt_2', threadId: 'th_ckpt_2', fleetTaskId: 'fleet_ckpt_2' },
+      goal: revisionText,
+      constraints: [{ id: 'c1', text: '不新增公共工具', source: 'user' }],
+      decisions: [{ id: 'd1', text: '复用图存储', reason: '不建第二套存储', at: 0, recordIds: [] }],
+      progress: {
+        done: [{ id: 'p1', text: '契约冻结', recordIds: [] }],
+        doing: [{ id: 'p2', text: 'sidecar 写入' }],
+        blocked: [{ id: 'p3', text: '等待资产', reason: '发布未闭环' }],
+      },
+      nextSteps: [{ id: 'n1', text: 'DSH 真实旅程', owner: 'dsh' }],
+      files: [{ path: 'packages/mcp/src/memory-capability.mjs', role: 'write', status: 'in_progress' }],
+      openQuestions: [{ id: 'q1', text: '详情跨域复制？', blocking: true }],
+      references: { recordIds: ['01JREF'], detailIds: ['01KDETAIL'], messageIds: ['m1'], fleetTaskId: 'fleet_ckpt_2', urls: [] },
+    });
+    const first = await post(capability('/internal-object'), {
+      actor: agent,
+      kind: 'context_checkpoint',
+      op: 'upsert',
+      agentId: 'opencode',
+      threadId: 'th_ckpt_2',
+      domain: 'task:fleet_ckpt_2',
+      expectedRevision: 0,
+      state: taskState('跨设备任务'),
+      summary: null,
+      recordIds: ['01JREF'],
+      detailIds: ['01KDETAIL'],
+    }, { token });
+    expect(first.status).toBe(200);
+    expect(first.body.data.object).toMatchObject({
+      domain: 'task:fleet_ckpt_2',
+      threadId: 'th_ckpt_2',
+      revision: 1,
+      schema: 2,
+      contentMode: 'structured',
+      structured: true,
+      detailIds: ['01KDETAIL'],
+    });
+    expect(first.body.data.object.updatedBy.agentId).toBe('opencode');
+
+    const hermesRead = await post(capability('/internal-object'), {
+      actor: { type: 'agent', agentId: 'hermes' },
+      kind: 'context_checkpoint',
+      op: 'get',
+      agentId: 'hermes',
+      threadId: 'th_ckpt_2',
+      domain: 'task:fleet_ckpt_2',
+    }, { token });
+    expect(hermesRead.status).toBe(200);
+    expect(hermesRead.body.data.object).toMatchObject({ revision: 1, agentId: 'opencode' });
+
+    const hermesWrite = await post(capability('/internal-object'), {
+      actor: { type: 'agent', agentId: 'hermes' },
+      kind: 'context_checkpoint',
+      op: 'upsert',
+      agentId: 'hermes',
+      threadId: 'th_ckpt_2',
+      domain: 'task:fleet_ckpt_2',
+      expectedRevision: 1,
+      state: taskState('Hermes 接续'),
+    }, { token });
+    expect(hermesWrite.status).toBe(200);
+    expect(hermesWrite.body.data.object.revision).toBe(2);
+    expect(hermesWrite.body.data.object.updatedBy.agentId).toBe('hermes');
+
+    const summaryOnly = await post(capability('/internal-object'), {
+      actor: { type: 'agent', agentId: 'opencode' },
+      kind: 'context_checkpoint',
+      op: 'upsert',
+      agentId: 'opencode',
+      threadId: 'th_summary_only',
+      domain: 'task:th_summary_only',
+      expectedRevision: 0,
+      state: {
+        schema: 2,
+        contentMode: 'summary_only',
+        task: { key: 'task:th_summary_only', threadId: 'th_summary_only', fleetTaskId: null },
+        goal: null,
+        constraints: [],
+        decisions: [],
+        progress: { done: [], doing: [], blocked: [] },
+        nextSteps: [],
+        files: [],
+        openQuestions: [],
+        references: { recordIds: [], detailIds: [], messageIds: [], fleetTaskId: null, urls: [] },
+      },
+      summary: null,
+    }, { token });
+    expect(summaryOnly.status).toBe(200);
+    expect(summaryOnly.body.data.object).toMatchObject({ contentMode: 'summary_only', structured: false, degraded: true });
+    expect(summaryOnly.body.degraded).toBe(true);
+    expect(summaryOnly.body.warnings).toContain('checkpoint_summary_only');
+    expect(summaryOnly.body.warnings).toContain('summary_unavailable');
+
+    const invalidSummaryOnly = await post(capability('/internal-object'), {
+      actor: agent,
+      kind: 'context_checkpoint',
+      op: 'upsert',
+      agentId: 'opencode',
+      threadId: 'th_bad_summary',
+      domain: 'task:th_bad_summary',
+      state: {
+        schema: 2,
+        contentMode: 'summary_only',
+        task: { key: 'task:th_bad_summary', threadId: 'th_bad_summary', fleetTaskId: null },
+        goal: '伪装结构化',
+      },
+      summary: 'only summary',
+    }, { token });
+    expect(invalidSummaryOnly.status).toBe(422);
+    expect(invalidSummaryOnly.body.error.code).toBe('validation_failed');
+
+    const oversizedGoal = await post(capability('/internal-object'), {
+      actor: agent,
+      kind: 'context_checkpoint',
+      op: 'upsert',
+      agentId: 'opencode',
+      threadId: 'th_big_goal',
+      domain: 'task:th_big_goal',
+      state: {
+        schema: 2,
+        contentMode: 'structured',
+        task: { key: 'task:th_big_goal', threadId: 'th_big_goal', fleetTaskId: null },
+        goal: 'x'.repeat(2049),
+        nextSteps: [{ id: 'n1', text: 'next' }],
+      },
+    }, { token });
+    expect(oversizedGoal.status).toBe(413);
+    expect(oversizedGoal.body.error.code).toBe('payload_too_large');
+
+    // Legacy schema 1 is readable but never promoted to structured.
+    const legacyNode = await app.graph.createNode('context_checkpoint', {
+      agentId: 'opencode',
+      threadId: 'th_legacy_ckpt',
+      revision: 1,
+      state: { plan: ['old'] },
+      summary: 'legacy summary',
+      recordIds: [],
+      lease: null,
+      expiresAt: 0,
+    }, undefined, { namespace: 'task:th_legacy_ckpt' });
+    await app.graph.updateNode(legacyNode.id, {
+      metadata: {
+        internal: true,
+        internalObject: { schema: 1, kind: 'context_checkpoint', agentId: 'opencode', threadId: 'th_legacy_ckpt', revision: 1 },
+      },
+    });
+    const legacyRead = await post(capability('/internal-object'), {
+      actor: agent,
+      kind: 'context_checkpoint',
+      op: 'get',
+      agentId: 'opencode',
+      threadId: 'th_legacy_ckpt',
+    }, { token });
+    expect(legacyRead.status).toBe(200);
+    expect(legacyRead.body.data.object).toMatchObject({
+      schema: 1,
+      contentMode: null,
+      structured: false,
+      legacy: true,
+      summary: 'legacy summary',
+    });
+    expect(legacyRead.body.degraded).toBe(true);
+  });
+
+  it('context_checkpoint default：按 (agentId, threadId) revision 隔离，其他 Agent 不可读', async () => {
+    const defaultState = (goal) => ({
+      schema: 2,
+      contentMode: 'structured',
+      task: { key: 'default', threadId: 'th_default_ckpt', fleetTaskId: null },
+      goal,
+      nextSteps: [{ id: 'n1', text: 'default next' }],
+      references: { recordIds: [], detailIds: [], messageIds: [], fleetTaskId: null, urls: [] },
+    });
+    const first = await post(capability('/internal-object'), {
+      actor: agent,
+      kind: 'context_checkpoint',
+      op: 'upsert',
+      agentId: 'opencode',
+      threadId: 'th_default_ckpt',
+      domain: 'default',
+      expectedRevision: 0,
+      state: defaultState('default one'),
+    }, { token });
+    expect(first.status).toBe(200);
+    const second = await post(capability('/internal-object'), {
+      actor: agent,
+      kind: 'context_checkpoint',
+      op: 'upsert',
+      agentId: 'opencode',
+      threadId: 'th_default_ckpt',
+      domain: 'default',
+      expectedRevision: 1,
+      state: defaultState('default two'),
+    }, { token });
+    expect(second.status).toBe(200);
+    expect(second.body.data.object.revision).toBe(2);
+
+    const hermesRead = await post(capability('/internal-object'), {
+      actor: { type: 'agent', agentId: 'hermes' },
+      kind: 'context_checkpoint',
+      op: 'get',
+      agentId: 'opencode',
+      threadId: 'th_default_ckpt',
+      domain: 'default',
+    }, { token });
+    expect(hermesRead.status).toBe(403);
+    expect(hermesRead.body.error.code).toBe('forbidden_scope');
   });
 });
 

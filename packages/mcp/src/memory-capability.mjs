@@ -74,6 +74,21 @@ const MAX_PROVENANCE_BYTES = 8 * 1024;
 const MAX_COMPACT_SUMMARY_BYTES = 64 * 1024;
 const MAX_CHECKPOINT_STATE_BYTES = 256 * 1024;
 const MAX_COMPACT_SOURCES = 200;
+const MAX_CHECKPOINT_GOAL_BYTES = 2 * 1024;
+const MAX_CHECKPOINT_CONSTRAINTS = 32;
+const MAX_CHECKPOINT_DECISIONS = 50;
+const MAX_CHECKPOINT_PROGRESS = 50;
+const MAX_CHECKPOINT_NEXT_STEPS = 32;
+const MAX_CHECKPOINT_FILES = 100;
+const MAX_CHECKPOINT_QUESTIONS = 32;
+const MAX_CHECKPOINT_REFERENCES = 200;
+const MAX_CHECKPOINT_URLS = 64;
+const MAX_CHECKPOINT_ITEM_BYTES = 1024;
+const MAX_CHECKPOINT_FILE_BYTES = 512;
+const MAX_CHECKPOINT_DECISION_BYTES = 2 * 1024;
+const MAX_CHECKPOINT_ID_CHARS = 128;
+const MAX_CHECKPOINT_URL_BYTES = 2 * 1024;
+const DEFAULT_CHECKPOINT_LEASE_MS = 60_000;
 const MAX_RELATED = 32;
 const MAX_MESSAGE_IDS = 64;
 const MAX_JSON_FIELD_BYTES = 16 * 1024;
@@ -128,6 +143,15 @@ export const CAPABILITY_LIMITS = Object.freeze({
   maxLimit: MAX_LIMIT,
   maxGraphDepth: MAX_DEPTH,
   maxCheckpointStateBytes: MAX_CHECKPOINT_STATE_BYTES,
+  maxCheckpointGoalBytes: MAX_CHECKPOINT_GOAL_BYTES,
+  maxCheckpointConstraints: MAX_CHECKPOINT_CONSTRAINTS,
+  maxCheckpointDecisions: MAX_CHECKPOINT_DECISIONS,
+  maxCheckpointProgress: MAX_CHECKPOINT_PROGRESS,
+  maxCheckpointNextSteps: MAX_CHECKPOINT_NEXT_STEPS,
+  maxCheckpointFiles: MAX_CHECKPOINT_FILES,
+  maxCheckpointQuestions: MAX_CHECKPOINT_QUESTIONS,
+  maxCheckpointReferences: MAX_CHECKPOINT_REFERENCES,
+  maxCheckpointUrls: MAX_CHECKPOINT_URLS,
   maxCompactSummaryBytes: MAX_COMPACT_SUMMARY_BYTES,
   maxCompactSources: MAX_COMPACT_SOURCES,
   maxDetailTextBytes: MAX_DETAIL_TEXT_BYTES,
@@ -791,6 +815,16 @@ function compareInternalObjectNodes(a, b) {
   return String(b.id).localeCompare(String(a.id));
 }
 
+function checkpointState(node) {
+  const content = isObject(node?.content) ? node.content : {};
+  return isObject(content.state) ? content.state : {};
+}
+
+function checkpointSchema(node) {
+  const state = checkpointState(node);
+  return state.schema === 2 ? 2 : 1;
+}
+
 function isV2CheckpointNode(node) {
   const domain = domainOfNamespace(node?.namespace);
   return node?.type === 'context_checkpoint'
@@ -809,16 +843,20 @@ function checkpointAgentId(node) {
 function checkpointThreadId(node) {
   const content = isObject(node?.content) ? node.content : {};
   const internalObject = internalObjectMetadata(node);
+  const state = checkpointState(node);
   if (typeof content.threadId === 'string') return content.threadId;
+  if (isObject(state.task) && typeof state.task.threadId === 'string') return state.task.threadId;
   if (typeof internalObject.threadId === 'string') return internalObject.threadId;
   const domain = domainOfNamespace(node?.namespace);
   return domain.startsWith('task:') ? domain.slice('task:'.length) : null;
 }
 
-function checkpointMatches(node, agentId, threadId) {
-  return isV2CheckpointNode(node)
-    && checkpointAgentId(node) === agentId
-    && checkpointThreadId(node) === threadId;
+function checkpointMatches(node, agentId, threadId, domain = null) {
+  if (!isV2CheckpointNode(node) || checkpointThreadId(node) !== threadId) return false;
+  const nodeDomain = domainOfNamespace(node?.namespace);
+  if (domain !== null && nodeDomain !== domain) return false;
+  if (nodeDomain.startsWith('task:')) return true;
+  return checkpointAgentId(node) === agentId;
 }
 
 async function currentSelfRecord(app, agentId) {
@@ -831,17 +869,35 @@ async function currentSelfRecord(app, agentId) {
     .sort(compareInternalObjectNodes)[0] ?? null;
 }
 
-async function currentCheckpoint(app, agentId, threadId) {
+function checkpointRevisionKey(node) {
+  const domain = domainOfNamespace(node?.namespace);
+  if (domain.startsWith('task:')) return `task:${domain}`;
+  return `default:${checkpointAgentId(node) ?? ''}:${checkpointThreadId(node) ?? ''}`;
+}
+
+async function currentCheckpoint(app, { agentId, threadId, domain = null } = {}) {
   const nodes = await listNodesOfType(app, 'context_checkpoint');
-  return nodes
-    .filter((node) => !node.deletedAt && checkpointMatches(node, agentId, threadId))
-    .sort(compareInternalObjectNodes)[0] ?? null;
+  const matches = nodes
+    .filter((node) => !node.deletedAt && checkpointMatches(node, agentId, threadId, domain));
+  if (matches.length === 0) return null;
+  const keyed = new Map();
+  for (const node of matches) {
+    const key = checkpointRevisionKey(node);
+    const existing = keyed.get(key);
+    if (!existing || compareInternalObjectNodes(node, existing) < 0) keyed.set(key, node);
+  }
+  return [...keyed.values()].sort(compareInternalObjectNodes)[0] ?? null;
 }
 
 async function allCheckpoints(app, agentId, threadId = null) {
   const nodes = await listNodesOfType(app, 'context_checkpoint');
   return nodes.filter((node) => {
     if (node.deletedAt || !isV2CheckpointNode(node)) return false;
+    const domain = domainOfNamespace(node.namespace);
+    if (domain.startsWith('task:')) {
+      if (threadId !== null && checkpointThreadId(node) !== threadId) return false;
+      return true;
+    }
     if (checkpointAgentId(node) !== agentId) return false;
     if (threadId !== null && checkpointThreadId(node) !== threadId) return false;
     return checkpointThreadId(node) !== null;
@@ -1345,9 +1401,20 @@ function checkpointObjectView(node, { userId = 'user' } = {}) {
   const internalObject = internalObjectMetadata(node);
   const threadId = typeof content.threadId === 'string'
     ? content.threadId
-    : typeof internalObject.threadId === 'string'
-      ? internalObject.threadId
-      : domain.startsWith('task:') ? domain.slice('task:'.length) : null;
+    : isObject(checkpointState(node).task) && typeof checkpointState(node).task.threadId === 'string'
+      ? checkpointState(node).task.threadId
+      : typeof internalObject.threadId === 'string'
+        ? internalObject.threadId
+        : domain.startsWith('task:') ? domain.slice('task:'.length) : null;
+  const state = checkpointState(node);
+  const schema = checkpointSchema(node);
+  const contentMode = schema === 2
+    ? (state.contentMode === 'summary_only' ? 'summary_only' : 'structured')
+    : null;
+  const structured = schema === 2 && contentMode === 'structured';
+  const summary = typeof content.summary === 'string' ? content.summary : null;
+  const summaryOnly = contentMode === 'summary_only';
+  const legacy = schema !== 2;
   return {
     id: node.id,
     type: 'context_checkpoint',
@@ -1364,15 +1431,34 @@ function checkpointObjectView(node, { userId = 'user' } = {}) {
         : null,
     threadId,
     revision: internalObjectRevision(node),
-    state: isObject(content.state) ? content.state : {},
-    summary: typeof content.summary === 'string' ? content.summary : null,
+    schema,
+    state,
+    contentMode,
+    structured,
+    legacy,
+    degraded: summaryOnly || legacy,
+    summary,
     recordIds: Array.isArray(content.recordIds) ? content.recordIds : [],
+    detailIds: Array.isArray(content.detailIds) ? content.detailIds : [],
     lease: isObject(content.lease) ? content.lease : null,
+    updatedBy: isObject(content.updatedBy) ? content.updatedBy : null,
     expiresAt: typeof content.expiresAt === 'number' ? content.expiresAt : 0,
     provenance: internalProvenance(node, domain, userId),
     createdAt: node.createdAt ?? null,
     updatedAt: node.updatedAt ?? node.createdAt ?? null,
   };
+}
+
+function checkpointWarnings(view) {
+  const warnings = [];
+  if (view?.contentMode === 'summary_only' && view?.summary === null) warnings.push('summary_unavailable');
+  if (view?.contentMode === 'summary_only') warnings.push('checkpoint_summary_only');
+  if (view?.legacy) warnings.push('checkpoint_legacy');
+  return warnings;
+}
+
+function checkpointDegraded(view) {
+  return view?.contentMode === 'summary_only' || view?.legacy === true;
 }
 
 function normalizeSelfRecord(value, index) {
@@ -1397,13 +1483,234 @@ function normalizeSelfRecord(value, index) {
   return record;
 }
 
+function checkpointFieldString(value, field, index, { maxBytes = MAX_CHECKPOINT_ITEM_BYTES, allowNull = false } = {}) {
+  if (value === undefined || value === null) {
+    if (allowNull) return null;
+    throw validationError(index, field, `${field} 必须是非空字符串`);
+  }
+  if (typeof value !== 'string') throw validationError(index, field, `${field} 必须是字符串`);
+  if (value.trim() === '') {
+    if (allowNull) return null;
+    throw validationError(index, field, `${field} 必须是非空字符串`);
+  }
+  if (Buffer.byteLength(value, 'utf-8') > maxBytes) {
+    throw new CapabilityError(413, 'payload_too_large', `${field} 超过 ${maxBytes} 字节`, { index, field });
+  }
+  return value;
+}
+
+function checkpointOptionalId(value, field, index) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string' || value.length === 0 || value.length > MAX_CHECKPOINT_ID_CHARS) {
+    throw validationError(index, field, `${field} 需为 1–${MAX_CHECKPOINT_ID_CHARS} 字符`);
+  }
+  return value;
+}
+
+function checkpointStringList(value, field, index, { maxItems = MAX_CHECKPOINT_REFERENCES, maxChars = 128 } = {}) {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw validationError(index, field, `${field} 必须是字符串数组`);
+  if (value.length > maxItems) throw validationError(index, field, `${field} 最多 ${maxItems} 项`);
+  const out = [];
+  for (const entry of value) {
+    if (typeof entry !== 'string' || entry.length === 0 || entry.length > maxChars) {
+      throw validationError(index, field, `${field} 每项需为 1–${maxChars} 字符`);
+    }
+    if (!out.includes(entry)) out.push(entry);
+  }
+  return out;
+}
+
+function checkpointItems(value, field, index, { maxItems, normalize }) {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw validationError(index, field, `${field} 必须是数组`);
+  if (value.length > maxItems) throw validationError(index, field, `${field} 最多 ${maxItems} 项`);
+  return value.map((entry, itemIndex) => normalize(entry, `${field}[${itemIndex}]`));
+}
+
+function checkpointTextItem(value, field, index, { maxBytes = MAX_CHECKPOINT_ITEM_BYTES } = {}) {
+  if (!isObject(value)) throw validationError(index, field, `${field} 必须是对象`);
+  const item = {
+    id: checkpointOptionalId(value.id, `${field}.id`, index),
+    text: checkpointFieldString(value.text, `${field}.text`, index, { maxBytes }),
+  };
+  return item;
+}
+
+function normalizeCheckpointReferences(value, index) {
+  if (value === undefined || value === null) {
+    return { recordIds: [], detailIds: [], messageIds: [], fleetTaskId: null, urls: [] };
+  }
+  if (!isObject(value)) throw validationError(index, 'state.references', 'references 必须是对象');
+  return {
+    recordIds: checkpointStringList(value.recordIds, 'state.references.recordIds', index),
+    detailIds: checkpointStringList(value.detailIds, 'state.references.detailIds', index),
+    messageIds: checkpointStringList(value.messageIds, 'state.references.messageIds', index, { maxChars: 256 }),
+    fleetTaskId: value.fleetTaskId === undefined || value.fleetTaskId === null
+      ? null
+      : checkpointFieldString(value.fleetTaskId, 'state.references.fleetTaskId', index, { maxBytes: 128 }),
+    urls: checkpointStringList(value.urls, 'state.references.urls', index, {
+      maxItems: MAX_CHECKPOINT_URLS,
+      maxChars: MAX_CHECKPOINT_URL_BYTES,
+    }),
+  };
+}
+
 function normalizeCheckpointState(value, index) {
-  if (value === undefined || value === null) return {};
-  if (!isObject(value)) throw validationError(index, 'state', 'state 必须是对象');
+  if (value === undefined || value === null || !isObject(value)) {
+    throw validationError(index, 'state', 'state 必须是 schema 2 对象');
+  }
+  if (value.schema !== 2) {
+    throw validationError(index, 'state.schema', '新写入 checkpoint 必须使用 state.schema=2');
+  }
   if (byteSize(value) > MAX_CHECKPOINT_STATE_BYTES) {
     throw new CapabilityError(413, 'payload_too_large', `state 超过 ${MAX_CHECKPOINT_STATE_BYTES} 字节`, { index });
   }
-  return jsonClone(value);
+  const contentMode = value.contentMode === 'summary_only' ? 'summary_only' : value.contentMode === 'structured' ? 'structured' : null;
+  if (contentMode === null) {
+    throw validationError(index, 'state.contentMode', 'contentMode 必须是 structured | summary_only');
+  }
+  if (!isObject(value.task)) throw validationError(index, 'state.task', 'task 必须是对象');
+  const task = {
+    ...jsonClone(value.task),
+    key: checkpointFieldString(value.task.key, 'state.task.key', index, { maxBytes: 128 }),
+    threadId: checkpointFieldString(value.task.threadId, 'state.task.threadId', index, { maxBytes: 128 }),
+    fleetTaskId: value.task.fleetTaskId === undefined || value.task.fleetTaskId === null
+      ? null
+      : checkpointFieldString(value.task.fleetTaskId, 'state.task.fleetTaskId', index, { maxBytes: 128 }),
+  };
+  const state = {
+    ...jsonClone(value),
+    schema: 2,
+    contentMode,
+    task,
+    goal: value.goal === undefined || value.goal === null || value.goal === ''
+      ? null
+      : checkpointFieldString(value.goal, 'state.goal', index, { maxBytes: MAX_CHECKPOINT_GOAL_BYTES }),
+    constraints: checkpointItems(value.constraints, 'state.constraints', index, {
+      maxItems: MAX_CHECKPOINT_CONSTRAINTS,
+      maxBytes: MAX_CHECKPOINT_ITEM_BYTES,
+      normalize: (entry, field) => {
+        if (!isObject(entry)) throw validationError(index, field, `${field} 必须是对象`);
+        return {
+          ...jsonClone(entry),
+          ...checkpointTextItem(entry, field, index),
+          ...(entry.source === undefined || entry.source === null
+            ? {}
+            : { source: checkpointFieldString(entry.source, `${field}.source`, index, { maxBytes: 128 }) }),
+        };
+      },
+    }),
+    decisions: checkpointItems(value.decisions, 'state.decisions', index, {
+      maxItems: MAX_CHECKPOINT_DECISIONS,
+      maxBytes: MAX_CHECKPOINT_DECISION_BYTES,
+      normalize: (entry, field) => {
+        if (!isObject(entry)) throw validationError(index, field, `${field} 必须是对象`);
+        const at = entry.at === undefined || entry.at === null ? undefined : optionalNumber(entry.at, `${field}.at`, index);
+        return {
+          ...jsonClone(entry),
+          ...checkpointTextItem(entry, field, index, { maxBytes: MAX_CHECKPOINT_DECISION_BYTES }),
+          ...(entry.reason === undefined || entry.reason === null
+            ? {}
+            : { reason: checkpointFieldString(entry.reason, `${field}.reason`, index, { maxBytes: MAX_CHECKPOINT_DECISION_BYTES }) }),
+          ...(at === undefined ? {} : { at }),
+          recordIds: checkpointStringList(entry.recordIds, `${field}.recordIds`, index, { maxItems: MAX_CHECKPOINT_REFERENCES }),
+        };
+      },
+    }),
+    progress: (() => {
+      const progress = value.progress === undefined || value.progress === null || !isObject(value.progress)
+        ? {}
+        : value.progress;
+      if (value.progress !== undefined && value.progress !== null && !isObject(value.progress)) {
+        throw validationError(index, 'state.progress', 'progress 必须是对象');
+      }
+      const normalizeProgress = (entries, key, { allowReason = false } = {}) => checkpointItems(entries, `state.progress.${key}`, index, {
+        maxItems: MAX_CHECKPOINT_PROGRESS,
+        maxBytes: MAX_CHECKPOINT_ITEM_BYTES,
+        normalize: (entry, field) => {
+          if (!isObject(entry)) throw validationError(index, field, `${field} 必须是对象`);
+          return {
+            ...jsonClone(entry),
+            ...checkpointTextItem(entry, field, index),
+            ...(allowReason && entry.reason !== undefined && entry.reason !== null
+              ? { reason: checkpointFieldString(entry.reason, `${field}.reason`, index) }
+              : {}),
+            recordIds: checkpointStringList(entry.recordIds, `${field}.recordIds`, index, { maxItems: MAX_CHECKPOINT_REFERENCES }),
+          };
+        },
+      });
+      return {
+        done: normalizeProgress(progress.done, 'done'),
+        doing: normalizeProgress(progress.doing, 'doing'),
+        blocked: normalizeProgress(progress.blocked, 'blocked', { allowReason: true }),
+      };
+    })(),
+    nextSteps: checkpointItems(value.nextSteps, 'state.nextSteps', index, {
+      maxItems: MAX_CHECKPOINT_NEXT_STEPS,
+      maxBytes: MAX_CHECKPOINT_ITEM_BYTES,
+      normalize: (entry, field) => {
+        if (!isObject(entry)) throw validationError(index, field, `${field} 必须是对象`);
+        return {
+          ...jsonClone(entry),
+          ...checkpointTextItem(entry, field, index),
+          ...(entry.owner === undefined || entry.owner === null
+            ? {}
+            : { owner: checkpointFieldString(entry.owner, `${field}.owner`, index, { maxBytes: 128 }) }),
+        };
+      },
+    }),
+    files: checkpointItems(value.files, 'state.files', index, {
+      maxItems: MAX_CHECKPOINT_FILES,
+      maxBytes: MAX_CHECKPOINT_FILE_BYTES,
+      normalize: (entry, field) => {
+        if (!isObject(entry)) throw validationError(index, field, `${field} 必须是对象`);
+        return {
+          ...jsonClone(entry),
+          path: checkpointFieldString(entry.path, `${field}.path`, index, { maxBytes: MAX_CHECKPOINT_FILE_BYTES }),
+          ...(entry.role === undefined || entry.role === null
+            ? {}
+            : { role: checkpointFieldString(entry.role, `${field}.role`, index, { maxBytes: 128 }) }),
+          ...(entry.status === undefined || entry.status === null
+            ? {}
+            : { status: checkpointFieldString(entry.status, `${field}.status`, index, { maxBytes: 128 }) }),
+        };
+      },
+    }),
+    openQuestions: checkpointItems(value.openQuestions, 'state.openQuestions', index, {
+      maxItems: MAX_CHECKPOINT_QUESTIONS,
+      maxBytes: MAX_CHECKPOINT_ITEM_BYTES,
+      normalize: (entry, field) => {
+        if (!isObject(entry)) throw validationError(index, field, `${field} 必须是对象`);
+        return {
+          ...jsonClone(entry),
+          ...checkpointTextItem(entry, field, index),
+          blocking: entry.blocking === true,
+        };
+      },
+    }),
+    references: normalizeCheckpointReferences(value.references, index),
+  };
+  if (contentMode === 'summary_only') {
+    const structuredFields = [
+      state.goal,
+      state.constraints.length,
+      state.decisions.length,
+      state.progress.done.length,
+      state.progress.doing.length,
+      state.progress.blocked.length,
+      state.nextSteps.length,
+      state.files.length,
+      state.openQuestions.length,
+    ];
+    if (structuredFields.some((entry) => (Array.isArray(entry) ? entry.length > 0 : Boolean(entry)))) {
+      throw validationError(index, 'state.contentMode', 'summary_only checkpoint 不得包含结构化字段');
+    }
+  }
+  if (byteSize(state) > MAX_CHECKPOINT_STATE_BYTES) {
+    throw new CapabilityError(413, 'payload_too_large', `state 超过 ${MAX_CHECKPOINT_STATE_BYTES} 字节`, { index });
+  }
+  return state;
 }
 
 function timeoutAfter(promise, ms, message) {
@@ -2660,7 +2967,6 @@ export function createMemoryCapabilityHandler({
         throw new CapabilityError(400, 'invalid_agent_id', 'agentId 格式非法');
       }
       const agentId = payload.agentId;
-      assertInternalObjectActor(actor, agentId);
       if (payload.sync !== undefined || payload['checkpoint.sync'] !== undefined) {
         throw new CapabilityError(400, 'legacy_sync_unsupported', '不再支持 sync/checkpoint.sync 字段');
       }
@@ -2668,39 +2974,88 @@ export function createMemoryCapabilityHandler({
       if (!appValue) throw new CapabilityError(503, 'capability_unavailable', '图存储尚未初始化', undefined, true);
       const identity = identitySnapshot();
 
+      const readDomain = (() => {
+        if (payload.domain === undefined || payload.domain === null) return null;
+        const domain = parseInternalDomain(payload.domain);
+        if (domain !== 'default' && !domain.startsWith('task:')) {
+          throw new CapabilityError(400, 'domain_mismatch', 'Checkpoint 只能位于 task:<key> 或 default 域', {
+            domain,
+          });
+        }
+        return domain;
+      })();
+      const assertCheckpointRead = (domain) => {
+        if (domain.startsWith('task:')) return;
+        assertInternalObjectActor(actor, agentId);
+      };
+
       if (op === 'get') {
+        if (payload.id !== undefined) {
+          if (typeof payload.id !== 'string' || payload.id.length === 0) {
+            throw new CapabilityError(400, 'invalid_request', 'id 非法');
+          }
+          const byId = await appValue.graph.getNode(payload.id);
+          if (!byId || byId.deletedAt || !isV2CheckpointNode(byId) || internalObjectKind(byId) !== 'context_checkpoint') {
+            return { data: { object: null, replayed: false }, warnings: [], degraded: false };
+          }
+          const visible = !checkpointExpired(byId, now()) ? byId : null;
+          const view = visible ? checkpointObjectView(visible, { userId: identity.userId }) : null;
+          if (view) assertCheckpointRead(view.domain);
+          return {
+            data: { object: view, replayed: false },
+            warnings: checkpointWarnings(view),
+            degraded: checkpointDegraded(view),
+          };
+        }
         const threadId = parseThreadId(payload.threadId);
         if (!threadId) throw new CapabilityError(400, 'invalid_thread_id', 'checkpoint get 需要 threadId');
-        const node = await currentCheckpoint(appValue, agentId, threadId);
-        const visible = node && !checkpointExpired(node, now()) ? node : null;
+        const requestedTaskId = typeof payload.fleetTaskId === 'string' && payload.fleetTaskId.length > 0
+          ? payload.fleetTaskId
+          : (typeof payload.taskId === 'string' && payload.taskId.length > 0 ? payload.taskId : null);
+        const candidates = readDomain
+          ? [readDomain]
+          : [...new Set([
+            ...(requestedTaskId ? [`task:${requestedTaskId}`] : []),
+            `task:${threadId}`,
+            'default',
+          ])];
+        let visible = null;
+        for (const domain of candidates) {
+          const node = await currentCheckpoint(appValue, { agentId, threadId, domain });
+          if (!node || checkpointExpired(node, now())) continue;
+          visible = node;
+          break;
+        }
+        const view = visible ? checkpointObjectView(visible, { userId: identity.userId }) : null;
+        if (view) assertCheckpointRead(view.domain);
         return {
           data: {
-            object: visible ? checkpointObjectView(visible, { userId: identity.userId }) : null,
+            object: view,
             replayed: false,
           },
-          warnings: [],
-          degraded: false,
+          warnings: checkpointWarnings(view),
+          degraded: checkpointDegraded(view),
         };
       }
 
       if (op === 'list') {
         const threadId = payload.threadId === undefined ? null : parseThreadId(payload.threadId);
         const limit = clampLimit(payload.limit, 20);
+        if (!readDomain?.startsWith('task:')) assertInternalObjectActor(actor, agentId);
         const nodes = (await allCheckpoints(appValue, agentId, threadId))
+          .filter((node) => (readDomain ? domainOfNamespace(node.namespace) === readDomain : true))
           .filter((node) => !checkpointExpired(node, now()))
           .sort(compareInternalObjectNodes);
-        const latestByThread = new Map();
+        const latestByKey = new Map();
         for (const node of nodes) {
-          const threadId = checkpointThreadId(node);
-          if (typeof threadId === 'string' && !latestByThread.has(threadId)) {
-            latestByThread.set(threadId, node);
-          }
+          const key = checkpointRevisionKey(node);
+          if (!latestByKey.has(key)) latestByKey.set(key, node);
         }
-        const objects = [...latestByThread.values()].map((node) => checkpointObjectView(node, { userId: identity.userId }));
+        const views = [...latestByKey.values()].map((node) => checkpointObjectView(node, { userId: identity.userId }));
         return {
-          data: { objects: objects.slice(0, limit), total: objects.length, replayed: false },
-          warnings: [],
-          degraded: false,
+          data: { objects: views.slice(0, limit), total: views.length, replayed: false },
+          warnings: [...new Set(views.flatMap((view) => checkpointWarnings(view)))],
+          degraded: views.some((view) => checkpointDegraded(view)),
         };
       }
 
@@ -2732,7 +3087,8 @@ export function createMemoryCapabilityHandler({
         }
         const threadId = parseThreadId(payload.threadId);
         if (!threadId) throw new CapabilityError(400, 'invalid_thread_id', 'checkpoint delete 需要 id 或 threadId');
-        const nodes = await allCheckpoints(appValue, agentId, threadId);
+        const nodes = (await allCheckpoints(appValue, agentId, threadId))
+          .filter((node) => (readDomain ? domainOfNamespace(node.namespace) === readDomain : true));
         for (const node of nodes) {
           await appValue.graph.deleteNode(node.id);
         }
@@ -2746,21 +3102,65 @@ export function createMemoryCapabilityHandler({
       // upsert
       const threadId = parseThreadId(payload.threadId);
       if (!threadId) throw new CapabilityError(400, 'invalid_thread_id', 'checkpoint 需要 threadId');
+      assertInternalObjectActor(actor, agentId);
       if (payload.force === true && actor.type === 'agent') {
         throw new CapabilityError(403, 'forbidden_scope', 'force=true 仅允许 user/system');
+      }
+      const state = normalizeCheckpointState(payload.state, 0);
+      let summary = null;
+      if (payload.summary !== undefined && payload.summary !== null) {
+        if (typeof payload.summary !== 'string') throw validationError(0, 'summary', 'summary 必须是字符串');
+        if (Buffer.byteLength(payload.summary, 'utf-8') > MAX_COMPACT_SUMMARY_BYTES) {
+          throw new CapabilityError(413, 'payload_too_large', 'summary 超过 64 KiB');
+        }
+        summary = payload.summary;
+      }
+      const warnings = [];
+      if (state.contentMode === 'summary_only' && summary === null) warnings.push('summary_unavailable');
+      const incomingWarnings = Array.isArray(payload.warnings)
+        ? payload.warnings
+        : (typeof payload.warning === 'string' ? [payload.warning] : []);
+      for (const warning of incomingWarnings) {
+        if (typeof warning === 'string' && warning.length > 0 && !warnings.includes(warning)) warnings.push(warning);
       }
       let domain = 'default';
       if (payload.domain !== undefined && payload.domain !== null) {
         domain = parseInternalDomain(payload.domain);
-        const validTaskDomain = domain.startsWith('task:') && domain.slice('task:'.length) === threadId;
-        if (domain !== 'default' && !validTaskDomain) {
-          throw new CapabilityError(400, 'domain_mismatch', 'Checkpoint 只能位于 task:<threadId> 或 default 域', {
+      } else if (state.task.key.startsWith('task:')) {
+        domain = parseInternalDomain(state.task.key);
+      } else if (state.task.key !== 'default') {
+        throw new CapabilityError(400, 'domain_mismatch', 'Checkpoint 只能位于 task:<key> 或 default 域', {
+          domain: state.task.key,
+          threadId,
+        });
+      }
+      if (state.task.key !== domain) {
+        throw new CapabilityError(400, 'domain_mismatch', 'state.task.key 必须等于 domain', {
+          domain,
+          taskKey: state.task.key,
+        });
+      }
+      if (state.task.threadId !== threadId) {
+        throw new CapabilityError(400, 'domain_mismatch', 'state.task.threadId 必须等于路径 threadId', {
+          threadId,
+          taskThreadId: state.task.threadId,
+        });
+      }
+      if (domain !== 'default') {
+        const validTaskDomain = domain.startsWith('task:')
+          && (domain.slice('task:'.length) === threadId
+            || domain.slice('task:'.length) === state.task.fleetTaskId
+            || domain.slice('task:'.length) === payload.fleetTaskId
+            || domain.slice('task:'.length) === payload.taskId);
+        if (!validTaskDomain) {
+          throw new CapabilityError(400, 'domain_mismatch', 'Checkpoint 只能位于 task:<threadId|taskId> 或 default 域', {
             domain,
             threadId,
+            fleetTaskId: state.task.fleetTaskId,
           });
         }
       }
-      const current = await currentCheckpoint(appValue, agentId, threadId);
+      const current = await currentCheckpoint(appValue, { agentId, threadId, domain });
       const currentRevision = current ? internalObjectRevision(current) : 0;
       if (hasValue(payload.expectedRevision)) {
         if (typeof payload.expectedRevision !== 'number' || !Number.isInteger(payload.expectedRevision) || payload.expectedRevision < 0) {
@@ -2770,6 +3170,7 @@ export function createMemoryCapabilityHandler({
           throw new CapabilityError(409, 'revision_mismatch', 'checkpoint revision 冲突', {
             agentId,
             threadId,
+            domain,
             currentRevision,
             expectedRevision: payload.expectedRevision,
           }, true);
@@ -2789,24 +3190,19 @@ export function createMemoryCapabilityHandler({
           throw new CapabilityError(403, 'forbidden_scope', '只有 user/system 可以抢占租约');
         }
       }
-      const state = normalizeCheckpointState(payload.state, 0);
-      let summary = null;
-      if (payload.summary !== undefined && payload.summary !== null) {
-        if (typeof payload.summary !== 'string') throw validationError(0, 'summary', 'summary 必须是字符串');
-        if (Buffer.byteLength(payload.summary, 'utf-8') > MAX_COMPACT_SUMMARY_BYTES) {
-          throw new CapabilityError(413, 'payload_too_large', 'summary 超过 64 KiB');
-        }
-        summary = payload.summary;
-      }
       const recordIds = stringArray(payload.recordIds, 'recordIds', 0, {
         maxItems: MAX_COMPACT_SOURCES,
         maxChars: 128,
       }) ?? [];
+      const detailIds = stringArray(payload.detailIds, 'detailIds', 0, {
+        maxItems: MAX_COMPACT_SOURCES,
+        maxChars: 128,
+      }) ?? state.references.detailIds;
       const expiresAt = payload.expiresAt === undefined || payload.expiresAt === null
         ? 0
         : optionalNumber(payload.expiresAt, 'expiresAt', 0);
       if (expiresAt < 0) throw validationError(0, 'expiresAt', 'expiresAt 不能为负数');
-      let leaseMs = 60_000;
+      let leaseMs = DEFAULT_CHECKPOINT_LEASE_MS;
       if (payload.leaseMs !== undefined && payload.leaseMs !== null) {
         if (typeof payload.leaseMs !== 'number' || !Number.isFinite(payload.leaseMs) || payload.leaseMs <= 0) {
           throw validationError(0, 'leaseMs', 'leaseMs 必须是正数');
@@ -2815,7 +3211,7 @@ export function createMemoryCapabilityHandler({
       }
       const lease = { hostId, until: now() + leaseMs };
       const provenanceInput = parseProvenanceInput(payload.provenance, 0);
-      assertDomainWrite(actor, domain, {
+      assertDomainWrite(actor, domain.startsWith('task:') ? `task:${threadId}` : domain, {
         ...provenanceInput,
         threadId: provenanceInput.threadId ?? threadId,
       }, threadId);
@@ -2828,14 +3224,24 @@ export function createMemoryCapabilityHandler({
         threadId: provenanceInput.threadId ?? threadId,
       });
       const revision = currentRevision + 1;
+      const updatedBy = {
+        agentId: actor.type === 'agent' ? actor.agentId : null,
+        actorType: actor.type,
+        hostId,
+        at: now(),
+      };
       const content = {
         agentId,
         threadId,
         revision,
         state,
+        contentMode: state.contentMode,
+        structured: state.contentMode === 'structured',
         summary,
         recordIds,
+        detailIds,
         lease,
+        updatedBy,
         expiresAt,
       };
       const created = await appValue.graph.createNode('context_checkpoint', content, undefined, { namespace: domain });
@@ -2843,12 +3249,16 @@ export function createMemoryCapabilityHandler({
         metadata: {
           internal: true,
           internalObject: {
-            schema: 1,
+            schema: 2,
             kind: 'context_checkpoint',
             agentId,
             threadId,
             revision,
             lease,
+            taskKey: domain,
+            contentMode: state.contentMode,
+            structured: state.contentMode === 'structured',
+            cloudId: identity.cloudId ?? null,
           },
           provenance,
         },
@@ -2856,10 +3266,11 @@ export function createMemoryCapabilityHandler({
       if (!node) {
         throw new CapabilityError(503, 'capability_unavailable', 'checkpoint 写入后读取失败', undefined, true);
       }
+      const view = checkpointObjectView(node, { userId: identity.userId });
       return {
-        data: { object: checkpointObjectView(node, { userId: identity.userId }), conflict: null, replayed: false },
-        warnings: [],
-        degraded: false,
+        data: { object: view, conflict: null, replayed: false },
+        warnings: [...new Set([...warnings, ...checkpointWarnings(view)])],
+        degraded: checkpointDegraded(view),
       };
     }
 

@@ -708,10 +708,56 @@ describe('ingest and compaction', () => {
       domain: 'task:ses_1',
       actor: { type: 'agent', agentId: 'opencode' },
       summary: 'The task moved from design to implementation.',
-      state: { kind: 'compaction', reason: 'auto' },
+      state: { kind: 'compaction', reason: 'auto', schema: 2, contentMode: 'summary_only' },
     });
     expect(checkpoint[0].body.sync).toBeUndefined();
     expect(controller.getStatus().counts.checkpoints.sent).toBe(1);
+  });
+
+  it('parses structured compaction headings into schema 2 checkpoint fields', async () => {
+    const fetchImpl = createFetch();
+    const { controller } = controllerWith({ fetchImpl });
+    const summary = [
+      '## Objective',
+      'Ship OpenCode structured checkpoints.',
+      '## Requirements',
+      '- Keep schema 2',
+      '## Decisions',
+      '- Reuse sidecar checkpoint — no new endpoint',
+      '## Work State',
+      '- Done: event wired',
+      '- Doing: parser',
+      '- Blocked: none',
+      '## Next Move',
+      '- Verify next turn context',
+      '## Relevant Files',
+      '- packages/opencode-plugin/index.js (write, in_progress)',
+    ].join('\n');
+    await controller.handleEvent({
+      id: 'evt_compact_2',
+      type: 'session.compaction.ended',
+      data: {
+        sessionID: 'ses_1',
+        reason: 'manual',
+        text: summary,
+        messageCount: 7,
+      },
+    });
+    const checkpoint = fetchImpl.callsFor('/checkpoints/ses_1');
+    expect(checkpoint).toHaveLength(1);
+    expect(checkpoint[0].body.state).toMatchObject({
+      schema: 2,
+      contentMode: 'structured',
+      task: { key: 'task:ses_1', threadId: 'ses_1', fleetTaskId: null },
+      goal: 'Ship OpenCode structured checkpoints.',
+      nextSteps: [{ text: 'Verify next turn context' }],
+      progress: {
+        done: [{ text: 'event wired' }],
+        doing: [{ text: 'parser' }],
+        blocked: [],
+      },
+    });
+    expect(checkpoint[0].body.state.constraints[0]).toMatchObject({ text: 'Keep schema 2', source: 'compaction_summary' });
   });
 
   it('does not block or throw when ingest fails', async () => {

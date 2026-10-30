@@ -36,6 +36,8 @@ const MAX_CAPABILITY_LIMIT = 50;
 const MAX_COMPACT_SCAN = 1000;
 const MAX_SUMMARY_CHARS = 64 * 1024;
 const MAX_STATE_BYTES = 256 * 1024;
+const MAX_CHECKPOINT_REFERENCE_IDS = 200;
+const CHECKPOINT_CONTENT_MODES = new Set(['structured', 'summary_only']);
 const DEFAULT_COMPACT_LIMIT = 20;
 const RECORD_TYPES = ['fact', 'preference', 'episode', 'observation', 'skill', 'entity'];
 
@@ -79,10 +81,17 @@ export interface CheckpointView {
   agentId: string;
   threadId: string;
   revision: number | null;
+  schema?: 1 | 2;
+  contentMode?: 'structured' | 'summary_only' | null;
+  structured?: boolean;
+  legacy?: boolean;
+  degraded?: boolean;
   state?: Record<string, unknown>;
   summary?: string | null;
   recordIds?: string[];
+  detailIds?: string[];
   lease?: { hostId?: string; until?: number } | null;
+  updatedBy?: Record<string, unknown> | null;
   expiresAt?: number;
   pending?: boolean;
   queuedAt?: number;
@@ -136,8 +145,8 @@ export interface SidecarObjectsApi {
   handleCompact(request: unknown): Promise<ObjectHttpResult>;
   getCompact(id: string): Promise<ObjectHttpResult>;
   putCheckpoint(threadId: string, request: unknown): Promise<ObjectHttpResult>;
-  getCheckpoint(threadId: string, options?: { agentId?: string | null; sync?: string | null }): Promise<ObjectHttpResult>;
-  deleteCheckpoint(threadId: string, options?: { agentId?: string | null; sync?: string | null }): Promise<ObjectHttpResult>;
+  getCheckpoint(threadId: string, options?: { agentId?: string | null; sync?: string | null; domain?: string | null }): Promise<ObjectHttpResult>;
+  deleteCheckpoint(threadId: string, options?: { agentId?: string | null; sync?: string | null; domain?: string | null }): Promise<ObjectHttpResult>;
   putSelf(agentId: string, request: unknown): Promise<ObjectHttpResult>;
   getSelf(agentId: string): Promise<ObjectHttpResult>;
 }
@@ -281,6 +290,63 @@ function requireDomain(value: unknown): string {
     });
   }
   return domain;
+}
+
+function checkpointStateTask(state: Record<string, unknown>): Record<string, unknown> | null {
+  return isObject(state.task) ? state.task : null;
+}
+
+function checkpointTaskKey(state: Record<string, unknown>): string | null {
+  const task = checkpointStateTask(state);
+  return typeof task?.key === 'string' ? task.key : null;
+}
+
+function checkpointFleetTaskId(state: Record<string, unknown>, body: Record<string, unknown>): string | null {
+  const task = checkpointStateTask(state);
+  if (typeof task?.fleetTaskId === 'string' && task.fleetTaskId.length > 0) return task.fleetTaskId;
+  if (typeof body.fleetTaskId === 'string' && body.fleetTaskId.length > 0) return body.fleetTaskId;
+  if (typeof body.taskId === 'string' && body.taskId.length > 0) return body.taskId;
+  return null;
+}
+
+function validateCheckpointState(
+  state: Record<string, unknown>,
+  threadId: string,
+): { contentMode: 'structured' | 'summary_only'; fleetTaskId: string | null } {  if (state.schema !== 2) {
+    throw new SidecarSettlementError('invalid_request', 'checkpoint state.schema 必须为 2', {
+      status: 400,
+      details: { field: 'state.schema' },
+    });
+  }
+  const contentMode = typeof state.contentMode === 'string' && CHECKPOINT_CONTENT_MODES.has(state.contentMode)
+    ? state.contentMode as 'structured' | 'summary_only'
+    : null;
+  if (!contentMode) {
+    throw new SidecarSettlementError('invalid_request', 'checkpoint state.contentMode 必须是 structured | summary_only', {
+      status: 400,
+      details: { field: 'state.contentMode' },
+    });
+  }
+  const task = checkpointStateTask(state);
+  if (!task) {
+    throw new SidecarSettlementError('invalid_request', 'checkpoint state.task 必须是对象', {
+      status: 400,
+      details: { field: 'state.task' },
+    });
+  }
+  if (typeof task.key !== 'string' || task.key.length === 0) {
+    throw new SidecarSettlementError('invalid_request', 'checkpoint state.task.key 必须是非空字符串', {
+      status: 400,
+      details: { field: 'state.task.key' },
+    });
+  }
+  if (task.threadId !== threadId) {
+    throw new SidecarSettlementError('domain_mismatch', 'state.task.threadId 必须等于路径 threadId', {
+      status: 400,
+      details: { field: 'state.task.threadId', threadId },
+    });
+  }
+  return { contentMode, fleetTaskId: checkpointFleetTaskId(state, {}) };
 }
 
 function confirmationOf(value: unknown): 'explicit' | 'policy' | 'none' {
@@ -548,7 +614,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
       if (typeof agentId !== 'string' || typeof threadId !== 'string') return;
       const view = this.checkpointView(object, { source: 'cloud' });
       this.counts.checkpoints += 1;
-      await this.cacheSet(this.checkpointCacheKey(agentId, threadId), view);
+      await this.cacheSet(this.checkpointCacheKey(agentId, threadId, view.domain), view);
     }
   }
 
@@ -587,8 +653,10 @@ export class MemoryObjectService implements SidecarObjectsApi {
     return `object:v1:compact:${id}`;
   }
 
-  private checkpointCacheKey(agentId: string, threadId: string): string {
-    return `object:v1:checkpoint:${agentId}:${threadId}`;
+  private checkpointCacheKey(agentId: string, threadId: string, domain?: string | null): string {
+    return domain && domain.startsWith('task:')
+      ? `object:v1:checkpoint:${domain}`
+      : `object:v1:checkpoint:${agentId}:${threadId}`;
   }
 
   private selfCacheKey(agentId: string): string {
@@ -1256,14 +1324,20 @@ export class MemoryObjectService implements SidecarObjectsApi {
     }
   }
 
-  private checkpointDomain(threadId: string, value: unknown): string {
+  private checkpointDomain(threadId: string, value: unknown, state: Record<string, unknown>, body: Record<string, unknown>): string {
     if (value === undefined || value === null) {
+      const taskKey = checkpointTaskKey(state);
+      if (taskKey !== null) return requireDomain(taskKey);
       return threadId === 'default' ? 'default' : `task:${threadId}`;
     }
     const domain = requireDomain(value);
     if (domain === 'default') return domain;
-    if (isTaskDomain(domain) && threadIdOfDomain(domain) === threadId) return domain;
-    throw new SidecarSettlementError('domain_mismatch', 'Checkpoint 只能位于 task:<threadId> 或 default 域', {
+    if (isTaskDomain(domain)) {
+      const suffix = threadIdOfDomain(domain);
+      const fleetTaskId = checkpointFleetTaskId(state, body);
+      if (suffix === threadId || (fleetTaskId !== null && suffix === fleetTaskId)) return domain;
+    }
+    throw new SidecarSettlementError('domain_mismatch', 'Checkpoint 只能位于 task:<threadId|taskId> 或 default 域', {
       status: 400,
       details: { domain, threadId },
     });
@@ -1282,19 +1356,6 @@ export class MemoryObjectService implements SidecarObjectsApi {
     const parsedActor = this.parseActorAlias(body, requireAgentId(body.agentId));
     const agentId = parsedActor.agentId!;
     const actor = this.actorForAgent(agentId, parsedActor.agentName);
-    const domain = this.checkpointDomain(threadId, body.domain);
-    this.assertWrite(actor, domain, { threadId });
-
-    const expectedRevision = body.expectedRevision === undefined || body.expectedRevision === null
-      ? undefined
-      : body.expectedRevision;
-    if (expectedRevision !== undefined
-      && (typeof expectedRevision !== 'number' || !Number.isInteger(expectedRevision) || expectedRevision < 0)) {
-      throw new SidecarSettlementError('invalid_request', 'expectedRevision 必须是非负整数', {
-        status: 400,
-        details: { field: 'expectedRevision' },
-      });
-    }
     const state = body.state === undefined || body.state === null ? {} : body.state;
     if (!isObject(state)) {
       throw new SidecarSettlementError('invalid_request', 'state 必须是对象', {
@@ -1308,6 +1369,26 @@ export class MemoryObjectService implements SidecarObjectsApi {
         details: { field: 'state' },
       });
     }
+    const checkpointState = validateCheckpointState(state, threadId);
+    const domain = this.checkpointDomain(threadId, body.domain, state, body);
+    if (checkpointTaskKey(state) !== domain) {
+      throw new SidecarSettlementError('domain_mismatch', 'state.task.key 必须等于 domain', {
+        status: 400,
+        details: { domain, field: 'state.task.key' },
+      });
+    }
+    this.assertWrite(actor, domain.startsWith('task:') ? `task:${threadId}` : domain, { threadId });
+
+    const expectedRevision = body.expectedRevision === undefined || body.expectedRevision === null
+      ? undefined
+      : body.expectedRevision;
+    if (expectedRevision !== undefined
+      && (typeof expectedRevision !== 'number' || !Number.isInteger(expectedRevision) || expectedRevision < 0)) {
+      throw new SidecarSettlementError('invalid_request', 'expectedRevision 必须是非负整数', {
+        status: 400,
+        details: { field: 'expectedRevision' },
+      });
+    }
     const summary = body.summary === undefined || body.summary === null
       ? null
       : typeof body.summary === 'string'
@@ -1319,6 +1400,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
           });
         })();
     const recordIds = stringArray(body.recordIds, 'recordIds') ?? [];
+    const detailIds = stringArray(body.detailIds, 'detailIds', MAX_CHECKPOINT_REFERENCE_IDS) ?? [];
     const expiresAt = body.expiresAt === undefined || body.expiresAt === null ? 0 : body.expiresAt;
     if (typeof expiresAt !== 'number' || !Number.isFinite(expiresAt) || expiresAt < 0) {
       throw new SidecarSettlementError('invalid_request', 'expiresAt 必须是非负数字', {
@@ -1340,6 +1422,17 @@ export class MemoryObjectService implements SidecarObjectsApi {
       });
     }
     const force = body.force === true;
+    const checkpointWarnings: string[] = [];
+    if (checkpointState.contentMode === 'summary_only' && summary === null) checkpointWarnings.push('summary_unavailable');
+    const incomingWarnings = Array.isArray(body.warnings)
+      ? body.warnings
+      : (typeof body.warning === 'string' ? [body.warning] : []);
+    for (const warning of incomingWarnings) {
+      if (typeof warning === 'string' && warning.length > 0 && !checkpointWarnings.includes(warning)) {
+        checkpointWarnings.push(warning);
+      }
+    }
+    const fleetTaskId = checkpointFleetTaskId(state, body);
 
     const requestId = typeof body.requestId === 'string' && /^[A-Za-z0-9._:-]{1,200}$/.test(body.requestId)
       ? body.requestId
@@ -1357,8 +1450,11 @@ export class MemoryObjectService implements SidecarObjectsApi {
         state,
         summary,
         recordIds,
+        detailIds,
         expiresAt,
         force,
+        ...(checkpointWarnings.length > 0 ? { warnings: checkpointWarnings } : {}),
+        ...(fleetTaskId ? { fleetTaskId } : {}),
         ...(expectedRevision !== undefined ? { expectedRevision } : {}),
         ...(leaseMs !== undefined ? { leaseMs } : {}),
         provenance: {
@@ -1369,7 +1465,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
       };
       if (!this.client) {
         await this.enqueueCheckpoint(requestId, capabilityBody);
-        return this.pendingCheckpoint(agentId, threadId, domain, expiresAt, state, summary, recordIds);
+        return this.pendingCheckpoint(agentId, threadId, domain, expiresAt, state, summary, recordIds, detailIds, checkpointWarnings);
       }
       try {
         const response = await this.client.internalObject<Record<string, unknown>>(
@@ -1385,18 +1481,20 @@ export class MemoryObjectService implements SidecarObjectsApi {
         }
         const view = this.checkpointView(object, { source: 'cloud' });
         this.counts.checkpoints += 1;
-        await this.cacheSet(this.checkpointCacheKey(agentId, threadId), view);
+        await this.cacheSet(this.checkpointCacheKey(agentId, threadId, domain), view);
         await this.markHealthyIfOutboxEmpty();
         return {
           status: 200,
           data: { checkpoint: view, source: 'cloud', degraded: response.degraded },
-          warnings: response.warnings,
-          degraded: response.degraded,
+          warnings: [...new Set([...checkpointWarnings, ...response.warnings])],
+          degraded: response.degraded || checkpointWarnings.includes('checkpoint_summary_only'),
         };
       } catch (error) {
         if (retryableCapabilityError(error)) {
           await this.enqueueCheckpoint(requestId, capabilityBody);
-          return this.pendingCheckpoint(agentId, threadId, domain, expiresAt, state, summary, recordIds, error);
+          return this.pendingCheckpoint(
+            agentId, threadId, domain, expiresAt, state, summary, recordIds, detailIds, checkpointWarnings, error,
+          );
         }
         this.noteFailed(error);
         throw capabilityError(error);
@@ -1407,6 +1505,11 @@ export class MemoryObjectService implements SidecarObjectsApi {
   private checkpointView(object: Record<string, unknown>, extra: { source: 'cloud' | 'cache' }): CheckpointView {
     const domain = normalizeDomain(object.domain ?? object.namespace)
       ?? (typeof object.domain === 'string' ? object.domain : 'default');
+    const state = isObject(object.state) ? object.state : {};
+    const schema = state.schema === 2 ? 2 : 1;
+    const contentMode = schema === 2
+      ? (state.contentMode === 'summary_only' ? 'summary_only' : 'structured')
+      : null;
     return {
       ...object,
       id: typeof object.id === 'string' ? object.id : null,
@@ -1416,10 +1519,17 @@ export class MemoryObjectService implements SidecarObjectsApi {
       agentId: typeof object.agentId === 'string' ? object.agentId : '',
       threadId: typeof object.threadId === 'string' ? object.threadId : '',
       revision: typeof object.revision === 'number' ? object.revision : null,
-      state: isObject(object.state) ? object.state : {},
+      schema,
+      contentMode,
+      structured: schema === 2 && contentMode === 'structured',
+      legacy: schema !== 2,
+      degraded: object.degraded === true || contentMode === 'summary_only' || schema !== 2,
+      state,
       summary: typeof object.summary === 'string' ? object.summary : null,
       recordIds: Array.isArray(object.recordIds) ? object.recordIds.filter((id): id is string => typeof id === 'string') : [],
+      detailIds: Array.isArray(object.detailIds) ? object.detailIds.filter((id): id is string => typeof id === 'string') : [],
       lease: isObject(object.lease) ? object.lease : null,
+      updatedBy: isObject(object.updatedBy) ? object.updatedBy : null,
       expiresAt: typeof object.expiresAt === 'number' ? object.expiresAt : 0,
       pending: false,
       stale: false,
@@ -1444,9 +1554,14 @@ export class MemoryObjectService implements SidecarObjectsApi {
     state: Record<string, unknown>,
     summary: string | null,
     recordIds: string[],
+    detailIds: string[],
+    checkpointWarnings: string[],
     error?: unknown,
   ): Promise<ObjectHttpResult> {
     const queuedAt = this.now();
+    const contentMode = state.schema === 2
+      ? (state.contentMode === 'summary_only' ? 'summary_only' : 'structured')
+      : null;
     const view: CheckpointView = {
       id: null,
       type: 'context_checkpoint',
@@ -1455,17 +1570,24 @@ export class MemoryObjectService implements SidecarObjectsApi {
       agentId,
       threadId,
       revision: null,
+      schema: state.schema === 2 ? 2 : 1,
+      contentMode,
+      structured: contentMode === 'structured',
+      legacy: state.schema !== 2,
+      degraded: contentMode === 'summary_only' || state.schema !== 2,
       state,
       summary,
       recordIds,
+      detailIds,
       lease: null,
+      updatedBy: null,
       expiresAt,
       pending: true,
       queuedAt,
       source: 'cache',
       stale: true,
     };
-    await this.cacheSet(this.checkpointCacheKey(agentId, threadId), view);
+    await this.cacheSet(this.checkpointCacheKey(agentId, threadId, domain), view);
     this.noteQueued(error ?? new SidecarSettlementError('capability_unavailable', 'capability API 不可用，已进入 outbox'));
     return {
       status: 202,
@@ -1475,87 +1597,103 @@ export class MemoryObjectService implements SidecarObjectsApi {
         pending: true,
         degraded: true,
       },
-      warnings: ['capability_unavailable', 'queued_outbox'],
+      warnings: [...new Set(['capability_unavailable', 'queued_outbox', ...checkpointWarnings])],
       degraded: true,
     };
   }
 
   async getCheckpoint(
     threadIdRaw: string,
-    options: { agentId?: string | null; sync?: string | null } = {},
+    options: { agentId?: string | null; sync?: string | null; domain?: string | null } = {},
   ): Promise<ObjectHttpResult> {
     rejectQuerySync(options.sync);
     const threadId = requireThreadId(threadIdRaw);
     const agentId = requireAgentId(options.agentId);
-    const key = this.checkpointCacheKey(agentId, threadId);
+    const domain = options.domain === undefined || options.domain === null || options.domain === ''
+      ? null
+      : requireDomain(options.domain);
+    const domains = domain ? [domain] : [...new Set([`task:${threadId}`, 'default'])];
+    const keys = domains.map((entry) => this.checkpointCacheKey(agentId, threadId, entry));
     if (!this.client) {
       this.noteReadDegraded(new SidecarSettlementError('capability_unavailable', 'capability API 不可用'));
-      return this.cachedCheckpoint(agentId, threadId, key);
+      return this.cachedCheckpoint(agentId, threadId, keys);
     }
     try {
-      const response = await this.client.internalObject<Record<string, unknown>>({
-        actor: this.actorForAgent(agentId).actor,
-        kind: 'context_checkpoint',
-        op: 'get',
-        agentId,
-        threadId,
-      });
-      const object = isObject(response.data.object) ? response.data.object : null;
-      if (!object) {
-        await this.cacheDelete(key);
+      for (const entry of domains) {
+        const response = await this.client.internalObject<Record<string, unknown>>({
+          actor: this.actorForAgent(agentId).actor,
+          kind: 'context_checkpoint',
+          op: 'get',
+          agentId,
+          threadId,
+          domain: entry,
+        });
+        const object = isObject(response.data.object) ? response.data.object : null;
+        if (!object) continue;
+        const view = this.checkpointView(object, { source: 'cloud' });
+        await this.cacheSet(this.checkpointCacheKey(agentId, threadId, view.domain), view);
         await this.markHealthyIfOutboxEmpty();
         return {
           status: 200,
-          data: { checkpoint: null, source: 'cloud', degraded: response.degraded },
+          data: { checkpoint: view, source: 'cloud', degraded: response.degraded },
           warnings: response.warnings,
           degraded: response.degraded,
         };
       }
-      const view = this.checkpointView(object, { source: 'cloud' });
-      await this.cacheSet(key, view);
+      for (const key of keys) await this.cacheDelete(key);
       await this.markHealthyIfOutboxEmpty();
       return {
         status: 200,
-        data: { checkpoint: view, source: 'cloud', degraded: response.degraded },
-        warnings: response.warnings,
-        degraded: response.degraded,
+        data: { checkpoint: null, source: 'cloud', degraded: false },
+        warnings: [],
+        degraded: false,
       };
     } catch (error) {
       if (!retryableCapabilityError(error)) throw capabilityError(error);
       this.noteReadDegraded(error);
-      return this.cachedCheckpoint(agentId, threadId, key);
+      return this.cachedCheckpoint(agentId, threadId, keys);
     }
   }
 
-  private async cachedCheckpoint(agentId: string, threadId: string, key: string): Promise<ObjectHttpResult> {
-    const cached = await this.cacheGet<CheckpointView>(key);
-    return {
-      status: 200,
-      data: {
-        checkpoint: cached
-          ? {
+  private async cachedCheckpoint(agentId: string, threadId: string, keys: string[]): Promise<ObjectHttpResult> {
+    for (const key of keys) {
+      const cached = await this.cacheGet<CheckpointView>(key);
+      if (!cached) continue;
+      return {
+        status: 200,
+        data: {
+          checkpoint: {
             ...cached,
             agentId: cached.agentId || agentId,
             threadId: cached.threadId || threadId,
             source: 'cache',
             stale: true,
-          }
-          : null,
-        source: 'cache',
+          },
+          source: 'cache',
+          degraded: true,
+        },
+        warnings: ['capability_unavailable', 'cache_stale'],
         degraded: true,
-      },
-      warnings: cached ? ['capability_unavailable', 'cache_stale'] : ['capability_unavailable'],
+      };
+    }
+    return {
+      status: 200,
+      data: { checkpoint: null, source: 'cache', degraded: true },
+      warnings: ['capability_unavailable'],
       degraded: true,
     };
   }
 
   async deleteCheckpoint(
     threadIdRaw: string,
-    options: { agentId?: string | null; sync?: string | null } = {},
+    options: { agentId?: string | null; sync?: string | null; domain?: string | null } = {},
   ): Promise<ObjectHttpResult> {
     rejectQuerySync(options.sync);
     const threadId = requireThreadId(threadIdRaw);
     const agentId = requireAgentId(options.agentId);
+    const domain = options.domain === undefined || options.domain === null || options.domain === ''
+      ? null
+      : requireDomain(options.domain);
     if (!this.client) {
       throw new SidecarSettlementError('capability_unavailable', 'capability API 不可用，无法确认删除', {
         status: 503,
@@ -1572,7 +1710,11 @@ export class MemoryObjectService implements SidecarObjectsApi {
           op: 'delete',
           agentId,
           threadId,
+          ...(domain ? { domain } : {}),
         });
+        for (const entry of new Set([`task:${threadId}`, 'default', ...(domain ? [domain] : [])])) {
+          await this.cacheDelete(this.checkpointCacheKey(agentId, threadId, entry));
+        }
         await this.cacheDelete(this.checkpointCacheKey(agentId, threadId));
         await this.markHealthyIfOutboxEmpty();
         return {

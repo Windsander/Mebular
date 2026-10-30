@@ -231,7 +231,15 @@ describe('0.3 共享记忆：真实 sidecar + capability + 设备同步', () => 
 
     const checkpointResult = await a.sidecar.putCheckpoint(threadId, {
       agentId: 'hermes',
-      state: { cursor: 3 },
+      state: {
+        schema: 2,
+        contentMode: 'structured',
+        task: { key: `task:${threadId}`, threadId, fleetTaskId: null },
+        goal: `CP-${RUN}`,
+        nextSteps: [{ id: 'n1', text: 'continue' }],
+        references: { recordIds: [], detailIds: [], messageIds: [], fleetTaskId: null, urls: [] },
+        cursor: 3,
+      },
       summary: `CP-${RUN}`,
     });
     const checkpoint = assertOk(checkpointResult, 'task checkpoint put').checkpoint;
@@ -586,7 +594,16 @@ describe('0.3 共享记忆：真实 sidecar + capability + 设备同步', () => 
 
     const put = await a.sidecar.putCheckpoint(threadId, {
       agentId: 'hermes',
-      state: { cursor: 7, plan: ['sync', 'restore'] },
+      state: {
+        schema: 2,
+        contentMode: 'structured',
+        task: { key: `task:${threadId}`, threadId, fleetTaskId: null },
+        goal: summary,
+        nextSteps: [{ id: 'n1', text: 'sync and restore' }],
+        references: { recordIds: [], detailIds: [], messageIds: [], fleetTaskId: null, urls: [] },
+        cursor: 7,
+        plan: ['sync', 'restore'],
+      },
       summary,
     });
     const checkpoint = assertOk(put, 'checkpoint put').checkpoint;
@@ -616,15 +633,25 @@ describe('0.3 共享记忆：真实 sidecar + capability + 设备同步', () => 
       revision: 1,
       source: 'cloud',
     });
-    expect(onB.checkpoint.state).toEqual({ cursor: 7, plan: ['sync', 'restore'] });
+    expect(onB.checkpoint.state).toMatchObject({
+      schema: 2,
+      contentMode: 'structured',
+      goal: summary,
+      cursor: 7,
+      plan: ['sync', 'restore'],
+    });
     expect(onB.checkpoint.summary).toBe(summary);
 
-    // 不同 Agent 同 thread 不串。
+    // task:* 是任务共享状态：其他参与 Agent 可读同一 revision。
     const otherAgent = assertOk(
       await b.sidecar.getCheckpoint(threadId, { agentId: 'opencode' }),
       'B get checkpoint other agent',
     );
-    expect(otherAgent.checkpoint).toBeNull();
+    expect(otherAgent.checkpoint).toMatchObject({
+      id: checkpoint.id,
+      domain: `task:${threadId}`,
+      revision: 1,
+    });
 
     // sync=local / sync=cloud 已从 API 移除。
     const legacyGet = await b.sidecar.getCheckpoint(threadId, { agentId: 'hermes', sync: 'local' });

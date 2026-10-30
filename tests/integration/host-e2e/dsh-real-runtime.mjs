@@ -274,6 +274,12 @@ async function assertEnabled({ runtime, tap, probe, seedToken, detailText, hostT
   check('无命中话题保持沉默，不注入空块',
     probe.preStep?.silenceInjected === false,
     JSON.stringify({ injected: probe.preStep?.silenceInjected }));
+  check('compaction 后新 turn 注入结构化 checkpoint',
+    probe.preStep?.checkpointInjected === true
+    && probe.preStep?.checkpointSource === 'mebular-memory'
+    && String(probe.preStep?.checkpointText ?? '').includes('Continue the memory e2e task')
+    && String(probe.preStep?.checkpointText ?? '').includes('Verify the next turn injects the checkpoint'),
+    JSON.stringify({ injected: probe.preStep?.checkpointInjected, text: probe.preStep?.checkpointText?.slice?.(0, 400) }));
 
   check('工具初始遮蔽 memory_*', Array.isArray(probe.tools?.initialDeny)
     && probe.tools.initialDeny.includes('mcp__mebular__memory_query')
@@ -330,13 +336,19 @@ async function assertEnabled({ runtime, tap, probe, seedToken, detailText, hostT
   const stored = await waitFor(async () => {
     const checkpoint = await runtime.sidecarCheckpoint(THREAD_ID, 'dsh').catch(() => null);
     return checkpoint?.state?.compactionId === 'memory-e2e-compaction'
-      && checkpoint?.summary === 'memory e2e compacted summary';
+      && checkpoint?.state?.contentMode === 'structured';
   }, { describe: 'real sidecar checkpoint' });
   const checkpoint = await runtime.sidecarCheckpoint(THREAD_ID, 'dsh');
   check('真实 sidecar 已持久化 compaction checkpoint', stored, JSON.stringify(checkpoint));
-  check('checkpoint 保留 DSH 状态与 summary', checkpoint?.agentId === 'dsh'
+  check('checkpoint 保留 DSH 状态、结构化字段与 summary', checkpoint?.agentId === 'dsh'
     && checkpoint?.state?.kind === 'dsh-compaction'
-    && checkpoint?.summary === 'memory e2e compacted summary'
+    && checkpoint?.state?.contentMode === 'structured'
+    && checkpoint?.structured === true
+    && checkpoint?.state?.task?.key === `task:${THREAD_ID}`
+    && String(checkpoint?.state?.goal ?? '').includes('Continue the memory e2e task')
+    && Array.isArray(checkpoint?.state?.nextSteps)
+    && checkpoint.state.nextSteps.length > 0
+    && String(checkpoint?.summary ?? '').includes('Continue the memory e2e task')
     && String(checkpoint?.domain).startsWith('task:'), JSON.stringify(checkpoint));
 
   // The prototype route is gone; hosts only use /memory-runtime/v1.

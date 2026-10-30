@@ -194,6 +194,251 @@ function truncateBytes(text, maxBytes) {
   return buffer.subarray(0, maxBytes).toString('utf8').replace(/\uFFFD+$/u, '');
 }
 
+const CHECKPOINT_HEADINGS = new Map([
+  ['objective', 'goal'],
+  ['goal', 'goal'],
+  ['aim', 'goal'],
+  ['requirements', 'constraints'],
+  ['constraints', 'constraints'],
+  ['decisions', 'decisions'],
+  ['decision log', 'decisions'],
+  ['work state', 'progress'],
+  ['progress', 'progress'],
+  ['status', 'progress'],
+  ['next move', 'next'],
+  ['next steps', 'next'],
+  ['next step', 'next'],
+  ['relevant files', 'files'],
+  ['files', 'files'],
+  ['important context', 'context'],
+  ['open questions', 'questions'],
+  ['questions', 'questions'],
+]);
+
+function headingKey(line) {
+  const raw = String(line ?? '').trim();
+  if (raw.length === 0 || raw.length > 80) return null;
+  let title = '';
+  const markdown = raw.match(/^#{1,6}\s+(.+?)\s*#*\s*$/u);
+  if (markdown) title = markdown[1];
+  else {
+    const bold = raw.match(/^\*\*(.+?)\*\*\s*:?\s*$/u);
+    if (bold) title = bold[1];
+    else {
+      const plain = raw.match(/^([A-Za-z][A-Za-z /&_-]{1,60}):\s*$/u);
+      if (plain) title = plain[1];
+    }
+  }
+  if (!title) return null;
+  const normalized = title.toLowerCase().replace(/\s+/gu, ' ').trim();
+  return CHECKPOINT_HEADINGS.get(normalized) ?? null;
+}
+
+function checkpointPlaceholder(text) {
+  const value = String(text ?? '').trim();
+  return /^\(?\s*(?:none|n\/a|no blockers?|无)\s*\)?$/iu.test(value);
+}
+
+function bulletText(line) {
+  const raw = String(line ?? '').trim();
+  const match = raw.match(/^(?:[-*•]|\d+[.)])\s+(.+)$/u);
+  return match ? match[1].trim() : '';
+}
+
+function splitDecision(text) {
+  const value = String(text ?? '').trim();
+  const parts = value.split(/\s+(?:—|–|-|because|reason:)\s+/iu);
+  if (parts.length < 2) return { text: value };
+  return {
+    text: parts[0].trim(),
+    reason: parts.slice(1).join(' ').trim(),
+  };
+}
+
+function parseFileItem(text) {
+  const value = String(text ?? '').trim();
+  const match = value.match(/^(.+?)(?:\s+[（(]([^）)]+)[）)])?$/u);
+  const path = (match?.[1] ?? value).replace(/`/gu, '').trim();
+  const meta = (match?.[2] ?? '').toLowerCase();
+  return {
+    path,
+    ...(/write|edit|modify/u.test(meta) ? { role: 'write' } : /read|reference/u.test(meta) ? { role: 'read' } : {}),
+    ...(meta.includes('in_progress') || meta.includes('in progress') ? { status: 'in_progress' } : {}),
+  };
+}
+
+function summarySections(text) {
+  const sections = new Map();
+  let current = null;
+  for (const line of String(text ?? '').split(/\r?\n/u)) {
+    const key = headingKey(line);
+    if (key) {
+      current = key;
+      if (!sections.has(current)) sections.set(current, []);
+      continue;
+    }
+    if (!current) continue;
+    sections.get(current).push(line);
+  }
+  return sections;
+}
+
+function sectionItems(lines) {
+  const out = [];
+  let current = '';
+  for (const line of lines ?? []) {
+    const bullet = bulletText(line);
+    if (bullet.length > 0) {
+      if (current.length > 0) out.push(current);
+      current = bullet;
+    } else if (String(line ?? '').trim().length > 0) {
+      const text = String(line).trim();
+      if (current.length > 0) current = `${current} ${text}`;
+      else out.push(text);
+    } else if (current.length > 0) {
+      out.push(current);
+      current = '';
+    }
+  }
+  if (current.length > 0) out.push(current);
+  return out.filter((item) => item.length > 0 && !checkpointPlaceholder(item));
+}
+
+function parseWorkState(lines) {
+  const progress = { done: [], doing: [], blocked: [] };
+  let bucket = 'doing';
+  let current = '';
+  const flush = () => {
+    if (current.length === 0) return;
+    progress[bucket].push({ text: current });
+    current = '';
+  };
+  for (const line of lines ?? []) {
+    const raw = String(line ?? '').trim();
+    const subheading = raw.match(/^#{1,6}\s*(.+?)\s*#*$/u)
+      ?? raw.match(/^\*\*(.+?)\*\*\s*:?\s*$/u)
+      ?? raw.match(/^([A-Za-z][A-Za-z /&_-]{1,40}):\s*$/u);
+    if (subheading) {
+      flush();
+      const label = subheading[1].toLowerCase();
+      if (/^(?:completed|done|finished|已完成)$/u.test(label)) bucket = 'done';
+      else if (/^(?:blocked|blocker|waiting|阻塞|等待)$/u.test(label)) bucket = 'blocked';
+      else if (/^(?:active|doing|in progress|current|进行中)$/u.test(label)) bucket = 'doing';
+      continue;
+    }
+    const bullet = bulletText(line);
+    if (bullet.length > 0) {
+      flush();
+      const normalized = bullet.toLowerCase();
+      if (/^(?:done|completed|finished|已完成)\b/u.test(normalized) || /^\[[xX]\]/u.test(bullet)) bucket = 'done';
+      else if (/^(?:blocked|blocker|waiting|阻塞|等待)\b/u.test(normalized)) bucket = 'blocked';
+      else if (/^(?:doing|in progress|current|进行中)\b/u.test(normalized)) bucket = 'doing';
+      const text = bullet.replace(/^\[[ xX]\]\s*/u, '').replace(/^(?:done|completed|finished|doing|in progress|current|blocked|blocker|waiting)\s*[:：-]\s*/iu, '').trim();
+      if (text.length > 0 && !checkpointPlaceholder(text)) current = text;
+      continue;
+    }
+    if (raw.length > 0) {
+      const text = raw.replace(/^(?:done|completed|finished|doing|in progress|current|blocked|blocker|waiting)\s*[:：-]\s*/iu, '').trim();
+      if (text.length === 0 || checkpointPlaceholder(text)) {
+        flush();
+        continue;
+      }
+      current = current.length > 0 ? `${current} ${text}` : text;
+    } else {
+      flush();
+    }
+  }
+  flush();
+  return {
+    done: progress.done.slice(0, 50),
+    doing: progress.doing.slice(0, 50),
+    blocked: progress.blocked.slice(0, 50),
+  };
+}
+
+/**
+ * Parse a host compaction summary into ContextCheckpoint schema 2.
+ *
+ * Returns null when the summary has no recognizable Objective/Goal and
+ * Next Move/Next Steps sections; callers must then write summary_only and must
+ * not invent structured fields.
+ */
+export function parseCompactionCheckpoint(summary, options = {}) {
+  const text = typeof summary === 'string' ? summary : '';
+  const sections = summarySections(text);
+  const goal = sectionItems(sections.get('goal')).join('\n').trim();
+  const nextSteps = sectionItems(sections.get('next'));
+  if (goal.length === 0 || nextSteps.length === 0) return null;
+  const constraints = sectionItems(sections.get('constraints')).map((item) => ({
+    text: item,
+    source: 'compaction_summary',
+  }));
+  const decisions = sectionItems(sections.get('decisions')).map((item) => splitDecision(item));
+  const progress = parseWorkState(sections.get('progress'));
+  const files = sectionItems(sections.get('files')).map(parseFileItem);
+  const questions = sectionItems(sections.get('questions')).map((item) => ({
+    text: item,
+    blocking: /[?？]/u.test(item) || /blocking/iu.test(item),
+  }));
+  const context = sectionItems(sections.get('context'));
+  const threadId = asText(options.threadId);
+  const domain = asText(options.domain) || (threadId ? `task:${threadId}` : 'default');
+  const fleetTaskId = asText(options.fleetTaskId) || null;
+  const recordIds = uniqueStrings(options.recordIds, 200);
+  const detailIds = uniqueStrings(options.detailIds, 200);
+  return {
+    schema: 2,
+    contentMode: 'structured',
+    task: { key: domain, threadId, fleetTaskId },
+    goal: truncateBytes(goal, 2048),
+    constraints: constraints.slice(0, 32).map((item, index) => ({ id: `c${index + 1}`, ...item })),
+    decisions: decisions.slice(0, 50).map((item, index) => ({ id: `d${index + 1}`, ...item })),
+    progress: {
+      done: progress.done.slice(0, 50).map((item, index) => ({ id: `p${index + 1}`, ...item })),
+      doing: progress.doing.slice(0, 50).map((item, index) => ({ id: `p${progress.done.length + index + 1}`, ...item })),
+      blocked: progress.blocked.slice(0, 50).map((item, index) => ({ id: `p${progress.done.length + progress.doing.length + index + 1}`, ...item })),
+    },
+    nextSteps: nextSteps.slice(0, 32).map((item, index) => ({ id: `n${index + 1}`, text: item })),
+    files: files.slice(0, 100),
+    openQuestions: questions.slice(0, 32).map((item, index) => ({ id: `q${index + 1}`, ...item })),
+    references: {
+      recordIds,
+      detailIds,
+      messageIds: uniqueStrings(options.messageIds, 200),
+      fleetTaskId,
+      urls: [],
+    },
+    ...(context.length > 0 ? { context: context.slice(0, 16) } : {}),
+    ...(isObject(options.metadata) ? { host: options.metadata } : {}),
+  };
+}
+
+export function summaryOnlyCheckpointState(summary, options = {}) {
+  const threadId = asText(options.threadId);
+  const domain = asText(options.domain) || (threadId ? `task:${threadId}` : 'default');
+  const fleetTaskId = asText(options.fleetTaskId) || null;
+  return {
+    schema: 2,
+    contentMode: 'summary_only',
+    task: { key: domain, threadId, fleetTaskId },
+    goal: null,
+    constraints: [],
+    decisions: [],
+    progress: { done: [], doing: [], blocked: [] },
+    nextSteps: [],
+    files: [],
+    openQuestions: [],
+    references: {
+      recordIds: uniqueStrings(options.recordIds, 200),
+      detailIds: uniqueStrings(options.detailIds, 200),
+      messageIds: uniqueStrings(options.messageIds, 200),
+      fleetTaskId,
+      urls: [],
+    },
+    ...(isObject(options.metadata) ? { host: options.metadata } : {}),
+  };
+}
+
 /**
  * Redact common credential shapes before text enters a prompt, a sidecar
  * request, a log line or a candidate record. This is a mitigation, not a
@@ -2044,12 +2289,18 @@ export function createMemoryRuntimeAdapter(options = {}) {
         return;
       }
       stats.checkpoints.attempts += 1;
-      const body = {
-        agentId: config.agentId,
-        state: {
-          schema: 1,
+      const summaryText = state.summary.text.trim();
+      const domain = config.domain?.startsWith('task:') ? config.domain : `task:${state.threadId}`;
+      const checkpointOptions = {
+        threadId: state.threadId,
+        domain,
+        fleetTaskId: state.fleetTaskId || '',
+        recordIds: state.recordIds ?? [],
+        detailIds: state.detailIds ?? [],
+        messageIds: state.messageIds ?? [],
+        metadata: {
+          host: 'dsh',
           kind: 'dsh-compaction',
-          threadId: state.threadId,
           compactionId: state.compactionId,
           turn: state.turn,
           startSeq: state.startSeq,
@@ -2062,12 +2313,36 @@ export function createMemoryRuntimeAdapter(options = {}) {
           model: state.summary.model,
           replacementMessageId: state.replacement.messageId,
           replacementSeq: state.replacement.seq,
-          summary: state.summary.text,
           ...(state.sourceCommandId === undefined ? {} : { sourceCommandId: state.sourceCommandId }),
         },
+      };
+      const structured = parseCompactionCheckpoint(summaryText, checkpointOptions);
+      const checkpointState = structured ?? summaryOnlyCheckpointState(summaryText, checkpointOptions);
+      Object.assign(checkpointState, {
+        kind: 'dsh-compaction',
+        compactionId: state.compactionId,
+        threadId: state.threadId,
+        turn: state.turn,
+        startSeq: state.startSeq,
+        summarySeq: state.summarySeq,
+        endSeq: state.endSeq,
+        shadowedRange: state.summary.shadowedRange,
+        shadowedSeqs: state.summary.shadowedSeqs,
+        shadowedTokenCount: state.summary.shadowedTokenCount,
+        provider: state.summary.provider,
+        model: state.summary.model,
+        replacementMessageId: state.replacement.messageId,
+        replacementSeq: state.replacement.seq,
         summary: state.summary.text,
-        recordIds: [],
-        domain: config.domain?.startsWith('task:') ? config.domain : `task:${state.threadId}`,
+        ...(state.sourceCommandId === undefined ? {} : { sourceCommandId: state.sourceCommandId }),
+      });
+      const body = {
+        agentId: config.agentId,
+        state: checkpointState,
+        summary: summaryText,
+        recordIds: state.recordIds ?? [],
+        detailIds: state.detailIds ?? [],
+        domain,
       };
       const idempotencyKey = `dsh_${hashText(`${state.sessionId}\u0000${state.compactionId}\u0000${state.endSeq}`).slice(0, 40)}`;
       const result = await runtimeRequest(`/checkpoints/${encodeURIComponent(state.threadId)}`, body, {
@@ -2112,6 +2387,10 @@ export function createMemoryRuntimeAdapter(options = {}) {
         endSeq: null,
         turn: Number.isInteger(data.turn) ? data.turn : null,
         sourceCommandId: typeof data.sourceCommandId === 'string' ? data.sourceCommandId : undefined,
+        fleetTaskId: asText(data.fleetTaskId) || asText(data.taskId),
+        recordIds: uniqueStrings(data.recordIds, 200),
+        detailIds: uniqueStrings(data.detailIds, 200),
+        messageIds: uniqueStrings(data.messageIds, 200),
         summary: null,
         replacement: null,
         ended: false,
@@ -2126,6 +2405,10 @@ export function createMemoryRuntimeAdapter(options = {}) {
     if (!state) return;
     if (event.type === 'compaction/summary') {
       state.summarySeq = event.seq;
+      state.fleetTaskId = asText(data.fleetTaskId) || asText(data.taskId) || state.fleetTaskId;
+      state.recordIds = uniqueStrings([...(state.recordIds ?? []), ...(Array.isArray(data.recordIds) ? data.recordIds : [])], 200);
+      state.detailIds = uniqueStrings([...(state.detailIds ?? []), ...(Array.isArray(data.detailIds) ? data.detailIds : [])], 200);
+      state.messageIds = uniqueStrings([...(state.messageIds ?? []), ...(Array.isArray(data.messageIds) ? data.messageIds : [])], 200);
       state.summary = {
         text: redactMemoryText(contentText(data.summary), { homeDir }).slice(0, 32_000),
         shadowedRange: isObject(data.shadowedRange) ? data.shadowedRange : null,

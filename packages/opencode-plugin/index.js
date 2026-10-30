@@ -181,6 +181,234 @@ function truncateChars(value, maxChars) {
   return text.length <= maxChars ? text : `${text.slice(0, maxChars)}\n[truncated]`;
 }
 
+const CHECKPOINT_HEADINGS = new Map([
+  ['objective', 'goal'],
+  ['goal', 'goal'],
+  ['aim', 'goal'],
+  ['requirements', 'constraints'],
+  ['constraints', 'constraints'],
+  ['decisions', 'decisions'],
+  ['decision log', 'decisions'],
+  ['work state', 'progress'],
+  ['progress', 'progress'],
+  ['status', 'progress'],
+  ['next move', 'next'],
+  ['next steps', 'next'],
+  ['next step', 'next'],
+  ['relevant files', 'files'],
+  ['files', 'files'],
+  ['important context', 'context'],
+  ['open questions', 'questions'],
+  ['questions', 'questions'],
+]);
+
+function checkpointHeadingKey(line) {
+  const raw = String(line ?? '').trim();
+  if (raw.length === 0 || raw.length > 80) return null;
+  let title = '';
+  const markdown = raw.match(/^#{1,6}\s+(.+?)\s*#*\s*$/u);
+  if (markdown) title = markdown[1];
+  else {
+    const bold = raw.match(/^\*\*(.+?)\*\*\s*:?\s*$/u);
+    if (bold) title = bold[1];
+    else {
+      const plain = raw.match(/^([A-Za-z][A-Za-z /&_-]{1,60}):\s*$/u);
+      if (plain) title = plain[1];
+    }
+  }
+  if (!title) return null;
+  return CHECKPOINT_HEADINGS.get(title.toLowerCase().replace(/\s+/gu, ' ').trim()) ?? null;
+}
+
+function checkpointPlaceholder(text) {
+  return /^\(?\s*(?:none|n\/a|no blockers?|无)\s*\)?$/iu.test(String(text ?? '').trim());
+}
+
+function checkpointBulletText(line) {
+  const match = String(line ?? '').trim().match(/^(?:[-*•]|\d+[.)])\s+(.+)$/u);
+  return match ? match[1].trim() : '';
+}
+
+function checkpointSummarySections(text) {
+  const sections = new Map();
+  let current = null;
+  for (const line of String(text ?? '').split(/\r?\n/u)) {
+    const key = checkpointHeadingKey(line);
+    if (key) {
+      current = key;
+      if (!sections.has(current)) sections.set(current, []);
+      continue;
+    }
+    if (current) sections.get(current).push(line);
+  }
+  return sections;
+}
+
+function checkpointSectionItems(lines) {
+  const out = [];
+  let current = '';
+  for (const line of lines ?? []) {
+    const bullet = checkpointBulletText(line);
+    if (bullet.length > 0) {
+      if (current.length > 0) out.push(current);
+      current = bullet;
+    } else if (String(line ?? '').trim().length > 0) {
+      const text = String(line).trim();
+      current = current.length > 0 ? `${current} ${text}` : text;
+    } else if (current.length > 0) {
+      out.push(current);
+      current = '';
+    }
+  }
+  if (current.length > 0) out.push(current);
+  return out.filter((item) => item.length > 0 && !checkpointPlaceholder(item));
+}
+
+function checkpointWorkState(lines) {
+  const progress = { done: [], doing: [], blocked: [] };
+  let bucket = 'doing';
+  let current = '';
+  const flush = () => {
+    if (current.length > 0) progress[bucket].push({ text: current });
+    current = '';
+  };
+  for (const line of lines ?? []) {
+    const raw = String(line ?? '').trim();
+    const subheading = raw.match(/^#{1,6}\s*(.+?)\s*#*$/u)
+      ?? raw.match(/^\*\*(.+?)\*\*\s*:?\s*$/u)
+      ?? raw.match(/^([A-Za-z][A-Za-z /&_-]{1,40}):\s*$/u);
+    if (subheading) {
+      flush();
+      const label = subheading[1].toLowerCase();
+      if (/^(?:completed|done|finished|已完成)$/u.test(label)) bucket = 'done';
+      else if (/^(?:blocked|blocker|waiting|阻塞|等待)$/u.test(label)) bucket = 'blocked';
+      else if (/^(?:active|doing|in progress|current|进行中)$/u.test(label)) bucket = 'doing';
+      continue;
+    }
+    const bullet = checkpointBulletText(line);
+    if (bullet.length > 0) {
+      flush();
+      const normalized = bullet.toLowerCase();
+      if (/^(?:done|completed|finished|已完成)\b/u.test(normalized) || /^\[[xX]\]/u.test(bullet)) bucket = 'done';
+      else if (/^(?:blocked|blocker|waiting|阻塞|等待)\b/u.test(normalized)) bucket = 'blocked';
+      else if (/^(?:doing|in progress|current|进行中)\b/u.test(normalized)) bucket = 'doing';
+      const text = bullet.replace(/^\[[ xX]\]\s*/u, '').replace(/^(?:done|completed|finished|doing|in progress|current|blocked|blocker|waiting)\s*[:：-]\s*/iu, '').trim();
+      if (text.length > 0 && !checkpointPlaceholder(text)) current = text;
+      continue;
+    }
+    if (raw.length > 0) {
+      const text = raw.replace(/^(?:done|completed|finished|doing|in progress|current|blocked|blocker|waiting)\s*[:：-]\s*/iu, '').trim();
+      if (text.length === 0 || checkpointPlaceholder(text)) {
+        flush();
+        continue;
+      }
+      current = current.length > 0 ? `${current} ${text}` : text;
+    } else {
+      flush();
+    }
+  }
+  flush();
+  return {
+    done: progress.done.slice(0, 50),
+    doing: progress.doing.slice(0, 50),
+    blocked: progress.blocked.slice(0, 50),
+  };
+}
+
+function splitCheckpointDecision(text) {
+  const parts = String(text ?? '').trim().split(/\s+(?:—|–|-|because|reason:)\s+/iu);
+  return parts.length < 2
+    ? { text: String(text ?? '').trim() }
+    : { text: parts[0].trim(), reason: parts.slice(1).join(' ').trim() };
+}
+
+function checkpointFileItem(text) {
+  const value = String(text ?? '').trim();
+  const match = value.match(/^(.+?)(?:\s+[（(]([^）)]+)[）)])?$/u);
+  const path = (match?.[1] ?? value).replace(/`/gu, '').trim();
+  const meta = (match?.[2] ?? '').toLowerCase();
+  return {
+    path,
+    ...(/write|edit|modify/u.test(meta) ? { role: 'write' } : /read|reference/u.test(meta) ? { role: 'read' } : {}),
+    ...(meta.includes('in_progress') || meta.includes('in progress') ? { status: 'in_progress' } : {}),
+  };
+}
+
+export function parseCompactionCheckpoint(summary, options = {}) {
+  const sections = checkpointSummarySections(summary);
+  const goal = checkpointSectionItems(sections.get('goal')).join('\n').trim();
+  const nextSteps = checkpointSectionItems(sections.get('next'));
+  if (goal.length === 0 || nextSteps.length === 0) return null;
+  const threadId = asText(options.threadId);
+  const domain = asText(options.domain) || (threadId ? `task:${threadId}` : 'default');
+  const fleetTaskId = asText(options.fleetTaskId) || null;
+  const recordIds = uniqueStrings(options.recordIds, 200);
+  const detailIds = uniqueStrings(options.detailIds, 200);
+  const constraints = checkpointSectionItems(sections.get('constraints')).map((item) => ({
+    text: item,
+    source: 'compaction_summary',
+  }));
+  const decisions = checkpointSectionItems(sections.get('decisions')).map(splitCheckpointDecision);
+  const progress = checkpointWorkState(sections.get('progress'));
+  const files = checkpointSectionItems(sections.get('files')).map(checkpointFileItem);
+  const questions = checkpointSectionItems(sections.get('questions')).map((item) => ({
+    text: item,
+    blocking: /[?？]/u.test(item) || /blocking/iu.test(item),
+  }));
+  const context = checkpointSectionItems(sections.get('context'));
+  return {
+    schema: 2,
+    contentMode: 'structured',
+    task: { key: domain, threadId, fleetTaskId },
+    goal: truncateBytes(goal, 2048),
+    constraints: constraints.slice(0, 32).map((item, index) => ({ id: `c${index + 1}`, ...item })),
+    decisions: decisions.slice(0, 50).map((item, index) => ({ id: `d${index + 1}`, ...item })),
+    progress: {
+      done: progress.done.slice(0, 50).map((item, index) => ({ id: `p${index + 1}`, ...item })),
+      doing: progress.doing.slice(0, 50).map((item, index) => ({ id: `p${progress.done.length + index + 1}`, ...item })),
+      blocked: progress.blocked.slice(0, 50).map((item, index) => ({ id: `p${progress.done.length + progress.doing.length + index + 1}`, ...item })),
+    },
+    nextSteps: nextSteps.slice(0, 32).map((item, index) => ({ id: `n${index + 1}`, text: item })),
+    files: files.slice(0, 100),
+    openQuestions: questions.slice(0, 32).map((item, index) => ({ id: `q${index + 1}`, ...item })),
+    references: {
+      recordIds,
+      detailIds,
+      messageIds: uniqueStrings(options.messageIds, 200),
+      fleetTaskId,
+      urls: [],
+    },
+    ...(context.length > 0 ? { context: context.slice(0, 16) } : {}),
+    ...(isObject(options.metadata) ? { host: options.metadata } : {}),
+  };
+}
+
+export function summaryOnlyCheckpointState(summary, options = {}) {
+  const threadId = asText(options.threadId);
+  const domain = asText(options.domain) || (threadId ? `task:${threadId}` : 'default');
+  const fleetTaskId = asText(options.fleetTaskId) || null;
+  return {
+    schema: 2,
+    contentMode: 'summary_only',
+    task: { key: domain, threadId, fleetTaskId },
+    goal: null,
+    constraints: [],
+    decisions: [],
+    progress: { done: [], doing: [], blocked: [] },
+    nextSteps: [],
+    files: [],
+    openQuestions: [],
+    references: {
+      recordIds: uniqueStrings(options.recordIds, 200),
+      detailIds: uniqueStrings(options.detailIds, 200),
+      messageIds: uniqueStrings(options.messageIds, 200),
+      fleetTaskId,
+      urls: [],
+    },
+    ...(isObject(options.metadata) ? { host: options.metadata } : {}),
+  };
+}
+
 function isLoopbackHostname(hostname) {
   return LOOPBACK_HOSTS.has(String(hostname ?? '').toLowerCase().replace(/^\[|\]$/g, ''));
 }
@@ -1894,13 +2122,22 @@ export function createController(dependencies = {}) {
       || asText(eventID)
       || `cmp_${hashText(`${session}:${summary ?? ''}`).slice(0, 32)}`;
     const endSeq = asText(data?.endSeq) || asText(data?.seq) || asText(eventID) || 'end';
-    const body = {
-      actor: { type: 'agent', agentId: config.agentId },
-      agentId: config.agentId,
+    const domain = checkpointDomain(session);
+    const fleetTaskId = asText(data?.fleetTaskId) || asText(data?.taskId);
+    const recordIds = uniqueStrings(options.recordIds, 200);
+    const detailIds = uniqueStrings(options.detailIds, 200);
+    const checkpointOptions = {
       threadId: session,
-      domain: checkpointDomain(session),
-      summary,
-      state: {
+      domain,
+      fleetTaskId,
+      recordIds,
+      detailIds,
+      messageIds: uniqueStrings([
+        asText(data?.lastMessageID) || asText(data?.lastMessageId),
+        ...(Array.isArray(data?.messageIds) ? data.messageIds : []),
+      ], 200),
+      metadata: {
+        host: 'opencode',
         kind: 'compaction',
         compactionId,
         ...(asText(eventID) ? { sourceEventId: asText(eventID) } : {}),
@@ -1913,7 +2150,31 @@ export function createController(dependencies = {}) {
         ...(asText(data?.transcriptHash) ? { transcriptHash: asText(data.transcriptHash) } : {}),
         ...(isObject(data?.model) ? { model: data.model } : {}),
       },
-      recordIds: uniqueStrings(options.recordIds, 64),
+    };
+    const parsed = summaryText.length > 0 ? parseCompactionCheckpoint(summaryText, checkpointOptions) : null;
+    const state = parsed ?? summaryOnlyCheckpointState(summaryText, checkpointOptions);
+    Object.assign(state, {
+      kind: 'compaction',
+      compactionId,
+      ...(asText(eventID) ? { sourceEventId: asText(eventID) } : {}),
+      reason: asText(data?.reason) || 'auto',
+      at: now(),
+      ...(Number.isFinite(data?.messageCount) ? { messageCount: data.messageCount } : {}),
+      ...(asText(data?.lastMessageID) || asText(data?.lastMessageId)
+        ? { lastMessageId: asText(data?.lastMessageID) || asText(data?.lastMessageId) }
+        : {}),
+      ...(asText(data?.transcriptHash) ? { transcriptHash: asText(data.transcriptHash) } : {}),
+      ...(isObject(data?.model) ? { model: data.model } : {}),
+    });
+    const body = {
+      actor: { type: 'agent', agentId: config.agentId },
+      agentId: config.agentId,
+      threadId: session,
+      domain,
+      summary,
+      state,
+      recordIds,
+      detailIds,
       expiresAt: 0,
     };
     const safeCompaction = compactionId.replace(/[^A-Za-z0-9._:-]/g, '_').slice(0, 80);
@@ -1995,6 +2256,7 @@ export function createController(dependencies = {}) {
     const eventID = asText(event?.id) || asText(data?.eventID) || asText(data?.eventId);
     const summary = asText(data.text) || asText(data.summary);
     let recordIds = [];
+    let detailIds = [];
     if (ingestAllowed && summary.length > 0) {
       const redacted = redactText(summary, { token: tokenState.value, home: config.home });
       const chunk = {
@@ -2010,11 +2272,14 @@ export function createController(dependencies = {}) {
         remember(seenChunks, chunk.key);
         const ingested = await sendIngest([chunk], { sessionID, extractor: 'heuristic' });
         if (ingested?.ok && Array.isArray(ingested.data?.records)) {
-          recordIds = uniqueStrings(ingested.data.records.map((record) => record?.id), 64);
+          recordIds = uniqueStrings(ingested.data.records.map((record) => record?.id), 200);
+          detailIds = uniqueStrings(ingested.data.records.flatMap((record) => (
+            Array.isArray(record?.detailIds) ? record.detailIds : []
+          )), 200);
         }
       }
     }
-    await putCheckpoint(sessionID, data, eventID, { recordIds });
+    await putCheckpoint(sessionID, data, eventID, { recordIds, detailIds });
   }
 
   async function handleEvent(event) {

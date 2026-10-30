@@ -321,7 +321,17 @@ describe('GET /version', () => {
     expect(res.body.data).toMatchObject({
       capabilityApiVersion: 1,
       schemaVersion: 1,
-      features: { domains: true, owner: true, provenance: true, graph: true, readOnly: true },
+      features: {
+        domains: true,
+        owner: true,
+        provenance: true,
+        graph: true,
+        readOnly: false,
+        batchWrite: true,
+        idempotency: true,
+        sync: true,
+        internalObjects: ['compact', 'self_record', 'context_checkpoint'],
+      },
       limits: { maxBodyBytes: 2 * 1024 * 1024, maxDomains: 16, maxLimit: 50, maxGraphDepth: 5 },
       domains: { reserved: ['user', 'default', 'shared', 'system'], agentPrefix: 'agent:', taskPrefix: 'task:' },
     });
@@ -635,16 +645,29 @@ describe('POST /graph', () => {
   });
 });
 
-describe('W2a 写端点占位', () => {
-  it.each(['write', 'update', 'delete', 'archive', 'internal-object', 'sync'])(
-    'POST /%s → 501 not_implemented',
+describe('W2b 写端点已实现', () => {
+  it.each(['write', 'update', 'delete', 'archive'])(
+    'POST /%s 空请求给出结构化 400，而不是 501 占位',
     async (endpoint) => {
       const res = await post(`/internal/memory/v1/${endpoint}`, { actor }, { token });
-      expect(res.status).toBe(501);
-      expect(res.body.error.code).toBe('not_implemented');
-      expect(res.body.error.details).toMatchObject({ endpoint, plannedIn: 'W2b' });
+      expect(res.status).not.toBe(501);
+      expect(res.status).toBe(400);
+      expect(res.body.ok).toBe(false);
+      expect(res.body.error.code).toBe('invalid_request');
     },
   );
+
+  it('POST /internal-object 空请求 → 400 internal_kind_invalid（不是 501）', async () => {
+    const res = await post('/internal/memory/v1/internal-object', { actor }, { token });
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('internal_kind_invalid');
+  });
+
+  it('POST /sync 空请求 → 400 invalid_request（不是 501）', async () => {
+    const res = await post('/internal/memory/v1/sync', { actor }, { token });
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('invalid_request');
+  });
 });
 
 describe('公共工具面不变', () => {

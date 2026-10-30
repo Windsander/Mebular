@@ -1048,9 +1048,9 @@ export async function startHttpServer({
     csrfValid,
   });
 
-  // 0.3 Memory Capability API：只读内部接口 `/internal/memory/v1`。
+  // 0.3 Memory Capability API：内部接口 `/internal/memory/v1`（读 + 写 + 内部对象 + sync）。
   // 只有 memoryRuntime.enabled=true 时挂载/生成 token；轻量模式零目录/文件/进程副作用。
-  // W2a 只接读端点；写端点由 W2b 补齐（当前返回 501 not_implemented）。
+  // capability 不是公共 MCP 工具；29 工具面不变。
   const memoryCapability = createMemoryCapabilityHandler({
     home,
     getConfig: () => config,

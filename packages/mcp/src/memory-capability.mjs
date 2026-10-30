@@ -3,27 +3,25 @@
 // 内部接口：`/internal/memory/v1`，运行在 MCP daemon 内，只允许本机 memory-runtime
 // sidecar 调用。不是公共 MCP 工具面（29 工具不变）。
 //
-// W2a 范围（只读）：
+// 端点：
 //   GET  /version
 //   GET  /status
 //   GET  /namespaces
-//   POST /query
-//   POST /search
-//   POST /history
-//   POST /profile
-//   POST /skills
-//   POST /graph
-//
-// W2b 才实现 write / update / delete / archive / internal-object / sync；本文件对
-// 这些路径返回结构化 501 `not_implemented`，不复制写入业务逻辑。
+//   POST /query /search /history /profile /skills /graph
+//   POST /write /update /delete /archive /internal-object
+//   GET/POST /sync
 //
 // 约束：
-// - 只调用 MemoryService / Mebular 公共方法；不直接打开 GraphStore / EventLog。
+// - 只调用 MemoryService / Mebular 公共方法（graph 节点方法）；不直接打开
+//   GraphStore 文件、不 append 事件、不新增事件类型或同步协议。
 // - 域过滤是 MemoryService 结果之上的后置过滤；不修改公共工具默认行为。
 // - 内部对象（metadata.internal / __*）默认不返回；graph 不遍历内部对象。
 // - capability token 不进入日志、status、错误详情；响应使用统一信封。
+// - 本模块不 import @mebular/memory-runtime 的业务实现。
 
 import { createHash, randomUUID } from 'node:crypto';
+import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import {
   ensureCapabilityToken,
   removeCapabilityToken,
@@ -43,26 +41,70 @@ const MAX_DEPTH = 5;
 const DEFAULT_LIMIT = 10;
 const MAX_TAGS = 32;
 const MAX_TAG_CHARS = 128;
+const MAX_BATCH_ITEMS = 100;
+const MAX_CONTENT_BYTES = 256 * 1024;
+const MAX_PROVENANCE_BYTES = 8 * 1024;
+const MAX_COMPACT_SUMMARY_BYTES = 64 * 1024;
+const MAX_CHECKPOINT_STATE_BYTES = 256 * 1024;
+const MAX_COMPACT_SOURCES = 200;
+const MAX_RELATED = 32;
+const MAX_MESSAGE_IDS = 64;
+const MAX_JSON_FIELD_BYTES = 16 * 1024;
+const OPEN_VALID_TO = 9999999999999;
+const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
+const IDEMPOTENCY_MAX_ENTRIES = 5000;
+const IDEMPOTENCY_LEDGER_VERSION = 1;
+const IDEMPOTENCY_LEDGER_FILE = 'capability-idempotency.json';
+const MAX_SYNC_WAIT_MS = 30_000;
 
 const AGENT_ID_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const THREAD_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
 const REQUEST_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
+const IDEMPOTENCY_KEY_RE = /^[A-Za-z0-9._:-]{1,200}$/;
+const CLIENT_ITEM_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
 
 const RESERVED_DOMAINS = new Set(['user', 'default', 'shared', 'system']);
 const MEMORY_TYPES = new Set(['entity', 'fact', 'episode', 'skill', 'meta']);
 const ALLOWED_TYPES = new Set(['fact', 'preference', 'episode', 'observation', 'skill', 'entity', 'meta']);
 const DEFAULT_TYPES = ['fact', 'preference', 'episode', 'observation', 'skill', 'entity'];
 const WRITE_ENDPOINTS = new Set(['write', 'update', 'delete', 'archive', 'internal-object', 'sync']);
+const INTERNAL_OBJECT_KINDS = ['compact', 'self_record', 'context_checkpoint'];
+const WRITE_KINDS = new Set(['fact', 'preference', 'episode', 'observation', 'skill', 'entity']);
+const EPISODE_KINDS = new Set(['conversation', 'task', 'decision', 'error', 'observation', 'other']);
+const ENTITY_KINDS = new Set(['user', 'project', 'tool', 'concept', 'organization', 'location', 'other']);
+const SOURCE_VALUES = new Set(['mcp', 'runtime', 'host', 'import', 'legacy']);
+const EXTRACTOR_VALUES = new Set(['user', 'heuristic', 'local', 'host', 'api']);
+const CONFIRMATION_VALUES = new Set(['explicit', 'policy', 'none']);
+const PROTECTED_METADATA_KEYS = new Set([
+  'internal',
+  'internalObject',
+  'provenance',
+  'owner',
+  'ownerType',
+  'ownerId',
+  'archivedAt',
+  'domain',
+  'namespace',
+  'kind',
+  'contentHash',
+  'contentHashValidFrom',
+  'clientItemId',
+  'updatedBy',
+]);
+const PATCH_KEYS = new Set(['content', 'tags', 'validFrom', 'validTo', 'metadata']);
 
 export const CAPABILITY_LIMITS = Object.freeze({
   maxBodyBytes: MAX_BODY_BYTES,
-  maxBatchItems: 100,
-  maxContentBytes: 256 * 1024,
+  maxBatchItems: MAX_BATCH_ITEMS,
+  maxContentBytes: MAX_CONTENT_BYTES,
+  maxProvenanceBytes: MAX_PROVENANCE_BYTES,
   maxDomains: MAX_DOMAINS,
   maxLimit: MAX_LIMIT,
   maxGraphDepth: MAX_DEPTH,
-  maxCheckpointStateBytes: 256 * 1024,
-  maxCompactSources: 200,
+  maxCheckpointStateBytes: MAX_CHECKPOINT_STATE_BYTES,
+  maxCompactSummaryBytes: MAX_COMPACT_SUMMARY_BYTES,
+  maxCompactSources: MAX_COMPACT_SOURCES,
+  idempotencyTtlMs: IDEMPOTENCY_TTL_MS,
 });
 
 class CapabilityError extends Error {
@@ -202,6 +244,597 @@ function isArchivedNode(node) {
   return typeof node?.metadata?.archivedAt === 'number';
 }
 
+// ---------- 写路径通用工具（W2b） ----------
+
+function canonicalize(value) {
+  if (value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map((entry) => canonicalize(entry));
+  const out = {};
+  for (const key of Object.keys(value).sort()) {
+    if (value[key] !== undefined) out[key] = canonicalize(value[key]);
+  }
+  return out;
+}
+
+function canonicalJson(value) {
+  return JSON.stringify(canonicalize(value));
+}
+
+function sha256Hex(value) {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function byteSize(value) {
+  return Buffer.byteLength(typeof value === 'string' ? value : canonicalJson(value), 'utf-8');
+}
+
+function jsonClone(value) {
+  return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+}
+
+function validationError(index, field, message, extra) {
+  return new CapabilityError(422, 'validation_failed', message, {
+    ...(Number.isInteger(index) ? { index } : {}),
+    field,
+    ...(extra ?? {}),
+  });
+}
+
+function nonEmptyString(value, field, index) {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw validationError(index, field, `${field} 必须是非空字符串`);
+  }
+  return value;
+}
+
+function optionalString(value, field, index, maxChars = 4096) {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string' || value.length > maxChars) {
+    throw validationError(index, field, `${field} 必须是字符串且不超过 ${maxChars} 字符`);
+  }
+  return value;
+}
+
+function optionalNumber(value, field, index) {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw validationError(index, field, `${field} 必须是有限数字`);
+  }
+  return value;
+}
+
+function optionalConfidence(value, field, index) {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1) {
+    throw validationError(index, field, `${field} 必须在 [0,1] 区间`);
+  }
+  return value;
+}
+
+function stringArray(value, field, index, { maxItems = MAX_TAGS, maxChars = MAX_TAG_CHARS } = {}) {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value)) throw validationError(index, field, `${field} 必须是字符串数组`);
+  if (value.length > maxItems) throw validationError(index, field, `${field} 最多 ${maxItems} 项`);
+  const out = [];
+  for (const entry of value) {
+    if (typeof entry !== 'string' || entry.length === 0 || entry.length > maxChars) {
+      throw validationError(index, field, `${field} 每项需为 1–${maxChars} 字符`);
+    }
+    if (!out.includes(entry)) out.push(entry);
+  }
+  return out;
+}
+
+function normalizeTags(value, index) {
+  const tags = stringArray(value, 'tags', index) ?? [];
+  for (const tag of tags) {
+    if (tag.startsWith('mebular:runtime:')) {
+      throw validationError(index, 'tags', '不得使用 mebular:runtime:* 保留标签', { tag });
+    }
+  }
+  return tags;
+}
+
+function normalizeRelatedTo(value, index) {
+  const related = stringArray(value, 'relatedTo', index, { maxItems: MAX_RELATED, maxChars: 128 }) ?? [];
+  return related;
+}
+
+function normalizeMessageIds(value, field, index) {
+  return stringArray(value, field, index, { maxItems: MAX_MESSAGE_IDS, maxChars: 256 }) ?? [];
+}
+
+function parseProvenanceInput(value, index) {
+  if (value === undefined || value === null) return {};
+  if (!isObject(value)) throw validationError(index, 'provenance', 'provenance 必须是对象');
+  const out = {};
+  if (value.source !== undefined) {
+    if (!SOURCE_VALUES.has(value.source)) throw validationError(index, 'provenance.source', 'provenance.source 非法');
+    out.source = value.source;
+  }
+  if (value.extractor !== undefined) {
+    if (!EXTRACTOR_VALUES.has(value.extractor)) {
+      throw validationError(index, 'provenance.extractor', 'provenance.extractor 非法');
+    }
+    out.extractor = value.extractor;
+  }
+  if (value.model !== undefined && value.model !== null) {
+    if (typeof value.model !== 'string' || value.model.length > 128) {
+      throw validationError(index, 'provenance.model', 'provenance.model 必须是字符串或 null');
+    }
+    out.model = value.model;
+  } else {
+    out.model = null;
+  }
+  if (value.threadId !== undefined && value.threadId !== null) {
+    if (typeof value.threadId !== 'string' || !THREAD_ID_RE.test(value.threadId)) {
+      throw validationError(index, 'provenance.threadId', 'threadId 格式非法');
+    }
+    out.threadId = value.threadId;
+  }
+  if (value.confirmation !== undefined) {
+    if (!CONFIRMATION_VALUES.has(value.confirmation)) {
+      throw validationError(index, 'provenance.confirmation', 'provenance.confirmation 非法');
+    }
+    out.confirmation = value.confirmation;
+  }
+  if (value.agentName !== undefined && value.agentName !== null) {
+    if (typeof value.agentName !== 'string' || value.agentName.length > 128) {
+      throw validationError(index, 'provenance.agentName', 'provenance.agentName 必须是字符串');
+    }
+    out.agentName = value.agentName;
+  }
+  out.messageIds = normalizeMessageIds(value.messageIds, 'provenance.messageIds', index);
+  out.rawChunkIds = normalizeMessageIds(value.rawChunkIds, 'provenance.rawChunkIds', index);
+  return out;
+}
+
+function buildWriteProvenance({
+  input,
+  actor,
+  identity,
+  hostId,
+  now,
+  threadId = null,
+  confirmation = 'none',
+}) {
+  const writerId = actor.type === 'agent'
+    ? actor.agentId
+    : actor.type === 'user'
+      ? (actor.userId ?? identity.userId ?? 'user')
+      : 'system';
+  return {
+    source: input.source ?? 'runtime',
+    writerType: actor.type,
+    writerId,
+    extractor: input.extractor ?? (actor.type === 'agent' ? 'heuristic' : 'user'),
+    model: input.model ?? null,
+    version: APP_VERSION,
+    deviceId: identity.deviceId ?? null,
+    hostId,
+    threadId: input.threadId ?? threadId ?? null,
+    agentId: actor.type === 'agent' ? actor.agentId : null,
+    agentName: actor.displayName ?? input.agentName ?? null,
+    messageIds: [...(input.messageIds ?? [])],
+    rawChunkIds: [...(input.rawChunkIds ?? [])],
+    confirmation,
+    at: now,
+  };
+}
+
+function domainWriteForbidden(message, details) {
+  return new CapabilityError(403, 'domain_write_forbidden', message, details);
+}
+
+/**
+ * 写权限矩阵（contract v2 §6.2 / capability-api §5.2）。
+ * actor/domain 由服务端推导 owner；客户端只能在 item 里回传校验。
+ */
+function assertDomainWrite(actor, domain, provenanceInput, requestThreadId = null) {
+  if (actor.type === 'system') return;
+  if (actor.type === 'user') {
+    // capability token 具备 memory.admin，user/system 可按治理矩阵写入。
+    return;
+  }
+  if (domain === 'user') {
+    if (provenanceInput?.confirmation !== 'explicit' || typeof provenanceInput?.source !== 'string'
+      || provenanceInput.source.length === 0) {
+      throw domainWriteForbidden('Agent 写入 user 域需要用户明确确认', {
+        domain,
+        actor: actor.agentId,
+        allowedDomain: `agent:${actor.agentId}`,
+      });
+    }
+    return;
+  }
+  if (domain === 'system') {
+    throw domainWriteForbidden('Agent 不能写入 system 域', { domain, actor: actor.agentId });
+  }
+  if (domain.startsWith('agent:')) {
+    if (domain !== `agent:${actor.agentId}`) {
+      throw domainWriteForbidden('Agent 不能写入其他 Agent 的记忆域', {
+        domain,
+        actor: actor.agentId,
+        allowedDomain: `agent:${actor.agentId}`,
+      });
+    }
+    return;
+  }
+  if (domain.startsWith('task:')) {
+    const threadId = domain.slice('task:'.length);
+    const claimed = provenanceInput?.threadId ?? requestThreadId;
+    if (claimed !== threadId) {
+      throw domainWriteForbidden('Agent 只能写入自己参与且 threadId 匹配的任务域', {
+        domain,
+        actor: actor.agentId,
+        threadId: claimed ?? null,
+      });
+    }
+  }
+}
+
+/** 治理动作：user/system 全部；agent 只能治理自己域内、自己写入的记录。 */
+function canGovernNode(actor, node) {
+  if (actor.type === 'user' || actor.type === 'system') return true;
+  if (actor.type !== 'agent') return false;
+  const domain = domainOfNamespace(node?.namespace);
+  if (domain !== `agent:${actor.agentId}`) return false;
+  const provenance = isObject(node?.metadata?.provenance) ? node.metadata.provenance : {};
+  return provenance.writerId === actor.agentId;
+}
+
+/** 更新：agent 只能更新自己域内、自己写入的记录。 */
+function canUpdateNode(actor, node) {
+  return canGovernNode(actor, node);
+}
+
+function factExtras(raw, index) {
+  const confidence = optionalConfidence(raw.confidence, 'content.confidence', index);
+  const source = optionalString(raw.source, 'content.source', index);
+  return {
+    ...(confidence !== undefined ? { confidence } : {}),
+    ...(source !== undefined ? { source } : {}),
+  };
+}
+
+function normalizeWriteContent(kind, raw, index) {
+  if (!isObject(raw)) throw validationError(index, 'content', 'content 必须是非空对象');
+  if (byteSize(raw) > MAX_CONTENT_BYTES) {
+    throw new CapabilityError(413, 'payload_too_large', `content 超过 ${MAX_CONTENT_BYTES} 字节`, { index });
+  }
+  switch (kind) {
+    case 'fact':
+      return {
+        nodeType: 'fact',
+        content: {
+          subject: nonEmptyString(raw.subject, 'content.subject', index),
+          predicate: nonEmptyString(raw.predicate, 'content.predicate', index),
+          object: nonEmptyString(raw.object, 'content.object', index),
+          ...factExtras(raw, index),
+        },
+        tags: [],
+      };
+    case 'preference':
+      return {
+        nodeType: 'fact',
+        content: {
+          subject: nonEmptyString(raw.entity, 'content.entity', index),
+          predicate: nonEmptyString(raw.preferenceType, 'content.preferenceType', index),
+          object: nonEmptyString(raw.value, 'content.value', index),
+          ...factExtras(raw, index),
+        },
+        tags: ['preference'],
+      };
+    case 'observation':
+      return {
+        nodeType: 'fact',
+        content: { content: nonEmptyString(raw.content, 'content.content', index) },
+        tags: [],
+      };
+    case 'episode': {
+      const episodeType = nonEmptyString(raw.episodeType, 'content.episodeType', index);
+      if (!EPISODE_KINDS.has(episodeType)) {
+        throw validationError(index, 'content.episodeType', 'episodeType 非法');
+      }
+      const content = {
+        episodeType,
+        content: nonEmptyString(raw.content, 'content.content', index),
+      };
+      const title = optionalString(raw.title, 'content.title', index, 512);
+      if (title !== undefined) content.title = title;
+      const startTime = optionalNumber(raw.startTime, 'content.startTime', index);
+      const endTime = optionalNumber(raw.endTime, 'content.endTime', index);
+      if (startTime !== undefined) content.startTime = startTime;
+      if (endTime !== undefined) content.endTime = endTime;
+      const context = optionalString(raw.context, 'content.context', index, 512);
+      if (context !== undefined) content.context = context;
+      return { nodeType: 'episode', content, tags: [] };
+    }
+    case 'skill': {
+      const content = {
+        name: nonEmptyString(raw.name, 'content.name', index),
+        description: nonEmptyString(raw.description, 'content.description', index),
+        category: nonEmptyString(raw.category, 'content.category', index),
+      };
+      for (const field of ['steps', 'commands', 'toolReferences', 'prerequisites', 'relatedEntities']) {
+        const value = stringArray(raw[field], `content.${field}`, index, { maxItems: 64, maxChars: 1024 });
+        if (value !== undefined) content[field] = value;
+      }
+      return { nodeType: 'skill', content, tags: [] };
+    }
+    case 'entity': {
+      const entityType = nonEmptyString(raw.entityType, 'content.entityType', index);
+      if (!ENTITY_KINDS.has(entityType)) throw validationError(index, 'content.entityType', 'entityType 非法');
+      const content = {
+        entityType,
+        name: nonEmptyString(raw.name, 'content.name', index),
+      };
+      const description = optionalString(raw.description, 'content.description', index, 4096);
+      if (description !== undefined) content.description = description;
+      if (raw.properties !== undefined && raw.properties !== null) {
+        if (!isObject(raw.properties)) throw validationError(index, 'content.properties', 'properties 必须是对象');
+        if (byteSize(raw.properties) > MAX_JSON_FIELD_BYTES) {
+          throw validationError(index, 'content.properties', `properties 超过 ${MAX_JSON_FIELD_BYTES} 字节`);
+        }
+        content.properties = jsonClone(raw.properties);
+      }
+      return { nodeType: 'entity', content, tags: [] };
+    }
+    default:
+      throw validationError(index, 'kind', 'kind 非法');
+  }
+}
+
+/** 更新时对合并后的节点内容重新按 kind 校验（只保留已知字段）。 */
+function normalizeNodeContent(kind, nodeType, raw, index) {
+  if (!isObject(raw)) throw validationError(index, 'patch.content', 'content 必须是对象');
+  if (byteSize(raw) > MAX_CONTENT_BYTES) {
+    throw new CapabilityError(413, 'payload_too_large', `content 超过 ${MAX_CONTENT_BYTES} 字节`, { index });
+  }
+  if (kind === 'observation' && nodeType === 'episode') {
+    const episodeType = nonEmptyString(raw.episodeType ?? 'observation', 'content.episodeType', index);
+    if (!EPISODE_KINDS.has(episodeType)) throw validationError(index, 'content.episodeType', 'episodeType 非法');
+    return {
+      episodeType,
+      content: nonEmptyString(raw.content, 'content.content', index),
+      ...(optionalString(raw.title, 'content.title', index, 512) !== undefined
+        ? { title: optionalString(raw.title, 'content.title', index, 512) }
+        : {}),
+      ...(optionalNumber(raw.startTime, 'content.startTime', index) !== undefined
+        ? { startTime: optionalNumber(raw.startTime, 'content.startTime', index) }
+        : {}),
+      ...(optionalNumber(raw.endTime, 'content.endTime', index) !== undefined
+        ? { endTime: optionalNumber(raw.endTime, 'content.endTime', index) }
+        : {}),
+      ...(optionalString(raw.context, 'content.context', index, 512) !== undefined
+        ? { context: optionalString(raw.context, 'content.context', index, 512) }
+        : {}),
+    };
+  }
+  if (kind === 'observation') {
+    return { content: nonEmptyString(raw.content, 'content.content', index) };
+  }
+  if (kind === 'fact' || kind === 'preference') {
+    return {
+      subject: nonEmptyString(raw.subject, 'content.subject', index),
+      predicate: nonEmptyString(raw.predicate, 'content.predicate', index),
+      object: nonEmptyString(raw.object, 'content.object', index),
+      ...factExtras(raw, index),
+    };
+  }
+  if (kind === 'episode') {
+    const episodeType = nonEmptyString(raw.episodeType, 'content.episodeType', index);
+    if (!EPISODE_KINDS.has(episodeType)) throw validationError(index, 'content.episodeType', 'episodeType 非法');
+    return {
+      episodeType,
+      content: nonEmptyString(raw.content, 'content.content', index),
+      ...(optionalString(raw.title, 'content.title', index, 512) !== undefined
+        ? { title: optionalString(raw.title, 'content.title', index, 512) }
+        : {}),
+      ...(optionalNumber(raw.startTime, 'content.startTime', index) !== undefined
+        ? { startTime: optionalNumber(raw.startTime, 'content.startTime', index) }
+        : {}),
+      ...(optionalNumber(raw.endTime, 'content.endTime', index) !== undefined
+        ? { endTime: optionalNumber(raw.endTime, 'content.endTime', index) }
+        : {}),
+      ...(optionalString(raw.context, 'content.context', index, 512) !== undefined
+        ? { context: optionalString(raw.context, 'content.context', index, 512) }
+        : {}),
+    };
+  }
+  if (kind === 'skill') {
+    const content = {
+      name: nonEmptyString(raw.name, 'content.name', index),
+      description: nonEmptyString(raw.description, 'content.description', index),
+      category: nonEmptyString(raw.category, 'content.category', index),
+    };
+    for (const field of ['steps', 'commands', 'toolReferences', 'prerequisites', 'relatedEntities']) {
+      const value = stringArray(raw[field], `content.${field}`, index, { maxItems: 64, maxChars: 1024 });
+      if (value !== undefined) content[field] = value;
+    }
+    return content;
+  }
+  if (kind === 'entity') {
+    const entityType = nonEmptyString(raw.entityType, 'content.entityType', index);
+    if (!ENTITY_KINDS.has(entityType)) throw validationError(index, 'content.entityType', 'entityType 非法');
+    const content = {
+      entityType,
+      name: nonEmptyString(raw.name, 'content.name', index),
+    };
+    const description = optionalString(raw.description, 'content.description', index, 4096);
+    if (description !== undefined) content.description = description;
+    if (raw.properties !== undefined && raw.properties !== null) {
+      if (!isObject(raw.properties)) throw validationError(index, 'content.properties', 'properties 必须是对象');
+      if (byteSize(raw.properties) > MAX_JSON_FIELD_BYTES) {
+        throw validationError(index, 'content.properties', `properties 超过 ${MAX_JSON_FIELD_BYTES} 字节`);
+      }
+      content.properties = jsonClone(raw.properties);
+    }
+    return content;
+  }
+  throw validationError(index, 'kind', '节点类型不支持更新');
+}
+
+function ownerMismatchError(index, domain, expected, actual) {
+  return new CapabilityError(400, 'owner_mismatch', '客户端 owner 与服务端推导不一致', {
+    index,
+    domain,
+    expected,
+    actual,
+  });
+}
+
+function contentHashFor(kind, content, validFrom) {
+  return `sha256:${sha256Hex(canonicalJson({
+    kind,
+    content,
+    ...(validFrom !== undefined ? { validFrom } : {}),
+  }))}`;
+}
+
+function dedupeKey(prefix, domain, value) {
+  return `${prefix}\u0000${domain}\u0000${value}`;
+}
+
+async function buildDedupeIndex(app) {
+  const index = { client: new Map(), hash: new Map() };
+  for (const node of await listAllNodes(app)) {
+    // 墓碑不参与去重；归档仍视为已存在（避免重复创建后又出现两条）。
+    if (!node || node.deletedAt || isInternalNode(node)) continue;
+    const metadata = isObject(node.metadata) ? node.metadata : {};
+    const domain = domainOfNamespace(node.namespace);
+    if (typeof metadata.clientItemId === 'string') {
+      index.client.set(dedupeKey('client', domain, metadata.clientItemId), node);
+    }
+    if (typeof metadata.contentHash === 'string') {
+      index.hash.set(dedupeKey('hash', domain, metadata.contentHash), node);
+    }
+  }
+  return index;
+}
+
+function recordWriteResult(status, node, item, owner) {
+  return {
+    ...(item.clientItemId !== undefined ? { clientItemId: item.clientItemId } : {}),
+    status,
+    id: node.id,
+    type: node.type,
+    kind: item.kind,
+    domain: item.domain,
+    ownerType: owner.ownerType,
+    ownerId: owner.ownerId,
+    ...(status === 'duplicate' ? { duplicate: true } : {}),
+  };
+}
+
+async function listNodesOfType(app, type) {
+  try {
+    if (app?.graph && typeof app.graph.listNodes === 'function') {
+      return await app.graph.listNodes({ type });
+    }
+  } catch {
+    // fall through
+  }
+  return (await listAllNodes(app)).filter((node) => node?.type === type);
+}
+
+function internalObjectMetadata(node) {
+  return isObject(node?.metadata?.internalObject) ? node.metadata.internalObject : {};
+}
+
+function internalObjectRevision(node) {
+  const value = internalObjectMetadata(node).revision ?? (isObject(node?.content) ? node.content.revision : undefined);
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+function compareInternalObjectNodes(a, b) {
+  if (internalObjectRevision(a) !== internalObjectRevision(b)) {
+    return internalObjectRevision(b) - internalObjectRevision(a);
+  }
+  if ((b.updatedAt ?? 0) !== (a.updatedAt ?? 0)) return (b.updatedAt ?? 0) - (a.updatedAt ?? 0);
+  return String(b.id).localeCompare(String(a.id));
+}
+
+function isV2CheckpointNode(node) {
+  const domain = domainOfNamespace(node?.namespace);
+  return node?.type === 'context_checkpoint'
+    && isInternalNode(node)
+    && (domain === 'default' || (domain.startsWith('task:') && !domain.startsWith('__')));
+}
+
+function checkpointAgentId(node) {
+  const content = isObject(node?.content) ? node.content : {};
+  const internalObject = internalObjectMetadata(node);
+  if (typeof content.agentId === 'string') return content.agentId;
+  if (typeof internalObject.agentId === 'string') return internalObject.agentId;
+  return null;
+}
+
+function checkpointThreadId(node) {
+  const content = isObject(node?.content) ? node.content : {};
+  const internalObject = internalObjectMetadata(node);
+  if (typeof content.threadId === 'string') return content.threadId;
+  if (typeof internalObject.threadId === 'string') return internalObject.threadId;
+  const domain = domainOfNamespace(node?.namespace);
+  return domain.startsWith('task:') ? domain.slice('task:'.length) : null;
+}
+
+function checkpointMatches(node, agentId, threadId) {
+  return isV2CheckpointNode(node)
+    && checkpointAgentId(node) === agentId
+    && checkpointThreadId(node) === threadId;
+}
+
+async function currentSelfRecord(app, agentId) {
+  const nodes = await listNodesOfType(app, 'self_record');
+  return nodes
+    .filter((node) => !node.deletedAt
+      && isInternalNode(node)
+      && internalObjectKind(node) === 'self_record'
+      && domainOfNamespace(node.namespace) === `agent:${agentId}`)
+    .sort(compareInternalObjectNodes)[0] ?? null;
+}
+
+async function currentCheckpoint(app, agentId, threadId) {
+  const nodes = await listNodesOfType(app, 'context_checkpoint');
+  return nodes
+    .filter((node) => !node.deletedAt && checkpointMatches(node, agentId, threadId))
+    .sort(compareInternalObjectNodes)[0] ?? null;
+}
+
+async function allCheckpoints(app, agentId, threadId = null) {
+  const nodes = await listNodesOfType(app, 'context_checkpoint');
+  return nodes.filter((node) => {
+    if (node.deletedAt || !isV2CheckpointNode(node)) return false;
+    if (checkpointAgentId(node) !== agentId) return false;
+    if (threadId !== null && checkpointThreadId(node) !== threadId) return false;
+    return checkpointThreadId(node) !== null;
+  });
+}
+
+function checkpointExpired(node, now = Date.now()) {
+  const content = isObject(node?.content) ? node.content : {};
+  return typeof content.expiresAt === 'number' && content.expiresAt > 0 && content.expiresAt < now;
+}
+
+async function isCompactStale(app, node) {
+  const content = isObject(node?.content) ? node.content : {};
+  const sourceIds = Array.isArray(content.sourceIds) ? content.sourceIds : [];
+  const sourceHashes = Array.isArray(content.sourceHashes) ? content.sourceHashes : [];
+  for (let index = 0; index < sourceIds.length; index += 1) {
+    const source = await app?.graph?.getNode?.(sourceIds[index]);
+    if (!source || source.deletedAt) return true;
+    const expected = sourceHashes[index];
+    if (typeof expected === 'string' && expected.length > 0) {
+      const actual = `sha256:${sha256Hex(canonicalJson(source.content ?? null))}`;
+      if (actual !== expected) return true;
+    } else if ((source.updatedAt ?? 0) > (node.createdAt ?? 0)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function requestIdOf(req) {
   const incoming = req?.headers?.['x-request-id'];
   return typeof incoming === 'string' && REQUEST_ID_RE.test(incoming) ? incoming : `req_${randomUUID()}`;
@@ -295,7 +928,11 @@ function serviceTypesFor(types, { search = false } = {}) {
       // search 的 MemoryStore 不认 preference；query 在“只要 preference”时可利用其原生过滤。
       if (search || types.includes('fact')) out.add('fact');
       else out.add('preference');
-    } else if (type === 'episode' || type === 'observation') {
+    } else if (type === 'observation') {
+      // 新写入的 observation 是 fact 节点；0.2 的 observation 是 episode 节点。
+      out.add('fact');
+      out.add('episode');
+    } else if (type === 'episode') {
       out.add('episode');
     } else {
       out.add(type);
@@ -311,7 +948,9 @@ function isNarrowSemanticFilter(types) {
 
 function matchesRequestedTypes(record, types) {
   if (record.type === 'fact') {
-    return types.includes('fact') || (types.includes('preference') && record.kind === 'preference');
+    return types.includes('fact')
+      || (types.includes('preference') && record.kind === 'preference')
+      || (types.includes('observation') && record.kind === 'observation');
   }
   if (record.type === 'episode') {
     return types.includes('episode') || (types.includes('observation') && record.kind === 'observation');
@@ -633,6 +1272,147 @@ function internalObjectKind(node) {
   return node?.type ?? null;
 }
 
+// ---------- 内部对象视图（compact / self_record / context_checkpoint） ----------
+
+function internalProvenance(node, domain, userId) {
+  const metadata = isObject(node?.metadata) ? node.metadata : {};
+  const owner = deriveOwner(domain, { userId });
+  return buildProvenance(metadata, domain, owner, node);
+}
+
+function compactObjectView(node, { userId = 'user', stale = false } = {}) {
+  const domain = domainOfNamespace(node?.namespace);
+  const content = isObject(node?.content) ? node.content : {};
+  const owner = deriveOwner(domain, { userId });
+  return {
+    id: node.id,
+    type: 'compact',
+    kind: 'compact',
+    domain,
+    namespace: domain,
+    ownerType: owner.ownerType,
+    ownerId: owner.ownerId,
+    internal: true,
+    provenance: internalProvenance(node, domain, userId),
+    summary: typeof content.summary === 'string' ? content.summary : '',
+    sourceIds: Array.isArray(content.sourceIds) ? content.sourceIds : [],
+    sourceHashes: Array.isArray(content.sourceHashes) ? content.sourceHashes : [],
+    strategy: typeof content.strategy === 'string' ? content.strategy : 'summary',
+    tokenCount: typeof content.tokenCount === 'number' ? content.tokenCount : null,
+    ...(isObject(content.model) ? { model: content.model } : {}),
+    stale,
+    createdAt: node.createdAt ?? null,
+    updatedAt: node.updatedAt ?? node.createdAt ?? null,
+  };
+}
+
+function selfRecordView(node, { userId = 'user' } = {}) {
+  const domain = domainOfNamespace(node?.namespace);
+  const content = isObject(node?.content) ? node.content : {};
+  const owner = deriveOwner(domain, { userId });
+  const record = isObject(content.record)
+    ? content.record
+    : Object.fromEntries(Object.entries(content).filter(([key]) => key !== 'agentId' && key !== 'revision'));
+  const internalObject = internalObjectMetadata(node);
+  return {
+    id: node.id,
+    type: 'self_record',
+    kind: 'self_record',
+    domain,
+    namespace: domain,
+    ownerType: owner.ownerType,
+    ownerId: owner.ownerId,
+    internal: true,
+    agentId: typeof content.agentId === 'string'
+      ? content.agentId
+      : typeof internalObject.agentId === 'string'
+        ? internalObject.agentId
+        : domain.startsWith('agent:') ? domain.slice('agent:'.length) : null,
+    revision: internalObjectRevision(node),
+    content: record,
+    provenance: internalProvenance(node, domain, userId),
+    createdAt: node.createdAt ?? null,
+    updatedAt: node.updatedAt ?? node.createdAt ?? null,
+  };
+}
+
+function checkpointObjectView(node, { userId = 'user' } = {}) {
+  const domain = domainOfNamespace(node?.namespace);
+  const content = isObject(node?.content) ? node.content : {};
+  const owner = deriveOwner(domain, { userId });
+  const internalObject = internalObjectMetadata(node);
+  const threadId = typeof content.threadId === 'string'
+    ? content.threadId
+    : typeof internalObject.threadId === 'string'
+      ? internalObject.threadId
+      : domain.startsWith('task:') ? domain.slice('task:'.length) : null;
+  return {
+    id: node.id,
+    type: 'context_checkpoint',
+    kind: 'context_checkpoint',
+    domain,
+    namespace: domain,
+    ownerType: owner.ownerType,
+    ownerId: owner.ownerId,
+    internal: true,
+    agentId: typeof content.agentId === 'string'
+      ? content.agentId
+      : typeof internalObject.agentId === 'string'
+        ? internalObject.agentId
+        : null,
+    threadId,
+    revision: internalObjectRevision(node),
+    state: isObject(content.state) ? content.state : {},
+    summary: typeof content.summary === 'string' ? content.summary : null,
+    recordIds: Array.isArray(content.recordIds) ? content.recordIds : [],
+    lease: isObject(content.lease) ? content.lease : null,
+    expiresAt: typeof content.expiresAt === 'number' ? content.expiresAt : 0,
+    provenance: internalProvenance(node, domain, userId),
+    createdAt: node.createdAt ?? null,
+    updatedAt: node.updatedAt ?? node.createdAt ?? null,
+  };
+}
+
+function normalizeSelfRecord(value, index) {
+  if (!isObject(value)) throw validationError(index, 'record', 'record 必须是对象');
+  const record = {};
+  const displayName = optionalString(value.displayName, 'record.displayName', index, 128);
+  if (displayName !== undefined) record.displayName = displayName;
+  for (const field of ['goals', 'traits', 'capabilities', 'boundaries']) {
+    const list = stringArray(value[field], `record.${field}`, index, { maxItems: 64, maxChars: 1024 });
+    if (list !== undefined) record[field] = list;
+  }
+  if (value.preferences !== undefined && value.preferences !== null) {
+    if (!isObject(value.preferences)) throw validationError(index, 'record.preferences', 'preferences 必须是对象');
+    if (byteSize(value.preferences) > MAX_JSON_FIELD_BYTES) {
+      throw validationError(index, 'record.preferences', `preferences 超过 ${MAX_JSON_FIELD_BYTES} 字节`);
+    }
+    record.preferences = jsonClone(value.preferences);
+  }
+  if (byteSize(record) > MAX_CONTENT_BYTES) {
+    throw new CapabilityError(413, 'payload_too_large', 'SelfRecord 超过大小限制', { index });
+  }
+  return record;
+}
+
+function normalizeCheckpointState(value, index) {
+  if (value === undefined || value === null) return {};
+  if (!isObject(value)) throw validationError(index, 'state', 'state 必须是对象');
+  if (byteSize(value) > MAX_CHECKPOINT_STATE_BYTES) {
+    throw new CapabilityError(413, 'payload_too_large', `state 超过 ${MAX_CHECKPOINT_STATE_BYTES} 字节`, { index });
+  }
+  return jsonClone(value);
+}
+
+function timeoutAfter(promise, ms, message) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new CapabilityError(503, 'sync_unavailable', message, { reason: 'timeout' }, true)), ms);
+    if (typeof timer.unref === 'function') timer.unref();
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 function domainStats(nodes) {
   const stats = new Map();
   for (const node of nodes) {
@@ -667,13 +1447,12 @@ function versionPayload() {
       domains: true,
       owner: true,
       provenance: true,
-      batchWrite: false,
-      idempotency: false,
-      internalObjects: [],
-      sync: false,
+      batchWrite: true,
+      idempotency: true,
+      internalObjects: [...INTERNAL_OBJECT_KINDS],
+      sync: true,
       graph: true,
-      // W2a 只读中间态；W2b 加入写/内部对象后去掉此标记。
-      readOnly: true,
+      readOnly: false,
       readEndpoints: [
         'version',
         'status',
@@ -684,7 +1463,9 @@ function versionPayload() {
         'profile',
         'skills',
         'graph',
+        'sync',
       ],
+      writeEndpoints: ['write', 'update', 'delete', 'archive', 'internal-object', 'sync'],
     },
     limits: { ...CAPABILITY_LIMITS },
     domains: {
@@ -866,6 +1647,1300 @@ export function createMemoryCapabilityHandler({
       return parsed;
     };
 
+    // ---------- 写路径：幂等账本（24h，本地过渡数据，不进入图/同步） ----------
+
+    const ledgerDir = typeof home === 'string' && home.length > 0 ? join(home, 'memory-runtime') : null;
+    const ledgerFile = ledgerDir ? join(ledgerDir, IDEMPOTENCY_LEDGER_FILE) : null;
+    let ledger = null;
+    let ledgerLoading = null;
+
+    async function ledgerState() {
+      if (ledger) return ledger;
+      if (!ledgerFile) {
+        ledger = new Map();
+        return ledger;
+      }
+      if (!ledgerLoading) {
+        ledgerLoading = (async () => {
+          const state = new Map();
+          try {
+            const raw = JSON.parse(await readFile(ledgerFile, 'utf-8'));
+            if (raw?.version === IDEMPOTENCY_LEDGER_VERSION && Array.isArray(raw.entries)) {
+              const cutoff = now() - IDEMPOTENCY_TTL_MS;
+              for (const entry of raw.entries) {
+                if (!isObject(entry) || typeof entry.key !== 'string' || !isObject(entry.data)) continue;
+                if (typeof entry.at !== 'number' || entry.at < cutoff) continue;
+                state.set(entry.key, entry);
+              }
+            }
+          } catch {
+            // 账本损坏/不存在：按空处理；clientItemId 与内容 hash 仍可防重。
+          }
+          ledger = state;
+          return state;
+        })().finally(() => {
+          ledgerLoading = null;
+        });
+      }
+      return ledgerLoading;
+    }
+
+    async function saveLedger(state) {
+      if (!ledgerFile || !ledgerDir) return;
+      const cutoff = now() - IDEMPOTENCY_TTL_MS;
+      const entries = [...state.values()].filter((entry) => entry.at >= cutoff);
+      while (entries.length > IDEMPOTENCY_MAX_ENTRIES) {
+        const oldest = entries.shift();
+        if (oldest) state.delete(oldest.key);
+      }
+      // 重新过滤：淘汰后 entries 与 state 保持一致。
+      const payload = {
+        version: IDEMPOTENCY_LEDGER_VERSION,
+        entries: entries.filter((entry) => state.has(entry.key)),
+      };
+      await mkdir(ledgerDir, { recursive: true, mode: 0o700 });
+      await chmod(ledgerDir, 0o700);
+      const tmp = `${ledgerFile}.tmp-${process.pid}-${randomUUID()}`;
+      try {
+        await writeFile(tmp, JSON.stringify(payload), { encoding: 'utf-8', mode: 0o600 });
+        await chmod(tmp, 0o600);
+        await rename(tmp, ledgerFile);
+        await chmod(ledgerFile, 0o600);
+      } catch (error) {
+        await rm(tmp, { force: true }).catch(() => undefined);
+        throw error;
+      }
+    }
+
+    function idempotencyKeyOf(req, payload) {
+      const header = req?.headers?.['idempotency-key'];
+      if (hasValue(header) && header !== '') {
+        if (typeof header !== 'string' || !IDEMPOTENCY_KEY_RE.test(header)) {
+          throw new CapabilityError(400, 'invalid_request', 'Idempotency-Key 格式非法', { field: 'Idempotency-Key' });
+        }
+        return header;
+      }
+      if (hasValue(payload?.requestId)) {
+        if (typeof payload.requestId !== 'string' || !IDEMPOTENCY_KEY_RE.test(payload.requestId)) {
+          throw new CapabilityError(400, 'invalid_request', 'requestId 格式非法', { field: 'requestId' });
+        }
+        return payload.requestId;
+      }
+      return null;
+    }
+
+    async function withIdempotency(route, payload, tokenId, execute) {
+      const key = idempotencyKeyOf(req, payload);
+      if (key === null) return execute();
+      const state = await ledgerState();
+      const composite = `${tokenId ?? 'none'}\u0000${route}\u0000${key}`;
+      const requestHash = sha256Hex(canonicalJson(payload));
+      const existing = state.get(composite);
+      if (existing) {
+        if (existing.requestHash !== requestHash) {
+          throw new CapabilityError(409, 'idempotency_conflict', '同一幂等键对应了不同请求体', {
+            key,
+            route,
+          });
+        }
+        return {
+          data: { ...jsonClone(existing.data), replayed: true },
+          warnings: jsonClone(existing.warnings ?? []),
+          degraded: existing.degraded === true,
+        };
+      }
+      const result = await execute();
+      const entry = {
+        key: composite,
+        requestHash,
+        at: now(),
+        data: jsonClone({ ...(result.data ?? {}), replayed: false }),
+        warnings: jsonClone(result.warnings ?? []),
+        degraded: result.degraded === true,
+      };
+      // LRU：同键刷新到队尾。
+      state.delete(composite);
+      state.set(composite, entry);
+      const cutoff = now() - IDEMPOTENCY_TTL_MS;
+      for (const [entryKey, value] of state) {
+        if (typeof value.at !== 'number' || value.at < cutoff) state.delete(entryKey);
+      }
+      while (state.size > IDEMPOTENCY_MAX_ENTRIES) {
+        const oldest = state.keys().next().value;
+        if (oldest === undefined) break;
+        state.delete(oldest);
+      }
+      try {
+        await saveLedger(state);
+      } catch {
+        result.warnings = [
+          ...(result.warnings ?? []),
+          { code: 'idempotency_ledger_unavailable', message: '幂等账本写入失败；仍可依赖内容 hash 防重' },
+        ];
+      }
+      return result;
+    }
+
+    // ---------- /write ----------
+
+    function validateWriteItem(raw, index, requestThreadId, actor) {
+      if (!isObject(raw)) throw validationError(index, 'item', 'item 必须是对象');
+      if (!hasValue(raw.domain) || (typeof raw.domain === 'string' && raw.domain.trim() === '')) {
+        throw validationError(index, 'domain', 'item.domain 必填');
+      }
+      const domain = normalizeDomain(raw.domain);
+      if (!domain) {
+        throw new CapabilityError(400, 'domain_invalid', 'item.domain 非法', {
+          index,
+          ...(typeof raw.domain === 'string' ? { domain: raw.domain } : {}),
+        });
+      }
+      if (typeof raw.kind !== 'string' || !WRITE_KINDS.has(raw.kind)) {
+        throw validationError(index, 'kind', 'kind 非法');
+      }
+      let clientItemId;
+      if (hasValue(raw.clientItemId)) {
+        if (typeof raw.clientItemId !== 'string' || !CLIENT_ITEM_ID_RE.test(raw.clientItemId)) {
+          throw validationError(index, 'clientItemId', 'clientItemId 格式非法');
+        }
+        clientItemId = raw.clientItemId;
+      }
+      const normalized = normalizeWriteContent(raw.kind, raw.content, index);
+      let tags = [...new Set([...normalized.tags, ...normalizeTags(raw.tags, index)])];
+      // `preference` 是 preference 的保留语义标签；其他 kind 不得借它冒充偏好。
+      if (raw.kind !== 'preference') tags = tags.filter((tag) => tag !== 'preference');
+      const relatedTo = normalizeRelatedTo(raw.relatedTo, index);
+      const validFrom = raw.validFrom === undefined || raw.validFrom === null
+        ? now()
+        : optionalNumber(raw.validFrom, 'validFrom', index);
+      const validTo = raw.validTo === undefined || raw.validTo === null
+        ? OPEN_VALID_TO
+        : optionalNumber(raw.validTo, 'validTo', index);
+      if (validTo < validFrom) throw validationError(index, 'validTo', 'validTo 必须不早于 validFrom');
+
+      const provenanceInput = parseProvenanceInput(raw.provenance, index);
+      assertDomainWrite(actor, domain, provenanceInput, requestThreadId);
+      const identity = identitySnapshot();
+      const provenance = buildWriteProvenance({
+        input: provenanceInput,
+        actor,
+        identity,
+        hostId,
+        now: now(),
+        threadId: provenanceInput.threadId ?? requestThreadId ?? null,
+        confirmation: provenanceInput.confirmation ?? 'none',
+      });
+      if (byteSize(provenance) > MAX_PROVENANCE_BYTES) {
+        throw new CapabilityError(413, 'payload_too_large', `provenance 超过 ${MAX_PROVENANCE_BYTES} 字节`, { index });
+      }
+      const owner = deriveOwner(domain, { userId: identity.userId });
+      if (hasValue(raw.ownerType) && raw.ownerType !== owner.ownerType) {
+        throw ownerMismatchError(index, domain, owner, {
+          ownerType: raw.ownerType,
+          ownerId: raw.ownerId ?? null,
+        });
+      }
+      if (hasValue(raw.ownerId) && raw.ownerId !== owner.ownerId) {
+        throw ownerMismatchError(index, domain, owner, {
+          ownerType: raw.ownerType ?? owner.ownerType,
+          ownerId: raw.ownerId,
+        });
+      }
+      const explicitValidFrom = raw.validFrom !== undefined && raw.validFrom !== null;
+      const contentHash = contentHashFor(
+        raw.kind,
+        normalized.content,
+        explicitValidFrom ? validFrom : undefined,
+      );
+      return {
+        index,
+        domain,
+        owner,
+        kind: raw.kind,
+        nodeType: normalized.nodeType,
+        content: normalized.content,
+        tags,
+        relatedTo,
+        validFrom,
+        validTo,
+        provenance,
+        ...(clientItemId !== undefined ? { clientItemId } : {}),
+        contentHash,
+        contentHashIncludesValidFrom: explicitValidFrom,
+      };
+    }
+
+    async function indexMemoryNode(appValue, node) {
+      try {
+        const index = appValue?.semanticVectorIndex;
+        if (index && typeof index.index === 'function') {
+          await index.index(node);
+        }
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
+    async function performWriteItem(appValue, item) {
+      if (!appValue?.graph?.createNode) {
+        throw new CapabilityError(503, 'capability_unavailable', '图存储不可用', undefined, true);
+      }
+      const created = await appValue.graph.createNode(item.nodeType, item.content, undefined, {
+        validFrom: item.validFrom,
+        validTo: item.validTo,
+        namespace: item.domain,
+      });
+      const metadata = {
+        kind: item.kind,
+        provenance: item.provenance,
+        contentHash: item.contentHash,
+        ...(item.contentHashIncludesValidFrom ? { contentHashValidFrom: item.validFrom } : {}),
+        ...(item.clientItemId !== undefined ? { clientItemId: item.clientItemId } : {}),
+      };
+      const updated = await appValue.graph.updateNode(created.id, { metadata });
+      if (!updated) throw new CapabilityError(503, 'capability_unavailable', '节点写入后读取失败', undefined, true);
+      let node = updated;
+      for (const tag of item.tags) {
+        node = (await appValue.graph.addTag(node.id, tag)) ?? node;
+      }
+      const warnings = [];
+      if (!(await indexMemoryNode(appValue, node))) {
+        warnings.push({ code: 'vector_index_unavailable', message: '向量索引更新失败；图数据已写入' });
+      }
+      for (const targetId of item.relatedTo) {
+        const target = await appValue.graph.getNode(targetId);
+        if (!target || target.deletedAt || isInternalNode(target)) {
+          warnings.push({
+            code: 'related_to_skipped',
+            id: targetId,
+            message: 'relatedTo 目标不存在、已删除或为内部对象，已跳过',
+          });
+          continue;
+        }
+        await appValue.graph.createEdge(node.id, targetId, 'related_to');
+      }
+      return { node, warnings };
+    }
+
+    async function handleWrite(payload, actor) {
+      const items = payload.items;
+      if (!Array.isArray(items) || items.length === 0) {
+        throw new CapabilityError(400, 'invalid_request', 'items 必须是非空数组');
+      }
+      if (items.length > MAX_BATCH_ITEMS) {
+        throw new CapabilityError(413, 'payload_too_large', `items 最多 ${MAX_BATCH_ITEMS} 条`, {
+          maxBatchItems: MAX_BATCH_ITEMS,
+        });
+      }
+      if (payload.sync !== undefined || payload['self.sync'] !== undefined || payload['checkpoint.sync'] !== undefined) {
+        throw new CapabilityError(400, 'legacy_sync_unsupported', '不再支持 sync/self.sync/checkpoint.sync 字段');
+      }
+      const requestThreadId = parseThreadId(payload.threadId);
+      const appValue = app();
+      if (!appValue) throw new CapabilityError(503, 'capability_unavailable', '图存储尚未初始化', undefined, true);
+      // 校验原子：先全部校验，再逐项落库。
+      const validated = [];
+      for (let index = 0; index < items.length; index += 1) {
+        validated.push(validateWriteItem(items[index], index, requestThreadId, actor));
+      }
+      const dedupe = await buildDedupeIndex(appValue);
+      const results = [];
+      const warnings = [];
+      let created = 0;
+      let duplicates = 0;
+      let failed = 0;
+      for (const item of validated) {
+        const existing = (item.clientItemId !== undefined
+          ? dedupe.client.get(dedupeKey('client', item.domain, item.clientItemId))
+          : undefined)
+          ?? dedupe.hash.get(dedupeKey('hash', item.domain, item.contentHash));
+        if (existing) {
+          duplicates += 1;
+          results.push(recordWriteResult('duplicate', existing, item, item.owner));
+          continue;
+        }
+        try {
+          const written = await performWriteItem(appValue, item);
+          warnings.push(...written.warnings);
+          const node = written.node;
+          created += 1;
+          results.push(recordWriteResult('created', node, item, item.owner));
+          if (item.clientItemId !== undefined) {
+            dedupe.client.set(dedupeKey('client', item.domain, item.clientItemId), node);
+          }
+          dedupe.hash.set(dedupeKey('hash', item.domain, item.contentHash), node);
+        } catch (error) {
+          failed += 1;
+          results.push({
+            ...(item.clientItemId !== undefined ? { clientItemId: item.clientItemId } : {}),
+            status: 'failed',
+            kind: item.kind,
+            domain: item.domain,
+            code: error instanceof CapabilityError ? error.code : 'internal',
+            retryable: error instanceof CapabilityError ? error.retryable : true,
+          });
+        }
+      }
+      return {
+        data: {
+          results,
+          created,
+          duplicates,
+          failed,
+          partial: failed > 0,
+          replayed: false,
+        },
+        warnings,
+        degraded: false,
+      };
+    }
+
+    // ---------- /update ----------
+
+    function validateUpdateItem(raw, index) {
+      if (!isObject(raw)) throw validationError(index, 'item', 'item 必须是对象');
+      if (typeof raw.id !== 'string' || raw.id.length === 0 || raw.id.length > 128) {
+        throw validationError(index, 'id', 'id 必须是节点 id');
+      }
+      if (!isObject(raw.patch)) throw validationError(index, 'patch', 'patch 必须是对象');
+      for (const key of Object.keys(raw.patch)) {
+        if (!PATCH_KEYS.has(key)) {
+          throw validationError(index, key, `${key} 不是允许更新的字段`, { field: key });
+        }
+      }
+      return raw;
+    }
+
+    async function handleUpdate(payload, actor) {
+      const items = payload.items;
+      if (!Array.isArray(items) || items.length === 0) {
+        throw new CapabilityError(400, 'invalid_request', 'items 必须是非空数组');
+      }
+      if (items.length > MAX_BATCH_ITEMS) {
+        throw new CapabilityError(413, 'payload_too_large', `items 最多 ${MAX_BATCH_ITEMS} 条`, {
+          maxBatchItems: MAX_BATCH_ITEMS,
+        });
+      }
+      if (payload.sync !== undefined || payload['self.sync'] !== undefined || payload['checkpoint.sync'] !== undefined) {
+        throw new CapabilityError(400, 'legacy_sync_unsupported', '不再支持 sync/self.sync/checkpoint.sync 字段');
+      }
+      const appValue = app();
+      if (!appValue) throw new CapabilityError(503, 'capability_unavailable', '图存储尚未初始化', undefined, true);
+      const identity = identitySnapshot();
+      const plans = [];
+      // 校验原子：保护字段、权限、版本、合并后的 content 全部通过后才写。
+      for (let index = 0; index < items.length; index += 1) {
+        const raw = validateUpdateItem(items[index], index);
+        const node = await appValue.graph.getNode(raw.id);
+        if (!node || node.deletedAt) {
+          throw new CapabilityError(404, 'not_found', '节点不存在', { index, id: raw.id });
+        }
+        if (isInternalNode(node)) {
+          throw new CapabilityError(404, 'internal_object', '内部对象必须通过 /internal-object 更新', { index, id: raw.id });
+        }
+        if (!canUpdateNode(actor, node)) {
+          throw new CapabilityError(403, 'forbidden_scope', '当前 actor 不能更新该记录', {
+            index,
+            id: raw.id,
+            domain: domainOfNamespace(node.namespace),
+          });
+        }
+        if (hasValue(raw.expectedUpdatedAt)) {
+          if (typeof raw.expectedUpdatedAt !== 'number' || !Number.isFinite(raw.expectedUpdatedAt)) {
+            throw validationError(index, 'expectedUpdatedAt', 'expectedUpdatedAt 必须是数字');
+          }
+          if (node.updatedAt !== raw.expectedUpdatedAt) {
+            throw new CapabilityError(409, 'update_conflict', '记录已被其他写入方更新', {
+              index,
+              id: raw.id,
+              currentUpdatedAt: node.updatedAt,
+            }, true);
+          }
+        }
+        const patch = raw.patch;
+        const kind = kindOf(node);
+        let content;
+        if (patch.content !== undefined) {
+          if (!isObject(patch.content)) throw validationError(index, 'patch.content', 'patch.content 必须是对象');
+          // preference 的写入形状是 entity/preferenceType/value；更新时兼容映射到 fact 三元组。
+          const contentPatch = kind === 'preference' ? { ...patch.content } : patch.content;
+          if (kind === 'preference') {
+            if (contentPatch.subject === undefined && contentPatch.entity !== undefined) contentPatch.subject = contentPatch.entity;
+            if (contentPatch.predicate === undefined && contentPatch.preferenceType !== undefined) {
+              contentPatch.predicate = contentPatch.preferenceType;
+            }
+            if (contentPatch.object === undefined && contentPatch.value !== undefined) contentPatch.object = contentPatch.value;
+          }
+          const merged = { ...(isObject(node.content) ? node.content : {}) };
+          for (const [key, value] of Object.entries(contentPatch)) {
+            if (value === null) delete merged[key];
+            else merged[key] = value;
+          }
+          content = normalizeNodeContent(kind, node.type, merged, index);
+        }
+        let tags;
+        if (patch.tags !== undefined) {
+          tags = normalizeTags(patch.tags, index);
+          if (kind === 'preference' && !tags.includes('preference')) tags.push('preference');
+          if (kind !== 'preference') tags = tags.filter((tag) => tag !== 'preference');
+        }
+        let contentHash;
+        if (content !== undefined) {
+          const metadataForHash = isObject(node.metadata) ? node.metadata : {};
+          contentHash = contentHashFor(
+            kind,
+            content,
+            typeof metadataForHash.contentHashValidFrom === 'number'
+              ? metadataForHash.contentHashValidFrom
+              : undefined,
+          );
+        }
+        let metadata;
+        if (patch.metadata !== undefined) {
+          if (!isObject(patch.metadata)) throw validationError(index, 'patch.metadata', 'patch.metadata 必须是对象');
+          for (const key of Object.keys(patch.metadata)) {
+            if (PROTECTED_METADATA_KEYS.has(key)) {
+              throw validationError(index, `patch.metadata.${key}`, 'metadata 含受保护字段', { field: key });
+            }
+          }
+          metadata = { ...(isObject(node.metadata) ? node.metadata : {}), ...jsonClone(patch.metadata) };
+        }
+        // GraphStore.updateNode 保留 validFrom/validTo（不可变）；显式变更给结构化错误。
+        if (patch.validFrom !== undefined && patch.validFrom !== node.validFrom) {
+          throw validationError(index, 'patch.validFrom', 'validFrom 暂不支持更新', {
+            code: 'temporal_update_unsupported',
+          });
+        }
+        if (patch.validTo !== undefined && patch.validTo !== node.validTo) {
+          throw validationError(index, 'patch.validTo', 'validTo 暂不支持更新', {
+            code: 'temporal_update_unsupported',
+          });
+        }
+        if (content === undefined && tags === undefined && metadata === undefined) {
+          throw validationError(index, 'patch', 'patch 没有可更新字段');
+        }
+        plans.push({
+          index,
+          id: raw.id,
+          node,
+          content,
+          tags,
+          metadata,
+          contentHash,
+          actorId: actor.type === 'agent' ? actor.agentId : actor.type === 'user' ? identity.userId : 'system',
+        });
+      }
+
+      const results = [];
+      const warnings = [];
+      let updated = 0;
+      let failed = 0;
+      for (const plan of plans) {
+        try {
+          const metadata = {
+            ...(plan.metadata ?? (isObject(plan.node.metadata) ? plan.node.metadata : {})),
+            ...(plan.contentHash !== undefined ? { contentHash: plan.contentHash } : {}),
+            updatedBy: { actorType: actor.type, actorId: plan.actorId, at: now() },
+          };
+          let node = await appValue.graph.updateNode(plan.id, {
+            ...(plan.content !== undefined ? { content: plan.content } : {}),
+            metadata,
+          });
+          if (!node) throw new CapabilityError(404, 'not_found', '节点不存在', { id: plan.id });
+          if (plan.tags !== undefined) {
+            const currentTags = Array.isArray(plan.node.tags) ? plan.node.tags : [];
+            for (const tag of currentTags) {
+              if (!plan.tags.includes(tag)) node = (await appValue.graph.removeTag(plan.id, tag)) ?? node;
+            }
+            for (const tag of plan.tags) {
+              if (!currentTags.includes(tag)) node = (await appValue.graph.addTag(plan.id, tag)) ?? node;
+            }
+          }
+          if (!(await indexMemoryNode(appValue, node))) {
+            warnings.push({ code: 'vector_index_unavailable', message: '向量索引更新失败；图数据已更新' });
+          }
+          updated += 1;
+          const domain = domainOfNamespace(node.namespace);
+          const owner = deriveOwner(domain, { userId: identity.userId });
+          results.push({
+            id: plan.id,
+            status: 'updated',
+            domain,
+            ownerType: owner.ownerType,
+            ownerId: owner.ownerId,
+            updatedAt: node.updatedAt,
+          });
+        } catch (error) {
+          failed += 1;
+          results.push({
+            id: plan.id,
+            status: 'failed',
+            code: error instanceof CapabilityError ? error.code : 'internal',
+            retryable: error instanceof CapabilityError ? error.retryable : true,
+          });
+        }
+      }
+      return {
+        data: { results, updated, failed, partial: failed > 0, replayed: false },
+        warnings,
+        degraded: false,
+      };
+    }
+
+    // ---------- /delete /archive ----------
+
+    function parseIdList(payload) {
+      const ids = payload.ids;
+      if (!Array.isArray(ids) || ids.length === 0) {
+        throw new CapabilityError(400, 'invalid_request', 'ids 必须是非空数组');
+      }
+      if (ids.length > MAX_BATCH_ITEMS) {
+        throw new CapabilityError(413, 'payload_too_large', `ids 最多 ${MAX_BATCH_ITEMS} 个`, {
+          maxBatchItems: MAX_BATCH_ITEMS,
+        });
+      }
+      for (const id of ids) {
+        if (typeof id !== 'string' || id.length === 0 || id.length > 128) {
+          throw new CapabilityError(422, 'validation_failed', 'ids 含非法节点 id', { field: 'ids' });
+        }
+      }
+      return [...new Set(ids)];
+    }
+
+    async function classifyGovernanceTargets(ids, actor) {
+      const appValue = app();
+      if (!appValue) throw new CapabilityError(503, 'capability_unavailable', '图存储尚未初始化', undefined, true);
+      const allowed = [];
+      const notFound = [];
+      const forbidden = [];
+      const internal = [];
+      const nodes = new Map();
+      for (const id of ids) {
+        const node = await appValue.graph.getNode(id);
+        if (!node) {
+          notFound.push(id);
+          continue;
+        }
+        nodes.set(id, node);
+        if (isInternalNode(node)) {
+          internal.push(id);
+          continue;
+        }
+        if (!canGovernNode(actor, node)) {
+          forbidden.push(id);
+          continue;
+        }
+        allowed.push(id);
+      }
+      return { appValue, nodes, allowed, notFound, forbidden, internal };
+    }
+
+    async function handleDelete(payload, actor) {
+      if (payload.sync !== undefined) {
+        throw new CapabilityError(400, 'legacy_sync_unsupported', '不再支持 sync 字段');
+      }
+      const ids = parseIdList(payload);
+      const classified = await classifyGovernanceTargets(ids, actor);
+      const deleted = [];
+      if (classified.allowed.length > 0) {
+        const result = await service().delete(classified.allowed);
+        deleted.push(...(result?.deleted ?? []));
+        classified.notFound.push(...(result?.notFound ?? []));
+        classified.internal.push(...(result?.internal ?? []));
+      }
+      return {
+        data: {
+          deleted,
+          notFound: classified.notFound,
+          forbidden: classified.forbidden,
+          internal: classified.internal,
+          partial: classified.notFound.length > 0
+            || classified.forbidden.length > 0
+            || classified.internal.length > 0,
+          replayed: false,
+        },
+        warnings: [],
+        degraded: false,
+      };
+    }
+
+    async function handleArchive(payload, actor) {
+      if (payload.sync !== undefined) {
+        throw new CapabilityError(400, 'legacy_sync_unsupported', '不再支持 sync 字段');
+      }
+      if (payload.archived !== undefined && typeof payload.archived !== 'boolean') {
+        throw new CapabilityError(400, 'invalid_request', 'archived 必须是布尔值');
+      }
+      const archived = payload.archived !== false;
+      const ids = parseIdList(payload);
+      const classified = await classifyGovernanceTargets(ids, actor);
+      const skipped = [];
+      const allowed = [];
+      for (const id of classified.allowed) {
+        const node = classified.nodes.get(id);
+        if (node?.deletedAt) skipped.push(id);
+        else allowed.push(id);
+      }
+      let archivedIds = [];
+      let unarchivedIds = [];
+      if (allowed.length > 0) {
+        const result = await service().archive(allowed, archived);
+        archivedIds = result?.archived ?? [];
+        unarchivedIds = result?.unarchived ?? [];
+        classified.notFound.push(...(result?.notFound ?? []));
+        skipped.push(...(result?.skipped ?? []));
+        classified.internal.push(...(result?.internal ?? []));
+      }
+      return {
+        data: {
+          archived: archivedIds,
+          unarchived: unarchivedIds,
+          notFound: classified.notFound,
+          skipped,
+          forbidden: classified.forbidden,
+          internal: classified.internal,
+          partial: classified.notFound.length > 0
+            || classified.forbidden.length > 0
+            || classified.internal.length > 0,
+          replayed: false,
+        },
+        warnings: [],
+        degraded: false,
+      };
+    }
+
+    // ---------- /internal-object ----------
+
+    function assertInternalObjectActor(actor, agentId) {
+      if (actor.type === 'user' || actor.type === 'system') return;
+      if (actor.type === 'agent' && actor.agentId === agentId) return;
+      throw new CapabilityError(403, 'forbidden_scope', '当前 actor 不能读写该 Agent 的内部对象', {
+        actor: actor.type === 'agent' ? actor.agentId : actor.type,
+        agentId,
+      });
+    }
+
+    function parseInternalDomain(value, { required = true } = {}) {
+      if (value === undefined || value === null) {
+        if (required) throw new CapabilityError(400, 'domain_invalid', '缺少 domain');
+        return null;
+      }
+      const domain = normalizeDomain(value);
+      if (!domain) throw new CapabilityError(400, 'domain_invalid', 'domain 非法', { domain: value });
+      return domain;
+    }
+
+    async function findCompactByIdentity(appValue, domain, identityKey) {
+      const nodes = await listNodesOfType(appValue, 'compact');
+      return nodes.find((node) => !node.deletedAt
+        && isInternalNode(node)
+        && internalObjectKind(node) === 'compact'
+        && domainOfNamespace(node.namespace) === domain
+        && internalObjectMetadata(node).identityKey === identityKey) ?? null;
+    }
+
+    async function handleCompactObject(payload, actor) {
+      const op = payload.op;
+      if (!['upsert', 'get', 'list', 'delete'].includes(op)) {
+        throw new CapabilityError(400, 'internal_kind_invalid', 'compact op 必须是 upsert/get/list/delete');
+      }
+      const appValue = app();
+      if (!appValue) throw new CapabilityError(503, 'capability_unavailable', '图存储尚未初始化', undefined, true);
+      const identity = identitySnapshot();
+
+      if (op === 'upsert') {
+        const domain = parseInternalDomain(payload.domain);
+        const strategy = payload.strategy === 'dedupe' ? 'dedupe' : 'summary';
+        if (payload.strategy !== undefined && !['summary', 'dedupe'].includes(payload.strategy)) {
+          throw new CapabilityError(400, 'invalid_request', 'strategy 必须是 summary | dedupe');
+        }
+        const sourceIds = (() => {
+          if (Array.isArray(payload.sourceIds) && payload.sourceIds.length > MAX_COMPACT_SOURCES) {
+            throw new CapabilityError(413, 'payload_too_large', `sourceIds 最多 ${MAX_COMPACT_SOURCES} 个`, {
+              maxCompactSources: MAX_COMPACT_SOURCES,
+            });
+          }
+          return stringArray(payload.sourceIds, 'sourceIds', 0, {
+            maxItems: MAX_COMPACT_SOURCES,
+            maxChars: 128,
+          }) ?? [];
+        })();
+        if (sourceIds.length === 0) {
+          throw new CapabilityError(400, 'invalid_request', 'sourceIds 不能为空');
+        }
+        if (new Set(sourceIds).size !== sourceIds.length) {
+          throw new CapabilityError(400, 'invalid_request', 'sourceIds 不得重复');
+        }
+        const sourceHashes = stringArray(payload.sourceHashes, 'sourceHashes', 0, {
+          maxItems: MAX_COMPACT_SOURCES,
+          maxChars: 128,
+        }) ?? [];
+        if (sourceHashes.length > 0 && sourceHashes.length !== sourceIds.length) {
+          throw new CapabilityError(400, 'invalid_request', 'sourceHashes 必须与 sourceIds 等长');
+        }
+        const provenanceInput = parseProvenanceInput(payload.provenance, 0);
+        assertDomainWrite(actor, domain, provenanceInput, payload.threadId);
+        const summary = nonEmptyString(payload.summary, 'summary', 0);
+        if (Buffer.byteLength(summary, 'utf-8') > MAX_COMPACT_SUMMARY_BYTES) {
+          throw new CapabilityError(413, 'payload_too_large', 'summary 超过 64 KiB');
+        }
+        const tokenCount = optionalNumber(payload.tokenCount, 'tokenCount', 0);
+        if (tokenCount !== undefined && tokenCount < 0) {
+          throw validationError(0, 'tokenCount', 'tokenCount 不能为负数');
+        }
+        const model = isObject(payload.model) ? jsonClone(payload.model) : undefined;
+        if (model && byteSize(model) > MAX_JSON_FIELD_BYTES) {
+          throw new CapabilityError(413, 'payload_too_large', 'model 超过大小限制');
+        }
+        const sourceNodes = [];
+        for (const sourceId of sourceIds) {
+          const source = await appValue.graph.getNode(sourceId);
+          if (!source || source.deletedAt) {
+            throw new CapabilityError(404, 'not_found', 'compact source 不存在', { id: sourceId });
+          }
+          if (isInternalNode(source)) {
+            throw new CapabilityError(400, 'domain_mismatch', 'compact source 不能是内部对象', { id: sourceId });
+          }
+          const sourceDomain = domainOfNamespace(source.namespace);
+          if (sourceDomain !== domain) {
+            throw new CapabilityError(400, 'domain_mismatch', 'compact 与 source 必须同域', {
+              domain,
+              sourceId,
+              sourceDomain,
+            });
+          }
+          sourceNodes.push(source);
+        }
+        const effectiveSourceHashes = sourceHashes.length > 0
+          ? [...sourceHashes]
+          : sourceNodes.map((source) => `sha256:${sha256Hex(canonicalJson(source.content ?? null))}`);
+        const identityKey = sha256Hex(canonicalJson({
+          domain,
+          strategy,
+          sourceIds: [...sourceIds].sort(),
+          sourceHashes: effectiveSourceHashes,
+        }));
+        const existing = await findCompactByIdentity(appValue, domain, identityKey);
+        if (existing) {
+          return {
+            data: {
+              object: compactObjectView(existing, {
+                userId: identity.userId,
+                stale: await isCompactStale(appValue, existing),
+              }),
+              replayed: false,
+            },
+            warnings: [],
+            degraded: false,
+          };
+        }
+        const provenance = buildWriteProvenance({
+          input: provenanceInput,
+          actor,
+          identity,
+          hostId,
+          now: now(),
+          threadId: provenanceInput.threadId ?? payload.threadId ?? null,
+        });
+        const content = {
+          summary,
+          sourceIds: [...sourceIds],
+          sourceHashes: effectiveSourceHashes,
+          strategy,
+          ...(tokenCount !== undefined ? { tokenCount } : {}),
+          ...(model !== undefined ? { model } : {}),
+        };
+        const created = await appValue.graph.createNode('compact', content, undefined, { namespace: domain });
+        const node = await appValue.graph.updateNode(created.id, {
+          metadata: {
+            internal: true,
+            internalObject: {
+              schema: 1,
+              kind: 'compact',
+              strategy,
+              identityKey,
+              sourceIds: [...sourceIds],
+              sourceHashes: effectiveSourceHashes,
+            },
+            provenance,
+          },
+        });
+        if (!node) throw new CapabilityError(503, 'capability_unavailable', 'compact 写入后读取失败', undefined, true);
+        return {
+          data: {
+            object: compactObjectView(node, { userId: identity.userId, stale: false }),
+            replayed: false,
+          },
+          warnings: [],
+          degraded: false,
+        };
+      }
+
+      if (op === 'get') {
+        if (typeof payload.id !== 'string' || payload.id.length === 0) {
+          throw new CapabilityError(400, 'invalid_request', 'compact get 需要 id');
+        }
+        const node = await appValue.graph.getNode(payload.id);
+        if (!node || node.deletedAt || !isInternalNode(node) || internalObjectKind(node) !== 'compact') {
+          throw new CapabilityError(404, 'not_found', 'compact 不存在', { id: payload.id });
+        }
+        return {
+          data: {
+            object: compactObjectView(node, {
+              userId: identity.userId,
+              stale: await isCompactStale(appValue, node),
+            }),
+            replayed: false,
+          },
+          warnings: [],
+          degraded: false,
+        };
+      }
+
+      if (op === 'list') {
+        let domains = null;
+        if (payload.domains !== undefined) {
+          if (!Array.isArray(payload.domains) || payload.domains.length > MAX_DOMAINS) {
+            throw new CapabilityError(400, 'invalid_request', `domains 最多 ${MAX_DOMAINS} 个`);
+          }
+          domains = payload.domains.map((value) => {
+            const domain = normalizeDomain(value);
+            if (!domain) throw new CapabilityError(400, 'domain_invalid', 'domains 含非法域', { domain: value });
+            return domain;
+          });
+        }
+        const limit = clampLimit(payload.limit, 20);
+        const staleOnly = payload.stale === true;
+        const nodes = (await listNodesOfType(appValue, 'compact'))
+          .filter((node) => !node.deletedAt && isInternalNode(node) && internalObjectKind(node) === 'compact')
+          .filter((node) => domains === null || domains.includes(domainOfNamespace(node.namespace)))
+          .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
+        const objects = [];
+        for (const node of nodes) {
+          const stale = await isCompactStale(appValue, node);
+          if (staleOnly && !stale) continue;
+          objects.push(compactObjectView(node, { userId: identity.userId, stale }));
+        }
+        return {
+          data: { objects: objects.slice(0, limit), total: objects.length, replayed: false },
+          warnings: [],
+          degraded: false,
+        };
+      }
+
+      // delete
+      if (actor.type !== 'user' && actor.type !== 'system') {
+        throw new CapabilityError(403, 'forbidden_scope', '删除 compact 需要 user/system 权限');
+      }
+      if (typeof payload.id !== 'string' || payload.id.length === 0) {
+        throw new CapabilityError(400, 'invalid_request', 'compact delete 需要 id');
+      }
+      const node = await appValue.graph.getNode(payload.id);
+      if (!node || node.deletedAt || !isInternalNode(node) || internalObjectKind(node) !== 'compact') {
+        throw new CapabilityError(404, 'not_found', 'compact 不存在', { id: payload.id });
+      }
+      await appValue.graph.deleteNode(payload.id);
+      return {
+        data: { deleted: true, id: payload.id, replayed: false },
+        warnings: [],
+        degraded: false,
+      };
+    }
+
+    async function handleSelfRecordObject(payload, actor) {
+      const op = payload.op;
+      if (!['upsert', 'get'].includes(op)) {
+        throw new CapabilityError(400, 'internal_kind_invalid', 'self_record op 必须是 upsert/get');
+      }
+      if (!isValidAgentId(payload.agentId)) {
+        throw new CapabilityError(400, 'invalid_agent_id', 'agentId 格式非法');
+      }
+      const agentId = payload.agentId;
+      assertInternalObjectActor(actor, agentId);
+      const domain = `agent:${agentId}`;
+      if (payload.domain !== undefined && payload.domain !== domain) {
+        throw new CapabilityError(400, 'domain_mismatch', 'SelfRecord 必须位于 agent:<agentId> 域', {
+          domain: payload.domain,
+          expected: domain,
+        });
+      }
+      if (payload.sync !== undefined || payload['self.sync'] !== undefined) {
+        throw new CapabilityError(400, 'legacy_sync_unsupported', '不再支持 sync/self.sync 字段');
+      }
+      const appValue = app();
+      if (!appValue) throw new CapabilityError(503, 'capability_unavailable', '图存储尚未初始化', undefined, true);
+      const identity = identitySnapshot();
+      const current = await currentSelfRecord(appValue, agentId);
+      if (op === 'get') {
+        return {
+          data: {
+            object: current ? selfRecordView(current, { userId: identity.userId }) : null,
+            replayed: false,
+          },
+          warnings: [],
+          degraded: false,
+        };
+      }
+      const currentRevision = current ? internalObjectRevision(current) : 0;
+      if (hasValue(payload.expectedRevision)) {
+        if (typeof payload.expectedRevision !== 'number' || !Number.isInteger(payload.expectedRevision) || payload.expectedRevision < 0) {
+          throw new CapabilityError(400, 'invalid_request', 'expectedRevision 必须是非负整数');
+        }
+        if (payload.expectedRevision !== currentRevision) {
+          throw new CapabilityError(409, 'revision_mismatch', 'SelfRecord revision 冲突', {
+            agentId,
+            currentRevision,
+            expectedRevision: payload.expectedRevision,
+          }, true);
+        }
+      }
+      const record = normalizeSelfRecord(payload.record, 0);
+      const provenanceInput = parseProvenanceInput(payload.provenance, 0);
+      assertDomainWrite(actor, domain, provenanceInput, null);
+      const provenance = buildWriteProvenance({
+        input: provenanceInput,
+        actor,
+        identity,
+        hostId,
+        now: now(),
+      });
+      const revision = currentRevision + 1;
+      const created = await appValue.graph.createNode('self_record', {
+        agentId,
+        revision,
+        record,
+      }, undefined, { namespace: domain });
+      const node = await appValue.graph.updateNode(created.id, {
+        metadata: {
+          internal: true,
+          internalObject: { schema: 1, kind: 'self_record', agentId, revision },
+          provenance,
+        },
+      });
+      if (!node) throw new CapabilityError(503, 'capability_unavailable', 'SelfRecord 写入后读取失败', undefined, true);
+      return {
+        data: { object: selfRecordView(node, { userId: identity.userId }), conflict: null, replayed: false },
+        warnings: [],
+        degraded: false,
+      };
+    }
+
+    async function handleCheckpointObject(payload, actor) {
+      const op = payload.op;
+      if (!['upsert', 'get', 'list', 'delete'].includes(op)) {
+        throw new CapabilityError(400, 'internal_kind_invalid', 'context_checkpoint op 必须是 upsert/get/list/delete');
+      }
+      if (!isValidAgentId(payload.agentId)) {
+        throw new CapabilityError(400, 'invalid_agent_id', 'agentId 格式非法');
+      }
+      const agentId = payload.agentId;
+      assertInternalObjectActor(actor, agentId);
+      if (payload.sync !== undefined || payload['checkpoint.sync'] !== undefined) {
+        throw new CapabilityError(400, 'legacy_sync_unsupported', '不再支持 sync/checkpoint.sync 字段');
+      }
+      const appValue = app();
+      if (!appValue) throw new CapabilityError(503, 'capability_unavailable', '图存储尚未初始化', undefined, true);
+      const identity = identitySnapshot();
+
+      if (op === 'get') {
+        const threadId = parseThreadId(payload.threadId);
+        if (!threadId) throw new CapabilityError(400, 'invalid_thread_id', 'checkpoint get 需要 threadId');
+        const node = await currentCheckpoint(appValue, agentId, threadId);
+        const visible = node && !checkpointExpired(node, now()) ? node : null;
+        return {
+          data: {
+            object: visible ? checkpointObjectView(visible, { userId: identity.userId }) : null,
+            replayed: false,
+          },
+          warnings: [],
+          degraded: false,
+        };
+      }
+
+      if (op === 'list') {
+        const threadId = payload.threadId === undefined ? null : parseThreadId(payload.threadId);
+        const limit = clampLimit(payload.limit, 20);
+        const nodes = (await allCheckpoints(appValue, agentId, threadId))
+          .filter((node) => !checkpointExpired(node, now()))
+          .sort(compareInternalObjectNodes);
+        const latestByThread = new Map();
+        for (const node of nodes) {
+          const threadId = checkpointThreadId(node);
+          if (typeof threadId === 'string' && !latestByThread.has(threadId)) {
+            latestByThread.set(threadId, node);
+          }
+        }
+        const objects = [...latestByThread.values()].map((node) => checkpointObjectView(node, { userId: identity.userId }));
+        return {
+          data: { objects: objects.slice(0, limit), total: objects.length, replayed: false },
+          warnings: [],
+          degraded: false,
+        };
+      }
+
+      if (op === 'delete') {
+        if (actor.type !== 'user' && actor.type !== 'system') {
+          throw new CapabilityError(403, 'forbidden_scope', '删除 checkpoint 需要 user/system 权限');
+        }
+        if (payload.id !== undefined) {
+          if (typeof payload.id !== 'string' || payload.id.length === 0) {
+            throw new CapabilityError(400, 'invalid_request', 'id 非法');
+          }
+          const node = await appValue.graph.getNode(payload.id);
+          if (!node || node.deletedAt || !isV2CheckpointNode(node) || internalObjectKind(node) !== 'context_checkpoint') {
+            throw new CapabilityError(404, 'not_found', 'checkpoint 不存在', { id: payload.id });
+          }
+          const revisionAgentId = checkpointAgentId(node);
+          const revisionThreadId = checkpointThreadId(node);
+          const revisions = revisionAgentId && revisionThreadId
+            ? await allCheckpoints(appValue, revisionAgentId, revisionThreadId)
+            : [node];
+          for (const revision of revisions) {
+            await appValue.graph.deleteNode(revision.id);
+          }
+          return {
+            data: { deleted: true, id: payload.id, count: revisions.length, replayed: false },
+            warnings: [],
+            degraded: false,
+          };
+        }
+        const threadId = parseThreadId(payload.threadId);
+        if (!threadId) throw new CapabilityError(400, 'invalid_thread_id', 'checkpoint delete 需要 id 或 threadId');
+        const nodes = await allCheckpoints(appValue, agentId, threadId);
+        for (const node of nodes) {
+          await appValue.graph.deleteNode(node.id);
+        }
+        return {
+          data: { deleted: nodes.length > 0, count: nodes.length, replayed: false },
+          warnings: [],
+          degraded: false,
+        };
+      }
+
+      // upsert
+      const threadId = parseThreadId(payload.threadId);
+      if (!threadId) throw new CapabilityError(400, 'invalid_thread_id', 'checkpoint 需要 threadId');
+      if (payload.force === true && actor.type === 'agent') {
+        throw new CapabilityError(403, 'forbidden_scope', 'force=true 仅允许 user/system');
+      }
+      let domain = 'default';
+      if (payload.domain !== undefined && payload.domain !== null) {
+        domain = parseInternalDomain(payload.domain);
+        const validTaskDomain = domain.startsWith('task:') && domain.slice('task:'.length) === threadId;
+        if (domain !== 'default' && !validTaskDomain) {
+          throw new CapabilityError(400, 'domain_mismatch', 'Checkpoint 只能位于 task:<threadId> 或 default 域', {
+            domain,
+            threadId,
+          });
+        }
+      }
+      const current = await currentCheckpoint(appValue, agentId, threadId);
+      const currentRevision = current ? internalObjectRevision(current) : 0;
+      if (hasValue(payload.expectedRevision)) {
+        if (typeof payload.expectedRevision !== 'number' || !Number.isInteger(payload.expectedRevision) || payload.expectedRevision < 0) {
+          throw new CapabilityError(400, 'invalid_request', 'expectedRevision 必须是非负整数');
+        }
+        if (payload.expectedRevision !== currentRevision) {
+          throw new CapabilityError(409, 'revision_mismatch', 'checkpoint revision 冲突', {
+            agentId,
+            threadId,
+            currentRevision,
+            expectedRevision: payload.expectedRevision,
+          }, true);
+        }
+      }
+      const currentContent = isObject(current?.content) ? current.content : {};
+      const currentLease = isObject(currentContent.lease) ? currentContent.lease : null;
+      if (currentLease && typeof currentLease.until === 'number' && currentLease.until > now()
+        && currentLease.hostId !== hostId) {
+        if (payload.force !== true) {
+          throw new CapabilityError(409, 'checkpoint_lease_held', 'checkpoint 租约被其他 host 持有', {
+            hostId: currentLease.hostId,
+            until: currentLease.until,
+          }, true);
+        }
+        if (actor.type !== 'user' && actor.type !== 'system') {
+          throw new CapabilityError(403, 'forbidden_scope', '只有 user/system 可以抢占租约');
+        }
+      }
+      const state = normalizeCheckpointState(payload.state, 0);
+      let summary = null;
+      if (payload.summary !== undefined && payload.summary !== null) {
+        if (typeof payload.summary !== 'string') throw validationError(0, 'summary', 'summary 必须是字符串');
+        if (Buffer.byteLength(payload.summary, 'utf-8') > MAX_COMPACT_SUMMARY_BYTES) {
+          throw new CapabilityError(413, 'payload_too_large', 'summary 超过 64 KiB');
+        }
+        summary = payload.summary;
+      }
+      const recordIds = stringArray(payload.recordIds, 'recordIds', 0, {
+        maxItems: MAX_COMPACT_SOURCES,
+        maxChars: 128,
+      }) ?? [];
+      const expiresAt = payload.expiresAt === undefined || payload.expiresAt === null
+        ? 0
+        : optionalNumber(payload.expiresAt, 'expiresAt', 0);
+      if (expiresAt < 0) throw validationError(0, 'expiresAt', 'expiresAt 不能为负数');
+      let leaseMs = 60_000;
+      if (payload.leaseMs !== undefined && payload.leaseMs !== null) {
+        if (typeof payload.leaseMs !== 'number' || !Number.isFinite(payload.leaseMs) || payload.leaseMs <= 0) {
+          throw validationError(0, 'leaseMs', 'leaseMs 必须是正数');
+        }
+        leaseMs = Math.min(payload.leaseMs, 3_600_000);
+      }
+      const lease = { hostId, until: now() + leaseMs };
+      const provenanceInput = parseProvenanceInput(payload.provenance, 0);
+      assertDomainWrite(actor, domain, {
+        ...provenanceInput,
+        threadId: provenanceInput.threadId ?? threadId,
+      }, threadId);
+      const provenance = buildWriteProvenance({
+        input: provenanceInput,
+        actor,
+        identity,
+        hostId,
+        now: now(),
+        threadId: provenanceInput.threadId ?? threadId,
+      });
+      const revision = currentRevision + 1;
+      const content = {
+        agentId,
+        threadId,
+        revision,
+        state,
+        summary,
+        recordIds,
+        lease,
+        expiresAt,
+      };
+      const created = await appValue.graph.createNode('context_checkpoint', content, undefined, { namespace: domain });
+      const node = await appValue.graph.updateNode(created.id, {
+        metadata: {
+          internal: true,
+          internalObject: {
+            schema: 1,
+            kind: 'context_checkpoint',
+            agentId,
+            threadId,
+            revision,
+            lease,
+          },
+          provenance,
+        },
+      });
+      if (!node) {
+        throw new CapabilityError(503, 'capability_unavailable', 'checkpoint 写入后读取失败', undefined, true);
+      }
+      return {
+        data: { object: checkpointObjectView(node, { userId: identity.userId }), conflict: null, replayed: false },
+        warnings: [],
+        degraded: false,
+      };
+    }
+
+    async function handleInternalObject(payload, actor) {
+      if (payload.sync !== undefined || payload['self.sync'] !== undefined || payload['checkpoint.sync'] !== undefined) {
+        throw new CapabilityError(400, 'legacy_sync_unsupported', '不再支持 sync/self.sync/checkpoint.sync 字段');
+      }
+      const kind = payload.kind;
+      if (!INTERNAL_OBJECT_KINDS.includes(kind)) {
+        throw new CapabilityError(400, 'internal_kind_invalid', 'kind 必须是 compact | self_record | context_checkpoint');
+      }
+      if (kind === 'compact') return handleCompactObject(payload, actor);
+      if (kind === 'self_record') return handleSelfRecordObject(payload, actor);
+      return handleCheckpointObject(payload, actor);
+    }
+
+    // ---------- /sync ----------
+
+    async function syncStatusData() {
+      const currentService = service();
+      const status = typeof currentService.status === 'function' ? await currentService.status() : null;
+      let syncStatus = null;
+      try {
+        syncStatus = await app()?.sync?.getSyncStatus?.();
+      } catch {
+        syncStatus = null;
+      }
+      const running = status?.running === true;
+      return {
+        running,
+        pendingEvents: typeof status?.pendingEventCount === 'number'
+          ? status.pendingEventCount
+          : typeof syncStatus?.pendingCount === 'number'
+            ? syncStatus.pendingCount
+            : 0,
+        peers: [],
+        subscriptions: subscriptionView(getConfig()),
+        lastSyncAt: typeof syncStatus?.lastSyncAt === 'number' ? syncStatus.lastSyncAt : null,
+        isSyncing: syncStatus?.isSyncing === true,
+        degraded: !running,
+        warnings: running
+          ? []
+          : [{ code: 'sync_unavailable', message: '同步网络未启用；本地图仍可读写' }],
+      };
+    }
+
+    async function handleSyncPost(payload) {
+      if (payload.action !== 'now') {
+        throw new CapabilityError(400, 'invalid_request', 'action 必须是 now');
+      }
+      let waitMs = MAX_SYNC_WAIT_MS;
+      if (payload.waitMs !== undefined && payload.waitMs !== null) {
+        if (typeof payload.waitMs !== 'number' || !Number.isFinite(payload.waitMs) || payload.waitMs < 0) {
+          throw new CapabilityError(400, 'invalid_request', 'waitMs 必须是非负数字');
+        }
+        waitMs = Math.min(payload.waitMs, MAX_SYNC_WAIT_MS);
+      }
+      const currentService = service();
+      if (typeof currentService.sync !== 'function') {
+        throw new CapabilityError(503, 'sync_unavailable', '当前 MemoryService 不提供同步触发', undefined, true);
+      }
+      const status = typeof currentService.status === 'function' ? await currentService.status() : null;
+      if (status?.running !== true) {
+        throw new CapabilityError(503, 'sync_unavailable', '同步网络未启用', { reason: 'network_not_running' }, true);
+      }
+      if (payload.peerId !== undefined && (typeof payload.peerId !== 'string' || payload.peerId.length === 0)) {
+        throw new CapabilityError(400, 'invalid_request', 'peerId 必须是非空字符串');
+      }
+      if (payload.address !== undefined && typeof payload.address !== 'string') {
+        throw new CapabilityError(400, 'invalid_request', 'address 必须是字符串');
+      }
+      if (typeof payload.peerId !== 'string' || payload.peerId.length === 0) {
+        throw new CapabilityError(503, 'sync_unavailable', '需要显式 peerId 才能触发单次同步', {
+          reason: 'peer_required',
+        }, true);
+      }
+      const address = typeof payload.address === 'string' && payload.address.length > 0
+        ? payload.address
+        : undefined;
+      let result;
+      try {
+        result = await timeoutAfter(
+          currentService.sync(payload.peerId, address),
+          Math.max(1, waitMs),
+          '同步等待超时',
+        );
+      } catch (error) {
+        if (error instanceof CapabilityError) throw error;
+        throw new CapabilityError(503, 'sync_unavailable', '同步不可用', { reason: 'sync_failed' }, true);
+      }
+      return {
+        data: {
+          synced: true,
+          peerId: typeof result?.peerDeviceId === 'string' ? result.peerDeviceId : payload.peerId,
+          applied: typeof result?.receivedEvents === 'number' ? result.receivedEvents : 0,
+          pushed: typeof result?.sentEvents === 'number' ? result.sentEvents : 0,
+          duplicates: typeof result?.duplicates === 'number' ? result.duplicates : 0,
+          conflicts: Array.isArray(result?.conflicts) ? result.conflicts.length : 0,
+          tookMs: typeof result?.durationMs === 'number' ? result.durationMs : 0,
+          replayed: false,
+        },
+        warnings: [],
+        degraded: false,
+      };
+    }
+
     try {
       if (disposed) throw new CapabilityError(503, 'capability_unavailable', '能力接口已关闭', undefined, true);
 
@@ -917,14 +2992,31 @@ export function createMemoryCapabilityHandler({
       const isGet = req?.method === 'GET' || req?.method === 'HEAD';
       const isPost = req?.method === 'POST';
 
-      // W2b TODO：这些路径的写入/内部对象/同步逻辑不在 W2a 实现。
+      // 6) 写端点：/sync（GET/POST）与 write/update/delete/archive/internal-object。
+      if (route === 'sync') {
+        if (isGet) {
+          const data = await syncStatusData();
+          return sendOk(data, data.warnings, 200, data.degraded);
+        }
+        if (!isPost) throw new CapabilityError(405, 'method_not_allowed', 'sync 仅接受 GET/POST');
+        const payload = requireObjectBody();
+        const result = await withIdempotency('sync', payload, record.tokenId, () => handleSyncPost(payload));
+        return sendOk(result.data, result.warnings, 200, result.degraded);
+      }
+
       if (WRITE_ENDPOINTS.has(route)) {
-        throw new CapabilityError(
-          501,
-          'not_implemented',
-          'W2a 只提供只读能力；写端点将在 W2b 实现',
-          { endpoint: route, plannedIn: 'W2b' },
-        );
+        if (!isPost) throw new CapabilityError(405, 'method_not_allowed', `${route} 仅接受 POST`);
+        const payload = requireObjectBody();
+        const actor = parseActor(payload.actor);
+        let execute;
+        if (route === 'write') execute = () => handleWrite(payload, actor);
+        else if (route === 'update') execute = () => handleUpdate(payload, actor);
+        else if (route === 'delete') execute = () => handleDelete(payload, actor);
+        else if (route === 'archive') execute = () => handleArchive(payload, actor);
+        else if (route === 'internal-object') execute = () => handleInternalObject(payload, actor);
+        else throw new CapabilityError(404, 'not_found', '未知能力端点', { path: relative });
+        const result = await withIdempotency(route, payload, record.tokenId, execute);
+        return sendOk(result.data, result.warnings, 200, result.degraded);
       }
 
       if (route === 'version') {
@@ -959,6 +3051,12 @@ export function createMemoryCapabilityHandler({
         } catch {
           status = null;
         }
+        let syncStatus = null;
+        try {
+          syncStatus = await app()?.sync?.getSyncStatus?.();
+        } catch {
+          syncStatus = null;
+        }
         if (nodes.length === 0 && typeof status?.nodeCount === 'number') {
           counts.nodes = status.nodeCount;
         }
@@ -983,7 +3081,7 @@ export function createMemoryCapabilityHandler({
             running: status?.running === true,
             pendingEvents: typeof status?.pendingEventCount === 'number' ? status.pendingEventCount : 0,
             subscriptions: subscriptionView(getConfig()),
-            lastSyncAt: null,
+            lastSyncAt: typeof syncStatus?.lastSyncAt === 'number' ? syncStatus.lastSyncAt : null,
           },
           limits: {
             maxBodyBytes: CAPABILITY_LIMITS.maxBodyBytes,

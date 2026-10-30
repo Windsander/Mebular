@@ -1245,6 +1245,20 @@ export class MemoryRuntimeSupervisor {
       if (lateChild.exitCode === null) this.#killChild('SIGKILL');
       if (this.child === lateChild) this.child = null;
     }
+    // Windows 强制终止不会执行 sidecar 自己的清理；只清理本 supervisor
+    // 确实停止的子进程残留，attach 的实例不动。
+    const stoppedPids = new Set([child?.pid, lateChild?.pid].filter((pid) => Number.isInteger(pid)));
+    for (const pid of stoppedPids) {
+      if (pidAlive(pid)) continue;
+      const discovery = await readDiscovery(this.paths.discoveryPath);
+      if (discovery?.pid === pid) {
+        await unlink(this.paths.discoveryPath).catch(() => undefined);
+      }
+      const lock = await this.#readLockView();
+      if (lock?.pid === pid) {
+        await unlink(this.paths.lockPath).catch(() => undefined);
+      }
+    }
     this.#setState({
       state: 'stopped',
       managed: false,

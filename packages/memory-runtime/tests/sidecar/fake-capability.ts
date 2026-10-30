@@ -45,6 +45,14 @@ export interface FakeCapabilityServer {
   close: () => Promise<void>;
 }
 
+export interface FakeCapabilityOptions {
+  /**
+   * 验收用可选行为：按 query/topic/search 做词法过滤，模拟真实 capability
+   * 只返回相关候选。默认关闭，保持既有 sidecar 测试的“返回全部记录”行为。
+   */
+  filterQuery?: boolean;
+}
+
 export interface FakeMemoryRecord {
   id: string;
   type: string;
@@ -66,6 +74,8 @@ export interface FakeMemoryRecord {
   score?: number;
   why?: string;
   stale?: boolean;
+  metadata?: Record<string, unknown>;
+  deletedAt?: number | null;
 }
 
 export interface FakeCompact {
@@ -173,7 +183,62 @@ function errorEnvelope(code: string, message: string, retryable: boolean, detail
   };
 }
 
-export async function startFakeCapability(): Promise<FakeCapabilityServer> {
+// 验收 fake 的轻量词法匹配：只用于让“无关 query”真的没有候选，
+// 不模拟真实 BM25/embedding，也不改变产品召回逻辑。
+const QUERY_STOPWORDS = new Set([
+  'a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'do', 'does', 'for', 'from',
+  'how', 'i', 'if', 'in', 'is', 'it', 'me', 'my', 'of', 'on', 'or', 'the',
+  'to', 'was', 'we', 'what', 'when', 'where', 'which', 'who', 'why', 'you',
+  'your', 'please', 'tell', 'remember', 'recall', 'last', 'time', 'about',
+  '的', '了', '吗', '呢', '吧', '啊', '呀', '嘛', '哦', '嗯', '是', '在',
+  '有', '和', '与', '就', '都', '也', '还', '很', '太', '我', '你', '他',
+  '她', '它', '我们', '你们', '他们', '这个', '那个', '这些', '那些',
+  '什么', '怎么', '怎样', '如何', '一下', '一些', '可以', '能否', '请问',
+  '帮我', '告诉', '记得', '现在', '之前', '刚才', '还是', '到底', '哪个',
+  '哪里', '多少', '几个', '哪天', '上次', '后来', '然后', '为什么', '是什么',
+  '是不是', '说的', '改了', '用', '选', '把', '给', '吗？', '呢？',
+]);
+
+function queryTerms(query: string): string[] {
+  const text = String(query ?? '').normalize('NFKC').toLowerCase();
+  const terms = new Set<string>();
+  const add = (value: string | undefined): void => {
+    const term = value?.trim().toLowerCase();
+    if (!term || term.length < 2 || QUERY_STOPWORDS.has(term)) return;
+    terms.add(term);
+  };
+  for (const match of text.matchAll(/[a-z0-9][a-z0-9._:/-]{1,63}/g)) add(match[0]);
+  for (const run of text.matchAll(/[\u3400-\u9fff]{2,}/g)) {
+    const value = run[0]!;
+    if (value.length <= 8) add(value);
+    for (let index = 0; index < value.length - 1; index += 1) {
+      add(value.slice(index, index + 2));
+    }
+  }
+  return [...terms];
+}
+
+function recordHaystack(record: FakeMemoryRecord): string {
+  return [
+    record.id,
+    record.type,
+    record.kind,
+    record.domain,
+    record.text,
+    ...(record.tags ?? []),
+    JSON.stringify(record.content ?? {}),
+  ].filter((part) => typeof part === 'string' && part.length > 0).join(' ').toLowerCase();
+}
+
+function recordMatchesQuery(record: FakeMemoryRecord, query: string): boolean {
+  const terms = queryTerms(query);
+  if (terms.length === 0) return true;
+  const haystack = recordHaystack(record);
+  return terms.some((term) => haystack.includes(term));
+}
+
+export async function startFakeCapability(options: FakeCapabilityOptions = {}): Promise<FakeCapabilityServer> {
+  const filterQuery = options.filterQuery === true;
   const requests: FakeCapabilityRequest[] = [];
   const writeRequests: FakeCapabilityRequest[] = [];
   const nodes: FakeNode[] = [];
@@ -370,7 +435,10 @@ export async function startFakeCapability(): Promise<FakeCapabilityServer> {
 
       if (request.path === '/internal/memory/v1/query') {
         const body = request.body as any;
-        const result = recordList(body);
+        let result = recordList(body);
+        if (filterQuery && typeof body?.query === 'string') {
+          result = result.filter((record) => recordMatchesQuery(record, body.query));
+        }
         res.statusCode = 200;
         res.setHeader('content-type', 'application/json');
         res.end(JSON.stringify(envelope({
@@ -387,7 +455,10 @@ export async function startFakeCapability(): Promise<FakeCapabilityServer> {
 
       if (request.path === '/internal/memory/v1/search') {
         const body = request.body as any;
-        const result = recordList(body);
+        let result = recordList(body);
+        if (filterQuery && typeof body?.query === 'string') {
+          result = result.filter((record) => recordMatchesQuery(record, body.query));
+        }
         res.statusCode = 200;
         res.setHeader('content-type', 'application/json');
         res.end(JSON.stringify(envelope({
@@ -401,7 +472,10 @@ export async function startFakeCapability(): Promise<FakeCapabilityServer> {
 
       if (request.path === '/internal/memory/v1/history') {
         const body = request.body as any;
-        const episodes = recordList(body).filter((record) => record.type === 'episode' || record.kind === 'episode');
+        let episodes = recordList(body).filter((record) => record.type === 'episode' || record.kind === 'episode');
+        if (filterQuery && typeof body?.topic === 'string' && body.topic.length > 0) {
+          episodes = episodes.filter((record) => recordMatchesQuery(record, body.topic));
+        }
         res.statusCode = 200;
         res.setHeader('content-type', 'application/json');
         res.end(JSON.stringify(envelope({
@@ -445,8 +519,12 @@ export async function startFakeCapability(): Promise<FakeCapabilityServer> {
 
       if (request.path === '/internal/memory/v1/skills') {
         const body = request.body as any;
-        const skills = recordList(body)
-          .filter((record) => record.kind === 'skill' || record.type === 'skill')
+        let skillRecords = recordList(body)
+          .filter((record) => record.kind === 'skill' || record.type === 'skill');
+        if (filterQuery && typeof body?.search === 'string' && body.search.length > 0) {
+          skillRecords = skillRecords.filter((record) => recordMatchesQuery(record, body.search));
+        }
+        const skills = skillRecords
           .map((record) => ({
             id: record.id,
             name: record.content?.name ?? record.text ?? '',

@@ -32,6 +32,8 @@ import type { SidecarModelRuntime } from './model.js';
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MAX_COMPACT_SOURCES = 200;
 const MAX_CAPABILITY_LIMIT = 50;
+// 指定 sourceIds 时需要按页扫描域内记录直到找齐；上限防止病态域拖垮请求。
+const MAX_COMPACT_SCAN = 1000;
 const MAX_SUMMARY_CHARS = 64 * 1024;
 const MAX_STATE_BYTES = 256 * 1024;
 const DEFAULT_COMPACT_LIMIT = 20;
@@ -755,6 +757,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
     actor: ActorContext,
     domain: string,
     limit: number,
+    wantedIds?: ReadonlySet<string>,
   ): Promise<{ records: Array<Record<string, unknown>>; warnings: string[]; degraded: boolean }> {
     if (!this.client) {
       throw new SidecarSettlementError('capability_unavailable', 'capability API 不可用', {
@@ -766,13 +769,16 @@ export class MemoryObjectService implements SidecarObjectsApi {
     let degraded = false;
     const out: Array<Record<string, unknown>> = [];
     const seen = new Set<string>();
-    const wanted = Math.min(MAX_COMPACT_SOURCES, Math.max(1, Math.floor(limit)));
-    for (let offset = 0; offset < wanted; offset += MAX_CAPABILITY_LIMIT) {
+    const target = wantedIds
+      ? MAX_COMPACT_SCAN
+      : Math.min(MAX_COMPACT_SOURCES, Math.max(1, Math.floor(limit)));
+    for (let offset = 0; offset < target; offset += MAX_CAPABILITY_LIMIT) {
+      const pageLimit = Math.min(MAX_CAPABILITY_LIMIT, target - offset);
       const response = await this.client.query<Record<string, unknown>>({
         actor: actor.actor,
         domains: [domain],
         types: RECORD_TYPES,
-        limit: Math.min(MAX_CAPABILITY_LIMIT, wanted - offset),
+        limit: pageLimit,
         offset,
         includeHistory: false,
         includeArchived: false,
@@ -790,7 +796,8 @@ export class MemoryObjectService implements SidecarObjectsApi {
         seen.add(id);
         out.push(entry);
       }
-      if (page.length < Math.min(MAX_CAPABILITY_LIMIT, wanted - offset)) break;
+      if (wantedIds && [...wantedIds].every((id) => seen.has(id))) break;
+      if (page.length < pageLimit) break;
     }
     return { records: out, warnings, degraded };
   }
@@ -809,6 +816,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
         actor,
         domain,
         sourceIds ? Math.max(sourceIds.length, 1) : limit,
+        sourceIds ? new Set(sourceIds) : undefined,
       );
       records = fetched.records;
       warnings.push(...fetched.warnings);

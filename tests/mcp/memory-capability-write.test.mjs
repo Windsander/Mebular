@@ -237,6 +237,7 @@ describe('POST /write', () => {
     expect(query.status).toBe(200);
     expect(query.body.data.records.map((entry) => entry.id)).toContain(observation.id);
     expect(query.body.data.records.every((entry) => entry.kind === 'observation')).toBe(true);
+    expect(query.body.data.records.find((entry) => entry.id === observation.id)?.text).toBe(marker);
   });
 
   it('Idempotency-Key 重放返回首次结果；同键不同 body → 409', async () => {

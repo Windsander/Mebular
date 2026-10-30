@@ -640,11 +640,14 @@ function renderContent(node: Node): string {
   const content = node.content;
   if (typeof content === 'string') return content;
   if (!content) return '';
-  if (node.type === 'fact') {
-    const fact = content as { subject: string; predicate: string; object: string };
-    return `${fact.subject} ${fact.predicate} ${fact.object}`;
-  }
   const record = content as Record<string, unknown>;
+  if (node.type === 'fact') {
+    // capability `/write` 的 observation / legacy fact 可能只有 content，
+    // 不能把缺失的 subject/predicate/object 渲染成 "undefined undefined undefined"。
+    const parts = [record.subject, record.predicate, record.object]
+      .filter((part): part is string => typeof part === 'string' && part.length > 0);
+    if (parts.length > 0) return parts.join(' ');
+  }
   return String(record.content ?? record.name ?? record.title ?? JSON.stringify(content));
 }
 

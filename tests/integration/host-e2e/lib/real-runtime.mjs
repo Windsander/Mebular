@@ -31,6 +31,85 @@ function parseJsonLines(text) {
   return out;
 }
 
+/** Read the sidecar discovery document written by the real supervisor. */
+export async function readSidecarDiscovery(home) {
+  try {
+    return JSON.parse(await readFile(join(home, 'memory-runtime.json'), 'utf8'));
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+/**
+ * Wait until the real sidecar supervisor has published a ready discovery file.
+ * Port 0 is used by every suite, so the URL is only known after the sidecar
+ * listens.
+ */
+export async function waitForSidecar(home, { timeoutMs = 30_000, intervalMs = 100 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const discovery = await readSidecarDiscovery(home);
+    if (discovery?.state === 'ready' && typeof discovery?.url === 'string') return discovery;
+    if (Date.now() >= deadline) {
+      throw new Error(`sidecar discovery not ready after ${timeoutMs}ms (${JSON.stringify(discovery)})`);
+    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, intervalMs));
+  }
+}
+
+/**
+ * The sidecar writes `{version,token,...}` to tokenFile. Accept that record and
+ * a raw token so test helpers are independent from the on-disk envelope.
+ * (The DSH/OpenCode adapters currently only accept the raw form; see README.)
+ */
+export function sidecarTokenFromFile(text) {
+  const raw = String(text ?? '').trim();
+  if (raw.length === 0) return '';
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed.token === 'string') return parsed.token.trim();
+  } catch {
+    // Raw token file.
+  }
+  return raw;
+}
+
+export async function readSidecarToken(discovery) {
+  if (typeof discovery?.tokenFile !== 'string' || discovery.tokenFile.length === 0) return '';
+  return sidecarTokenFromFile(await readFile(discovery.tokenFile, 'utf8'));
+}
+
+/** Authenticated request against the real sidecar. `path` starts with `/`. */
+export async function requestSidecar(discovery, path, init = {}) {
+  if (discovery?.url === undefined) throw new Error('sidecar discovery missing');
+  const token = await readSidecarToken(discovery);
+  const headers = {
+    accept: 'application/json',
+    ...(token.length > 0 ? { authorization: `Bearer ${token}` } : {}),
+    ...(init.body === undefined ? {} : { 'content-type': 'application/json' }),
+    ...(init.headers ?? {}),
+  };
+  const response = await fetch(`${discovery.url}${path}`, { ...init, headers });
+  let body = null;
+  try {
+    body = await response.json();
+  } catch {
+    body = null;
+  }
+  return { status: response.status, body, data: body?.data ?? null };
+}
+
+async function readSidecarJsonLines(home, relativePath) {
+  try {
+    const text = await readFile(join(home, relativePath), 'utf8');
+    return parseJsonLines(text);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return [];
+    throw error;
+  }
+}
+
 /**
  * @param {{
  *   auth?: 'none' | 'bearer',
@@ -234,6 +313,49 @@ export async function startRealRuntime(options = {}) {
     await app.shutdown().catch(() => undefined);
   }
 
+  async function sidecarDiscovery() {
+    return readSidecarDiscovery(home);
+  }
+
+  async function sidecarStatus() {
+    const discovery = await sidecarDiscovery();
+    if (discovery === null) return null;
+    const result = await requestSidecar(discovery, '/status');
+    if (result.status !== 200 || result.data === null) {
+      throw new Error(`sidecar status failed: ${result.status} ${JSON.stringify(result.body)}`);
+    }
+    return result.data;
+  }
+
+  async function sidecarCheckpoint(threadId, agentId) {
+    const discovery = await sidecarDiscovery();
+    if (discovery === null) return null;
+    const query = agentId ? `?agentId=${encodeURIComponent(agentId)}` : '';
+    const result = await requestSidecar(
+      discovery,
+      `/checkpoints/${encodeURIComponent(threadId)}${query}`,
+    );
+    if (result.status !== 200) {
+      throw new Error(`sidecar checkpoint failed: ${result.status} ${JSON.stringify(result.body)}`);
+    }
+    return result.data?.checkpoint ?? null;
+  }
+
+  async function sidecarRawEntries() {
+    const entries = await readSidecarJsonLines(home, join('memory-runtime', 'raw', 'chunks.jsonl'));
+    return entries.map((entry) => entry.chunk).filter(Boolean);
+  }
+
+  async function sidecarRawChunks() {
+    return (await sidecarRawEntries())
+      .map((chunk) => chunk.text)
+      .filter((textValue) => typeof textValue === 'string');
+  }
+
+  async function sidecarTraces() {
+    return readSidecarJsonLines(home, join('memory-runtime', 'traces.jsonl'));
+  }
+
   return {
     url,
     root,
@@ -253,6 +375,13 @@ export async function startRealRuntime(options = {}) {
     checkpoint,
     rawChunks,
     checkpointFiles,
+    sidecarDiscovery,
+    waitForSidecar: (options) => waitForSidecar(home, options),
+    sidecarStatus,
+    sidecarCheckpoint,
+    sidecarRawEntries,
+    sidecarRawChunks,
+    sidecarTraces,
     close,
     async cleanup() {
       await close();

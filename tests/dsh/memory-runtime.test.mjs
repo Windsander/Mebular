@@ -392,6 +392,29 @@ describe('@mebular/dsh-plugin memory runtime：sidecar 发现与 host token', ()
     expect(JSON.stringify(state)).not.toContain('file-token-value');
   });
 
+  it('tokenFile 兼容 sidecar 写入的 JSON host-token record', async () => {
+    const { home, tokenFile } = await makeHome({}, 'placeholder');
+    await writeFile(tokenFile, JSON.stringify({
+      version: 1,
+      token: 'json-record-token',
+      issuedAt: Date.now(),
+      expiresAt: Date.now() + 60_000,
+    }), 'utf8');
+    await chmod(tokenFile, 0o600);
+    const fetch = installFetch(() => jsonOk(contextData()));
+    const { ctx } = adapterFor({
+      config: { enabled: true, ingest: false, checkpoints: false, hideMemoryTools: false, auth: 'auto' },
+      homeDir: home,
+      env: {},
+      fetchImpl: fetch.fetchImpl,
+    }, { discovery: true });
+
+    const { payload, fallback } = preStepPayload();
+    await waterfall(ctx, 'agent/pre-step', payload, fallback);
+    expect(fetch.calls).toHaveLength(1);
+    expect(fetch.calls[0].init.headers.authorization).toBe('Bearer json-record-token');
+  });
+
   it('config.url > env URL > discovery', async () => {
     const { home } = await makeHome({ url: OTHER_BASE });
     for (const [label, config, env, expected] of [

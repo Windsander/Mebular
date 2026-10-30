@@ -1416,10 +1416,27 @@ export function createMemoryRuntimeAdapter(options = {}) {
         return '';
       }
       const value = await readFile(filePath, 'utf8');
-      return value.trim();
+      return parseTokenFileContents(value);
     } catch {
       return '';
     }
+  }
+
+  // The sidecar writes `{version, token, issuedAt, expiresAt}`; older setups
+  // and manual overrides may still hold a raw token. Accept both.
+  function parseTokenFileContents(value) {
+    const trimmed = String(value).trim();
+    if (trimmed.startsWith('{')) {
+      try {
+        const record = JSON.parse(trimmed);
+        if (record && typeof record.token === 'string' && record.token.trim().length > 0) {
+          return record.token.trim();
+        }
+      } catch {
+        // A raw token that merely starts with "{" is not valid JSON.
+      }
+    }
+    return trimmed;
   }
 
   /**

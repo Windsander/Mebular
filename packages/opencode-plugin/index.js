@@ -321,7 +321,7 @@ export function readHostTokenFile(path) {
     if (process.platform !== 'win32' && (stat.mode & 0o077) !== 0) {
       return { token: '', reason: 'token_file_insecure' };
     }
-    const token = readFileSync(path, 'utf8').replace(/[\r\n]/g, '').trim();
+    const token = parseHostTokenContents(readFileSync(path, 'utf8'));
     if (token.length === 0) return { token: '', reason: 'runtime_token_empty' };
     return { token, reason: null };
   } catch (error) {
@@ -330,6 +330,23 @@ export function readHostTokenFile(path) {
       reason: error?.code === 'ENOENT' ? 'runtime_token_missing' : 'runtime_token_unreadable',
     };
   }
+}
+
+// The sidecar writes `{version, token, issuedAt, expiresAt}`; older setups
+// and manual overrides may still hold a raw token. Accept both.
+function parseHostTokenContents(value) {
+  const trimmed = String(value).replace(/[\r\n]/g, '').trim();
+  if (trimmed.startsWith('{')) {
+    try {
+      const record = JSON.parse(trimmed);
+      if (record && typeof record.token === 'string' && record.token.trim().length > 0) {
+        return record.token.trim();
+      }
+    } catch {
+      // A raw token that merely starts with "{" is not valid JSON.
+    }
+  }
+  return trimmed;
 }
 
 function redactText(value, context = {}) {

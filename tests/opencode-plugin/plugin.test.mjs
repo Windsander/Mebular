@@ -876,6 +876,21 @@ describe('sidecar discovery and host authentication', () => {
     await controller.dispose();
   });
 
+  it('reads the sidecar JSON host-token record from tokenFile', async () => {
+    const home = await tempDir();
+    await writeDiscovery(home, {
+      token: JSON.stringify({
+        version: 1,
+        token: 'json-record-token',
+        issuedAt: Date.now(),
+        expiresAt: Date.now() + 60_000,
+      }),
+    });
+    const resolved = resolvePluginConfig({}, { env: {}, homeDir: home });
+    expect(resolved.token).toBe('json-record-token');
+    expect(resolved.tokenSource).toBe('tokenFile');
+  });
+
   it('rejects stale discovery instead of guessing a port', async () => {
     const home = await tempDir();
     await writeDiscovery(home, { updatedAt: Date.now() - 16_000 });

@@ -1,13 +1,20 @@
 #!/usr/bin/env node
-// Run the three host E2E suites against a real Runtime HTTP server.
+// Run the three host E2E suites against real host adapters and a real Memory
+// Runtime sidecar:
+//
+//   host process -> real adapter -> real sidecar `/memory-runtime/v1`
+//                                -> real MCP capability `/internal/memory/v1`
+//                                -> real Runtime/GraphStore
+//
+// No suite downloads a model, calls an external API or runs a real LLM. Each
+// suite starts its own temporary Mebular home and its own MCP daemon + sidecar;
+// DSH additionally installs the real `@deepseek-ai/dsh` into a temp prefix from
+// the npm cache. No user home is touched.
 //
 //   node tests/integration/host-e2e/verify-host-e2e.mjs
 //   node tests/integration/host-e2e/verify-host-e2e.mjs --host hermes,opencode
 //   node tests/integration/host-e2e/verify-host-e2e.mjs --host dsh --dsh-version 0.2.1-rc.2 --keep
 //
-// Each suite starts its own temporary Mebular home and its own real Runtime
-// server. DSH additionally installs the real `@deepseek-ai/dsh` into a temp
-// prefix (npm cache only); no model download and no user home are touched.
 // Exit code is nonzero if any selected suite fails.
 
 import { spawn } from 'node:child_process';
@@ -15,6 +22,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
+const repoRoot = resolve(here, '..', '..', '..');
 const suites = {
   hermes: { label: 'Hermes', script: join(here, 'hermes-real-runtime.mjs') },
   opencode: { label: 'OpenCode / OpenChamber', script: join(here, 'opencode-real-runtime.mjs') },
@@ -62,14 +70,31 @@ function runSuite(name, options) {
     if (name === 'dsh' && options.dshVersion) args.push('--dsh-version', options.dshVersion);
     if (name === 'opencode' && options.controllerFallback) args.push('--controller-fallback');
     console.log(`\n${'='.repeat(72)}\n▶ ${suites[name].label}\n${'='.repeat(72)}`);
-    const child = spawn(process.execPath, args, { cwd: resolve(here, '..', '..', '..'), stdio: 'inherit' });
-    child.on('close', (code) => resolvePromise({ name, code: code ?? 1 }));
+    const started = Date.now();
+    const child = spawn(process.execPath, args, { cwd: repoRoot, stdio: 'inherit' });
+    child.on('close', (code) => resolvePromise({
+      name,
+      code: code ?? 1,
+      tookMs: Date.now() - started,
+    }));
+    child.on('error', (error) => resolvePromise({
+      name,
+      code: 1,
+      tookMs: Date.now() - started,
+      error,
+    }));
   });
+}
+
+function formatDuration(ms) {
+  return `${(ms / 1000).toFixed(1)}s`;
 }
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
-  console.log('Mebular 0.3.0 host E2E（真实 Runtime HTTP，heuristic，无模型下载）');
+  console.log('Mebular 0.3.0 host E2E');
+  console.log('真实宿主适配器 + 真实 MCP capability + 真实 Memory Runtime sidecar');
+  console.log('heuristic / 无真实模型 / 无外部网络 / 临时 home');
   console.log(`范围：${options.hosts.join(', ')}`);
   const results = [];
   for (const name of options.hosts) {
@@ -77,7 +102,8 @@ async function main() {
   }
   console.log(`\n${'='.repeat(72)}\n汇总\n${'='.repeat(72)}`);
   for (const result of results) {
-    console.log(`  ${result.code === 0 ? '✓' : '✗'} ${suites[result.name].label}: exit ${result.code}`);
+    const detail = result.error ? ` (${result.error.message})` : ` (${formatDuration(result.tookMs)})`;
+    console.log(`  ${result.code === 0 ? '✓' : '✗'} ${suites[result.name].label}: exit ${result.code}${detail}`);
   }
   const failed = results.filter((result) => result.code !== 0);
   console.log(failed.length === 0

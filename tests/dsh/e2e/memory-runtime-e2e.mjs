@@ -208,7 +208,11 @@ async function assertScenario({ name, world, runtime, probe }) {
     const committed = (server.checkpoints ?? []).find((entry) => entry.committed === true
       && entry.compactionId === 'memory-e2e-compaction');
     check('compaction checkpoint 已提交', committed !== undefined
-      && committed?.summary === 'memory e2e compacted summary', JSON.stringify(committed));
+      && typeof committed?.summary === 'string'
+      && committed.summary.includes('Continue the memory e2e task')
+      && committed?.stateSchema === 2
+      && ['structured', 'summary_only'].includes(committed?.contentMode),
+    JSON.stringify(committed));
     check('checkpoint 写入 task 域且不带 sync', committed?.domain === 'task:dsh_memory-e2e-session'
       && committed?.hasSync !== true, JSON.stringify(committed));
 

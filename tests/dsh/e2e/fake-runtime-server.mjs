@@ -348,6 +348,8 @@ export async function createFakeRuntime(options = {}) {
         threadId: decodeURIComponent(checkpointMatch[1]),
         compactionId: body?.state?.compactionId ?? null,
         summary: typeof body?.summary === 'string' ? body.summary : null,
+        stateSchema: body?.state?.schema ?? null,
+        contentMode: body?.state?.contentMode ?? null,
         domain: body?.domain ?? null,
         hasSync: Object.prototype.hasOwnProperty.call(body ?? {}, 'sync'),
         committed: true,

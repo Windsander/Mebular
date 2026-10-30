@@ -48,10 +48,12 @@ describe('memory capability token', () => {
     expect(capabilityTokenPath(home)).toBe(join(home, CAPABILITY_TOKEN_DIR, CAPABILITY_TOKEN_FILE));
 
     const record = await ensureCapabilityToken({ home, env: {}, now: 1_700_000_000_000 });
-    const dirMode = (await stat(capabilityTokenDir(home))).mode & 0o777;
-    const fileMode = (await stat(capabilityTokenPath(home))).mode & 0o777;
-    expect(dirMode).toBe(0o700);
-    expect(fileMode).toBe(0o600);
+    if (process.platform !== 'win32') {
+      const dirMode = (await stat(capabilityTokenDir(home))).mode & 0o777;
+      const fileMode = (await stat(capabilityTokenPath(home))).mode & 0o777;
+      expect(dirMode).toBe(0o700);
+      expect(fileMode).toBe(0o600);
+    }
 
     const raw = JSON.parse(await readFile(capabilityTokenPath(home), 'utf-8'));
     expect(Object.keys(raw).sort()).toEqual(['expiresAt', 'issuedAt', 'mcpPid', 'token', 'version'].sort());

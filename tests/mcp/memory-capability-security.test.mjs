@@ -137,10 +137,12 @@ describe('启用后的 token 与鉴权', () => {
         mcp: { http: { host: '127.0.0.1', port: 0, auth: 'none' } },
       },
     });
-    const dirMode = (await stat(capabilityTokenDir(home))).mode & 0o777;
-    const fileMode = (await stat(capabilityTokenPath(home))).mode & 0o777;
-    expect(dirMode).toBe(0o700);
-    expect(fileMode).toBe(0o600);
+    if (process.platform !== 'win32') {
+      const dirMode = (await stat(capabilityTokenDir(home))).mode & 0o777;
+      const fileMode = (await stat(capabilityTokenPath(home))).mode & 0o777;
+      expect(dirMode).toBe(0o700);
+      expect(fileMode).toBe(0o600);
+    }
     const record = await readCapabilityToken({ home, env: {} });
     expect(record?.source).toBe('file');
     const res = await request(base, '/internal/memory/v1/version', { token: record.token });

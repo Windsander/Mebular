@@ -38,7 +38,9 @@ describe('SidecarLocalLayer', () => {
     for (const dir of ['raw', 'cache', 'outbox', 'outbox/dead', 'logs', 'tmp', 'models']) {
       const info = await stat(join(root, dir));
       expect(info.isDirectory()).toBe(true);
-      expect(info.mode & 0o777).toBe(0o700);
+      if (process.platform !== 'win32') {
+        expect(info.mode & 0o777).toBe(0o700);
+      }
     }
     expect(layer.store.root).toBe(root);
     expect(layer.store.rawPath).toBe(join(root, 'raw', 'chunks.jsonl'));
@@ -66,7 +68,9 @@ describe('SidecarLocalLayer', () => {
     };
     const stored = await layer.store.putRawChunk('cl_test', chunk);
     expect(stored.duplicate).toBe(false);
-    expect((await stat(join(root, 'raw', 'chunks.jsonl'))).mode & 0o777).toBe(0o600);
+    if (process.platform !== 'win32') {
+      expect((await stat(join(root, 'raw', 'chunks.jsonl'))).mode & 0o777).toBe(0o600);
+    }
 
     const trace = {
       schema: 1 as const,
@@ -85,7 +89,9 @@ describe('SidecarLocalLayer', () => {
       degraded: false,
     };
     await layer.store.putTrace(trace);
-    expect((await stat(join(root, 'traces.jsonl'))).mode & 0o777).toBe(0o600);
+    if (process.platform !== 'win32') {
+      expect((await stat(join(root, 'traces.jsonl'))).mode & 0o777).toBe(0o600);
+    }
 
     const stats = await layer.stats();
     expect(stats.rawChunks).toBe(1);

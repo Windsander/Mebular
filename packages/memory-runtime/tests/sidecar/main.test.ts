@@ -98,8 +98,10 @@ describe('memory-runtime sidecar process', () => {
     expect(handle.discovery.state).toBe('ready');
     expect(handle.discovery.degraded).toBe(false);
     expect(handle.discovery.capabilities.ingest).toBe(false);
-    expect((await stat(join(home, 'memory-runtime.json'))).mode & 0o777).toBe(0o600);
-    expect((await stat(join(home, 'memory-runtime', 'host-token'))).mode & 0o777).toBe(0o600);
+    if (process.platform !== 'win32') {
+      expect((await stat(join(home, 'memory-runtime.json'))).mode & 0o777).toBe(0o600);
+      expect((await stat(join(home, 'memory-runtime', 'host-token'))).mode & 0o777).toBe(0o600);
+    }
 
     const health = await fetch(handle.healthUrl);
     expect(health.status).toBe(200);

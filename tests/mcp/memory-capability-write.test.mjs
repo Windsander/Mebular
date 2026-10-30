@@ -273,8 +273,10 @@ describe('POST /write', () => {
     expect(conflict.status).toBe(409);
     expect(conflict.body.error.code).toBe('idempotency_conflict');
 
-    const ledger = await stat(join(home, 'memory-runtime', 'capability-idempotency.json'));
-    expect(ledger.mode & 0o777).toBe(0o600);
+    if (process.platform !== 'win32') {
+      const ledger = await stat(join(home, 'memory-runtime', 'capability-idempotency.json'));
+      expect(ledger.mode & 0o777).toBe(0o600);
+    }
   });
 
   it('内容重复 / clientItemId 重复 → duplicate，不写第二条', async () => {

@@ -69,7 +69,9 @@ describe('sidecar start.lock', () => {
       profileId: 'default',
       command: 'serve',
     });
-    expect((await stat(path)).mode & 0o777).toBe(0o600);
+    if (process.platform !== 'win32') {
+      expect((await stat(path)).mode & 0o777).toBe(0o600);
+    }
 
     expect(await updateStartLock(path, { pid: 9999, now: 2000, patch: { port: 7000 } })).toBe(false);
     expect(await updateStartLock(path, {
@@ -146,7 +148,9 @@ describe('sidecar start.lock', () => {
       port: first.discovery.port,
       command: 'serve',
     });
-    expect((await stat(lockPath)).mode & 0o777).toBe(0o600);
+    if (process.platform !== 'win32') {
+      expect((await stat(lockPath)).mode & 0o777).toBe(0o600);
+    }
     expect((await getSidecarStatus({ home, env })).lock).toMatchObject({
       pid: process.pid,
       stale: false,

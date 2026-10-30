@@ -31,7 +31,9 @@ describe('sidecar token', () => {
     const ensured = await ensureHostToken({ tokenFile: hostTokenFile, env: {}, now: 1000 });
     expect(ensured.token.length).toBeGreaterThanOrEqual(32);
     expect(ensured.source).toBe('generated');
-    expect((await stat(hostTokenFile)).mode & 0o777).toBe(0o600);
+    if (process.platform !== 'win32') {
+      expect((await stat(hostTokenFile)).mode & 0o777).toBe(0o600);
+    }
 
     const read = await readHostToken({ tokenFile: hostTokenFile, env: {} });
     expect(read?.token).toBe(ensured.token);
@@ -87,7 +89,9 @@ describe('sidecar token', () => {
       mcpPid: 123,
       expired: false,
     });
-    expect((await stat(join(dir, 'capability-token'))).mode & 0o777).toBe(0o600);
+    if (process.platform !== 'win32') {
+      expect((await stat(join(dir, 'capability-token'))).mode & 0o777).toBe(0o600);
+    }
 
     const expired = await readCapabilityToken({ dataDir: dir, env: {}, now: 3000 });
     expect(expired?.expired).toBe(true);

@@ -47,8 +47,10 @@ describe('sidecar discovery', () => {
     // 即使调用方误把 token 挂在对象上，写盘时也必须被剔除。
     await writeDiscovery(path, { ...discovery, token: 'secret-token' } as typeof discovery);
 
-    const mode = (await stat(path)).mode & 0o777;
-    expect(mode).toBe(0o600);
+    if (process.platform !== 'win32') {
+      const mode = (await stat(path)).mode & 0o777;
+      expect(mode).toBe(0o600);
+    }
 
     const raw = await readFile(path, 'utf8');
     expect(raw).not.toContain('secret-token');

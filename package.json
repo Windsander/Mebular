@@ -239,6 +239,7 @@
       "!packages/fleet/src/**/*.d.ts",
       "packages/memory-runtime/src/**/*.ts",
       "!packages/memory-runtime/src/**/*.d.ts",
+      "!packages/memory-runtime/src/sidecar/**",
       "packages/service/src/**/*.ts",
       "!packages/service/src/**/*.d.ts"
     ],

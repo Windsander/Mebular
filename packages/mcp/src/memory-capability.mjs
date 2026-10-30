@@ -8,13 +8,14 @@
 //   GET  /status
 //   GET  /namespaces
 //   POST /query /search /history /profile /skills /graph
-//   POST /write /update /delete /archive /internal-object
+//   POST /write /update /delete /archive /internal-object /detail
 //   GET/POST /sync
 //
 // 约束：
 // - 只调用 MemoryService / Mebular 公共方法；不直接打开 GraphStore 文件、不 append
 //   事件、不新增事件类型或同步协议。普通 MemoryRecord 的读写只经 MemoryService；
-//   只有 internal-object（compact/self_record/context_checkpoint）允许直接 GraphStore 写入。
+//   只有 internal-object（compact/self_record/context_checkpoint）与 detail
+//   （detail_record）允许受控的内部对象写入，且都经统一图/事件/同步。
 // - 读取（query/search/history/profile/skills/graph）、状态/域统计与同步状态都由
 //   MemoryService 统一执行；capability 只负责授权域、owner/provenance 投影与响应信封。
 // - 内部对象（metadata.internal / __*）默认不返回；graph 不遍历内部对象。
@@ -25,6 +26,27 @@ import { createHash, randomUUID } from 'node:crypto';
 import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { domainOfNamespace, semanticKindOf } from '@mebular/core';
+import {
+  DEFAULT_DETAIL_QUOTA_LIMITS,
+  DETAIL_DELETE_REASONS,
+  DETAIL_KINDS,
+  DETAIL_RETENTION_CLASSES,
+  DETAIL_RETENTION_DAYS,
+  MAX_DETAIL_BATCH_ITEMS,
+  MAX_DETAIL_DOMAINS,
+  MAX_DETAIL_GET_BYTES,
+  MAX_DETAIL_LIST_LIMIT,
+  MAX_DETAIL_RECORD_IDS,
+  MAX_DETAIL_TEXT_BYTES,
+  detailContentHash,
+  detailTextBytes,
+  isDetailDeleteReason,
+  isDetailKind,
+  isDetailMime,
+  isDetailRetentionClass,
+  isDetailRole,
+  resolveDetailExpiresAt,
+} from '@mebular/core';
 import {
   ensureCapabilityToken,
   removeCapabilityToken,
@@ -108,6 +130,14 @@ export const CAPABILITY_LIMITS = Object.freeze({
   maxCheckpointStateBytes: MAX_CHECKPOINT_STATE_BYTES,
   maxCompactSummaryBytes: MAX_COMPACT_SUMMARY_BYTES,
   maxCompactSources: MAX_COMPACT_SOURCES,
+  maxDetailTextBytes: MAX_DETAIL_TEXT_BYTES,
+  maxDetailBatchItems: MAX_DETAIL_BATCH_ITEMS,
+  maxDetailGetBytes: MAX_DETAIL_GET_BYTES,
+  maxDetailListLimit: MAX_DETAIL_LIST_LIMIT,
+  maxDetailDomains: MAX_DETAIL_DOMAINS,
+  detailDomainQuotaBytes: DEFAULT_DETAIL_QUOTA_LIMITS.domainBytes,
+  detailCloudQuotaBytes: DEFAULT_DETAIL_QUOTA_LIMITS.cloudBytes,
+  detailThreadQuotaBytes: DEFAULT_DETAIL_QUOTA_LIMITS.threadBytes,
   idempotencyTtlMs: IDEMPOTENCY_TTL_MS,
 });
 
@@ -1380,6 +1410,10 @@ function versionPayload() {
       batchWrite: true,
       idempotency: true,
       internalObjects: [...INTERNAL_OBJECT_KINDS],
+      details: true,
+      detailKinds: [...DETAIL_KINDS],
+      detailRetentionClasses: [...DETAIL_RETENTION_CLASSES],
+      detailDeleteReasons: [...DETAIL_DELETE_REASONS],
       sync: true,
       graph: true,
       readOnly: false,
@@ -1393,9 +1427,10 @@ function versionPayload() {
         'profile',
         'skills',
         'graph',
+        'detail',
         'sync',
       ],
-      writeEndpoints: ['write', 'update', 'delete', 'archive', 'internal-object', 'sync'],
+      writeEndpoints: ['write', 'update', 'delete', 'archive', 'internal-object', 'detail', 'sync'],
     },
     limits: { ...CAPABILITY_LIMITS },
     domains: {
@@ -1725,6 +1760,11 @@ export function createMemoryCapabilityHandler({
         };
       }
       const result = await execute();
+      // 详情批量部分失败不缓存：同一 outbox 键重放时应重新尝试失败项；
+      // 已成功项仍由 clientItemId/contentHash 去重，不会重复写。
+      if (route === 'detail:write' && result?.data?.partial === true) {
+        return result;
+      }
       const entry = {
         key: composite,
         requestHash,
@@ -2207,15 +2247,18 @@ export function createMemoryCapabilityHandler({
       const ids = parseIdList(payload);
       const classified = await classifyGovernanceTargets(ids, actor);
       const deleted = [];
+      let detailsDeleted = [];
       if (classified.allowed.length > 0) {
         const result = await service().delete(classified.allowed);
         deleted.push(...(result?.deleted ?? []));
+        detailsDeleted = Array.isArray(result?.detailsDeleted) ? result.detailsDeleted : [];
         classified.notFound.push(...(result?.notFound ?? []));
         classified.internal.push(...(result?.internal ?? []));
       }
       return {
         data: {
           deleted,
+          ...(detailsDeleted.length > 0 ? { detailsDeleted } : {}),
           notFound: classified.notFound,
           forbidden: classified.forbidden,
           internal: classified.internal,
@@ -2816,6 +2859,510 @@ export function createMemoryCapabilityHandler({
       return handleCheckpointObject(payload, actor);
     }
 
+    // ---------- /detail ----------
+
+    /**
+     * 详情配额可被本机 admin 配置收紧（`memoryRuntime.detailLimits`）；
+     * 默认值仍是契约的 256 MiB/域、1 GiB/云、64 MiB/thread。
+     * 该配置只在 capability 进程内使用，不进入公共 MCP 工具面。
+     */
+    function detailLimitsForConfig() {
+      const raw = getConfig()?.memoryRuntime?.detailLimits;
+      const limits = { ...DEFAULT_DETAIL_QUOTA_LIMITS };
+      if (isObject(raw)) {
+        for (const key of ['domainBytes', 'cloudBytes', 'threadBytes']) {
+          const value = raw[key];
+          if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+            // 契约只允许在默认配额内收紧，不允许配置放大。
+            limits[key] = Math.min(limits[key], Math.trunc(value));
+          }
+        }
+      }
+      return limits;
+    }
+
+    function detailCoreError(error, index) {
+      if (error instanceof CapabilityError) return error;
+      if (error?.code === 'DETAIL_QUOTA_EXCEEDED') {
+        return new CapabilityError(413, 'detail_quota_exceeded', '详情配额超限且无法淘汰', {
+          ...(Number.isInteger(index) ? { index } : {}),
+          ...(isObject(error.details) ? error.details : {}),
+        });
+      }
+      if (error?.name === 'ValidationError' || error?.code === 'VALIDATION_INVALID_NODE') {
+        return new CapabilityError(422, 'validation_failed', error.message ?? '详情字段非法', {
+          ...(Number.isInteger(index) ? { index } : {}),
+          ...(isObject(error.details) ? error.details : {}),
+        });
+      }
+      return new CapabilityError(500, 'internal', '能力接口内部错误', undefined, true);
+    }
+
+    function parseDetailKinds(value) {
+      if (value === undefined || value === null) return undefined;
+      if (!Array.isArray(value) || value.length === 0) {
+        throw new CapabilityError(400, 'invalid_request', 'detailKinds 必须是非空数组');
+      }
+      const kinds = [];
+      for (const kind of value) {
+        if (!isDetailKind(kind)) {
+          throw new CapabilityError(400, 'invalid_request', 'detailKinds 含未知类型', { detailKind: kind });
+        }
+        if (!kinds.includes(kind)) kinds.push(kind);
+      }
+      return kinds;
+    }
+
+    function assertDetailGovernance(actor, includeExpired, includeDeleted) {
+      if (!includeExpired && !includeDeleted) return;
+      if (actor.type === 'user' || actor.type === 'system') return;
+      throw new CapabilityError(403, 'forbidden_scope', 'includeExpired/includeDeleted 仅允许 user/system 治理读取');
+    }
+
+    function validateDetailItem(raw, index, requestThreadId, actor) {
+      if (!isObject(raw)) throw validationError(index, 'item', 'item 必须是对象');
+      for (const key of ['internal', 'internalObject', 'owner']) {
+        if (hasValue(raw[key])) {
+          throw validationError(index, key, `${key} 是服务端受保护字段`);
+        }
+      }
+      if (hasValue(raw.type) && raw.type !== 'detail_record') {
+        throw validationError(index, 'type', 'type 固定为 detail_record');
+      }
+      if (hasValue(raw.kind) && raw.kind !== 'detail_record') {
+        throw validationError(index, 'kind', 'kind 固定为 detail_record');
+      }
+      if (!hasValue(raw.domain) || (typeof raw.domain === 'string' && raw.domain.trim() === '')) {
+        throw validationError(index, 'domain', 'item.domain 必填');
+      }
+      const domain = normalizeDomain(raw.domain);
+      if (!domain) {
+        throw new CapabilityError(400, 'domain_invalid', 'item.domain 非法', {
+          index,
+          ...(typeof raw.domain === 'string' ? { domain: raw.domain } : {}),
+        });
+      }
+      if (hasValue(raw.namespace) && raw.namespace !== domain) {
+        throw ownerMismatchError(index, domain, { ownerType: 'namespace', ownerId: domain }, {
+          ownerType: 'namespace',
+          ownerId: raw.namespace,
+        });
+      }
+      if (!isDetailKind(raw.detailKind)) {
+        throw validationError(index, 'detailKind', 'detailKind 非法');
+      }
+      if (typeof raw.text !== 'string' || raw.text.trim() === '') {
+        throw validationError(index, 'text', 'text 必须是非空字符串');
+      }
+      if (detailTextBytes(raw.text) > MAX_DETAIL_TEXT_BYTES) {
+        throw new CapabilityError(413, 'payload_too_large', `text 超过 ${MAX_DETAIL_TEXT_BYTES} 字节`, {
+          index,
+          maxBytes: MAX_DETAIL_TEXT_BYTES,
+        });
+      }
+      const contentHash = detailContentHash(raw.text);
+      if (hasValue(raw.contentHash) && raw.contentHash !== contentHash) {
+        throw validationError(index, 'contentHash', 'contentHash 必须等于 sha256(text)', {
+          expected: contentHash,
+        });
+      }
+      if (hasValue(raw.mime) && !isDetailMime(raw.mime)) {
+        throw validationError(index, 'mime', 'mime 非法');
+      }
+      if (hasValue(raw.role) && !isDetailRole(raw.role)) {
+        throw validationError(index, 'role', 'role 非法');
+      }
+      if (raw.detailKind === 'raw_chunk' && !hasValue(raw.role)) {
+        throw validationError(index, 'role', 'raw_chunk 需要 role');
+      }
+      if (hasValue(raw.messageId)
+        && (typeof raw.messageId !== 'string' || raw.messageId.length > 256)) {
+        throw validationError(index, 'messageId', 'messageId 需为 1–256 字符');
+      }
+      if (hasValue(raw.chunkIndex)
+        && (typeof raw.chunkIndex !== 'number' || !Number.isInteger(raw.chunkIndex) || raw.chunkIndex < 0)) {
+        throw validationError(index, 'chunkIndex', 'chunkIndex 必须是非负整数');
+      }
+      if (hasValue(raw.turn)
+        && (typeof raw.turn !== 'number' || !Number.isInteger(raw.turn) || raw.turn < 0)) {
+        throw validationError(index, 'turn', 'turn 必须是非负整数');
+      }
+      if (hasValue(raw.retentionClass) && !isDetailRetentionClass(raw.retentionClass)) {
+        throw validationError(index, 'retentionClass', 'retentionClass 非法');
+      }
+      const retentionClass = hasValue(raw.retentionClass) ? raw.retentionClass : 'conversation';
+      if (hasValue(raw.expiresAt)
+        && (typeof raw.expiresAt !== 'number' || !Number.isFinite(raw.expiresAt) || raw.expiresAt < 0)) {
+        throw validationError(index, 'expiresAt', 'expiresAt 必须是非负数字');
+      }
+      try {
+        resolveDetailExpiresAt(retentionClass, hasValue(raw.expiresAt) ? raw.expiresAt : undefined, now());
+      } catch (error) {
+        throw validationError(index, 'expiresAt', error.message);
+      }
+      if (hasValue(raw.redaction)) {
+        if (!isObject(raw.redaction)) throw validationError(index, 'redaction', 'redaction 必须是对象');
+        if (raw.redaction.applied !== undefined && typeof raw.redaction.applied !== 'boolean') {
+          throw validationError(index, 'redaction.applied', 'redaction.applied 必须是布尔值');
+        }
+        if (raw.redaction.rules !== undefined
+          && (!Array.isArray(raw.redaction.rules)
+            || raw.redaction.rules.some((rule) => typeof rule !== 'string' || rule.length === 0 || rule.length > 256)
+            || raw.redaction.rules.length > 64)) {
+          throw validationError(index, 'redaction.rules', 'redaction.rules 非法');
+        }
+      }
+      if (hasValue(raw.clientItemId)
+        && (typeof raw.clientItemId !== 'string' || !CLIENT_ITEM_ID_RE.test(raw.clientItemId))) {
+        throw validationError(index, 'clientItemId', 'clientItemId 格式非法');
+      }
+      const safeMetadata = {};
+      if (hasValue(raw.metadata)) {
+        if (!isObject(raw.metadata)) throw validationError(index, 'metadata', 'metadata 必须是对象');
+        for (const [key, value] of Object.entries(raw.metadata)) {
+          if (PROTECTED_METADATA_KEYS.has(key)
+            || ['expiresAt', 'detailKind', 'recordIds', 'deletedReason', 'detailAvailable'].includes(key)) {
+            throw validationError(index, `metadata.${key}`, 'metadata 含受保护字段', { field: key });
+          }
+          safeMetadata[key] = value;
+        }
+      }
+      if (hasValue(raw.recordIds)) {
+        if (!Array.isArray(raw.recordIds) || raw.recordIds.length === 0) {
+          throw validationError(index, 'recordIds', 'recordIds 必须是非空数组');
+        }
+        if (raw.recordIds.length > MAX_DETAIL_RECORD_IDS) {
+          throw validationError(index, 'recordIds', `recordIds 最多 ${MAX_DETAIL_RECORD_IDS} 项`);
+        }
+        if (raw.recordIds.some((id) => typeof id !== 'string' || id.length === 0 || id.length > 128)) {
+          throw validationError(index, 'recordIds', 'recordIds 含非法节点 id');
+        }
+      }
+      const provenanceInput = parseProvenanceInput(raw.provenance, index);
+      let detailThreadId = hasValue(raw.threadId) ? raw.threadId : null;
+      if (hasValue(raw.threadId) && (typeof raw.threadId !== 'string' || !THREAD_ID_RE.test(raw.threadId))) {
+        throw new CapabilityError(400, 'invalid_thread_id', 'threadId 格式非法', { index });
+      }
+      if (detailThreadId === null && typeof provenanceInput.threadId === 'string') {
+        detailThreadId = provenanceInput.threadId;
+      }
+      if (detailThreadId === null && requestThreadId !== null) {
+        detailThreadId = requestThreadId;
+      }
+      if (typeof provenanceInput.threadId === 'string'
+        && detailThreadId !== null
+        && provenanceInput.threadId !== detailThreadId) {
+        throw validationError(index, 'provenance.threadId', 'provenance.threadId 与详情 threadId 不一致');
+      }
+      if (domain.startsWith('task:')) {
+        const expected = domain.slice('task:'.length);
+        if (detailThreadId !== null && detailThreadId !== expected) {
+          if (actor.type === 'agent') {
+            throw domainWriteForbidden('Agent 只能写入自己参与且 threadId 匹配的任务域', {
+              domain,
+              actor: actor.agentId,
+              threadId: detailThreadId,
+            });
+          }
+          throw validationError(index, 'threadId', 'task 域详情 threadId 必须与域一致', {
+            domain,
+            expected,
+          });
+        }
+        detailThreadId = expected;
+      }
+      if (detailThreadId !== null) provenanceInput.threadId = detailThreadId;
+      assertDomainWrite(actor, domain, provenanceInput, requestThreadId);
+      const identity = identitySnapshot();
+      const provenance = buildWriteProvenance({
+        input: provenanceInput,
+        actor,
+        identity,
+        hostId,
+        now: now(),
+        threadId: detailThreadId,
+        confirmation: provenanceInput.confirmation ?? 'none',
+      });
+      if (byteSize(provenance) > MAX_PROVENANCE_BYTES) {
+        throw new CapabilityError(413, 'payload_too_large', `provenance 超过 ${MAX_PROVENANCE_BYTES} 字节`, { index });
+      }
+      const owner = deriveOwner(domain, { userId: identity.userId });
+      if (hasValue(raw.ownerType) && raw.ownerType !== owner.ownerType) {
+        throw ownerMismatchError(index, domain, owner, {
+          ownerType: raw.ownerType,
+          ownerId: raw.ownerId ?? null,
+        });
+      }
+      if (hasValue(raw.ownerId) && raw.ownerId !== owner.ownerId) {
+        throw ownerMismatchError(index, domain, owner, {
+          ownerType: raw.ownerType ?? owner.ownerType,
+          ownerId: raw.ownerId,
+        });
+      }
+      return {
+        domain,
+        detailKind: raw.detailKind,
+        text: raw.text,
+        ...(hasValue(raw.mime) ? { mime: raw.mime } : {}),
+        ...(hasValue(raw.role) ? { role: raw.role } : {}),
+        ...(hasValue(raw.messageId) ? { messageId: raw.messageId } : {}),
+        ...(hasValue(raw.chunkIndex) ? { chunkIndex: raw.chunkIndex } : {}),
+        ...(hasValue(raw.turn) ? { turn: raw.turn } : {}),
+        ...(detailThreadId !== null ? { threadId: detailThreadId } : {}),
+        recordIds: [...raw.recordIds],
+        contentHash,
+        ...(hasValue(raw.redaction) ? { redaction: jsonClone(raw.redaction) } : {}),
+        retentionClass,
+        ...(hasValue(raw.expiresAt) ? { expiresAt: raw.expiresAt } : {}),
+        ...(hasValue(raw.clientItemId) ? { clientItemId: raw.clientItemId } : {}),
+        provenance,
+        ...(Object.keys(safeMetadata).length > 0 ? { metadata: safeMetadata } : {}),
+        ownerType: owner.ownerType,
+        ownerId: owner.ownerId,
+      };
+    }
+
+    async function handleDetailWrite(payload, actor) {
+      const items = payload.items;
+      if (!Array.isArray(items) || items.length === 0) {
+        throw new CapabilityError(400, 'invalid_request', 'items 必须是非空数组');
+      }
+      if (items.length > MAX_DETAIL_BATCH_ITEMS) {
+        throw new CapabilityError(413, 'payload_too_large', `items 最多 ${MAX_DETAIL_BATCH_ITEMS} 条`, {
+          maxBatchItems: MAX_DETAIL_BATCH_ITEMS,
+        });
+      }
+      const requestThreadId = parseThreadId(payload.threadId);
+      // 校验原子：所有 item 先通过域/owner/recordIds/retention 校验，再逐项落库。
+      const validated = items.map((raw, index) => validateDetailItem(raw, index, requestThreadId, actor));
+      const currentService = service();
+      if (typeof currentService.writeDetails !== 'function') {
+        throw new CapabilityError(503, 'capability_unavailable', '记忆服务不支持详情写入', undefined, true);
+      }
+      let result;
+      try {
+        result = await currentService.writeDetails(validated, {
+          userId: identitySnapshot().userId,
+          detailLimits: detailLimitsForConfig(),
+        });
+      } catch (error) {
+        throw detailCoreError(error);
+      }
+      const first = result.results[0];
+      if (items.length === 1 && result.failed === 1 && first?.code === 'detail_quota_exceeded') {
+        throw new CapabilityError(413, 'detail_quota_exceeded', first.message ?? '详情配额超限', {
+          ...(isObject(first.details) ? first.details : {}),
+          result: first,
+        });
+      }
+      const warnings = [];
+      if (Array.isArray(result.evicted) && result.evicted.length > 0) {
+        warnings.push({
+          code: 'detail_quota_evicted',
+          ids: [...result.evicted],
+          message: '详情配额淘汰了最旧 tool_output/conversation；记录保留',
+        });
+      }
+      return {
+        data: {
+          results: result.results,
+          created: result.created,
+          duplicates: result.duplicates,
+          failed: result.failed,
+          partial: result.partial,
+          replayed: false,
+        },
+        warnings,
+        degraded: false,
+      };
+    }
+
+    async function handleDetailGet(payload, actor) {
+      if (typeof payload.id !== 'string' || payload.id.length === 0 || payload.id.length > 128) {
+        throw new CapabilityError(400, 'invalid_request', 'get 需要合法 id');
+      }
+      const includeText = payload.includeText !== false;
+      const includeExpired = payload.includeExpired === true;
+      const includeDeleted = payload.includeDeleted === true;
+      assertDetailGovernance(actor, includeExpired, includeDeleted);
+      const maxBytes = hasValue(payload.maxBytes)
+        ? Math.min(Math.max(1, Math.trunc(optionalNumber(payload.maxBytes, 'maxBytes', 0) ?? MAX_DETAIL_GET_BYTES)), MAX_DETAIL_GET_BYTES)
+        : MAX_DETAIL_GET_BYTES;
+      const currentService = service();
+      let detail;
+      try {
+        detail = await currentService.getDetail(payload.id, {
+          includeText,
+          maxBytes,
+          includeExpired,
+          includeDeleted,
+          userId: identitySnapshot().userId,
+        });
+      } catch (error) {
+        throw detailCoreError(error);
+      }
+      if (!detail) throw new CapabilityError(404, 'not_found', '详情不存在', { id: payload.id });
+      const threadId = parseThreadId(payload.threadId);
+      const readable = await detailDomainReadable(payload, actor, detail.domain, threadId);
+      if (!readable) {
+        throw new CapabilityError(403, 'domain_read_forbidden', '当前 actor 不能读取该域详情', {
+          domain: detail.domain,
+        });
+      }
+      if (detail.deletedAt !== null && !includeDeleted) {
+        throw new CapabilityError(410, 'detail_deleted', '详情已删除', {
+          id: detail.id,
+          reason: detail.deletedReason,
+          availability: detail.availability,
+        });
+      }
+      if (detail.deletedAt === null && detail.availability[0] === 'expired' && !includeExpired) {
+        throw new CapabilityError(410, 'detail_expired', '详情已过期', {
+          id: detail.id,
+          expiresAt: detail.expiresAt,
+          availability: detail.availability,
+        });
+      }
+      return {
+        data: { detail },
+        warnings: [],
+        degraded: false,
+      };
+    }
+
+    async function handleDetailList(payload, actor) {
+      const includeExpired = payload.includeExpired === true;
+      const includeDeleted = payload.includeDeleted === true;
+      assertDetailGovernance(actor, includeExpired, includeDeleted);
+      const threadId = parseThreadId(payload.threadId);
+      const detailKinds = parseDetailKinds(payload.detailKinds);
+      let recordIds;
+      if (hasValue(payload.recordIds)) {
+        if (!Array.isArray(payload.recordIds) || payload.recordIds.length === 0) {
+          throw new CapabilityError(400, 'invalid_request', 'recordIds 必须是非空数组');
+        }
+        if (payload.recordIds.length > MAX_DETAIL_RECORD_IDS) {
+          throw new CapabilityError(400, 'invalid_request', `recordIds 最多 ${MAX_DETAIL_RECORD_IDS} 项`);
+        }
+        recordIds = payload.recordIds.filter((id) => typeof id === 'string' && id.length > 0);
+        if (recordIds.length !== payload.recordIds.length) {
+          throw new CapabilityError(422, 'validation_failed', 'recordIds 含非法节点 id', { field: 'recordIds' });
+        }
+      }
+      const currentService = service();
+      const resolved = await resolveDomains({
+        requested: payload.domains,
+        endpoint: 'detail',
+        actor,
+        threadId,
+        strictDomains: payload.strictDomains === true,
+        app: app(),
+        config: getConfig(),
+        service: currentService,
+      });
+      const limit = hasValue(payload.limit)
+        ? Math.min(Math.max(1, Math.trunc(optionalNumber(payload.limit, 'limit', 0) ?? 20)), MAX_DETAIL_LIST_LIMIT)
+        : 20;
+      const offset = clampOffset(payload.offset);
+      if (resolved.domains.length === 0) {
+        return {
+          data: {
+            details: [],
+            total: 0,
+            offset,
+            limit,
+            hasMore: false,
+          },
+          warnings: resolved.warnings,
+          degraded: false,
+        };
+      }
+      let result;
+      try {
+        result = await currentService.listDetails({
+          domains: resolved.domains,
+          ...(threadId !== null ? { threadId } : {}),
+          ...(recordIds !== undefined ? { recordIds } : {}),
+          ...(detailKinds !== undefined ? { detailKinds } : {}),
+          limit,
+          offset,
+          includeExpired,
+          includeDeleted,
+          userId: identitySnapshot().userId,
+        });
+      } catch (error) {
+        throw detailCoreError(error);
+      }
+      return { data: result, warnings: resolved.warnings, degraded: false };
+    }
+
+    async function handleDetailDelete(payload, actor) {
+      const ids = parseIdList(payload);
+      const reason = payload.reason === undefined ? 'user_requested' : payload.reason;
+      if (!isDetailDeleteReason(reason)) {
+        throw new CapabilityError(422, 'validation_failed', 'reason 非法', { field: 'reason', reason });
+      }
+      const currentService = service();
+      let result;
+      try {
+        result = await currentService.deleteDetails(ids, {
+          reason,
+          actorType: actor.type,
+          ...(actor.type === 'agent' ? { agentId: actor.agentId } : {}),
+          userId: identitySnapshot().userId,
+        });
+      } catch (error) {
+        throw detailCoreError(error);
+      }
+      return {
+        data: {
+          deleted: result.deleted,
+          notFound: result.notFound,
+          forbidden: result.forbidden,
+          partial: result.partial,
+          replayed: false,
+        },
+        warnings: [],
+        degraded: false,
+      };
+    }
+
+    async function detailDomainReadable(payload, actor, domain, threadId) {
+      if (actor.type === 'user' || actor.type === 'system') return true;
+      if (hasValue(payload.domains)) {
+        const resolved = await resolveDomains({
+          requested: payload.domains,
+          endpoint: 'detail',
+          actor,
+          threadId,
+          strictDomains: payload.strictDomains === true,
+          app: app(),
+          config: getConfig(),
+          service: service(),
+        });
+        return resolved.domains.includes(domain);
+      }
+      // task 域是协作域：sidecar 已用 recall trace 证明 fragment 来源；
+      // 这里按 id 读取不开放 list 枚举，但允许参与者域。
+      if (domain.startsWith('task:')) return true;
+      const defaults = defaultDomainsFor('detail', actor, threadId);
+      return defaults.includes(domain);
+    }
+
+    async function handleDetail(payload, actor) {
+      const op = payload.op;
+      if (!['write', 'get', 'list', 'delete'].includes(op)) {
+        throw new CapabilityError(400, 'invalid_request', 'detail op 必须是 write/get/list/delete');
+      }
+      if (payload.sync !== undefined || payload['self.sync'] !== undefined || payload['checkpoint.sync'] !== undefined) {
+        throw new CapabilityError(400, 'legacy_sync_unsupported', '不再支持 sync/self.sync/checkpoint.sync 字段');
+      }
+      if (op === 'write') return handleDetailWrite(payload, actor);
+      if (op === 'get') return handleDetailGet(payload, actor);
+      if (op === 'list') return handleDetailList(payload, actor);
+      return handleDetailDelete(payload, actor);
+    }
+
     // ---------- /sync ----------
 
     async function syncStatusData() {
@@ -2959,6 +3506,18 @@ export function createMemoryCapabilityHandler({
         return sendOk(result.data, result.warnings, 200, result.degraded);
       }
 
+      if (route === 'detail') {
+        if (!isPost) throw new CapabilityError(405, 'method_not_allowed', 'detail 仅接受 POST');
+        const payload = requireObjectBody();
+        const actor = parseActor(payload.actor);
+        const op = payload.op;
+        const execute = () => handleDetail(payload, actor);
+        const result = (op === 'write' || op === 'delete')
+          ? await withIdempotency(`detail:${op}`, payload, record.tokenId, execute)
+          : await execute();
+        return sendOk(result.data, result.warnings, 200, result.degraded);
+      }
+
       if (WRITE_ENDPOINTS.has(route)) {
         if (!isPost) throw new CapabilityError(405, 'method_not_allowed', `${route} 仅接受 POST`);
         const payload = requireObjectBody();
@@ -2996,6 +3555,8 @@ export function createMemoryCapabilityHandler({
             userId: identity.userId ?? 'user',
           },
           counts: includeCounts ? stats.counts : null,
+          detailQuota: detailLimitsForConfig(),
+          detailRetentionDays: { ...DETAIL_RETENTION_DAYS, pinned: 0 },
           domains: includeCounts
             ? stats.domains.map((entry) => ({
               domain: entry.domain,
@@ -3013,6 +3574,10 @@ export function createMemoryCapabilityHandler({
             maxBodyBytes: CAPABILITY_LIMITS.maxBodyBytes,
             maxBatchItems: CAPABILITY_LIMITS.maxBatchItems,
             maxLimit: CAPABILITY_LIMITS.maxLimit,
+            maxDetailTextBytes: CAPABILITY_LIMITS.maxDetailTextBytes,
+            maxDetailBatchItems: CAPABILITY_LIMITS.maxDetailBatchItems,
+            maxDetailGetBytes: CAPABILITY_LIMITS.maxDetailGetBytes,
+            maxDetailListLimit: CAPABILITY_LIMITS.maxDetailListLimit,
           },
           actor: { type: actor.type, ...(actor.agentId ? { agentId: actor.agentId } : {}) },
         };
@@ -3039,6 +3604,7 @@ export function createMemoryCapabilityHandler({
                 count: entry.count,
                 memoryRecords: entry.memoryRecords,
                 internalObjects: entry.internalObjects,
+                detailBytes: entry.detailBytes ?? 0,
               }
               : {}),
             subscribed: subscriptions.mode === 'all' || subscriptions.namespaces.includes(entry.domain),

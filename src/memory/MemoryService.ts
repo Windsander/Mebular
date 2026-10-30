@@ -15,6 +15,48 @@ import {
 } from './types.js';
 import type { VectorIndex } from './VectorIndex.js';
 import { isInternalNode } from './visibility.js';
+import {
+  DEFAULT_DETAIL_QUOTA_LIMITS,
+  DETAIL_NODE_TYPE,
+  DetailQuotaError,
+  MAX_DETAIL_BATCH_ITEMS,
+  MAX_DETAIL_LIST_LIMIT,
+  MAX_DETAIL_MESSAGE_ID_CHARS,
+  MAX_DETAIL_RECORD_IDS,
+  MAX_DETAIL_TEXT_BYTES,
+  buildDetailContent,
+  detailBytes,
+  detailContentHash,
+  detailListView,
+  detailMatchesFilters,
+  detailRecordIds,
+  detailRetentionClass,
+  detailTextBytes,
+  detailView,
+  deriveDetailOwner,
+  isDetailDeleteReason,
+  isDetailExpired,
+  isDetailKind,
+  isDetailMime,
+  isDetailNode,
+  isDetailRetentionClass,
+  isDetailRole,
+  normalizeRedaction,
+  resolveDetailExpiresAt,
+  type DetailDeleteOptions,
+  type DetailDeleteReason,
+  type DetailDeleteResult,
+  type DetailKind,
+  type DetailListOptions,
+  type DetailListResult,
+  type DetailQuotaLimits,
+  type DetailReadOptions,
+  type DetailRetentionClass,
+  type DetailView,
+  type DetailWriteBatchResult,
+  type DetailWriteInput,
+  type DetailWriteResultEntry,
+} from './detail.js';
 import { ValidationError, ErrorCodes, MebularError, SyncError } from '../errors.js';
 import type { Edge, Node, TraverseOptions, TraverseResult } from '../types/index.js';
 import { domainOfNamespace, matchesNamespace } from '../core/namespace.js';
@@ -141,6 +183,8 @@ export interface MemoryDomainStats {
   memoryRecords: number;
   internalObjects: number;
   internalKinds: Record<string, number>;
+  /** 域内未删除详情正文的 UTF-8 字节数。 */
+  detailBytes: number;
   lastUpdatedAt: number;
 }
 
@@ -174,6 +218,19 @@ export interface NamespaceStatsOptions {
   includeReserved?: boolean;
 }
 
+export interface DetailWriteOptions {
+  /** 服务端身份（owner 推导；capability 传入）。 */
+  userId?: string;
+  /** 测试/维护可注入的时钟。 */
+  now?: number;
+  /** 配额（默认 256 MiB/域、1 GiB/云、64 MiB/thread；测试可收紧）。 */
+  detailLimits?: Partial<DetailQuotaLimits>;
+}
+
+export interface PruneDetailsOptions {
+  now?: number;
+}
+
 export interface MemoryStats {
   nodeCount: number;
   edgeCount: number;
@@ -183,7 +240,11 @@ export interface MemoryStats {
     compacts: number;
     checkpoints: number;
     selfRecords: number;
+    details: number;
+    detailBytes: number;
   };
+  /** 默认详情配额（capability /status 只读展示）。 */
+  detailQuota: DetailQuotaLimits;
   domains: MemoryDomainStats[];
 }
 
@@ -202,6 +263,8 @@ export interface DeleteResult {
   notFound: string[];
   /** 内部对象默认拒绝普通删除（需管理端点） */
   internal?: string[];
+  /** 记录删除级联墓碑的 DetailRecord id（随 node_deleted 同步）。 */
+  detailsDeleted?: string[];
 }
 
 /** G-ML-1 归档结果（`metadata.archivedAt` 标记，可逆；随 `node_updated` 事件同步传播）。 */
@@ -243,6 +306,49 @@ export type ImportResult = AdapterImportReport;
 
 const PREFERENCE_TAG = 'preference';
 const MEMORY_NODE_TYPES = new Set<Node['type']>(['entity', 'fact', 'episode', 'skill', 'meta']);
+const THREAD_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+const DETAIL_PROTECTED_METADATA_KEYS = new Set([
+  'internal',
+  'internalObject',
+  'provenance',
+  'owner',
+  'ownerType',
+  'ownerId',
+  'domain',
+  'namespace',
+  'kind',
+  'type',
+  'contentHash',
+  'contentHashValidFrom',
+  'clientItemId',
+  'updatedBy',
+  'deletedAt',
+  'deletedBy',
+  'deletedReason',
+  'detailAvailable',
+  'expiresAt',
+  'detailKind',
+  'recordIds',
+]);
+
+interface DetailWritePlan {
+  index: number;
+  domain: string;
+  detailKind: DetailKind;
+  text: string;
+  contentHash: string;
+  chunkIndex: number;
+  threadId: string | null;
+  recordIds: string[];
+  retentionClass: DetailRetentionClass;
+  expiresAt: number;
+  ownerType: string;
+  ownerId: string;
+  content: Record<string, unknown>;
+  provenance: Record<string, unknown>;
+  safeMetadata: Record<string, unknown>;
+  clientItemId?: string;
+}
 
 export class MemoryService {
   private readonly mebular: Mebular;
@@ -646,9 +752,14 @@ export class MemoryService {
       const ok = await this.mebular.graph.deleteNode(id);
       (ok ? deleted : notFound).push(id);
     }
-    return internal.length > 0
+    // O6 / API-34：记录删除级联墓碑其链接详情；仅当没有其他 live 记录引用该详情。
+    // Compact 只由 source 状态变 stale，不在此级联删除。
+    const detailsDeleted = deleted.length > 0 ? await this.cascadeDetailTombstones(deleted) : [];
+    const result: DeleteResult = internal.length > 0
       ? { deleted, notFound, internal }
       : { deleted, notFound };
+    if (detailsDeleted.length > 0) result.detailsDeleted = detailsDeleted;
+    return result;
   }
 
   /**
@@ -682,7 +793,238 @@ export class MemoryService {
       : { archived: archivedIds, unarchived: unarchivedIds, notFound, skipped };
   }
 
+  // ---------- 域内详情（DetailRecord / RawChunk，0.3.0 §2） ----------
+
+  /**
+   * 批量写入详情（capability `/detail op=write` 的唯一落库入口）。
+   *
+   * - 校验原子：所有 item 的域、recordIds、retention、大小先全部通过；
+   * - 落库逐项：配额失败只影响该项（结果 code=detail_quota_exceeded），不静默丢弃；
+   * - 复用现有图 + 事件日志，不建第二套存储/同步。
+   */
+  async writeDetails(
+    inputs: DetailWriteInput[],
+    options: DetailWriteOptions = {},
+  ): Promise<DetailWriteBatchResult> {
+    if (!Array.isArray(inputs) || inputs.length === 0) {
+      throw new ValidationError('items 必须是非空数组', { field: 'items' });
+    }
+    if (inputs.length > MAX_DETAIL_BATCH_ITEMS) {
+      throw new ValidationError(`items 最多 ${MAX_DETAIL_BATCH_ITEMS} 条`, {
+        field: 'items',
+        maxBatchItems: MAX_DETAIL_BATCH_ITEMS,
+      });
+    }
+    const now = options.now ?? Date.now();
+    const userId = options.userId ?? 'user';
+    const limits: DetailQuotaLimits = {
+      ...DEFAULT_DETAIL_QUOTA_LIMITS,
+      ...(options.detailLimits ?? {}),
+    };
+
+    const plans: DetailWritePlan[] = [];
+    for (let index = 0; index < inputs.length; index += 1) {
+      plans.push(await this.validateDetailWrite(inputs[index]!, index, now, userId));
+    }
+
+    const live = (await this.detailNodes()).filter((node) => !node.deletedAt);
+    const dedupe = new Map<string, Node>();
+    for (const node of live) {
+      const content = isRecord(node.content) ? node.content : {};
+      const domain = domainOfNamespace(node.namespace);
+      const key = detailDedupeKey({
+        domain,
+        detailKind: content.detailKind as DetailKind,
+        contentHash: typeof content.contentHash === 'string' ? content.contentHash : '',
+        chunkIndex: typeof content.chunkIndex === 'number' ? content.chunkIndex : 0,
+      });
+      dedupe.set(key, node);
+      const clientItemId = node.metadata?.clientItemId;
+      if (typeof clientItemId === 'string') {
+        dedupe.set(detailClientDedupeKey(domain, clientItemId), node);
+      }
+    }
+
+    const results: DetailWriteResultEntry[] = [];
+    const evicted: string[] = [];
+    let created = 0;
+    let duplicates = 0;
+    let failed = 0;
+
+    for (const plan of plans) {
+      const contentKey = detailDedupeKey(plan);
+      const clientKey = plan.clientItemId !== undefined
+        ? detailClientDedupeKey(plan.domain, plan.clientItemId)
+        : null;
+      const existing = (clientKey !== null ? dedupe.get(clientKey) : undefined) ?? dedupe.get(contentKey);
+      if (existing) {
+        duplicates += 1;
+        results.push(detailResultEntry('duplicate', plan, existing.id));
+        continue;
+      }
+      let createdNode: Node | null = null;
+      try {
+        const evictedForItem = await this.ensureDetailQuota(plan, live, limits);
+        evicted.push(...evictedForItem);
+        createdNode = await this.mebular.graph.createNode(DETAIL_NODE_TYPE, plan.content, undefined, {
+          namespace: plan.domain,
+        });
+        const node = await this.mebular.graph.updateNode(createdNode.id, {
+          metadata: this.detailMetadata(plan),
+        });
+        if (!node) {
+          throw new ValidationError('详情写入后读取失败', { index: plan.index, id: createdNode.id });
+        }
+        await this.refreshRecordDetailAvailability(plan.recordIds);
+        live.push(node);
+        dedupe.set(contentKey, node);
+        if (clientKey !== null) dedupe.set(clientKey, node);
+        created += 1;
+        results.push(detailResultEntry('created', plan, node.id));
+      } catch (error) {
+        if (createdNode) {
+          // 元数据合并失败时不要把半成品暴露给列表/召回；写墓碑后按失败项返回。
+          await this.mebular.graph.deleteNode(createdNode.id).catch(() => undefined);
+        }
+        if (error instanceof DetailQuotaError) {
+          if (Array.isArray(error.details?.evicted)) {
+            for (const id of error.details.evicted) {
+              if (typeof id === 'string' && !evicted.includes(id)) evicted.push(id);
+            }
+          }
+          failed += 1;
+          results.push({
+            ...(plan.clientItemId !== undefined ? { clientItemId: plan.clientItemId } : {}),
+            status: 'failed',
+            domain: plan.domain,
+            detailKind: plan.detailKind,
+            contentHash: plan.contentHash,
+            ownerType: plan.ownerType,
+            ownerId: plan.ownerId,
+            code: 'detail_quota_exceeded',
+            retryable: false,
+            message: error.message,
+            details: error.details,
+          });
+          continue;
+        }
+        failed += 1;
+        results.push({
+          ...(plan.clientItemId !== undefined ? { clientItemId: plan.clientItemId } : {}),
+          status: 'failed',
+          domain: plan.domain,
+          detailKind: plan.detailKind,
+          contentHash: plan.contentHash,
+          ownerType: plan.ownerType,
+          ownerId: plan.ownerId,
+          code: 'internal',
+          retryable: true,
+        });
+      }
+    }
+
+    return {
+      results,
+      created,
+      duplicates,
+      failed,
+      partial: failed > 0,
+      evicted,
+    };
+  }
+
+  /** capability `/detail op=get`：返回详情视图（是否过期/删除由 availability 表达）。 */
+  async getDetail(id: string, options: DetailReadOptions = {}): Promise<DetailView | null> {
+    const node = await this.mebular.graph.getNode(id);
+    if (!isDetailNode(node)) return null;
+    return detailView(node, { userId: options.userId ?? 'user', ...options });
+  }
+
+  /** capability `/detail op=list`：默认只返回未过期、未删除详情；list 不带正文。 */
+  async listDetails(options: DetailListOptions = {}): Promise<DetailListResult> {
+    const now = options.now ?? Date.now();
+    const userId = options.userId ?? 'user';
+    const nodes = (await this.detailNodes())
+      .filter((node) => detailMatchesFilters(node, options, now))
+      .sort((a, b) => {
+        const delta = (b.createdAt ?? 0) - (a.createdAt ?? 0);
+        if (delta !== 0) return delta;
+        return String(b.id).localeCompare(String(a.id));
+      });
+    const total = nodes.length;
+    const offset = typeof options.offset === 'number' && Number.isFinite(options.offset)
+      ? Math.max(0, Math.trunc(options.offset))
+      : 0;
+    const limit = typeof options.limit === 'number' && Number.isFinite(options.limit)
+      ? Math.min(Math.max(1, Math.trunc(options.limit)), MAX_DETAIL_LIST_LIMIT)
+      : 20;
+    const page = nodes.slice(offset, offset + limit);
+    return {
+      details: page.map((node) => detailListView(node, {
+        userId,
+        includeDeleted: options.includeDeleted === true,
+        includeExpired: options.includeExpired === true,
+        now,
+      })),
+      total,
+      offset,
+      limit,
+      hasMore: offset + page.length < total,
+    };
+  }
+
+  /**
+   * capability `/detail op=delete`：写墓碑，不删除 MemoryRecord。
+   * agent 只能删除自己域内、自己写入的详情；user/system 可治理全部。
+   */
+  async deleteDetails(ids: string[], options: DetailDeleteOptions = {}): Promise<DetailDeleteResult> {
+    if (!Array.isArray(ids) || ids.length === 0) {
+      throw new ValidationError('ids 必须是非空数组', { field: 'ids' });
+    }
+    const reason = options.reason ?? 'user_requested';
+    if (!isDetailDeleteReason(reason)) {
+      throw new ValidationError('reason 非法', { field: 'reason', reason });
+    }
+    const actorType = options.actorType ?? 'system';
+    const deleted: string[] = [];
+    const notFound: string[] = [];
+    const forbidden: string[] = [];
+    for (const id of [...new Set(ids)]) {
+      const node = await this.mebular.graph.getNode(id);
+      if (!isDetailNode(node) || node.deletedAt) {
+        notFound.push(id);
+        continue;
+      }
+      if (!this.canGovernDetail(actorType, options.agentId, node)) {
+        forbidden.push(id);
+        continue;
+      }
+      const ok = await this.tombstoneDetailNode(node, reason);
+      (ok ? deleted : notFound).push(id);
+    }
+    return {
+      deleted,
+      notFound,
+      forbidden,
+      partial: notFound.length > 0 || forbidden.length > 0,
+    };
+  }
+
+  /** 维护：按 retention 过期写墓碑（不做模型摘要，不做第二套存储）。 */
+  async pruneExpiredDetails(options: PruneDetailsOptions = {}): Promise<string[]> {
+    const now = options.now ?? Date.now();
+    const pruned: string[] = [];
+    for (const node of await this.detailNodes()) {
+      if (node.deletedAt || !isDetailExpired(node, now)) continue;
+      if (await this.tombstoneDetailNode(node, 'retention_expired')) {
+        pruned.push(node.id);
+      }
+    }
+    return pruned;
+  }
+
   // ---------- 图 / 导入 / 状态 / 同步 ----------
+
 
   async graph(
     startId: string,
@@ -742,6 +1084,8 @@ export class MemoryService {
       compacts: 0,
       checkpoints: 0,
       selfRecords: 0,
+      details: 0,
+      detailBytes: 0,
     };
     for (const entry of list) {
       counts.nodes += entry.count;
@@ -749,11 +1093,14 @@ export class MemoryService {
       counts.compacts += entry.internalKinds.compact ?? 0;
       counts.checkpoints += entry.internalKinds.context_checkpoint ?? 0;
       counts.selfRecords += entry.internalKinds.self_record ?? 0;
+      counts.details += entry.internalKinds.detail_record ?? 0;
+      counts.detailBytes += entry.detailBytes;
     }
     return {
       nodeCount: nodes.length,
       edgeCount: edges.length,
       counts,
+      detailQuota: { ...DEFAULT_DETAIL_QUOTA_LIMITS },
       domains: list,
     };
   }
@@ -1097,6 +1444,452 @@ export class MemoryService {
     return { node, vectorIndexed };
   }
 
+  private async validateDetailWrite(
+    input: DetailWriteInput,
+    index: number,
+    now: number,
+    userId: string,
+  ): Promise<DetailWritePlan> {
+    if (!isRecord(input)) throw detailValidationError(index, 'item', 'item 必须是对象');
+    const raw = input as unknown as Record<string, unknown>;
+    if (typeof raw.domain !== 'string' || raw.domain.trim() === '') {
+      throw detailValidationError(index, 'domain', 'domain 必填');
+    }
+    const domain = raw.domain.trim();
+    if (domain.length > 128 || domain.startsWith('__')) {
+      throw detailValidationError(index, 'domain', 'domain 非法', { domain });
+    }
+    if (!isDetailKind(raw.detailKind)) {
+      throw detailValidationError(index, 'detailKind', 'detailKind 非法');
+    }
+    if (typeof raw.text !== 'string' || raw.text.trim() === '') {
+      throw detailValidationError(index, 'text', 'text 必须是非空字符串');
+    }
+    if (detailTextBytes(raw.text) > MAX_DETAIL_TEXT_BYTES) {
+      throw new ValidationError(`text 超过 ${MAX_DETAIL_TEXT_BYTES} 字节`, {
+        index,
+        field: 'text',
+        maxBytes: MAX_DETAIL_TEXT_BYTES,
+      });
+    }
+    const contentHash = detailContentHash(raw.text);
+    if (raw.contentHash !== undefined && raw.contentHash !== contentHash) {
+      throw detailValidationError(index, 'contentHash', 'contentHash 必须等于 sha256(text)', {
+        expected: contentHash,
+      });
+    }
+    if (raw.mime !== undefined && !isDetailMime(raw.mime)) {
+      throw detailValidationError(index, 'mime', 'mime 非法');
+    }
+    if (raw.role !== undefined && !isDetailRole(raw.role)) {
+      throw detailValidationError(index, 'role', 'role 非法');
+    }
+    if (raw.detailKind === 'raw_chunk' && raw.role === undefined) {
+      throw detailValidationError(index, 'role', 'raw_chunk 需要 role');
+    }
+    if (raw.messageId !== undefined
+      && (typeof raw.messageId !== 'string' || raw.messageId.length > MAX_DETAIL_MESSAGE_ID_CHARS)) {
+      throw detailValidationError(index, 'messageId', `messageId 需为 1–${MAX_DETAIL_MESSAGE_ID_CHARS} 字符`);
+    }
+    const chunkIndex = raw.chunkIndex === undefined ? 0 : raw.chunkIndex;
+    if (typeof chunkIndex !== 'number' || !Number.isInteger(chunkIndex) || chunkIndex < 0) {
+      throw detailValidationError(index, 'chunkIndex', 'chunkIndex 必须是非负整数');
+    }
+    if (raw.turn !== undefined
+      && (typeof raw.turn !== 'number' || !Number.isInteger(raw.turn) || raw.turn < 0)) {
+      throw detailValidationError(index, 'turn', 'turn 必须是非负整数');
+    }
+
+    const provenanceInput = isRecord(raw.provenance) ? { ...raw.provenance } : {};
+    if (raw.provenance !== undefined && raw.provenance !== null && !isRecord(raw.provenance)) {
+      throw detailValidationError(index, 'provenance', 'provenance 必须是对象');
+    }
+    let threadId: string | undefined;
+    if (raw.threadId !== undefined && raw.threadId !== null && typeof raw.threadId !== 'string') {
+      throw detailValidationError(index, 'threadId', 'threadId 必须是字符串');
+    }
+    if (typeof raw.threadId === 'string') threadId = raw.threadId;
+    else if (typeof provenanceInput.threadId === 'string') threadId = provenanceInput.threadId;
+    if (domain.startsWith('task:')) {
+      const expected = domain.slice('task:'.length);
+      if (threadId !== undefined && threadId !== expected) {
+        throw detailValidationError(index, 'threadId', 'task 域详情 threadId 必须与域一致', {
+          domain,
+          expected,
+        });
+      }
+      threadId = expected;
+    }
+    if (threadId !== undefined && !THREAD_ID_PATTERN.test(threadId)) {
+      throw detailValidationError(index, 'threadId', 'threadId 格式非法');
+    }
+    if (typeof provenanceInput.threadId === 'string'
+      && threadId !== undefined
+      && provenanceInput.threadId !== threadId) {
+      throw detailValidationError(index, 'provenance.threadId', 'provenance.threadId 与详情 threadId 不一致');
+    }
+    const provenance: Record<string, unknown> = {
+      source: 'runtime',
+      writerType: 'system',
+      writerId: 'system',
+      extractor: 'heuristic',
+      model: null,
+      version: '0.3.0',
+      deviceId: null,
+      hostId: null,
+      threadId: threadId ?? null,
+      agentId: null,
+      agentName: null,
+      messageIds: [],
+      rawChunkIds: [],
+      confirmation: 'none',
+      at: now,
+      ...provenanceInput,
+    };
+    provenance.threadId = threadId ?? provenance.threadId ?? null;
+
+    if (!Array.isArray(raw.recordIds) || raw.recordIds.length === 0) {
+      throw detailValidationError(index, 'recordIds', 'recordIds 必须是非空数组');
+    }
+    if (raw.recordIds.length > MAX_DETAIL_RECORD_IDS) {
+      throw detailValidationError(index, 'recordIds', `recordIds 最多 ${MAX_DETAIL_RECORD_IDS} 项`);
+    }
+    const recordIds: string[] = [];
+    for (const entry of raw.recordIds) {
+      if (typeof entry !== 'string' || entry.length === 0 || entry.length > 128) {
+        throw detailValidationError(index, 'recordIds', 'recordIds 含非法节点 id');
+      }
+      if (recordIds.includes(entry)) continue;
+      const target = await this.mebular.graph.getNode(entry);
+      if (!target || target.deletedAt) {
+        throw detailValidationError(index, 'recordIds', 'recordIds 指向的记录不存在或已删除', { id: entry });
+      }
+      if (isInternalNode(target)) {
+        const internalKind = target.metadata?.internalObject && typeof target.metadata.internalObject === 'object'
+          ? (target.metadata.internalObject as { kind?: unknown }).kind
+          : null;
+        if (internalKind !== 'context_checkpoint' && internalKind !== 'detail_record') {
+          throw detailValidationError(index, 'recordIds', 'recordIds 不能指向该内部对象', { id: entry });
+        }
+      }
+      const targetDomain = domainOfNamespace(target.namespace);
+      if (targetDomain !== domain) {
+        throw detailValidationError(index, 'recordIds', 'recordIds 必须与详情同域', {
+          id: entry,
+          domain,
+          recordDomain: targetDomain,
+        });
+      }
+      recordIds.push(entry);
+    }
+    if (recordIds.length === 0) {
+      throw detailValidationError(index, 'recordIds', '没有可链接的记录；详情不应写入');
+    }
+
+    const retentionClass: DetailRetentionClass = raw.retentionClass === undefined
+      ? 'conversation'
+      : raw.retentionClass as DetailRetentionClass;
+    if (!isDetailRetentionClass(retentionClass)) {
+      throw detailValidationError(index, 'retentionClass', 'retentionClass 非法');
+    }
+    let expiresAt: number;
+    try {
+      if (raw.expiresAt !== undefined && raw.expiresAt !== null
+        && (typeof raw.expiresAt !== 'number' || !Number.isFinite(raw.expiresAt) || raw.expiresAt < 0)) {
+        throw new RangeError('expiresAt 必须是非负有限数字');
+      }
+      expiresAt = resolveDetailExpiresAt(
+        retentionClass,
+        typeof raw.expiresAt === 'number' ? raw.expiresAt : undefined,
+        now,
+      );
+    } catch (error) {
+      throw detailValidationError(index, 'expiresAt', (error as Error).message);
+    }
+
+    const owner = deriveDetailOwner(domain, { userId });
+    if (raw.ownerType !== undefined && raw.ownerType !== owner.ownerType) {
+      throw detailValidationError(index, 'ownerType', 'ownerType 与服务端推导不一致', {
+        expected: owner.ownerType,
+      });
+    }
+    if (raw.ownerId !== undefined && raw.ownerId !== owner.ownerId) {
+      throw detailValidationError(index, 'ownerId', 'ownerId 与服务端推导不一致', {
+        expected: owner.ownerId,
+      });
+    }
+
+    let clientItemId: string | undefined;
+    if (raw.clientItemId !== undefined) {
+      if (typeof raw.clientItemId !== 'string' || !/^[A-Za-z0-9._:-]{1,128}$/.test(raw.clientItemId)) {
+        throw detailValidationError(index, 'clientItemId', 'clientItemId 格式非法');
+      }
+      clientItemId = raw.clientItemId;
+    }
+
+    const safeMetadata: Record<string, unknown> = isRecord(raw.metadata) ? { ...raw.metadata } : {};
+    if (raw.metadata !== undefined && raw.metadata !== null && !isRecord(raw.metadata)) {
+      throw detailValidationError(index, 'metadata', 'metadata 必须是对象');
+    }
+    if (raw.redaction !== undefined && raw.redaction !== null && !isRecord(raw.redaction)) {
+      throw detailValidationError(index, 'redaction', 'redaction 必须是对象');
+    }
+    for (const key of Object.keys(safeMetadata)) {
+      if (DETAIL_PROTECTED_METADATA_KEYS.has(key)) {
+        throw detailValidationError(index, `metadata.${key}`, 'metadata 含受保护字段', { field: key });
+      }
+    }
+
+    const content = buildDetailContent({
+      ...input,
+      detailKind: raw.detailKind,
+      text: raw.text,
+      mime: raw.mime as DetailWriteInput['mime'],
+      role: raw.role as DetailWriteInput['role'],
+      messageId: raw.messageId as string | undefined,
+      chunkIndex,
+      turn: raw.turn as number | undefined,
+      threadId: threadId ?? undefined,
+      recordIds,
+      redaction: normalizeRedaction(input.redaction),
+      retentionClass,
+    }, {
+      contentHash,
+      expiresAt,
+      threadId: threadId ?? null,
+    });
+
+    return {
+      index,
+      domain,
+      detailKind: raw.detailKind,
+      text: raw.text,
+      contentHash,
+      chunkIndex,
+      threadId: threadId ?? null,
+      recordIds,
+      retentionClass,
+      expiresAt,
+      ownerType: owner.ownerType,
+      ownerId: owner.ownerId,
+      content,
+      provenance,
+      safeMetadata,
+      ...(clientItemId !== undefined ? { clientItemId } : {}),
+    };
+  }
+
+  private detailMetadata(plan: DetailWritePlan): Record<string, unknown> {
+    return {
+      internal: true,
+      internalObject: {
+        schema: 1,
+        kind: 'detail_record',
+        detailKind: plan.detailKind,
+        ...(plan.threadId !== null ? { threadId: plan.threadId } : {}),
+        recordIds: [...plan.recordIds],
+        contentHash: plan.contentHash,
+        expiresAt: plan.expiresAt,
+      },
+      provenance: plan.provenance,
+      ...(plan.clientItemId !== undefined ? { clientItemId: plan.clientItemId } : {}),
+      ...plan.safeMetadata,
+    };
+  }
+
+  private async detailNodes(): Promise<Node[]> {
+    let nodes: Node[];
+    try {
+      nodes = await this.mebular.graph.listNodes({ type: DETAIL_NODE_TYPE });
+    } catch {
+      nodes = [];
+    }
+    if (nodes.length === 0) {
+      nodes = await this.allStorageNodes();
+    }
+    const seen = new Set<string>();
+    const out: Node[] = [];
+    for (const node of nodes) {
+      if (!isDetailNode(node) || seen.has(node.id)) continue;
+      seen.add(node.id);
+      out.push(node);
+    }
+    return out;
+  }
+
+  private async ensureDetailQuota(
+    plan: DetailWritePlan,
+    live: Node[],
+    limits: DetailQuotaLimits,
+  ): Promise<string[]> {
+    const incoming = detailTextBytes(plan.text);
+    const evicted: string[] = [];
+    const usageWhere = (predicate: (node: Node) => boolean): number =>
+      live.reduce((sum, node) => sum + (predicate(node) ? detailBytes(node) : 0), 0);
+    const domainUsage = (domain: string): number =>
+      usageWhere((node) => domainOfNamespace(node.namespace) === domain);
+    const threadUsage = (threadId: string): number =>
+      usageWhere((node) => {
+        const content = isRecord(node.content) ? node.content : {};
+        return content.threadId === threadId;
+      });
+    const evictionPriority = (node: Node): number => {
+      const retention = detailRetentionClass(node);
+      if (retention === 'tool_output') return 0;
+      if (retention === 'conversation') return 1;
+      return 2;
+    };
+
+    const evictOldest = async (
+      scope: 'domain' | 'cloud' | 'thread',
+      limit: number,
+      used: () => number,
+      matcher: (node: Node) => boolean,
+      extra: Record<string, unknown>,
+    ): Promise<void> => {
+      while (used() + incoming > limit) {
+        const domainBytes = new Map<string, number>();
+        if (scope === 'cloud') {
+          for (const node of live) {
+            const domain = domainOfNamespace(node.namespace);
+            domainBytes.set(domain, (domainBytes.get(domain) ?? 0) + detailBytes(node));
+          }
+        }
+        const candidates = live
+          .filter((node) => !node.deletedAt && matcher(node) && evictionPriority(node) < 2)
+          .sort((a, b) => {
+            if (scope === 'cloud') {
+              // 单云总量：按域公平淘汰（当前占用最大的域先让出空间）。
+              const aDomain = domainOfNamespace(a.namespace);
+              const bDomain = domainOfNamespace(b.namespace);
+              const bytesDelta = (domainBytes.get(bDomain) ?? 0) - (domainBytes.get(aDomain) ?? 0);
+              if (bytesDelta !== 0) return bytesDelta;
+            }
+            const priorityDelta = evictionPriority(a) - evictionPriority(b);
+            if (priorityDelta !== 0) return priorityDelta;
+            return (a.createdAt ?? 0) - (b.createdAt ?? 0) || String(a.id).localeCompare(String(b.id));
+          });
+        const candidate = candidates[0];
+        if (!candidate) {
+          throw new DetailQuotaError('详情配额超限且无法淘汰', {
+            ...extra,
+            limitBytes: limit,
+            usedBytes: used(),
+            requiredBytes: used() + incoming,
+            evicted: [...evicted],
+          });
+        }
+        const ok = await this.tombstoneDetailNode(candidate, 'quota_evicted');
+        const position = live.indexOf(candidate);
+        if (position >= 0) live.splice(position, 1);
+        if (ok) evicted.push(candidate.id);
+      }
+    };
+
+    await evictOldest(
+      'domain',
+      limits.domainBytes,
+      () => domainUsage(plan.domain),
+      (node) => domainOfNamespace(node.namespace) === plan.domain,
+      { scope: 'domain', domain: plan.domain },
+    );
+    await evictOldest(
+      'cloud',
+      limits.cloudBytes,
+      () => usageWhere(() => true),
+      () => true,
+      { scope: 'cloud' },
+    );
+    if (plan.threadId !== null) {
+      await evictOldest(
+        'thread',
+        limits.threadBytes,
+        () => threadUsage(plan.threadId!),
+        (node) => {
+          const content = isRecord(node.content) ? node.content : {};
+          return content.threadId === plan.threadId;
+        },
+        { scope: 'thread', threadId: plan.threadId },
+      );
+    }
+    return evicted;
+  }
+
+  private async tombstoneDetailNode(node: Node, reason: DetailDeleteReason): Promise<boolean> {
+    if (node.deletedAt) return false;
+    const metadata = {
+      ...(isRecord(node.metadata) ? node.metadata : {}),
+      deletedReason: reason,
+    };
+    await this.mebular.graph.updateNode(node.id, { metadata });
+    const ok = await this.mebular.graph.deleteNode(node.id);
+    if (ok) {
+      await this.refreshRecordDetailAvailability(detailRecordIds(node));
+    }
+    return ok;
+  }
+
+  private async refreshRecordDetailAvailability(recordIds: string[]): Promise<void> {
+    const unique = [...new Set(recordIds)];
+    if (unique.length === 0) return;
+    const liveDetails = (await this.detailNodes())
+      .filter((node) => !node.deletedAt && !isDetailExpired(node));
+    for (const id of unique) {
+      const record = await this.mebular.graph.getNode(id);
+      if (!record || record.deletedAt || isInternalNode(record)) continue;
+      const referenced = liveDetails.some((detail) => detailRecordIds(detail).includes(id));
+      const metadata = isRecord(record.metadata) ? record.metadata : {};
+      if (referenced && metadata.detailAvailable === false) {
+        await this.mebular.graph.updateNode(id, { metadata: { ...metadata, detailAvailable: true } });
+      } else if (!referenced && metadata.detailAvailable !== false) {
+        await this.mebular.graph.updateNode(id, { metadata: { ...metadata, detailAvailable: false } });
+      }
+    }
+  }
+
+  private canGovernDetail(
+    actorType: 'agent' | 'user' | 'system',
+    agentId: string | undefined,
+    node: Node,
+  ): boolean {
+    if (actorType === 'user' || actorType === 'system') return true;
+    if (actorType !== 'agent' || typeof agentId !== 'string') return false;
+    if (domainOfNamespace(node.namespace) !== `agent:${agentId}`) return false;
+    const provenance = isRecord(node.metadata?.provenance) ? node.metadata.provenance : {};
+    return provenance.writerId === agentId;
+  }
+
+  private async cascadeDetailTombstones(recordIds: string[]): Promise<string[]> {
+    const deletedIds = new Set(recordIds);
+    if (deletedIds.size === 0) return [];
+    const detailsDeleted: string[] = [];
+    for (const detail of await this.detailNodes()) {
+      if (detail.deletedAt) continue;
+      const refs = detailRecordIds(detail);
+      if (!refs.some((id) => deletedIds.has(id))) continue;
+      let hasLiveOther = false;
+      for (const otherId of refs) {
+        if (deletedIds.has(otherId)) continue;
+        const other = await this.mebular.graph.getNode(otherId);
+        if (!other || other.deletedAt) continue;
+        const internalKind = other.metadata?.internalObject && typeof other.metadata.internalObject === 'object'
+          ? (other.metadata.internalObject as { kind?: unknown }).kind
+          : null;
+        if (!isInternalNode(other)
+          || internalKind === 'context_checkpoint'
+          || internalKind === 'detail_record') {
+          hasLiveOther = true;
+          break;
+        }
+      }
+      if (hasLiveOther) continue;
+      if (await this.tombstoneDetailNode(detail, 'record_deleted')) {
+        detailsDeleted.push(detail.id);
+      }
+    }
+    return detailsDeleted;
+  }
+
   private async allStorageNodes(): Promise<Node[]> {
     return this.mebular.storage.listNodes();
   }
@@ -1162,6 +1955,48 @@ function optionalStringArray(value: unknown): string[] | undefined {
   return value.filter((entry): entry is string => typeof entry === 'string');
 }
 
+function detailValidationError(
+  index: number,
+  field: string,
+  message: string,
+  extra?: Record<string, unknown>,
+): ValidationError {
+  return new ValidationError(message, { index, field, ...(extra ?? {}) });
+}
+
+function detailDedupeKey(value: {
+  domain: string;
+  detailKind: DetailKind;
+  contentHash: string;
+  chunkIndex: number;
+}): string {
+  return `content\u0000${value.domain}\u0000${value.detailKind}\u0000${value.contentHash}\u0000${value.chunkIndex}`;
+}
+
+function detailClientDedupeKey(domain: string, clientItemId: string): string {
+  return `client\u0000${domain}\u0000${clientItemId}`;
+}
+
+function detailResultEntry(
+  status: 'created' | 'duplicate',
+  plan: DetailWritePlan,
+  id: string,
+): DetailWriteResultEntry {
+  return {
+    ...(plan.clientItemId !== undefined ? { clientItemId: plan.clientItemId } : {}),
+    status,
+    id,
+    type: DETAIL_NODE_TYPE,
+    kind: DETAIL_NODE_TYPE,
+    domain: plan.domain,
+    detailKind: plan.detailKind,
+    contentHash: plan.contentHash,
+    ownerType: plan.ownerType,
+    ownerId: plan.ownerId,
+    ...(status === 'duplicate' ? { duplicate: true } : {}),
+  };
+}
+
 /** fact/preference 两种外部形状 → 统一三元组（preference 允许 entity/preferenceType/value）。 */
 function factContentFrom(content: Record<string, unknown>): {
   subject: string;
@@ -1195,11 +2030,13 @@ function domainStatsFromNodes(nodes: Node[], options: { includeReserved: boolean
         memoryRecords: 0,
         internalObjects: 0,
         internalKinds: {},
+        detailBytes: 0,
         lastUpdatedAt: 0,
       };
       domains.set(domain, entry);
     }
     entry.count += 1;
+    if (isDetailNode(node) && !node.deletedAt) entry.detailBytes += detailBytes(node);
     if (isInternalNode(node)) {
       entry.internalObjects += 1;
       const kind = internalObjectKindOf(node);

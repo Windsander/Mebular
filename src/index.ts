@@ -140,6 +140,10 @@ export {
   type MemoryRecordListOptions,
   type MemoryRecordList,
   type NamespaceStatsOptions,
+  type DeleteResult,
+  type ArchiveResult,
+  type DetailWriteOptions,
+  type PruneDetailsOptions,
 } from './memory/MemoryService.js';
 export { computeStateHash, computeStateHashByNamespace, isEvidenceNode } from './core/stateHash.js';
 export * from './hermes/index.js';

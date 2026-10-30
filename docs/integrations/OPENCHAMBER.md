@@ -7,7 +7,7 @@ OpenChamber is an OpenCode-based desktop host. Mebular supports it in two layers
 | Layer | What you get | Default |
 |---|---|---|
 | **MCP** | The official 29-tool Mebular server in OpenCode's global config | Available when configured |
-| **Memory Runtime** (`@mebular/opencode-plugin`) | Request-only recall, event ingest, compaction checkpoints, optional current-model extraction | Follows the sidecar discovery mode; no host-level enable/capture |
+| **Memory Runtime** (`@mebular/opencode-plugin`) | Request-only recall, event ingest, compaction checkpoints, optional current-model extraction | Follows the sidecar discovery mode; no host-level enable/collection switch |
 
 OpenChamber reuses OpenCode's global configuration. Mebular writes only the
 `mcp.servers.mebular` entry. It never writes OpenChamber's private
@@ -237,7 +237,7 @@ after a turn. This has three consequences:
   old `default` namespace is preserved as the third/Other fallback (`domain=default`) and
   is not rewritten to `user`.
 - MCP keeps only lifecycle keys (`memoryRuntime.enabled`, `memoryRuntime.command`,
-  `memoryRuntime.startTimeoutMs`). Capture, model, trace and retention settings belong to
+  `memoryRuntime.startTimeoutMs`). Detail/staging, model, trace and retention settings belong to
   `<home>/memory-runtime/config.json`, not to MCP `runtime.*` keys.
 - Checkpoints and SelfRecords have no local/cloud switch. There is no `sync=cloud`,
   `checkpoint.sync` or `self.sync`; all durable objects go through MCP and existing cloud

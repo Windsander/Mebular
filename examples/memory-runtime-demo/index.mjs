@@ -235,7 +235,6 @@ async function main() {
         agentId: AGENT_ID,
         agentName: AGENT_NAME,
         threadId,
-        capture: 'local',
         extractor: 'heuristic',
         chunks: [{
           role: 'user',
@@ -258,7 +257,6 @@ async function main() {
         agentId: AGENT_ID,
         agentName: AGENT_NAME,
         threadId,
-        capture: 'local',
         extractor: 'host',
         chunks: [{
           role: 'user',

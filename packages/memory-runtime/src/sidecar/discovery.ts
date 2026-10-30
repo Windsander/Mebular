@@ -35,6 +35,15 @@ export type SidecarState =
   | 'stopping'
   | 'failed';
 
+/**
+ * 产品模式与进程状态分离：
+ * - `immersive`：沉浸式，sidecar 运行并写 discovery；
+ * - `mcp`：轻量 MCP，不启动 sidecar、不写 discovery。
+ *
+ * sidecar 自己只会写 `immersive`；`mcp` 保留给未来的只读发现文档与兼容解析。
+ */
+export type SidecarMode = 'mcp' | 'immersive';
+
 export interface SidecarDiscoveryCapabilities {
   ingest: boolean;
   recall: boolean;
@@ -62,6 +71,7 @@ export interface SidecarDiscovery {
   minMcpVersion: string;
   maxMcpVersion: string;
   state: SidecarState;
+  mode: SidecarMode;
   degraded: boolean;
   tokenFile: string;
   startedAt: number;
@@ -84,6 +94,7 @@ export interface SidecarDiscoveryInput {
   minMcpVersion?: string;
   maxMcpVersion?: string;
   state?: SidecarState;
+  mode?: SidecarMode;
   degraded?: boolean;
   startedAt?: number;
   updatedAt?: number;
@@ -127,6 +138,7 @@ export function buildDiscovery(input: SidecarDiscoveryInput): SidecarDiscovery {
     minMcpVersion: input.minMcpVersion ?? SIDECAR_MIN_MCP_VERSION,
     maxMcpVersion: input.maxMcpVersion ?? SIDECAR_MAX_MCP_VERSION,
     state: input.state ?? 'ready',
+    mode: input.mode ?? 'immersive',
     degraded: input.degraded === true,
     tokenFile: input.tokenFile,
     startedAt: input.startedAt ?? Date.now(),
@@ -165,6 +177,7 @@ export async function writeDiscovery(path: string, discovery: SidecarDiscovery):
     minMcpVersion: discovery.minMcpVersion,
     maxMcpVersion: discovery.maxMcpVersion,
     state: discovery.state,
+    mode: discovery.mode === 'mcp' ? 'mcp' : 'immersive',
     degraded: discovery.degraded,
     tokenFile: discovery.tokenFile,
     startedAt: discovery.startedAt,
@@ -184,9 +197,12 @@ export async function writeDiscovery(path: string, discovery: SidecarDiscovery):
   return safe;
 }
 
-function isSidecarDiscovery(value: unknown): value is SidecarDiscovery {
+type StoredSidecarDiscovery = Omit<SidecarDiscovery, 'mode'> & { mode?: SidecarMode };
+
+function isStoredSidecarDiscovery(value: unknown): value is StoredSidecarDiscovery {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const record = value as Partial<SidecarDiscovery>;
+  if (record.mode !== undefined && record.mode !== 'mcp' && record.mode !== 'immersive') return false;
   return record.schema === DISCOVERY_SCHEMA
     && record.kind === DISCOVERY_KIND
     && typeof record.pid === 'number'
@@ -201,10 +217,14 @@ function isSidecarDiscovery(value: unknown): value is SidecarDiscovery {
     && typeof record.updatedAt === 'number';
 }
 
-/** 读取 discovery；缺失/损坏返回 null。 */
+/**
+ * 读取 discovery；缺失/损坏返回 null。
+ * 旧文档没有 `mode` 时按 `immersive` 归一化，下一次心跳会补写该字段。
+ */
 export async function readDiscovery(path: string): Promise<SidecarDiscovery | null> {
   const value = await readJsonFile<unknown>(path);
-  return isSidecarDiscovery(value) ? value : null;
+  if (!isStoredSidecarDiscovery(value)) return null;
+  return { ...value, mode: value.mode ?? 'immersive' };
 }
 
 /**

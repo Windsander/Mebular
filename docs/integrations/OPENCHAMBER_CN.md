@@ -7,7 +7,7 @@ OpenChamber 是基于 OpenCode 的桌面宿主。Mebular 通过两层接入：
 | 层 | 得到什么 | 默认 |
 |---|---|---|
 | **MCP** | OpenCode global 配置里的官方 29 工具 Mebular server | 配置后可用 |
-| **Memory Runtime**（`@mebular/opencode-plugin`） | request-only 召回、事件 ingest、压缩检查点、可选当前模型抽取 | 自动跟随 sidecar discovery 模式；无逐宿主 enable/capture |
+| **Memory Runtime**（`@mebular/opencode-plugin`） | request-only 召回、事件 ingest、压缩检查点、可选当前模型抽取 | 自动跟随 sidecar discovery 模式；无逐宿主 enable/采集开关 |
 
 OpenChamber 复用 OpenCode 的 global 配置。Mebular 只写 `mcp.servers.mebular`，永不写
 OpenChamber 私有的 `opencode.managed.json` 或 `run/instances` 下的实例副本。

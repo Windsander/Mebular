@@ -1,7 +1,7 @@
 // discovery：原子写入、0600、不泄露 token、pid 守卫删除、心跳与 stale 判定。
 
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
-import { mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -55,6 +55,7 @@ describe('sidecar discovery', () => {
     const raw = await readFile(path, 'utf8');
     expect(raw).not.toContain('secret-token');
     expect(raw).not.toMatch(/"token"\s*:/);
+    expect(raw).toContain('"mode":"immersive"');
 
     const parsed = await readDiscovery(path);
     expect(parsed).not.toBeNull();
@@ -63,6 +64,8 @@ describe('sidecar discovery', () => {
     expect(parsed?.healthUrl).toBe('http://127.0.0.1:7341/memory-runtime/v1/health');
     expect(parsed?.cloudId).toBe('cl_test');
     expect(parsed?.tokenFile).toBe(join(home, 'memory-runtime', 'host-token'));
+    expect(parsed?.state).toBe('ready');
+    expect(parsed?.mode).toBe('immersive');
 
     // 没有遗留临时文件（原子写）。
     const entries = await readdir(home);
@@ -100,8 +103,29 @@ describe('sidecar discovery', () => {
     expect(isDiscoveryDead({ updatedAt: 1000 }, 1000 + 30_000)).toBe(false);
   });
 
+  it('state 与 mode 分离：starting 状态仍写 immersive 模式', () => {
+    const discovery = make({ state: 'starting', mode: 'immersive' });
+    expect(discovery.state).toBe('starting');
+    expect(discovery.mode).toBe('immersive');
+  });
+
+  it('旧文档缺少 mode 时按 immersive 读取，心跳后补写 mode', async () => {
+    const legacy: Record<string, unknown> = { ...make() };
+    delete legacy.mode;
+    await writeFile(path, JSON.stringify(legacy), { mode: 0o600 });
+
+    expect((await readDiscovery(path))?.mode).toBe('immersive');
+    expect(await touchDiscovery(path, { pid: 4242, now: 3000 })).toBe(true);
+    const rewritten = JSON.parse(await readFile(path, 'utf8')) as { mode?: string };
+    expect(rewritten.mode).toBe('immersive');
+  });
+
+  it('未知 mode 的 discovery 视为损坏', async () => {
+    await writeFile(path, JSON.stringify({ ...make(), mode: 'local' }), { mode: 0o600 });
+    expect(await readDiscovery(path)).toBeNull();
+  });
+
   it('损坏的 discovery 不会被 pid 守卫误删', async () => {
-    const { writeFile } = await import('node:fs/promises');
     await writeFile(path, '{ broken', { mode: 0o600 });
     expect(await readDiscovery(path)).toBeNull();
     expect(await clearDiscovery(path, { pid: 4242 })).toBe(false);

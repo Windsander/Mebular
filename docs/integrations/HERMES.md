@@ -7,7 +7,7 @@ Hermes can use Mebular in two layers, and they can run together:
 | Layer | What Hermes gets | Default |
 |---|---|---|
 | **MCP** | The official Mebular MCP server: explicit `memory_*` and `task_*` tools | Available when configured |
-| **Memory Runtime** (`MemoryProvider`) | Automatic recall before a turn, turn/compaction ingest, state-only checkpoints, session-boundary archive | Follows the sidecar discovery mode; no host-level enable/capture |
+| **Memory Runtime** (`MemoryProvider`) | Automatic recall before a turn, turn/compaction ingest, state-only checkpoints, session-boundary archive | Follows the sidecar discovery mode; no host-level enable/collection switch |
 
 The provider lives in [`integrations/hermes/mebular-memory`](../../integrations/hermes/mebular-memory/).
 The optional companion lives in
@@ -244,7 +244,7 @@ never blocks Hermes compression.
   old `default` namespace is preserved and interpreted as the third/Other fallback
   (`domain=default`); it is not rewritten to `user`.
 - MCP keeps only lifecycle keys (`memoryRuntime.enabled`, `memoryRuntime.command`,
-  `memoryRuntime.startTimeoutMs`). Capture, model, trace and retention settings belong to
+  `memoryRuntime.startTimeoutMs`). Detail/staging, model, trace and retention settings belong to
   `<home>/memory-runtime/config.json`, not to MCP `runtime.*` keys.
 - Checkpoints and SelfRecords no longer have a local/cloud choice. There is no
   `sync=cloud`, `checkpoint.sync` or `self.sync`; every durable object is written through

@@ -825,6 +825,7 @@ export class SidecarServer {
           minMcpVersion: this.minMcpVersion,
           maxMcpVersion: this.maxMcpVersion,
           state: this.state,
+          mode: 'immersive',
           degraded: this.currentDegraded(),
           pid: process.pid,
           startedAt: this.startedAt,

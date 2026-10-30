@@ -96,6 +96,7 @@ describe('memory-runtime sidecar process', () => {
     expect(handle.discovery.pid).toBe(process.pid);
     expect(handle.discovery.port).toBe(handle.server.listenedPort);
     expect(handle.discovery.state).toBe('ready');
+    expect(handle.discovery.mode).toBe('immersive');
     expect(handle.discovery.degraded).toBe(false);
     expect(handle.discovery.capabilities.ingest).toBe(true);
     if (process.platform !== 'win32') {
@@ -113,6 +114,7 @@ describe('memory-runtime sidecar process', () => {
     const status = await fetch(`${handle.url}/status`, { headers: bearer('host-token') });
     expect(status.status).toBe(200);
     const body = await status.json() as any;
+    expect(body.data.mode).toBe('immersive');
     expect(body.data.counts).toMatchObject({ stagingChunks: 0, traces: 0, outbox: 0 });
     expect(body.data.details).toMatchObject({
       available: true,
@@ -120,6 +122,10 @@ describe('memory-runtime sidecar process', () => {
       cache: { days: 30 },
     });
     expect(body.data.identity.hostId).toMatch(/^h_/);
+
+    const version = await fetch(`${handle.url}/version`, { headers: bearer('host-token') });
+    expect(version.status).toBe(200);
+    expect((await version.json() as any).data.mode).toBe('immersive');
 
     await handle.stop();
     await handle.stop();
@@ -195,6 +201,7 @@ describe('memory-runtime sidecar process', () => {
       capabilityApiVersion: 1,
       minMcpVersion: '0.3.0',
       maxMcpVersion: '0.3.x',
+      mode: 'immersive',
       capabilities: { details: true },
       details: { stagingHours: 24, cacheDays: 30 },
     });

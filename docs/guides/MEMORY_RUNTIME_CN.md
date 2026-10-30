@@ -21,7 +21,7 @@ sidecar。沉浸式是每台设备显式开启的可选项。
           │ MCP daemon               │   │ Memory Runtime sidecar   │
           │ 29 个公共 MCP 工具        │◄──┤ ingest / recall / context│
           │ MemoryService            │   │ compact / self / trace   │
-          │ 图 + 事件日志 + 同步       │   │ Raw / Trace / cache /    │
+          │ 图 + 事件日志 + 同步       │   │ staging / cache / Trace /│
           │ /internal/memory/v1      │   │ outbox / 模型配置         │
           └────────────┬─────────────┘   └──────────────────────────┘
                        │
@@ -47,7 +47,7 @@ sidecar 是**独立进程**（`mebular-memory-runtime serve`）和独立包
 | 谁决定记什么 | 宿主模型通过工具决定 | sidecar 处理宿主显式发来的内容 |
 | 公共工具 | 29 个 `memory_*` / `task_*` | 仍是 29 个；不新增公共工具 |
 | 自动召回 | 无 | 显式开启；仅请求级，每个用户 turn 最多一次 |
-| 原始对话 | 不采集 | 默认 `capture=off`；仅显式请求时 `capture=local` |
+| 原始对话 | 不采集 | 按域采集；本机只 staging，沉降后的详情随图同步 |
 | 模型 | Mebular 不调用 | 只用你配置的来源；默认 `heuristic` |
 | 持久数据 | 现有图 + 事件 + 同步 | 同一张图 + 事件 + 同步，经 capability 写入 |
 
@@ -88,8 +88,9 @@ sidecar 是**独立进程**（`mebular-memory-runtime serve`）和独立包
    ```
 
 sidecar 就绪后会原子写入 `<home>/memory-runtime.json`。文件包含 URL、端口、版本、
-profile/忆云 ID 和 **`tokenFile`**（通常是 `<home>/memory-runtime/host-token`），但
-**不包含 token 本身**。宿主必须读发现文件，不要硬编码 7341 端口。
+profile/忆云 ID、`mode=immersive` 和 **`tokenFile`**（通常是
+`<home>/memory-runtime/host-token`），但**不包含 token 本身**。宿主必须读发现文件，不要
+硬编码 7341 端口。
 
 **host token** 由 sidecar 每次启动时生成，权限 `0600`，供宿主适配器访问
 `/memory-runtime/v1`。它不是 MCP capability token：capability token 由 MCP daemon
@@ -164,27 +165,31 @@ sidecar 数据目录是 `<home>/memory-runtime/`，其中只有过程数据：
 | `Compact` | 现有图，与来源同域 | 是 | 派生摘要；源记录不变 |
 | `SelfRecord` | 现有图，`agent:<agentId>` | 是 | Agent 自我模型；普通查询不可见 |
 | `ContextCheckpoint` | 现有图，`task:<threadId>` 或 `default` | 是 | 任务恢复点；revision/lease 由 MCP 执行 |
-| `RawChunk` | `<home>/memory-runtime/raw/` | **否** | 本机原始材料，默认保留 7 天 |
+| `DetailRecord` / `RawChunk` | 现有图 + 事件日志 | 保留期内且已订阅时可读 | 域内共享详情；`raw_chunk` 只是详情子类型 |
+| staging | `<home>/memory-runtime/staging/` | **否** | 未沉降 chunk；默认 24 小时，沉降成功后删除 |
+| 详情 cache | `<home>/memory-runtime/cache/details/` | **否** | 只读缓存；可能 stale，不是权威 |
 | `RecallTrace` | `<home>/memory-runtime/traces.jsonl` | **否** | 本机诊断，默认 7 天 / 2,000 条 |
 | cache / index | `<home>/memory-runtime/cache/` | 否 | 可重建；不是权威 |
 | outbox | `<home>/memory-runtime/outbox/` | 否 | 有界重试队列（默认 1,000 项 / 16 MiB）；成功后删除 |
 
 没有 `sync=cloud` / `sync=local` 开关，也没有本地 checkpoint 模式。checkpoint 和 self
 record 始终是忆云对象；本地 cache 只是缓存。删除整个 `<home>/memory-runtime/` 不会删除
-已沉降记忆——它们会从 MCP/图恢复。Raw 原文不跨设备；另一台设备只有已沉降记录时会如实
-说明，而不是假装引用原文。
+已沉降记忆——它们会从 MCP/图恢复。沉降后的详情是域内共享的图对象：只要仍在保留期内且域已
+订阅，其他设备也能展开原文/切片。本机 staging/cache 不是权威副本；只有过期、删除、配额
+淘汰或未订阅才会让详情不可用。
 
 有界 outbox 只用于 MCP 暂时不可达的情况。它不是第二套记忆库：条目是幂等写请求，成功后
 立即删除；永久失败会移动到 `outbox/dead/`，不会无限重试。
 
 ## 隐私与控制
 
-- **默认不采集。** sidecar 自身默认 `capture=off`：chunk 只在本次请求内使用，不落盘。
-  宿主可以针对某次 ingest 请求 `capture=local`；产品流程会在首次开启沉浸式时询问一次。
+- **采集跟随模式。** 轻量 MCP 不启动 sidecar，也不采集任何内容。沉浸式由宿主适配器按域
+  显式 `/ingest` 当前轮次；没有单独的采集开关，也没有首次开启的授权。staging 在本机，
+  详情沉降后进入图。
 - **默认不调用模型。** `heuristic` 在进程内运行，不发网络请求。不会自动下载模型文件。
   本地、host 和 API 来源都需要显式配置。
-- **Raw 和 Trace 留在本机。** 它们不进入图、事件、快照或同步。日志/状态不包含原文、
-  token 或密钥。
+- **staging 和 Trace 留在本机。** 未沉降的 staging chunk 与召回轨迹属于本机过程数据；
+  已沉降的详情是图对象，按域同步。日志/状态不包含原文、token 或密钥。
 - **注入的记忆是不可信背景数据。** 宿主把它放在仅请求级、非 instruction 的通道里，转义
   闭合标签，不执行记忆里出现的命令或工具调用。
 - **可以关闭。** 关闭 `memoryRuntime.enabled` 和/或停止 sidecar。若还要删除本地过程数据，
@@ -269,8 +274,9 @@ sidecar 故障绝不能阻塞 MCP 启动、工具、同步或鉴权。
 
 - 29 个公共 MCP 工具不变；不新增 `runtime_*` / `fragment_*` 工具。
 - 一个忆云、一个用户。没有多用户账号、namespace ACL 或按 Agent 的密码学隔离。
-- 不自动采集每一轮对话；只处理显式 `/ingest` 的内容。
-- 没有云端 Raw/Trace，不静默下载模型，不自动更新模型，不同步模型配置。
+- 不在后台扫描对话；只处理宿主适配器显式发来的 `/ingest`。
+- 没有第二套记忆库：沉降后的详情走现有图/事件/同步，召回轨迹留在本机。不静默下载模型，
+  不自动更新模型，不同步模型配置。
 - 不做破坏性压缩，不自动合并冲突事实。
 - 不做跨忆云联邦。
 - 删除是协作式的，离线对端可能延迟。

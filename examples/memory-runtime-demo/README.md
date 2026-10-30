@@ -27,9 +27,9 @@ node examples/memory-runtime-demo/index.mjs --home /tmp/mebular-memory-demo
    This is host-provided structured data, not a model call.
 3. **Broad recall** (“你还记得我的偏好吗？”) returns only the gist for the matching
    fragment. The demo asserts that no `detail` is attached.
-4. **Specific recall** (`7331`) expands the fact detail and asserts the raw value
-   `7331` is present. Because `capture=local` was requested, the demo also shows the
-   local Raw quote; it is never written into the graph.
+4. **Specific recall** (`7331`) expands the fact detail and asserts the original value
+   `7331` is present. The detail is a domain-shared record in the graph; local staging is
+   not the authoritative copy.
 5. **`/context`** assembles a request-ready block inside `maxBytes=2048` /
    `tokenBudget=500`, marked `trust=untrusted` and `purpose=background`.
 6. **Checkpoint** writes `task:<threadId>` through capability and reads it back from

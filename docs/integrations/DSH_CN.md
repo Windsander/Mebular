@@ -135,7 +135,7 @@ daemon child。service/外部 daemon 不会被插件停止。
 sidecar **不是** MCP daemon runtime。DSH 绝不把 `daemonUrl`、MCP 的 `runtime.json` 或 7331
 端口当作 sidecar，也不盲连 7341。适配器读取 `<home>/memory-runtime.json` 的 `mode` /
 `state` / `capabilities`；轻量 MCP 没有 discovery 时不发 sidecar 请求，工具面保持 0.2。
-**没有逐宿主 `memoryRuntime.enabled` / `capture` 开关**；旧字段忽略并 warning。
+**没有逐宿主 `memoryRuntime.enabled` / 采集开关**；旧字段忽略并 warning。
 
 ### 切换设备模式
 

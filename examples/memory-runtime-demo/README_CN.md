@@ -25,8 +25,8 @@ node examples/memory-runtime-demo/index.mjs --home /tmp/mebular-memory-demo
    结构化数据，不是模型调用。
 3. **宽泛 recall**（“你还记得我的偏好吗？”）只返回命中片段的 gist。脚本断言没有附加
    `detail`。
-4. **具体 recall**（`7331`）展开事实详情，并断言原值 `7331` 存在。因为请求了
-   `capture=local`，演示还会显示本机 Raw 原文；原文不会写入图。
+4. **具体 recall**（`7331`）展开事实详情，并断言原值 `7331` 存在。详情是写入图的域内
+   共享记录；本机 staging 不是权威副本。
 5. **`/context`** 在 `maxBytes=2048` / `tokenBudget=500` 内组装请求级块，标记
    `trust=untrusted`、`purpose=background`。
 6. **checkpoint** 通过 capability 写入 `task:<threadId>`，再从 sidecar 读回，显示

@@ -7,7 +7,7 @@ Hermes 可以通过两层接入 Mebular，两层可以同时使用：
 | 层 | Hermes 得到什么 | 默认 |
 |---|---|---|
 | **MCP** | 官方 Mebular MCP server：显式的 `memory_*` 与 `task_*` 工具 | 配置后可用 |
-| **Memory Runtime**（`MemoryProvider`） | 每轮自动召回、轮次/压缩 ingest、state-only 检查点、会话边界归档 | 自动跟随 sidecar discovery 模式；无逐宿主 enable/capture |
+| **Memory Runtime**（`MemoryProvider`） | 每轮自动召回、轮次/压缩 ingest、state-only 检查点、会话边界归档 | 自动跟随 sidecar discovery 模式；无逐宿主 enable/采集开关 |
 
 Provider 位于 [`integrations/hermes/mebular-memory`](../../integrations/hermes/mebular-memory/)；
 可选 companion 位于

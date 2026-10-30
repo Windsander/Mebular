@@ -151,7 +151,7 @@ The sidecar is **not** the MCP daemon runtime. DSH never reuses `daemonUrl`, the
 `runtime.json` or port 7331 as the sidecar address, and never blindly connects to 7341.
 The adapter reads `<home>/memory-runtime.json` (`mode` / `state` / `capabilities`). In
 light MCP there is no discovery file, so it sends no sidecar request and keeps the 0.2
-tool surface. There is **no per-host `memoryRuntime.enabled` or `capture` switch**;
+tool surface. There is **no per-host `memoryRuntime.enabled` or collection switch**;
 legacy values are ignored with a warning.
 
 ### Switch the device mode

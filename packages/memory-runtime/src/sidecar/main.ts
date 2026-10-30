@@ -162,6 +162,7 @@ export interface SidecarVersionResult {
   capabilityApiVersion: number;
   minMcpVersion: string;
   maxMcpVersion: string;
+  mode: 'immersive';
   nodeVersion: string;
   capabilities: {
     ingest: boolean;
@@ -596,6 +597,7 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
       minMcpVersion: SIDECAR_MIN_MCP_VERSION,
       maxMcpVersion: SIDECAR_MAX_MCP_VERSION,
       state: 'ready',
+      mode: 'immersive',
       degraded,
       startedAt,
       updatedAt: now(),
@@ -814,6 +816,7 @@ export function getSidecarVersion(): SidecarVersionResult {
     capabilityApiVersion: SIDECAR_CAPABILITY_API_VERSION,
     minMcpVersion: SIDECAR_MIN_MCP_VERSION,
     maxMcpVersion: SIDECAR_MAX_MCP_VERSION,
+    mode: 'immersive',
     nodeVersion: process.version,
     capabilities: {
       ingest: true,

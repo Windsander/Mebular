@@ -1,20 +1,24 @@
-// Real Mebular Runtime HTTP for host integration tests.
+// Real Mebular MCP daemon + capability API + Memory Runtime sidecar for host
+// integration tests.
 //
-// This starts the actual `startHttpServer` + `RuntimeService` path against a
-// disposable home. Model source is forced to `heuristic`; no local model is
-// downloaded and no API endpoint is configured. Raw/trace stay local under the
-// temp home so tests can assert what the real Runtime persisted.
+// This starts the actual `startHttpServer` with a real `MemoryService`, mounts
+// the real `/internal/memory/v1` capability API, and lets the real supervisor
+// spawn the sidecar. Seed/status/recall/checkpoint assertions go through the
+// real capability API (or the sidecar helper below); the obsolete prototype
+// `/runtime/v1` route is only probed to assert that it no longer exists.
 //
 // It is a test harness only: production code and the Mebular home directory
 // are never touched.
 
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { Mebular, IdentityManager, MemoryService } from '../../../../dist/index.js';
 import { buildServer } from '../../../../packages/mcp/src/server.mjs';
 import { hashToken, startHttpServer } from '../../../../packages/mcp/src/serve.mjs';
+import { readCapabilityToken } from '../../../../packages/mcp/src/memory-runtime-token.mjs';
 
 export const ALL_SCOPES = ['memory.read', 'memory.write', 'memory.admin'];
 
@@ -114,9 +118,6 @@ async function readSidecarJsonLines(home, relativePath) {
  * @param {{
  *   auth?: 'none' | 'bearer',
  *   token?: string,
- *   mode?: 'immersive' | 'mcp',
- *   capture?: 'off' | 'local',
- *   trace?: 'off' | 'local',
  *   root?: string | null,
  *   memoryRuntime?: { enabled?: boolean } | null,
  *   manageMemoryRuntime?: boolean,
@@ -127,10 +128,7 @@ export async function startRealRuntime(options = {}) {
   const token = typeof options.token === 'string' && options.token.length > 0
     ? options.token
     : 'host-e2e-runtime-token';
-  const mode = options.mode === 'mcp' ? 'mcp' : 'immersive';
-  const capture = options.capture === 'off' ? 'off' : 'local';
-  const trace = options.trace === 'off' ? 'off' : 'local';
-  const memoryRuntime = options.memoryRuntime ?? null;
+  const memoryRuntime = options.memoryRuntime ?? { enabled: true };
   const manageMemoryRuntime = options.manageMemoryRuntime !== false;
   const root = options.root ?? await mkdtemp(join(tmpdir(), 'mebular-host-e2e-runtime-'));
   const home = join(root, 'mebular-home');
@@ -166,22 +164,13 @@ export async function startRealRuntime(options = {}) {
     }, null, 2), { encoding: 'utf8', mode: 0o600 });
   }
 
+  const service = new MemoryService(app);
   const server = await startHttpServer({
     home,
     app,
-    // The Memory Capability API needs a real MemoryService.  Keep the legacy
-    // /runtime/v1-only suites on the original null-service harness.
-    service: memoryRuntime?.enabled === true ? new MemoryService(app) : null,
+    service,
     buildServer,
-    config: {
-      runtime: {
-        mode,
-        capture,
-        trace,
-        model: { source: 'heuristic' },
-      },
-      ...(memoryRuntime ? { memoryRuntime } : {}),
-    },
+    config: { memoryRuntime },
     host: '127.0.0.1',
     port: 0,
     auth,
@@ -190,119 +179,132 @@ export async function startRealRuntime(options = {}) {
   });
   const url = `http://127.0.0.1:${server.port}`;
 
-  function headers(extra = {}) {
-    return {
-      ...(auth === 'bearer' ? { authorization: `Bearer ${token}` } : {}),
-      ...extra,
-    };
+  async function capabilityToken() {
+    const record = await readCapabilityToken({ home });
+    if (typeof record?.token !== 'string' || record.token.length === 0) {
+      throw new Error('capability token missing (memoryRuntime.enabled must be true)');
+    }
+    return record.token;
   }
 
-  async function request(path, init = {}) {
-    const response = await fetch(`${url}${path}`, {
-      ...init,
-      headers: headers({
-        ...(init.body === undefined ? {} : { 'content-type': 'application/json' }),
-        ...(init.headers ?? {}),
-      }),
-    });
+  /** Authenticated request against the real MCP capability API. */
+  async function requestCapability(path, init = {}) {
+    const headers = {
+      accept: 'application/json',
+      authorization: `Bearer ${await capabilityToken()}`,
+      ...(init.body === undefined ? {} : { 'content-type': 'application/json' }),
+      ...(init.headers ?? {}),
+    };
+    const response = await fetch(`${url}/internal/memory/v1${path}`, { ...init, headers });
     let body = null;
     try {
       body = await response.json();
     } catch {
       body = null;
     }
-    return { status: response.status, body, headers: response.headers };
-  }
-
-  async function post(path, body) {
-    return request(path, { method: 'POST', body: JSON.stringify(body) });
+    return { status: response.status, body, data: body?.data ?? null, headers: response.headers };
   }
 
   async function status() {
-    const result = await request('/runtime/v1/status');
-    return result.body?.data ?? null;
+    const agentId = 'host-e2e';
+    const result = await requestCapability(`/status?agentId=${encodeURIComponent(agentId)}`);
+    if (result.status !== 200 || result.body?.ok !== true) {
+      throw new Error(`capability status failed: ${result.status} ${JSON.stringify(result.body)}`);
+    }
+    return result.data;
   }
 
   async function seedMemory({ text, namespace = 'default', agentId = 'host-e2e', threadId = 'th_host_e2e_seed' }) {
-    const result = await post('/runtime/v1/ingest', {
-      agentId,
-      threadId,
-      namespace,
-      capture,
-      chunks: [{ role: 'user', text, at: Date.now(), messageId: `seed-${Date.now()}` }],
+    const result = await requestCapability('/write', {
+      method: 'POST',
+      body: JSON.stringify({
+        actor: { type: 'agent', agentId },
+        ...(threadId ? { threadId } : {}),
+        items: [{
+          clientItemId: `seed-${randomUUID()}`,
+          domain: namespace,
+          // Episode/observation keeps the exact seed text as the record gist
+          // (fact rendering would prepend subject/predicate).
+          kind: 'episode',
+          content: { episodeType: 'observation', content: text },
+          provenance: {
+            source: 'mcp',
+            extractor: 'heuristic',
+            ...(threadId ? { threadId } : {}),
+          },
+        }],
+      }),
     });
     if (result.status !== 200 || result.body?.ok !== true) {
-      throw new Error(`seed ingest failed: ${result.status} ${JSON.stringify(result.body)}`);
+      throw new Error(`seed write failed: ${result.status} ${JSON.stringify(result.body)}`);
     }
-    return result.body.data;
-  }
-
-  async function seedCandidate({ candidate, namespace = 'default', agentId = 'host-e2e', threadId = 'th_host_e2e_seed_candidate' }) {
-    const result = await post('/runtime/v1/ingest', {
-      agentId,
-      threadId,
-      namespace,
-      capture: 'off',
-      extractor: 'host',
-      candidates: [candidate],
-    });
-    if (result.status !== 200 || result.body?.ok !== true) {
-      throw new Error(`seed candidate failed: ${result.status} ${JSON.stringify(result.body)}`);
-    }
-    return result.body.data;
+    const data = result.data;
+    return {
+      accepted: {
+        records: data.created,
+        duplicates: data.duplicates,
+        failed: data.failed,
+      },
+      records: data.results,
+      data,
+    };
   }
 
   async function recall(query, { agentId = 'host-e2e', namespaces = ['default'], threadId = 'th_host_e2e_recall' } = {}) {
-    const result = await post('/runtime/v1/recall', {
-      query,
-      agentId,
-      ...(threadId ? { threadId } : {}),
-      namespaces,
-      limit: 20,
+    const result = await requestCapability('/query', {
+      method: 'POST',
+      body: JSON.stringify({
+        actor: { type: 'agent', agentId },
+        query,
+        domains: namespaces,
+        ...(threadId ? { threadId } : {}),
+        limit: 20,
+      }),
     });
     if (result.status !== 200 || result.body?.ok !== true) {
-      throw new Error(`recall failed: ${result.status} ${JSON.stringify(result.body)}`);
+      throw new Error(`capability query failed: ${result.status} ${JSON.stringify(result.body)}`);
     }
-    return result.body.data;
+    const data = result.data;
+    return {
+      ...data,
+      records: (data.records ?? []).map((record) => ({
+        ...record,
+        content: record.text ?? record.content,
+      })),
+    };
   }
 
   async function checkpoint(threadId, agentId) {
-    const result = await request(`/runtime/v1/checkpoints/${encodeURIComponent(threadId)}?agentId=${encodeURIComponent(agentId)}`);
-    if (result.status !== 200) {
-      throw new Error(`checkpoint get failed: ${result.status} ${JSON.stringify(result.body)}`);
+    const result = await requestCapability('/internal-object', {
+      method: 'POST',
+      body: JSON.stringify({
+        actor: { type: 'agent', agentId },
+        kind: 'context_checkpoint',
+        op: 'get',
+        agentId,
+        threadId,
+      }),
+    });
+    if (result.status !== 200 || result.body?.ok !== true) {
+      throw new Error(`capability checkpoint failed: ${result.status} ${JSON.stringify(result.body)}`);
     }
-    return result.body?.data?.checkpoint ?? null;
+    return result.data?.object ?? null;
   }
 
-  async function rawChunks() {
+  /** Probe the removed prototype route; real hosts must never use it. */
+  async function legacyRuntimeStatus() {
+    const response = await fetch(`${url}/runtime/v1/status`);
+    let body = null;
     try {
-      const text = await readFile(join(home, 'runtime', 'raw', 'chunks.jsonl'), 'utf8');
-      return parseJsonLines(text).map((entry) => entry.chunk).filter(Boolean);
-    } catch (error) {
-      if (error?.code === 'ENOENT') return [];
-      throw error;
+      body = await response.json();
+    } catch {
+      body = null;
     }
-  }
-
-  async function checkpointFiles() {
-    const base = join(home, 'runtime', 'checkpoints');
-    const out = [];
-    async function walk(dir) {
-      let entries = [];
-      try {
-        entries = await readdir(dir, { withFileTypes: true });
-      } catch (error) {
-        if (error?.code === 'ENOENT') return;
-        throw error;
-      }
-      for (const entry of entries) {
-        const path = join(dir, entry.name);
-        if (entry.isDirectory()) await walk(path);
-        else if (entry.name.endsWith('.json')) out.push(JSON.parse(await readFile(path, 'utf8')));
-      }
-    }
-    await walk(base);
-    return out;
+    return {
+      status: response.status,
+      body,
+      deprecatedHeader: response.headers.get('x-mebular-deprecated'),
+    };
   }
 
   let closed = false;
@@ -363,18 +365,11 @@ export async function startRealRuntime(options = {}) {
     cloudRoot,
     auth,
     token,
-    mode,
-    capture,
-    trace,
-    request,
-    post,
     status,
     seedMemory,
-    seedCandidate,
     recall,
     checkpoint,
-    rawChunks,
-    checkpointFiles,
+    legacyRuntimeStatus,
     sidecarDiscovery,
     waitForSidecar: (options) => waitForSidecar(home, options),
     sidecarStatus,

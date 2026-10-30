@@ -5,7 +5,7 @@
 //
 // This replaces the former fake `/memory-runtime/v1` sidecar. Discovery,
 // `/context`, `/ingest`, checkpoint PUT, the capability API and the
-// Runtime/GraphStore are all real. The fake provider only supplies a model
+// MemoryService/GraphStore are all real. The fake provider only supplies a model
 // response so OpenCode can execute a turn without external network access.
 //
 // Token-file: the real sidecar writes `{version,token,...}` to `host-token`

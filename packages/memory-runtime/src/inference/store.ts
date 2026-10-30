@@ -341,7 +341,7 @@ function cloneStatus(status: ModelDownloadStatus): ModelDownloadStatus {
 }
 
 /**
- * 本地模型包管理器。默认根目录通常为 `<home>/runtime/models`。
+ * 本地模型包管理器。默认根目录通常为 `<home>/models`。
  */
 export class ModelStore {
   readonly rootDir: string;

@@ -84,7 +84,7 @@ try {
   check(`mcp tarball 依賴 @mebular/core=${range}`, mcpManifest.dependencies?.['@mebular/core'] === range, mcpManifest.dependencies?.['@mebular/core']);
   check(`mcp tarball 依賴 @mebular/fleet=${range}`, mcpManifest.dependencies?.['@mebular/fleet'] === range, mcpManifest.dependencies?.['@mebular/fleet']);
   check(`mcp tarball 依賴 @mebular/memory-runtime=${range}`, mcpManifest.dependencies?.['@mebular/memory-runtime'] === range, mcpManifest.dependencies?.['@mebular/memory-runtime']);
-  check(`memory-runtime tarball 依賴 @mebular/core=${range}`, memoryRuntimeManifest.dependencies?.['@mebular/core'] === range, memoryRuntimeManifest.dependencies?.['@mebular/core']);
+  check('memory-runtime tarball 不依賴 @mebular/core', memoryRuntimeManifest.dependencies?.['@mebular/core'] === undefined, memoryRuntimeManifest.dependencies?.['@mebular/core'] ?? 'none');
   check(`fleet tarball 依賴 @mebular/core=${range}`, fleetManifest.dependencies?.['@mebular/core'] === range, fleetManifest.dependencies?.['@mebular/core']);
   check(`fleet tarball 依賴 @mebular/service=${range}`, fleetManifest.dependencies?.['@mebular/service'] === range, fleetManifest.dependencies?.['@mebular/service']);
   check('fleet tarball 依賴 qrcode-generator=2.0.4', fleetManifest.dependencies?.['qrcode-generator'] === '2.0.4', fleetManifest.dependencies?.['qrcode-generator']);
@@ -103,7 +103,7 @@ try {
   check('pack 後 mcp 本地依賴還原為 file:../..', mcpLocal.dependencies?.['@mebular/core'] === 'file:../..', mcpLocal.dependencies?.['@mebular/core']);
   check('pack 後 mcp 本地 memory-runtime 還原為 file:../memory-runtime', mcpLocal.dependencies?.['@mebular/memory-runtime'] === 'file:../memory-runtime', mcpLocal.dependencies?.['@mebular/memory-runtime']);
   check('pack 後 fleet 本地依賴還原為 file:../..', fleetLocal.dependencies?.['@mebular/core'] === 'file:../..', fleetLocal.dependencies?.['@mebular/core']);
-  check('pack 後 memory-runtime 本地依賴還原為 file:../..', memoryRuntimeLocal.dependencies?.['@mebular/core'] === 'file:../..', memoryRuntimeLocal.dependencies?.['@mebular/core']);
+  check('pack 後 memory-runtime 不依賴 core', memoryRuntimeLocal.dependencies?.['@mebular/core'] === undefined, memoryRuntimeLocal.dependencies?.['@mebular/core'] ?? 'none');
   check(
     'pack 備份已清除',
     !existsSync(join(mcpDir, 'package.json.packbak'))

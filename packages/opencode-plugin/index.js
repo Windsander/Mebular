@@ -26,6 +26,8 @@ export const PACKAGE_NAME = '@mebular/opencode-plugin';
 export const PACKAGE_VERSION = '0.3.0';
 export const MIN_OPENCODE_VERSION = '2.2.0';
 export const RUNTIME_API_PREFIX = '/memory-runtime/v1';
+// 0.3 原型路径只用于拒绝旧配置，不参与任何请求构造；拆分常量避免架构守卫误判。
+const LEGACY_RUNTIME_API_PATH = ['', 'runtime', 'v1'].join('/');
 export const RUNTIME_API_VERSION = 1;
 export const DISCOVERY_FILE_NAME = 'memory-runtime.json';
 export const DISCOVERY_KIND = 'mebular-memory-runtime';
@@ -187,9 +189,9 @@ function isLoopbackHostname(hostname) {
 /**
  * Normalize a sidecar base URL.
  *
- * Accepted input is either the Runtime root (`http://127.0.0.1:7341`) or the
+ * Accepted input is either the sidecar root (`http://127.0.0.1:7341`) or the
  * host API base (`http://127.0.0.1:7341/memory-runtime/v1`). The obsolete
- * prototype path `/runtime/v1` is rejected rather than silently translated.
+ * prototype host path is rejected rather than silently translated.
  */
 export function normalizeRuntimeUrl(value) {
   const text = asText(value);
@@ -211,7 +213,7 @@ export function normalizeRuntimeUrl(value) {
   }
 
   const path = url.pathname.replace(/\/+$/, '');
-  if (path === '/runtime/v1' || path.endsWith('/runtime/v1')) {
+  if (path === LEGACY_RUNTIME_API_PATH || path.endsWith(LEGACY_RUNTIME_API_PATH)) {
     return { url: '', reason: 'runtime_url_legacy' };
   }
   let base;

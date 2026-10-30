@@ -1,6 +1,6 @@
 // Runtime 本地存储（contract §2.3.1 / §2.3.5 / §2.9）
 //
-// RawChunk 与 RecallTrace 只存在于本机 `<home>/runtime/`：
+// RawChunk 与 RecallTrace 只存在于本机 sidecar 数据目录（`<home>/memory-runtime/`）：
 //   - raw/chunks.jsonl
 //   - traces.jsonl
 // 不进 GraphStore、不 append EventLog、不参与同步。
@@ -35,7 +35,7 @@ export class RuntimeLocalStoreError extends Error {
 }
 
 export interface RuntimeLocalStoreOptions {
-  /** Runtime 根目录（通常 `<home>/runtime`） */
+  /** 本地过程数据根目录（sidecar 固定 `<home>/memory-runtime`） */
   root: string;
   /** RawChunk 保留天数（用于清理；单条 expiresAt 仍由调用方设置） */
   rawRetentionDays?: number;
@@ -156,7 +156,7 @@ export class RuntimeLocalStore {
     });
   }
 
-  /** 显式清理（启动时 + 每日一次；RuntimeService 可在合适时机调用）。 */
+  /** 显式清理（sidecar 启动时 + 每日一次）。 */
   async cleanup(now = this.now()): Promise<RuntimeLocalCleanupResult> {
     return this.exclusive(async () => {
       await this.ensureRawLoaded();

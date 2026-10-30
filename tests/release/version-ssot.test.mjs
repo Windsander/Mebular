@@ -32,7 +32,6 @@ function buildFixture() {
     'packages/mcp': { name: '@mebular/mcp', deps: { '@mebular/core': 'file:../..' } },
     'packages/memory-runtime': {
       name: '@mebular/memory-runtime',
-      deps: { '@mebular/core': 'file:../..' },
       scripts: {
         prepack: 'node ../../scripts/publish-manifest.mjs set',
         postpack: 'node ../../scripts/publish-manifest.mjs restore',
@@ -216,7 +215,7 @@ describe('verify-release-version：通过/失败定位', () => {
     expect(result.checks.find((check) => check.label === '@mebular/dsh-plugin version')?.ok).toBe(false);
   });
 
-  it('memory-runtime 的 @mebular/core 无法随 tarball 安装时报错', () => {
+  it('memory-runtime 若依赖 core 但 tarball 无法安装时报错', () => {
     const root = buildFixture();
     bumpVersion({ root, version: '0.2.0', tag: 'v0.2.0', date: '2026-10-26' });
     writeJson(root, 'packages/memory-runtime/package.json', {
@@ -227,7 +226,7 @@ describe('verify-release-version：通过/失败定位', () => {
     const result = verifyReleaseVersion({ root, version: '0.2.0', tag: 'v0.2.0' });
     expect(result.ok).toBe(false);
     expect(
-      result.checks.find((check) => check.label === '@mebular/memory-runtime 的 @mebular/core 可随 tarball 安装')?.ok,
+      result.checks.find((check) => check.label === '@mebular/memory-runtime 不依赖 core，或依赖可随 tarball 安装')?.ok,
     ).toBe(false);
   });
 

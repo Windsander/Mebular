@@ -19,7 +19,6 @@ import { attachFleetEvents, resolveFleetNamespace } from './fleet-events.mjs';
 import { READ_ROUTES, buildHandoffPlan } from './admin.mjs';
 import { configPath } from './config.mjs';
 import { createServiceFacade } from './service-facade.mjs';
-import { buildRuntimeService, createRuntimeHttpHandler, isRuntimePath } from './runtime-memory.mjs';
 import {
   createMemoryCapabilityHandler,
   isMemoryCapabilityPath,
@@ -912,7 +911,7 @@ export async function startHttpServer({
     if (configPack && configPath) return base;
     if (configPack) {
       // 显式 config pack 但未写 path：设备 store 默认在 <home>/models/<pack>，
-      // 避免 RuntimeService 回落到旧的 <home>/runtime/models。
+      // 默认设备模型目录固定为 <home>/models/<pack>。
       try {
         const next = withPath();
         next.runtime.model.local.path = join(home, 'models', configPack);
@@ -1018,43 +1017,6 @@ export async function startHttpServer({
   const runtimeReady = () => phase === 'READY' && Boolean(service);
   const serviceFacade = createServiceFacade({ getService: () => service, isReady: runtimeReady });
 
-  // 0.3 Runtime：设备级服务层（G0/G1 只读 status + mode 切换）。
-  // app 热初始化后切换实例；本地 Raw/Trace 固定落在 <home>/runtime。
-  let runtimeService = null;
-  let runtimeServiceApp = null;
-  const getRuntimeService = () => {
-    if (!app) return null;
-    if (runtimeServiceApp !== app) {
-      runtimeService = buildRuntimeService({
-        app,
-        config,
-        home,
-        version: APP_VERSION,
-        hostKey: homeKey(home),
-        profileId: cloudId,
-      });
-      runtimeServiceApp = app;
-    }
-    return runtimeService;
-  };
-  const runtimeHttpHandler = createRuntimeHttpHandler({
-    getService: getRuntimeService,
-    getConfig: () => config,
-    onModeChanged: (mode) => {
-      const next = config && typeof config === 'object' ? config : {};
-      const current = next.runtime && typeof next.runtime === 'object' && !Array.isArray(next.runtime)
-        ? next.runtime
-        : {};
-      next.runtime = { ...current, mode };
-      config = next;
-    },
-    home,
-    authenticate,
-    sendJson,
-    origin: () => origin,
-    csrfValid,
-  });
-
   // 0.3 Memory Capability API：内部接口 `/internal/memory/v1`（读 + 写 + 内部对象 + sync）。
   // 只有 memoryRuntime.enabled=true 时挂载/生成 token；轻量模式零目录/文件/进程副作用。
   // capability 不是公共 MCP 工具；29 工具面不变。
@@ -1091,7 +1053,7 @@ export async function startHttpServer({
     })
     : null;
 
-  // 模型选择/卸载后让 RuntimeService 重新读取 runtime.model.local；旧引擎由 dispose 停止。
+  // 模型选择/卸载后刷新内存中的设备模型配置（管理面状态读取同一份配置）。
   const refreshInferenceRuntime = async () => {
     try {
       const { readDeviceConfig } = await import('./inference-store.mjs');
@@ -1105,11 +1067,6 @@ export async function startHttpServer({
       }
     } catch {
       // 读盘失败时保留当前内存配置；下一次启动会重新解析。
-    }
-    if (runtimeService) {
-      await runtimeService.dispose?.().catch?.(() => undefined);
-      runtimeService = null;
-      runtimeServiceApp = null;
     }
   };
 
@@ -2155,7 +2112,7 @@ export async function startHttpServer({
         input: parseJsonBody(body) ?? {},
       });
       if (result.status < 400 && ['select', 'remove', 'uninstall', 'stop'].includes(modelAction[1])) {
-        // stop 同时释放 RuntimeService 自己的按需引擎，避免“admin stop 之后 runtime 仍占着模型”。
+        // stop 同时释放设备模型引擎，避免“admin stop 之后模型仍被占用”。
         await refreshInferenceRuntime();
       }
       return sendJson(res, result.status, result.body);
@@ -3280,11 +3237,6 @@ export async function startHttpServer({
       if (isMemoryCapabilityPath(path)) {
         return memoryCapability({ req, res, url, body });
       }
-      // 0.3 原型 /runtime/v1（保留但 deprecated）：新宿主必须使用 sidecar 的 /memory-runtime/v1。
-      if (isRuntimePath(path)) {
-        res.setHeader('x-mebular-deprecated', '/runtime/v1; use /memory-runtime/v1');
-        return runtimeHttpHandler({ req, res, url, body });
-      }
       if (auth === 'oauth') {
         if (path === '/.well-known/oauth-protected-resource' && req.method === 'GET') {
           return sendJson(res, 200, metadata.protectedResource);
@@ -3881,12 +3833,6 @@ export async function startHttpServer({
         // 4) 无论前面如何都要清理；pid 守卫保证不误删新实例的 runtime.json。
         await clearRuntimeFile(home, { pid: process.pid }).catch(() => undefined);
         // 5) 本地模型子进程先停，避免 daemon 退出后留下孤儿 llama-server。
-        //    RuntimeService 自己的按需引擎与 admin/CLI 引擎都必须在退出前关闭。
-        try {
-          await runtimeService?.dispose?.();
-        } catch {
-          // 关闭路径不抛出。
-        }
         await import('./inference-admin.mjs')
           .then(({ disposeInferenceManager }) => disposeInferenceManager(home))
           .catch(() => undefined);

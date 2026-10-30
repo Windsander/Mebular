@@ -1,7 +1,7 @@
-// Test-only HTTP tap in front of a real Runtime.
+// Test-only HTTP tap in front of the real Memory Runtime sidecar.
 //
 // The host client still talks HTTP to one loopback origin; every request is
-// forwarded to the real Runtime and the real response is returned unchanged.
+// forwarded to the real sidecar and the real response is returned unchanged.
 // The tap only records observability data (method, path, auth shape, JSON body,
 // status and a bounded JSON response). It is never part of production code and
 // never stores the bearer token: only whether a bearer header was present.
@@ -57,7 +57,7 @@ function responseHeaders(headers) {
 }
 
 /**
- * @param {string} targetUrl real Runtime base URL
+ * @param {string} targetUrl real sidecar base URL
  * @param {{ name?: string }} [options]
  */
 export async function createRuntimeTap(targetUrl, options = {}) {
@@ -141,8 +141,6 @@ export async function createRuntimeTap(targetUrl, options = {}) {
   return {
     url,
     state,
-    requests: () => state.requests.filter((entry) => entry.path.startsWith('/runtime/v1')),
-    runtimeRequests: () => state.requests.filter((entry) => entry.path.startsWith('/runtime/v1')),
     allRequests: () => state.requests,
     close: () => new Promise((resolve) => server.close(() => resolve())),
   };

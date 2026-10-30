@@ -5,7 +5,7 @@
 // The DSH plugin is the exact tarball packed from packages/dsh-plugin. It talks
 // to the real MCP daemon (`daemonUrl`) and to the real sidecar at
 // `/memory-runtime/v1` (discovery or explicit URL). The sidecar talks to the
-// real capability API, which writes the real Runtime/GraphStore. No fake
+// real capability API, which writes the real MemoryService/GraphStore. No fake
 // sidecar and no legacy `/runtime/v1` host path are used.
 //
 // Covered scenarios:
@@ -318,12 +318,15 @@ async function assertEnabled({ mode, runtime, tap, probe, seedToken, hostToken }
     && checkpoint?.summary === 'memory e2e compacted summary'
     && String(checkpoint?.domain).startsWith('task:'), JSON.stringify(checkpoint));
 
-  // The legacy /runtime/v1 path must not receive the host conversation: only
-  // the explicit seed written by this harness may appear there.
-  const legacyRaw = (await runtime.rawChunks()).map((chunk) => chunk.text).join('\n');
-  check('旧 /runtime/v1 未收到 DSH ingest',
-    !legacyRaw.includes('memory e2e ingest') && !legacyRaw.includes('memory e2e assistant'),
-    legacyRaw.slice(0, 300));
+  // The prototype route is gone; hosts only use /memory-runtime/v1.
+  const legacy = await runtime.legacyRuntimeStatus();
+  check('旧 /runtime/v1 已移除（404）',
+    legacy.status === 404 && legacy.deprecatedHeader === null,
+    `status=${legacy.status} deprecated=${legacy.deprecatedHeader ?? 'none'}`);
+  check('旧 /runtime/v1 不返回 DSH ingest',
+    !JSON.stringify(legacy.body ?? {}).includes('memory e2e ingest')
+    && !JSON.stringify(legacy.body ?? {}).includes('memory e2e assistant'),
+    JSON.stringify(legacy.body).slice(0, 300));
 
   const requests = sidecarRequestsFromTap(tap);
   if (mode === 'enabled-token') {
@@ -469,10 +472,10 @@ async function runScenario({ mode, root, dshBin, dshInstall, dshVersion, pluginT
       JSON.stringify(finalStatus?.counts));
       check('关闭态没有绕过 tap 的 sidecar 请求', sidecarRequestsFromTap(tap).length === 0,
         `count=${sidecarRequestsFromTap(tap).length}`);
-      const legacyRaw = (await runtime.rawChunks()).map((chunk) => chunk.text).join('\n');
-      check('关闭态没有绕过 tap 的 Runtime 写',
-        !legacyRaw.includes('memory e2e ingest') && !legacyRaw.includes('memory e2e assistant'),
-        legacyRaw.slice(0, 300));
+      const legacy = await runtime.legacyRuntimeStatus();
+      check('关闭态旧 /runtime/v1 已移除（404）',
+        legacy.status === 404 && legacy.deprecatedHeader === null,
+        `status=${legacy.status} deprecated=${legacy.deprecatedHeader ?? 'none'}`);
     } else {
       await assertEnabled({ mode, runtime, tap, probe, seedToken, hostToken });
     }
@@ -481,7 +484,7 @@ async function runScenario({ mode, root, dshBin, dshInstall, dshVersion, pluginT
     check('artifacts 已脱敏（无敏感片段）', artifacts !== null && artifacts.leaks.length === 0,
       artifacts === null ? 'collect failed' : JSON.stringify(artifacts.leaks));
     check('tap 状态不包含 host token', !JSON.stringify(tap.state).includes(hostToken));
-    check('Runtime status 不含 host token', !JSON.stringify(await runtime.status()).includes(hostToken));
+    check('Memory capability status 不含 host token', !JSON.stringify(await runtime.status()).includes(hostToken));
     console.log(`  artifacts：${world.state.artifactsDir}`);
   } finally {
     await tap.close().catch(() => undefined);

@@ -4,9 +4,10 @@
 // 强制边界：
 // 1. core（src/**）不得 import @mebular/memory-runtime，也不得 import
 //    src/runtime 或 src/inference（包已迁出）。
-// 2. core 根入口不得导出 runtime / inference。
+// 2. core / memory-runtime 根入口不得导出废弃的 RuntimeService。
 // 3. memory-runtime 原型允许 import `@mebular/core` 包根公共 API，但不得
 //    import core 子路径或逃逸到包外的相对路径。
+// 4. 产品源码不得再出现 0.3 原型路径 `/runtime/v1`（docs/design 历史文档除外）。
 //
 // 只读源码文本，不执行构建产物；`npm run check:architecture` 与 Jest
 // tests/architecture/boundaries.test.mjs 共用同一实现。
@@ -22,7 +23,10 @@ const RUNTIME_SRC = join(ROOT, 'packages', 'memory-runtime', 'src');
 
 const IMPORT_PATTERN = /(?:from\s*|import\s*\(\s*|require\s*\(\s*)['"]([^'"]+)['"]/g;
 
-async function listSourceFiles(dir) {
+const SOURCE_EXTENSIONS = ['.ts', '.mts', '.js', '.mjs', '.cjs'];
+const PRODUCT_SKIP_DIRS = new Set(['node_modules', 'dist', 'tests', 'test', 'fixtures', 'scripts']);
+
+async function listSourceFiles(dir, { product = false } = {}) {
   const out = [];
   let entries;
   try {
@@ -33,8 +37,9 @@ async function listSourceFiles(dir) {
   for (const entry of entries) {
     const file = join(dir, entry.name);
     if (entry.isDirectory()) {
-      out.push(...await listSourceFiles(file));
-    } else if (entry.isFile() && (file.endsWith('.ts') || file.endsWith('.mts'))) {
+      if (product && PRODUCT_SKIP_DIRS.has(entry.name)) continue;
+      out.push(...await listSourceFiles(file, { product }));
+    } else if (entry.isFile() && SOURCE_EXTENSIONS.some((extension) => file.endsWith(extension))) {
       out.push(file);
     }
   }
@@ -57,6 +62,9 @@ function relativeId(fromDir, absoluteTarget) {
 async function checkCore(errors) {
   const indexFile = join(CORE_SRC, 'index.ts');
   const indexText = await readFile(indexFile, 'utf-8');
+  if (indexText.includes('RuntimeService')) {
+    errors.push('src/index.ts 不得导出废弃的 RuntimeService');
+  }
   for (const spec of importSpecifiers(indexText)) {
     if (/(^|\/)runtime(\/|$)/.test(spec) || /(^|\/)inference(\/|$)/.test(spec)) {
       errors.push(`src/index.ts 不得导出 runtime/inference：${spec}`);
@@ -97,6 +105,15 @@ async function checkCore(errors) {
 }
 
 async function checkRuntime(errors) {
+  const indexFile = join(RUNTIME_SRC, 'index.ts');
+  const indexText = await readFile(indexFile, 'utf-8');
+  if (indexText.includes('RuntimeService')) {
+    errors.push('packages/memory-runtime/src/index.ts 不得导出废弃的 RuntimeService');
+  }
+  if (existsSync(join(RUNTIME_SRC, 'runtime', 'RuntimeService.ts'))) {
+    errors.push('packages/memory-runtime/src/runtime/RuntimeService.ts 应已删除');
+  }
+
   for (const file of await listSourceFiles(RUNTIME_SRC)) {
     const text = await readFile(file, 'utf-8');
     const relFile = relativeId(ROOT, file);
@@ -150,12 +167,34 @@ async function checkSidecar(errors) {
   }
 }
 
+const LEGACY_RUNTIME_PATH = '/runtime/v1';
+
+/**
+ * A8：产品源码不得再提供 0.3 原型 `/runtime/v1`。
+ * 只扫产品目录；docs/design、tests、验证脚本和构建产物不在范围内。
+ */
+async function checkLegacyRuntimePath(errors) {
+  for (const file of await listSourceFiles(CORE_SRC, { product: true })) {
+    const text = await readFile(file, 'utf-8');
+    if (text.includes(LEGACY_RUNTIME_PATH)) {
+      errors.push(`${relativeId(ROOT, file)} 不得出现旧路径 ${LEGACY_RUNTIME_PATH}`);
+    }
+  }
+  for (const file of await listSourceFiles(join(ROOT, 'packages'), { product: true })) {
+    const text = await readFile(file, 'utf-8');
+    if (text.includes(LEGACY_RUNTIME_PATH)) {
+      errors.push(`${relativeId(ROOT, file)} 不得出现旧路径 ${LEGACY_RUNTIME_PATH}`);
+    }
+  }
+}
+
 /** @returns {Promise<string[]>} 架构违规列表；空数组表示通过。 */
 export async function checkArchitecture() {
   const errors = [];
   await checkCore(errors);
   await checkRuntime(errors);
   await checkSidecar(errors);
+  await checkLegacyRuntimePath(errors);
   return errors;
 }
 
@@ -166,6 +205,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     for (const error of errors) console.error(`  - ${error}`);
     process.exitCode = 1;
   } else {
-    console.error('[check-architecture] OK：core 无 runtime/inference 反向依赖');
+    console.error('[check-architecture] OK：core 无 runtime/inference 反向依赖，旧 /runtime/v1 已退场');
   }
 }

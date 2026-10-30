@@ -1,7 +1,7 @@
 {
   "name": "@mebular/memory-runtime",
   "version": "0.3.0",
-  "description": "Mebular Memory Runtime（0.3.0 原型包）：本地 Raw/Trace、候选抽取、召回、上下文与模型编排",
+  "description": "Mebular Memory Runtime sidecar：本地 Raw/Trace、候选抽取、召回、上下文、checkpoint 与模型编排",
   "license": "MIT",
   "author": {
     "name": "Sobert Li (Windsander)",
@@ -42,7 +42,6 @@
     "postpack": "node ../../scripts/publish-manifest.mjs restore"
   },
   "dependencies": {
-    "@mebular/core": "file:../..",
     "ulid": "^3.0.2"
   }
 }

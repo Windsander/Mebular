@@ -4,7 +4,7 @@
 //
 //   host process -> real adapter -> real sidecar `/memory-runtime/v1`
 //                                -> real MCP capability `/internal/memory/v1`
-//                                -> real Runtime/GraphStore
+//                                -> real MemoryService/GraphStore
 //
 // No suite downloads a model, calls an external API or runs a real LLM. Each
 // suite starts its own temporary Mebular home and its own MCP daemon + sidecar;

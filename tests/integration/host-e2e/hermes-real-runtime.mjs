@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Hermes host E2E: real MemoryProvider plugin -> real Memory Runtime sidecar ->
-// real MCP Runtime/GraphStore.
+// real MCP capability API -> real MemoryService/GraphStore.
 //
 // Boundary: this does not start a real Hermes gateway or run an LLM. It loads
 // the exact plugin file a Hermes profile loads, drives the documented
@@ -8,7 +8,7 @@
 // on_session_switch / shutdown), and sends real HTTP to the real sidecar.
 //
 // The sidecar is the real `@mebular/memory-runtime` bundled with this repo; the
-// MCP daemon under it is the real `startHttpServer` + `RuntimeService` path.
+// MCP daemon under it is the real `startHttpServer` + capability API + MemoryService path.
 // The Hermes profile never receives the MCP capability token or the runtime
 // bearer token, and reads the sidecar host token from discovery tokenFile only.
 //

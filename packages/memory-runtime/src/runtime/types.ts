@@ -1,7 +1,7 @@
 // Runtime 对象模型（0.3.0 memory runtime contract §2 / §5.6 / §7.1）
 //
 // 这些类型是 0.3 的冻结形状：图内对象复用 GraphStore 节点，本地对象
-// （RawChunk / RecallTrace）只落在 <home>/runtime，不进入图/事件日志。
+// （RawChunk / RecallTrace）只落在 sidecar 数据目录，不进入图/事件日志。
 // 本文件只定义类型与常量，不包含存储或业务实现。
 
 export const RUNTIME_SCHEMA_VERSION = 1 as const;

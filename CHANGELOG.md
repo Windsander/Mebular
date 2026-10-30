@@ -1,16 +1,16 @@
 # Changelog
 
 All notable changes to Mebular are documented here.
-Mebular uses a single-version umbrella: the six npm packages (`core`, `service`, `skill`, `mcp`,
-`fleet`, `dsh-plugin`) share one release version. `@mebular/dsh-plugin` is an isolated adapter
-published by its own npm job, and it follows the same unified release train.
+Mebular uses a single-version umbrella: the seven npm packages (`core`, `service`, `skill`, `mcp`,
+`fleet`, `memory-runtime`, `dsh-plugin`) share one release version. `@mebular/dsh-plugin` is an
+isolated adapter published by its own npm job, and it follows the same unified release train.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 > Version headings carry the `v` prefix (`## [vX.Y.Z]`) because it is the release SSOT:
-> the branch name (`release/vX.Y.Z`), the six `package.json` versions, the locks, the MCP
-> version source and the Git tag must all agree with this section.
+> the branch name (`release/vX.Y.Z`), the seven `package.json` versions, the locks, the MCP
+> and sidecar version sources, and the Git tag must all agree with this section.
 
 The GitHub Release body is extracted from this file: everything between the release's
 `## [vX.Y.Z]` heading and the next `## [` heading. Keep that section self-contained.
@@ -23,14 +23,14 @@ The MCP surface stays compatible at 29 tools; every runtime capability is opt-in
 
 ### Added
 
-- **Memory Runtime service** — a `/runtime/v1` HTTP surface on the same daemon, port, TLS and bearer/OAuth scopes as `/mcp`: status, mode, ingest, extraction read-back, recall, context, checkpoints, compaction, self records, trace feedback and admin object/trace reads. Runtime writes use the existing graph and event log; no new event type or sync wire protocol is introduced.
-- **Two access modes** — lightweight `mcp` (default) and immersive `immersive` (opt-in). Mode is device-local. Switching changes processing only: it does not migrate, copy, rewrite or delete nodes. In `mcp`, runtime write endpoints return `409 mode_mismatch`; read endpoints remain available.
-- **Runtime object model** — `MemoryRecord` reuses existing entity/fact/episode/skill nodes; `Compact` is a derived graph summary with source IDs and stale detection; `ContextCheckpoint` has revisions and leases and is local by default; `SelfRecord` is shared per logical agent and hidden from ordinary queries. `RawChunk` and `RecallTrace` live only under `<home>/runtime/`, never in the graph, events or sync.
+- **Memory Runtime sidecar** — a separate `@mebular/memory-runtime` process exposes `/memory-runtime/v1` (status, ingest, recall, context, checkpoints, compaction, self records, trace feedback and model orchestration). All durable writes go through the internal MCP capability API (`/internal/memory/v1`) into the existing graph and event log; no new event type or sync wire protocol is introduced.
+- **Two access modes** — lightweight `mcp` (default) and immersive `immersive` (opt-in). Mode is device-local. Switching changes processing only: it does not migrate, copy, rewrite or delete nodes. Lightweight mode starts no sidecar, opens no sidecar port and creates no sidecar files.
+- **Runtime object model** — `MemoryRecord` reuses existing entity/fact/episode/skill nodes; `Compact` is a derived graph summary with source IDs and stale detection; `ContextCheckpoint` has revisions and leases and always goes through capability; `SelfRecord` is shared per logical agent and hidden from ordinary queries. `RawChunk` and `RecallTrace` live only under `<home>/memory-runtime/`, never in the graph, events or sync.
 - **Four model sources** — built-in `heuristic` rules (default, offline), curated local Qwen packs, host-provided `CandidateRecord`s, and one explicitly allowed OpenAI-compatible API. The runtime never reads host credentials, calls a host model or switches providers on its own; failures fall back to heuristic with `degraded` status and warnings.
 - **Curated local Qwen** — Qwen 9B as the default pack, 27B for high quality and 4B for low-memory devices. Packs are downloaded and selected explicitly, verified by manifest/checksum, run through a loopback `llama-server`, and are never installed or updated silently. `mebular models list|status|install|import|select|remove|start|stop|test` manage them from the CLI.
 - **Model credentials and API safety** — API keys are stored only as `env:`, `keychain:` or `file:` references; plaintext keys never enter config, graph metadata, events, logs, Console or status. URLs reject non-HTTPS endpoints (loopback HTTP excepted), userinfo and cloud-metadata addresses; file keys must be private.
-- **Console Runtime settings** — access mode, model source, curated pack download/selection, API configuration, raw capture, trace retention, checkpoint settings and local model status are available in Settings → Runtime. Runtime status, active model, degraded reasons and counts are exposed without secrets.
-- **Internal-object governance** — `compact`, `context_checkpoint`, `self_record` and defensive `raw_chunk`/`recall_trace` are hidden from default `memory_*` results, graph traversal and the Console memory list; `includeInternal=1` is admin-only. `memory_delete`/`memory_archive` reject internal objects and leave them to runtime admin endpoints.
+- **Console Memory Runtime settings** — sidecar lifecycle, model source, curated pack download/selection, API configuration, raw capture, trace retention and local model status are available in Settings → 记忆运行时. Sidecar status, active model, degraded reasons and counts are exposed without secrets.
+- **Internal-object governance** — `compact`, `context_checkpoint`, `self_record` and defensive `raw_chunk`/`recall_trace` are hidden from default `memory_*` results, graph traversal and the Console memory list; `includeInternal=1` is admin-only. `memory_delete`/`memory_archive` reject internal objects and leave them to capability admin endpoints.
 - **DSH Memory Runtime bridge** — opt-in `memoryRuntime` with recall on the first step of a new human turn, batched event ingest with retries and idempotency, compaction checkpoints, optional tool hiding with a governance allowlist, and optional idle maintenance using the current DSH session model. When disabled it registers no listener, timer or request.
 - **Hermes MemoryProvider and companion** — `integrations/hermes/mebular-memory` adds automatic recall and turn/compaction ingest to Hermes while leaving built-in `MEMORY.md`/`USER.md` active and untouched. The optional `mebular-companion` uses Hermes `ctx.llm` to submit host candidates, separately from the single external-provider slot.
 - **OpenChamber / OpenCode integration** — Mebular's MCP path writes only the shared OpenCode `mcp.servers.mebular` entry and never OpenChamber's managed config. The opt-in `@mebular/opencode-plugin` adds request-only `<mebular_memory trust="untrusted">` recall, event ingest and compaction checkpoints for OpenCode >= 2.2; OpenChamber native memory is detected read-only and is never imported, replaced or dual-written.
@@ -40,10 +40,10 @@ The MCP surface stays compatible at 29 tools; every runtime capability is opt-in
 
 - **Default behaviour is unchanged** — a fresh or upgraded install stays in lightweight MCP, uses heuristic rules, captures no raw conversation and calls no model. Existing MCP/CLI/Console read paths keep their 0.2 results.
 - **MCP surface is frozen** — the 29 `memory_*` / `task_*` tools keep their names and semantics; no `runtime_*` MCP tools are added. Runtime capability is HTTP-only, and CLI `mebular tools` still reports the same surface.
-- **Runtime configuration is device-local** — `runtime.*` settings, model packs, API credentials and raw/trace retention do not enter shared memory or sync. SelfRecord defaults to cloud with logical `agentId` filtering; Checkpoint defaults to local and syncs only when explicitly configured.
-- **Internal objects are filtered by default** — default queries, graph traversal and the Console memory list skip runtime-internal types, `metadata.runtime.internal` and reserved `__*` namespaces. Older clients see ordinary 0.2 data.
+- **Memory Runtime configuration is device-local** — MCP only owns `memoryRuntime.*` lifecycle keys; sidecar settings (model packs, API credentials, raw/trace retention) live in `<home>/memory-runtime/config.json` and do not enter shared memory or sync. SelfRecord and Checkpoint always go through capability with logical `agentId` filtering.
+- **Internal objects are filtered by default** — default queries, graph traversal and the Console memory list skip `metadata.internal=true` and reserved `__*` namespaces. Older clients see ordinary 0.2 data.
 - **OpenChamber reuse** — OpenChamber is treated as an OpenCode host: one global MCP entry, read-only native-memory detection, and no writes to `opencode.managed.json` or per-instance copies.
-- **Release train** — all six npm packages, the desktop app and the isolated DSH plugin are aligned at `0.3.0`.
+- **Release train** — all seven npm packages, the desktop app and the isolated DSH plugin are aligned at `0.3.0`.
 
 ### Fixed
 
@@ -55,10 +55,10 @@ The MCP surface stays compatible at 29 tools; every runtime capability is opt-in
 ### Notes
 
 - **No migration** — 0.2 nodes, events, namespaces, tags and IDs are read as legacy data and are not rewritten. Runtime nodes are ordinary nodes; older peers can store them but do not show them in default queries.
-- **Rollback** — returning to 0.2 keeps the graph and data intact. Runtime nodes remain stored but hidden, and local `runtime/` files are ignored by older code. Keep the `runtime` config section when rolling back.
+- **Rollback** — returning to 0.2 keeps the graph and data intact. Internal nodes remain stored but hidden, and local `<home>/memory-runtime/` files are ignored by older code.
 - **Scope limits** — 0.3 remains one cloud and one user. `agentId` is an assertion, not authentication; SelfRecord/Checkpoint isolation is logical, not cryptographic; `memory.read` is cloud-wide and namespace ACLs are not included. Deletion remains cooperative, so an already-synced copy on an offline peer may survive until reconnect.
 - **No bundled model** — local Qwen packs are explicit downloads with their own licenses. No model, API key or cloud raw data is shipped or enabled by default.
-- **Verification** — `npm run check:docs`, `npm run check:i18n` and `npm run check:cleanliness` pass. Runtime, inference, Console, DSH, Hermes and OpenChamber coverage lives in `tests/runtime`, `tests/inference`, `tests/console`, `tests/dsh`, `tests/opencode-plugin` and `tests/integration/host-e2e`; the host suites run against a real `/runtime/v1` with temporary homes.
+- **Verification** — `npm run check:docs`, `npm run check:i18n` and `npm run check:cleanliness` pass. Sidecar, inference, Console, DSH, Hermes and OpenChamber coverage lives in `packages/memory-runtime/tests`, `tests/mcp`, `tests/console`, `tests/dsh`, `tests/opencode-plugin` and `tests/integration/host-e2e`; the host suites run against a real `/memory-runtime/v1` with temporary homes.
 
 ## [v0.2.4] - 2026-10-29
 

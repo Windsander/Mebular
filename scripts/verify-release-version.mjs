@@ -7,7 +7,7 @@
 // 校验：
 //   - 7 个 package manifest（core / fleet / mcp / memory-runtime / service / skill / dsh-plugin）；
 //   - 根 package-lock 与 7 个 workspace 条目；
-//   - memory-runtime 的 @mebular/core 依赖可由 prepack 改写为版本区间（tarball 可安装）；
+//   - memory-runtime 不依赖 core；若未来加回，依赖必须可随 tarball 安装；
 //   - apps/desktop package.json / package-lock / APP_VERSION；
 //   - packages/mcp/src/version.mjs，以及 MCP 其它版本使用点不再手写版本号；
 //   - CHANGELOG.md 含 `## [vX.Y.Z]` 章节。
@@ -55,7 +55,7 @@ export function verifyReleaseVersion({ root = SCRIPT_ROOT, version, tag = `v${ve
     });
   }
 
-  // ---- memory-runtime 发布依赖：源码可用 file: 链接，tarball 内必须是版本区间 ----
+  // ---- memory-runtime 发布依赖：它不依赖 core；若未来加回则必须可随 tarball 安装 ----
   safe('@mebular/memory-runtime 发布依赖', () => {
     const file = join(root, 'packages/memory-runtime/package.json');
     if (!existsSync(file)) {
@@ -69,9 +69,9 @@ export function verifyReleaseVersion({ root = SCRIPT_ROOT, version, tag = `v${ve
       /publish-manifest\.mjs\s+set/.test(pkg.scripts?.prepack ?? '')
       && /publish-manifest\.mjs\s+restore/.test(pkg.scripts?.postpack ?? '');
     add(
-      '@mebular/memory-runtime 的 @mebular/core 可随 tarball 安装',
-      isRange || (coreSpec === 'file:../..' && rewritesForPack),
-      `${coreSpec || '缺少依赖'}（需为版本区间，或 file:../.. + prepack/postpack 改写）`,
+      '@mebular/memory-runtime 不依赖 core，或依赖可随 tarball 安装',
+      coreSpec === '' || isRange || (coreSpec === 'file:../..' && rewritesForPack),
+      `${coreSpec || '无依赖'}（需为空、版本区间，或 file:../.. + prepack/postpack 改写）`,
     );
   });
 

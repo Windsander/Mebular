@@ -48,14 +48,14 @@ node tests/integration/host-e2e/dsh-real-runtime.mjs --scenario disabled
 
 1. **host-token 文件格式已统一。** 真实 sidecar 写 JSON `{ version: 1, token: "...", issuedAt, expiresAt }`（`0600`）；DSH、OpenCode、Hermes 三个适配器都直接解析该 JSON record，同时兼容手工写入的 raw token。DSH/OpenCode real E2E 不再注入 `MEBULAR_MEMORY_RUNTIME_TOKEN`，走生产 discovery + `tokenFile` 路径。
 2. **DSH 新 turn 注入无法用当前 synthetic probe 断言。** probe 第二次 turn 复用同一 `messageId`，真实 sidecar 按同一 `turnId` 返回 `duplicate_turn`；因此 suite 断言“同 turn anchor 去重”与“新 turn 请求确实到达 sidecar”，但不伪造“新 messageId 必然再次注入”。adapter 的 anchor 已包含 turn，真实宿主新 turn 会带新 messageId。
-3. **DSH real E2E 的 seed 由 harness 通过临时 Runtime 写入。** host 请求路径不经过旧 `/runtime/v1`；suite 显式断言旧 Runtime raw 中没有 DSH ingest。旧 `/runtime/v1` 产品端仍是 deprecated 兼容路径，不在本 suite 的宿主断言范围内。
+3. **DSH real E2E 的 seed 由 harness 通过真实 capability API 写入。** host 请求路径只走 `/memory-runtime/v1`；suite 显式断言旧 `/runtime/v1` 已不存在（404），且不会返回 DSH ingest。
 4. **OpenCode 注入块是 request-only。** 断言真实 outgoing model request 含记忆块，但 fake provider 不验证模型是否遵守“不可信背景”声明。
 5. **不跑真实模型。** DSH/Hermes 不启动 LLM；OpenCode 只使用 fake OpenAI-compatible provider。所有抽取均为 `heuristic`。
 
 ## 结果（本机 2026-10-30）
 
 ```text
-DSH host E2E：111 passed, 0 failed（enabled-discovery / enabled-token / disabled）
+DSH host E2E：113 passed, 0 failed（enabled-discovery / enabled-token / disabled）
 Hermes host E2E：35 passed, 0 failed
 OpenCode host E2E：38 passed, 0 failed, 0 skipped
 verify-host-e2e：三个宿主全部 exit 0
@@ -67,6 +67,6 @@ verify-host-e2e：三个宿主全部 exit 0
 
 - 每个 suite 独立 `mkdtemp` Mebular home；不读写 `~/.mebular`、`~/.config/opencode`、`~/.dsh`。
 - 真实 sidecar 使用临时 `memory-runtime/config.json`（`port: 0`）与每次启动轮换的 host token；MCP capability token 只存在于 sidecar/MCP 之间。
-- tap 只记录 `auth: bearer|missing|other`，不记录 token 值；断言 tap / sidecar status / Runtime status / OpenCode state/log / Hermes profile 不含 token。
+- tap 只记录 `auth: bearer|missing|other`，不记录 token 值；断言 tap / sidecar status / capability status / OpenCode state/log / Hermes profile 不含 token。
 - DSH 复用现有 `scripts/lib/dsh-e2e-world.mjs` 的临时 DSH profile 与 artifacts 脱敏；OpenCode 使用独立 `HOME` / `XDG_*`。
 - 不改 `src/`、`packages/` 或宿主实现；只改 `tests/integration/host-e2e/**`。

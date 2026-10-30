@@ -128,8 +128,10 @@ describe('订阅自主（订阅即读 + 域公告 + 热生效）', () => {
       await a.declareNamespace({ namespace: 'ledger', note: 'new domain' });
       await syncBetween(a, b);
 
-      // 目录 = 公告 ∪ 本地节点：B 未订阅也能看到
-      expect(await b.getNamespaceDirectory()).toContain('ledger');
+      // 目录 = 公告 ∪ 本地节点：B 未订阅也能看到。
+      // 单次 sync-completed 不代表该轮公告已应用；有界重试直到目录收敛。
+      const announced = await syncUntil(a, b, async () => (await b.getNamespaceDirectory()).includes('ledger'), 15_000);
+      expect(announced).toBe(true);
       expect((await b.getNamespaceSubscriptions('ledger')).subscribers).not.toContain('device-B');
       expect(await b.graph.getNode(node.id)).toBeNull();
 

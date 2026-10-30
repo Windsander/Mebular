@@ -21,6 +21,8 @@ export interface OutboxReplayerOptions {
   maxPerRun?: number;
   now?: () => number;
   onSummary?: (summary: OutboxReplaySummary) => void;
+  /** 成功写回后的对象缓存/计数回填；失败不影响已提交的图写入。 */
+  onSettled?: (item: OutboxItem, data: unknown) => void | Promise<void>;
 }
 
 interface ItemOutcome {
@@ -70,6 +72,7 @@ export class OutboxReplayer {
   private readonly client: CapabilityClient | null;
   private readonly now: () => number;
   private readonly onSummary?: (summary: OutboxReplaySummary) => void;
+  private readonly onSettled?: (item: OutboxItem, data: unknown) => void | Promise<void>;
   private timer: ReturnType<typeof setInterval> | null = null;
   private inFlight: Promise<OutboxReplaySummary> | null = null;
 
@@ -80,6 +83,7 @@ export class OutboxReplayer {
     this.maxPerRun = Math.max(1, Math.floor(options.maxPerRun ?? 20));
     this.now = options.now ?? Date.now;
     this.onSummary = options.onSummary;
+    this.onSettled = options.onSettled;
   }
 
   start(): void {
@@ -163,6 +167,11 @@ export class OutboxReplayer {
         idempotencyKey: item.requestId,
         retries: 0,
       });
+      try {
+        await this.onSettled?.(item, envelope.data);
+      } catch {
+        // 回填缓存/计数失败不影响已提交的 capability 写入。
+      }
       await this.outbox.remove(item.id);
       return { outcome: 'settled', count: settledCount(envelope.data) };
     } catch (error) {

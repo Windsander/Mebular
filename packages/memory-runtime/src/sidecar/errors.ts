@@ -7,13 +7,17 @@
 
 export type SidecarSettlementErrorCode =
   | 'invalid_request'
+  | 'legacy_sync_unsupported'
   | 'domain_invalid'
   | 'domain_mismatch'
   | 'domain_write_forbidden'
+  | 'forbidden_scope'
   | 'payload_too_large'
   | 'validation_failed'
   | 'content_hash_mismatch'
   | 'idempotency_conflict'
+  | 'revision_mismatch'
+  | 'checkpoint_lease_held'
   | 'not_found'
   | 'outbox_full'
   | 'storage_full'
@@ -22,13 +26,14 @@ export type SidecarSettlementErrorCode =
   | 'internal';
 
 export class SidecarSettlementError extends Error {
-  readonly code: SidecarSettlementErrorCode;
+  /** 可保留 capability 的稳定错误码；未知码按字符串透传，不丢失语义。 */
+  readonly code: string;
   readonly status: number;
   readonly retryable: boolean;
   readonly details?: unknown;
 
   constructor(
-    code: SidecarSettlementErrorCode,
+    code: SidecarSettlementErrorCode | string,
     message: string,
     options: { status?: number; retryable?: boolean; details?: unknown } = {},
   ) {
@@ -41,17 +46,21 @@ export class SidecarSettlementError extends Error {
   }
 }
 
-function defaultStatus(code: SidecarSettlementErrorCode): number {
+function defaultStatus(code: SidecarSettlementErrorCode | string): number {
   switch (code) {
     case 'invalid_request':
+    case 'legacy_sync_unsupported':
     case 'domain_invalid':
     case 'domain_mismatch':
       return 400;
     case 'domain_write_forbidden':
+    case 'forbidden_scope':
       return 403;
     case 'not_found':
       return 404;
     case 'idempotency_conflict':
+    case 'revision_mismatch':
+    case 'checkpoint_lease_held':
       return 409;
     case 'payload_too_large':
       return 413;
@@ -64,6 +73,7 @@ function defaultStatus(code: SidecarSettlementErrorCode): number {
     case 'stopping':
       return 503;
     case 'internal':
+      return 500;
     default:
       return 500;
   }

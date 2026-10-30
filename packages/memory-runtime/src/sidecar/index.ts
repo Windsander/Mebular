@@ -16,6 +16,7 @@ export * from './recall.js';
 export * from './candidates.js';
 export * from './errors.js';
 export * from './ingest.js';
+export * from './internal-objects.js';
 export * from './outbox-replayer.js';
 export * from './settlement.js';
 export * from './server.js';

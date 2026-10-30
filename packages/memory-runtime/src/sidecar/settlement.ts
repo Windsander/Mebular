@@ -26,6 +26,7 @@ import {
   type IngestServiceOptions,
   type IngestStatsSnapshot,
 } from './ingest.js';
+import { MemoryObjectService } from './internal-objects.js';
 import type { SidecarLocalLayer } from './local-layer.js';
 import { OutboxReplayer } from './outbox-replayer.js';
 import {
@@ -139,6 +140,7 @@ export class SettlementRuntime {
   readonly ingest: IngestService;
   readonly replayer: OutboxReplayer;
   readonly recall: RecallService;
+  readonly objects: MemoryObjectService;
 
   private readonly client: CapabilityClient | null;
   private policy: SidecarPolicy;
@@ -179,12 +181,29 @@ export class SettlementRuntime {
       getPolicy: () => this.policy,
       ...(options.now ? { now: options.now } : {}),
     });
+    this.objects = new MemoryObjectService({
+      config: options.config,
+      local: options.local,
+      client: options.client,
+      identity: {
+        cloudId: options.identity.cloudId,
+        profileId: options.identity.profileId,
+        hostId: options.identity.hostId,
+        ...(options.identity.userId !== undefined ? { userId: options.identity.userId } : {}),
+      },
+      policy: this.policy,
+      ...(options.now ? { now: options.now } : {}),
+    });
     this.replayer = new OutboxReplayer({
       outbox: options.local.outbox,
       client: options.client,
       ...(options.now ? { now: options.now } : {}),
       ...(options.replayerIntervalMs !== undefined ? { intervalMs: options.replayerIntervalMs } : {}),
-      onSummary: (summary) => this.ingest.applyReplaySummary(summary),
+      onSummary: (summary) => {
+        this.ingest.applyReplaySummary(summary);
+        this.objects.applyReplaySummary(summary);
+      },
+      onSettled: (item, data) => this.objects.applyReplayedItem(item, data),
     });
     if (options.autoStartReplayer !== false) {
       this.replayer.start();
@@ -212,11 +231,39 @@ export class SettlementRuntime {
   }
 
   get degraded(): boolean {
-    return this.ingest.isDegraded || this.recall.isDegraded;
+    return this.ingest.isDegraded || this.recall.isDegraded || this.objects.isDegraded;
   }
 
   get stats(): IngestStatsSnapshot {
     return this.ingest.stats();
+  }
+
+  handleCompact(request: unknown) {
+    return this.objects.handleCompact(request);
+  }
+
+  getCompact(id: string) {
+    return this.objects.getCompact(id);
+  }
+
+  putCheckpoint(threadId: string, request: unknown) {
+    return this.objects.putCheckpoint(threadId, request);
+  }
+
+  getCheckpoint(threadId: string, options: { agentId?: string | null; sync?: string | null } = {}) {
+    return this.objects.getCheckpoint(threadId, options);
+  }
+
+  deleteCheckpoint(threadId: string, options: { agentId?: string | null; sync?: string | null } = {}) {
+    return this.objects.deleteCheckpoint(threadId, options);
+  }
+
+  putSelf(agentId: string, request: unknown) {
+    return this.objects.putSelf(agentId, request);
+  }
+
+  getSelf(agentId: string) {
+    return this.objects.getSelf(agentId);
   }
 
   async handleIngest(
@@ -285,6 +332,7 @@ export class SettlementRuntime {
     this.policy = next;
     this.ingest.setPolicy(next);
     this.recall.setPolicy(next);
+    this.objects.setPolicy(next);
   }
 
   /**
@@ -369,12 +417,11 @@ export class SettlementRuntime {
     const [stats, outbox] = await Promise.all([this.local.stats(), this.local.outbox.stats()]);
     const ingest = this.ingest.stats();
     const recall = this.recall.stats();
-    const ingestError = ingest.lastError;
-    const recallError = recall.lastError;
-    const lastError = base.lastError
-      ?? (ingestError && (!recallError || ingestError.at >= recallError.at)
-        ? ingestError
-        : recallError ?? ingestError);
+    const objects = this.objects.stats();
+    const errors = [ingest.lastError, recall.lastError, objects.lastError]
+      .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
+    errors.sort((a, b) => b.at - a.at);
+    const lastError = base.lastError ?? errors[0] ?? null;
     return {
       ...base,
       counts: {
@@ -391,6 +438,11 @@ export class SettlementRuntime {
         contexts: recall.contexts,
         feedback: recall.feedback,
         recallSilent: recall.silent,
+        compacts: objects.compacts,
+        checkpoints: objects.checkpoints,
+        selfRecords: objects.selfRecords,
+        objectWritesQueued: objects.queued,
+        objectWritesFailed: objects.failed,
         ...base.counts,
       },
       outbox: {

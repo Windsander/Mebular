@@ -100,6 +100,7 @@ async function setup(): Promise<Harness> {
     ingest: runtime,
     namespaces: runtime,
     recall: runtime,
+    objects: runtime,
     getDegraded: () => runtime.degraded,
   });
   await server.listen();
@@ -220,9 +221,9 @@ describe('sidecar recall/context HTTP', () => {
       context: true,
       feedback: true,
       traces: true,
-      checkpoint: false,
-      compact: false,
-      self: false,
+      checkpoint: true,
+      compact: true,
+      self: true,
     });
   });
 

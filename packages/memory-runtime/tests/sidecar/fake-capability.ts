@@ -1,7 +1,9 @@
-// fake MCP Memory Capability API（只用于 sidecar 沉降测试）。
+// fake MCP Memory Capability API（只用于 sidecar 测试）。
 //
-// 不启动真实 MCP/core；只实现 /write 与 /namespaces，记录请求，
-// 并按内存内容去重，足以验证幂等、域路由、provenance、outbox 重放。
+// 不启动真实 MCP/core；实现 /write、/query、/search、/history、/profile、
+// /skills、/graph、/internal-object 与 /namespaces，记录请求并按内存内容去重，
+// 足以验证幂等、域路由、provenance、outbox 重放、compact stale、
+// checkpoint revision/lease 与 SelfRecord revision。
 
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -34,8 +36,11 @@ export interface FakeCapabilityServer {
   nodes: FakeNode[];
   records: FakeMemoryRecord[];
   compacts: FakeCompact[];
+  selfRecords: FakeSelfRecord[];
+  checkpoints: FakeCheckpoint[];
   setRecords: (records: FakeMemoryRecord[]) => void;
   setCompacts: (compacts: FakeCompact[]) => void;
+  setCheckpointLeaseHost: (hostId: string) => void;
   setFailure: (failure: { status: number; code: string; retryable?: boolean } | null) => void;
   close: () => Promise<void>;
 }
@@ -73,7 +78,37 @@ export interface FakeCompact {
   summary: string;
   sourceIds?: string[];
   sourceHashes?: string[];
+  strategy?: 'summary' | 'dedupe';
+  tokenCount?: number | null;
   stale?: boolean;
+  provenance?: Record<string, unknown>;
+  createdAt?: number | null;
+  updatedAt?: number | null;
+  identityKey?: string;
+}
+
+export interface FakeSelfRecord {
+  id: string;
+  domain: string;
+  agentId: string;
+  revision: number;
+  content: Record<string, unknown>;
+  provenance?: Record<string, unknown>;
+  createdAt?: number | null;
+  updatedAt?: number | null;
+}
+
+export interface FakeCheckpoint {
+  id: string;
+  domain: string;
+  agentId: string;
+  threadId: string;
+  revision: number;
+  state: Record<string, unknown>;
+  summary: string | null;
+  recordIds: string[];
+  lease: { hostId: string; until: number } | null;
+  expiresAt: number;
   provenance?: Record<string, unknown>;
   createdAt?: number | null;
   updatedAt?: number | null;
@@ -81,6 +116,25 @@ export interface FakeCompact {
 
 function sha256(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
+
+function canonicalize(value: unknown): unknown {
+  if (value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map((entry) => canonicalize(entry));
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+    const entry = (value as Record<string, unknown>)[key];
+    if (entry !== undefined) out[key] = canonicalize(entry);
+  }
+  return out;
+}
+
+function canonicalHash(value: unknown): string {
+  return `sha256:${createHash('sha256').update(JSON.stringify(canonicalize(value))).digest('hex')}`;
+}
+
+function isObjectLike(value: unknown): value is Record<string, any> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
 function typeOf(kind: string): string {
@@ -105,12 +159,17 @@ function envelope(data: unknown, warnings: unknown[] = [], degraded = false) {
   };
 }
 
-function errorEnvelope(code: string, message: string, retryable: boolean) {
+function errorEnvelope(code: string, message: string, retryable: boolean, details?: unknown) {
   return {
     ok: false,
     requestId: 'req_fake',
     capabilityVersion: 1,
-    error: { code, message, retryable: Boolean(retryable) },
+    error: {
+      code,
+      message,
+      retryable: Boolean(retryable),
+      ...(details !== undefined ? { details } : {}),
+    },
   };
 }
 
@@ -120,7 +179,10 @@ export async function startFakeCapability(): Promise<FakeCapabilityServer> {
   const nodes: FakeNode[] = [];
   let records: FakeMemoryRecord[] = [];
   let compacts: FakeCompact[] = [];
+  const selfRecords: FakeSelfRecord[] = [];
+  const checkpoints: FakeCheckpoint[] = [];
   let failure: { status: number; code: string; retryable?: boolean } | null = null;
+  let leaseHost = 'h_fake';
   let counter = 0;
 
   const domainsOf = (body: any): string[] | null => {
@@ -146,6 +208,101 @@ export async function startFakeCapability(): Promise<FakeCapabilityServer> {
       legacy: record.legacy === true,
       ...record,
     }));
+
+  const compactView = (compact: FakeCompact) => {
+    const sourceIds = compact.sourceIds ?? [];
+    const sourceHashes = compact.sourceHashes ?? [];
+    let stale = compact.stale === true;
+    for (let index = 0; index < sourceIds.length; index += 1) {
+      const source = records.find((record) => record.id === sourceIds[index]);
+      if (!source) {
+        stale = true;
+        break;
+      }
+      const expected = sourceHashes[index];
+      if (typeof expected === 'string' && expected.length > 0) {
+        if (canonicalHash(source.content ?? {}) !== expected) {
+          stale = true;
+          break;
+        }
+      } else if ((source.updatedAt ?? 0) > (compact.createdAt ?? 0)) {
+        stale = true;
+        break;
+      }
+    }
+    return {
+      ...compact,
+      type: 'compact' as const,
+      kind: 'compact' as const,
+      namespace: compact.domain,
+      ownerType: compact.ownerType ?? ownerOf(compact.domain).ownerType,
+      ownerId: compact.ownerId ?? ownerOf(compact.domain).ownerId,
+      internal: true,
+      sourceIds,
+      sourceHashes,
+      strategy: compact.strategy ?? 'summary',
+      tokenCount: compact.tokenCount ?? null,
+      stale,
+      provenance: compact.provenance ?? {},
+      createdAt: compact.createdAt ?? 0,
+      updatedAt: compact.updatedAt ?? compact.createdAt ?? 0,
+    };
+  };
+
+  const currentSelf = (agentId: string): FakeSelfRecord | null => selfRecords
+    .filter((record) => record.agentId === agentId)
+    .sort((a, b) => b.revision - a.revision
+      || (b.updatedAt ?? 0) - (a.updatedAt ?? 0)
+      || b.id.localeCompare(a.id))[0] ?? null;
+
+  const selfView = (record: FakeSelfRecord) => ({
+    id: record.id,
+    type: 'self_record' as const,
+    kind: 'self_record' as const,
+    domain: record.domain,
+    namespace: record.domain,
+    ownerType: ownerOf(record.domain).ownerType,
+    ownerId: ownerOf(record.domain).ownerId,
+    internal: true,
+    agentId: record.agentId,
+    revision: record.revision,
+    content: record.content,
+    provenance: record.provenance ?? {},
+    createdAt: record.createdAt ?? 0,
+    updatedAt: record.updatedAt ?? record.createdAt ?? 0,
+  });
+
+  const currentCheckpoint = (agentId: string, threadId: string): FakeCheckpoint | null => checkpoints
+    .filter((checkpoint) => checkpoint.agentId === agentId && checkpoint.threadId === threadId)
+    .sort((a, b) => b.revision - a.revision
+      || (b.updatedAt ?? 0) - (a.updatedAt ?? 0)
+      || b.id.localeCompare(a.id))[0] ?? null;
+
+  const checkpointView = (checkpoint: FakeCheckpoint) => ({
+    id: checkpoint.id,
+    type: 'context_checkpoint' as const,
+    kind: 'context_checkpoint' as const,
+    domain: checkpoint.domain,
+    namespace: checkpoint.domain,
+    ownerType: ownerOf(checkpoint.domain).ownerType,
+    ownerId: ownerOf(checkpoint.domain).ownerId,
+    internal: true,
+    agentId: checkpoint.agentId,
+    threadId: checkpoint.threadId,
+    revision: checkpoint.revision,
+    state: checkpoint.state,
+    summary: checkpoint.summary,
+    recordIds: checkpoint.recordIds,
+    lease: checkpoint.lease,
+    expiresAt: checkpoint.expiresAt,
+    provenance: checkpoint.provenance ?? {},
+    createdAt: checkpoint.createdAt ?? 0,
+    updatedAt: checkpoint.updatedAt ?? checkpoint.createdAt ?? 0,
+  });
+
+  const actorCanTouchAgent = (actor: any, agentId: string): boolean => actor?.type === 'user'
+    || actor?.type === 'system'
+    || (actor?.type === 'agent' && actor.agentId === agentId);
 
   const server: Server = createServer((req, res) => {
     void (async () => {
@@ -335,33 +492,306 @@ export async function startFakeCapability(): Promise<FakeCapabilityServer> {
 
       if (request.path === '/internal/memory/v1/internal-object') {
         const body = request.body as any;
-        if (body?.kind === 'compact' && body?.op === 'list') {
-          const objects = compacts
-            .filter((compact) => inDomains(compact.domain, domainsOf(body)))
-            .map((compact) => ({
-              ...compact,
-              type: 'compact' as const,
-              kind: 'compact' as const,
-              namespace: compact.domain,
-              ownerType: compact.ownerType ?? ownerOf(compact.domain).ownerType,
-              ownerId: compact.ownerId ?? ownerOf(compact.domain).ownerId,
-              internal: true,
-              sourceIds: compact.sourceIds ?? [],
-              sourceHashes: compact.sourceHashes ?? [],
-              strategy: 'summary',
-              stale: compact.stale === true,
-              provenance: compact.provenance ?? {},
-              createdAt: compact.createdAt ?? 0,
-              updatedAt: compact.updatedAt ?? compact.createdAt ?? 0,
-            }));
-          res.statusCode = 200;
+        const actor = body?.actor;
+        const send = (status: number, payload: unknown) => {
+          res.statusCode = status;
           res.setHeader('content-type', 'application/json');
-          res.end(JSON.stringify(envelope({ objects, total: objects.length, replayed: false })));
+          res.end(JSON.stringify(payload));
+        };
+        const fail = (status: number, code: string, message: string, details?: unknown, retryable = false) => {
+          send(status, errorEnvelope(code, message, retryable, details));
+        };
+        if (body?.sync !== undefined || body?.['self.sync'] !== undefined || body?.['checkpoint.sync'] !== undefined) {
+          fail(400, 'legacy_sync_unsupported', '不再支持 sync/self.sync/checkpoint.sync');
           return;
         }
-        res.statusCode = 404;
-        res.setHeader('content-type', 'application/json');
-        res.end(JSON.stringify(errorEnvelope('not_found', 'internal object not found', false)));
+
+        if (body?.kind === 'compact') {
+          const op = body.op;
+          if (op === 'list') {
+            const staleOnly = body.stale === true;
+            const objects = compacts
+              .filter((compact) => inDomains(compact.domain, domainsOf(body)))
+              .map(compactView)
+              .filter((compact) => !staleOnly || compact.stale);
+            send(200, envelope({ objects, total: objects.length, replayed: false }));
+            return;
+          }
+          if (op === 'get') {
+            const compact = compacts.find((entry) => entry.id === body.id);
+            if (!compact) {
+              fail(404, 'not_found', 'compact 不存在');
+              return;
+            }
+            send(200, envelope({ object: compactView(compact), replayed: false }));
+            return;
+          }
+          if (op === 'delete') {
+            if (actor?.type !== 'user' && actor?.type !== 'system') {
+              fail(403, 'forbidden_scope', '删除 compact 需要 user/system 权限');
+              return;
+            }
+            const index = compacts.findIndex((entry) => entry.id === body.id);
+            if (index < 0) {
+              fail(404, 'not_found', 'compact 不存在');
+              return;
+            }
+            compacts.splice(index, 1);
+            send(200, envelope({ deleted: true, id: body.id, replayed: false }));
+            return;
+          }
+          if (op !== 'upsert') {
+            fail(400, 'internal_kind_invalid', 'compact op 非法');
+            return;
+          }
+          if (typeof body.domain !== 'string' || body.domain.length === 0) {
+            fail(400, 'domain_invalid', 'compact 需要 domain');
+            return;
+          }
+          if (actor?.type === 'agent' && body.domain.startsWith('agent:')
+            && body.domain !== `agent:${actor.agentId}`) {
+            fail(403, 'domain_write_forbidden', 'Agent 不能写入其他 Agent 域');
+            return;
+          }
+          const sourceIds = Array.isArray(body.sourceIds) ? body.sourceIds.filter((id: unknown) => typeof id === 'string') : [];
+          if (sourceIds.length === 0) {
+            fail(400, 'invalid_request', 'sourceIds 不能为空');
+            return;
+          }
+          const sources: FakeMemoryRecord[] = [];
+          for (const sourceId of sourceIds) {
+            const source = records.find((record) => record.id === sourceId);
+            if (!source) {
+              fail(404, 'not_found', 'compact source 不存在', { id: sourceId });
+              return;
+            }
+            if (source.domain !== body.domain) {
+              fail(400, 'domain_mismatch', 'compact 与 source 必须同域', {
+                domain: body.domain,
+                sourceId,
+                sourceDomain: source.domain,
+              });
+              return;
+            }
+            sources.push(source);
+          }
+          const sourceHashes = Array.isArray(body.sourceHashes) && body.sourceHashes.length > 0
+            ? body.sourceHashes.filter((hash: unknown) => typeof hash === 'string')
+            : sources.map((source) => canonicalHash(source.content ?? {}));
+          if (sourceHashes.length !== sourceIds.length) {
+            fail(400, 'invalid_request', 'sourceHashes 必须与 sourceIds 等长');
+            return;
+          }
+          const strategy = body.strategy === 'dedupe' ? 'dedupe' : 'summary';
+          const identityKey = sha256({
+            domain: body.domain,
+            strategy,
+            sourceIds: [...sourceIds].sort(),
+            sourceHashes,
+          });
+          const existing = compacts.find((compact) => compact.identityKey === identityKey);
+          if (existing) {
+            send(200, envelope({ object: compactView(existing), replayed: false }));
+            return;
+          }
+          counter += 1;
+          const createdAt = Date.now();
+          const compact: FakeCompact = {
+            id: `01FAKEC${String(counter).padStart(4, '0')}`,
+            type: 'compact',
+            kind: 'compact',
+            domain: body.domain,
+            summary: String(body.summary ?? ''),
+            sourceIds,
+            sourceHashes,
+            strategy,
+            tokenCount: typeof body.tokenCount === 'number' ? body.tokenCount : null,
+            provenance: isObjectLike(body.provenance) ? body.provenance : {},
+            createdAt,
+            updatedAt: createdAt,
+            identityKey,
+          };
+          compacts.push(compact);
+          send(200, envelope({ object: compactView(compact), replayed: false }));
+          return;
+        }
+
+        if (body?.kind === 'self_record') {
+          if (typeof body.agentId !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(body.agentId)) {
+            fail(400, 'invalid_agent_id', 'agentId 格式非法');
+            return;
+          }
+          const agentId = body.agentId;
+          if (!actorCanTouchAgent(actor, agentId)) {
+            fail(403, 'forbidden_scope', '当前 actor 不能读写该 Agent 的内部对象');
+            return;
+          }
+          const current = currentSelf(agentId);
+          if (body.op === 'get') {
+            send(200, envelope({ object: current ? selfView(current) : null, replayed: false }));
+            return;
+          }
+          if (body.op !== 'upsert') {
+            fail(400, 'internal_kind_invalid', 'self_record op 非法');
+            return;
+          }
+          if (body.domain !== undefined && body.domain !== `agent:${agentId}`) {
+            fail(400, 'domain_mismatch', 'SelfRecord 必须位于 agent:<agentId> 域');
+            return;
+          }
+          const currentRevision = current?.revision ?? 0;
+          if (body.expectedRevision !== undefined && body.expectedRevision !== currentRevision) {
+            fail(409, 'revision_mismatch', 'SelfRecord revision 冲突', {
+              agentId,
+              currentRevision,
+              expectedRevision: body.expectedRevision,
+            }, true);
+            return;
+          }
+          counter += 1;
+          const createdAt = Date.now();
+          const record = isObjectLike(body.record) ? body.record : {};
+          const self: FakeSelfRecord = {
+            id: `01FAKES${String(counter).padStart(4, '0')}`,
+            domain: `agent:${agentId}`,
+            agentId,
+            revision: currentRevision + 1,
+            content: record,
+            provenance: {
+              ...(isObjectLike(body.provenance) ? body.provenance : {}),
+              writerType: actor?.type ?? 'unknown',
+              writerId: actor?.agentId ?? (actor?.type === 'user' ? 'u_test' : 'system'),
+              agentId,
+            },
+            createdAt,
+            updatedAt: createdAt,
+          };
+          selfRecords.push(self);
+          send(200, envelope({ object: selfView(self), conflict: null, replayed: false }));
+          return;
+        }
+
+        if (body?.kind === 'context_checkpoint') {
+          if (typeof body.agentId !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(body.agentId)) {
+            fail(400, 'invalid_agent_id', 'agentId 格式非法');
+            return;
+          }
+          const agentId = body.agentId;
+          if (!actorCanTouchAgent(actor, agentId)) {
+            fail(403, 'forbidden_scope', '当前 actor 不能读写该 Agent 的内部对象');
+            return;
+          }
+          if (body.op === 'get') {
+            const threadId = body.threadId;
+            const current = currentCheckpoint(agentId, threadId);
+            const visible = current && !(current.expiresAt > 0 && current.expiresAt < Date.now()) ? current : null;
+            send(200, envelope({ object: visible ? checkpointView(visible) : null, replayed: false }));
+            return;
+          }
+          if (body.op === 'list') {
+            const objects = checkpoints
+              .filter((checkpoint) => checkpoint.agentId === agentId)
+              .filter((checkpoint) => !body.threadId || checkpoint.threadId === body.threadId)
+              .filter((checkpoint) => !(checkpoint.expiresAt > 0 && checkpoint.expiresAt < Date.now()))
+              .sort((a, b) => b.revision - a.revision)
+              .map(checkpointView);
+            send(200, envelope({ objects, total: objects.length, replayed: false }));
+            return;
+          }
+          if (body.op === 'delete') {
+            if (actor?.type !== 'user' && actor?.type !== 'system') {
+              fail(403, 'forbidden_scope', '删除 checkpoint 需要 user/system 权限');
+              return;
+            }
+            const before = checkpoints.length;
+            for (let index = checkpoints.length - 1; index >= 0; index -= 1) {
+              const checkpoint = checkpoints[index]!;
+              const matches = body.id
+                ? checkpoint.id === body.id
+                : checkpoint.agentId === agentId && checkpoint.threadId === body.threadId;
+              if (matches) checkpoints.splice(index, 1);
+            }
+            send(200, envelope({ deleted: checkpoints.length < before, count: before - checkpoints.length, replayed: false }));
+            return;
+          }
+          if (body.op !== 'upsert') {
+            fail(400, 'internal_kind_invalid', 'context_checkpoint op 非法');
+            return;
+          }
+          const threadId = body.threadId;
+          if (typeof threadId !== 'string' || threadId.length === 0) {
+            fail(400, 'invalid_thread_id', 'checkpoint 需要 threadId');
+            return;
+          }
+          if (body.force === true && actor?.type === 'agent') {
+            fail(403, 'forbidden_scope', 'force=true 仅允许 user/system');
+            return;
+          }
+          const domain = body.domain ?? 'default';
+          const validTask = typeof domain === 'string' && domain.startsWith('task:')
+            && domain.slice('task:'.length) === threadId;
+          if (domain !== 'default' && !validTask) {
+            fail(400, 'domain_mismatch', 'Checkpoint 只能位于 task:<threadId> 或 default 域', {
+              domain,
+              threadId,
+            });
+            return;
+          }
+          const current = currentCheckpoint(agentId, threadId);
+          const currentRevision = current?.revision ?? 0;
+          if (body.expectedRevision !== undefined && body.expectedRevision !== currentRevision) {
+            fail(409, 'revision_mismatch', 'checkpoint revision 冲突', {
+              agentId,
+              threadId,
+              currentRevision,
+              expectedRevision: body.expectedRevision,
+            }, true);
+            return;
+          }
+          if (current?.lease && current.lease.until > Date.now() && current.lease.hostId !== leaseHost) {
+            if (body.force !== true) {
+              fail(409, 'checkpoint_lease_held', 'checkpoint 租约被其他 host 持有', {
+                hostId: current.lease.hostId,
+                until: current.lease.until,
+              }, true);
+              return;
+            }
+            if (actor?.type !== 'user' && actor?.type !== 'system') {
+              fail(403, 'forbidden_scope', '只有 user/system 可以抢占租约');
+              return;
+            }
+          }
+          const leaseMs = typeof body.leaseMs === 'number' && body.leaseMs > 0
+            ? Math.min(body.leaseMs, 3_600_000)
+            : 60_000;
+          counter += 1;
+          const createdAt = Date.now();
+          const checkpoint: FakeCheckpoint = {
+            id: `01FAKEP${String(counter).padStart(4, '0')}`,
+            domain: String(domain),
+            agentId,
+            threadId,
+            revision: currentRevision + 1,
+            state: isObjectLike(body.state) ? body.state : {},
+            summary: typeof body.summary === 'string' ? body.summary : null,
+            recordIds: Array.isArray(body.recordIds) ? body.recordIds.filter((id: unknown) => typeof id === 'string') : [],
+            lease: { hostId: leaseHost, until: createdAt + leaseMs },
+            expiresAt: typeof body.expiresAt === 'number' ? body.expiresAt : 0,
+            provenance: {
+              ...(isObjectLike(body.provenance) ? body.provenance : {}),
+              writerType: actor?.type ?? 'unknown',
+              writerId: actor?.agentId ?? (actor?.type === 'user' ? 'u_test' : 'system'),
+              threadId,
+            },
+            createdAt,
+            updatedAt: createdAt,
+          };
+          checkpoints.push(checkpoint);
+          send(200, envelope({ object: checkpointView(checkpoint), conflict: null, replayed: false }));
+          return;
+        }
+
+        fail(400, 'internal_kind_invalid', 'kind 必须是 compact | self_record | context_checkpoint');
         return;
       }
 
@@ -448,8 +878,11 @@ export async function startFakeCapability(): Promise<FakeCapabilityServer> {
     nodes,
     get records() { return records; },
     get compacts() { return compacts; },
+    selfRecords,
+    checkpoints,
     setRecords: (next) => { records = next; },
     setCompacts: (next) => { compacts = next; },
+    setCheckpointLeaseHost: (hostId) => { leaseHost = hostId; },
     setFailure: (next) => {
       failure = next;
     },

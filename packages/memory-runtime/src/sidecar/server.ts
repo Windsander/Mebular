@@ -32,6 +32,7 @@ import type {
   IngestExtractionView,
   IngestHttpResult,
 } from './ingest.js';
+import type { SidecarObjectsApi } from './internal-objects.js';
 import { SidecarSettlementError } from './errors.js';
 import type { NamespacesView } from './settlement.js';
 
@@ -39,10 +40,6 @@ const REQUEST_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 const UNIMPLEMENTED_ROUTES = new Set([
   'mode',
-  'checkpoints',
-  'compact',
-  'compacts',
-  'self',
   'config',
   'metrics',
 ]);
@@ -101,6 +98,16 @@ export interface SidecarStatusCounts {
   feedback?: number;
   /** 沉默的召回/上下文次数。 */
   recallSilent?: number;
+  /** 已确认写入/复用的 Compact 数。 */
+  compacts?: number;
+  /** 已确认写入的 ContextCheckpoint 数。 */
+  checkpoints?: number;
+  /** 已确认写入的 SelfRecord 数。 */
+  selfRecords?: number;
+  /** 进入 outbox 的对象写请求数。 */
+  objectWritesQueued?: number;
+  /** 永久失败的对象写请求数。 */
+  objectWritesFailed?: number;
 }
 
 export interface SidecarStatusOutbox {
@@ -193,6 +200,7 @@ export interface SidecarServerOptions {
   ingest?: SidecarIngestApi;
   namespaces?: SidecarNamespacesApi;
   recall?: SidecarRecallApi;
+  objects?: SidecarObjectsApi;
   /** 动态降级标记（沉降/outbox）；与显式 degraded 取或。 */
   getDegraded?: () => boolean;
   state?: SidecarState;
@@ -344,6 +352,7 @@ export class SidecarServer {
   private readonly ingest?: SidecarIngestApi;
   private readonly namespaces?: SidecarNamespacesApi;
   private readonly recall?: SidecarRecallApi;
+  private readonly objects?: SidecarObjectsApi;
   private readonly getDegraded?: () => boolean;
   private readonly now: () => number;
   private server: Server | null = null;
@@ -363,6 +372,7 @@ export class SidecarServer {
     this.ingest = options.ingest;
     this.namespaces = options.namespaces;
     this.recall = options.recall;
+    this.objects = options.objects;
     this.getDegraded = options.getDegraded;
     this.state = options.state ?? 'starting';
     this.degraded = options.degraded === true;
@@ -577,6 +587,11 @@ export class SidecarServer {
         contexts: 0,
         feedback: 0,
         recallSilent: 0,
+        compacts: 0,
+        checkpoints: 0,
+        selfRecords: 0,
+        objectWritesQueued: 0,
+        objectWritesFailed: 0,
       },
       outbox: { items: 0, bytes: 0, oldestAt: null },
       limits: {
@@ -625,6 +640,7 @@ export class SidecarServer {
       const method = req.method ?? 'GET';
       const isGet = method === 'GET' || method === 'HEAD';
       const isPost = method === 'POST';
+      const isPut = method === 'PUT';
 
       if (pathname === `${SIDECAR_API_PREFIX}/health`) {
         if (!isGet) {
@@ -684,9 +700,9 @@ export class SidecarServer {
             context: Boolean(this.recall),
             feedback: Boolean(this.recall),
             traces: Boolean(this.recall),
-            checkpoint: false,
-            compact: false,
-            self: false,
+            checkpoint: Boolean(this.objects),
+            compact: Boolean(this.objects),
+            self: Boolean(this.objects),
             models: ['heuristic', 'host'],
           },
         }, [], this.currentDegraded()));
@@ -778,6 +794,137 @@ export class SidecarServer {
           result.queued ? 202 : 200,
           this.envelope(requestId, result, result.warnings, result.degraded),
         );
+        return;
+      }
+
+      if (relative === 'compact') {
+        if (!isPost) {
+          req.resume();
+          this.sendError(res, 405, requestId, 'method_not_allowed', 'compact 仅接受 POST');
+          return;
+        }
+        if (!this.objects) {
+          req.resume();
+          this.sendError(res, 501, requestId, 'not_implemented', 'compact 尚未启用');
+          return;
+        }
+        if (this.state === 'stopping') {
+          req.resume();
+          this.sendError(res, 503, requestId, 'stopping', 'sidecar 正在停止', undefined, true);
+          return;
+        }
+        const body = await readJsonBody(req);
+        const result = await this.objects.handleCompact(body);
+        this.send(res, result.status, this.envelope(requestId, result.data, result.warnings, result.degraded));
+        return;
+      }
+
+      if (relative.startsWith('compacts/')) {
+        if (!isGet) {
+          req.resume();
+          this.sendError(res, 405, requestId, 'method_not_allowed', 'compacts 仅接受 GET');
+          return;
+        }
+        if (!this.objects) {
+          req.resume();
+          this.sendError(res, 501, requestId, 'not_implemented', 'compacts 尚未启用');
+          return;
+        }
+        const id = relative.slice('compacts/'.length);
+        if (id.length === 0 || id.includes('/')) {
+          req.resume();
+          this.sendError(res, 404, requestId, 'not_found', 'compact 不存在');
+          return;
+        }
+        const result = await this.objects.getCompact(id);
+        this.send(res, result.status, this.envelope(requestId, result.data, result.warnings, result.degraded));
+        return;
+      }
+
+      if (relative.startsWith('checkpoints/')) {
+        if (!this.objects) {
+          req.resume();
+          this.sendError(res, 501, requestId, 'not_implemented', 'checkpoints 尚未启用');
+          return;
+        }
+        const threadId = relative.slice('checkpoints/'.length);
+        if (threadId.length === 0 || threadId.includes('/')) {
+          req.resume();
+          this.sendError(res, 404, requestId, 'not_found', 'checkpoint 不存在');
+          return;
+        }
+        const agentId = url.searchParams.get('agentId') ?? url.searchParams.get('agent');
+        const sync = url.searchParams.get('sync');
+        if (isGet) {
+          const result = await this.objects.getCheckpoint(threadId, { agentId, sync });
+          this.send(res, result.status, this.envelope(requestId, result.data, result.warnings, result.degraded));
+          return;
+        }
+        if (method === 'DELETE') {
+          if (this.state === 'stopping') {
+            req.resume();
+            this.sendError(res, 503, requestId, 'stopping', 'sidecar 正在停止', undefined, true);
+            return;
+          }
+          const result = await this.objects.deleteCheckpoint(threadId, { agentId, sync });
+          this.send(res, result.status, this.envelope(requestId, result.data, result.warnings, result.degraded));
+          return;
+        }
+        if (!isPut) {
+          req.resume();
+          this.sendError(res, 405, requestId, 'method_not_allowed', 'checkpoints 仅接受 GET/PUT/DELETE');
+          return;
+        }
+        if (this.state === 'stopping') {
+          req.resume();
+          this.sendError(res, 503, requestId, 'stopping', 'sidecar 正在停止', undefined, true);
+          return;
+        }
+        const body = await readJsonBody(req);
+        if (agentId && isObject(body) && typeof body.agentId === 'string' && body.agentId !== agentId) {
+          this.sendError(res, 403, requestId, 'forbidden_scope', 'Agent 不能写入其他 Agent 的 checkpoint');
+          return;
+        }
+        const result = await this.objects.putCheckpoint(threadId, body);
+        this.send(res, result.status, this.envelope(requestId, result.data, result.warnings, result.degraded));
+        return;
+      }
+
+      if (relative.startsWith('self/')) {
+        if (!this.objects) {
+          req.resume();
+          this.sendError(res, 501, requestId, 'not_implemented', 'self 尚未启用');
+          return;
+        }
+        const agentId = relative.slice('self/'.length);
+        if (agentId.length === 0 || agentId.includes('/')) {
+          req.resume();
+          this.sendError(res, 404, requestId, 'not_found', 'SelfRecord 不存在');
+          return;
+        }
+        if (url.searchParams.has('sync')) {
+          req.resume();
+          this.sendError(res, 400, requestId, 'legacy_sync_unsupported', '不再支持 sync / checkpoint.sync / self.sync');
+          return;
+        }
+        if (isGet) {
+          const result = await this.objects.getSelf(agentId);
+          this.send(res, result.status, this.envelope(requestId, result.data, result.warnings, result.degraded));
+          return;
+        }
+        if (!isPut) {
+          req.resume();
+          this.sendError(res, 405, requestId, 'method_not_allowed', 'self 仅接受 GET/PUT');
+          return;
+        }
+        if (this.state === 'stopping') {
+          req.resume();
+          this.sendError(res, 503, requestId, 'stopping', 'sidecar 正在停止', undefined, true);
+          return;
+        }
+        const body = await readJsonBody(req);
+        const result = await this.objects.putSelf(agentId, body);
+        this.send(res, result.status, this.envelope(requestId, result.data, result.warnings, result.degraded));
         return;
       }
 

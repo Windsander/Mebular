@@ -285,7 +285,7 @@ jobs:
           mkdir -p release-pack
           ROOT="$PWD"
           npm pack --pack-destination "$ROOT/release-pack"
-          for p in packages/fleet packages/service packages/mcp packages/skill; do
+          for p in packages/fleet packages/service packages/mcp packages/memory-runtime packages/skill; do
             (cd "$p" && npm pack --pack-destination "$ROOT/release-pack")
           done
 

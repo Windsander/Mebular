@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 """Drive the real Hermes MemoryProvider plugin against a real Runtime URL.
 
-The Node host-E2E runner starts a real Mebular Runtime HTTP server, writes a
-disposable Hermes profile, and invokes this file with that profile. This script
-imports the same `integrations/hermes/mebular-memory/__init__.py` that a Hermes
-profile would load, uses Hermes' MemoryProvider seam, and prints one JSON
-observation document. It never contacts a real LLM.
+The Node host-E2E runner starts a real Memory Runtime sidecar in front of a
+real Mebular Runtime HTTP server, writes a disposable Hermes profile, and
+invokes this file with that profile. This script imports the same
+`integrations/hermes/mebular-memory/__init__.py` that a Hermes profile would
+load, uses Hermes' MemoryProvider seam, and prints one JSON observation
+document. It never contacts a real LLM.
 
 Environment expected from the runner:
-  HERMES_HOME                 disposable profile
-  MEBULAR_HOME                disposable (unused) Mebular root
-  MEBULAR_RUNTIME_TOKEN       bearer token for the real Runtime
-  HERMES_E2E_CONFIG           JSON with runtime_url, query, tokens, messages
+  HERMES_HOME                     disposable profile
+  MEBULAR_MEMORY_RUNTIME_HOME     sidecar home containing memory-runtime.json
+  HERMES_E2E_CONFIG               JSON with session/query/messages
+
+The runner deliberately does not pass MEBULAR_MEMORY_RUNTIME_TOKEN; the plugin
+must read the sidecar host token from discovery tokenFile.
 """
 
 from __future__ import annotations
@@ -105,6 +108,7 @@ def main() -> int:
         "available": bool(provider.is_available()),
         "tools": provider.get_tool_schemas(),
         "systemPrompt": provider.system_prompt_block(),
+        "status": provider.get_status_config(),
     }
 
     result["prefetch"] = provider.prefetch(config["query"])
@@ -131,6 +135,7 @@ def main() -> int:
     result["preCompressReturn"] = provider.on_pre_compress(archive_messages)
     result["compressFlushed"] = bool(provider.flush(timeout=8.0))
     result["compressPending"] = int(provider.pending())
+    result["checkpointPending"] = int(provider.checkpoint_pending())
 
     provider.on_session_switch(config["next_session_id"], reset=True)
     provider.sync_turn(

@@ -12,7 +12,7 @@ import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { Mebular, IdentityManager } from '../../../../dist/index.js';
+import { Mebular, IdentityManager, MemoryService } from '../../../../dist/index.js';
 import { buildServer } from '../../../../packages/mcp/src/server.mjs';
 import { hashToken, startHttpServer } from '../../../../packages/mcp/src/serve.mjs';
 
@@ -39,6 +39,8 @@ function parseJsonLines(text) {
  *   capture?: 'off' | 'local',
  *   trace?: 'off' | 'local',
  *   root?: string | null,
+ *   memoryRuntime?: { enabled?: boolean } | null,
+ *   manageMemoryRuntime?: boolean,
  * }} [options]
  */
 export async function startRealRuntime(options = {}) {
@@ -49,6 +51,8 @@ export async function startRealRuntime(options = {}) {
   const mode = options.mode === 'mcp' ? 'mcp' : 'immersive';
   const capture = options.capture === 'off' ? 'off' : 'local';
   const trace = options.trace === 'off' ? 'off' : 'local';
+  const memoryRuntime = options.memoryRuntime ?? null;
+  const manageMemoryRuntime = options.manageMemoryRuntime !== false;
   const root = options.root ?? await mkdtemp(join(tmpdir(), 'mebular-host-e2e-runtime-'));
   const home = join(root, 'mebular-home');
   const cloudRoot = join(root, 'cloud-root');
@@ -86,7 +90,9 @@ export async function startRealRuntime(options = {}) {
   const server = await startHttpServer({
     home,
     app,
-    service: null,
+    // The Memory Capability API needs a real MemoryService.  Keep the legacy
+    // /runtime/v1-only suites on the original null-service harness.
+    service: memoryRuntime?.enabled === true ? new MemoryService(app) : null,
     buildServer,
     config: {
       runtime: {
@@ -95,10 +101,12 @@ export async function startRealRuntime(options = {}) {
         trace,
         model: { source: 'heuristic' },
       },
+      ...(memoryRuntime ? { memoryRuntime } : {}),
     },
     host: '127.0.0.1',
     port: 0,
     auth,
+    manageMemoryRuntime,
     ...(tokensFile ? { tokensFile } : {}),
   });
   const url = `http://127.0.0.1:${server.port}`;

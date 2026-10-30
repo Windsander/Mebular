@@ -1,22 +1,27 @@
 #!/usr/bin/env node
-// Hermes host E2E: real MemoryProvider plugin + real Runtime HTTP.
+// Hermes host E2E: real MemoryProvider plugin -> real Memory Runtime sidecar ->
+// real MCP Runtime/GraphStore.
 //
 // Boundary: this does not start a real Hermes gateway or run an LLM. It loads
 // the exact plugin file a Hermes profile loads, drives the documented
 // MemoryProvider methods (initialize / prefetch / sync_turn / on_pre_compress /
-// on_session_switch / shutdown), and sends real HTTP to the real Runtime.
+// on_session_switch / shutdown), and sends real HTTP to the real sidecar.
+//
+// The sidecar is the real `@mebular/memory-runtime` bundled with this repo; the
+// MCP daemon under it is the real `startHttpServer` + `RuntimeService` path.
+// The Hermes profile never receives the MCP capability token or the runtime
+// bearer token, and reads the sidecar host token from discovery tokenFile only.
 //
 // Usage:
 //   node tests/integration/host-e2e/hermes-real-runtime.mjs [--keep]
 
 import { spawn } from 'node:child_process';
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { startRealRuntime } from './lib/real-runtime.mjs';
-import { createRuntimeTap } from './lib/runtime-tap.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..', '..', '..');
@@ -56,6 +61,25 @@ function parseMarker(stdout) {
   }
 }
 
+async function readJson(path) {
+  try {
+    return JSON.parse(await readFile(path, 'utf8'));
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+async function waitFor(checkFn, { timeoutMs = 15000, intervalMs = 40 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = await checkFn();
+    if (value) return value;
+    if (Date.now() >= deadline) throw new Error('waitFor timeout');
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, intervalMs));
+  }
+}
+
 async function scanForToken(dir, token) {
   const hits = [];
   async function walk(current) {
@@ -70,10 +94,10 @@ async function scanForToken(dir, token) {
       const path = join(current, entry.name);
       if (entry.isDirectory()) {
         await walk(path);
-      } else if (entry.isFile() && entry.name.endsWith('.json') && entry.name !== 'tokens.json') {
-        const text = await readFile(path, 'utf8').catch(() => '');
-        if (text.includes(token)) hits.push(path);
-      } else if (entry.isFile() && (entry.name.endsWith('.jsonl') || entry.name.endsWith('.log') || entry.name.endsWith('.txt'))) {
+      } else if (entry.isFile() && (entry.name.endsWith('.json')
+        || entry.name.endsWith('.jsonl')
+        || entry.name.endsWith('.log')
+        || entry.name.endsWith('.txt'))) {
         const text = await readFile(path, 'utf8').catch(() => '');
         if (text.includes(token)) hits.push(path);
       }
@@ -83,14 +107,69 @@ async function scanForToken(dir, token) {
   return hits;
 }
 
+function parseJsonLines(text) {
+  const out = [];
+  for (const line of text.split('\n')) {
+    if (line.trim().length === 0) continue;
+    try {
+      out.push(JSON.parse(line));
+    } catch {
+      // Ignore a torn line, matching the local store's own recovery rule.
+    }
+  }
+  return out;
+}
+
+async function sidecarRawChunks(home) {
+  try {
+    const text = await readFile(join(home, 'memory-runtime', 'raw', 'chunks.jsonl'), 'utf8');
+    return parseJsonLines(text).map((entry) => entry.chunk?.text).filter((textValue) => typeof textValue === 'string');
+  } catch (error) {
+    if (error?.code === 'ENOENT') return [];
+    throw error;
+  }
+}
+
+async function sidecarStatus(discovery, home) {
+  const tokenRecord = await readJson(join(home, 'memory-runtime', 'host-token'));
+  const token = typeof tokenRecord?.token === 'string' ? tokenRecord.token : '';
+  const response = await fetch(`${discovery.url}/status`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  const body = await response.json().catch(() => null);
+  return { token, status: response.status, body, data: body?.data ?? null };
+}
+
+async function sidecarCheckpoint(discovery, token, threadId) {
+  const response = await fetch(
+    `${discovery.url}/checkpoints/${encodeURIComponent(threadId)}?agentId=hermes`,
+    { headers: { authorization: `Bearer ${token}` } },
+  );
+  const body = await response.json().catch(() => null);
+  return { status: response.status, data: body?.data ?? null };
+}
+
 async function main() {
   const keep = process.argv.includes('--keep');
   const runRoot = join(tmpdir(), `mebular-hermes-host-e2e-${process.pid}-${Date.now()}`);
   const hermesHome = join(runRoot, 'hermes-home');
+  const runtimeRoot = join(runRoot, 'runtime-root');
+  const runtimeHome = join(runtimeRoot, 'mebular-home');
   await mkdir(hermesHome, { recursive: true });
+  // Port 0 avoids colliding with a developer's sidecar or another test suite.
+  await mkdir(join(runtimeHome, 'memory-runtime'), { recursive: true });
+  await writeFile(join(runtimeHome, 'memory-runtime', 'config.json'), JSON.stringify({
+    schema: 1,
+    http: { host: '127.0.0.1', port: 0 },
+  }, null, 2), 'utf8');
 
-  const runtime = await startRealRuntime({ auth: 'bearer', token: `hermes-host-token-${Date.now()}` });
-  const tap = await createRuntimeTap(runtime.url, { name: 'hermes-real-runtime' });
+  const runtime = await startRealRuntime({
+    auth: 'bearer',
+    token: `hermes-host-token-${Date.now()}`,
+    root: runtimeRoot,
+    memoryRuntime: { enabled: true },
+    manageMemoryRuntime: true,
+  });
   const suffix = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
   const query = `hermes-prefetch-${suffix}`;
   const turnUser = `以后默认用 hermes-turn-${suffix} 主题`;
@@ -98,32 +177,23 @@ async function main() {
   const nextTurnUser = `以后默认用 hermes-s2-${suffix} 主题`;
   const secretSystemPrompt = `SECRET HOST PROMPT ${suffix} do not archive`;
 
-  await writeFile(join(hermesHome, 'mebular-memory.json'), JSON.stringify({
-    runtime_url: tap.url,
-    agent_id: 'hermes',
-    capture: 'local',
-    extractor: 'heuristic',
-    recall_timeout: 3,
-    ingest_timeout: 3,
-    archive_flush_timeout: 3,
-  }, null, 2), 'utf8');
-
-  const config = {
-    session_id: 'hermes-s1',
-    query,
-    turn_user: turnUser,
-    turn_assistant: '已经记住这个偏好。',
-    compress_user: compressUser,
-    compress_assistant: '压缩前的助手回复。',
-    secret_system_prompt: secretSystemPrompt,
-    next_session_id: 'hermes-s2',
-    next_turn_user: nextTurnUser,
-    next_turn_assistant: '第二个会话已经记住。',
-  };
-
   try {
-    console.log('Hermes 真实 plugin + 真实 Runtime HTTP');
-    console.log('===================================');
+    console.log('Hermes 真实 plugin + 真实 sidecar + 真实 Runtime');
+    console.log('================================================');
+
+    const discoveryPath = join(runtime.home, 'memory-runtime.json');
+    const discovery = await waitFor(async () => {
+      const record = await readJson(discoveryPath);
+      return record?.state === 'ready' && typeof record?.url === 'string' ? record : null;
+    });
+    check('sidecar discovery 写出 /memory-runtime/v1', String(discovery.url).endsWith('/memory-runtime/v1'),
+      discovery.url);
+    check('sidecar discovery 不含 token 明文',
+      discovery.token === undefined && discovery.capabilityToken === undefined);
+    check('sidecar discovery 使用 host-token tokenFile',
+      typeof discovery.tokenFile === 'string'
+      && discovery.tokenFile.endsWith('/memory-runtime/host-token'));
+
     const seeded = await runtime.seedMemory({
       text: `以后默认用 ${query} 主题`,
       namespace: 'default',
@@ -131,10 +201,37 @@ async function main() {
     });
     check('Runtime heuristic seed 写入', seeded.accepted.records === 1, JSON.stringify(seeded.records));
 
+    await writeFile(join(hermesHome, 'mebular-memory.json'), JSON.stringify({
+      agent_id: 'hermes',
+      capture: 'local',
+      extractor: 'heuristic',
+      recall_timeout: 3,
+      ingest_timeout: 3,
+      checkpoint_timeout: 3,
+      archive_flush_timeout: 3,
+    }, null, 2), 'utf8');
+
+    const config = {
+      session_id: 'hermes-s1',
+      query,
+      turn_user: turnUser,
+      turn_assistant: '已经记住这个偏好。',
+      compress_user: compressUser,
+      compress_assistant: '压缩前的助手回复。',
+      secret_system_prompt: secretSystemPrompt,
+      next_session_id: 'hermes-s2',
+      next_turn_user: nextTurnUser,
+      next_turn_assistant: '第二个会话已经记住。',
+    };
+
     const python = await runPython({
       HERMES_HOME: hermesHome,
-      MEBULAR_HOME: join(runRoot, 'unused-mebular-home'),
-      MEBULAR_RUNTIME_TOKEN: runtime.token,
+      MEBULAR_MEMORY_RUNTIME_HOME: runtime.home,
+      MEBULAR_HOME: runtime.home,
+      MEBULAR_MEMORY_RUNTIME_URL: '',
+      MEBULAR_MEMORY_RUNTIME_TOKEN: '',
+      MEBULAR_RUNTIME_URL: '',
+      MEBULAR_RUNTIME_TOKEN: '',
       HERMES_E2E_CONFIG: JSON.stringify(config),
       PYTHONDONTWRITEBYTECODE: '1',
     }, repoRoot);
@@ -145,65 +242,76 @@ async function main() {
       result?.error ?? python.stderr.slice(-500));
 
     if (result !== null && result.error === undefined) {
-      check('真实 Runtime 可发现', result.available === true);
+      check('真实 sidecar 可发现', result.available === true);
       check('插件不暴露工具（保持 MCP 治理面）', Array.isArray(result.tools) && result.tools.length === 0);
       check('system prompt 声明 Mebular 记忆已启用', String(result.systemPrompt).includes('Mebular Memory'));
-      check('prefetch 命中 seed 记忆', String(result.prefetch).includes('## Mebular Memory')
+      check('插件使用 discovery 而非宿主 token', result.status?.tokenSource === 'tokenFile'
+        && result.status?.discovery === 'discovery',
+      JSON.stringify(result.status));
+      check('插件状态不含 host token', !JSON.stringify(result.status).includes('host-token'));
+      check('prefetch 命中 seed 记忆', String(result.prefetch).includes('<mebular_memory')
         && String(result.prefetch).includes(query), result.prefetch);
       check('prefetch 第二次仍可用', String(result.prefetchSecond).includes(query));
       check('sync_turn 已 flush', result.turnFlushed === true && result.turnPending === 0,
         JSON.stringify({ flushed: result.turnFlushed, pending: result.turnPending }));
       check('on_pre_compress 返回空且不阻塞', result.preCompressReturn === ''
         && result.compressFlushed === true && result.compressPending === 0,
-        JSON.stringify({ returned: result.preCompressReturn, pending: result.compressPending }));
+      JSON.stringify({ returned: result.preCompressReturn, pending: result.compressPending }));
       check('session switch 后 s2 已 flush', result.switchFlushed === true && result.switchPending === 0);
       check('shutdown 后队列清空', result.pendingAfterShutdown === 0);
+      check('checkpoint 已提交', result.checkpointPending === 0);
     }
 
-    const requests = tap.runtimeRequests();
-    check('所有 Runtime 请求通过真实 bearer', requests.length > 0
-      && requests.every((entry) => entry.auth === 'bearer' && entry.ok), JSON.stringify(
-      requests.map((entry) => `${entry.method} ${entry.path}:${entry.status}:${entry.auth}`),
-    ));
+    const statusResult = await sidecarStatus(discovery, runtime.home);
+    check('sidecar /status 鉴权成功', statusResult.status === 200 && statusResult.data != null,
+      `status=${statusResult.status}`);
+    check('插件状态不含 host token', result === null
+      || !JSON.stringify(result.status).includes(statusResult.token));
+    const counts = statusResult.data?.counts ?? {};
+    check('sidecar 记录 context 请求（第二次由 Provider 缓存）', (counts.contexts ?? 0) >= 1,
+      JSON.stringify(counts));
+    check('sidecar 记录 ingest 请求', (counts.ingested ?? 0) >= 3, JSON.stringify(counts));
+    check('sidecar 记录 checkpoint 提交', (counts.checkpoints ?? 0) >= 1, JSON.stringify(counts));
+    check('sidecar outbox 已清空', (statusResult.data?.outbox?.items ?? 0) === 0,
+      JSON.stringify(statusResult.data?.outbox));
 
-    const recalls = requests.filter((entry) => entry.method === 'POST' && entry.path === '/runtime/v1/recall');
-    check('prefetch 走真实 /recall 且返回 seed 记录', recalls.length >= 2
-      && recalls.every((entry) => entry.body?.query === query)
-      && JSON.stringify(recalls[0]?.response).includes(query), `count=${recalls.length}`);
+    const rawTexts = await sidecarRawChunks(runtime.home);
+    const rawText = rawTexts.join('\n');
+    check('sidecar 本地 raw 含 sync_turn 内容', rawText.includes(turnUser));
+    check('sidecar 本地 raw 含压缩前归档', rawText.includes(compressUser));
+    check('sidecar 本地 raw 不含 host system prompt', !rawText.includes(secretSystemPrompt));
+    check('sidecar 本地 raw 含 s2 内容', rawText.includes(nextTurnUser));
 
-    const ingests = requests.filter((entry) => entry.method === 'POST' && entry.path === '/runtime/v1/ingest');
-    const ingestTexts = ingests.map((entry) => (entry.body?.chunks ?? []).map((chunk) => chunk.text).join('\n'));
-    check('sync_turn 走真实 /ingest 且 thread=s1', ingests.some((entry) => entry.body?.threadId === 'hermes-s1'
-      && ingestTexts[ingests.indexOf(entry)].includes(turnUser)), `count=${ingests.length}`);
-    const compress = ingests.find((entry) => String(entry.body?.requestId).startsWith('hermes_compress'));
-    const compressText = (compress?.body?.chunks ?? []).map((chunk) => chunk.text).join('\n');
-    check('on_pre_compress 走真实 /ingest 并归档 user 内容', compress !== undefined
-      && compressText.includes(compressUser), compress?.body?.requestId ?? 'missing');
-    check('on_pre_compress 不归档 system prompt', !compressText.includes(secretSystemPrompt));
-    check('session switch 后 ingest thread=s2', ingests.some((entry) => entry.body?.threadId === 'hermes-s2'
-      && (entry.body?.chunks ?? []).some((chunk) => String(chunk.text).includes(nextTurnUser))));
-
-    const raw = await runtime.rawChunks();
-    const rawText = raw.map((chunk) => chunk.text).join('\n');
-    check('真实 Runtime 本地 raw 含 sync_turn 内容', rawText.includes(turnUser));
-    check('真实 Runtime 本地 raw 含压缩前归档', rawText.includes(compressUser));
-    check('真实 Runtime 本地 raw 不含 host system prompt', !rawText.includes(secretSystemPrompt));
-    check('真实 Runtime 本地 raw 含 s2 内容', rawText.includes(nextTurnUser));
-
-    const recalled = await runtime.recall(`hermes-turn-${suffix}`, { agentId: 'hermes' });
-    check('真实 Runtime 可从 heuristic 记录召回 sync_turn', recalled.records.some((record) => String(record.content).includes(`hermes-turn-${suffix}`)),
+    const recalled = await runtime.recall(`hermes-turn-${suffix}`, {
+      agentId: 'hermes',
+      namespaces: ['default', 'agent:hermes', 'user'],
+    });
+    check('真实 Runtime 可从 heuristic 记录召回 sync_turn',
+      recalled.records.some((record) => String(record.content).includes(`hermes-turn-${suffix}`)),
       JSON.stringify(recalled.records));
 
-    const leaked = await scanForToken(hermesHome, runtime.token);
-    check('Hermes profile 不持久化 Runtime token', leaked.length === 0, JSON.stringify(leaked));
+    const checkpointResult = await sidecarCheckpoint(discovery, statusResult.token, 'hermes-s1');
+    const checkpoint = checkpointResult.data?.checkpoint ?? null;
+    check('真实 sidecar 持久化 checkpoint', checkpointResult.status === 200 && checkpoint !== null,
+      JSON.stringify(checkpointResult.data));
+    check('checkpoint 无伪造 summary', checkpoint?.summary === null,
+      JSON.stringify({ summary: checkpoint?.summary }));
+    check('checkpoint state-only 元数据', checkpoint?.state?.kind === 'pre_compress'
+      && checkpoint?.state?.messageCount >= 2, JSON.stringify(checkpoint?.state));
+
+    const leaked = await scanForToken(hermesHome, statusResult.token);
+    check('Hermes profile 不持久化 sidecar host token', leaked.length === 0, JSON.stringify(leaked));
+    const runtimeLeaked = await scanForToken(hermesHome, runtime.token);
+    check('Hermes profile 不持久化 Runtime bearer', runtimeLeaked.length === 0, JSON.stringify(runtimeLeaked));
+
+    check('未使用旧 /runtime/v1 路径（插件侧）',
+      String(result?.status?.runtime_url ?? '').includes('/memory-runtime/v1'));
   } finally {
-    await tap.close().catch(() => undefined);
     if (keep) {
       console.log(`临时目录保留：${runRoot}（Runtime home：${runtime.home}）`);
       await runtime.close().catch(() => undefined);
     } else {
       await runtime.cleanup().catch(() => undefined);
-      const { rm } = await import('node:fs/promises');
       await rm(runRoot, { recursive: true, force: true }).catch(() => undefined);
     }
   }

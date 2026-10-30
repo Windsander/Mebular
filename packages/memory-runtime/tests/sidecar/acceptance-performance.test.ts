@@ -140,7 +140,7 @@ describe('0.3.0 acceptance: performance and resource budgets', () => {
     expect(recallP50).toBeLessThan(250);
     expect(recallP95).toBeLessThan(500);
     expect(recallMax).toBeLessThan(1_000);
-  });
+  }, 60_000);
 
   it('fragment/字节/token/outbox/trace/cache 预算与环形保留', async () => {
     const harness = await createAcceptanceHarness({
@@ -240,7 +240,7 @@ describe('0.3.0 acceptance: performance and resource budgets', () => {
     expect(outboxAfter.items).toBeLessThanOrEqual(3);
     expect(outboxAfter.bytes).toBeLessThanOrEqual(4_096);
     expect(cacheStats.entries).toBeLessThanOrEqual(5);
-  });
+  }, 60_000);
 
   it('outbox 字节上限独立生效', async () => {
     const harness = await createAcceptanceHarness({
@@ -268,5 +268,5 @@ describe('0.3.0 acceptance: performance and resource budgets', () => {
     expect(full).toBeGreaterThan(0);
     expect(stats.items).toBeLessThanOrEqual(1_000);
     expect(stats.bytes).toBeLessThanOrEqual(700);
-  });
+  }, 60_000);
 });

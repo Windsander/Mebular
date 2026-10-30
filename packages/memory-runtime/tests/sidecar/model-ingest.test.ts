@@ -63,7 +63,6 @@ function configWith(model: SidecarModelSettings): SidecarConfig {
   const config = defaultSidecarConfig();
   config.model = model;
   config.http.port = 0;
-  config.capture = 'off';
   return config;
 }
 
@@ -152,7 +151,6 @@ function preferenceRequest(overrides: Record<string, unknown> = {}) {
   return {
     agentId: 'opencode',
     threadId: 'th_model',
-    capture: 'local',
     chunks: [{ role: 'user', text: '以后默认用深色主题', messageId: 'm1', chunkIndex: 0 }],
     ...overrides,
   };
@@ -180,7 +178,7 @@ describe('sidecar ingest model sources', () => {
       extractor: 'heuristic',
       degraded: false,
     });
-    expect(result.data.rawChunkIds).toHaveLength(1);
+    expect(result.data.detailIds).toHaveLength(1);
     expect(result.data.records).toHaveLength(1);
     const item = (fake.writeRequests[0]!.body.items as any[])[0];
     expect(item.provenance).toMatchObject({ extractor: 'heuristic', model: null, source: 'runtime' });
@@ -198,8 +196,8 @@ describe('sidecar ingest model sources', () => {
       accepted: { chunks: 1, records: 0 },
     });
     expect(pending.data.extraction).toMatchObject({ status: 'pending', extractor: 'host' });
-    expect(pending.data.rawChunkIds).toHaveLength(1);
-    expect(await local.store.countRawChunks({ cloudId: 'cl_test', agentId: 'opencode', threadId: 'th_model' })).toBe(1);
+    expect(pending.data.stagingChunkIds).toHaveLength(1);
+    expect(await local.store.countStagingChunks({ cloudId: 'cl_test', agentId: 'opencode', threadId: 'th_model' })).toBe(1);
     expect(fake.writeRequests).toHaveLength(0);
 
     const before = await model.status();
@@ -244,7 +242,7 @@ describe('sidecar ingest model sources', () => {
 
     expect(result.status).toBe(200);
     expect(result.data.degraded).toBe(true);
-    expect(result.data.rawChunkIds).toHaveLength(1);
+    expect(result.data.detailIds).toHaveLength(1);
     expect(result.data.records).toHaveLength(1);
     expect(result.data.extraction).toMatchObject({ extractor: 'heuristic', degraded: true });
     expect(result.data.warnings).toEqual(expect.arrayContaining(['model_local_not_found', 'model_unavailable']));
@@ -308,7 +306,7 @@ describe('sidecar ingest model sources', () => {
 
     expect(tracker.calls).toBe(1);
     expect(result.data.degraded).toBe(false);
-    expect(result.data.rawChunkIds).toHaveLength(1);
+    expect(result.data.detailIds).toHaveLength(1);
     expect(result.data.extraction).toMatchObject({
       extractor: 'api',
       model: 'test-model',
@@ -346,7 +344,7 @@ describe('sidecar ingest model sources', () => {
 
     expect(tracker.calls).toBe(2);
     expect(result.data.degraded).toBe(true);
-    expect(result.data.rawChunkIds).toHaveLength(1);
+    expect(result.data.detailIds).toHaveLength(1);
     expect(result.data.records).toHaveLength(1);
     expect(result.data.extraction).toMatchObject({ extractor: 'heuristic', degraded: true });
     expect(result.data.warnings).toEqual(expect.arrayContaining(['model_http_error:503', 'model_unavailable']));

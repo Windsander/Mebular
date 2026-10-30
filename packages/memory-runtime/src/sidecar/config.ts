@@ -43,9 +43,32 @@ export class SidecarConfigError extends Error {
 }
 
 export interface SidecarRetentionSettings {
-  rawDays: number;
+  /** 本地 RecallTrace 保留天数；trace 不是权威。 */
   traceDays: number;
   checkpointDays: number;
+}
+
+/**
+ * 详情（DetailRecord）相关内部配置。
+ *
+ * 权威详情在 capability 图 + 事件日志；本机只保留 staging（未沉降 chunk）、
+ * 只读 cache 与 outbox。配额数值仅用于诊断展示，服务端仍会强制。
+ */
+export interface SidecarDetailSettings {
+  /** staging chunk 保留小时数（默认 24h）；成功后立即删除。 */
+  stagingHours: number;
+  /** staging 总字节上限（默认 256 MiB）。 */
+  stagingBytes: number;
+  /** 详情 cache 保留天数；cache 读取必须标 stale。 */
+  cacheDays: number;
+  /** 详情 cache 总字节上限（默认 256 MiB）。 */
+  cacheBytes: number;
+  /** 详情 cache 条目上限。 */
+  cacheMaxEntries: number;
+  /** 只读诊断：单域详情配额（默认 256 MiB）。 */
+  quotaBytesPerDomain: number;
+  /** 只读诊断：单忆云详情配额（默认 1 GiB）。 */
+  quotaBytesCloud: number;
 }
 
 export interface SidecarModelSettings {
@@ -102,9 +125,9 @@ export interface SidecarCapabilitySettings {
 
 export interface SidecarConfig {
   schema: 1;
-  capture: 'off' | 'local';
   trace: 'off' | 'local';
   retention: SidecarRetentionSettings;
+  detail: SidecarDetailSettings;
   model: SidecarModelSettings;
   limits: SidecarLimitSettings;
   recall: SidecarRecallSettings;
@@ -127,9 +150,12 @@ export interface SidecarPaths {
   hostTokenPath: string;
   capabilityTokenPath: string;
   startLockPath: string;
-  rawDir: string;
+  /** `<dataDir>/staging`：未沉降 chunk；不是权威。 */
+  stagingDir: string;
   tracesPath: string;
   cacheDir: string;
+  /** `<cacheDir>/details`：已沉降详情只读缓存。 */
+  detailCacheDir: string;
   outboxDir: string;
   outboxDeadDir: string;
   logsDir: string;
@@ -140,9 +166,17 @@ export interface SidecarPaths {
 export function defaultSidecarConfig(): SidecarConfig {
   return {
     schema: 1,
-    capture: 'off',
     trace: 'local',
-    retention: { rawDays: 7, traceDays: 7, checkpointDays: 30 },
+    retention: { traceDays: 7, checkpointDays: 30 },
+    detail: {
+      stagingHours: 24,
+      stagingBytes: 268_435_456,
+      cacheDays: 30,
+      cacheBytes: 268_435_456,
+      cacheMaxEntries: 5000,
+      quotaBytesPerDomain: 268_435_456,
+      quotaBytesCloud: 1_073_741_824,
+    },
     model: {
       source: 'heuristic',
       local: { pack: null, path: null, threads: 4, enginePath: null },
@@ -348,9 +382,10 @@ export function resolveSidecarPaths({
     hostTokenPath: join(resolvedDataDir, 'host-token'),
     capabilityTokenPath: join(resolvedDataDir, 'capability-token'),
     startLockPath: join(resolvedDataDir, 'start.lock'),
-    rawDir: join(resolvedDataDir, 'raw'),
+    stagingDir: join(resolvedDataDir, 'staging'),
     tracesPath: join(resolvedDataDir, 'traces.jsonl'),
     cacheDir: join(resolvedDataDir, 'cache'),
+    detailCacheDir: join(resolvedDataDir, 'cache', 'details'),
     outboxDir: join(resolvedDataDir, 'outbox'),
     outboxDeadDir: join(resolvedDataDir, 'outbox', 'dead'),
     logsDir: join(resolvedDataDir, 'logs'),
@@ -390,12 +425,28 @@ export function assertNoLegacyConfigKeys(input: Record<string, unknown>): void {
   }
 }
 
+/**
+ * 已废弃配置只警告、不再控制行为：
+ * - `capture` / `rawCapture`：沉浸式总是按域采集，没有本机/关闭开关；
+ * - `retention.rawDays`：本地保留改由 `detail.stagingHours` 控制。
+ */
+export function collectConfigDeprecations(raw: Record<string, unknown>): string[] {
+  const warnings: string[] = [];
+  if ('capture' in raw || 'rawCapture' in raw) warnings.push('legacy_capture_ignored');
+  const retention = objectOf(raw.retention);
+  if ('rawDays' in retention) warnings.push('legacy_retention_raw_days_ignored');
+  return warnings;
+}
+
 /** 归一化 sidecar 设备配置；非法值抛 config_invalid，不部分应用。 */
-export function normalizeSidecarConfig(raw: unknown): SidecarConfig {
+export function normalizeSidecarConfig(raw: unknown, options: { warnings?: string[] } = {}): SidecarConfig {
   if (!isObject(raw)) {
     throw new SidecarConfigError('config_invalid', '配置必须是 JSON 对象');
   }
   assertNoLegacyConfigKeys(raw);
+  for (const warning of collectConfigDeprecations(raw)) {
+    if (options.warnings && !options.warnings.includes(warning)) options.warnings.push(warning);
+  }
 
   const defaults = defaultSidecarConfig();
   if (raw.schema !== undefined && raw.schema !== 1) {
@@ -403,6 +454,7 @@ export function normalizeSidecarConfig(raw: unknown): SidecarConfig {
   }
 
   const retention = objectOf(raw.retention);
+  const detail = objectOf(raw.detail);
   const model = objectOf(raw.model);
   const local = objectOf(model.local);
   const api = objectOf(model.api);
@@ -420,12 +472,24 @@ export function normalizeSidecarConfig(raw: unknown): SidecarConfig {
 
   return {
     schema: 1,
-    capture: enumOf(raw, 'capture', ['off', 'local'] as const, defaults.capture),
     trace: enumOf(raw, 'trace', ['off', 'local'] as const, defaults.trace),
     retention: {
-      rawDays: intOf(retention, 'rawDays', defaults.retention.rawDays),
       traceDays: intOf(retention, 'traceDays', defaults.retention.traceDays),
       checkpointDays: intOf(retention, 'checkpointDays', defaults.retention.checkpointDays),
+    },
+    detail: {
+      stagingHours: intOf(detail, 'stagingHours', defaults.detail.stagingHours, { min: 1 }),
+      stagingBytes: intOf(detail, 'stagingBytes', defaults.detail.stagingBytes, { min: 1 }),
+      cacheDays: intOf(detail, 'cacheDays', defaults.detail.cacheDays),
+      cacheBytes: intOf(detail, 'cacheBytes', defaults.detail.cacheBytes, { min: 1 }),
+      cacheMaxEntries: intOf(detail, 'cacheMaxEntries', defaults.detail.cacheMaxEntries, { min: 1 }),
+      quotaBytesPerDomain: intOf(
+        detail,
+        'quotaBytesPerDomain',
+        defaults.detail.quotaBytesPerDomain,
+        { min: 1 },
+      ),
+      quotaBytesCloud: intOf(detail, 'quotaBytesCloud', defaults.detail.quotaBytesCloud, { min: 1 }),
     },
     model: {
       source: enumOf(model, 'source', ['heuristic', 'local', 'host', 'api', 'auto'] as const, defaults.model.source),
@@ -479,12 +543,15 @@ export interface LoadSidecarConfigOptions {
   paths: SidecarPaths;
   env?: NodeJS.ProcessEnv;
   overrides?: Record<string, unknown>;
+  /** 调用方收集废弃配置 warning；不改变配置行为。 */
+  warnings?: string[];
 }
 
 /** 读取 `<home>/memory-runtime/config.json`；不存在时使用安全默认。 */
 export async function loadSidecarConfig({
   paths,
   overrides,
+  warnings,
 }: LoadSidecarConfigOptions): Promise<SidecarConfig> {
   let raw: Record<string, unknown> = {};
   let text: string | null = null;
@@ -508,7 +575,7 @@ export async function loadSidecarConfig({
 
   assertNoLegacyConfigKeys(raw);
   const merged = mergeDeep(raw, overrides);
-  return normalizeSidecarConfig(merged);
+  return normalizeSidecarConfig(merged, warnings ? { warnings } : {});
 }
 
 function runtimeHostToLoopback(host: unknown): string {

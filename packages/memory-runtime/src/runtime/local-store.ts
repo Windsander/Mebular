@@ -1,9 +1,9 @@
 // Runtime 本地存储（contract §2.3.1 / §2.3.5 / §2.9）
 //
-// RawChunk 与 RecallTrace 只存在于本机 sidecar 数据目录（`<home>/memory-runtime/`）：
-//   - raw/chunks.jsonl
+// staging chunk 与 RecallTrace 只存在于本机 sidecar 数据目录（`<home>/memory-runtime/`）：
+//   - staging/chunks.jsonl（已接收、未成功写入 capability 的 chunk；不是权威）
 //   - traces.jsonl
-// 不进 GraphStore、不 append EventLog、不参与同步。
+// 不进 GraphStore、不 append EventLog、不参与同步；成功沉降后由调用方删除。
 //
 // 写入策略：JSONL 追加（O_APPEND）+ fsync；文件 0600、目录 0700。
 // 崩溃恢复：加载时丢弃损坏行；若文件末尾没有换行（可能是半行），
@@ -37,8 +37,10 @@ export class RuntimeLocalStoreError extends Error {
 export interface RuntimeLocalStoreOptions {
   /** 本地过程数据根目录（sidecar 固定 `<home>/memory-runtime`） */
   root: string;
-  /** RawChunk 保留天数（用于清理；单条 expiresAt 仍由调用方设置） */
-  rawRetentionDays?: number;
+  /** staging chunk 保留小时数（用于清理；单条 expiresAt 仍由调用方设置） */
+  stagingHours?: number;
+  /** staging 总字节上限；超过时先淘汰最旧 chunk。 */
+  stagingMaxBytes?: number;
   /** RecallTrace 保留天数 */
   traceRetentionDays?: number;
   /** RecallTrace 环形上限 */
@@ -66,14 +68,14 @@ export interface RecallTraceFilter {
 }
 
 export interface RuntimeLocalCleanupResult {
-  rawChunks: number;
+  stagingChunks: number;
   traces: number;
 }
 
 export interface RuntimeLocalStoreStats {
-  rawChunks: number;
+  stagingChunks: number;
   traces: number;
-  rawPath: string;
+  stagingPath: string;
   tracesPath: string;
 }
 
@@ -119,17 +121,18 @@ function readTraceLine(value: unknown): RecallTrace | null {
 
 export class RuntimeLocalStore {
   readonly root: string;
-  readonly rawPath: string;
+  readonly stagingPath: string;
   readonly tracesPath: string;
 
-  private readonly rawRetentionDays: number;
+  private readonly stagingHours: number;
+  private readonly stagingMaxBytes: number;
   private readonly traceRetentionDays: number;
   private readonly traceMaxEntries: number;
   private readonly now: () => number;
 
-  private raw: StoredRawChunk[] = [];
+  private staging: StoredRawChunk[] = [];
   private traces: RecallTrace[] = [];
-  private rawLoaded = false;
+  private stagingLoaded = false;
   private tracesLoaded = false;
   private lastCleanupAt = 0;
 
@@ -138,9 +141,10 @@ export class RuntimeLocalStore {
 
   constructor(options: RuntimeLocalStoreOptions) {
     this.root = options.root;
-    this.rawPath = join(this.root, 'raw', 'chunks.jsonl');
+    this.stagingPath = join(this.root, 'staging', 'chunks.jsonl');
     this.tracesPath = join(this.root, 'traces.jsonl');
-    this.rawRetentionDays = Math.max(0, options.rawRetentionDays ?? 7);
+    this.stagingHours = Math.max(0.001, options.stagingHours ?? 24);
+    this.stagingMaxBytes = Math.max(1, Math.floor(options.stagingMaxBytes ?? 268_435_456));
     this.traceRetentionDays = Math.max(0, options.traceRetentionDays ?? 7);
     this.traceMaxEntries = Math.max(1, Math.floor(options.traceMaxEntries ?? 2000));
     this.now = options.now ?? Date.now;
@@ -150,7 +154,7 @@ export class RuntimeLocalStore {
   async init(): Promise<void> {
     await ensureDir(this.root);
     await this.exclusive(async () => {
-      await this.ensureRawLoaded();
+      await this.ensureStagingLoaded();
       await this.ensureTracesLoaded();
       await this.prune(this.now());
     });
@@ -159,7 +163,7 @@ export class RuntimeLocalStore {
   /** 显式清理（sidecar 启动时 + 每日一次）。 */
   async cleanup(now = this.now()): Promise<RuntimeLocalCleanupResult> {
     return this.exclusive(async () => {
-      await this.ensureRawLoaded();
+      await this.ensureStagingLoaded();
       await this.ensureTracesLoaded();
       return this.prune(now);
     });
@@ -173,38 +177,39 @@ export class RuntimeLocalStore {
 
   async stats(): Promise<RuntimeLocalStoreStats> {
     return this.exclusive(async () => {
-      await this.ensureRawLoaded();
+      await this.ensureStagingLoaded();
       await this.ensureTracesLoaded();
       const now = this.now();
       return {
-        rawChunks: this.raw.filter((entry) => this.rawAlive(entry.chunk, now)).length,
+        stagingChunks: this.staging.filter((entry) => this.stagingAlive(entry.chunk, now)).length,
         traces: this.traces.filter((trace) => this.traceAlive(trace, now)).length,
-        rawPath: this.rawPath,
+        stagingPath: this.stagingPath,
         tracesPath: this.tracesPath,
       };
     });
   }
 
-  // ---------- RawChunk ----------
+  // ---------- StagingChunk ----------
 
   /**
-   * 写入 RawChunk。
+   * 写入本地 staging chunk。
    * 幂等键：`(cloudId, agentId, threadId, contentHash, chunkIndex)`。
    * 同键同文本返回已有记录 `duplicate=true`；同键不同文本拒绝 `content_hash_mismatch`。
+   * staging 不是权威；超过总字节上限时淘汰最旧 chunk。
    */
-  async putRawChunk(cloudId: string, chunk: RawChunk): Promise<RawChunkWriteResult> {
+  async putStagingChunk(cloudId: string, chunk: RawChunk): Promise<RawChunkWriteResult> {
     if (typeof cloudId !== 'string' || cloudId.length === 0) {
       throw new RuntimeLocalStoreError('cloudId 不能为空', 'invalid_raw_chunk');
     }
     this.validateRawChunk(chunk);
 
     return this.exclusive(async () => {
-      await this.ensureRawLoaded();
+      await this.ensureStagingLoaded();
       const now = this.now();
-      const dirty = this.pruneRaw(now);
+      const expiredDirty = this.pruneStaging(now);
       const key = rawKey(cloudId, chunk);
 
-      const existing = this.raw.find((entry) => rawKey(entry.cloudId, entry.chunk) === key);
+      const existing = this.staging.find((entry) => rawKey(entry.cloudId, entry.chunk) === key);
       if (existing) {
         if (existing.chunk.text !== chunk.text || existing.chunk.contentHash !== chunk.contentHash) {
           throw new RuntimeLocalStoreError(
@@ -212,34 +217,35 @@ export class RuntimeLocalStore {
             'content_hash_mismatch',
           );
         }
-        if (dirty) await this.writeRawAtomic();
+        if (expiredDirty) await this.writeStagingAtomic();
         return { chunk: existing.chunk, duplicate: true };
       }
 
       const record: StoredRawChunk = { cloudId, chunk };
-      this.raw.push(record);
-      if (dirty) await this.writeRawAtomic();
-      else await this.appendLine(this.rawPath, record);
+      this.staging.push(record);
+      const quotaDirty = this.enforceStagingQuota();
+      if (expiredDirty || quotaDirty) await this.writeStagingAtomic();
+      else await this.appendLine(this.stagingPath, record);
       return { chunk, duplicate: false };
     });
   }
 
-  async getRawChunk(id: string): Promise<RawChunk | null> {
+  async getStagingChunk(id: string): Promise<RawChunk | null> {
     return this.exclusive(async () => {
-      await this.ensureRawLoaded();
-      const found = this.raw.find((entry) => entry.chunk.id === id);
-      if (!found || !this.rawAlive(found.chunk, this.now())) return null;
+      await this.ensureStagingLoaded();
+      const found = this.staging.find((entry) => entry.chunk.id === id);
+      if (!found || !this.stagingAlive(found.chunk, this.now())) return null;
       return found.chunk;
     });
   }
 
-  async listRawChunks(filter: RawChunkFilter = {}): Promise<RawChunk[]> {
+  async listStagingChunks(filter: RawChunkFilter = {}): Promise<RawChunk[]> {
     return this.exclusive(async () => {
-      await this.ensureRawLoaded();
+      await this.ensureStagingLoaded();
       const now = this.now();
-      return this.raw
+      return this.staging
         .filter(({ cloudId, chunk }) => {
-          if (!filter.includeExpired && !this.rawAlive(chunk, now)) return false;
+          if (!filter.includeExpired && !this.stagingAlive(chunk, now)) return false;
           if (filter.cloudId !== undefined && cloudId !== filter.cloudId) return false;
           if (filter.agentId !== undefined && chunk.agentId !== filter.agentId) return false;
           if (filter.threadId !== undefined && chunk.threadId !== filter.threadId) return false;
@@ -249,20 +255,28 @@ export class RuntimeLocalStore {
     });
   }
 
-  async countRawChunks(filter: RawChunkFilter = {}): Promise<number> {
-    return (await this.listRawChunks(filter)).length;
+  async countStagingChunks(filter: RawChunkFilter = {}): Promise<number> {
+    return (await this.listStagingChunks(filter)).length;
   }
 
-  async deleteRawChunk(id: string): Promise<boolean> {
+  async deleteStagingChunk(id: string): Promise<boolean> {
+    return this.deleteStagingChunks([id]).then((count) => count > 0);
+  }
+
+  /** 成功沉降后批量清理 staging；返回删除数量。 */
+  async deleteStagingChunks(ids: readonly string[]): Promise<number> {
+    if (ids.length === 0) return 0;
+    const target = new Set(ids);
     return this.exclusive(async () => {
-      await this.ensureRawLoaded();
-      const index = this.raw.findIndex((entry) => entry.chunk.id === id);
-      if (index < 0) return false;
-      this.raw.splice(index, 1);
-      await this.writeRawAtomic();
-      return true;
+      await this.ensureStagingLoaded();
+      const before = this.staging.length;
+      this.staging = this.staging.filter((entry) => !target.has(entry.chunk.id));
+      const removed = before - this.staging.length;
+      if (removed > 0) await this.writeStagingAtomic();
+      return removed;
     });
   }
+
 
   // ---------- RecallTrace ----------
 
@@ -304,6 +318,19 @@ export class RuntimeLocalStore {
     return this.exclusive(async () => {
       await this.ensureTracesLoaded();
       return this.traces.find((trace) => trace.id === id) ?? null;
+    });
+  }
+
+  /** `/expand` 用 recallId 找回 10 分钟内的 trace；同一 recallId 取最新一条。 */
+  async getTraceByRecallId(recallId: string): Promise<RecallTrace | null> {
+    return this.exclusive(async () => {
+      await this.ensureTracesLoaded();
+      let found: RecallTrace | null = null;
+      for (const trace of this.traces) {
+        if (trace.recallId !== recallId) continue;
+        if (!found || trace.at > found.at) found = trace;
+      }
+      return found;
     });
   }
 
@@ -391,18 +418,36 @@ export class RuntimeLocalStore {
     }
   }
 
-  private rawAlive(chunk: RawChunk, now: number): boolean {
-    return chunk.expiresAt > now && chunk.at >= now - this.rawRetentionDays * DAY_MS;
+  private stagingAlive(chunk: RawChunk, now: number): boolean {
+    return chunk.expiresAt > now && chunk.at >= now - this.stagingHours * 60 * 60 * 1000;
   }
 
   private traceAlive(trace: RecallTrace, now: number): boolean {
     return trace.at >= now - this.traceRetentionDays * DAY_MS;
   }
 
-  private pruneRaw(now: number): boolean {
-    const before = this.raw.length;
-    this.raw = this.raw.filter((entry) => this.rawAlive(entry.chunk, now));
-    return this.raw.length !== before;
+  private pruneStaging(now: number): boolean {
+    const before = this.staging.length;
+    this.staging = this.staging.filter((entry) => this.stagingAlive(entry.chunk, now));
+    return this.staging.length !== before;
+  }
+
+  /**
+   * staging 总字节上限（默认 256 MiB）。只淘汰最旧 chunk，不淘汰 trace；
+   * staging 不是权威，超限宁可丢本地副本。
+   */
+  private enforceStagingQuota(): boolean {
+    let total = this.staging.reduce((sum, entry) => sum + Buffer.byteLength(entry.chunk.text, 'utf8'), 0);
+    if (total <= this.stagingMaxBytes) return false;
+    const sorted = [...this.staging].sort((a, b) => a.chunk.at - b.chunk.at || a.chunk.id.localeCompare(b.chunk.id));
+    const keep = new Set<StoredRawChunk>(this.staging);
+    for (const entry of sorted) {
+      if (total <= this.stagingMaxBytes) break;
+      keep.delete(entry);
+      total -= Buffer.byteLength(entry.chunk.text, 'utf8');
+    }
+    this.staging = this.staging.filter((entry) => keep.has(entry));
+    return true;
   }
 
   private pruneTraces(now: number): boolean {
@@ -416,23 +461,23 @@ export class RuntimeLocalStore {
   }
 
   private async prune(now: number): Promise<RuntimeLocalCleanupResult> {
-    const rawDirty = this.pruneRaw(now);
+    const stagingDirty = this.pruneStaging(now);
     const traceDirty = this.pruneTraces(now);
-    if (rawDirty) await this.writeRawAtomic();
+    if (stagingDirty) await this.writeStagingAtomic();
     if (traceDirty) await this.writeTracesAtomic();
     this.lastCleanupAt = now;
     return {
-      rawChunks: this.raw.length,
+      stagingChunks: this.staging.length,
       traces: this.traces.length,
     };
   }
 
-  private async ensureRawLoaded(): Promise<void> {
-    if (this.rawLoaded) return;
-    const { values, dirty } = await readJsonl(this.rawPath, readRawLine);
-    this.raw = values;
-    this.rawLoaded = true;
-    if (dirty) await this.writeRawAtomic();
+  private async ensureStagingLoaded(): Promise<void> {
+    if (this.stagingLoaded) return;
+    const { values, dirty } = await readJsonl(this.stagingPath, readRawLine);
+    this.staging = values;
+    this.stagingLoaded = true;
+    if (dirty) await this.writeStagingAtomic();
   }
 
   private async ensureTracesLoaded(): Promise<void> {
@@ -443,8 +488,8 @@ export class RuntimeLocalStore {
     if (dirty) await this.writeTracesAtomic();
   }
 
-  private async writeRawAtomic(): Promise<void> {
-    await writeJsonlAtomic(this.rawPath, this.raw);
+  private async writeStagingAtomic(): Promise<void> {
+    await writeJsonlAtomic(this.stagingPath, this.staging);
   }
 
   private async writeTracesAtomic(): Promise<void> {

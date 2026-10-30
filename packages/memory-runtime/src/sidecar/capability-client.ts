@@ -8,7 +8,7 @@
 // - 请求超时与有限重试（网络/429/5xx）；
 // - 统一信封解析与错误映射（保留稳定 code/retryable/details）；
 // - 覆盖 version/status/namespaces/query/search/history/profile/skills/graph/
-//   write/update/delete/archive/internal-object/sync。
+//   write/update/delete/archive/internal-object/detail/sync。
 
 import { randomUUID } from 'node:crypto';
 import { normalizeCapabilityBaseUrl } from './config.js';
@@ -62,7 +62,81 @@ export interface CapabilityStatusInfo {
   domains?: unknown[];
   sync?: Record<string, unknown>;
   limits?: Record<string, number>;
+  detailQuota?: Record<string, number>;
+  detailRetentionDays?: Record<string, number>;
   [key: string]: unknown;
+}
+
+export interface CapabilityDetailWriteItem {
+  clientItemId: string;
+  domain: string;
+  detailKind: string;
+  threadId?: string;
+  recordIds: string[];
+  role?: string;
+  text: string;
+  mime?: string;
+  messageId?: string;
+  chunkIndex?: number;
+  turn?: number;
+  contentHash?: string;
+  redaction?: { applied: boolean; rules: string[] };
+  retentionClass?: 'conversation' | 'tool_output' | 'document_slice' | 'pinned';
+  expiresAt?: number;
+  provenance?: Record<string, unknown>;
+}
+
+export interface CapabilityDetailWriteResult {
+  clientItemId?: string;
+  status: 'created' | 'duplicate' | 'failed' | string;
+  id?: string;
+  domain?: string;
+  detailKind?: string;
+  contentHash?: string;
+  code?: string;
+  retryable?: boolean;
+  message?: string;
+}
+
+export interface CapabilityDetailWriteResponse {
+  results: CapabilityDetailWriteResult[];
+  created: number;
+  duplicates: number;
+  failed: number;
+  partial: boolean;
+}
+
+export interface CapabilityDetailRecord {
+  id: string;
+  type?: string;
+  kind?: string;
+  detailKind?: string;
+  domain: string;
+  ownerType?: string;
+  ownerId?: string;
+  role?: string;
+  text?: string;
+  truncated?: boolean;
+  redacted?: boolean;
+  contentHash?: string;
+  recordIds?: string[];
+  threadId?: string;
+  messageId?: string;
+  chunkIndex?: number;
+  turn?: number;
+  retentionClass?: string;
+  expiresAt?: number;
+  deletedAt?: number;
+  availability?: string[];
+  provenance?: Record<string, unknown>;
+}
+
+export interface CapabilityDetailListResponse {
+  details: CapabilityDetailRecord[];
+  total?: number;
+  offset?: number;
+  limit?: number;
+  hasMore?: boolean;
 }
 
 export interface CapabilityClientErrorOptions {
@@ -435,6 +509,26 @@ export class CapabilityClient {
 
   internalObject<T = Record<string, unknown>>(body: unknown, options: { idempotencyKey?: string } = {}): Promise<CapabilityEnvelope<T>> {
     return this.post<T>('/internal-object', body, options);
+  }
+
+  /**
+   * 详情内部端点（`POST /detail`，单端点分 op）。
+   * 只允许 sidecar 使用；不新增公共 MCP 工具。
+   */
+  detailWrite(body: unknown, options: { idempotencyKey?: string } = {}): Promise<CapabilityEnvelope<CapabilityDetailWriteResponse>> {
+    return this.post<CapabilityDetailWriteResponse>('/detail', { ...(isObject(body) ? body : {}), op: 'write' }, options);
+  }
+
+  detailGet(body: unknown, options: { idempotencyKey?: string } = {}): Promise<CapabilityEnvelope<{ detail: CapabilityDetailRecord | null }>> {
+    return this.post<{ detail: CapabilityDetailRecord | null }>('/detail', { ...(isObject(body) ? body : {}), op: 'get' }, options);
+  }
+
+  detailList(body: unknown, options: { idempotencyKey?: string } = {}): Promise<CapabilityEnvelope<CapabilityDetailListResponse>> {
+    return this.post<CapabilityDetailListResponse>('/detail', { ...(isObject(body) ? body : {}), op: 'list' }, options);
+  }
+
+  detailDelete(body: unknown, options: { idempotencyKey?: string } = {}): Promise<CapabilityEnvelope<Record<string, unknown>>> {
+    return this.post<Record<string, unknown>>('/detail', { ...(isObject(body) ? body : {}), op: 'delete' }, options);
   }
 
   getSync(query?: CapabilityQuery): Promise<CapabilityEnvelope<Record<string, unknown>>> {

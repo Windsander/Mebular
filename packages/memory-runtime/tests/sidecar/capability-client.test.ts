@@ -166,6 +166,56 @@ describe('CapabilityClient', () => {
     expect(fake.requests[6]?.headers.authorization).toBe('Bearer cap-token');
   });
 
+  it('detail 端点覆盖 write/get/list/delete，并保留 op/幂等键', async () => {
+    const fake = await startFake((request) => ({
+      body: ok({ path: request.path, method: request.method, body: request.body }),
+    }));
+    const client = new CapabilityClient({ baseUrl: fake.baseUrl, token: 'cap-token', retries: 0 });
+
+    const write = await client.detailWrite({
+      requestId: 'req_det',
+      actor: { type: 'agent', agentId: 'test' },
+      items: [{ clientItemId: 'det_1', domain: 'user', detailKind: 'raw_chunk', recordIds: ['01J'], text: 'x' }],
+    }, { idempotencyKey: 'req_det' });
+    const get = await client.detailGet({ actor: { type: 'agent', agentId: 'test' }, id: '01D', includeText: true });
+    const list = await client.detailList({ actor: { type: 'agent', agentId: 'test' }, domains: ['user'] });
+    const remove = await client.detailDelete({ actor: { type: 'user' }, ids: ['01D'], reason: 'user_requested' });
+
+    expect((write.data as any).body.op).toBe('write');
+    expect((get.data as any).body.op).toBe('get');
+    expect((list.data as any).body.op).toBe('list');
+    expect((remove.data as any).body.op).toBe('delete');
+    expect(fake.requests.map((request) => request.path)).toEqual([
+      '/internal/memory/v1/detail',
+      '/internal/memory/v1/detail',
+      '/internal/memory/v1/detail',
+      '/internal/memory/v1/detail',
+    ]);
+    expect(fake.requests[0]?.headers['idempotency-key']).toBe('req_det');
+  });
+
+  it('detail 错误映射保留 410/403/413 稳定 code', async () => {
+    const fake = await startFake((request) => {
+      const body = request.body as any;
+      if (body?.op === 'get') return error(410, 'detail_deleted');
+      if (body?.op === 'list') return error(403, 'domain_read_forbidden');
+      return error(413, 'detail_quota_exceeded');
+    });
+    const client = new CapabilityClient({ baseUrl: fake.baseUrl, token: 'cap-token', retries: 0 });
+    await expect(client.detailGet({ id: '01D' })).rejects.toMatchObject({
+      code: 'detail_deleted',
+      status: 410,
+    });
+    await expect(client.detailList({ domains: ['user'] })).rejects.toMatchObject({
+      code: 'domain_read_forbidden',
+      status: 403,
+    });
+    await expect(client.detailWrite({ items: [] })).rejects.toMatchObject({
+      code: 'detail_quota_exceeded',
+      status: 413,
+    });
+  });
+
   it('把 403/409/422 映射为稳定错误，不泄漏 token', async () => {
     const fake = await startFake(() => error(403, 'domain_write_forbidden'));
     const client = new CapabilityClient({ baseUrl: fake.baseUrl, token: 'super-secret-token', retries: 0 });

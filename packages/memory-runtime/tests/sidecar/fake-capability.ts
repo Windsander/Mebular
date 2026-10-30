@@ -33,15 +33,19 @@ export interface FakeCapabilityServer {
   baseUrl: string;
   requests: FakeCapabilityRequest[];
   writeRequests: FakeCapabilityRequest[];
+  detailRequests: FakeCapabilityRequest[];
   nodes: FakeNode[];
   records: FakeMemoryRecord[];
   compacts: FakeCompact[];
   selfRecords: FakeSelfRecord[];
   checkpoints: FakeCheckpoint[];
+  details: FakeDetail[];
   setRecords: (records: FakeMemoryRecord[]) => void;
   setCompacts: (compacts: FakeCompact[]) => void;
+  setDetails: (details: FakeDetail[]) => void;
   setCheckpointLeaseHost: (hostId: string) => void;
   setFailure: (failure: { status: number; code: string; retryable?: boolean } | null) => void;
+  setDetailFailure: (failure: { status: number; code: string; retryable?: boolean } | null) => void;
   close: () => Promise<void>;
 }
 
@@ -103,6 +107,32 @@ export interface FakeSelfRecord {
   agentId: string;
   revision: number;
   content: Record<string, unknown>;
+  provenance?: Record<string, unknown>;
+  createdAt?: number | null;
+  updatedAt?: number | null;
+}
+
+export interface FakeDetail {
+  id: string;
+  type?: 'detail_record';
+  kind?: 'detail_record';
+  detailKind: string;
+  domain: string;
+  ownerType?: string;
+  ownerId?: string;
+  recordIds: string[];
+  role?: string;
+  text: string;
+  mime?: string;
+  messageId?: string;
+  chunkIndex?: number;
+  turn?: number;
+  contentHash?: string;
+  redaction?: { applied: boolean; rules: string[] };
+  retentionClass?: string;
+  expiresAt?: number;
+  deletedAt?: number | null;
+  metadata?: Record<string, unknown>;
   provenance?: Record<string, unknown>;
   createdAt?: number | null;
   updatedAt?: number | null;
@@ -241,12 +271,15 @@ export async function startFakeCapability(options: FakeCapabilityOptions = {}): 
   const filterQuery = options.filterQuery === true;
   const requests: FakeCapabilityRequest[] = [];
   const writeRequests: FakeCapabilityRequest[] = [];
+  const detailRequests: FakeCapabilityRequest[] = [];
   const nodes: FakeNode[] = [];
   let records: FakeMemoryRecord[] = [];
   let compacts: FakeCompact[] = [];
   const selfRecords: FakeSelfRecord[] = [];
   const checkpoints: FakeCheckpoint[] = [];
+  let details: FakeDetail[] = [];
   let failure: { status: number; code: string; retryable?: boolean } | null = null;
+  let detailFailure: { status: number; code: string; retryable?: boolean } | null = null;
   let leaseHost = 'h_fake';
   let counter = 0;
 
@@ -343,6 +376,33 @@ export async function startFakeCapability(options: FakeCapabilityOptions = {}): 
       || (b.updatedAt ?? 0) - (a.updatedAt ?? 0)
       || b.id.localeCompare(a.id))[0] ?? null;
 
+  const detailView = (detail: FakeDetail, includeText: boolean) => ({
+    id: detail.id,
+    type: 'detail_record' as const,
+    kind: 'detail_record' as const,
+    detailKind: detail.detailKind,
+    domain: detail.domain,
+    namespace: detail.domain,
+    ownerType: detail.ownerType ?? ownerOf(detail.domain).ownerType,
+    ownerId: detail.ownerId ?? ownerOf(detail.domain).ownerId,
+    role: detail.role ?? 'user',
+    ...(includeText ? { text: detail.text } : {}),
+    ...(detail.text.length > 4096 ? { truncated: true } : {}),
+    redacted: detail.redaction?.applied === true,
+    contentHash: detail.contentHash ?? `sha256:${sha256(detail.text)}`,
+    recordIds: detail.recordIds,
+    ...(detail.messageId ? { messageId: detail.messageId } : {}),
+    ...(typeof detail.chunkIndex === 'number' ? { chunkIndex: detail.chunkIndex } : {}),
+    ...(typeof detail.turn === 'number' ? { turn: detail.turn } : {}),
+    retentionClass: detail.retentionClass ?? 'conversation',
+    expiresAt: detail.expiresAt ?? 0,
+    ...(detail.deletedAt ? { deletedAt: detail.deletedAt } : {}),
+    availability: detail.deletedAt ? ['deleted'] : ['available'],
+    provenance: detail.provenance ?? {},
+    createdAt: detail.createdAt ?? 0,
+    updatedAt: detail.updatedAt ?? detail.createdAt ?? 0,
+  });
+
   const checkpointView = (checkpoint: FakeCheckpoint) => ({
     id: checkpoint.id,
     type: 'context_checkpoint' as const,
@@ -383,11 +443,22 @@ export async function startFakeCapability(options: FakeCapabilityOptions = {}): 
       };
       requests.push(request);
       if (request.path === '/internal/memory/v1/write') writeRequests.push(request);
+      if (request.path === '/internal/memory/v1/detail') detailRequests.push(request);
 
       if (failure && request.path !== '/internal/memory/v1/version') {
         res.statusCode = failure.status;
         res.setHeader('content-type', 'application/json');
         res.end(JSON.stringify(errorEnvelope(failure.code, 'fake failure', failure.retryable === true)));
+        return;
+      }
+      if (detailFailure && request.path === '/internal/memory/v1/detail') {
+        res.statusCode = detailFailure.status;
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify(errorEnvelope(
+          detailFailure.code,
+          'fake detail failure',
+          detailFailure.retryable === true,
+        )));
         return;
       }
 
@@ -399,7 +470,7 @@ export async function startFakeCapability(options: FakeCapabilityOptions = {}): 
           schemaVersion: 1,
           mcpVersion: '0.3.1',
           coreVersion: '0.3.1',
-          features: {},
+          features: { details: true },
           limits: {},
         })));
         return;
@@ -873,6 +944,181 @@ export async function startFakeCapability(options: FakeCapabilityOptions = {}): 
         return;
       }
 
+      if (request.path === '/internal/memory/v1/detail') {
+        const body = request.body as any;
+        const op = body?.op;
+        const actor = body?.actor;
+        const send = (status: number, payload: unknown) => {
+          res.statusCode = status;
+          res.setHeader('content-type', 'application/json');
+          res.end(JSON.stringify(payload));
+        };
+        const fail = (status: number, code: string, message: string, details?: unknown, retryable = false) => {
+          send(status, errorEnvelope(code, message, retryable, details));
+        };
+        const canReadDomain = (domain: string): boolean => {
+          if (actor?.type !== 'agent') return true;
+          if (!domain.startsWith('agent:')) return true;
+          return domain === `agent:${actor.agentId}`;
+        };
+
+        if (op === 'write') {
+          const items = Array.isArray(body?.items) ? body.items : [];
+          if (items.length === 0 || items.length > 100) {
+            fail(400, 'invalid_request', 'items 必须是 1–100 条');
+            return;
+          }
+          const results = items.map((item: any) => {
+            if (typeof item?.clientItemId !== 'string' || typeof item?.domain !== 'string') {
+              return { clientItemId: item?.clientItemId, status: 'failed', code: 'validation_failed' };
+            }
+            const recordIds = Array.isArray(item.recordIds)
+              ? item.recordIds.filter((id: unknown) => typeof id === 'string')
+              : [];
+            if (recordIds.length === 0) {
+              return { clientItemId: item.clientItemId, status: 'failed', code: 'validation_failed' };
+            }
+            for (const recordId of recordIds) {
+              const record = records.find((entry) => entry.id === recordId);
+              const node = nodes.find((entry) => entry.id === recordId);
+              const domain = record?.domain ?? node?.domain;
+              if (!domain || domain !== item.domain) {
+                return { clientItemId: item.clientItemId, status: 'failed', code: 'validation_failed' };
+              }
+            }
+            const contentHash = typeof item.contentHash === 'string'
+              ? item.contentHash
+              : `sha256:${sha256(item.text ?? '')}`;
+            const existing = details.find((detail) => detail.domain === item.domain
+              && detail.detailKind === (item.detailKind ?? 'raw_chunk')
+              && detail.contentHash === contentHash
+              && (detail.chunkIndex ?? -1) === (item.chunkIndex ?? -1));
+            if (existing) {
+              return {
+                clientItemId: item.clientItemId,
+                status: 'duplicate',
+                id: existing.id,
+                domain: existing.domain,
+                detailKind: existing.detailKind,
+                contentHash: existing.contentHash,
+                duplicate: true,
+              };
+            }
+            counter += 1;
+            const createdAt = Date.now();
+            const detail: FakeDetail = {
+              id: `01FAKED${String(counter).padStart(4, '0')}`,
+              type: 'detail_record',
+              kind: 'detail_record',
+              detailKind: typeof item.detailKind === 'string' ? item.detailKind : 'raw_chunk',
+              domain: item.domain,
+              recordIds,
+              role: item.role,
+              text: String(item.text ?? ''),
+              mime: item.mime,
+              messageId: item.messageId,
+              chunkIndex: item.chunkIndex,
+              turn: item.turn,
+              contentHash,
+              redaction: isObjectLike(item.redaction) ? item.redaction : { applied: false, rules: [] },
+              retentionClass: item.retentionClass,
+              expiresAt: typeof item.expiresAt === 'number' ? item.expiresAt : 0,
+              metadata: { internal: true },
+              provenance: isObjectLike(item.provenance) ? item.provenance : {},
+              createdAt,
+              updatedAt: createdAt,
+            };
+            details.push(detail);
+            return {
+              clientItemId: item.clientItemId,
+              status: 'created',
+              id: detail.id,
+              domain: detail.domain,
+              detailKind: detail.detailKind,
+              contentHash: detail.contentHash,
+            };
+          });
+          send(200, envelope({
+            results,
+            created: results.filter((result: any) => result.status === 'created').length,
+            duplicates: results.filter((result: any) => result.status === 'duplicate').length,
+            failed: results.filter((result: any) => result.status === 'failed').length,
+            partial: results.some((result: any) => result.status === 'failed'),
+          }));
+          return;
+        }
+
+        if (op === 'get') {
+          const detail = details.find((entry) => entry.id === body?.id);
+          if (!detail) {
+            fail(404, 'not_found', '详情不存在');
+            return;
+          }
+          if (!canReadDomain(detail.domain)) {
+            fail(403, 'domain_read_forbidden', '不能读取其他 Agent 域的详情');
+            return;
+          }
+          if (detail.deletedAt) {
+            fail(410, 'detail_deleted', '详情已删除');
+            return;
+          }
+          if (typeof detail.expiresAt === 'number' && detail.expiresAt > 0 && detail.expiresAt < Date.now()) {
+            fail(410, 'detail_expired', '详情已过期');
+            return;
+          }
+          send(200, envelope({ detail: detailView(detail, body?.includeText !== false) }));
+          return;
+        }
+
+        if (op === 'list') {
+          const domains = Array.isArray(body?.domains) ? body.domains : null;
+          const recordIds = Array.isArray(body?.recordIds) ? new Set(body.recordIds) : null;
+          const detailKinds = Array.isArray(body?.detailKinds) ? new Set(body.detailKinds) : null;
+          const listed = details
+            .filter((detail) => !domains || domains.includes(detail.domain))
+            .filter((detail) => !body?.threadId || detail.provenance?.threadId === body.threadId)
+            .filter((detail) => !recordIds || detail.recordIds.some((id) => recordIds.has(id)))
+            .filter((detail) => !detailKinds || detailKinds.has(detail.detailKind))
+            .filter((detail) => !detail.deletedAt)
+            .slice(0, typeof body?.limit === 'number' ? body.limit : 20)
+            .map((detail) => detailView(detail, body?.includeText === true));
+          send(200, envelope({ details: listed, total: listed.length, offset: 0, limit: listed.length, hasMore: false }));
+          return;
+        }
+
+        if (op === 'delete') {
+          const ids = Array.isArray(body?.ids) ? body.ids.filter((id: unknown) => typeof id === 'string') : [];
+          const deleted: string[] = [];
+          const notFound: string[] = [];
+          const forbidden: string[] = [];
+          for (const id of ids) {
+            const detail = details.find((entry) => entry.id === id);
+            if (!detail) {
+              notFound.push(id);
+              continue;
+            }
+            if (actor?.type === 'agent') {
+              if (detail.domain !== `agent:${actor.agentId}`
+                || detail.provenance?.agentId !== actor.agentId) {
+                forbidden.push(id);
+                continue;
+              }
+            } else if (actor?.type !== 'user' && actor?.type !== 'system') {
+              forbidden.push(id);
+              continue;
+            }
+            detail.deletedAt = Date.now();
+            detail.metadata = { ...(detail.metadata ?? {}), deletedReason: body?.reason ?? 'user_requested' };
+            deleted.push(id);
+          }
+          send(200, envelope({ deleted, notFound, forbidden, partial: notFound.length + forbidden.length > 0 }));
+          return;
+        }
+
+        fail(400, 'invalid_request', 'detail op 必须是 write/get/list/delete');
+        return;
+      }
+
       if (request.path === '/internal/memory/v1/write') {
         const body = request.body as any;
         const items = Array.isArray(body?.items) ? body.items : [];
@@ -953,16 +1199,22 @@ export async function startFakeCapability(options: FakeCapabilityOptions = {}): 
     baseUrl: `http://127.0.0.1:${address.port}/internal/memory/v1`,
     requests,
     writeRequests,
+    detailRequests,
     nodes,
     get records() { return records; },
     get compacts() { return compacts; },
     selfRecords,
     checkpoints,
+    get details() { return details; },
     setRecords: (next) => { records = next; },
     setCompacts: (next) => { compacts = next; },
+    setDetails: (next) => { details = next; },
     setCheckpointLeaseHost: (hostId) => { leaseHost = hostId; },
     setFailure: (next) => {
       failure = next;
+    },
+    setDetailFailure: (next) => {
+      detailFailure = next;
     },
     close: () => new Promise<void>((resolve) => {
       server.close(() => resolve());

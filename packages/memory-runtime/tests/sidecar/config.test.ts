@@ -34,9 +34,10 @@ describe('sidecar config', () => {
     expect(paths.home).toBe(home);
     expect(paths.dataDir).toBe(join(home, 'memory-runtime'));
     expect(paths.discoveryPath).toBe(join(home, 'memory-runtime.json'));
-    expect(paths.rawDir).toBe(join(home, 'memory-runtime', 'raw'));
+    expect(paths.stagingDir).toBe(join(home, 'memory-runtime', 'staging'));
     expect(paths.tracesPath).toBe(join(home, 'memory-runtime', 'traces.jsonl'));
     expect(paths.cacheDir).toBe(join(home, 'memory-runtime', 'cache'));
+    expect(paths.detailCacheDir).toBe(join(home, 'memory-runtime', 'cache', 'details'));
     expect(paths.outboxDir).toBe(join(home, 'memory-runtime', 'outbox'));
     expect(paths.hostTokenPath).toBe(join(home, 'memory-runtime', 'host-token'));
     expect(paths.capabilityTokenPath).toBe(join(home, 'memory-runtime', 'capability-token'));
@@ -57,9 +58,11 @@ describe('sidecar config', () => {
   it('默认端口 7341、host 127.0.0.1；允许 port=0 临时端口', () => {
     const defaults = defaultSidecarConfig();
     expect(defaults.http).toEqual({ host: '127.0.0.1', port: 7341 });
-    expect(defaults.capture).toBe('off');
     expect(defaults.trace).toBe('local');
-    expect(defaults.retention.rawDays).toBe(7);
+    expect(defaults.detail.stagingHours).toBe(24);
+    expect(defaults.detail.stagingBytes).toBe(268_435_456);
+    expect(defaults.detail.quotaBytesPerDomain).toBe(268_435_456);
+    expect(defaults.detail.quotaBytesCloud).toBe(1_073_741_824);
     expect(defaults.limits.maxOutboxItems).toBe(1000);
     expect(normalizeSidecarConfig({ http: { port: 0 } }).http.port).toBe(0);
     expect(normalizeSidecarConfig({ http: { port: 0 } }).http.host).toBe('127.0.0.1');
@@ -70,6 +73,22 @@ describe('sidecar config', () => {
     expect(() => normalizeSidecarConfig({ http: { host: '192.168.1.2' } })).toThrow(SidecarConfigError);
     expect(normalizeSidecarConfig({ http: { host: '::1' } }).http.host).toBe('::1');
     expect(normalizeSidecarConfig({ http: { host: 'localhost' } }).http.host).toBe('localhost');
+  });
+
+  it('detail 配置：stagingHours/stagingBytes/cacheDays 生效，旧 capture 不控制行为', () => {
+    const normalized = normalizeSidecarConfig({
+      capture: 'off',
+      detail: { stagingHours: 6, stagingBytes: 1024, cacheDays: 3, cacheBytes: 4096, cacheMaxEntries: 7 },
+    });
+    expect(normalized.detail).toMatchObject({
+      stagingHours: 6,
+      stagingBytes: 1024,
+      cacheDays: 3,
+      cacheBytes: 4096,
+      cacheMaxEntries: 7,
+    });
+    expect((normalized as unknown as Record<string, unknown>).capture).toBeUndefined();
+    expect(() => normalizeSidecarConfig({ detail: { stagingHours: 0 } })).toThrow(SidecarConfigError);
   });
 
   it('拒绝旧原型/已删除配置键', () => {
@@ -91,13 +110,26 @@ describe('sidecar config', () => {
     await writeFile(paths.configPath, JSON.stringify({
       schema: 1,
       capture: 'local',
+      retention: { rawDays: 7 },
       http: { port: 0 },
       limits: { maxOutboxItems: 2 },
       capability: { url: 'http://127.0.0.1:7331/internal/memory/v1' },
     }), { mode: 0o600 });
 
-    const loaded = await loadSidecarConfig({ paths, env: {}, overrides: { http: { port: 0 } } });
-    expect(loaded.capture).toBe('local');
+    const warnings: string[] = [];
+    const loaded = await loadSidecarConfig({
+      paths,
+      env: {},
+      overrides: { http: { port: 0 } },
+      warnings,
+    });
+    expect(warnings).toEqual(expect.arrayContaining([
+      'legacy_capture_ignored',
+      'legacy_retention_raw_days_ignored',
+    ]));
+    expect((loaded as unknown as Record<string, unknown>).capture).toBeUndefined();
+    expect((loaded.retention as unknown as Record<string, unknown>).rawDays).toBeUndefined();
+    expect(loaded.detail.stagingHours).toBe(24);
     expect(loaded.http.port).toBe(0);
     expect(loaded.limits.maxOutboxItems).toBe(2);
     expect(loaded.capability.url).toBe('http://127.0.0.1:7331/internal/memory/v1');

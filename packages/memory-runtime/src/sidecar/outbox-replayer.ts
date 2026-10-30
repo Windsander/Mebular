@@ -21,8 +21,8 @@ export interface OutboxReplayerOptions {
   maxPerRun?: number;
   now?: () => number;
   onSummary?: (summary: OutboxReplaySummary) => void;
-  /** 成功写回后的对象缓存/计数回填；失败不影响已提交的图写入。 */
-  onSettled?: (item: OutboxItem, data: unknown) => void | Promise<void>;
+  /** 成功写回后的对象缓存/计数回填；返回 false 表示仍需重试（部分成功）。 */
+  onSettled?: (item: OutboxItem, data: unknown) => void | boolean | Promise<void | boolean>;
 }
 
 interface ItemOutcome {
@@ -72,7 +72,7 @@ export class OutboxReplayer {
   private readonly client: CapabilityClient | null;
   private readonly now: () => number;
   private readonly onSummary?: (summary: OutboxReplaySummary) => void;
-  private readonly onSettled?: (item: OutboxItem, data: unknown) => void | Promise<void>;
+  private readonly onSettled?: (item: OutboxItem, data: unknown) => void | boolean | Promise<void | boolean>;
   private timer: ReturnType<typeof setInterval> | null = null;
   private inFlight: Promise<OutboxReplaySummary> | null = null;
 
@@ -167,10 +167,16 @@ export class OutboxReplayer {
         idempotencyKey: item.requestId,
         retries: 0,
       });
+      let keepForRetry = false;
       try {
-        await this.onSettled?.(item, envelope.data);
+        keepForRetry = (await this.onSettled?.(item, envelope.data)) === false;
       } catch {
         // 回填缓存/计数失败不影响已提交的 capability 写入。
+      }
+      if (keepForRetry) {
+        const delay = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** Math.min(6, item.attempts));
+        await this.outbox.recordAttempt(item.id, { error: 'partial_failure', retryDelayMs: delay });
+        return { outcome: 'retry' };
       }
       await this.outbox.remove(item.id);
       return { outcome: 'settled', count: settledCount(envelope.data) };

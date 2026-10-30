@@ -39,6 +39,7 @@ export interface SidecarDiscoveryCapabilities {
   ingest: boolean;
   recall: boolean;
   context: boolean;
+  details: boolean;
   checkpoint: boolean;
   compact: boolean;
   self: boolean;
@@ -134,6 +135,7 @@ export function buildDiscovery(input: SidecarDiscoveryInput): SidecarDiscovery {
       ingest: capabilities.ingest === true,
       recall: capabilities.recall === true,
       context: capabilities.context === true,
+      details: capabilities.details === true,
       checkpoint: capabilities.checkpoint === true,
       compact: capabilities.compact === true,
       self: capabilities.self === true,
@@ -171,6 +173,7 @@ export async function writeDiscovery(path: string, discovery: SidecarDiscovery):
       ingest: discovery.capabilities.ingest,
       recall: discovery.capabilities.recall,
       context: discovery.capabilities.context,
+      details: discovery.capabilities.details,
       checkpoint: discovery.capabilities.checkpoint,
       compact: discovery.capabilities.compact,
       self: discovery.capabilities.self,

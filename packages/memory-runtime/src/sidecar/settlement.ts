@@ -36,7 +36,7 @@ import {
   type RecallHttpResult,
   type RecallResponse,
 } from './recall.js';
-import type { SidecarStatusSnapshot } from './server.js';
+import type { SidecarStatusDetails, SidecarStatusSnapshot } from './server.js';
 
 export interface SettlementIdentity {
   cloudId: string | null;
@@ -210,7 +210,9 @@ export class SettlementRuntime {
         this.ingest.applyReplaySummary(summary);
         this.objects.applyReplaySummary(summary);
       },
-      onSettled: (item, data) => this.objects.applyReplayedItem(item, data),
+      onSettled: (item, data) => (item.endpoint === '/detail' || item.meta?.kind === 'record'
+        ? this.ingest.applyReplayedOutbox(item, data)
+        : this.objects.applyReplayedItem(item, data)),
     });
     if (options.autoStartReplayer !== false) {
       this.replayer.start();
@@ -301,6 +303,14 @@ export class SettlementRuntime {
   async handleContext(request: unknown): Promise<RecallHttpResult<ContextResponse>> {
     await this.reloadPolicy().catch(() => []);
     return this.recall.handleContext(request);
+  }
+
+  expandRecall(recallId: string, request: unknown) {
+    return this.recall.expandRecall(recallId, request);
+  }
+
+  getDetail(id: string) {
+    return this.recall.getDetail(id);
   }
 
   getTraces(query: {
@@ -419,9 +429,10 @@ export class SettlementRuntime {
   }
 
   /** `/status` 的计数与 lastError；base 由 main 提供 capability/model/limits。 */
-  async statusSnapshot(base: Omit<SidecarStatusSnapshot, 'counts' | 'outbox' | 'lastError'> & {
+  async statusSnapshot(base: Omit<SidecarStatusSnapshot, 'counts' | 'outbox' | 'details' | 'lastError'> & {
     counts?: Partial<SidecarStatusSnapshot['counts']>;
     outbox?: Partial<SidecarStatusSnapshot['outbox']>;
+    details?: Partial<SidecarStatusDetails>;
     lastError?: SidecarStatusSnapshot['lastError'];
   }): Promise<SidecarStatusSnapshot> {
     const [stats, outbox] = await Promise.all([this.local.stats(), this.local.outbox.stats()]);
@@ -435,13 +446,15 @@ export class SettlementRuntime {
     return {
       ...base,
       counts: {
-        rawChunks: stats.rawChunks,
+        stagingChunks: stats.stagingChunks,
+        localStagingChunks: stats.stagingChunks,
         traces: stats.traces,
+        localTraces: stats.traces,
         cachedRecords: stats.cacheEntries,
+        detailCacheEntries: stats.detailCacheEntries,
+        detailCacheBytes: stats.detailCacheBytes,
         outbox: stats.outboxItems,
         deadLetter: stats.deadLetter,
-        localRawChunks: stats.rawChunks,
-        localTraces: stats.traces,
         ingested: ingest.ingested,
         settled: ingest.settled,
         recalls: recall.recalls,
@@ -460,6 +473,29 @@ export class SettlementRuntime {
         bytes: outbox.bytes,
         oldestAt: outbox.oldestAt,
         ...base.outbox,
+      },
+      details: {
+        available: true,
+        staging: {
+          chunks: stats.stagingChunks,
+          hours: this.config.detail.stagingHours,
+          maxBytes: this.config.detail.stagingBytes,
+        },
+        cache: {
+          entries: stats.detailCacheEntries,
+          bytes: stats.detailCacheBytes,
+          days: this.config.detail.cacheDays,
+          maxBytes: this.config.detail.cacheBytes,
+        },
+        outbox: { items: outbox.items, bytes: outbox.bytes },
+        quota: {
+          bytesPerDomain: this.config.detail.quotaBytesPerDomain,
+          bytesCloud: this.config.detail.quotaBytesCloud,
+          usedBytes: null,
+          bytes: null,
+        },
+        retentionDays: { conversation: 30, tool_output: 7, document_slice: 90 },
+        ...base.details,
       },
       lastError: lastError ?? ingest.lastError,
     };

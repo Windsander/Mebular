@@ -54,13 +54,12 @@ describe('0.3 离线恢复：outbox / Raw / capability 失败开放', () => {
     await cluster?.cleanup();
   });
 
-  it('离线 ingest 202/queued、Raw 保留；恢复后 outbox 只写一次；重启后可恢复', async () => {
+  it('离线 ingest 202/queued、staging 保留；恢复后 outbox 只写一次；重启后可恢复', async () => {
     // 先沉降一条基线记忆；它必须只存在于 capability/图中，而不是 sidecar 本地。
     const baseline = assertOk(await a.sidecar.ingest({
       requestId: `req_offline_baseline_${RUN}`,
       agentId: 'hermes',
       agentName: 'Hermes',
-      capture: 'local',
       extractor: 'host',
       chunks: [{ role: 'user', text: `${BASELINE_RAW} ${BASELINE_MARKER}`, messageId: `m_offline_base_${RUN}` }],
       candidates: [{
@@ -70,16 +69,19 @@ describe('0.3 离线恢复：outbox / Raw / capability 失败开放', () => {
       }],
     }), 'baseline ingest');
     expect(baseline.records).toHaveLength(1);
+    expect(baseline.detailIds.length).toBeGreaterThan(0);
+    // 成功沉降详情后 staging 清理；本地不再是权威副本。
+    expect((await a.sidecar.stagingTexts()).some((text) => text.includes(BASELINE_RAW))).toBe(false);
+    expect((await a.sidecar.detailCacheTexts()).some((text) => text.includes(BASELINE_RAW))).toBe(true);
 
     gate.down();
 
-    // capability 不可达：写入进入有界 outbox，Raw 仍先落本机。
+    // capability 不可达：写入进入有界 outbox，chunk 先落本地 staging。
     const offlineStarted = Date.now();
     const offline = await a.sidecar.ingest({
       requestId: `req_offline_queued_${RUN}`,
       agentId: 'hermes',
       agentName: 'Hermes',
-      capture: 'local',
       extractor: 'host',
       chunks: [{ role: 'user', text: `${QUEUED_RAW} ${QUEUED_MARKER}`, messageId: `m_offline_queued_${RUN}` }],
       candidates: [{
@@ -97,12 +99,12 @@ describe('0.3 离线恢复：outbox / Raw / capability 失败开放', () => {
       accepted: { chunks: 1, records: 0 },
     });
     expect(offline.data.records).toEqual([]);
-    expect(offline.data.rawChunkIds.length).toBeGreaterThan(0);
+    expect(offline.data.stagingChunkIds.length).toBeGreaterThan(0);
     expect(offline.data.warnings).toEqual(expect.arrayContaining(['capability_unavailable', 'queued_outbox']));
 
-    const rawWhileOffline = await a.sidecar.rawTexts();
-    expect(rawWhileOffline.some((text) => text.includes(BASELINE_RAW))).toBe(true);
-    expect(rawWhileOffline.some((text) => text.includes(QUEUED_RAW))).toBe(true);
+    const stagingWhileOffline = await a.sidecar.stagingTexts();
+    expect(stagingWhileOffline.some((text) => text.includes(BASELINE_RAW))).toBe(false);
+    expect(stagingWhileOffline.some((text) => text.includes(QUEUED_RAW))).toBe(true);
 
     const statusWhileOffline = await a.sidecar.status();
     expect(statusWhileOffline.counts.outbox).toBeGreaterThanOrEqual(1);
@@ -132,17 +134,18 @@ describe('0.3 离线恢复：outbox / Raw / capability 失败开放', () => {
     expect(JSON.stringify(offlineRecall)).not.toContain(BASELINE_MARKER);
     expect(JSON.stringify(offlineRecall)).not.toContain(QUEUED_MARKER);
 
-    // sidecar 重启：outbox 与 Raw 都是本地持久化数据，重启后仍在。
+    // sidecar 重启：outbox 与 staging 都是本地过程数据，重启后仍在。
     const beforeRestart = await a.sidecar.discovery();
     process.kill(beforeRestart.pid, 'SIGKILL');
     const afterRestart = await a.sidecar.waitForRestart(beforeRestart.pid, { timeoutMs: 60_000 });
     expect(afterRestart.pid).not.toBe(beforeRestart.pid);
     const statusAfterRestart = await a.sidecar.status();
     expect(statusAfterRestart.counts.outbox).toBeGreaterThanOrEqual(1);
+    expect(statusAfterRestart.counts.stagingChunks).toBeGreaterThanOrEqual(1);
     expect(statusAfterRestart.degraded).toBe(true);
-    const rawAfterRestart = await a.sidecar.rawTexts();
-    expect(rawAfterRestart.some((text) => text.includes(BASELINE_RAW))).toBe(true);
-    expect(rawAfterRestart.some((text) => text.includes(QUEUED_RAW))).toBe(true);
+    const stagingAfterRestart = await a.sidecar.stagingTexts();
+    expect(stagingAfterRestart.some((text) => text.includes(BASELINE_RAW))).toBe(false);
+    expect(stagingAfterRestart.some((text) => text.includes(QUEUED_RAW))).toBe(true);
 
     // capability 恢复后 outbox 自动重放并沉降；幂等键保证不重复写。
     gate.up();
@@ -190,10 +193,15 @@ describe('0.3 离线恢复：outbox / Raw / capability 失败开放', () => {
     const finalStatus = await a.sidecar.status();
     expect(finalStatus.counts.outbox).toBe(0);
     expect(finalStatus.counts.deadLetter).toBe(0);
+    expect(finalStatus.counts.stagingChunks).toBe(0);
+    expect(finalStatus.details).toMatchObject({
+      available: true,
+      staging: { chunks: 0 },
+    });
 
-    // Raw 仍在本机（跨设备不可见，但本地重启不丢）。
-    const finalRaw = await a.sidecar.rawTexts();
-    expect(finalRaw.some((text) => text.includes(BASELINE_RAW))).toBe(true);
-    expect(finalRaw.some((text) => text.includes(QUEUED_RAW))).toBe(true);
+    // 详情成功沉降后 staging 清理；本机 cache 只是只读副本，不是权威。
+    const finalStaging = await a.sidecar.stagingTexts();
+    expect(finalStaging.some((text) => text.includes(BASELINE_RAW))).toBe(false);
+    expect(finalStaging.some((text) => text.includes(QUEUED_RAW))).toBe(false);
   });
 });

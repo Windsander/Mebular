@@ -2,7 +2,6 @@
 // anchor 去重、trace/feedback。使用 fake capability server，不启动真实 MCP/core。
 
 import { describe, it, expect, afterEach } from '@jest/globals';
-import { createHash } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -176,7 +175,7 @@ describe('RecallService', () => {
     expect(fake.requests.some((request) => request.path.endsWith('/profile'))).toBe(true);
   });
 
-  it('细节 query 展开 MemoryRecord；无本机 Raw 时标 settled，不冒充原文', async () => {
+  it('细节 query 展开 MemoryRecord；无 DetailRecord 时标 pending_sync，不冒充原文', async () => {
     const { service } = await setup({
       records: [record({
         id: '01JPORT0001',
@@ -197,14 +196,14 @@ describe('RecallService', () => {
     const fragment = response.data.fragments[0]!;
     expect(fragment.gist).toContain('7331');
     expect(fragment.detail).toMatchObject({
-      format: 'structured',
+      format: 'summary',
       truncated: false,
-      availability: expect.arrayContaining(['cloud']),
+      availability: ['pending_sync'],
     });
     expect(fragment.detail?.text).toContain('7331');
     expect(fragment.detailAvailable).toBe(false);
     expect(fragment.source).toBe('settled');
-    expect(fragment.detailAvailability).toEqual(expect.arrayContaining(['cloud']));
+    expect(fragment.detailAvailability).toEqual(['pending_sync']);
     expect(response.data.records[0]).toMatchObject({ id: '01JPORT0001', why: 'exact_value+keyword' });
   });
 
@@ -318,10 +317,10 @@ describe('RecallService', () => {
     expect(response.data.citations.every((citation) => citation.domain === 'agent:hermes')).toBe(true);
   });
 
-  it('本机有 Raw 时原文可用；Raw 缺失时诚实降级', async () => {
+  it('详情经 capability /detail 展开；跨设备在保留期内可读，不依赖本机 Raw', async () => {
     const text = '我当时说的是：先冻结契约，再迁移 runtime，不要先改宿主。';
-    const rawId = 'rc_recall_raw_1';
-    const { service, local } = await setup({
+    const detailId = '01JDETAILRECALL01';
+    const { service, fake } = await setup({
       records: [record({
         id: '01JRAW0001',
         type: 'episode',
@@ -342,27 +341,23 @@ describe('RecallService', () => {
           agentId: 'opencode',
           agentName: 'OpenCode',
           messageIds: ['m_raw_1'],
-          rawChunkIds: [rawId],
+          detailIds: [detailId],
           confirmation: 'none',
           at: NOW - 86_400_000,
         },
       })],
     });
-    await local.store.putRawChunk('cl_test', {
-      schema: 1,
-      id: rawId,
-      threadId: 'th_recall',
-      agentId: 'opencode',
-      hostId: 'h_test',
+    fake.details.push({
+      id: detailId,
+      detailKind: 'raw_chunk',
+      domain: 'agent:opencode',
+      recordIds: ['01JRAW0001'],
       role: 'user',
       text,
-      mime: 'text/plain',
-      at: NOW - 86_400_000,
       messageId: 'm_raw_1',
       chunkIndex: 0,
-      contentHash: createHash('sha256').update(text).digest('hex'),
-      redaction: { applied: false, rules: [] },
-      expiresAt: NOW + 86_400_000,
+      provenance: { source: 'runtime', deviceId: 'device-a', agentId: 'opencode' },
+      createdAt: NOW - 86_400_000,
     });
 
     const first = await service.handleRecall({
@@ -370,26 +365,191 @@ describe('RecallService', () => {
       threadId: 'th_recall',
       query: '我当时原话怎么说的？',
     });
-    const withRaw = first.data.fragments[0]!;
-    expect(withRaw.detailAvailable).toBe(true);
-    expect(withRaw.source).toBe('local_raw');
-    expect(withRaw.detail).toMatchObject({ format: 'verbatim', availability: expect.arrayContaining(['local_raw']) });
-    expect(withRaw.detail?.text).toBe(text);
+    const withDetail = first.data.fragments[0]!;
+    expect(withDetail.detailAvailable).toBe(true);
+    expect(withDetail.detailIds).toEqual([detailId]);
+    expect(withDetail.source).toBe('settled');
+    expect(withDetail.detail).toMatchObject({
+      format: 'verbatim',
+      availability: expect.arrayContaining(['available']),
+      source: 'capability',
+      stale: false,
+    });
+    expect(withDetail.detail?.text).toBe(text);
+    expect(fake.detailRequests.some((request) => request.body?.op === 'get')).toBe(true);
+  });
 
-    await local.store.deleteRawChunk(rawId);
-    const second = await service.handleRecall({
+  it('详情过期/删除时诚实降级，不伪造原文', async () => {
+    const text = '原话：先冻结契约。';
+    const detailId = '01JDETAILRECALL02';
+    const { service, fake } = await setup({
+      records: [record({
+        id: '01JRAW0002',
+        type: 'episode',
+        kind: 'episode',
+        domain: 'agent:opencode',
+        content: { title: '原话记录', content: text, episodeType: 'conversation' },
+        text,
+        provenance: {
+          source: 'runtime',
+          agentId: 'opencode',
+          threadId: 'th_recall',
+          detailIds: [detailId],
+          at: NOW - 86_400_000,
+        },
+      })],
+    });
+    fake.details.push({
+      id: detailId,
+      detailKind: 'raw_chunk',
+      domain: 'agent:opencode',
+      recordIds: ['01JRAW0002'],
+      role: 'user',
+      text,
+      expiresAt: NOW - 1,
+      createdAt: NOW - 86_400_000,
+    });
+
+    const expired = await service.handleRecall({
       agentId: 'opencode',
       threadId: 'th_recall',
       query: '我当时原话怎么说的？',
-      anchor: 'raw-missing-anchor',
     });
-    const withoutRaw = second.data.fragments[0]!;
-    expect(withoutRaw.detailAvailable).toBe(false);
-    expect(withoutRaw.source).toBe('settled');
-    expect(withoutRaw.detail?.format).not.toBe('verbatim');
-    expect(withoutRaw.detail?.availability).toEqual(expect.arrayContaining(['missing_cross_device']));
-    expect(withoutRaw.detail?.text).toContain('原文仅保留在写入设备');
-    expect(second.data.warnings).toEqual(expect.arrayContaining(['raw_unavailable']));
+    expect(expired.data.fragments[0]?.detail?.availability).toContain('expired');
+    expect(expired.data.fragments[0]?.detail?.format).not.toBe('verbatim');
+    expect(expired.data.fragments[0]?.detail?.text).not.toBe(text);
+    expect(expired.data.warnings).toEqual(expect.arrayContaining(['detail_expired']));
+
+    fake.details[0]!.expiresAt = 0;
+    fake.details[0]!.deletedAt = NOW - 1;
+    const deleted = await service.handleRecall({
+      agentId: 'opencode',
+      threadId: 'th_recall',
+      query: '我当时原话怎么说的？',
+      anchor: 'detail-deleted-anchor',
+    });
+    expect(deleted.data.fragments[0]?.detail?.availability).toContain('deleted');
+    expect(deleted.data.fragments[0]?.detail?.text).not.toBe(text);
+    expect(deleted.data.warnings).toEqual(expect.arrayContaining(['detail_deleted']));
+  });
+
+  it('详情尚未同步时标 pending_sync，不回连写入设备、不伪造原文', async () => {
+    const detailId = '01JDETAILRECALL03';
+    const { service } = await setup({
+      records: [record({
+        id: '01JRAW0003',
+        type: 'episode',
+        kind: 'episode',
+        domain: 'agent:opencode',
+        content: { title: '原话记录', content: '远端原文', episodeType: 'conversation' },
+        text: '远端原文',
+        provenance: { source: 'runtime', agentId: 'opencode', threadId: 'th_recall', detailIds: [detailId] },
+      })],
+    });
+    const response = await service.handleRecall({
+      agentId: 'opencode',
+      threadId: 'th_recall',
+      query: '我当时原话怎么说的？',
+    });
+    const fragment = response.data.fragments[0]!;
+    expect(fragment.detail?.availability).toContain('pending_sync');
+    expect(fragment.detail?.format).not.toBe('verbatim');
+    expect(fragment.detail?.text).toContain('详情仍在同步中');
+    expect(response.data.warnings).toEqual(expect.arrayContaining(['detail_pending_sync']));
+  });
+
+  it('离线只读 cache 展开必须标 source=cache/stale=true；过期不用缓存冒充原文', async () => {
+    const detailId = '01JDETAILRECALL04';
+    const text = '缓存里的原文';
+    const { service, fake, local } = await setup({
+      records: [record({
+        id: '01JRAW0004',
+        type: 'episode',
+        kind: 'episode',
+        domain: 'agent:opencode',
+        content: { title: '原话记录', content: text, episodeType: 'conversation' },
+        text,
+        provenance: { source: 'runtime', agentId: 'opencode', threadId: 'th_recall', detailIds: [detailId] },
+      })],
+    });
+    await local.putCachedDetail(detailId, {
+      detail: {
+        id: detailId,
+        detailKind: 'raw_chunk',
+        domain: 'agent:opencode',
+        text,
+        recordIds: ['01JRAW0004'],
+        availability: ['available'],
+      },
+    });
+
+    const cached = await service.handleRecall({
+      agentId: 'opencode',
+      threadId: 'th_recall',
+      query: '我当时原话怎么说的？',
+    });
+    const fragment = cached.data.fragments[0]!;
+    expect(fragment.source).toBe('cache');
+    expect(fragment.detail).toMatchObject({ source: 'cache', stale: true, format: 'structured' });
+    expect(fragment.detail?.text).toContain(text);
+    expect(cached.data.warnings).toEqual(expect.arrayContaining(['detail_from_cache']));
+
+    fake.details.push({
+      id: detailId,
+      detailKind: 'raw_chunk',
+      domain: 'agent:opencode',
+      recordIds: ['01JRAW0004'],
+      role: 'user',
+      text,
+      expiresAt: NOW - 1,
+      createdAt: NOW - 86_400_000,
+    });
+    const expired = await service.handleRecall({
+      agentId: 'opencode',
+      threadId: 'th_recall',
+      query: '我当时原话怎么说的？',
+      anchor: 'cached-expired-anchor',
+    });
+    expect(expired.data.fragments[0]?.detail?.availability).toContain('expired');
+    expect(expired.data.fragments[0]?.detail?.source).not.toBe('cache');
+    expect(await local.getCachedDetail(detailId)).toBeNull();
+  });
+
+  it('未订阅域详情返回 not_subscribed，不泄漏存在性', async () => {
+    const detailId = '01JDETAILHERMES1';
+    const { service, fake } = await setup({
+      policy: policyAllowingHermes(),
+      records: [record({
+        id: '01JHERMESDETAIL1',
+        type: 'episode',
+        kind: 'episode',
+        domain: 'agent:hermes',
+        content: { title: 'Hermes 原话', content: 'Hermes 的秘密原文', episodeType: 'conversation' },
+        text: 'Hermes 的秘密原文',
+        provenance: { source: 'runtime', agentId: 'hermes', threadId: 'th_hermes', detailIds: [detailId] },
+      })],
+    });
+    fake.details.push({
+      id: detailId,
+      detailKind: 'raw_chunk',
+      domain: 'agent:hermes',
+      recordIds: ['01JHERMESDETAIL1'],
+      role: 'user',
+      text: 'Hermes 的秘密原文',
+      provenance: { source: 'runtime', agentId: 'hermes', deviceId: 'device-hermes' },
+      createdAt: NOW - 86_400_000,
+    });
+    const response = await service.handleRecall({
+      agentId: 'opencode',
+      threadId: 'th_recall',
+      query: 'Hermes 原话是什么？',
+      includeOtherAgents: true,
+    });
+    const fragment = response.data.fragments.find((entry) => entry.owner.domain === 'agent:hermes');
+    expect(fragment?.detail?.availability).toContain('not_subscribed');
+    expect(fragment?.detail?.format).not.toBe('verbatim');
+    expect(fragment?.detail?.text).toContain('未订阅该记忆域');
+    expect(response.data.warnings).toEqual(expect.arrayContaining(['detail_not_subscribed']));
   });
 
   it('stale compact 默认不注入；显式 includeHistory 时保留 stale 标记', async () => {

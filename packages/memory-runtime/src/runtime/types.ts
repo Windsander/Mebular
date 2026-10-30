@@ -1,7 +1,8 @@
 // Runtime 对象模型（0.3.0 memory runtime contract §2 / §5.6 / §7.1）
 //
 // 这些类型是 0.3 的冻结形状：图内对象复用 GraphStore 节点，本地对象
-// （RawChunk / RecallTrace）只落在 sidecar 数据目录，不进入图/事件日志。
+// （staging chunk / detail cache / RecallTrace）只落在 sidecar 数据目录，
+// 不进入图/事件日志，也不是权威副本。
 // 本文件只定义类型与常量，不包含存储或业务实现。
 
 export const RUNTIME_SCHEMA_VERSION = 1 as const;
@@ -11,7 +12,7 @@ export type RuntimeMode = (typeof RUNTIME_MODES)[number];
 
 export const RUNTIME_OBJECT_KINDS = [
   'memory_record',
-  'raw_chunk',
+  'detail_record',
   'compact',
   'context_checkpoint',
   'recall_trace',
@@ -23,7 +24,7 @@ export const RUNTIME_INTERNAL_NODE_TYPES = [
   'compact',
   'context_checkpoint',
   'self_record',
-  'raw_chunk', // 0.3 不落图，防御性保留
+  'detail_record',
   'recall_trace', // 0.3 不落图，防御性保留
 ] as const;
 export type RuntimeInternalNodeType = (typeof RUNTIME_INTERNAL_NODE_TYPES)[number];
@@ -42,8 +43,19 @@ export const RUNTIME_METADATA_KEY = 'runtime';
 export const RUNTIME_MODEL_SOURCES = ['heuristic', 'local', 'host', 'api', 'auto'] as const;
 export type RuntimeModelSource = (typeof RUNTIME_MODEL_SOURCES)[number];
 
-export const RUNTIME_CAPTURE_MODES = ['off', 'local'] as const;
-export type RuntimeCaptureMode = (typeof RUNTIME_CAPTURE_MODES)[number];
+export const RUNTIME_DETAIL_KINDS = ['raw_chunk', 'raw_quote', 'message', 'document_slice'] as const;
+export type RuntimeDetailKind = (typeof RUNTIME_DETAIL_KINDS)[number];
+
+export const RUNTIME_DETAIL_AVAILABILITY = [
+  'available',
+  'pending_sync',
+  'expired',
+  'deleted',
+  'quota_evicted',
+  'not_subscribed',
+  'redacted_only',
+] as const;
+export type RuntimeDetailAvailability = (typeof RUNTIME_DETAIL_AVAILABILITY)[number];
 
 export const RUNTIME_TRACE_MODES = ['off', 'local'] as const;
 export type RuntimeTraceMode = (typeof RUNTIME_TRACE_MODES)[number];
@@ -106,11 +118,16 @@ export interface RuntimeNodeMetadata {
   provenance: RuntimeEnvelope['provenance'];
 }
 
-// ---------- 2.3.1 RawChunk（本地） ----------
+// ---------- 2.3.1 StagingChunk（本地过程数据，非权威） ----------
 
+/**
+ * 已接收、尚未成功写入 capability 的原始切片。
+ * 旧名 RawChunk 仅作为代码兼容别名保留；本地 `staging/` 不是召回权威，
+ * 成功沉降（capability `/detail`）后删除，默认 24h 过期。
+ */
 export interface RawChunk {
   schema: 1;
-  id: string; // rc_<ULID>
+  id: string; // rc_<ULID>（本地 staging id）
   threadId: string;
   agentId: string;
   hostId: string;
@@ -123,7 +140,39 @@ export interface RawChunk {
   chunkIndex?: number;
   contentHash: string; // sha256 hex；去重键
   redaction: { applied: boolean; rules: string[] };
-  expiresAt: number; // 默认 now + runtime.retention.rawDays
+  expiresAt: number; // staging TTL（默认 now + detail.stagingHours）
+}
+
+/** 新代码应使用这个名字；RawChunk 是 0.3 旧类型的兼容别名。 */
+export type StagingChunk = RawChunk;
+
+// ---------- 2.3.2 DetailRecord（图内权威，经 capability `/detail`） ----------
+
+export type DetailRetentionClass = 'conversation' | 'tool_output' | 'document_slice' | 'pinned';
+
+export interface DetailRecord {
+  schema: 1;
+  id: string;
+  kind: 'detail_record';
+  detailKind: RuntimeDetailKind;
+  domain: string;
+  ownerType?: 'user' | 'agent' | 'other';
+  ownerId?: string;
+  role?: RawChunk['role'];
+  text?: string;
+  truncated?: boolean;
+  redacted?: boolean;
+  contentHash?: string;
+  recordIds: string[];
+  threadId?: string;
+  messageId?: string;
+  chunkIndex?: number;
+  turn?: number;
+  retentionClass?: DetailRetentionClass;
+  expiresAt?: number;
+  deletedAt?: number;
+  availability?: RuntimeDetailAvailability[];
+  provenance?: Record<string, unknown>;
 }
 
 // ---------- MemoryRecord（共享记忆视图） ----------
@@ -149,6 +198,10 @@ export interface MemoryRecordView {
     agentId?: string;
     model?: string;
     source?: string;
+    /** 指向 DetailRecord；0.3 的详情展开入口。 */
+    detailIds?: string[];
+    /** 旧字段，只作兼容别名；新写入不再依赖。 */
+    rawChunkIds?: string[];
   };
   tags?: string[];
 }

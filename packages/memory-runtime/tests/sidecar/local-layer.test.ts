@@ -1,4 +1,5 @@
-// sidecar 本地层：目录/权限、Raw/Trace 路径、有界 outbox、TTL cache。
+// sidecar 本地层：目录/权限、staging/Trace 路径、有界 outbox、TTL cache、
+// 详情只读 cache 与 staging 配额。
 
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
@@ -31,11 +32,11 @@ describe('SidecarLocalLayer', () => {
     await rm(home, { recursive: true, force: true });
   });
 
-  it('初始化 memory-runtime/raw|cache|outbox|logs|tmp 目录，0700', async () => {
+  it('初始化 memory-runtime/staging|cache|outbox|logs|tmp 目录，0700', async () => {
     const layer = new SidecarLocalLayer({ root, now: () => now });
     await layer.init();
 
-    for (const dir of ['raw', 'cache', 'outbox', 'outbox/dead', 'logs', 'tmp', 'models']) {
+    for (const dir of ['staging', 'cache', 'cache/details', 'outbox', 'outbox/dead', 'logs', 'tmp', 'models']) {
       const info = await stat(join(root, dir));
       expect(info.isDirectory()).toBe(true);
       if (process.platform !== 'win32') {
@@ -43,11 +44,11 @@ describe('SidecarLocalLayer', () => {
       }
     }
     expect(layer.store.root).toBe(root);
-    expect(layer.store.rawPath).toBe(join(root, 'raw', 'chunks.jsonl'));
+    expect(layer.store.stagingPath).toBe(join(root, 'staging', 'chunks.jsonl'));
     expect(layer.store.tracesPath).toBe(join(root, 'traces.jsonl'));
   });
 
-  it('Raw/Trace 写入 <root>/raw 与 <root>/traces.jsonl，文件 0600', async () => {
+  it('staging/Trace 写入 <root>/staging 与 <root>/traces.jsonl，文件 0600', async () => {
     const layer = new SidecarLocalLayer({ root, now: () => now });
     await layer.init();
 
@@ -64,12 +65,12 @@ describe('SidecarLocalLayer', () => {
       at: now,
       contentHash: sha256Hex(text),
       redaction: { applied: false, rules: [] },
-      expiresAt: now + 7 * 24 * 60 * 60 * 1000,
+      expiresAt: now + 24 * 60 * 60 * 1000,
     };
-    const stored = await layer.store.putRawChunk('cl_test', chunk);
+    const stored = await layer.store.putStagingChunk('cl_test', chunk);
     expect(stored.duplicate).toBe(false);
     if (process.platform !== 'win32') {
-      expect((await stat(join(root, 'raw', 'chunks.jsonl'))).mode & 0o777).toBe(0o600);
+      expect((await stat(join(root, 'staging', 'chunks.jsonl'))).mode & 0o777).toBe(0o600);
     }
 
     const trace = {
@@ -94,8 +95,89 @@ describe('SidecarLocalLayer', () => {
     }
 
     const stats = await layer.stats();
-    expect(stats.rawChunks).toBe(1);
+    expect(stats.stagingChunks).toBe(1);
     expect(stats.traces).toBe(1);
+
+    expect(await layer.clearStaging([chunk.id])).toBe(1);
+    expect((await layer.stats()).stagingChunks).toBe(0);
+  });
+
+  it('staging 超过字节上限时淘汰最旧 chunk', async () => {
+    let clock = now;
+    const layer = new SidecarLocalLayer({ root, stagingBytes: 8, now: () => clock });
+    await layer.init();
+
+    const make = (id: string, text: string) => ({
+      schema: 1 as const,
+      id,
+      threadId: 'th_1',
+      agentId: 'agent:test',
+      hostId: 'h_test',
+      role: 'user' as const,
+      text,
+      mime: 'text/plain' as const,
+      at: clock,
+      contentHash: sha256Hex(text),
+      redaction: { applied: false, rules: [] },
+      expiresAt: now + 24 * 60 * 60 * 1000,
+    });
+    await layer.store.putStagingChunk('cl_test', make('rc_old_0001', '1111'));
+    clock += 1;
+    await layer.store.putStagingChunk('cl_test', make('rc_new_0002', '2222'));
+    clock += 1;
+    await layer.store.putStagingChunk('cl_test', make('rc_new_0003', '3333'));
+
+    const chunks = await layer.store.listStagingChunks();
+    expect(chunks.map((chunk) => chunk.id)).toEqual(['rc_new_0002', 'rc_new_0003']);
+  });
+
+  it('详情只读 cache 独立于通用 cache，可失效', async () => {
+    const layer = new SidecarLocalLayer({ root, now: () => now });
+    await layer.init();
+    await layer.putCachedDetail('01DETAIL', { detail: { text: '原文' } });
+    expect(await layer.getCachedDetail('01DETAIL')).toMatchObject({ detail: { text: '原文' } });
+    expect((await layer.stats()).detailCacheEntries).toBe(1);
+    expect(await layer.invalidateCachedDetail('01DETAIL')).toBe(true);
+    expect(await layer.getCachedDetail('01DETAIL')).toBeNull();
+  });
+
+  it('重启后 staging 与 outbox 可从磁盘恢复；成功重放即删', async () => {
+    const first = new SidecarLocalLayer({ root, now: () => now });
+    await first.init();
+    const text = 'staging 恢复';
+    await first.store.putStagingChunk('cl_test', {
+      schema: 1,
+      id: 'rc_restart_0001',
+      threadId: 'th_restart',
+      agentId: 'opencode',
+      hostId: 'h_test',
+      role: 'user',
+      text,
+      mime: 'text/plain',
+      at: now,
+      contentHash: sha256Hex(text),
+      redaction: { applied: false, rules: [] },
+      expiresAt: now + 86_400_000,
+    });
+    await first.outbox.enqueue({
+      id: 'ob_restart_1',
+      requestId: 'req_restart_1',
+      endpoint: '/detail',
+      body: { op: 'write', items: [] },
+      meta: { kind: 'detail', stagingChunkIds: ['rc_restart_0001'] },
+      createdAt: now,
+    });
+
+    const second = new SidecarLocalLayer({ root, now: () => now + 1_000 });
+    await second.init();
+    expect((await second.stats()).stagingChunks).toBe(1);
+    const outbox = await second.outbox.list();
+    expect(outbox).toHaveLength(1);
+    expect(outbox[0]?.endpoint).toBe('/detail');
+    expect(outbox[0]?.meta?.stagingChunkIds).toEqual(['rc_restart_0001']);
+
+    expect(await second.clearStaging(['rc_restart_0001'])).toBe(1);
+    expect(await second.outbox.remove('ob_restart_1')).toBe(true);
   });
 
   it('outbox 有界、幂等入队、删除与 dead letter', async () => {

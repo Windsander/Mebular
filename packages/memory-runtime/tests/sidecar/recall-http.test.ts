@@ -221,10 +221,147 @@ describe('sidecar recall/context HTTP', () => {
       context: true,
       feedback: true,
       traces: true,
+      details: true,
       checkpoint: true,
       compact: true,
       self: true,
     });
+    expect(versionBody.data.details).toMatchObject({
+      stagingHours: 24,
+      cacheDays: 30,
+      quotaBytesPerDomain: 268_435_456,
+      quotaBytesCloud: 1_073_741_824,
+    });
+  });
+
+  it('/recall/:recallId/expand 经 capability 读详情；删除/越权/未知 fragment 诚实降级', async () => {
+    const { server, fake } = await setup();
+    const text = '我当时原话：先冻结契约，再迁移 runtime。';
+    fake.setRecords([{
+      ...preference(),
+      id: '01JHTTPQUOTE1',
+      type: 'episode',
+      kind: 'episode',
+      content: { episodeType: 'conversation', title: '原话', content: text },
+      text,
+      provenance: {
+        ...preference().provenance,
+        detailIds: ['01JHTTPDETAIL1'],
+      },
+    }]);
+    fake.details.push({
+      id: '01JHTTPDETAIL1',
+      detailKind: 'raw_chunk',
+      domain: 'user',
+      recordIds: ['01JHTTPQUOTE1'],
+      role: 'user',
+      text,
+      messageId: 'm_http_detail',
+      chunkIndex: 0,
+      provenance: { source: 'runtime', deviceId: 'device-a', agentId: 'opencode' },
+      createdAt: NOW - 60_000,
+    });
+
+    const recall = await post(`${server.url}/recall`, {
+      agentId: 'opencode',
+      threadId: 'th_http_recall',
+      query: '我当时原话怎么说的？',
+    });
+    expect(recall.status).toBe(200);
+    const fragment = recall.body.data.fragments[0];
+    expect(fragment.detailIds).toEqual(['01JHTTPDETAIL1']);
+    expect(fragment.detail?.format).toBe('verbatim');
+
+    const expand = await post(`${server.url}/recall/${recall.body.data.recallId}/expand`, {
+      agentId: 'opencode',
+      threadId: 'th_http_recall',
+      fragmentId: fragment.id,
+    });
+    expect(expand.status).toBe(200);
+    expect(expand.body.data).toMatchObject({
+      recallId: recall.body.data.recallId,
+      fragmentId: fragment.id,
+      degraded: false,
+    });
+    expect(expand.body.data.detail).toMatchObject({
+      kind: 'detail_record',
+      detailKind: 'raw_chunk',
+      format: 'verbatim',
+      text,
+      availability: expect.arrayContaining(['available']),
+      source: 'capability',
+      stale: false,
+    });
+    expect(expand.body.data.detail.citations[0]).toMatchObject({
+      id: '01JHTTPDETAIL1',
+      type: 'detail_record',
+      domain: 'user',
+    });
+
+    const admin = await fetch(`${server.url}/details/01JHTTPDETAIL1`, { headers: auth() });
+    const adminBody = await admin.json() as any;
+    expect(admin.status).toBe(200);
+    expect(adminBody.data.detail).toMatchObject({ id: '01JHTTPDETAIL1', text });
+
+    const denied = await post(`${server.url}/recall/${recall.body.data.recallId}/expand`, {
+      agentId: 'hermes',
+      threadId: 'th_http_recall',
+      fragmentId: fragment.id,
+    });
+    expect(denied.status).toBe(403);
+
+    const missing = await post(`${server.url}/recall/${recall.body.data.recallId}/expand`, {
+      agentId: 'opencode',
+      fragmentId: 'mf_missing',
+    });
+    expect(missing.status).toBe(404);
+
+    fake.details[0]!.deletedAt = NOW - 1;
+    const deleted = await post(`${server.url}/recall/${recall.body.data.recallId}/expand`, {
+      agentId: 'opencode',
+      threadId: 'th_http_recall',
+      fragmentId: fragment.id,
+    });
+    expect(deleted.status).toBe(200);
+    expect(deleted.body.data.detail).toBeNull();
+    expect(deleted.body.data.degraded).toBe(true);
+    expect(deleted.body.data.warnings).toEqual(expect.arrayContaining(['detail_deleted']));
+    expect(JSON.stringify(deleted.body)).not.toContain(text);
+  });
+
+  it('/status 反映 staging/detail cache/outbox 与 detail 配额，不含 token', async () => {
+    const { server, runtime } = await setup();
+    await runtime.local.store.putStagingChunk('cl_test', {
+      schema: 1,
+      id: 'rc_status_0001',
+      threadId: 'th_http_recall',
+      agentId: 'opencode',
+      hostId: 'h_test',
+      role: 'user',
+      text: 'staging only',
+      mime: 'text/plain',
+      at: NOW,
+      contentHash: 'a'.repeat(64),
+      redaction: { applied: false, rules: [] },
+      expiresAt: NOW + 86_400_000,
+    });
+    await runtime.local.putCachedDetail('01STATUSDETAIL', { detail: { text: 'cached' } });
+    const status = await fetch(`${server.url}/status`, { headers: auth() });
+    const body = await status.json() as any;
+    expect(status.status).toBe(200);
+    expect(body.data.counts).toMatchObject({
+      stagingChunks: 1,
+      detailCacheEntries: 1,
+    });
+    expect(body.data.details).toMatchObject({
+      available: true,
+      staging: { chunks: 1, hours: 24, maxBytes: 268_435_456 },
+      cache: { entries: 1, days: 30, maxBytes: 268_435_456 },
+      quota: { bytesPerDomain: 268_435_456, bytesCloud: 1_073_741_824 },
+      retentionDays: { conversation: 30, tool_output: 7, document_slice: 90 },
+    });
+    expect(JSON.stringify(body)).not.toContain('host-token');
+    expect(JSON.stringify(body)).not.toContain('cap-token');
   });
 
   it('重复 turnId 第二次沉默且不重复注入', async () => {

@@ -79,7 +79,6 @@ describe('0.3.0 acceptance: performance and resource budgets', () => {
       requestId: 'req_perf_warmup',
       agentId: AGENT,
       threadId: 'th_perf',
-      capture: 'off',
       chunks: [{ role: 'user', text: '我喜欢预热主题', messageId: 'm_perf_warmup', chunkIndex: 0 }],
     });
 
@@ -91,8 +90,7 @@ describe('0.3.0 acceptance: performance and resource budgets', () => {
         requestId: `req_perf_${index}`,
         agentId: AGENT,
         threadId: 'th_perf',
-        capture: 'off',
-        chunks: [{
+          chunks: [{
           role: 'user',
           text: `我喜欢性能测试主题 ${index}`,
           messageId: `m_perf_${index}`,
@@ -236,7 +234,7 @@ describe('0.3.0 acceptance: performance and resource budgets', () => {
     console.log(`[perf] budgets traces=${statsAfter.traces} outbox=${outboxAfter.items}/${outboxAfter.bytes}B cache=${cacheStats.entries}`);
     expect(traces.length).toBeLessThanOrEqual(12);
     expect(statsAfter.traces).toBeLessThanOrEqual(12);
-    expect(statsAfter.rawChunks).toBe(0);
+    expect(statsAfter.stagingChunks).toBe(0);
     expect(outboxAfter.items).toBeLessThanOrEqual(3);
     expect(outboxAfter.bytes).toBeLessThanOrEqual(4_096);
     expect(cacheStats.entries).toBeLessThanOrEqual(5);

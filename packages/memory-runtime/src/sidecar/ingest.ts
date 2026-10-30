@@ -1,18 +1,25 @@
-// 记忆沉降：ingest → 本地 Raw（可选）→ 候选 → capability `/write` → 忆云。
+// 记忆沉降：ingest → 本地 staging（非权威）→ 候选 → capability `/write`
+// → capability `/detail` → 忆云。
 //
-// W4a 范围：
+// 0.3 范围：
 // - 请求/chunk/candidate 校验与大小/数量限制；
 // - requestId / Idempotency-Key 幂等；chunk 内容 hash 与 (threadId,messageId) 去重；
-// - capture=local 写 `<home>/memory-runtime/raw`，capture=off 不落盘；
+// - 沉浸式总是按域采集：chunk 先写 `<home>/memory-runtime/staging`，成功沉降后删除；
 // - 宿主候选直接写；无候选时确定性 heuristic；全非法 422；
 // - 域路由与 provenance；禁止跨 Agent 写入；
-// - capability 暂不可用时进有界 outbox，成功即删；不做第二权威。
+// - 记录写入成功后按目标 domain 写 DetailRecord；同一文本多域按域复制；
+// - 详情写入失败进有界 outbox；staging 只保留到 TTL；没有可链接记录时不写详情；
+// - capability 暂不可用时记录进 outbox，成功即删；不做第二权威。
 //
-// 不实现 recall/context/compact/self/checkpoint；不 import @mebular/core，
-// 不打开 GraphStore/EventLog，所有持久记忆只经 capability client 写入。
+// 不实现 checkpoint 读取；不 import @mebular/core，不打开 GraphStore/EventLog，
+// 所有持久记忆与详情只经 capability client 写入。
 
 import { randomUUID } from 'node:crypto';
-import { CapabilityClient, CapabilityClientError } from './capability-client.js';
+import {
+  CapabilityClient,
+  CapabilityClientError,
+  type CapabilityDetailWriteItem,
+} from './capability-client.js';
 import type { SidecarConfig } from './config.js';
 import {
   agentDomain,
@@ -33,16 +40,19 @@ import {
 } from './candidates.js';
 import { SidecarSettlementError } from './errors.js';
 import { heuristicCandidates } from './heuristic.js';
-import { LocalLayerError, type SidecarLocalLayer } from './local-layer.js';
+import { LocalLayerError, type OutboxItem, type SidecarLocalLayer } from './local-layer.js';
 import type {
   SidecarModelExtractionResult,
   SidecarModelExtractionSourceSelection,
   SidecarModelRuntime,
 } from './model.js';
+import { redactText } from './text.js';
 import type { RawChunk } from '../runtime/types.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
 export const MAX_INGEST_CHUNKS = 100;
+export const MAX_DETAIL_ITEMS_PER_WRITE = 100;
 export const IDEMPOTENCY_TTL_MS = DAY_MS;
 export const EXTRACTION_TTL_MS = DAY_MS;
 const IDEMPOTENCY_KEY_RE = /^[A-Za-z0-9._:-]{1,200}$/;
@@ -50,10 +60,8 @@ const EXTRACTION_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
 const RAW_CHUNK_ID_RE = /^rc_[A-Za-z0-9]{8,}$/;
 const ROLES = ['user', 'assistant', 'system', 'tool'] as const;
 const MIMES = ['text/plain', 'text/markdown', 'application/json'] as const;
-const CAPTURES = ['off', 'local'] as const;
 const EXTRACTORS = ['auto', 'heuristic', 'local', 'host', 'api'] as const;
 
-export type IngestCapture = (typeof CAPTURES)[number];
 export type IngestExtractor = (typeof EXTRACTORS)[number];
 export type IngestExtractorKind = 'heuristic' | 'local' | 'api' | 'host';
 
@@ -79,7 +87,8 @@ export interface IngestRequest {
   actor?: { type?: string; agentId?: string };
   threadId?: string;
   domain?: string;
-  capture?: IngestCapture;
+  /** @deprecated 不再控制行为；出现时只记 legacy_capture_ignored。 */
+  capture?: unknown;
   extractor?: IngestExtractor;
   allowRemote?: boolean;
   chunks?: IngestChunkInput[];
@@ -96,12 +105,23 @@ export interface IngestRecordView {
   duplicate?: boolean;
 }
 
+export interface IngestDetailView {
+  /** 成功写入/复用的 DetailRecord id。 */
+  ids: string[];
+  written: number;
+  duplicates: number;
+  /** 已进入 outbox 等待重试的详情条数。 */
+  queued: number;
+  failed: number;
+}
+
 export interface IngestExtractionView {
   id: string;
   status: 'pending' | 'completed' | 'failed';
   extractor: IngestExtractorKind;
   model?: string;
   records: IngestRecordView[];
+  detailIds: string[];
   warnings: string[];
   degraded: boolean;
   expiresAt?: number;
@@ -109,7 +129,13 @@ export interface IngestExtractionView {
 
 export interface IngestResult {
   accepted: { chunks: number; records: number };
+  /** 本地 staging chunk id；不是权威，只用于排障。 */
+  stagingChunkIds: string[];
+  /** @deprecated 兼容别名；等于 stagingChunkIds。 */
   rawChunkIds: string[];
+  /** 已确认写入的 DetailRecord id。 */
+  detailIds: string[];
+  detail: IngestDetailView;
   records: IngestRecordView[];
   extraction: IngestExtractionView;
   queued: boolean;
@@ -179,6 +205,7 @@ interface StoredExtraction {
   extractor: IngestExtractorKind;
   model?: string;
   records: IngestRecordView[];
+  detailIds: string[];
   warnings: string[];
   degraded: boolean;
   expiresAt: number;
@@ -187,7 +214,8 @@ interface StoredExtraction {
   agentName?: string;
   threadId?: string;
   domain?: string;
-  capture: IngestCapture;
+  stagingChunkIds: string[];
+  /** @deprecated 旧字段兼容；等于 stagingChunkIds。 */
   rawChunkIds: string[];
   messageIds: string[];
 }
@@ -208,12 +236,22 @@ interface SettlementOutcome {
   status: 'completed' | 'pending' | 'failed';
 }
 
+interface DetailSettlementOutcome {
+  ids: string[];
+  written: number;
+  duplicates: number;
+  queued: number;
+  failed: number;
+  warnings: string[];
+  queuedRequestIds: string[];
+}
+
 interface CandidateContext {
   agentId: string;
   agentName?: string;
   threadId: string | null;
   messageIds: string[];
-  rawChunkIds: string[];
+  stagingChunkIds: string[];
   extractor: IngestExtractorKind;
   model: string | null;
   source: 'runtime' | 'host';
@@ -456,13 +494,16 @@ export class IngestService {
     const agentId = this.agentIdOf(input);
     const agentName = optionalText(input.agentName, 'agentName', 128);
     const explicitThreadId = this.threadIdOf(input.threadId);
-    const capture = enumValue(input.capture, CAPTURES, 'capture', this.config.capture);
     const extractor = enumValue(input.extractor, EXTRACTORS, 'extractor', 'auto');
     const allowRemote = optionalBoolean(input.allowRemote, 'allowRemote');
     const requestDomain = this.domainOf(input.domain);
     const warnings: string[] = [];
+    if (input.capture !== undefined || input.rawCapture !== undefined) {
+      // 旧宿主可能仍发送 capture；忽略，绝不再控制采集行为。
+      appendWarnings(warnings, ['legacy_capture_ignored']);
+    }
 
-    const chunks = this.buildChunks(input.chunks, { agentId, capture });
+    const chunks = this.buildChunks(input.chunks, { agentId });
     const threadId = explicitThreadId ?? this.deriveThreadId(agentId, chunks);
 
     const rawCandidates = input.candidates;
@@ -492,10 +533,9 @@ export class IngestService {
       || (extractor === 'auto' && this.config.model.source === 'host')
     );
     if (hostPending) {
-      const rawChunkIds = await this.captureRaw({
+      const stagingChunkIds = await this.stageChunks({
         agentId,
         threadId,
-        capture,
         chunks,
         warnings,
       });
@@ -503,19 +543,22 @@ export class IngestService {
         status: 'pending',
         extractor: 'host',
         records: [],
+        detailIds: [],
         warnings,
         degraded: false,
         agentId,
         ...(agentName ? { agentName } : {}),
         ...(explicitThreadId ? { threadId: explicitThreadId } : {}),
         ...(requestDomain ? { domain: requestDomain } : {}),
-        capture,
-        rawChunkIds,
+        stagingChunkIds,
         messageIds: this.messageIdsOf(chunks),
       });
       const data: IngestResult = {
         accepted: { chunks: chunks.length, records: 0 },
-        rawChunkIds,
+        stagingChunkIds,
+        rawChunkIds: stagingChunkIds,
+        detailIds: [],
+        detail: { ids: [], written: 0, duplicates: 0, queued: 0, failed: 0 },
         records: [],
         extraction: this.extractionView(extraction),
         queued: false,
@@ -527,11 +570,10 @@ export class IngestService {
       return { status: 202, data, warnings: data.warnings, degraded: false };
     }
 
-    // 先落 Raw（capture=local 时），确保模型失败/超时不会丢原始材料。
-    const rawChunkIds = await this.captureRaw({
+    // 先写本地 staging，确保模型失败/超时不会丢原始材料；staging 不是权威。
+    const stagingChunkIds = await this.stageChunks({
       agentId,
       threadId,
-      capture,
       chunks,
       warnings,
     });
@@ -576,7 +618,7 @@ export class IngestService {
               latencyMs: 0,
             };
         } catch {
-          // 模型层异常不能让 ingest 失败，也不能丢 Raw。
+          // 模型层异常不能让 ingest 失败，也不能丢 staging。
           outcome = {
             ok: false,
             candidates: [],
@@ -659,7 +701,7 @@ export class IngestService {
       ...(agentName ? { agentName } : {}),
       threadId: explicitThreadId,
       messageIds: this.messageIdsOf(chunks),
-      rawChunkIds,
+      stagingChunkIds,
       extractor: resolvedExtractor,
       model,
       source: resolvedExtractor === 'host' ? 'host' : 'runtime',
@@ -667,7 +709,23 @@ export class IngestService {
 
     const outcome = await this.settle(routed, context);
     warnings.push(...outcome.warnings);
-    const extractionStatus = outcome.queued
+
+    // 记录成功后才写详情：详情必须链接同域记录；没有记录只保留 staging 到 TTL。
+    const detailOutcome = await this.settleDetails({
+      chunks,
+      records: outcome.records,
+      threadId,
+      stagingChunkIds,
+      context,
+      warnings,
+    });
+    if (outcome.records.length > 0 && detailOutcome.queued === 0
+      && detailOutcome.failed === 0 && stagingChunkIds.length > 0) {
+      await this.clearStaging(stagingChunkIds, warnings);
+    }
+
+    const queued = outcome.queued || detailOutcome.queued > 0;
+    const extractionStatus = queued
       ? 'pending'
       : outcome.records.length > 0
         ? 'completed'
@@ -678,29 +736,39 @@ export class IngestService {
       extractor: resolvedExtractor,
       ...(model ? { model } : {}),
       records: outcome.records,
+      detailIds: detailOutcome.ids,
       warnings: [...warnings],
       degraded: degraded || outcome.degraded,
       agentId,
       ...(agentName ? { agentName } : {}),
       ...(explicitThreadId ? { threadId: explicitThreadId } : {}),
       ...(requestDomain ? { domain: requestDomain } : {}),
-      capture,
-      rawChunkIds,
+      stagingChunkIds,
       messageIds: this.messageIdsOf(chunks),
     });
 
-    const resultDegraded = degraded || outcome.degraded || this.degraded;
+    const resultDegraded = degraded || outcome.degraded || detailOutcome.queued > 0
+      || detailOutcome.failed > 0 || this.degraded;
     const data: IngestResult = {
       accepted: { chunks: chunks.length, records: outcome.records.length },
-      rawChunkIds,
+      stagingChunkIds,
+      rawChunkIds: stagingChunkIds,
+      detailIds: detailOutcome.ids,
+      detail: {
+        ids: detailOutcome.ids,
+        written: detailOutcome.written,
+        duplicates: detailOutcome.duplicates,
+        queued: detailOutcome.queued,
+        failed: detailOutcome.failed,
+      },
       records: outcome.records,
       extraction: this.extractionView(extraction),
-      queued: outcome.queued,
+      queued,
       duplicate: false,
       degraded: resultDegraded,
       warnings: [...warnings],
     };
-    const status: 200 | 202 = outcome.queued ? 202 : 200;
+    const status: 200 | 202 = queued ? 202 : 200;
     await this.rememberIdempotent(idempotencyCacheKey ?? '', bodyHash, status, data);
     return { status, data, warnings: data.warnings, degraded: resultDegraded };
   }
@@ -754,25 +822,50 @@ export class IngestService {
         ...(extraction.agentName ? { agentName: extraction.agentName } : {}),
         threadId: extraction.threadId ?? null,
         messageIds: extraction.messageIds,
-        rawChunkIds: extraction.rawChunkIds,
+        stagingChunkIds: extraction.stagingChunkIds,
         extractor: 'host',
         model: 'host-provided',
         source: 'host',
       });
       warnings.push(...outcome.warnings);
+
+      const staged = await this.stagedChunksFor(extraction.stagingChunkIds);
+      const detailOutcome = await this.settleDetails({
+        chunks: staged,
+        records: outcome.records,
+        threadId: extraction.threadId ?? this.deriveThreadId(extraction.agentId, staged),
+        stagingChunkIds: extraction.stagingChunkIds,
+        context: {
+          agentId: extraction.agentId,
+          ...(extraction.agentName ? { agentName: extraction.agentName } : {}),
+          threadId: extraction.threadId ?? null,
+          messageIds: extraction.messageIds,
+          stagingChunkIds: extraction.stagingChunkIds,
+          extractor: 'host',
+          model: 'host-provided',
+          source: 'host',
+        },
+        warnings,
+      });
+      if (outcome.records.length > 0 && detailOutcome.queued === 0
+        && detailOutcome.failed === 0 && extraction.stagingChunkIds.length > 0) {
+        await this.clearStaging(extraction.stagingChunkIds, warnings);
+      }
+      const queued = outcome.queued || detailOutcome.queued > 0;
       const updated = await this.saveExtraction({
         ...extraction,
-        status: outcome.queued ? 'pending' : outcome.records.length > 0 ? 'completed' : 'failed',
+        status: queued ? 'pending' : outcome.records.length > 0 ? 'completed' : 'failed',
         extractor: 'host',
         model: 'host-provided',
         records: outcome.records,
+        detailIds: detailOutcome.ids.length > 0 ? detailOutcome.ids : extraction.detailIds,
         warnings,
-        degraded: outcome.degraded,
+        degraded: outcome.degraded || detailOutcome.queued > 0 || detailOutcome.failed > 0,
       });
       return {
         extraction: this.extractionView(updated),
-        queued: outcome.queued,
-        degraded: outcome.degraded || this.degraded,
+        queued,
+        degraded: outcome.degraded || this.degraded || queued || detailOutcome.failed > 0,
         warnings,
       };
     });
@@ -786,6 +879,93 @@ export class IngestService {
     const run = this.tail.then(operation, operation);
     this.tail = run.then(() => undefined, () => undefined);
     return run;
+  }
+
+  /** outbox 重放成功后的本地清理/缓存回填。返回 false 表示仍需重试。 */
+  async applyReplayedOutbox(item: OutboxItem, data: unknown): Promise<boolean> {
+    if (item.endpoint !== '/detail') {
+      if (item.meta?.kind === 'record') {
+        await this.applyReplayedRecord(item, data).catch(() => undefined);
+      }
+      return true;
+    }
+    const body: Record<string, unknown> = isObject(item.body) ? item.body : {};
+    const items = (Array.isArray(body.items) ? body.items.filter(isObject) : []) as unknown as CapabilityDetailWriteItem[];
+    const payload: Record<string, unknown> = isObject(data) ? data : {};
+    const results = Array.isArray(payload.results) ? payload.results : [];
+    let retryableFailure = false;
+    for (const result of results) {
+      if (!isObject(result)) continue;
+      const status = typeof result.status === 'string' ? result.status : 'failed';
+      const id = typeof result.id === 'string' ? result.id : '';
+      if ((status === 'created' || status === 'duplicate') && id.length > 0) {
+        await this.cacheDetail(id, result, items);
+        continue;
+      }
+      if (result.retryable === true || result.code === 'detail_quota_exceeded') retryableFailure = true;
+    }
+    if (retryableFailure) return false;
+    const failed = typeof payload.failed === 'number' ? payload.failed : 0;
+    if (failed > 0) return true;
+    if (item.meta?.stagingChunkIds && item.meta.stagingChunkIds.length > 0) {
+      try {
+        await this.local.clearStaging(item.meta.stagingChunkIds);
+      } catch {
+        // 清理失败只保留 staging 到 TTL，不影响已沉降详情。
+      }
+    }
+    return true;
+  }
+
+  private async applyReplayedRecord(item: OutboxItem, data: unknown): Promise<void> {
+    const payload: Record<string, unknown> = isObject(data) ? data : {};
+    const results = Array.isArray(payload.results) ? payload.results : [];
+    const records: IngestRecordView[] = [];
+    for (const result of results) {
+      if (!isObject(result)) continue;
+      const status = typeof result.status === 'string' ? result.status : 'failed';
+      if (status !== 'created' && status !== 'duplicate') continue;
+      if (typeof result.id !== 'string' || typeof result.domain !== 'string') continue;
+      records.push({
+        id: result.id,
+        kind: typeof result.kind === 'string' ? result.kind : 'observation',
+        domain: result.domain,
+        status,
+      });
+    }
+    if (records.length === 0) return;
+    const stagingChunkIds = item.meta?.stagingChunkIds ?? [];
+    const chunks = await this.stagedChunksFor(stagingChunkIds);
+    if (chunks.length === 0) return;
+    const body: Record<string, unknown> = isObject(item.body) ? item.body : {};
+    const actor: Record<string, unknown> = isObject(body.actor) ? body.actor : {};
+    const items = Array.isArray(body.items) ? body.items.filter(isObject) : [];
+    const first = items[0] ?? {};
+    const provenance: Record<string, unknown> = isObject(first.provenance) ? first.provenance : {};
+    const agentId = typeof actor.agentId === 'string' ? actor.agentId : 'runtime';
+    const threadId = typeof provenance.threadId === 'string' ? provenance.threadId : null;
+    const warnings: string[] = [];
+    const detailOutcome = await this.settleDetails({
+      chunks,
+      records,
+      threadId: threadId ?? this.deriveThreadId(agentId, chunks),
+      stagingChunkIds,
+      context: {
+        agentId,
+        ...(typeof actor.displayName === 'string' ? { agentName: actor.displayName } : {}),
+        threadId,
+        messageIds: this.messageIdsOf(chunks),
+        stagingChunkIds,
+        extractor: provenance.extractor === 'local' || provenance.extractor === 'host'
+          || provenance.extractor === 'api' ? provenance.extractor : 'heuristic',
+        model: typeof provenance.model === 'string' ? provenance.model : null,
+        source: provenance.source === 'host' ? 'host' : 'runtime',
+      },
+      warnings,
+    });
+    if (detailOutcome.queued === 0 && detailOutcome.failed === 0) {
+      await this.local.clearStaging(stagingChunkIds).catch(() => 0);
+    }
   }
 
   private cloudKey(): string {
@@ -876,7 +1056,7 @@ export class IngestService {
       .filter((value): value is string => typeof value === 'string' && value.length > 0))].slice(0, 64);
   }
 
-  private buildChunks(raw: unknown, context: { agentId: string; capture: IngestCapture }): RawChunk[] {
+  private buildChunks(raw: unknown, context: { agentId: string }): RawChunk[] {
     if (raw === undefined || raw === null) return [];
     if (!Array.isArray(raw)) invalid('chunks 必须是数组', { field: 'chunks' });
     if (raw.length > MAX_INGEST_CHUNKS) {
@@ -903,9 +1083,6 @@ export class IngestService {
       const at = optionalPositiveNumber(input.at, `chunks[${index}].at`) ?? this.now();
       const actualHash = sha256Hex(text);
       const contentHash = this.contentHashOf(input.contentHash, actualHash, index);
-      const id = typeof input.id === 'string' && RAW_CHUNK_ID_RE.test(input.id)
-        ? input.id
-        : `rc_${randomUUID().replace(/-/g, '')}`;
       const redaction = isObject(input.redaction) && typeof input.redaction.applied === 'boolean'
         ? {
           applied: input.redaction.applied,
@@ -917,14 +1094,22 @@ export class IngestService {
       const messageId = optionalText(input.messageId, `chunks[${index}].messageId`, 200);
       const turn = optionalNonNegativeInt(input.turn, `chunks[${index}].turn`);
       const chunkIndex = optionalNonNegativeInt(input.chunkIndex, `chunks[${index}].chunkIndex`);
+      const id = typeof input.id === 'string' && RAW_CHUNK_ID_RE.test(input.id)
+        ? input.id
+        : `rc_${sha256Hex([
+          context.agentId,
+          contentHash,
+          chunkIndex ?? -1,
+          messageId ?? '',
+        ].join('\u0000')).slice(0, 32)}`;
       const expiresAt = optionalPositiveNumber(input.expiresAt, `chunks[${index}].expiresAt`)
-        ?? nowPlus(this.now(), this.config.retention.rawDays);
+        ?? nowPlusHours(this.now(), this.config.detail.stagingHours);
 
       chunks.push({
         schema: 1,
         id,
-        // 真实 threadId 在 captureRaw/route 前由 deriveThreadId 提供；此处占位，
-        // captureRaw 会按最终 threadId 重写。
+        // 真实 threadId 在 stageChunks 前由 deriveThreadId 提供；此处占位，
+        // stageChunks 会按最终 threadId 重写。
         threadId: '',
         agentId: context.agentId,
         hostId: this.identity.hostId ?? 'h_local',
@@ -956,22 +1141,24 @@ export class IngestService {
     return actual;
   }
 
-  private async captureRaw({
+  /**
+   * 写本地 staging（非权威）。同 thread/message/contentHash 复用已有 id；
+   * 写失败只 warning，不阻断记录沉降；成功沉降后由调用方删除。
+   */
+  private async stageChunks({
     agentId,
     threadId,
-    capture,
     chunks,
     warnings,
   }: {
     agentId: string;
     threadId: string;
-    capture: IngestCapture;
     chunks: RawChunk[];
     warnings: string[];
   }): Promise<string[]> {
-    if (capture !== 'local' || chunks.length === 0) return [];
+    if (chunks.length === 0) return [];
     const cloudId = this.cloudKey();
-    const existing = await this.local.store.listRawChunks({ cloudId, agentId, threadId });
+    const existing = await this.local.store.listStagingChunks({ cloudId, agentId, threadId });
     const byMessage = new Map<string, RawChunk>();
     for (const chunk of existing) {
       if (typeof chunk.messageId === 'string' && chunk.messageId.length > 0) {
@@ -990,20 +1177,232 @@ export class IngestService {
         }
       }
       try {
-        const stored = await this.local.store.putRawChunk(cloudId, chunk);
+        const stored = await this.local.store.putStagingChunk(cloudId, chunk);
         ids.push(stored.chunk.id);
-        if (stored.duplicate) warnings.push('duplicate_raw_chunk');
+        if (stored.duplicate) appendWarnings(warnings, ['duplicate_staging_chunk']);
       } catch (error) {
         if ((error as { code?: string })?.code === 'content_hash_mismatch') {
           throw new SidecarSettlementError('content_hash_mismatch', '相同内容哈希对应了不同文本', {
             status: 400,
           });
         }
-        warnings.push('raw_capture_failed');
+        appendWarnings(warnings, ['staging_write_failed']);
         break;
       }
     }
     return ids;
+  }
+
+  private async stagedChunksFor(ids: readonly string[]): Promise<RawChunk[]> {
+    const chunks: RawChunk[] = [];
+    for (const id of ids.slice(0, MAX_INGEST_CHUNKS)) {
+      const chunk = await this.local.store.getStagingChunk(id);
+      if (chunk) chunks.push(chunk);
+    }
+    return chunks.sort((a, b) => a.at - b.at || (a.chunkIndex ?? 0) - (b.chunkIndex ?? 0));
+  }
+
+  private async clearStaging(ids: readonly string[], warnings: string[]): Promise<void> {
+    try {
+      await this.local.clearStaging(ids);
+    } catch {
+      appendWarnings(warnings, ['staging_cleanup_failed']);
+    }
+  }
+
+  /**
+   * 记录写入成功后写 DetailRecord：
+   * - 每个目标 domain 一份（同一文本跨域复制，contentHash 相同、ID 不同）；
+   * - `recordIds` 只链接同域、已确认写入的记录；没有可链接记录时不写；
+   * - 失败项进入 outbox（`/detail`），不丢记录、不把 staging 当权威；
+   * - 成功写/复用后缓存只读详情，供离线展开。
+   */
+  private async settleDetails({
+    chunks,
+    records,
+    threadId,
+    stagingChunkIds,
+    context,
+    warnings,
+  }: {
+    chunks: RawChunk[];
+    records: IngestRecordView[];
+    threadId: string;
+    stagingChunkIds: string[];
+    context: CandidateContext;
+    warnings: string[];
+  }): Promise<DetailSettlementOutcome> {
+    const linked = records.filter((record) => typeof record.id === 'string' && record.id.length > 0);
+    if (chunks.length === 0 || linked.length === 0) {
+      return { ids: [], written: 0, duplicates: 0, queued: 0, failed: 0, warnings: [], queuedRequestIds: [] };
+    }
+    const byDomain = new Map<string, string[]>();
+    for (const record of linked) {
+      const domain = record.domain || context.agentId;
+      const list = byDomain.get(domain) ?? [];
+      if (!list.includes(record.id)) list.push(record.id);
+      byDomain.set(domain, list);
+    }
+
+    const items: CapabilityDetailWriteItem[] = [];
+    for (const [domain, recordIds] of byDomain) {
+      for (const chunk of chunks) {
+        const redacted = redactText(chunk.text);
+        const rules = [...chunk.redaction.rules];
+        if (redacted.redacted && !rules.includes('builtin_secret')) rules.push('builtin_secret');
+        items.push({
+          clientItemId: detailClientItemId(domain, chunk),
+          domain,
+          detailKind: 'raw_chunk',
+          ...(threadId ? { threadId } : {}),
+          recordIds: recordIds.slice(0, 32),
+          role: chunk.role,
+          text: redacted.text,
+          mime: chunk.mime,
+          ...(chunk.messageId ? { messageId: chunk.messageId } : {}),
+          ...(typeof chunk.chunkIndex === 'number' ? { chunkIndex: chunk.chunkIndex } : {}),
+          ...(typeof chunk.turn === 'number' ? { turn: chunk.turn } : {}),
+          contentHash: `sha256:${sha256Hex(redacted.text)}`,
+          redaction: { applied: chunk.redaction.applied || redacted.redacted, rules },
+          retentionClass: 'conversation',
+          expiresAt: 0,
+          provenance: {
+            source: context.source,
+            extractor: context.extractor,
+            ...(context.model ? { model: context.model } : {}),
+            agentId: context.agentId,
+            ...(context.agentName ? { agentName: context.agentName } : {}),
+            ...(threadId ? { threadId } : {}),
+            messageIds: this.messageIdsOf(chunks),
+            confirmation: domain === 'user' ? 'explicit' : 'none',
+            ...(this.identity.hostId ? { hostId: this.identity.hostId } : {}),
+            ...(this.identity.userId ? { userId: this.identity.userId } : {}),
+          },
+        });
+      }
+    }
+
+    const outcome: DetailSettlementOutcome = {
+      ids: [],
+      written: 0,
+      duplicates: 0,
+      queued: 0,
+      failed: 0,
+      warnings: [],
+      queuedRequestIds: [],
+    };
+    const actor = {
+      type: 'agent' as const,
+      agentId: context.agentId,
+      ...(context.agentName ? { displayName: context.agentName } : {}),
+    };
+
+    for (let offset = 0; offset < items.length; offset += MAX_DETAIL_ITEMS_PER_WRITE) {
+      const batch = items.slice(offset, offset + MAX_DETAIL_ITEMS_PER_WRITE);
+      const requestId = this.detailRequestId(batch);
+      if (!this.client) {
+        await this.enqueueDetail(requestId, actor, batch, stagingChunkIds, outcome);
+        continue;
+      }
+      try {
+        const response = await this.client.detailWrite(
+          { requestId, actor, items: batch },
+          { idempotencyKey: requestId },
+        );
+        const data: Record<string, unknown> = isObject(response.data) ? response.data : {};
+        const results = Array.isArray(data.results) ? data.results : [];
+        const failedItems: CapabilityDetailWriteItem[] = [];
+        for (const result of results) {
+          if (!isObject(result)) continue;
+          const status = typeof result.status === 'string' ? result.status : 'failed';
+          const id = typeof result.id === 'string' ? result.id : '';
+          if ((status === 'created' || status === 'duplicate') && id.length > 0) {
+            if (!outcome.ids.includes(id)) outcome.ids.push(id);
+            if (status === 'created') outcome.written += 1;
+            else outcome.duplicates += 1;
+            await this.cacheDetail(id, result, batch);
+            continue;
+          }
+          const code = typeof result.code === 'string' ? result.code : 'detail_write_failed';
+          appendWarnings(outcome.warnings, [`detail_write_failed:${code}`]);
+          const clientItemId = typeof result.clientItemId === 'string' ? result.clientItemId : null;
+          const item = clientItemId ? batch.find((entry) => entry.clientItemId === clientItemId) : undefined;
+          if (item && (result.retryable === true || code === 'detail_quota_exceeded')) {
+            failedItems.push(item);
+          } else {
+            outcome.failed += 1;
+          }
+        }
+        if (failedItems.length > 0) {
+          await this.enqueueDetail(requestId, actor, failedItems, stagingChunkIds, outcome);
+        }
+      } catch (error) {
+        const code = error instanceof CapabilityClientError ? error.code : 'internal';
+        appendWarnings(outcome.warnings, [`detail_write_failed:${code}`]);
+        if (retryableCapabilityError(error) || code === 'detail_quota_exceeded') {
+          await this.enqueueDetail(requestId, actor, batch, stagingChunkIds, outcome);
+        } else {
+          outcome.failed += batch.length;
+        }
+      }
+    }
+    appendWarnings(warnings, outcome.warnings);
+    return outcome;
+  }
+
+  private async cacheDetail(id: string, result: Record<string, unknown>, batch: CapabilityDetailWriteItem[]): Promise<void> {
+    const clientItemId = typeof result.clientItemId === 'string' ? result.clientItemId : null;
+    const item = clientItemId ? batch.find((entry) => entry.clientItemId === clientItemId) : undefined;
+    if (!item) return;
+    await this.local.putCachedDetail(id, {
+      detail: {
+        id,
+        type: 'detail_record',
+        kind: 'detail_record',
+        detailKind: item.detailKind,
+        domain: item.domain,
+        text: item.text,
+        recordIds: item.recordIds,
+        expiresAt: 0,
+        availability: ['available'],
+        provenance: item.provenance ?? {},
+      },
+    }, this.config.detail.cacheDays * DAY_MS);
+  }
+
+  private async enqueueDetail(
+    requestId: string,
+    actor: Record<string, unknown>,
+    items: CapabilityDetailWriteItem[],
+    stagingChunkIds: string[],
+    outcome: DetailSettlementOutcome,
+  ): Promise<void> {
+    const body = { requestId, actor, op: 'write', items };
+    const id = `ob_${sha256Hex(`${requestId}\u0000detail`).slice(0, 40)}`;
+    try {
+      await this.local.outbox.enqueue({
+        id,
+        requestId,
+        endpoint: '/detail',
+        method: 'POST',
+        body,
+        createdAt: this.now(),
+        meta: {
+          kind: 'detail',
+          ...(items[0]?.domain ? { domain: items[0].domain } : {}),
+          stagingChunkIds: [...stagingChunkIds],
+        },
+      });
+      outcome.queued += items.length;
+      outcome.queuedRequestIds.push(requestId);
+      appendWarnings(outcome.warnings, ['detail_queued', 'queued_outbox']);
+      this.noteQueued({ code: 'detail_queued', message: '详情写入失败，已进入 outbox' });
+    } catch (error) {
+      const code = error instanceof LocalLayerError ? error.code : 'internal';
+      appendWarnings(outcome.warnings, [`detail_outbox_failed:${code}`]);
+      outcome.failed += items.length;
+      this.noteSettlementError(error);
+    }
   }
 
   private async settle(candidates: RoutedCandidate[], context: CandidateContext): Promise<SettlementOutcome> {
@@ -1014,14 +1413,12 @@ export class IngestService {
       agentId: context.agentId,
       threadId: context.threadId,
       messageIds: context.messageIds,
-      rawChunkIds: context.rawChunkIds,
       provenance: {
         source: context.source,
         extractor: context.extractor,
         model: context.model,
         ...(context.agentName ? { agentName: context.agentName } : {}),
         messageIds: [],
-        rawChunkIds: [],
       },
     }));
     const actor = {
@@ -1032,7 +1429,7 @@ export class IngestService {
     const requestId = this.writeRequestId(context.agentId, items);
 
     if (!this.client) {
-      await this.enqueueWriteSafe(requestId, actor, items);
+      await this.enqueueWriteSafe(requestId, actor, items, context);
       this.noteQueued({ code: 'capability_unavailable', message: 'capability API 不可用，已进入 outbox' });
       return {
         records: [],
@@ -1081,7 +1478,7 @@ export class IngestService {
       const queued = failedRetryable.length > 0;
       if (queued) {
         const retryRequestId = this.writeRequestId(context.agentId, failedRetryable);
-        await this.enqueueWriteSafe(retryRequestId, actor, failedRetryable);
+        await this.enqueueWriteSafe(retryRequestId, actor, failedRetryable, context);
         warnings.push('queued_outbox');
         this.noteQueued({ code: 'capability_unavailable', message: '部分候选已进入 outbox' });
       }
@@ -1096,7 +1493,7 @@ export class IngestService {
       };
     } catch (error) {
       if (retryableCapabilityError(error)) {
-        await this.enqueueWriteSafe(requestId, actor, items);
+        await this.enqueueWriteSafe(requestId, actor, items, context);
         this.noteQueued(error);
         return {
           records: [],
@@ -1123,10 +1520,16 @@ export class IngestService {
     return `req_${hash}`;
   }
 
+  private detailRequestId(items: CapabilityDetailWriteItem[]): string {
+    const hash = sha256Hex(canonicalJson(items)).slice(0, 40);
+    return `req_det_${hash}`;
+  }
+
   private async enqueueWrite(
     requestId: string,
     actor: Record<string, unknown>,
     items: CapabilityWriteItem[],
+    context: CandidateContext,
   ): Promise<void> {
     const id = `ob_${sha256Hex(requestId).slice(0, 40)}`;
     await this.local.outbox.enqueue({
@@ -1136,6 +1539,11 @@ export class IngestService {
       method: 'POST',
       body: { requestId, actor, items },
       createdAt: this.now(),
+      meta: {
+        kind: 'record',
+        stagingChunkIds: [...context.stagingChunkIds],
+        ...(context.threadId ? { domain: context.threadId } : {}),
+      },
     });
   }
 
@@ -1144,9 +1552,10 @@ export class IngestService {
     requestId: string,
     actor: Record<string, unknown>,
     items: CapabilityWriteItem[],
+    context: CandidateContext,
   ): Promise<void> {
     try {
-      await this.enqueueWrite(requestId, actor, items);
+      await this.enqueueWrite(requestId, actor, items, context);
     } catch (error) {
       if (error instanceof LocalLayerError) {
         throw new SidecarSettlementError(
@@ -1198,14 +1607,14 @@ export class IngestService {
     extractor: IngestExtractorKind;
     model?: string;
     records: IngestRecordView[];
+    detailIds: string[];
     warnings: string[];
     degraded: boolean;
     agentId: string;
     agentName?: string;
     threadId?: string;
     domain?: string;
-    capture: IngestCapture;
-    rawChunkIds: string[];
+    stagingChunkIds: string[];
     messageIds: string[];
   }): Promise<StoredExtraction> {
     const now = this.now();
@@ -1216,6 +1625,7 @@ export class IngestService {
       extractor: input.extractor,
       ...(input.model ? { model: input.model } : {}),
       records: input.records.map((record) => ({ ...record })),
+      detailIds: [...input.detailIds],
       warnings: [...input.warnings],
       degraded: input.degraded,
       expiresAt: now + this.extractionTtlMs,
@@ -1224,8 +1634,8 @@ export class IngestService {
       ...(input.agentName ? { agentName: input.agentName } : {}),
       ...(input.threadId ? { threadId: input.threadId } : {}),
       ...(input.domain ? { domain: input.domain } : {}),
-      capture: input.capture,
-      rawChunkIds: [...input.rawChunkIds],
+      stagingChunkIds: [...input.stagingChunkIds],
+      rawChunkIds: [...input.stagingChunkIds],
       messageIds: [...input.messageIds],
     };
     await this.local.cache.set(this.extractionCacheKey(extraction.id), extraction, {
@@ -1251,6 +1661,7 @@ export class IngestService {
       extractor: extraction.extractor,
       ...(extraction.model ? { model: extraction.model } : {}),
       records: extraction.records.map((record) => ({ ...record })),
+      detailIds: [...(extraction.detailIds ?? [])],
       warnings: [...extraction.warnings],
       degraded: extraction.degraded,
       expiresAt: extraction.expiresAt,
@@ -1258,6 +1669,16 @@ export class IngestService {
   }
 }
 
-function nowPlus(now: number, days: number): number {
-  return now + Math.max(0, days) * DAY_MS;
+function nowPlusHours(now: number, hours: number): number {
+  return now + Math.max(0, hours) * HOUR_MS;
+}
+
+function detailClientItemId(domain: string, chunk: RawChunk): string {
+  const hash = sha256Hex([
+    domain,
+    chunk.contentHash,
+    chunk.chunkIndex ?? -1,
+    chunk.messageId ?? '',
+  ].join('\u0000')).slice(0, 40);
+  return `det_${hash}`;
 }

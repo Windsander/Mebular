@@ -63,7 +63,6 @@ describe('0.3 共享记忆：真实 sidecar + capability + 设备同步', () => 
       agentId: 'hermes',
       agentName: 'Hermes',
       threadId,
-      capture: 'local',
       extractor: 'host',
       chunks: [{ role: 'user', text: `${SECRET_RAW} ${marker}`, messageId: `m_shared_${RUN}` }],
       candidates: [{
@@ -77,9 +76,10 @@ describe('0.3 共享记忆：真实 sidecar + capability + 设备同步', () => 
     expect(data.queued).toBe(false);
     expect(data.records).toHaveLength(1);
     expect(data.records[0].domain).toBe('user');
+    expect(data.detailIds.length).toBeGreaterThan(0);
 
-    // Raw 只在本机 A。
-    expect((await a.sidecar.rawTexts()).some((text) => text.includes(SECRET_RAW))).toBe(true);
+    // 成功沉降后 staging 清理；详情权威在 capability 图/事件日志。
+    expect((await a.sidecar.stagingTexts()).some((text) => text.includes(SECRET_RAW))).toBe(false);
 
     // A 本机 recall 产生一条本地 trace（只在本机）。
     const recallA = assertOk(await a.sidecar.recall({
@@ -88,6 +88,12 @@ describe('0.3 共享记忆：真实 sidecar + capability + 设备同步', () => 
       domains: ['user'],
     }), 'A recall');
     expect(fragmentFor(recallA, marker)).toBeDefined();
+    const fragmentA = fragmentFor(recallA, marker);
+    const expansionA = assertOk(await a.sidecar.expand(recallA.recallId, {
+      agentId: 'hermes',
+      fragmentId: fragmentA.id,
+    }), 'A expand');
+    expect(expansionA.detail.text).toContain(SECRET_RAW);
 
     await sync();
 
@@ -106,21 +112,29 @@ describe('0.3 共享记忆：真实 sidecar + capability + 设备同步', () => 
     expect(fragment.provenance.deviceId).toBe(a.deviceId);
     expect(fragment.provenance.deviceId).not.toBe(b.deviceId);
     expect(fragment.provenance.hostId).toEqual(expect.any(String));
-    // B 没有 A 的 Raw：只能给已沉降记录，不冒充原文。
-    expect(fragment.detailAvailable).toBe(false);
-    expect(fragment.source).toBe('settled');
-    expect(fragment.detailAvailability).toContain('missing_cross_device');
+    // 详情随域同步：B 在保留期内可以展开原文，不再依赖写入设备。
+    expect(fragment.detailAvailable).toBe(true);
+    expect(fragment.detailAvailability).toContain('available');
+    expect(fragment.detailIds.length).toBeGreaterThan(0);
+    const expansionB = assertOk(await b.sidecar.expand(recall.recallId, {
+      agentId: 'opencode',
+      threadId: `th_recall_${RUN}`,
+      fragmentId: fragment.id,
+    }), 'B expand');
+    expect(expansionB.detail).toMatchObject({ format: 'verbatim', source: 'capability', stale: false });
+    expect(expansionB.detail.text).toContain(SECRET_RAW);
+    expect(expansionB.detail.citations[0]).toMatchObject({ type: 'detail_record', domain: 'user' });
 
-    // Raw / Trace 不跨设备；B 的图/事件里也没有 A 的原文。
-    expect(await b.sidecar.rawTexts()).toEqual([]);
+    // 本机 staging / Trace 不跨设备；B 的图/事件里可以有详情，但日志不含正文。
+    expect(await b.sidecar.stagingTexts()).toEqual([]);
     const bTraces = await b.sidecar.traces();
     expect(bTraces.length).toBeGreaterThan(0);
     expect(JSON.stringify(bTraces)).not.toContain(SECRET_RAW);
     const bStatus = await b.capability.status('opencode');
     expect(bTraces.every((trace) => trace.hostId === bStatus.identity.hostId)).toBe(true);
     expect(fragment.provenance.hostId).not.toBe(bStatus.identity.hostId);
-    expect(JSON.stringify(await b.app.graph.listNodes({}))).not.toContain(SECRET_RAW);
-    expect(JSON.stringify(await b.app.eventLog.listEvents())).not.toContain(SECRET_RAW);
+    expect(JSON.stringify(bStatus)).not.toContain(SECRET_RAW);
+    expect(JSON.stringify(await b.sidecar.status())).not.toContain(SECRET_RAW);
 
     // A 自己的 trace 仍在本机（证明 trace 确实产生，只是没有同步）。
     const aStatus = await a.capability.status('hermes');

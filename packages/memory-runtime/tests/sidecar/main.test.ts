@@ -113,7 +113,12 @@ describe('memory-runtime sidecar process', () => {
     const status = await fetch(`${handle.url}/status`, { headers: bearer('host-token') });
     expect(status.status).toBe(200);
     const body = await status.json() as any;
-    expect(body.data.counts).toMatchObject({ rawChunks: 0, traces: 0, outbox: 0 });
+    expect(body.data.counts).toMatchObject({ stagingChunks: 0, traces: 0, outbox: 0 });
+    expect(body.data.details).toMatchObject({
+      available: true,
+      staging: { hours: 24 },
+      cache: { days: 30 },
+    });
     expect(body.data.identity.hostId).toMatch(/^h_/);
 
     await handle.stop();
@@ -190,6 +195,8 @@ describe('memory-runtime sidecar process', () => {
       capabilityApiVersion: 1,
       minMcpVersion: '0.3.0',
       maxMcpVersion: '0.3.x',
+      capabilities: { details: true },
+      details: { stagingHours: 24, cacheDays: 30 },
     });
   });
 });

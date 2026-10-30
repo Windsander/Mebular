@@ -84,7 +84,6 @@ function ingestBody(requestId: string, text = '我喜欢深色主题') {
     agentId: 'opencode',
     agentName: 'OpenCode',
     threadId: 'th_http',
-    capture: 'local',
     chunks: [{ role: 'user', text, messageId: `m_${requestId}`, chunkIndex: 0 }],
   };
 }
@@ -106,18 +105,24 @@ describe('sidecar ingest HTTP', () => {
       queued: false,
       duplicate: false,
     });
-    expect(body.data.rawChunkIds).toHaveLength(1);
+    expect(body.data.detailIds).toHaveLength(1);
+    expect(body.data.stagingChunkIds).toHaveLength(1);
     expect(runtime.stats).toMatchObject({ ingested: 1, settled: 1 });
 
     const status = await fetch(`${server.url}/status`, { headers: auth() });
     const statusBody = await status.json() as any;
     expect(status.status).toBe(200);
     expect(statusBody.data.counts).toMatchObject({
-      localRawChunks: 1,
+      stagingChunks: 0,
       localTraces: 0,
       outbox: 0,
       ingested: 1,
       settled: 1,
+    });
+    expect(statusBody.data.details).toMatchObject({
+      available: true,
+      staging: { chunks: 0 },
+      quota: { bytesPerDomain: 268_435_456, bytesCloud: 1_073_741_824 },
     });
     expect(statusBody.data.lastError).toBeNull();
     expect(statusBody.data.degraded).toBe(false);
@@ -143,7 +148,7 @@ describe('sidecar ingest HTTP', () => {
     const statusBody = await status.json() as any;
     expect(statusBody.data).toMatchObject({ degraded: true });
     expect(statusBody.data.counts).toMatchObject({
-      localRawChunks: 1,
+      stagingChunks: 1,
       outbox: 1,
       ingested: 1,
       settled: 0,

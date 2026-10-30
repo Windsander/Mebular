@@ -86,13 +86,17 @@ export interface SidecarStatusModel {
 }
 
 export interface SidecarStatusCounts {
-  rawChunks: number;
+  /** 本地 staging chunk 数（未沉降，非权威）。 */
+  stagingChunks: number;
+  localStagingChunks: number;
   traces: number;
   cachedRecords: number;
+  /** 详情只读缓存条目数。 */
+  detailCacheEntries: number;
+  /** 详情只读缓存字节数。 */
+  detailCacheBytes: number;
   outbox: number;
   deadLetter: number;
-  /** 本地 Raw 数量（契约 W4a `/status` 明确字段）。 */
-  localRawChunks: number;
   /** 本地 Trace 数量。 */
   localTraces: number;
   /** 已接受的 ingest 请求数（不含幂等重放）。 */
@@ -131,6 +135,40 @@ export interface SidecarStatusLimits {
   maxRecall: number;
 }
 
+/** 详情能力/配额/保留诊断；不包含正文与 token。 */
+export interface SidecarStatusDetails {
+  /** capability `/detail` 是否可用（sidecar 已装配）。 */
+  available: boolean;
+  staging: {
+    chunks: number;
+    hours: number;
+    maxBytes: number;
+  };
+  cache: {
+    entries: number;
+    bytes: number;
+    days: number;
+    maxBytes: number;
+  };
+  outbox: {
+    items: number;
+    bytes: number;
+  };
+  quota: {
+    bytesPerDomain: number;
+    bytesCloud: number;
+    /** capability 报告的当前详情字节数（若可用）。 */
+    usedBytes: number | null;
+    /** capability 报告的配额（若可用）。 */
+    bytes: number | null;
+  };
+  retentionDays: {
+    conversation: number;
+    tool_output: number;
+    document_slice: number;
+  };
+}
+
 export interface SidecarStatusError {
   code: string;
   message: string;
@@ -143,6 +181,7 @@ export interface SidecarStatusSnapshot {
   capability: SidecarStatusCapability;
   model: SidecarStatusModel;
   counts: SidecarStatusCounts;
+  details: SidecarStatusDetails;
   outbox: SidecarStatusOutbox;
   limits: SidecarStatusLimits;
   warnings: string[];
@@ -192,6 +231,18 @@ export interface SidecarRecallApi {
     degraded: boolean;
   }>;
   getTrace(id: string): Promise<unknown | null>;
+  expandRecall(recallId: string, request: unknown): Promise<{
+    status: 200;
+    data: unknown;
+    warnings: string[];
+    degraded: boolean;
+  }>;
+  getDetail(id: string): Promise<{
+    status: 200;
+    data: unknown;
+    warnings: string[];
+    degraded: boolean;
+  }>;
   submitFeedback(traceId: string, body: unknown): Promise<{
     traceId: string;
     feedback: { useful: boolean; reason?: string; at: number };
@@ -630,12 +681,14 @@ export class SidecarServer {
         sources: ['heuristic', 'host'],
       },
       counts: {
-        rawChunks: 0,
+        stagingChunks: 0,
+        localStagingChunks: 0,
         traces: 0,
         cachedRecords: 0,
+        detailCacheEntries: 0,
+        detailCacheBytes: 0,
         outbox: 0,
         deadLetter: 0,
-        localRawChunks: 0,
         localTraces: 0,
         ingested: 0,
         settled: 0,
@@ -648,6 +701,28 @@ export class SidecarServer {
         selfRecords: 0,
         objectWritesQueued: 0,
         objectWritesFailed: 0,
+      },
+      details: {
+        available: Boolean(this.recall),
+        staging: {
+          chunks: 0,
+          hours: this.config.detail.stagingHours,
+          maxBytes: this.config.detail.stagingBytes,
+        },
+        cache: {
+          entries: 0,
+          bytes: 0,
+          days: this.config.detail.cacheDays,
+          maxBytes: this.config.detail.cacheBytes,
+        },
+        outbox: { items: 0, bytes: 0 },
+        quota: {
+          bytesPerDomain: this.config.detail.quotaBytesPerDomain,
+          bytesCloud: this.config.detail.quotaBytesCloud,
+          usedBytes: null,
+          bytes: null,
+        },
+        retentionDays: { conversation: 30, tool_output: 7, document_slice: 90 },
       },
       outbox: { items: 0, bytes: 0, oldestAt: null },
       limits: {
@@ -667,6 +742,7 @@ export class SidecarServer {
       ...snapshot,
       model: { ...fallback.model, ...(snapshot.model ?? {}) },
       counts: { ...fallback.counts, ...(snapshot.counts ?? {}) },
+      details: { ...fallback.details, ...(snapshot.details ?? {}) },
       state: this.state,
       degraded: this.currentDegraded(),
       pid: process.pid,
@@ -759,10 +835,18 @@ export class SidecarServer {
             context: Boolean(this.recall),
             feedback: Boolean(this.recall),
             traces: Boolean(this.recall),
+            details: Boolean(this.recall),
             checkpoint: Boolean(this.objects),
             compact: Boolean(this.objects),
             self: Boolean(this.objects),
             models: model.sources ?? ['heuristic', 'host'],
+          },
+          details: {
+            stagingHours: this.config.detail.stagingHours,
+            cacheDays: this.config.detail.cacheDays,
+            quotaBytesPerDomain: this.config.detail.quotaBytesPerDomain,
+            quotaBytesCloud: this.config.detail.quotaBytesCloud,
+            retentionDays: { conversation: 30, tool_output: 7, document_slice: 90 },
           },
         }, [], this.currentDegraded()));
         return;
@@ -1050,19 +1134,24 @@ export class SidecarServer {
 
       if (relative.startsWith('recall/')) {
         const parts = relative.split('/');
-        if (parts.length !== 3 || parts[2] !== 'feedback') {
+        if (parts.length !== 3 || (parts[2] !== 'feedback' && parts[2] !== 'expand')) {
           req.resume();
           this.sendError(res, 404, requestId, 'not_found', '未知召回路径');
           return;
         }
         if (!isPost) {
           req.resume();
-          this.sendError(res, 405, requestId, 'method_not_allowed', 'feedback 仅接受 POST');
+          this.sendError(res, 405, requestId, 'method_not_allowed', 'feedback/expand 仅接受 POST');
           return;
         }
         if (!this.recall) {
           req.resume();
-          this.sendError(res, 501, requestId, 'not_implemented', 'feedback 尚未启用');
+          this.sendError(res, 501, requestId, 'not_implemented', 'recall 扩展尚未启用');
+          return;
+        }
+        if (this.state === 'stopping') {
+          req.resume();
+          this.sendError(res, 503, requestId, 'stopping', 'sidecar 正在停止', undefined, true);
           return;
         }
         const traceId = parts[1] ?? '';
@@ -1072,8 +1161,35 @@ export class SidecarServer {
           return;
         }
         const body = await readJsonBody(req);
+        if (parts[2] === 'expand') {
+          const result = await this.recall.expandRecall(traceId, body);
+          this.send(res, 200, this.envelope(requestId, result.data, result.warnings, result.degraded));
+          return;
+        }
         const result = await this.recall.submitFeedback(traceId, body);
         this.send(res, 200, this.envelope(requestId, result, result.warnings, result.degraded));
+        return;
+      }
+
+      if (relative.startsWith('details/')) {
+        if (!isGet) {
+          req.resume();
+          this.sendError(res, 405, requestId, 'method_not_allowed', 'details 仅接受 GET');
+          return;
+        }
+        if (!this.recall) {
+          req.resume();
+          this.sendError(res, 501, requestId, 'not_implemented', 'details 尚未启用');
+          return;
+        }
+        const id = relative.slice('details/'.length);
+        if (id.length === 0 || id.includes('/')) {
+          req.resume();
+          this.sendError(res, 404, requestId, 'not_found', '详情不存在');
+          return;
+        }
+        const result = await this.recall.getDetail(id);
+        this.send(res, 200, this.envelope(requestId, result.data, result.warnings, result.degraded));
         return;
       }
 

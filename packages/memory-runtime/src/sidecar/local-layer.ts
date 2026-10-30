@@ -1,7 +1,7 @@
-// Memory Runtime sidecar 本地层：Raw / Trace / cache / outbox。
+// Memory Runtime sidecar 本地层：staging / Trace / cache / detail cache / outbox。
 //
 // 这些都是本机过程数据，可重建、非权威；删除不影响已沉降到忆云的记忆。
-// Raw/Trace 复用现有 RuntimeLocalStore，但 root 固定为 `<home>/memory-runtime`，
+// staging/Trace 复用现有 RuntimeLocalStore，但 root 固定为 `<home>/memory-runtime`，
 // 不再使用 MCP daemon 的 `<home>/runtime`。
 //
 // outbox 是有界重试队列：一项 = 一个 capability 写请求 + 幂等键；
@@ -48,6 +48,16 @@ export interface OutboxItem {
   lastError: string | null;
   /** 指数退避后的下次可尝试时间；缺省表示立即可尝试。 */
   nextAttemptAt?: number;
+  /**
+   * 本地重放元数据（不发给 capability）：
+   * 成功后清理对应 staging chunk / detail cache。
+   */
+  meta?: {
+    kind?: 'detail' | 'record' | 'object';
+    stagingChunkIds?: string[];
+    detailIds?: string[];
+    domain?: string;
+  };
 }
 
 export interface OutboxEnqueueInput {
@@ -57,6 +67,7 @@ export interface OutboxEnqueueInput {
   method?: 'GET' | 'POST';
   body: unknown;
   createdAt?: number;
+  meta?: OutboxItem['meta'];
 }
 
 export interface OutboxEnqueueResult {
@@ -84,21 +95,33 @@ export interface CacheStats {
 
 export interface SidecarLocalLayerOptions {
   root: string;
-  rawRetentionDays?: number;
+  /** staging chunk 保留小时数（默认 24）。 */
+  stagingHours?: number;
+  /** staging 总字节上限（默认 256 MiB）。 */
+  stagingBytes?: number;
   traceRetentionDays?: number;
   traceMaxEntries?: number;
   maxOutboxItems?: number;
   maxOutboxBytes?: number;
+  /** 通用缓存（幂等/抽取任务）上限。 */
   maxCacheEntries?: number;
   maxCacheBytes?: number;
+  /** 详情只读缓存保留天数（默认 30）。 */
+  detailCacheDays?: number;
+  /** 详情只读缓存总字节上限（默认 256 MiB）。 */
+  detailCacheBytes?: number;
+  /** 详情只读缓存条目上限（默认 5000）。 */
+  detailCacheMaxEntries?: number;
   now?: () => number;
 }
 
 export interface SidecarLocalLayerStats {
-  rawChunks: number;
+  stagingChunks: number;
   traces: number;
   cacheEntries: number;
   cacheBytes: number;
+  detailCacheEntries: number;
+  detailCacheBytes: number;
   outboxItems: number;
   outboxBytes: number;
   deadLetter: number;
@@ -108,8 +131,9 @@ export interface SidecarLocalLayerStats {
 export async function ensureSidecarDirectories(paths: SidecarPaths): Promise<void> {
   await Promise.all([
     ensurePrivateDir(paths.dataDir),
-    ensurePrivateDir(paths.rawDir),
+    ensurePrivateDir(paths.stagingDir),
     ensurePrivateDir(paths.cacheDir),
+    ensurePrivateDir(paths.detailCacheDir),
     ensurePrivateDir(paths.outboxDir),
     ensurePrivateDir(paths.outboxDeadDir),
     ensurePrivateDir(paths.logsDir),
@@ -230,6 +254,7 @@ export class BoundedOutbox {
         attempts: 0,
         lastAttemptAt: null,
         lastError: null,
+        ...(input.meta ? { meta: input.meta } : {}),
       };
 
       let bytes: number;
@@ -501,18 +526,20 @@ export class JsonCache {
   }
 }
 
-/** sidecar 本地层门面：统一初始化/统计 Raw、Trace、cache、outbox。 */
+/** sidecar 本地层门面：统一初始化/统计 staging、Trace、cache、detail cache、outbox。 */
 export class SidecarLocalLayer {
   readonly root: string;
   readonly store: RuntimeLocalStore;
   readonly outbox: BoundedOutbox;
   readonly cache: JsonCache;
+  readonly detailCache: JsonCache;
 
   constructor(options: SidecarLocalLayerOptions) {
     this.root = options.root;
     this.store = new RuntimeLocalStore({
       root: options.root,
-      rawRetentionDays: options.rawRetentionDays,
+      stagingHours: options.stagingHours,
+      stagingMaxBytes: options.stagingBytes,
       traceRetentionDays: options.traceRetentionDays,
       traceMaxEntries: options.traceMaxEntries,
       now: options.now,
@@ -530,13 +557,20 @@ export class SidecarLocalLayer {
       maxBytes: options.maxCacheBytes,
       now: options.now,
     });
+    this.detailCache = new JsonCache({
+      root: join(options.root, 'cache', 'details'),
+      maxEntries: options.detailCacheMaxEntries,
+      maxBytes: options.detailCacheBytes,
+      now: options.now,
+    });
   }
 
   async init(): Promise<void> {
     await ensurePrivateDir(this.root);
     await Promise.all([
-      ensurePrivateDir(join(this.root, 'raw')),
+      ensurePrivateDir(join(this.root, 'staging')),
       ensurePrivateDir(join(this.root, 'cache')),
+      ensurePrivateDir(join(this.root, 'cache', 'details')),
       ensurePrivateDir(join(this.root, 'outbox')),
       ensurePrivateDir(join(this.root, 'outbox', 'dead')),
       ensurePrivateDir(join(this.root, 'logs')),
@@ -546,20 +580,24 @@ export class SidecarLocalLayer {
     await this.store.init();
     await this.outbox.init();
     await this.cache.init();
+    await this.detailCache.init();
   }
 
   async stats(): Promise<SidecarLocalLayerStats> {
-    const [rawStats, cacheStats, outboxStats, deadLetter] = await Promise.all([
+    const [stagingStats, cacheStats, detailCacheStats, outboxStats, deadLetter] = await Promise.all([
       this.store.stats(),
       this.cache.stats(),
+      this.detailCache.stats(),
       this.outbox.stats(),
       this.outbox.deadCount(),
     ]);
     return {
-      rawChunks: rawStats.rawChunks,
-      traces: rawStats.traces,
+      stagingChunks: stagingStats.stagingChunks,
+      traces: stagingStats.traces,
       cacheEntries: cacheStats.entries,
       cacheBytes: cacheStats.bytes,
+      detailCacheEntries: detailCacheStats.entries,
+      detailCacheBytes: detailCacheStats.bytes,
       outboxItems: outboxStats.items,
       outboxBytes: outboxStats.bytes,
       deadLetter,
@@ -570,8 +608,35 @@ export class SidecarLocalLayer {
     return this.store.cleanup(now);
   }
 
-  /** 本地保留清理：Raw/Trace 由 store 处理，cache/outbox 的 TTL 在读取时处理。 */
+  /** 本地保留清理：staging/Trace 由 store 处理，cache/outbox 的 TTL 在读取时处理。 */
   async cleanupIfDue(now = Date.now()): Promise<RuntimeLocalCleanupResult | null> {
     return this.store.cleanupIfDue(now);
+  }
+
+  /** 成功沉降后清理 staging；失败只保留到 TTL，不影响已写入记录。 */
+  async clearStaging(ids: readonly string[]): Promise<number> {
+    return this.store.deleteStagingChunks(ids);
+  }
+
+  // ---------- 详情只读缓存 ----------
+
+  detailCacheKey(id: string): string {
+    return `detail:v1:${id}`;
+  }
+
+  async getCachedDetail<T = unknown>(id: string): Promise<T | null> {
+    return this.detailCache.get<T>(this.detailCacheKey(id));
+  }
+
+  async putCachedDetail<T>(id: string, value: T, ttlMs?: number): Promise<void> {
+    try {
+      await this.detailCache.set(this.detailCacheKey(id), value, ttlMs ? { ttlMs } : {});
+    } catch {
+      // 缓存失败不影响读取能力；下一次重新向 capability 取。
+    }
+  }
+
+  async invalidateCachedDetail(id: string): Promise<boolean> {
+    return this.detailCache.delete(this.detailCacheKey(id));
   }
 }

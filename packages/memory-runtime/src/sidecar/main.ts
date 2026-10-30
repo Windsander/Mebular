@@ -6,7 +6,7 @@
 //   mebular-memory-runtime version
 //
 // serve 的 W3a 职责：
-// - 初始化本地 Raw/Trace/cache/outbox；
+// - 初始化本地 staging/Trace/detail cache/outbox；
 // - 读取 capability token 并做版本握手（可 --skip-handshake 跳过，测试/排障）；
 // - 生成 host token、监听 loopback、写 `<home>/memory-runtime.json`；
 // - 心跳更新 discovery；SIGINT/SIGTERM/父进程退出时优雅停止。
@@ -169,10 +169,18 @@ export interface SidecarVersionResult {
     context: boolean;
     feedback: boolean;
     traces: boolean;
+    details: boolean;
     checkpoint: boolean;
     compact: boolean;
     self: boolean;
     models: string[];
+  };
+  details: {
+    stagingHours: number;
+    cacheDays: number;
+    quotaBytesPerDomain: number;
+    quotaBytesCloud: number;
+    retentionDays: { conversation: number; tool_output: number; document_slice: number };
   };
 }
 
@@ -229,10 +237,15 @@ function startupFromUnknown(error: unknown): SidecarStartupError {
   return new SidecarStartupError('internal', 1, (error as Error)?.message ?? 'sidecar 启动失败');
 }
 
+function isObject(value: unknown): value is Record<string, any> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
 interface CapabilityProbe {
   capability: SidecarStatusCapability;
   versionInfo: CapabilityVersionInfo | null;
   identity: CapabilityIdentity | null;
+  detailQuota: { usedBytes: number | null; domainBytes: number | null; cloudBytes: number | null } | null;
   warnings: string[];
 }
 
@@ -250,12 +263,20 @@ async function probeCapability(
       );
     }
     let identity: CapabilityIdentity | null = null;
+    let detailQuota: CapabilityProbe['detailQuota'] = null;
     try {
       const status = await client.getStatus({
         actor: JSON.stringify({ type: 'user' }),
-        includeCounts: 'false',
+        includeCounts: 'true',
       });
       identity = status.data?.identity ?? null;
+      const quota = isObject(status.data?.detailQuota) ? status.data.detailQuota : {};
+      const counts = isObject(status.data?.counts) ? status.data.counts : {};
+      detailQuota = {
+        usedBytes: typeof counts.detailBytes === 'number' ? counts.detailBytes : null,
+        domainBytes: typeof quota.domainBytes === 'number' ? quota.domainBytes : null,
+        cloudBytes: typeof quota.cloudBytes === 'number' ? quota.cloudBytes : null,
+      };
     } catch {
       identity = null;
     }
@@ -268,6 +289,7 @@ async function probeCapability(
       },
       versionInfo: version.data,
       identity,
+      detailQuota,
       warnings: version.warnings,
     };
   } catch (error) {
@@ -302,6 +324,7 @@ async function probeCapability(
         },
         versionInfo: null,
         identity: null,
+        detailQuota: null,
         warnings: [error.code],
       };
     }
@@ -344,18 +367,23 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
   }
 
   let config: SidecarConfig;
+  const configWarnings: string[] = [];
   try {
-    config = await loadSidecarConfig({ paths, env, overrides });
+    config = await loadSidecarConfig({ paths, env, overrides, warnings: configWarnings });
   } catch (error) {
     throw startupFromUnknown(error);
   }
 
   const localOptions: SidecarLocalLayerOptions = {
     root: paths.dataDir,
-    rawRetentionDays: config.retention.rawDays,
+    stagingHours: config.detail.stagingHours,
+    stagingBytes: config.detail.stagingBytes,
     traceRetentionDays: config.retention.traceDays,
     maxOutboxItems: config.limits.maxOutboxItems,
     maxOutboxBytes: config.limits.maxOutboxBytes,
+    detailCacheDays: config.detail.cacheDays,
+    detailCacheBytes: config.detail.cacheBytes,
+    detailCacheMaxEntries: config.detail.cacheMaxEntries,
     now,
   };
   const local = new SidecarLocalLayer(localOptions);
@@ -378,6 +406,7 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
   };
   let capabilityVersionInfo: CapabilityVersionInfo | null = null;
   let capabilityIdentity: CapabilityIdentity | null = null;
+  let capabilityDetailQuota: CapabilityProbe['detailQuota'] = null;
   let warnings: string[] = [];
 
   if (!options.skipHandshake) {
@@ -423,6 +452,7 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
     capability = probe.capability;
     capabilityVersionInfo = probe.versionInfo;
     capabilityIdentity = probe.identity;
+    capabilityDetailQuota = probe.detailQuota;
     warnings = [...probe.warnings];
   }
 
@@ -491,7 +521,7 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
     } catch {
       // 模型状态探测失败只影响展示，不阻塞 status；沿用最近一次不可用状态。
     }
-    const mergedWarnings = [...warnings];
+    const mergedWarnings = [...configWarnings, ...warnings];
     for (const warning of modelStatus.warnings) {
       if (!mergedWarnings.includes(warning)) mergedWarnings.push(warning);
     }
@@ -504,6 +534,19 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
         maxChunkBytes: config.limits.maxChunkBytes,
         maxContextTokens: config.limits.maxContextTokens,
         maxRecall: config.limits.maxRecall,
+      },
+      details: {
+        available: true,
+        ...(capabilityDetailQuota
+          ? {
+            quota: {
+              bytesPerDomain: capabilityDetailQuota.domainBytes ?? config.detail.quotaBytesPerDomain,
+              bytesCloud: capabilityDetailQuota.cloudBytes ?? config.detail.quotaBytesCloud,
+              usedBytes: capabilityDetailQuota.usedBytes,
+              bytes: capabilityDetailQuota.cloudBytes,
+            },
+          }
+          : {}),
       },
       warnings: mergedWarnings,
     });
@@ -560,6 +603,7 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
         ingest: true,
         recall: true,
         context: true,
+        details: true,
         checkpoint: true,
         compact: true,
         self: true,
@@ -777,10 +821,18 @@ export function getSidecarVersion(): SidecarVersionResult {
       context: true,
       feedback: true,
       traces: true,
+      details: true,
       checkpoint: true,
       compact: true,
       self: true,
       models: ['heuristic', 'host', 'local', 'api'],
+    },
+    details: {
+      stagingHours: 24,
+      cacheDays: 30,
+      quotaBytesPerDomain: 268_435_456,
+      quotaBytesCloud: 1_073_741_824,
+      retentionDays: { conversation: 30, tool_output: 7, document_slice: 90 },
     },
   };
 }

@@ -13,7 +13,7 @@
 
 import { randomUUID } from 'node:crypto';
 import http from 'node:http';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -369,6 +369,12 @@ async function createDevice({
         body: JSON.stringify(body),
       });
     },
+    async expand(recallId, body) {
+      return requestSidecar(`/recall/${encodeURIComponent(recallId)}/expand`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      });
+    },
     async context(body) {
       return requestSidecar('/context', {
         method: 'POST',
@@ -408,14 +414,30 @@ async function createDevice({
     async getCompact(id) {
       return requestSidecar(`/compacts/${encodeURIComponent(id)}`);
     },
-    async rawEntries() {
-      const entries = await readSidecarJsonLines(home, join('memory-runtime', 'raw', 'chunks.jsonl'));
+    async stagingEntries() {
+      const entries = await readSidecarJsonLines(home, join('memory-runtime', 'staging', 'chunks.jsonl'));
       return entries.map((entry) => entry.chunk).filter(Boolean);
     },
-    async rawTexts() {
-      return (await sidecar.rawEntries())
+    async stagingTexts() {
+      return (await sidecar.stagingEntries())
         .map((chunk) => chunk.text)
         .filter((textValue) => typeof textValue === 'string');
+    },
+    async detailCacheTexts() {
+      const dir = join(home, 'memory-runtime', 'cache', 'details');
+      const names = await readdir(dir).catch(() => []);
+      const texts = [];
+      for (const name of names) {
+        if (!name.endsWith('.json')) continue;
+        try {
+          const record = JSON.parse(await readFile(join(dir, name), 'utf8'));
+          const textValue = record?.value?.detail?.text;
+          if (typeof textValue === 'string') texts.push(textValue);
+        } catch {
+          // 损坏缓存不影响验收；下一次从 capability 重新读取。
+        }
+      }
+      return texts;
     },
     async traces() {
       return readSidecarJsonLines(home, join('memory-runtime', 'traces.jsonl'));

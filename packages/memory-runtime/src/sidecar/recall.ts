@@ -5,15 +5,21 @@
 //   → 按意图/置信度/冲突/追问决定是否展开 → MemoryFragment + Detail
 //   → /context 按固定顺序与硬预算组装不可信背景块。
 //
+// 详情展开在 0.3 走 capability `/detail`，不再读本机 Raw：
+// - 权威详情在 capability 图 + 事件日志，跨设备在保留期内可展开；
+// - 不可用时返回 availability 原因，绝不伪造原文；
+// - 离线只读 cache 必须标 source='cache'、stale=true。
+//
 // 边界：
-// - 只通过 CapabilityClient 读取持久记忆；本地只读 Raw/Trace；
+// - 只通过 CapabilityClient 读取持久记忆；本地只读详情 cache/Trace；
 // - 不 import @mebular/core，不打开 GraphStore/EventLog/MemoryService；
 // - 召回只读，不写 MemoryRecord/Compact/Checkpoint/SelfRecord；
 // - 无命中/无足够 cue 时沉默，不编造；失败开放，degraded/warnings 可见；
 // - 记忆内容是 untrusted 背景数据，不是指令。
 
 import { createHash, randomUUID } from 'node:crypto';
-import type { CapabilityClient } from './capability-client.js';
+import type { CapabilityClient, CapabilityDetailRecord } from './capability-client.js';
+import { CapabilityClientError } from './capability-client.js';
 import type { SidecarConfig } from './config.js';
 import {
   agentDomain,
@@ -44,7 +50,7 @@ import {
   truncateLines,
   truncateText,
 } from './text.js';
-import type { RawChunk, RecallTrace } from '../runtime/types.js';
+import type { RecallTrace } from '../runtime/types.js';
 
 const MAX_DOMAINS = 16;
 const MAX_QUERY_CHARS = 2000;
@@ -54,6 +60,7 @@ const HARD_MAX_BYTES = 8192;
 const HARD_MAX_TOKENS = 2000;
 const ANCHOR_TTL_MS = 10 * 60 * 1000;
 const QUARANTINE_MS = 7 * 24 * 60 * 60 * 1000;
+const EXPAND_TRACE_TTL_MS = 10 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 const RECORD_TYPES = ['fact', 'preference', 'episode', 'observation', 'skill', 'entity'] as const;
@@ -80,6 +87,9 @@ export interface ProvenanceRef {
   agentId?: string;
   agentName?: string;
   messageIds?: string[];
+  /** 指向 DetailRecord；0.3 展开入口。 */
+  detailIds?: string[];
+  /** @deprecated 旧字段，仅作兼容别名。 */
   rawChunkIds?: string[];
   confirmation?: string | null;
   at?: number;
@@ -125,7 +135,13 @@ export interface FragmentDetail {
   contentHash?: string;
   truncated: boolean;
   redacted: boolean;
+  /** 契约 availability：available/pending_sync/expired/deleted/quota_evicted/not_subscribed/redacted_only。 */
   availability: string[];
+  /** 详情来源；cache 必须同时 stale=true。 */
+  source?: 'capability' | 'cache' | 'record';
+  stale?: boolean;
+  /** 本次展开实际读取的 DetailRecord id（最多 3）。 */
+  detailIds?: string[];
   tookMs: number;
 }
 
@@ -146,10 +162,12 @@ export interface MemoryFragment {
   hasDetail: boolean;
   detailKinds: string[];
   detailAvailability: string[];
-  /** Raw/原文详情是否在本机可用；只有已沉降记录时为 false。 */
+  /** 可展开详情是否可读（有 DetailRecord 且未被标记删除）。 */
   detailAvailable: boolean;
-  source: 'settled' | 'local_raw' | 'cache';
+  source: 'settled' | 'cache';
   stale: boolean;
+  /** 指向 DetailRecord；展开/宿主 UI 使用。 */
+  detailIds: string[];
   conflictGroup?: string;
   crossAgent?: boolean;
   trust: 'untrusted';
@@ -230,6 +248,30 @@ export interface ContextResponse extends Omit<RecallResponse, 'records'> {
   notice: string;
 }
 
+export interface RecallExpandDetail {
+  id: string;
+  kind: 'detail_record';
+  detailKind: string;
+  format: FragmentDetail['format'];
+  text: string;
+  truncated: boolean;
+  redacted: boolean;
+  availability: string[];
+  citations: FragmentCitation[];
+  owner: { role: RecallOwner['role']; domain: string };
+  provenance: Record<string, unknown>;
+  source: 'capability' | 'cache';
+  stale: boolean;
+}
+
+export interface RecallExpandResponse {
+  recallId: string;
+  fragmentId: string;
+  detail: RecallExpandDetail | null;
+  degraded: boolean;
+  warnings: string[];
+}
+
 export interface RecallHttpResult<T = RecallResponse | ContextResponse> {
   status: 200;
   data: T;
@@ -300,7 +342,7 @@ interface Candidate {
   gistHash: string;
   conflictKey: string | null;
   conflictObject: string | null;
-  localRaw: RawChunk[];
+  detailIds: string[];
   detail?: FragmentDetail;
   expandReason?: string;
   filteredReason?: string;
@@ -689,12 +731,81 @@ function provenanceOf(record: Record<string, unknown>): ProvenanceRef {
     ...(asString(raw.agentId) ? { agentId: asString(raw.agentId)! } : {}),
     ...(asString(raw.agentName) ? { agentName: asString(raw.agentName)! } : {}),
     ...(Array.isArray(raw.messageIds) ? { messageIds: asStringArray(raw.messageIds) } : {}),
+    ...(Array.isArray(raw.detailIds) ? { detailIds: asStringArray(raw.detailIds) } : {}),
+    ...(Array.isArray(record.detailIds) ? { detailIds: asStringArray(record.detailIds) } : {}),
     ...(Array.isArray(raw.rawChunkIds) ? { rawChunkIds: asStringArray(raw.rawChunkIds) } : {}),
     ...(raw.confirmation === null || typeof raw.confirmation === 'string'
       ? { confirmation: raw.confirmation as string | null }
       : {}),
     ...(asNumber(raw.at) !== null ? { at: asNumber(raw.at)! } : {}),
   };
+}
+
+function detailIdsOf(record: Record<string, unknown>, provenance: ProvenanceRef): string[] {
+  const direct = asStringArray(record.detailIds);
+  if (direct.length > 0) return direct.slice(0, 8);
+  const fromProvenance = provenance.detailIds ?? [];
+  if (fromProvenance.length > 0) return fromProvenance.slice(0, 8);
+  // 旧 capability 可能把旧 rawChunkIds 当详情 id 返回；只作兼容，不作为本地 raw。
+  return (provenance.rawChunkIds ?? []).slice(0, 8);
+}
+
+/**
+ * 诚实降级原因：可用/同步中/过期/删除/配额淘汰/未订阅/仅脱敏。
+ * 不再使用 missing_cross_device 作为常态。
+ */
+function detailAvailabilityOf(record: Record<string, unknown>, detailIds: string[]): string[] {
+  const declared = asStringArray(record.detailAvailability, 8)
+    .filter((value) => ['available', 'pending_sync', 'expired', 'deleted', 'quota_evicted', 'not_subscribed', 'redacted_only'].includes(value));
+  if (declared.length > 0) return declared;
+  if (record.detailAvailable === false) return ['deleted'];
+  if (detailIds.length > 0) return ['available'];
+  return ['pending_sync'];
+}
+
+function detailUnavailableNotice(availability: readonly string[]): string {
+  const reason = availability[0] ?? 'pending_sync';
+  const messages: Record<string, string> = {
+    pending_sync: '详情仍在同步中，当前设备暂时无法展开原文。',
+    expired: '原文已过期，不再提供逐字内容。',
+    deleted: '原文已删除，不再提供逐字内容。',
+    quota_evicted: '原文因配额限制已被淘汰，不再提供逐字内容。',
+    not_subscribed: '当前设备未订阅该记忆域，不能展开原文。',
+    redacted_only: '原文包含敏感信息，只提供脱敏后的内容。',
+    unavailable: '记忆运行时暂时不可用，无法展开原文。',
+  };
+  return `${messages[reason] ?? messages.unavailable} 这里只提供已沉降记录，不伪造原文。`;
+}
+
+function mapDetailError(error: unknown): { code: string; warning: string } {
+  if (error instanceof CapabilityClientError) {
+    switch (error.code) {
+      case 'detail_expired':
+        return { code: 'expired', warning: 'detail_expired' };
+      case 'detail_deleted':
+        return { code: 'deleted', warning: 'detail_deleted' };
+      case 'detail_quota_exceeded':
+        return { code: 'quota_evicted', warning: 'detail_quota_evicted' };
+      case 'domain_read_forbidden':
+        return { code: 'not_subscribed', warning: 'detail_not_subscribed' };
+      case 'not_found':
+        return { code: 'pending_sync', warning: 'detail_pending_sync' };
+      case 'timeout':
+      case 'network_error':
+      case 'capability_unavailable':
+      case 'capability_token_invalid':
+      case 'capability_token_missing':
+        return { code: 'unavailable', warning: 'detail_timeout' };
+      default:
+        break;
+    }
+    if (error.status === 403) return { code: 'not_subscribed', warning: 'detail_not_subscribed' };
+    if (error.status === 404) return { code: 'pending_sync', warning: 'detail_pending_sync' };
+    if (error.status === 410) return { code: 'expired', warning: 'detail_expired' };
+    if (error.status === 413) return { code: 'quota_evicted', warning: 'detail_quota_evicted' };
+    return { code: 'unavailable', warning: 'capability_unavailable' };
+  }
+  return { code: 'unavailable', warning: 'capability_unavailable' };
 }
 
 function confidenceOf(record: Record<string, unknown>, kind: string, stale: boolean): number {
@@ -916,13 +1027,13 @@ function citationsOf(record: Record<string, unknown>, kind: string): FragmentCit
   return [{ id: String(record.id), type: citationType(kind), domain, contentHash: hash }];
 }
 
-function detailKindsOf(record: Record<string, unknown>, kind: string, hasRaw: boolean): string[] {
+function detailKindsOf(record: Record<string, unknown>, kind: string, hasDetails: boolean): string[] {
   const out: string[] = [];
   if (kind === 'compact') return asStringArray(contentOf(record).sourceIds).length > 0 ? ['compact_sources'] : [];
   if (kind === 'fact' || kind === 'preference') out.push('fact_object');
   if (kind === 'episode') out.push('episode_body');
   if (kind === 'skill') out.push('skill_steps');
-  if (hasRaw) out.push('raw_quote');
+  if (hasDetails) out.push('raw_quote');
   if (out.length === 0) out.push('record_body');
   return dedupe(out);
 }
@@ -1112,6 +1223,171 @@ export class RecallService {
       warnings: [],
       degraded: false,
     };
+  }
+
+  /**
+   * `POST /recall/:recallId/expand`：只展开 10 分钟内本次召回出现过的 fragment。
+   * 详情经 capability `/detail` 读取；不可用时 HTTP 200 + detail=null + availability。
+   */
+  async expandRecall(recallId: string, body: unknown): Promise<RecallHttpResult<RecallExpandResponse>> {
+    if (!/^rr_[A-Za-z0-9._:-]{1,128}$/.test(recallId)) {
+      throw new SidecarSettlementError('fragment_not_found', '召回不存在或已过期', { status: 404 });
+    }
+    if (!isObject(body)) invalid('expand 请求必须是对象');
+    const agentId = asString(body.agentId);
+    if (!agentId || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(agentId)) {
+      throw new SidecarSettlementError('invalid_request', 'agentId 格式非法', {
+        status: 400,
+        details: { field: 'agentId' },
+      });
+    }
+    const fragmentId = asString(body.fragmentId);
+    if (!fragmentId || !/^mf_[A-Za-z0-9._:-]{1,128}$/.test(fragmentId)) {
+      throw new SidecarSettlementError('invalid_request', 'fragmentId 格式非法', {
+        status: 400,
+        details: { field: 'fragmentId' },
+      });
+    }
+    const threadId = asString(body.threadId);
+    const requestedKinds = asStringArray(body.detailKinds, 8);
+    const maxBytes = typeof body.maxBytes === 'number' && Number.isFinite(body.maxBytes)
+      ? Math.min(8192, Math.max(1, Math.floor(body.maxBytes)))
+      : 8192;
+    const warnings: string[] = [];
+    const trace = await this.local.store.getTraceByRecallId(recallId);
+    if (!trace || this.now() - trace.at > EXPAND_TRACE_TTL_MS) {
+      throw new SidecarSettlementError('fragment_not_found', '召回不存在或已过期', { status: 404 });
+    }
+    if (trace.agentId !== agentId) {
+      throw new SidecarSettlementError('forbidden_scope', '不能展开其他 Agent 的召回', { status: 403 });
+    }
+    if (threadId && trace.threadId && threadId !== trace.threadId) {
+      throw new SidecarSettlementError('forbidden_scope', '不能展开其他会话的召回', { status: 403 });
+    }
+    const expansions = Array.isArray(trace.expansions) ? trace.expansions : [];
+    const expansion = expansions.find((entry) => isObject(entry) && entry.fragmentId === fragmentId);
+    if (!expansion || !isObject(expansion)) {
+      throw new SidecarSettlementError('fragment_not_found', 'fragment 不在本次召回中', { status: 404 });
+    }
+    const domain = asString(expansion.domain) ?? asString(trace.domains?.[0]) ?? 'default';
+    const ownerRole: RecallOwner['role'] = domain === 'user'
+      ? 'user'
+      : isAgentDomain(domain) ? 'agent' : 'other';
+    const detailKinds = asStringArray(expansion.detailKinds, 8);
+    if (requestedKinds.length > 0 && detailKinds.length > 0
+      && !requestedKinds.some((kind) => detailKinds.includes(kind))) {
+      return {
+        status: 200,
+        data: {
+          recallId,
+          fragmentId,
+          detail: null,
+          degraded: true,
+          warnings: ['detail_kind_mismatch'],
+        },
+        warnings: ['detail_kind_mismatch'],
+        degraded: true,
+      };
+    }
+
+    const detailIds = asStringArray(expansion.detailIds, 3);
+    if (detailIds.length === 0) {
+      const availability = asStringArray(expansion.availability, 8);
+      const reason = availability[0] ?? 'pending_sync';
+      return {
+        status: 200,
+        data: {
+          recallId,
+          fragmentId,
+          detail: null,
+          degraded: true,
+          warnings: [`detail_${reason}`],
+        },
+        warnings: [`detail_${reason}`],
+        degraded: true,
+      };
+    }
+
+    const fetched = await this.fetchDetails(detailIds, agentId, warnings, maxBytes);
+    if (fetched.text.length === 0) {
+      const warning = `detail_${fetched.availability[0] ?? 'pending_sync'}`;
+      pushWarning(warnings, warning);
+      return {
+        status: 200,
+        data: { recallId, fragmentId, detail: null, degraded: true, warnings: [...warnings] },
+        warnings: [...warnings],
+        degraded: true,
+      };
+    }
+    const safe = redactText(fetched.text);
+    const citations: FragmentCitation[] = fetched.detailIds.map((id) => ({
+      id,
+      type: 'detail_record',
+      domain,
+    }));
+    const detail: RecallExpandDetail = {
+      id: fetched.detailIds[0] ?? detailIds[0]!,
+      kind: 'detail_record',
+      detailKind: asString(expansion.detailKind) ?? 'raw_chunk',
+      format: fetched.stale ? 'structured' : 'verbatim',
+      text: safe.text,
+      truncated: fetched.truncated,
+      redacted: safe.redacted || fetched.availability.includes('redacted_only'),
+      availability: fetched.availability,
+      citations,
+      owner: { role: ownerRole, domain },
+      provenance: {
+        source: expansion.source === 'host' ? 'host' : 'runtime',
+        ...(asString(expansion.sourceId) ? { recordId: asString(expansion.sourceId)! } : {}),
+        ...(trace.threadId ? { threadId: trace.threadId } : {}),
+      },
+      source: fetched.source === 'cache' ? 'cache' : 'capability',
+      stale: fetched.stale,
+    };
+    const degraded = fetched.stale || fetched.availability.includes('redacted_only')
+      || !fetched.availability.includes('available');
+    if (fetched.stale) pushWarning(warnings, 'detail_from_cache');
+    return {
+      status: 200,
+      data: { recallId, fragmentId, detail, degraded, warnings: [...warnings] },
+      warnings: [...warnings],
+      degraded,
+    };
+  }
+
+  /** 管理/治理读取：`GET /details/:id`；不枚举、不跨域泄漏。 */
+  async getDetail(id: string): Promise<RecallHttpResult<{ detail: CapabilityDetailRecord | null }>> {
+    if (!/^[A-Za-z0-9._:-]{1,128}$/.test(id)) {
+      throw new SidecarSettlementError('not_found', '详情不存在', { status: 404 });
+    }
+    if (!this.client) {
+      return {
+        status: 200,
+        data: { detail: null },
+        warnings: ['capability_unavailable'],
+        degraded: true,
+      };
+    }
+    try {
+      const response = await this.client.detailGet({
+        actor: { type: 'user' },
+        id,
+        includeText: true,
+        maxBytes: 65_536,
+      });
+      const detail = isObject(response.data) && isObject(response.data.detail)
+        ? response.data.detail as CapabilityDetailRecord
+        : null;
+      return { status: 200, data: { detail }, warnings: response.warnings, degraded: response.degraded };
+    } catch (error) {
+      const mapped = mapDetailError(error);
+      return {
+        status: 200,
+        data: { detail: null },
+        warnings: [mapped.warning],
+        degraded: true,
+      };
+    }
   }
 
   private tracePreview(trace: RecallTrace): Record<string, unknown> {
@@ -1381,11 +1657,10 @@ export class RecallService {
       return this.finish(run, mode);
     }
 
-    const rawCache = new Map<string, RawChunk[]>();
     const fuzzyStart = this.now();
     let rawRecords: RawCandidate[] = [];
     try {
-      const collected = await this.collectCandidates(request, cue, domains, rawCache, warnings, searchQuery);
+      const collected = await this.collectCandidates(request, cue, domains, warnings, searchQuery);
       rawRecords = collected.records;
       degraded = degraded || collected.degraded;
       run.degraded = degraded;
@@ -1404,7 +1679,7 @@ export class RecallService {
       return this.finish(run, mode);
     }
 
-    const candidates = await this.buildCandidates(rawRecords, cue, request, rawCache, warnings);
+    const candidates = await this.buildCandidates(rawRecords, cue, request, warnings);
     run.candidates = candidates;
     const eligible = candidates.filter((candidate) => !candidate.filteredReason);
 
@@ -1566,7 +1841,6 @@ export class RecallService {
     request: NormalizedRequest,
     cue: Cue,
     domains: string[],
-    rawCache: Map<string, RawChunk[]>,
     warnings: string[],
     query: string = request.query,
   ): Promise<{ records: RawCandidate[]; degraded: boolean }> {
@@ -1767,11 +2041,42 @@ export class RecallService {
     return { records: [...byId.values()], degraded };
   }
 
+  private async resolveDetailIds(
+    record: Record<string, unknown>,
+    domain: string,
+    provenance: ProvenanceRef,
+    cue: Cue,
+  ): Promise<string[]> {
+    const known = detailIdsOf(record, provenance);
+    if (known.length > 0 || record.detailAvailable === false || !this.client) return known;
+    if (!record.id || typeof record.id !== 'string') return [];
+    try {
+      const response = await this.client.detailList({
+        actor: { type: 'agent', agentId: cue.agentId },
+        domains: [domain],
+        recordIds: [record.id],
+        detailKinds: ['raw_chunk'],
+        limit: 3,
+        includeText: false,
+      });
+      const details = isObject(response.data) && Array.isArray(response.data.details)
+        ? response.data.details
+        : [];
+      return details
+        .filter(isObject)
+        .map((entry) => asString(entry.id))
+        .filter((id): id is string => id !== null)
+        .slice(0, 3);
+    } catch {
+      // 详情列表失败按待同步处理；不把失败伪装成“没有详情”。
+      return [];
+    }
+  }
+
   private async buildCandidates(
     rawRecords: RawCandidate[],
     cue: Cue,
     request: NormalizedRequest,
-    rawCache: Map<string, RawChunk[]>,
     warnings: string[],
   ): Promise<Candidate[]> {
     const candidates: Candidate[] = [];
@@ -1800,21 +2105,15 @@ export class RecallService {
       }
 
       const provenance = provenanceOf(record);
-      const localRaw = await this.findLocalRaw(record, provenance, cue, rawCache);
       const owner = ownerOf(record);
       const fragmentTime = timeOf(record);
       const confidence = confidenceOf(record, kind, stale);
       const sourceIds = kind === 'compact'
         ? dedupe([String(record.id), ...asStringArray(contentOf(record).sourceIds, 12)])
         : [String(record.id)];
-      const hasRaw = localRaw.length > 0;
-      const rawIds = provenance.rawChunkIds ?? [];
-      const quoteRequested = cue.detailIntent.reasons.includes('quote_request');
-      const availability: string[] = [];
-      if (record.detailAvailable !== false) availability.push('cloud');
-      if (hasRaw) availability.push('local_raw');
-      if (!hasRaw && (rawIds.length > 0 || quoteRequested)) availability.push('missing_cross_device');
-      if (stale) availability.push('stale');
+      const detailIds = await this.resolveDetailIds(record, domain, provenance, cue);
+      const hasDetails = record.detailAvailable !== false && detailIds.length > 0;
+      const availability = detailAvailabilityOf(record, detailIds);
 
       const fragment: MemoryFragment = {
         schema: 1,
@@ -1830,11 +2129,12 @@ export class RecallService {
         provenance,
         confidence,
         salience: salienceOf(kind),
-        hasDetail: record.detailAvailable !== false || hasRaw,
-        detailKinds: detailKindsOf(record, kind, hasRaw),
+        hasDetail: record.detailAvailable !== false || hasDetails,
+        detailKinds: detailKindsOf(record, kind, hasDetails),
         detailAvailability: dedupe(availability),
-        detailAvailable: hasRaw,
-        source: hasRaw ? 'local_raw' : 'settled',
+        detailAvailable: hasDetails,
+        detailIds,
+        source: 'settled',
         stale,
         ...(isAgentDomain(domain) && owner.agentId && owner.agentId !== cue.agentId
           ? { crossAgent: true }
@@ -1863,7 +2163,7 @@ export class RecallService {
         gistHash,
         conflictKey: null,
         conflictObject: null,
-        localRaw,
+        detailIds,
       };
       candidate.fragment.score = scoreCandidate(candidate, cue, now);
 
@@ -2003,7 +2303,8 @@ export class RecallService {
       candidate.detail = await this.expandCandidate(candidate, cue, reason, warnings);
       candidate.detail.tookMs = elapsed(started, this.now());
       candidate.fragment.detail = candidate.detail;
-      candidate.fragment.hasDetail = true;
+      candidate.fragment.hasDetail = candidate.detail.availability.includes('available')
+        || candidate.detail.source === 'cache';
       candidate.fragment.detailAvailability = dedupe([
         ...candidate.fragment.detailAvailability,
         ...candidate.detail.availability,
@@ -2012,6 +2313,10 @@ export class RecallService {
         ...candidate.fragment.detailKinds,
         candidate.detail.format === 'verbatim' ? 'raw_quote' : 'record_body',
       ]);
+      if (candidate.detail.source === 'cache') candidate.fragment.source = 'cache';
+      if (candidate.detail.detailIds && candidate.detail.detailIds.length > 0) {
+        candidate.fragment.detailIds = dedupe([...candidate.fragment.detailIds, ...candidate.detail.detailIds]);
+      }
     }
   }
 
@@ -2063,44 +2368,58 @@ export class RecallService {
   ): Promise<FragmentDetail> {
     const record = candidate.record;
     const kind = candidate.fragment.kind;
-    const raw = candidate.localRaw;
     const body = this.recordBody(record, kind);
     const quote = reason === 'quote_request' || cue.detailIntent.level === 'quote';
     let text = body;
     let format: FragmentDetail['format'] = kind === 'compact' ? 'summary' : 'structured';
-    const availability: string[] = [];
+    let availability = [...candidate.fragment.detailAvailability];
+    let source: FragmentDetail['source'] = 'record';
+    let stale = false;
+    let truncated = false;
+    let detailIds: string[] = [];
 
-    if (quote) {
-      if (raw.length > 0) {
-        text = raw.map((chunk) => chunk.text).join('\n\n');
-        format = 'verbatim';
-        availability.push('local_raw');
-      } else {
-        text = `${body}\n\n原文仅保留在写入设备，当前设备只有已沉降记录。`;
-        format = 'summary';
-        availability.push('missing_cross_device');
-        pushWarning(warnings, 'raw_unavailable');
-      }
-    } else if (reason === 'command_request' && raw.length > 0) {
-      text = body.length > 0
-        ? `${body}\n\n原文：\n${raw.map((chunk) => chunk.text).join('\n')}`
-        : raw.map((chunk) => chunk.text).join('\n');
-      format = body.length > 0 ? 'structured' : 'verbatim';
-      availability.push('local_raw');
-    } else if (reason === 'exact_value' && raw.length > 0) {
-      // 事实对象保持结构化；原文只作为附加证据，不替换权威字段。
-      text = `${body}\n\n原文：\n${raw.map((chunk) => chunk.text).join('\n')}`;
-      format = 'structured';
-      availability.push('local_raw');
-    } else if (kind === 'compact') {
+    if (kind === 'compact') {
       text = `以下为已沉降摘要，不是原文。\n${body}`;
       format = 'summary';
-      availability.push('cloud');
-    } else if (raw.length > 0) {
-      availability.push('local_raw');
+      availability = ['available'];
+      source = 'record';
+    } else if (candidate.detailIds.length > 0) {
+      const fetched = await this.fetchDetails(candidate.detailIds, cue.agentId, warnings);
+      availability = fetched.availability;
+      source = fetched.source;
+      stale = fetched.stale;
+      truncated = fetched.truncated;
+      detailIds = fetched.detailIds;
+      if (fetched.text.length > 0) {
+        if (quote) {
+          text = fetched.text;
+          format = 'verbatim';
+        } else if (reason === 'command_request') {
+          text = body.length > 0 ? `${body}\n\n原文：\n${fetched.text}` : fetched.text;
+          format = body.length > 0 ? 'structured' : 'verbatim';
+        } else if (reason === 'exact_value') {
+          // 事实对象保持结构化；原文只作为附加证据，不替换权威字段。
+          text = `${body}\n\n原文：\n${fetched.text}`;
+          format = 'structured';
+        } else {
+          text = body.length > 0 ? body : fetched.text;
+        }
+        if (fetched.stale) {
+          pushWarning(warnings, 'detail_from_cache');
+          text = `${text}\n\n（详情来自本机缓存，可能不是最新原文。）`;
+          if (format === 'verbatim') format = 'structured';
+        }
+      } else {
+        text = `${body}\n\n${detailUnavailableNotice(availability)}`;
+        format = 'summary';
+        pushWarning(warnings, `detail_${availability[0] ?? 'unavailable'}`);
+      }
     } else {
-      availability.push('cloud');
-      if (cue.detailIntent.reasons.includes('quote_request')) availability.push('missing_cross_device');
+      const reasonCode = availability[0] ?? 'pending_sync';
+      text = `${body}\n\n${detailUnavailableNotice([reasonCode])}`;
+      format = 'summary';
+      availability = [reasonCode];
+      pushWarning(warnings, `detail_${reasonCode}`);
     }
 
     const redacted = redactText(text);
@@ -2108,10 +2427,10 @@ export class RecallService {
     if (redacted.redacted) {
       pushWarning(warnings, 'redacted_content');
       if (format === 'verbatim') format = 'structured';
+      if (!availability.includes('redacted_only')) availability.push('redacted_only');
     }
 
-    const maxBytes = Math.min(4096, Math.max(512, cue.budget.maxBytes));
-    let truncated = false;
+    const maxBytes = Math.min(8192, Math.max(512, cue.budget.maxBytes));
     if (byteLength(text) > maxBytes) {
       const lineBased = format === 'verbatim' || reason === 'command_request' || kind === 'skill';
       const result = lineBased
@@ -2129,8 +2448,139 @@ export class RecallService {
       contentHash: contentHashOf(record),
       truncated,
       redacted: redacted.redacted,
-      availability: dedupe(availability.length > 0 ? availability : ['cloud']),
+      availability: dedupe(availability.length > 0 ? availability : ['available']),
+      source,
+      stale,
+      ...(detailIds.length > 0 ? { detailIds } : {}),
       tookMs: 0,
+    };
+  }
+
+  /**
+   * 通过 capability `/detail` 展开，最多 3 条；不读本机 raw。
+   * 不可用时返回诚实 availability；网络失败才允许读详情 cache 并标 stale。
+   */
+  private async fetchDetails(
+    ids: readonly string[],
+    agentId: string,
+    warnings: string[],
+    maxBytes = 8192,
+  ): Promise<{
+    text: string;
+    detailIds: string[];
+    availability: string[];
+    source: 'capability' | 'cache' | 'record';
+    stale: boolean;
+    truncated: boolean;
+  }> {
+    const actor = { type: 'agent' as const, agentId };
+    const texts: string[] = [];
+    const used: string[] = [];
+    const availability: string[] = [];
+    let redactedOnly = false;
+    let networkFailure = false;
+    let truncated = false;
+
+    for (const id of ids.slice(0, 3)) {
+      if (!this.client) {
+        networkFailure = true;
+        break;
+      }
+      try {
+        const response = await this.client.detailGet({
+          actor,
+          id,
+          includeText: true,
+          maxBytes,
+        });
+        const detail = isObject(response.data) ? response.data.detail : null;
+        if (!isObject(detail)) {
+          availability.push('pending_sync');
+          continue;
+        }
+        const record = detail as CapabilityDetailRecord;
+        const declared = Array.isArray(record.availability)
+          ? record.availability.filter((value): value is string => typeof value === 'string')
+          : [];
+        if (record.deletedAt !== undefined && record.deletedAt !== null) {
+          availability.push('deleted');
+          continue;
+        }
+        if (typeof record.expiresAt === 'number' && record.expiresAt > 0 && record.expiresAt <= this.now()) {
+          availability.push('expired');
+          await this.local.invalidateCachedDetail(id).catch(() => false);
+          continue;
+        }
+        if (typeof record.text === 'string' && record.text.length > 0) {
+          texts.push(record.text);
+          used.push(id);
+          if (record.truncated === true) truncated = true;
+          if (record.redacted === true) redactedOnly = true;
+          for (const value of declared) {
+            if (!availability.includes(value)) availability.push(value);
+          }
+          continue;
+        }
+        availability.push(declared[0] ?? 'pending_sync');
+      } catch (error) {
+        const mapped = mapDetailError(error);
+        if (mapped.code === 'pending_sync' || mapped.code === 'unavailable') {
+          networkFailure = true;
+        } else if (mapped.code === 'deleted' || mapped.code === 'expired') {
+          await this.local.invalidateCachedDetail(id).catch(() => false);
+        }
+        availability.push(mapped.code);
+        pushWarning(warnings, mapped.warning);
+      }
+    }
+
+    if (texts.length > 0) {
+      return {
+        text: texts.join('\n\n'),
+        detailIds: used,
+        availability: dedupe([
+          'available',
+          ...(redactedOnly ? ['redacted_only'] : []),
+          ...availability,
+        ]),
+        source: 'capability',
+        stale: false,
+        truncated,
+      };
+    }
+
+    // 只有网络/能力不可用时才读只读 cache；过期/删除/未订阅不用缓存冒充原文。
+    if (networkFailure || availability.includes('pending_sync') || availability.includes('unavailable')) {
+      const cachedTexts: string[] = [];
+      const cachedIds: string[] = [];
+      for (const id of ids.slice(0, 3)) {
+        const cached = await this.local.getCachedDetail<{ detail?: CapabilityDetailRecord }>(id);
+        const text = cached?.detail?.text;
+        if (typeof text === 'string' && text.length > 0) {
+          cachedTexts.push(text);
+          cachedIds.push(id);
+        }
+      }
+      if (cachedTexts.length > 0) {
+        pushWarning(warnings, 'detail_from_cache');
+        return {
+          text: cachedTexts.join('\n\n'),
+          detailIds: cachedIds,
+          availability: ['available'],
+          source: 'cache',
+          stale: true,
+          truncated: false,
+        };
+      }
+    }
+
+    return {
+      text: '',
+      detailIds: [],
+      availability: dedupe(availability.length > 0 ? availability : ['pending_sync']),
+      source: 'record',
+      stale: false,
+      truncated: false,
     };
   }
 
@@ -2176,42 +2626,6 @@ export class RecallService {
       return firstString(content.summary) ?? recordText(record);
     }
     return recordText(record);
-  }
-
-  private async findLocalRaw(
-    record: Record<string, unknown>,
-    provenance: ProvenanceRef,
-    cue: Cue,
-    cache: Map<string, RawChunk[]>,
-  ): Promise<RawChunk[]> {
-    const cloudId = this.identity.cloudId ?? 'cl_local';
-    const writerAgent = provenance.agentId ?? cue.agentId;
-    if (writerAgent !== cue.agentId) return [];
-    const rawIds = provenance.rawChunkIds ?? [];
-    const found: RawChunk[] = [];
-    for (const id of rawIds.slice(0, 8)) {
-      const chunk = await this.local.store.getRawChunk(id);
-      if (chunk && chunk.agentId === cue.agentId) found.push(chunk);
-    }
-    if (found.length > 0) return found.sort((a, b) => a.at - b.at).slice(0, 3);
-
-    const messageIds = new Set(provenance.messageIds ?? []);
-    if (messageIds.size === 0) return [];
-    const threadId = provenance.threadId ?? cue.threadId ?? '';
-    const key = `${cloudId}\u0000${cue.agentId}\u0000${threadId}`;
-    let pool = cache.get(key);
-    if (!pool) {
-      pool = await this.local.store.listRawChunks({
-        cloudId,
-        agentId: cue.agentId,
-        ...(threadId ? { threadId } : {}),
-      });
-      cache.set(key, pool);
-    }
-    return pool
-      .filter((chunk) => typeof chunk.messageId === 'string' && messageIds.has(chunk.messageId))
-      .sort((a, b) => a.at - b.at)
-      .slice(0, 3);
   }
 
   private assembleBlocks(
@@ -2539,12 +2953,18 @@ export class RecallService {
       expansions: run.selected.map((candidate) => ({
         fragmentId: candidate.fragment.id,
         sourceId: String(candidate.record.id),
+        domain: candidate.fragment.owner.domain,
+        source: candidate.fragment.provenance.source ?? null,
         detailKinds: candidate.fragment.detailKinds,
+        detailIds: candidate.fragment.detailIds.slice(0, 3),
+        availability: candidate.fragment.detailAvailability,
         reason: candidate.expandReason ?? null,
         status: candidate.detail ? 'ok' : 'gist',
         tookMs: candidate.detail?.tookMs ?? 0,
         bytes: candidate.detail ? byteLength(candidate.detail.text) : 0,
-        detailKind: candidate.detail?.format ?? null,
+        detailKind: candidate.detail ? 'raw_chunk' : null,
+        format: candidate.detail?.format ?? null,
+        sourceDetailIds: candidate.detail?.detailIds ?? [],
       })),
       injected,
       silenceReason,

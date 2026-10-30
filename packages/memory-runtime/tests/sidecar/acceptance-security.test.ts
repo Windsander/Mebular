@@ -4,7 +4,6 @@
 // 使用 fake capability 与真实 sidecar 服务/HTTP 面；不启动 MCP/core、不访问网络。
 
 import { describe, it, expect, afterEach } from '@jest/globals';
-import { createHash } from 'node:crypto';
 import { bearer, getJson, postJson } from './helpers.js';
 import {
   ACCEPTANCE_THREAD,
@@ -16,7 +15,6 @@ import {
   type AcceptanceHarness,
 } from './acceptance-fixtures.js';
 import { SidecarServer, type SidecarStatusSnapshot } from '../../src/sidecar/server.js';
-import type { RawChunk } from '../../src/runtime/types.js';
 
 const AGENT = 'opencode';
 const HOST_TOKEN = 'host-token-acceptance-secret';
@@ -66,12 +64,14 @@ function statusSnapshot(harness: AcceptanceHarness): () => Promise<SidecarStatus
         sources: ['heuristic', 'host'],
       },
       counts: {
-        rawChunks: stats.rawChunks,
+        stagingChunks: stats.stagingChunks,
+        localStagingChunks: stats.stagingChunks,
         traces: stats.traces,
         cachedRecords: stats.cacheEntries,
+        detailCacheEntries: stats.detailCacheEntries,
+        detailCacheBytes: stats.detailCacheBytes,
         outbox: stats.outboxItems,
         deadLetter: stats.deadLetter,
-        localRawChunks: stats.rawChunks,
         localTraces: stats.traces,
         ingested: ingest.ingested,
         settled: ingest.settled,
@@ -79,6 +79,28 @@ function statusSnapshot(harness: AcceptanceHarness): () => Promise<SidecarStatus
         contexts: recall.contexts,
         feedback: recall.feedback,
         recallSilent: recall.silent,
+      },
+      details: {
+        available: true,
+        staging: {
+          chunks: stats.stagingChunks,
+          hours: harness.config.detail.stagingHours,
+          maxBytes: harness.config.detail.stagingBytes,
+        },
+        cache: {
+          entries: stats.detailCacheEntries,
+          bytes: stats.detailCacheBytes,
+          days: harness.config.detail.cacheDays,
+          maxBytes: harness.config.detail.cacheBytes,
+        },
+        outbox: { items: stats.outboxItems, bytes: stats.outboxBytes },
+        quota: {
+          bytesPerDomain: harness.config.detail.quotaBytesPerDomain,
+          bytesCloud: harness.config.detail.quotaBytesCloud,
+          usedBytes: null,
+          bytes: null,
+        },
+        retentionDays: { conversation: 30, tool_output: 7, document_slice: 90 },
       },
       outbox,
       limits: {
@@ -131,23 +153,25 @@ async function createHttpHarness(): Promise<HttpHarness> {
   return entry;
 }
 
-function rawChunk(text: string, id: string, messageId: string): RawChunk {
-  return {
-    schema: 1,
+function seedDetail(harness: AcceptanceHarness, text: string, id: string, messageId: string, recordId: string): void {
+  harness.fake.details.push({
     id,
-    threadId: ACCEPTANCE_THREAD,
-    agentId: AGENT,
-    hostId: 'h_accept',
+    detailKind: 'raw_chunk',
+    domain: `agent:${AGENT}`,
+    recordIds: [recordId],
     role: 'user',
     text,
-    mime: 'text/plain',
-    at: NOW - DAY_MS,
     messageId,
     chunkIndex: 0,
-    contentHash: createHash('sha256').update(text).digest('hex'),
-    redaction: { applied: false, rules: [] },
-    expiresAt: NOW + DAY_MS,
-  };
+    provenance: {
+      source: 'runtime',
+      agentId: AGENT,
+      deviceId: 'device-a',
+      hostId: 'h_a',
+      threadId: ACCEPTANCE_THREAD,
+    },
+    createdAt: NOW - DAY_MS,
+  });
 }
 
 const hangingFetch = ((url: string, init?: RequestInit) => new Promise((_resolve, reject) => {
@@ -313,7 +337,6 @@ describe('0.3.0 acceptance: memory security', () => {
       agentId: AGENT,
       threadId: ACCEPTANCE_THREAD,
       extractor: 'host' as const,
-      capture: 'off' as const,
     };
     await expect(harness.ingest.ingest({
       ...base,
@@ -381,7 +404,7 @@ describe('0.3.0 acceptance: memory security', () => {
         source: 'runtime', writerType: 'agent', writerId: 'opencode', extractor: 'heuristic',
         model: null, version: '0.3.0', deviceId: 'device-a', hostId: 'h_a',
         threadId: ACCEPTANCE_THREAD, agentId: 'opencode', agentName: 'OpenCode',
-        confirmation: 'none', at: NOW - DAY_MS, messageIds: ['m_cloud'], rawChunkIds: ['rc_cloud'],
+        confirmation: 'none', at: NOW - DAY_MS, messageIds: ['m_cloud'], detailIds: ['rc_cloud'],
       },
     });
     const onlyA = acceptanceRecord({
@@ -405,7 +428,7 @@ describe('0.3.0 acceptance: memory security', () => {
       filterQuery: true,
     });
     harnesses.push(cloudA, cloudB);
-    await cloudA.local.store.putRawChunk('cl_cloud_a', rawChunk(sharedText, 'rc_cloud', 'm_cloud'));
+    seedDetail(cloudA, sharedText, 'rc_cloud', 'm_cloud', shared.id);
 
     const request = {
       agentId: AGENT,
@@ -427,7 +450,7 @@ describe('0.3.0 acceptance: memory security', () => {
     expect(fragmentB?.sourceIds).toContain(shared.id);
     expect(fragmentB?.sourceIds).not.toContain(onlyA.id);
     expect(fragmentB?.detail?.format).not.toBe('verbatim');
-    expect(fragmentB?.detail?.availability).toContain('missing_cross_device');
+    expect(fragmentB?.detail?.availability).toContain('pending_sync');
 
     // 未显式订阅的 namespace 不进入默认召回。
     const notes = await createAcceptanceHarness({

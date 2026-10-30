@@ -2,17 +2,15 @@
 //
 // 固定 fixture + fake capability（可选词法过滤）驱动真实 RecallService：
 // - 宽泛主题只给 gist；数字/日期/端口/版本/命令/路径/原文/追问才展开；
-// - 无命中/闲聊/否定/过期/归档沉默；冲突成组；跨设备无 Raw 诚实降级；
+// - 无命中/闲聊/否定/过期/归档沉默；冲突成组；跨设备详情在保留期内可展开；
 // - 统计 precision、详情正确率、false recall、capability 调用预算与字节/token 预算。
 //
 // 不启动真实 MCP/core、不访问网络、不下载模型。矩阵结果在测试末尾打印。
 
 import { describe, it, expect, afterEach } from '@jest/globals';
-import { createHash } from 'node:crypto';
 import { ACCEPTANCE_THREAD, NOW, DAY_MS, acceptancePolicy, acceptanceRecord, createAcceptanceHarness, type AcceptanceHarness } from './acceptance-fixtures.js';
 import type { FakeCompact, FakeMemoryRecord } from './fake-capability.js';
 import type { ContextResponse, MemoryFragment } from '../../src/sidecar/recall.js';
-import type { RawChunk } from '../../src/runtime/types.js';
 
 const AGENT = 'opencode';
 const LONG_EPISODE = [
@@ -392,7 +390,7 @@ const staleCompact: FakeCompact = {
   updatedAt: NOW - 10 * DAY_MS,
 };
 
-type DetailExpectation = 'none' | 'expand' | 'verbatim' | 'missing_cross_device' | 'conflict' | 'truncated';
+type DetailExpectation = 'none' | 'expand' | 'verbatim' | 'conflict' | 'truncated';
 
 interface ScenarioRequest {
   maxFragments?: number;
@@ -466,15 +464,16 @@ function scenarios(): QualityScenario[] {
       expected: { relevant: [pathFact.id], detail: 'expand', require: ['/opt/mebular/deploy.sh'], maxFragments: 1 },
     },
     {
-      id: 'Q08', name: '本机原文 → verbatim', query: '我当时原话怎么说的？',
+      id: 'Q08', name: '详情展开 → verbatim', query: '我当时原话怎么说的？',
       records: [verbatimEpisode],
       rawText: { id: 'rc_verbatim', messageId: 'm_verbatim', text: VERBATIM_TEXT },
       expected: { relevant: [verbatimEpisode.id], detail: 'verbatim', require: [VERBATIM_TEXT] },
     },
     {
-      id: 'Q09', name: '跨设备无 Raw → 诚实降级', query: '我当时原话怎么说的？',
+      id: 'Q09', name: '跨设备详情 → 保留期内可展开', query: '我当时原话怎么说的？',
       records: [crossDeviceEpisode],
-      expected: { relevant: [crossDeviceEpisode.id], detail: 'missing_cross_device', require: ['原文仅保留在写入设备'] },
+      rawText: { id: 'rc_remote_device', messageId: 'm_remote', text: CROSS_DEVICE_TEXT },
+      expected: { relevant: [crossDeviceEpisode.id], detail: 'verbatim', require: [CROSS_DEVICE_TEXT] },
     },
     {
       id: 'Q10', name: '追问“那个方案” → expand', query: '那个方案后来呢？',
@@ -598,24 +597,28 @@ afterEach(async () => {
   for (const harness of harnesses.splice(0)) await harness.close();
 });
 
-function putRaw(harness: AcceptanceHarness, raw: { id: string; messageId: string; text: string }): Promise<unknown> {
-  const chunk: RawChunk = {
-    schema: 1,
+function seedDetail(
+  harness: AcceptanceHarness,
+  raw: { id: string; messageId: string; text: string },
+  recordId: string,
+): void {
+  harness.fake.details.push({
     id: raw.id,
-    threadId: ACCEPTANCE_THREAD,
-    agentId: AGENT,
-    hostId: harness.identity.hostId,
+    detailKind: 'raw_chunk',
+    domain: `agent:${AGENT}`,
+    recordIds: [recordId],
     role: 'user',
     text: raw.text,
-    mime: 'text/plain',
-    at: NOW - DAY_MS,
     messageId: raw.messageId,
     chunkIndex: 0,
-    contentHash: createHash('sha256').update(raw.text).digest('hex'),
-    redaction: { applied: false, rules: [] },
-    expiresAt: NOW + DAY_MS,
-  };
-  return harness.local.store.putRawChunk(harness.identity.cloudId, chunk);
+    provenance: {
+      source: 'runtime',
+      agentId: AGENT,
+      deviceId: 'device-a',
+      threadId: ACCEPTANCE_THREAD,
+    },
+    createdAt: NOW - DAY_MS,
+  });
 }
 
 function fragmentText(fragment: MemoryFragment): string {
@@ -638,9 +641,20 @@ describe('0.3.0 acceptance: fragmented recall quality', () => {
     expect(allScenarios.length).toBeGreaterThanOrEqual(20);
 
     for (const scenario of allScenarios) {
-      harness.fake.setRecords(scenario.records);
+      const detailRecordId = scenario.expected.relevant[0];
+      harness.fake.setRecords(scenario.records.map((entry) => (
+        scenario.rawText && detailRecordId === entry.id
+          ? {
+            ...entry,
+            provenance: { ...(entry.provenance ?? {}), detailIds: [scenario.rawText.id] },
+          }
+          : entry
+      )));
       harness.fake.setCompacts(scenario.compacts ?? []);
-      if (scenario.rawText) await putRaw(harness, scenario.rawText);
+      harness.fake.setDetails([]);
+      if (scenario.rawText && detailRecordId) {
+        seedDetail(harness, scenario.rawText, detailRecordId);
+      }
 
       const before = harness.fake.requests.length;
       const request = {
@@ -730,17 +744,11 @@ describe('0.3.0 acceptance: fragmented recall quality', () => {
         }
       } else if (detailExpectation === 'verbatim') {
         const top = fragments[0];
-        if (!top?.detail || top.detail.format !== 'verbatim' || top.detail.text !== VERBATIM_TEXT) {
+        const expectedText = scenario.expected.require?.[0];
+        if (!top?.detail || top.detail.format !== 'verbatim'
+          || (expectedText !== undefined && top.detail.text !== expectedText)) {
           detailOk = false;
           detailFailures.push(`${scenario.id} 原文未以 verbatim 返回`);
-        }
-      } else if (detailExpectation === 'missing_cross_device') {
-        const top = fragments[0];
-        if (!top?.detail || top.detail.format === 'verbatim'
-          || !top.detail.availability.includes('missing_cross_device')
-          || !top.detail.text.includes('原文仅保留在写入设备')) {
-          detailOk = false;
-          detailFailures.push(`${scenario.id} 跨设备无 Raw 未诚实降级`);
         }
       } else if (detailExpectation === 'truncated') {
         if (!data.truncated) {
@@ -784,6 +792,11 @@ describe('0.3.0 acceptance: fragmented recall quality', () => {
       const counts = new Map<string, number>();
       for (const path of callPaths) counts.set(path, (counts.get(path) ?? 0) + 1);
       for (const [path, count] of counts) {
+        // 详情按 fragment/record 展开，单次召回最多 3 条；其余通道最多一次。
+        if (path === 'detail') {
+          if (count > 3) fail(`capability 通道 detail 调用 ${count} 次`);
+          continue;
+        }
         if (count > 1) fail(`capability 通道 ${path} 调用 ${count} 次`);
       }
       if (calls.length > (scenario.maxCalls ?? 8)) fail(`capability 调用 ${calls.length} 次超预算`);

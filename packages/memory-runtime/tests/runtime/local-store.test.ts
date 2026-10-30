@@ -74,78 +74,78 @@ describe('RuntimeLocalStore', () => {
     const local = store();
     const chunk = raw('以后默认用深色主题');
 
-    const first = await local.putRawChunk('cl_test', chunk);
+    const first = await local.putStagingChunk('cl_test', chunk);
     expect(first.duplicate).toBe(false);
     expect(first.chunk.id).toBe(chunk.id);
 
-    const second = await local.putRawChunk('cl_test', { ...chunk, id: newRawChunkId() });
+    const second = await local.putStagingChunk('cl_test', { ...chunk, id: newRawChunkId() });
     expect(second.duplicate).toBe(true);
     expect(second.chunk.id).toBe(chunk.id);
-    expect(await local.countRawChunks()).toBe(1);
+    expect(await local.countStagingChunks()).toBe(1);
 
     const conflicting: RawChunk = {
       ...chunk,
       id: newRawChunkId(),
       text: '不同文本但相同哈希键',
     };
-    await expect(local.putRawChunk('cl_test', conflicting)).rejects.toMatchObject({
+    await expect(local.putStagingChunk('cl_test', conflicting)).rejects.toMatchObject({
       code: 'content_hash_mismatch',
     });
-    expect(await local.countRawChunks()).toBe(1);
+    expect(await local.countStagingChunks()).toBe(1);
 
-    const otherCloud = await local.putRawChunk('cl_other', chunk);
+    const otherCloud = await local.putStagingChunk('cl_other', chunk);
     expect(otherCloud.duplicate).toBe(false);
-    expect(await local.countRawChunks()).toBe(2);
+    expect(await local.countStagingChunks()).toBe(2);
   });
 
   it('文件与目录权限：runtime/ 0700、JSONL 0600', async () => {
     // Windows has no POSIX mode bits; ACLs are enforced by the OS profile.
     if (process.platform === 'win32') return;
     const local = store();
-    await local.putRawChunk('cl_test', raw('权限测试'));
+    await local.putStagingChunk('cl_test', raw('权限测试'));
     await local.putTrace(trace());
 
     expect((await stat(dir)).mode & 0o777).toBe(0o700);
-    expect((await stat(join(dir, 'raw'))).mode & 0o777).toBe(0o700);
-    expect((await stat(join(dir, 'raw', 'chunks.jsonl'))).mode & 0o777).toBe(0o600);
+    expect((await stat(join(dir, 'staging'))).mode & 0o777).toBe(0o700);
+    expect((await stat(join(dir, 'staging', 'chunks.jsonl'))).mode & 0o777).toBe(0o600);
     expect((await stat(join(dir, 'traces.jsonl'))).mode & 0o777).toBe(0o600);
   });
 
   it('过期清理：启动/显式 cleanup 删除 Raw，清理后同内容可重新写入', async () => {
     const local = store();
     const chunk = raw('短期内容', { expiresAt: now + 1000 });
-    await local.putRawChunk('cl_test', chunk);
-    expect(await local.countRawChunks()).toBe(1);
+    await local.putStagingChunk('cl_test', chunk);
+    expect(await local.countStagingChunks()).toBe(1);
 
     now += 2000;
     const cleaned = await local.cleanup();
-    expect(cleaned.rawChunks).toBe(0);
-    expect(await local.countRawChunks()).toBe(0);
-    expect(await local.getRawChunk(chunk.id)).toBeNull();
+    expect(cleaned.stagingChunks).toBe(0);
+    expect(await local.countStagingChunks()).toBe(0);
+    expect(await local.getStagingChunk(chunk.id)).toBeNull();
 
-    const rewritten = await local.putRawChunk('cl_test', { ...chunk, expiresAt: now + 1000 });
+    const rewritten = await local.putStagingChunk('cl_test', { ...chunk, expiresAt: now + 1000 });
     expect(rewritten.duplicate).toBe(false);
-    expect(await local.countRawChunks()).toBe(1);
+    expect(await local.countStagingChunks()).toBe(1);
 
-    const onDisk = await readFile(join(dir, 'raw', 'chunks.jsonl'), 'utf8');
+    const onDisk = await readFile(join(dir, 'staging', 'chunks.jsonl'), 'utf8');
     expect(onDisk.trim().split('\n')).toHaveLength(1);
   });
 
   it('崩溃恢复：损坏/半行 JSONL 被丢弃并原子重写，不粘连下一条', async () => {
     const local = store();
     const first = raw('第一条');
-    await local.putRawChunk('cl_test', first);
-    await appendFile(join(dir, 'raw', 'chunks.jsonl'), '{"cloudId":"cl_test","chunk":');
+    await local.putStagingChunk('cl_test', first);
+    await appendFile(join(dir, 'staging', 'chunks.jsonl'), '{"cloudId":"cl_test","chunk":');
 
     const recovered = store();
     await recovered.init();
-    expect(await recovered.countRawChunks()).toBe(1);
-    expect((await recovered.listRawChunks())[0]!.id).toBe(first.id);
+    expect(await recovered.countStagingChunks()).toBe(1);
+    expect((await recovered.listStagingChunks())[0]!.id).toBe(first.id);
 
     const second = raw('第二条');
-    await recovered.putRawChunk('cl_test', second);
-    expect(await recovered.countRawChunks()).toBe(2);
-    const text = await readFile(join(dir, 'raw', 'chunks.jsonl'), 'utf8');
+    await recovered.putStagingChunk('cl_test', second);
+    expect(await recovered.countStagingChunks()).toBe(2);
+    const text = await readFile(join(dir, 'staging', 'chunks.jsonl'), 'utf8');
     expect(text.endsWith('\n')).toBe(true);
     for (const line of text.trim().split('\n')) {
       expect(() => JSON.parse(line)).not.toThrow();
@@ -155,8 +155,8 @@ describe('RuntimeLocalStore', () => {
   it('缺少结尾换行的有效 JSONL 会先重写，再安全追加', async () => {
     const local = store();
     const first = raw('无换行');
-    await local.putRawChunk('cl_test', first);
-    const path = join(dir, 'raw', 'chunks.jsonl');
+    await local.putStagingChunk('cl_test', first);
+    const path = join(dir, 'staging', 'chunks.jsonl');
     const current = await readFile(path, 'utf8');
     await appendFile(path, JSON.stringify({ cloudId: 'cl_test', chunk: raw('手工记录') }).trim());
     expect((await readFile(path, 'utf8')).endsWith('\n')).toBe(false);
@@ -164,8 +164,8 @@ describe('RuntimeLocalStore', () => {
 
     const recovered = store();
     await recovered.init();
-    expect(await recovered.countRawChunks()).toBe(2);
-    await recovered.putRawChunk('cl_test', raw('后续'));
+    expect(await recovered.countStagingChunks()).toBe(2);
+    await recovered.putStagingChunk('cl_test', raw('后续'));
     const lines = (await readFile(path, 'utf8')).trim().split('\n');
     expect(lines).toHaveLength(3);
     expect(lines.every((line) => Boolean(JSON.parse(line)))).toBe(true);
@@ -210,8 +210,8 @@ describe('RuntimeLocalStore', () => {
 
   it('错误码：空 id / 非法 expiresAt / 重复 trace id', async () => {
     const local = store();
-    await expect(local.putRawChunk('cl_test', raw('x', { id: '' }))).rejects.toBeInstanceOf(RuntimeLocalStoreError);
-    await expect(local.putRawChunk('cl_test', raw('x', { expiresAt: Number.NaN }))).rejects.toMatchObject({
+    await expect(local.putStagingChunk('cl_test', raw('x', { id: '' }))).rejects.toBeInstanceOf(RuntimeLocalStoreError);
+    await expect(local.putStagingChunk('cl_test', raw('x', { expiresAt: Number.NaN }))).rejects.toMatchObject({
       code: 'invalid_raw_chunk',
     });
     const t = trace();

@@ -574,7 +574,10 @@ export interface WriteProvenance {
   model: string | null;
   threadId?: string;
   messageIds: string[];
-  rawChunkIds: string[];
+  /** 旧字段：仅兼容旧读取方；0.3 新写入不依赖本地 staging id。 */
+  rawChunkIds?: string[];
+  /** 指向 DetailRecord；由 detail 沉降后回填。 */
+  detailIds?: string[];
   confirmation: Confirmation;
   agentName?: string;
 }
@@ -620,7 +623,9 @@ export function toWriteItem(
     ...(context.threadId ? { threadId: context.threadId } : {}),
     // capability 的 provenance 上限 8 KiB；这里保守截断，避免 413。
     messageIds: [...(context.messageIds ?? [])].slice(0, 16),
-    rawChunkIds: [...(context.rawChunkIds ?? [])].slice(0, 32),
+    ...(context.rawChunkIds && context.rawChunkIds.length > 0
+      ? { rawChunkIds: [...context.rawChunkIds].slice(0, 32) }
+      : {}),
   };
   const item: CapabilityWriteItem = {
     clientItemId: clientItemIdFor(candidate, context.agentId),

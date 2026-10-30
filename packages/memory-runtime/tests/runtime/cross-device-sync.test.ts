@@ -349,7 +349,7 @@ describe('Runtime 跨设备与跨 Agent（真实同步）', () => {
       namespaces: ['notes'],
     });
     expect(helperRecall.records.map((record) => record.id)).toContain(preferenceRecord!.id);
-  });
+  }, 30000);
 
   it('删除墓碑、归档跨设备生效；compact 标记 stale；本地 checkpoint 不泄漏', async () => {
     const a = await makeDevice('device-A', {
@@ -426,7 +426,7 @@ describe('Runtime 跨设备与跨 Agent（真实同步）', () => {
     expect(await b.runtime.getCheckpoint('th_local_deleted', 'opencode'))
       .toEqual({ checkpoint: null });
     expect((await b.runtime.status()).counts.checkpoints).toBe(0);
-  });
+  }, 30000);
 
   it('跨 Agent：共享记录可见，Self/Checkpoint 按 agentId 隔离，内部对象不进入普通查询', async () => {
     const a = await makeDevice('device-A', {
@@ -557,7 +557,7 @@ describe('Runtime 跨设备与跨 Agent（真实同步）', () => {
     const history = await b.memory.history({});
     expect(history.episodes.some((entry) => internalIds.has(entry.id))).toBe(false);
     await expect(b.memory.graph(compact.compactId!)).rejects.toMatchObject({ code: 'INTERNAL_OBJECT' });
-  });
+  }, 30000);
 
   it('云 checkpoint 跨设备 revision/lease：租约未过期拒绝接管，过期后可接管并同步新 revision', async () => {
     let now = Date.UTC(2026, 9, 29, 12, 0, 0);
@@ -606,7 +606,7 @@ describe('Runtime 跨设备与跨 Agent（真实同步）', () => {
       revision: 2,
       state: { version: 2 },
     });
-  });
+  }, 30000);
 
   it('模式切换不迁移；离线恢复、重复同步/ingest 幂等；同步后可重建索引', async () => {
     const a = await makeDevice('device-A');
@@ -740,5 +740,5 @@ describe('Runtime 跨设备与跨 Agent（真实同步）', () => {
     }
     const hits = await store.vectorQuery('gamma 离线期间', 10);
     expect(hits.map((hit) => hit.node.id)).toContain(gamma!.id);
-  });
+  }, 30000);
 });

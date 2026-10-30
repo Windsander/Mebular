@@ -908,7 +908,7 @@ describe('sidecar discovery and host authentication', () => {
     expect(calls.hooks).toHaveLength(0);
   });
 
-  it('rejects a token file readable by group/other', async () => {
+  (process.platform === 'win32' ? it.skip : it)('rejects a token file readable by group/other', async () => {
     const home = await tempDir();
     const { tokenFile } = await writeDiscovery(home);
     await chmod(tokenFile, 0o644);

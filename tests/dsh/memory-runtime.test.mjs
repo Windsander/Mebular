@@ -558,22 +558,25 @@ describe('@mebular/dsh-plugin memory runtime：sidecar 发现与 host token', ()
       expect(JSON.stringify(adapter.getState())).not.toContain(expected);
     }
 
-    const { home, tokenFile } = await makeHome({}, 'insecure-token');
-    await chmod(tokenFile, 0o644);
-    const fetch = installFetch(() => jsonOk({ fragments: [], blocks: [] }));
-    const ctx = fakeContext();
-    const adapter = createMemoryRuntimeAdapter({
-      ctx,
-      config: { enabled: true, ingest: false, checkpoints: false, hideMemoryTools: false, auth: 'auto' },
-      homeDir: home,
-      env: {},
-      fetchImpl: fetch.fetchImpl,
-    });
-    cleanups.push(() => adapter.dispose());
-    const { payload, fallback } = preStepPayload({ text: 'insecure token' });
-    await waterfall(ctx, 'agent/pre-step', payload, fallback);
-    expect(fetch.calls[0].init.headers.authorization).toBeUndefined();
-    expect(fetch.calls[0].url).toBe(`${BASE}/context`);
+    // Windows 没有 POSIX group/other 位，文件权限检查按平台跳过。
+    if (process.platform !== 'win32') {
+      const { home, tokenFile } = await makeHome({}, 'insecure-token');
+      await chmod(tokenFile, 0o644);
+      const fetch = installFetch(() => jsonOk({ fragments: [], blocks: [] }));
+      const ctx = fakeContext();
+      const adapter = createMemoryRuntimeAdapter({
+        ctx,
+        config: { enabled: true, ingest: false, checkpoints: false, hideMemoryTools: false, auth: 'auto' },
+        homeDir: home,
+        env: {},
+        fetchImpl: fetch.fetchImpl,
+      });
+      cleanups.push(() => adapter.dispose());
+      const { payload, fallback } = preStepPayload({ text: 'insecure token' });
+      await waterfall(ctx, 'agent/pre-step', payload, fallback);
+      expect(fetch.calls[0].init.headers.authorization).toBeUndefined();
+      expect(fetch.calls[0].url).toBe(`${BASE}/context`);
+    }
   });
 
   it('401 会重新读取轮换后的 token 文件并重试一次', async () => {

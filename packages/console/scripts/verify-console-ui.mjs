@@ -160,7 +160,7 @@ async function seedHome(home) {
   const { Mebular, IdentityManager, POLICY_NAMESPACE } = await import('@mebular/core');
   // 运行时内部对象 helper 用本工作树构建产物（node_modules 可能指向旧包）。
   const { createCompactNode, createContextCheckpointNode, createSelfRecordNode } = await import(
-    new URL('../../../dist/index.js', import.meta.url).href
+    new URL('../../../packages/memory-runtime/dist/index.js', import.meta.url).href
   );
   const { securityActionDigest, pairingCodeForDigest } = await import('@mebular/fleet');
   const master = await new IdentityManager().generateUserMasterKey();

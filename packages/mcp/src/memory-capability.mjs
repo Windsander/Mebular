@@ -1191,10 +1191,11 @@ function renderNodeText(node) {
   }
 }
 
-function recordView(memory, node, { userId = 'user', withScore = false } = {}) {
+function recordView(memory, node, { userId = 'user', withScore = false, detailAvailability = null } = {}) {
   const domain = domainOfNamespace(node?.namespace ?? memory?.metadata?.namespace);
   const owner = deriveOwner(domain, { userId });
   const metadata = isObject(node?.metadata) ? node.metadata : {};
+  const id = memory?.id ?? node?.id;
   const text = typeof memory?.content === 'string' ? memory.content : renderNodeText(node);
   const content = isObject(node?.content) ? node.content : { content: text };
   const tags = Array.isArray(node?.tags)
@@ -1203,7 +1204,7 @@ function recordView(memory, node, { userId = 'user', withScore = false } = {}) {
       ? memory.metadata.tags
       : [];
   const view = {
-    id: memory?.id ?? node?.id,
+    id,
     type: node?.type ?? memory?.type ?? 'unknown',
     kind: kindOf(node, memory),
     domain,
@@ -1218,7 +1219,10 @@ function recordView(memory, node, { userId = 'user', withScore = false } = {}) {
     validTo: normalizeValidTo(node?.validTo ?? memory?.metadata?.validTo),
     createdAt: node?.createdAt ?? memory?.metadata?.createdAt ?? null,
     updatedAt: node?.updatedAt ?? node?.createdAt ?? memory?.metadata?.createdAt ?? null,
-    detailAvailable: metadata.detailAvailable !== false,
+    // 详情是否存在是派生状态：新运行时批量查 DetailRecord；旧运行时保留 metadata 兼容。
+    detailAvailable: detailAvailability !== null
+      ? detailAvailability.get(id) === true
+      : metadata.detailAvailable !== false,
     legacy: !isObject(metadata.provenance),
   };
   if (withScore && typeof memory?.relevance === 'number') {
@@ -1230,8 +1234,22 @@ function recordView(memory, node, { userId = 'user', withScore = false } = {}) {
   return view;
 }
 
-function nodeView(node, { userId = 'user' } = {}) {
-  return recordView(null, node, { userId });
+function nodeView(node, { userId = 'user', detailAvailability = null } = {}) {
+  return recordView(null, node, { userId, detailAvailability });
+}
+
+/**
+ * 批量派生记录/节点的 `detailAvailable`。
+ *
+ * 新 MemoryService 一次扫描详情并返回 Map；旧运行时返回 null，
+ * 由 recordView 回退到 metadata（不产生 N+1 查询）。
+ */
+async function detailAvailabilityFor(currentService, ids, { now = Date.now() } = {}) {
+  if (!currentService || typeof currentService.detailAvailabilityForRecords !== 'function') return null;
+  const unique = [...new Set((Array.isArray(ids) ? ids : [])
+    .filter((id) => typeof id === 'string' && id.length > 0))];
+  if (unique.length === 0) return new Map();
+  return currentService.detailAvailabilityForRecords(unique, { now });
 }
 
 async function loadNode(app, id, cache) {
@@ -3677,9 +3695,14 @@ export function createMemoryCapabilityHandler({
           node: await loadNode(app(), memory.id, cache),
         })));
         // 选择/过滤/分页已全部由 MemoryService 完成；这里只做 owner/provenance 投影。
+        const detailAvailability = await detailAvailabilityFor(
+          currentService,
+          loaded.map(({ memory, node }) => memory?.id ?? node?.id),
+        );
         const records = loaded.map(({ memory, node }) => recordView(memory, node, {
           userId: identitySnapshot().userId,
           withScore: true,
+          detailAvailability,
         }));
         const total = typeof result?.totalMatches === 'number' ? result.totalMatches : records.length;
         return sendOk({
@@ -3735,9 +3758,14 @@ export function createMemoryCapabilityHandler({
           node: await loadNode(app(), memory.id, cache),
         })));
         // 选择/过滤/域关系过滤/分页已全部由 MemoryService 完成。
+        const detailAvailability = await detailAvailabilityFor(
+          currentService,
+          loaded.map(({ memory, node }) => memory?.id ?? node?.id),
+        );
         const records = loaded.map(({ memory, node }) => recordView(memory, node, {
           userId: identitySnapshot().userId,
           withScore: true,
+          detailAvailability,
         }));
         const relations = payload.includeRelations === true
           ? (Array.isArray(result?.relations) ? result.relations : []).map((relation) => ({
@@ -3788,8 +3816,12 @@ export function createMemoryCapabilityHandler({
           offset,
         });
         // 域过滤、会话/时间/主题过滤、排序与分页均由 MemoryService.history 统一执行。
+        const detailAvailability = await detailAvailabilityFor(
+          currentService,
+          (result?.episodes ?? []).map((node) => node?.id),
+        );
         const episodes = (result?.episodes ?? [])
-          .map((node) => nodeView(node, { userId: identitySnapshot().userId }));
+          .map((node) => nodeView(node, { userId: identitySnapshot().userId, detailAvailability }));
         const total = typeof result?.totalCount === 'number' ? result.totalCount : episodes.length;
         return sendOk({
           episodes,
@@ -3836,10 +3868,18 @@ export function createMemoryCapabilityHandler({
           page = { skills: all.slice(0, limit), total: all.length };
         }
         const cache = new Map();
-        const skills = [];
+        const loadedSkills = [];
         for (const skill of Array.isArray(page?.skills) ? page.skills : []) {
           const node = await loadNode(app(), skill?.id, cache);
           if (!node) continue;
+          loadedSkills.push({ skill, node });
+        }
+        const detailAvailability = await detailAvailabilityFor(
+          currentService,
+          loadedSkills.map(({ node }) => node?.id),
+        );
+        const skills = [];
+        for (const { skill, node } of loadedSkills) {
           const domain = domainOfNamespace(node?.namespace);
           const owner = deriveOwner(domain, { userId: identitySnapshot().userId });
           const metadata = isObject(node?.metadata) ? node.metadata : {};
@@ -3852,7 +3892,9 @@ export function createMemoryCapabilityHandler({
             ownerId: owner.ownerId,
             provenance: buildProvenance(metadata, domain, owner, node),
             legacy: !isObject(metadata.provenance),
-            detailAvailable: metadata.detailAvailable !== false,
+            detailAvailable: detailAvailability !== null
+              ? detailAvailability.get(node?.id) === true
+              : metadata.detailAvailable !== false,
           });
         }
         return sendOk({
@@ -4014,9 +4056,16 @@ export function createMemoryCapabilityHandler({
 
         // 深度/方向/边类型、域、内部与归档过滤均已由 MemoryService.graph 执行。
         const visibleNodes = result?.visitedNodes ?? [];
+        const detailAvailability = await detailAvailabilityFor(
+          currentService,
+          [startNode?.id, ...visibleNodes.map((node) => node?.id)],
+        );
         const nodes = visibleNodes
           .filter((node) => node.id !== payload.startId)
-          .map((node) => nodeView(node, { userId: identitySnapshot().userId }));
+          .map((node) => nodeView(node, {
+            userId: identitySnapshot().userId,
+            detailAvailability,
+          }));
         const edges = (result?.visitedEdges ?? [])
           .map((edge) => ({
             id: edge.id,
@@ -4026,7 +4075,10 @@ export function createMemoryCapabilityHandler({
             domain: domainOfNamespace(edge.namespace),
           }));
         return sendOk({
-          start: nodeView(startNode, { userId: identitySnapshot().userId }),
+          start: nodeView(startNode, {
+            userId: identitySnapshot().userId,
+            detailAvailability,
+          }),
           nodes,
           edges,
           truncated: false,

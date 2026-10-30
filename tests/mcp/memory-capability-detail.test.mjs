@@ -641,12 +641,23 @@ describe('保留、过期与配额', () => {
   it('过期详情：get 410、list 默认排除；user includeExpired 可见，agent 不可治理读取', async () => {
     const marker = unique('detail-expired');
     const recordId = await createRecord('agent:opencode', marker);
+    const recordBefore = await app.graph.getNode(recordId);
     const written = await writeDetail([detailItem('agent:opencode', [recordId], marker, {
       expiresAt: Date.now() - 1_000,
     })]);
     expect(written.status).toBe(200);
     const id = written.body.data.results[0].id;
-    expect((await app.graph.getNode(recordId)).metadata.detailAvailable).toBe(false);
+    const record = await app.graph.getNode(recordId);
+    expect(record.metadata?.detailAvailable).toBeUndefined();
+    expect(record.updatedAt).toBe(recordBefore.updatedAt);
+
+    const query = await post(capability('/query'), {
+      actor: agent,
+      query: marker,
+      domains: ['agent:opencode'],
+    }, { token });
+    expect(query.body.data.records.find((entry) => entry.id === recordId))
+      .toMatchObject({ detailAvailable: false });
 
     const got = await getDetail(id);
     expect(got.status).toBe(410);
@@ -806,11 +817,13 @@ describe('保留、过期与配额', () => {
 });
 
 describe('删除、墓碑与级联', () => {
-  it('删除详情只墓碑详情，不删除记录；记录 detailAvailable=false；get 410 detail_deleted', async () => {
+  it('删除详情只墓碑详情，不删除记录；记录 detailAvailable 派生为 false；get 410 detail_deleted', async () => {
     const marker = unique('detail-delete');
     const recordId = await createRecord('agent:opencode', marker);
+    const recordBefore = await app.graph.getNode(recordId);
     const written = await writeDetail([detailItem('agent:opencode', [recordId], marker)]);
     const id = written.body.data.results[0].id;
+    expect((await app.graph.getNode(recordId)).updatedAt).toBe(recordBefore.updatedAt);
 
     const res = await post(capability('/detail'), {
       actor: user,
@@ -827,7 +840,8 @@ describe('删除、墓碑与级联', () => {
     const record = await app.graph.getNode(recordId);
     expect(record).not.toBeNull();
     expect(record.deletedAt).toBeUndefined();
-    expect(record.metadata.detailAvailable).toBe(false);
+    expect(record.metadata?.detailAvailable).toBeUndefined();
+    expect(record.updatedAt).toBe(recordBefore.updatedAt);
 
     const query = await post(capability('/query'), {
       actor: agent,
@@ -948,15 +962,95 @@ describe('删除、墓碑与级联', () => {
     expect((await detailNode(detailId)).metadata.deletedReason).toBe('record_deleted');
   });
 
-  it('写入新详情后恢复记录 detailAvailable=true', async () => {
+  it('详情写入/删除/过期不推进记录 updatedAt：旧 Compact 不因派生标记误判 stale', async () => {
+    const marker = unique('detail-compact-stale');
+    const recordId = await createRecord('agent:opencode', marker);
+    const recordBefore = await app.graph.getNode(recordId);
+    // 模拟旧版 Compact：没有 sourceHashes，只能回退到 updatedAt 判定。
+    const compact = await app.graph.createNode('compact', {
+      summary: 'legacy compact without hashes',
+      sourceIds: [recordId],
+      sourceHashes: [],
+      strategy: 'summary',
+    }, undefined, { namespace: 'agent:opencode' });
+    await app.graph.updateNode(compact.id, {
+      metadata: {
+        internal: true,
+        internalObject: {
+          schema: 1,
+          kind: 'compact',
+          sourceIds: [recordId],
+          sourceHashes: [],
+        },
+      },
+    });
+    const compactStale = async () => {
+      const res = await post(capability('/internal-object'), {
+        actor: agent,
+        kind: 'compact',
+        op: 'get',
+        id: compact.id,
+      }, { token });
+      expect(res.status).toBe(200);
+      return res.body.data.object.stale;
+    };
+    expect(await compactStale()).toBe(false);
+
+    const written = await writeDetail([detailItem('agent:opencode', [recordId], marker)]);
+    const detailId = written.body.data.results[0].id;
+    const afterWrite = await app.graph.getNode(recordId);
+    expect(afterWrite.metadata?.detailAvailable).toBeUndefined();
+    expect(afterWrite.updatedAt).toBe(recordBefore.updatedAt);
+    expect(await compactStale()).toBe(false);
+
+    await post(capability('/detail'), { actor: user, op: 'delete', ids: [detailId] }, { token });
+    const afterDelete = await app.graph.getNode(recordId);
+    expect(afterDelete.metadata?.detailAvailable).toBeUndefined();
+    expect(afterDelete.updatedAt).toBe(recordBefore.updatedAt);
+    expect(await compactStale()).toBe(false);
+
+    await writeDetail([detailItem('agent:opencode', [recordId], `${marker}-expired`, {
+      expiresAt: Date.now() - 1_000,
+    })]);
+    expect((await app.graph.getNode(recordId)).updatedAt).toBe(recordBefore.updatedAt);
+    const query = await post(capability('/query'), {
+      actor: agent,
+      query: marker,
+      domains: ['agent:opencode'],
+    }, { token });
+    expect(query.body.data.records.find((entry) => entry.id === recordId))
+      .toMatchObject({ detailAvailable: false });
+    expect(await compactStale()).toBe(false);
+  });
+
+  it('写入新详情后记录 detailAvailable 派生恢复 true（不改 metadata/updatedAt）', async () => {
     const marker = unique('detail-availability-restore');
     const recordId = await createRecord('agent:opencode', marker);
+    const recordBefore = await app.graph.getNode(recordId);
     const first = await writeDetail([detailItem('agent:opencode', [recordId], marker)]);
     const firstId = first.body.data.results[0].id;
     await post(capability('/detail'), { actor: user, op: 'delete', ids: [firstId] }, { token });
-    expect((await app.graph.getNode(recordId)).metadata.detailAvailable).toBe(false);
+    const afterDelete = await app.graph.getNode(recordId);
+    expect(afterDelete.metadata?.detailAvailable).toBeUndefined();
+    expect(afterDelete.updatedAt).toBe(recordBefore.updatedAt);
+    const unavailable = await post(capability('/query'), {
+      actor: agent,
+      query: marker,
+      domains: ['agent:opencode'],
+    }, { token });
+    expect(unavailable.body.data.records.find((entry) => entry.id === recordId))
+      .toMatchObject({ detailAvailable: false });
 
     await writeDetail([detailItem('agent:opencode', [recordId], `${marker}-again`)]);
-    expect((await app.graph.getNode(recordId)).metadata.detailAvailable).toBe(true);
+    const afterWrite = await app.graph.getNode(recordId);
+    expect(afterWrite.metadata?.detailAvailable).toBeUndefined();
+    expect(afterWrite.updatedAt).toBe(recordBefore.updatedAt);
+    const available = await post(capability('/query'), {
+      actor: agent,
+      query: marker,
+      domains: ['agent:opencode'],
+    }, { token });
+    expect(available.body.data.records.find((entry) => entry.id === recordId))
+      .toMatchObject({ detailAvailable: true });
   });
 });

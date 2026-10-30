@@ -875,7 +875,6 @@ export class MemoryService {
         if (!node) {
           throw new ValidationError('详情写入后读取失败', { index: plan.index, id: createdNode.id });
         }
-        await this.refreshRecordDetailAvailability(plan.recordIds);
         live.push(node);
         dedupe.set(contentKey, node);
         if (clientKey !== null) dedupe.set(clientKey, node);
@@ -1021,6 +1020,35 @@ export class MemoryService {
       }
     }
     return pruned;
+  }
+
+  /**
+   * 读面派生 `detailAvailable`：详情是否存在，只在读取时计算。
+   *
+   * 不把派生标记写回 MemoryRecord —— `updateNode` 会推进 `updatedAt`，
+   * 而旧 Compact（没有 sourceHashes）用 `source.updatedAt > compact.createdAt`
+   * 判 stale；写/删详情不应该让 Compact 变 stale（契约 §2.7/§2.9）。
+   *
+   * 批量读取一次 detail 节点集合后按 recordIds 建索引，避免逐记录 N+1。
+   * 过期但尚未 tombstone 的详情同样视为不可用；墓碑/过期原因由 `/detail` 表达。
+   */
+  async detailAvailabilityForRecords(
+    recordIds: string[],
+    options: { now?: number } = {},
+  ): Promise<Map<string, boolean>> {
+    const unique = [...new Set(recordIds.filter((id): id is string => typeof id === 'string' && id.length > 0))];
+    const availability = new Map<string, boolean>();
+    for (const id of unique) availability.set(id, false);
+    if (unique.length === 0) return availability;
+    const now = options.now ?? Date.now();
+    const wanted = new Set(unique);
+    for (const detail of await this.detailNodes()) {
+      if (detail.deletedAt || isDetailExpired(detail, now)) continue;
+      for (const recordId of detailRecordIds(detail)) {
+        if (wanted.has(recordId)) availability.set(recordId, true);
+      }
+    }
+    return availability;
   }
 
   // ---------- 图 / 导入 / 状态 / 同步 ----------
@@ -1822,29 +1850,7 @@ export class MemoryService {
       deletedReason: reason,
     };
     await this.mebular.graph.updateNode(node.id, { metadata });
-    const ok = await this.mebular.graph.deleteNode(node.id);
-    if (ok) {
-      await this.refreshRecordDetailAvailability(detailRecordIds(node));
-    }
-    return ok;
-  }
-
-  private async refreshRecordDetailAvailability(recordIds: string[]): Promise<void> {
-    const unique = [...new Set(recordIds)];
-    if (unique.length === 0) return;
-    const liveDetails = (await this.detailNodes())
-      .filter((node) => !node.deletedAt && !isDetailExpired(node));
-    for (const id of unique) {
-      const record = await this.mebular.graph.getNode(id);
-      if (!record || record.deletedAt || isInternalNode(record)) continue;
-      const referenced = liveDetails.some((detail) => detailRecordIds(detail).includes(id));
-      const metadata = isRecord(record.metadata) ? record.metadata : {};
-      if (referenced && metadata.detailAvailable === false) {
-        await this.mebular.graph.updateNode(id, { metadata: { ...metadata, detailAvailable: true } });
-      } else if (!referenced && metadata.detailAvailable !== false) {
-        await this.mebular.graph.updateNode(id, { metadata: { ...metadata, detailAvailable: false } });
-      }
-    }
+    return this.mebular.graph.deleteNode(node.id);
   }
 
   private canGovernDetail(

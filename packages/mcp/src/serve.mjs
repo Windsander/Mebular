@@ -19,6 +19,7 @@ import { attachFleetEvents, resolveFleetNamespace } from './fleet-events.mjs';
 import { READ_ROUTES, buildHandoffPlan } from './admin.mjs';
 import { configPath } from './config.mjs';
 import { createServiceFacade } from './service-facade.mjs';
+import { createDetailMaintenance } from './detail-maintenance.mjs';
 import {
   createMemoryCapabilityHandler,
   isMemoryCapabilityPath,
@@ -891,6 +892,10 @@ export async function startHttpServer({
   let config = initialConfig ?? {};
   let runtime = initialRuntime;
 
+  // 0.3 详情保留维护：service 就绪后启动（启动一次 + 每 24h），热切换复用同一 timer。
+  // 失败只记录状态/日志，不阻断 MCP；关闭时显式清理，避免测试/宿主进程残留 timer。
+  const detailMaintenance = createDetailMaintenance({ getService: () => service });
+
   // 0.3 设备级模型选择：config 显式 pack 优先；否则 <home>/inference.json.selectedPack。
   // 这里只改内存中的 runtime.model.local，不写盘、不进忆云；显式选择失败也不会被换成别的包。
   const applyInferenceSelection = async (value) => {
@@ -988,6 +993,8 @@ export async function startHttpServer({
     cloudId = cloud.available ? await profileIdForHome(cloud.root, home).catch(() => null) : null;
     phase = 'READY';
     if (viaHotInit) hotInitialized = true;
+    // 热初始化：同一个 scheduler 动态读取新 service；当天已成功扫过则不重复。
+    detailMaintenance.start();
     return { phase, cloudId };
   }
 
@@ -3795,12 +3802,17 @@ export async function startHttpServer({
       console.error(`MEMORY_RUNTIME_START_FAILED ${error?.code ?? 'ERROR'}`);
     });
   }
+  // 详情保留维护同样在 listen 后异步启动：过期扫描失败只记录状态，不影响 MCP。
+  detailMaintenance.start();
   let closePromise = null;
   const close = () => {
     if (closePromise) return closePromise;
     closePromise = (async () => {
       // 优雅停止的顺序很重要：MCP/SSE/keep-alive 连接不会自己断，
       // 先收 MCP sessions，再主动结束连接，最后才等 listener（带有限超时）。
+      // 详情维护先停 timer；进行中的 prune 最多等一个 session 预算，不拖死关闭。
+      detailMaintenance.stop();
+      await settleWithin(detailMaintenance.idle(), SESSION_CLOSE_TIMEOUT_MS);
       const deadline = Date.now() + CLOSE_TIMEOUT_MS;
       try {
         // 1) 先让每个 MCP session 的 transport/server 正常收尾。
@@ -3859,6 +3871,15 @@ export async function startHttpServer({
     auth,
     issuer,
     close,
-    getState: () => ({ phase, hotInitialized, app, service, config, runtime, deviceId }),
+    getState: () => ({
+      phase,
+      hotInitialized,
+      app,
+      service,
+      config,
+      runtime,
+      deviceId,
+      detailMaintenance: detailMaintenance.status(),
+    }),
   };
 }

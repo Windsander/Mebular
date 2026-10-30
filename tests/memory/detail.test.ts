@@ -99,13 +99,15 @@ describe('DetailRecord core model', () => {
     expect(pinned).toBe(0);
   });
 
-  it('过期维护只墓碑详情，不删除 MemoryRecord；recordIds 级联仍在删除路径', async () => {
+  it('过期维护只墓碑详情，不删除 MemoryRecord；record detailAvailable 读取时派生', async () => {
     const marker = `core-prune-${Date.now()}`;
     const recordId = await makeRecord('agent:core', marker);
+    const recordBefore = await app.graph.getNode(recordId);
     const written = await service.writeDetails([
       detailInput('agent:core', [recordId], marker, { expiresAt: Date.now() - 1_000 }),
     ]);
     const detailId = written.results[0]!.id!;
+    expect(await service.detailAvailabilityForRecords([recordId])).toEqual(new Map([[recordId, false]]));
     const pruned = await service.pruneExpiredDetails();
     expect(pruned).toContain(detailId);
     const detail = await app.graph.getNode(detailId);
@@ -113,7 +115,30 @@ describe('DetailRecord core model', () => {
     expect(detail?.metadata?.deletedReason).toBe('retention_expired');
     const record = await app.graph.getNode(recordId);
     expect(record?.deletedAt).toBeUndefined();
-    expect(record?.metadata?.detailAvailable).toBe(false);
+    // 派生标记不落盘：记录本身不被详情写入/过期/墓碑触碰。
+    expect(record?.metadata?.detailAvailable).toBeUndefined();
+    expect(record?.updatedAt).toBe(recordBefore?.updatedAt);
+    expect(await service.detailAvailabilityForRecords([recordId])).toEqual(new Map([[recordId, false]]));
+  });
+
+  it('详情写入/删除只派生 detailAvailable，不推进 MemoryRecord.updatedAt', async () => {
+    const marker = `core-availability-${Date.now()}`;
+    const recordId = await makeRecord('agent:core', marker);
+    const before = await app.graph.getNode(recordId);
+    expect(await service.detailAvailabilityForRecords([recordId])).toEqual(new Map([[recordId, false]]));
+
+    const written = await service.writeDetails([detailInput('agent:core', [recordId], marker)]);
+    const detailId = written.results[0]!.id!;
+    expect(await service.detailAvailabilityForRecords([recordId])).toEqual(new Map([[recordId, true]]));
+    const afterWrite = await app.graph.getNode(recordId);
+    expect(afterWrite?.updatedAt).toBe(before?.updatedAt);
+    expect(afterWrite?.metadata?.detailAvailable).toBeUndefined();
+
+    await service.deleteDetails([detailId], { actorType: 'user' });
+    expect(await service.detailAvailabilityForRecords([recordId])).toEqual(new Map([[recordId, false]]));
+    const afterDelete = await app.graph.getNode(recordId);
+    expect(afterDelete?.updatedAt).toBe(before?.updatedAt);
+    expect(afterDelete?.metadata?.detailAvailable).toBeUndefined();
   });
 
   it('单域配额可收紧：先淘汰最旧 tool_output，再淘汰 conversation；pinned 不可淘汰', async () => {

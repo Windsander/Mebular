@@ -28,6 +28,12 @@ import {
 } from './ingest.js';
 import type { SidecarLocalLayer } from './local-layer.js';
 import { OutboxReplayer } from './outbox-replayer.js';
+import {
+  RecallService,
+  type ContextResponse,
+  type RecallHttpResult,
+  type RecallResponse,
+} from './recall.js';
 import type { SidecarStatusSnapshot } from './server.js';
 
 export interface SettlementIdentity {
@@ -132,6 +138,7 @@ export class SettlementRuntime {
   readonly identity: SettlementIdentity;
   readonly ingest: IngestService;
   readonly replayer: OutboxReplayer;
+  readonly recall: RecallService;
 
   private readonly client: CapabilityClient | null;
   private policy: SidecarPolicy;
@@ -158,6 +165,20 @@ export class SettlementRuntime {
       ...(options.now ? { now: options.now } : {}),
     };
     this.ingest = new IngestService(ingestOptions);
+    this.recall = new RecallService({
+      config: options.config,
+      local: options.local,
+      client: options.client,
+      identity: {
+        cloudId: options.identity.cloudId,
+        profileId: options.identity.profileId,
+        hostId: options.identity.hostId,
+        ...(options.identity.userId !== undefined ? { userId: options.identity.userId } : {}),
+      },
+      policy: this.policy,
+      getPolicy: () => this.policy,
+      ...(options.now ? { now: options.now } : {}),
+    });
     this.replayer = new OutboxReplayer({
       outbox: options.local.outbox,
       client: options.client,
@@ -178,6 +199,7 @@ export class SettlementRuntime {
         // 策略文件不可读时保留安全默认，不阻塞 sidecar 启动。
         this.policy = { schema: 1, agents: {} };
         this.ingest.setPolicy(this.policy);
+        this.recall.setPolicy(this.policy);
       }
     }
     await this.ingest.init();
@@ -190,7 +212,7 @@ export class SettlementRuntime {
   }
 
   get degraded(): boolean {
-    return this.ingest.isDegraded;
+    return this.ingest.isDegraded || this.recall.isDegraded;
   }
 
   get stats(): IngestStatsSnapshot {
@@ -212,6 +234,32 @@ export class SettlementRuntime {
   async completeExtraction(id: string, candidates: unknown): Promise<IngestExtractionResult> {
     await this.reloadPolicy().catch(() => []);
     return this.ingest.completeExtraction(id, candidates);
+  }
+
+  async handleRecall(request: unknown): Promise<RecallHttpResult<RecallResponse>> {
+    await this.reloadPolicy().catch(() => []);
+    return this.recall.handleRecall(request);
+  }
+
+  async handleContext(request: unknown): Promise<RecallHttpResult<ContextResponse>> {
+    await this.reloadPolicy().catch(() => []);
+    return this.recall.handleContext(request);
+  }
+
+  getTraces(query: {
+    limit?: number | string | null;
+    agentId?: string | null;
+    threadId?: string | null;
+  } = {}) {
+    return this.recall.getTraces(query);
+  }
+
+  getTrace(id: string) {
+    return this.recall.getTrace(id);
+  }
+
+  submitFeedback(traceId: string, body: unknown) {
+    return this.recall.submitFeedback(traceId, body);
   }
 
   async reloadPolicy(): Promise<string[]> {
@@ -236,6 +284,7 @@ export class SettlementRuntime {
     }
     this.policy = next;
     this.ingest.setPolicy(next);
+    this.recall.setPolicy(next);
   }
 
   /**
@@ -319,6 +368,13 @@ export class SettlementRuntime {
   }): Promise<SidecarStatusSnapshot> {
     const [stats, outbox] = await Promise.all([this.local.stats(), this.local.outbox.stats()]);
     const ingest = this.ingest.stats();
+    const recall = this.recall.stats();
+    const ingestError = ingest.lastError;
+    const recallError = recall.lastError;
+    const lastError = base.lastError
+      ?? (ingestError && (!recallError || ingestError.at >= recallError.at)
+        ? ingestError
+        : recallError ?? ingestError);
     return {
       ...base,
       counts: {
@@ -331,6 +387,10 @@ export class SettlementRuntime {
         localTraces: stats.traces,
         ingested: ingest.ingested,
         settled: ingest.settled,
+        recalls: recall.recalls,
+        contexts: recall.contexts,
+        feedback: recall.feedback,
+        recallSilent: recall.silent,
         ...base.counts,
       },
       outbox: {
@@ -339,7 +399,7 @@ export class SettlementRuntime {
         oldestAt: outbox.oldestAt,
         ...base.outbox,
       },
-      lastError: base.lastError ?? ingest.lastError,
+      lastError: lastError ?? ingest.lastError,
     };
   }
 }

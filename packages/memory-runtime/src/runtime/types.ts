@@ -187,7 +187,8 @@ export interface ContextCheckpoint {
 // ---------- 2.3.5 RecallTrace（本地诊断） ----------
 
 export interface RecallTrace {
-  schema: 1;
+  /** schema 1 是旧原型；schema 2 是 sidecar 碎片化召回 trace（本地对象）。 */
+  schema: 1 | 2;
   id: string; // tr_<ULID>
   cloudId: string;
   agentId: string;
@@ -202,6 +203,30 @@ export interface RecallTrace {
   tookMs: number;
   degraded: boolean;
   feedback?: { useful: boolean; reason?: string; at: number };
+
+  // schema 2（只增不改；旧读取方忽略）。不存正文/raw/gist/prompt。
+  recallId?: string;
+  domains?: string[];
+  cue?: Record<string, unknown>;
+  candidates?: Array<Record<string, unknown>>;
+  expansions?: Array<Record<string, unknown>>;
+  injected?: Array<Record<string, unknown>>;
+  silenceReason?: string | null;
+  budget?: {
+    maxFragments: number;
+    maxBytes: number;
+    maxTokens: number;
+    usedBytes: number;
+    usedTokens: number;
+  };
+  timing?: {
+    cueMs: number;
+    fuzzyMs: number;
+    expandMs: number;
+    assembleMs: number;
+    totalMs: number;
+  };
+  warnings?: string[];
 }
 
 // ---------- 2.3.6 SelfRecord（Agent 自我） ----------

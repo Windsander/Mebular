@@ -39,13 +39,10 @@ const REQUEST_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 const UNIMPLEMENTED_ROUTES = new Set([
   'mode',
-  'recall',
-  'context',
   'checkpoints',
   'compact',
   'compacts',
   'self',
-  'traces',
   'config',
   'metrics',
 ]);
@@ -96,6 +93,14 @@ export interface SidecarStatusCounts {
   ingested: number;
   /** 已成功沉降到 capability 的记录数（含重复确认）。 */
   settled: number;
+  /** 召回请求数（/recall）。 */
+  recalls?: number;
+  /** 上下文组装请求数（/context）。 */
+  contexts?: number;
+  /** 召回反馈数。 */
+  feedback?: number;
+  /** 沉默的召回/上下文次数。 */
+  recallSilent?: number;
 }
 
 export interface SidecarStatusOutbox {
@@ -146,6 +151,40 @@ export interface SidecarNamespacesApi {
   getNamespaces(agentId: string | null): Promise<NamespacesView>;
 }
 
+/** 召回/上下文/trace 的 host API；由 RecallService 实现。 */
+export interface SidecarRecallApi {
+  handleRecall(request: unknown): Promise<{
+    status: 200;
+    data: unknown;
+    warnings: string[];
+    degraded: boolean;
+  }>;
+  handleContext(request: unknown): Promise<{
+    status: 200;
+    data: unknown;
+    warnings: string[];
+    degraded: boolean;
+  }>;
+  getTraces(query: {
+    limit?: number | string | null;
+    agentId?: string | null;
+    threadId?: string | null;
+  }): Promise<{
+    traces: unknown[];
+    total: number;
+    warnings: string[];
+    degraded: boolean;
+  }>;
+  getTrace(id: string): Promise<unknown | null>;
+  submitFeedback(traceId: string, body: unknown): Promise<{
+    traceId: string;
+    feedback: { useful: boolean; reason?: string; at: number };
+    quarantined: string[];
+    warnings: string[];
+    degraded: boolean;
+  }>;
+}
+
 export interface SidecarServerOptions {
   config: SidecarConfig;
   hostToken: string;
@@ -153,6 +192,7 @@ export interface SidecarServerOptions {
   getStatus?: () => SidecarStatusSnapshot | Promise<SidecarStatusSnapshot>;
   ingest?: SidecarIngestApi;
   namespaces?: SidecarNamespacesApi;
+  recall?: SidecarRecallApi;
   /** 动态降级标记（沉降/outbox）；与显式 degraded 取或。 */
   getDegraded?: () => boolean;
   state?: SidecarState;
@@ -303,6 +343,7 @@ export class SidecarServer {
   private readonly getStatus?: () => SidecarStatusSnapshot | Promise<SidecarStatusSnapshot>;
   private readonly ingest?: SidecarIngestApi;
   private readonly namespaces?: SidecarNamespacesApi;
+  private readonly recall?: SidecarRecallApi;
   private readonly getDegraded?: () => boolean;
   private readonly now: () => number;
   private server: Server | null = null;
@@ -321,6 +362,7 @@ export class SidecarServer {
     this.getStatus = options.getStatus;
     this.ingest = options.ingest;
     this.namespaces = options.namespaces;
+    this.recall = options.recall;
     this.getDegraded = options.getDegraded;
     this.state = options.state ?? 'starting';
     this.degraded = options.degraded === true;
@@ -531,6 +573,10 @@ export class SidecarServer {
         localTraces: 0,
         ingested: 0,
         settled: 0,
+        recalls: 0,
+        contexts: 0,
+        feedback: 0,
+        recallSilent: 0,
       },
       outbox: { items: 0, bytes: 0, oldestAt: null },
       limits: {
@@ -548,6 +594,7 @@ export class SidecarServer {
     }
     return {
       ...snapshot,
+      counts: { ...fallback.counts, ...(snapshot.counts ?? {}) },
       state: this.state,
       degraded: this.currentDegraded(),
       pid: process.pid,
@@ -631,6 +678,17 @@ export class SidecarServer {
           degraded: this.currentDegraded(),
           pid: process.pid,
           startedAt: this.startedAt,
+          capabilities: {
+            ingest: Boolean(this.ingest),
+            recall: Boolean(this.recall),
+            context: Boolean(this.recall),
+            feedback: Boolean(this.recall),
+            traces: Boolean(this.recall),
+            checkpoint: false,
+            compact: false,
+            self: false,
+            models: ['heuristic', 'host'],
+          },
         }, [], this.currentDegraded()));
         return;
       }
@@ -737,6 +795,125 @@ export class SidecarServer {
         const agentId = url.searchParams.get('agentId');
         const view = await this.namespaces.getNamespaces(agentId && agentId.length > 0 ? agentId : null);
         this.send(res, 200, this.envelope(requestId, view, view.warnings, view.degraded));
+        return;
+      }
+
+      if (relative === 'recall') {
+        if (!isPost) {
+          req.resume();
+          this.sendError(res, 405, requestId, 'method_not_allowed', 'recall 仅接受 POST');
+          return;
+        }
+        if (!this.recall) {
+          req.resume();
+          this.sendError(res, 501, requestId, 'not_implemented', 'recall 尚未启用');
+          return;
+        }
+        if (this.state === 'stopping') {
+          req.resume();
+          this.sendError(res, 503, requestId, 'stopping', 'sidecar 正在停止', undefined, true);
+          return;
+        }
+        const body = await readJsonBody(req);
+        const result = await this.recall.handleRecall(body);
+        this.send(res, result.status, this.envelope(requestId, result.data, result.warnings, result.degraded));
+        return;
+      }
+
+      if (relative === 'context') {
+        if (!isPost) {
+          req.resume();
+          this.sendError(res, 405, requestId, 'method_not_allowed', 'context 仅接受 POST');
+          return;
+        }
+        if (!this.recall) {
+          req.resume();
+          this.sendError(res, 501, requestId, 'not_implemented', 'context 尚未启用');
+          return;
+        }
+        if (this.state === 'stopping') {
+          req.resume();
+          this.sendError(res, 503, requestId, 'stopping', 'sidecar 正在停止', undefined, true);
+          return;
+        }
+        const body = await readJsonBody(req);
+        const result = await this.recall.handleContext(body);
+        this.send(res, result.status, this.envelope(requestId, result.data, result.warnings, result.degraded));
+        return;
+      }
+
+      if (relative.startsWith('recall/')) {
+        const parts = relative.split('/');
+        if (parts.length !== 3 || parts[2] !== 'feedback') {
+          req.resume();
+          this.sendError(res, 404, requestId, 'not_found', '未知召回路径');
+          return;
+        }
+        if (!isPost) {
+          req.resume();
+          this.sendError(res, 405, requestId, 'method_not_allowed', 'feedback 仅接受 POST');
+          return;
+        }
+        if (!this.recall) {
+          req.resume();
+          this.sendError(res, 501, requestId, 'not_implemented', 'feedback 尚未启用');
+          return;
+        }
+        const traceId = parts[1] ?? '';
+        if (traceId.length === 0) {
+          req.resume();
+          this.sendError(res, 404, requestId, 'not_found', 'trace 不存在');
+          return;
+        }
+        const body = await readJsonBody(req);
+        const result = await this.recall.submitFeedback(traceId, body);
+        this.send(res, 200, this.envelope(requestId, result, result.warnings, result.degraded));
+        return;
+      }
+
+      if (relative === 'traces') {
+        if (!isGet) {
+          req.resume();
+          this.sendError(res, 405, requestId, 'method_not_allowed', 'traces 仅接受 GET');
+          return;
+        }
+        if (!this.recall) {
+          req.resume();
+          this.sendError(res, 501, requestId, 'not_implemented', 'traces 尚未启用');
+          return;
+        }
+        const result = await this.recall.getTraces({
+          limit: url.searchParams.get('limit'),
+          agentId: url.searchParams.get('agentId'),
+          threadId: url.searchParams.get('threadId'),
+        });
+        this.send(res, 200, this.envelope(requestId, result, result.warnings, result.degraded));
+        return;
+      }
+
+      if (relative.startsWith('traces/')) {
+        if (!isGet) {
+          req.resume();
+          this.sendError(res, 405, requestId, 'method_not_allowed', 'traces 仅接受 GET');
+          return;
+        }
+        if (!this.recall) {
+          req.resume();
+          this.sendError(res, 501, requestId, 'not_implemented', 'traces 尚未启用');
+          return;
+        }
+        const id = relative.slice('traces/'.length);
+        if (id.length === 0 || id.includes('/')) {
+          req.resume();
+          this.sendError(res, 404, requestId, 'not_found', 'trace 不存在');
+          return;
+        }
+        const trace = await this.recall.getTrace(id);
+        if (!trace) {
+          this.sendError(res, 404, requestId, 'not_found', 'trace 不存在或已过期');
+          return;
+        }
+        this.send(res, 200, this.envelope(requestId, trace));
         return;
       }
 

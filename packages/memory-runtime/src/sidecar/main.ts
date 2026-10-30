@@ -157,6 +157,17 @@ export interface SidecarVersionResult {
   minMcpVersion: string;
   maxMcpVersion: string;
   nodeVersion: string;
+  capabilities: {
+    ingest: boolean;
+    recall: boolean;
+    context: boolean;
+    feedback: boolean;
+    traces: boolean;
+    checkpoint: boolean;
+    compact: boolean;
+    self: boolean;
+    models: string[];
+  };
 }
 
 function hostIdForHome(home: string): string {
@@ -472,6 +483,7 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
     getStatus: statusSnapshot,
     ingest: settlement,
     namespaces: settlement,
+    recall: settlement,
     getDegraded: () => settlement.degraded,
     state: 'starting',
     degraded: degraded || settlement.degraded,
@@ -508,8 +520,8 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
       updatedAt: now(),
       capabilities: {
         ingest: true,
-        recall: false,
-        context: false,
+        recall: true,
+        context: true,
         checkpoint: false,
         compact: false,
         self: false,
@@ -716,6 +728,17 @@ export function getSidecarVersion(): SidecarVersionResult {
     minMcpVersion: SIDECAR_MIN_MCP_VERSION,
     maxMcpVersion: SIDECAR_MAX_MCP_VERSION,
     nodeVersion: process.version,
+    capabilities: {
+      ingest: true,
+      recall: true,
+      context: true,
+      feedback: true,
+      traces: true,
+      checkpoint: false,
+      compact: false,
+      self: false,
+      models: ['heuristic', 'host'],
+    },
   };
 }
 

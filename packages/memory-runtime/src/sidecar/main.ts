@@ -777,4 +777,3 @@ export async function main(argv: string[] = process.argv.slice(2), env: NodeJS.P
     return startup.exitCode;
   }
 }
-

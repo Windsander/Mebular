@@ -159,10 +159,20 @@ async function seedHome(home) {
   const storagePath = join(home, 'store.jsonl');
   // S3：真实 root + 两条他机会签请求（批准/拒绝写入走真实端点，不靠桩）
   const { Mebular, IdentityManager, POLICY_NAMESPACE } = await import('@mebular/core');
-  // 运行时内部对象 helper 用本工作树构建产物（node_modules 可能指向旧包）。
-  const { createCompactNode, createContextCheckpointNode, createSelfRecordNode } = await import(
-    new URL('../../../packages/memory-runtime/dist/index.js', import.meta.url).href
-  );
+  // 内部对象只依赖 core 的通用可见性约定：metadata.internal=true。
+  // Console UI 冒烟不需要 sidecar 业务实现。
+  const createInternalObject = async (graph, type, content, kind, namespace) => {
+    const created = await graph.createNode(type, content, undefined, { namespace });
+    const updated = await graph.updateNode(created.id, {
+      metadata: {
+        ...(created.metadata ?? {}),
+        internal: true,
+        internalObject: { schema: 1, kind },
+      },
+    });
+    if (!updated) throw new Error(`internal object write failed: ${created.id}`);
+    return updated;
+  };
   const { securityActionDigest, pairingCodeForDigest } = await import('@mebular/fleet');
   const master = await new IdentityManager().generateUserMasterKey();
   const defaultFingerprint = `sha256:${createHash('sha256').update(Buffer.from(master.publicKey)).digest('hex').slice(0, 12)}`;
@@ -234,22 +244,7 @@ async function seedHome(home) {
       namespace: POLICY_NAMESPACE,
     });
     // 0.3 运行时治理视图用料：compact / checkpoint / self（内部对象默认隐藏）+ 本机召回轨迹。
-    const runtimeEnvelope = (kind) => ({
-      schema: 1,
-      kind,
-      id: 'ignored',
-      cloudId: 'cl_ui',
-      userId: 'u_ui',
-      agentId: 'opencode',
-      namespace: 'notes',
-      visibility: kind === 'self_record' ? 'agent-self' : kind === 'context_checkpoint' ? 'task' : 'user',
-      sync: 'cloud',
-      internal: true,
-      provenance: { source: 'runtime', extractor: 'heuristic', at: now },
-      createdAt: now,
-      updatedAt: now,
-    });
-    await createCompactNode(app.graph, {
+    await createInternalObject(app.graph, 'compact', {
       schema: 1,
       summary: 'UI 运行时摘要：普通记忆的合并视图',
       sourceIds: [],
@@ -258,8 +253,8 @@ async function seedHome(home) {
       model: { extractor: 'heuristic' },
       tokenCount: 12,
       stale: false,
-    }, runtimeEnvelope('compact'), { namespace: 'notes' });
-    await createContextCheckpointNode(app.graph, {
+    }, 'compact', 'notes');
+    await createInternalObject(app.graph, 'context_checkpoint', {
       schema: 1,
       threadId: 'th_ui_runtime',
       agentId: 'opencode',
@@ -270,8 +265,8 @@ async function seedHome(home) {
       originHostId: 'h_ui',
       lease: { hostId: 'h_ui', until: now + 60_000 },
       expiresAt: now + 86_400_000,
-    }, runtimeEnvelope('context_checkpoint'));
-    await createSelfRecordNode(app.graph, {
+    }, 'context_checkpoint', '__checkpoint__');
+    await createInternalObject(app.graph, 'self_record', {
       schema: 1,
       agentId: 'opencode',
       revision: 2,
@@ -282,7 +277,7 @@ async function seedHome(home) {
       capabilities: [],
       boundaries: [],
       updatedAt: now,
-    }, runtimeEnvelope('self_record'));
+    }, 'self_record', '__self__');
     const trace = {
       schema: 2,
       id: 'tr_ui_runtime_0001',

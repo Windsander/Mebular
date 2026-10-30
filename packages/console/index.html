@@ -160,7 +160,7 @@
               <button id="runtime-refresh" class="btn btn-crt" type="button" data-i18n="runtime.refresh">刷新</button>
             </div>
           </div>
-          <p class="panel-note panel-note-wide muted" data-i18n="runtime.note">本机视角：启用开关只影响这台设备；普通记忆按域同步，Raw 与轨迹不离开本机。</p>
+          <p class="panel-note panel-note-wide muted" data-i18n="runtime.note">本机视角：记忆模式只影响这台设备；已有记忆会保留，切换或停止不会删除记忆。</p>
           <div id="runtime-status" class="runtime-status" aria-live="polite"></div>
           <div class="runtime-layout">
             <section class="runtime-panel" aria-labelledby="runtime-timeline-title">
@@ -168,7 +168,7 @@
                 <h3 id="runtime-timeline-title" data-i18n="runtime.timeline.title">记忆时间线</h3>
                 <div id="runtime-timeline-controls" class="runtime-timeline-controls"></div>
               </div>
-              <p class="runtime-panel-note muted" data-i18n="runtime.timeline.note">默认隐藏内部对象；普通记忆查询不会返回 compact / checkpoint / self。</p>
+              <p class="runtime-panel-note muted" data-i18n="runtime.timeline.note">默认隐藏内部对象；普通记忆查询不会返回它们。</p>
               <div id="runtime-timeline" class="memories-list"></div>
             </section>
             <section class="runtime-panel" aria-labelledby="runtime-trace-title">

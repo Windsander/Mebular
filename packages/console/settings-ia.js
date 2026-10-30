@@ -41,6 +41,7 @@ export const IA_SETTINGS_EXTRA = [
 /**
  * 折叠白名单（设置/关于共用；≤5，当前 3）。
  * 设置内 2 个（MCP 危险与自救 / 诊断与恢复）；关于本机 1 个（运行状态）。
+ * 0.3 记忆运行时不提供用户可操作的诊断折叠：状态卡只读，避免暴露实现细节。
  * 邀请面板不再有详情折叠。每项必须带 data-settings-fold，UI 断言据此防回归。
  * labelKey 是用户可见文案真源；label 只作 catalog 缺 key 时的中文兜底。
  */
@@ -48,7 +49,6 @@ export const IA_SETTINGS_FOLDS = [
   { id: 'mcp-danger', label: 'MCP 接入 · 危险与自救', labelKey: 'settings.fold.mcpDanger', home: 'mcp' },
   { id: 'diagnostics', label: '诊断与恢复', labelKey: 'settings.fold.diagnostics', home: 'advanced' },
   { id: 'about-runtime', label: '运行状态（只读）', labelKey: 'settings.fold.aboutRuntime', home: 'about' },
-  { id: 'runtime-advanced', label: '高级 · 采集、保留与上下文', labelKey: 'settings.fold.runtimeAdvanced', home: 'runtime' },
 ];
 
 /**
@@ -227,14 +227,53 @@ export const IA_ADVANCED_FIELDS = IA_ADVANCED_SECTIONS.flatMap((section) => sect
 export const IA_MCP_FIELDS = IA_MCP_SECTIONS.flatMap((section) => section.fields);
 
 /**
- * 0.3 记忆运行时：用户只面对一个开关（memoryRuntime.enabled），默认关闭；
- * 模型区继续走 /admin/api/models，但本地模型由 Mebular 管理，当前对话模型由宿主管理。
- * 旧模式的字段不再属于 Console 设置面。
+ * 0.3 记忆运行时：普通用户只面对两个产品增量：
+ * 1. 设置 · 记忆模式 = MCP 配置 memoryRuntime.enabled（轻量 MCP / 沉浸式）；
+ * 2. 高级 · 模型来源 = sidecar config.json 的 model.source（仅此一个下拉）。
+ * 旧 runtime.* 字段不再属于 Console 设置面。
  */
 export const IA_RUNTIME_CONTROL_PATHS = ['memoryRuntime.enabled'];
 export const IA_RUNTIME_FIELDS = [];
 /** Runtime 字段文案（当前没有由 schema 编辑器渲染的 runtime 字段）。 */
 export const IA_RUNTIME_FIELD_COPY = {};
+
+/** 模型来源：唯一第二个产品增量；不暴露 endpoint / key / keyRef / 模型路径。 */
+export const IA_RUNTIME_MODEL_SOURCES = Object.freeze(['heuristic', 'local', 'host', 'api', 'auto']);
+export const IA_RUNTIME_MODEL_SOURCE_DEFAULT = 'heuristic';
+
+export function runtimeModelSourceOf(value) {
+  const source = String(value ?? '').trim().toLowerCase();
+  return IA_RUNTIME_MODEL_SOURCES.includes(source) ? source : IA_RUNTIME_MODEL_SOURCE_DEFAULT;
+}
+
+/**
+ * 某一来源当前是否可用：
+ * - heuristic / auto 总是可选；
+ * - local / api 需要 sidecar 报告已配置（sources 包含对应项）；
+ * - host 总是基础来源，但无候选时 sidecar 会降级到 heuristic。
+ */
+export function runtimeModelSourceAvailable(source, model = null) {
+  const normalized = runtimeModelSourceOf(source);
+  if (normalized === 'heuristic' || normalized === 'auto') return true;
+  const sources = Array.isArray(model?.sources) ? model.sources : [];
+  if (normalized === 'host') return sources.length === 0 || sources.includes('host');
+  return sources.includes(normalized);
+}
+
+/** 记忆模式真值：MCP 配置 memoryRuntime.enabled；lightweight=轻量 MCP，immersive=沉浸式。 */
+export function memoryRuntimeModeOf(status, config) {
+  return memoryRuntimeEnabledOf(status, config) ? 'immersive' : 'lightweight';
+}
+
+/** 轻量模式不显示模型配置，也不读取/写入 sidecar 配置。 */
+export function runtimeShowsModelSettings(status, config) {
+  return memoryRuntimeModeOf(status, config) === 'immersive';
+}
+
+/** 模型来源控件只在沉浸式且记忆运行时可用时启用；轻量/未就绪均禁用。 */
+export function runtimeModelSourceReady(meta) {
+  return meta?.enabled === true && meta?.available === true;
+}
 
 /** sidecar 生命周期状态 → Console 文案 key（未知状态按 stopped 展示，不暴露原始码）。 */
 export const RUNTIME_SIDECAR_STATES = Object.freeze([
@@ -426,45 +465,6 @@ export function localizeSchemaReason(path, reason, translate) {
 
 /** config-schema `effective` 的「已配置」哨兵值（文本字段只读展示用）。 */
 export const SCHEMA_CONFIGURED_VALUE = '（已配置）';
-
-/** Runtime 模型包状态 → 文案 key（未知状态回退 failed，不把内部状态码直接给用户）。 */
-export function runtimePackStateKey(state) {
-  const key = `settings.runtime.state.${String(state ?? 'not_installed')}`;
-  return [
-    'settings.runtime.state.not_installed',
-    'settings.runtime.state.downloading',
-    'settings.runtime.state.verifying',
-    'settings.runtime.state.installing',
-    'settings.runtime.state.paused',
-    'settings.runtime.state.failed',
-    'settings.runtime.state.cancelled',
-    'settings.runtime.state.installed',
-    'settings.runtime.state.corrupt',
-  ].includes(key) ? key : 'settings.runtime.state.failed';
-}
-
-/** 下载进度（字节 + 百分比）；total 未知时 percent=null。 */
-export function runtimePackProgress(download) {
-  const downloadedBytes = Number.isFinite(download?.downloadedBytes) ? Math.max(0, download.downloadedBytes) : 0;
-  const totalBytes = Number.isFinite(download?.totalBytes) ? Math.max(0, download.totalBytes) : 0;
-  const percent = totalBytes > 0 ? Math.min(100, Math.max(0, (downloadedBytes / totalBytes) * 100)) : null;
-  return { downloadedBytes, totalBytes, percent };
-}
-
-/** 人类可读体积（十进制单位；不显示量化/上下文长度等技术细节）。 */
-export function formatByteSize(bytes) {
-  const value = Number(bytes);
-  if (!Number.isFinite(value) || value <= 0) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let amount = value;
-  let index = 0;
-  while (amount >= 1000 && index < units.length - 1) {
-    amount /= 1000;
-    index += 1;
-  }
-  const rounded = index === 0 ? Math.round(amount) : Math.round(amount * 10) / 10;
-  return `${rounded} ${units[index]}`;
-}
 
 /** 内部对象判定（与 core 通用可见性 + 0.3 内部类型同义；用于 Console 时间线过滤）。 */
 export const RUNTIME_INTERNAL_NODE_TYPES = Object.freeze([

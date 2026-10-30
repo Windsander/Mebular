@@ -730,24 +730,26 @@ async function main() {
     await evalJs('document.querySelector("#view-nav li:nth-of-type(1) button").click()');
     check('从记忆视图切回星图', await waitFor('document.querySelector("#memories-view")?.hidden === true'));
 
-    // 0.3 · 记忆运行时：sidecar 状态 / 内部对象过滤 / 轨迹 / 反馈 / 单开关（全部经 admin 代理）
+    // 0.3 · 记忆运行时：状态 / 内部对象过滤 / 轨迹 / 反馈（全部经 admin 代理；模式开关只在设置里）
     await evalJs('document.querySelector("#view-nav li:nth-of-type(5) button").click()');
     check('切换到运行时视图（#runtime-view 可见）', await waitFor('document.querySelector("#runtime-view")?.hidden === false'));
-    check('运行时状态卡：启用开关 + sidecar 健康 + 模型（宿主管理 / 本地由 Mebular 管理）',
+    check('运行时状态卡：记忆模式 + 运行状态（只读，无启停开关/PID/模型包）',
       await waitFor(`(() => {
         const v = document.querySelector('#runtime-view');
         const s = document.querySelector('#runtime-status');
-        return Boolean(v) && Boolean(s) && /接入方式/.test(s.textContent) && /Sidecar 健康/.test(s.textContent)
-          && /记忆模型/.test(s.textContent) && /宿主管理/.test(s.textContent)
-          && /由 Mebular 管理/.test(s.textContent) && /PID/.test(s.textContent) && /版本/.test(s.textContent)
-          && Boolean(s.querySelector('[data-rt-enabled]')) && /本机视角/.test(v.textContent);
+        return Boolean(v) && Boolean(s) && /记忆模式/.test(s.textContent) && /运行状态/.test(s.textContent)
+          && /模式/.test(s.textContent) && /状态/.test(s.textContent) && /降级/.test(s.textContent)
+          && /错误/.test(s.textContent) && /版本/.test(s.textContent) && /模型状态/.test(s.textContent)
+          && !s.querySelector('[data-rt-enabled]') && !s.querySelector('.runtime-pack')
+          && !/PID|Sidecar 健康|由 Mebular 管理/.test(s.textContent)
+          && /本机视角/.test(v.textContent);
       })()`, 30000));
     check('sidecar 由 MCP 自动启动并显示就绪（无 token 泄漏）',
       await waitFor(`(() => {
         const s = document.querySelector('#runtime-status [data-rt-sidecar-status]');
         const head = document.querySelector('#runtime-head-mode');
-        return Boolean(s) && /就绪/.test(s.textContent) && /沉浸式 sidecar/.test(head?.textContent ?? '')
-          && !/Bearer|host-token|tokenFile/.test(document.querySelector('#runtime-view')?.textContent ?? '');
+        return Boolean(s) && /就绪/.test(s.textContent) && /沉浸式/.test(head?.textContent ?? '')
+          && !/Bearer|host-token|tokenFile|token/i.test(document.querySelector('#runtime-view')?.textContent ?? '');
       })()`, 30000));
     check('运行时时间线默认只显示普通记录（compact/checkpoint/self 隐藏）',
       await waitFor(`(() => {
@@ -807,81 +809,101 @@ async function main() {
     check('反馈经 admin 代理写入并即时显示',
       await waitFor('(() => { const list = document.querySelector("#runtime-traces"); return Boolean(list) && /已标记有用/.test(list.textContent); })()', 30000));
     await evalJs('document.querySelector("[data-rt-filter=memory]").click()');
-    const beforeToggle = await evalJs('document.querySelectorAll("#runtime-timeline .mem-row[data-rt-kind=memory]").length');
-    await evalJs('document.querySelector("#runtime-status [data-rt-enabled]").click()');
-    check('关闭记忆运行时走品牌确认（不迁移、不删除）',
-      await waitFor('document.querySelector("#modal")?.hidden === false && /停止|不迁移|不删除/.test(document.querySelector("#modal-body")?.textContent ?? "")'));
-    await evalJs('document.querySelector("#modal-confirm").click()');
-    check('关闭后回到轻量 MCP，轨迹显示未启用（不是 501/错误弹窗）',
-      await waitFor(`(() => {
-        const head = document.querySelector('#runtime-head-mode')?.textContent ?? '';
-        const traces = document.querySelector('#runtime-traces')?.textContent ?? '';
-        return /轻量 MCP/.test(head) && /记忆运行时未启用/.test(traces);
-      })()`, 30000));
-    check('开关不迁移数据：普通记录数量不变',
-      beforeToggle >= 1 && await evalJs('document.querySelectorAll("#runtime-timeline .mem-row[data-rt-kind=memory]").length') === beforeToggle);
-    await evalJs('document.querySelector("#runtime-status [data-rt-enabled]").click()');
-    await waitFor('document.querySelector("#modal")?.hidden === false');
-    await evalJs('document.querySelector("#modal-confirm").click()');
-    check('重新启用后 sidecar 就绪、反馈恢复可用（失败开放）',
-      await waitFor(`(() => {
-        const head = document.querySelector('#runtime-head-mode')?.textContent ?? '';
-        const b = document.querySelector('#runtime-traces [data-rt-trace-useful]');
-        return /沉浸式 sidecar/.test(head) && Boolean(b) && b.disabled === false;
-      })()`, 30000));
+    const beforeModeSwitch = await evalJs('document.querySelectorAll("#runtime-timeline .mem-row[data-rt-kind=memory]").length');
     await evalJs('document.querySelector("#view-nav li:nth-of-type(1) button").click()');
     check('从运行时视图切回星图', await waitFor('document.querySelector("#runtime-view")?.hidden === true'));
 
     // H-1/UX-2：设置 · AI 助手专区（连接页已收编进设置；单列表 + 行内闭环）
     await evalJs('document.querySelector("#open-settings").click()');
     check('设置弹层打开', await waitFor('document.querySelector("#settings")?.hidden === false'));
-    // 0.3 · 设置 · 记忆运行时：单开关 + sidecar 健康 + 本地模型；旧 runtime.* 字段不再出现
+    // 0.3 · 设置 · 记忆模式：唯一新增控件 1；轻量模式不显示模型配置。
     await evalJs('document.querySelector("[data-settings-tab=runtime]").click()');
-    check('设置·记忆运行时：单开关 / sidecar 健康 / 宿主管理 / 本地模型',
+    check('设置·记忆运行时：记忆模式 / 运行状态 / 模型状态；无本地模型包与旧 runtime.* 字段',
       await waitFor(`(() => {
         const p = document.querySelector('#settings-panel-runtime');
         if (!p || p.hidden) return false;
-        const toggle = p.querySelector('[data-rt-enabled]');
-        return /记忆运行时/.test(p.textContent) && /Sidecar 健康/.test(p.textContent)
-          && /宿主管理/.test(p.textContent) && /由 Mebular 管理/.test(p.textContent)
-          && Boolean(toggle) && toggle.checked === true
-          && p.querySelectorAll('.runtime-pack').length >= 3
+        return /记忆模式/.test(p.textContent) && /轻量 MCP/.test(p.textContent) && /沉浸式/.test(p.textContent)
+          && /运行状态/.test(p.textContent) && /模型状态/.test(p.textContent)
+          && Boolean(p.querySelector('[data-rt-mode=lightweight]'))
+          && Boolean(p.querySelector('[data-rt-mode=immersive]'))
+          && !p.querySelector('[data-rt-enabled]') && !p.querySelector('.runtime-pack')
           && p.querySelectorAll('[data-rt-path]').length === 0
-          && !/第三方 API/.test(p.textContent);
+          && !/Sidecar 健康|PID|由 Mebular 管理|token/i.test(p.textContent);
       })()`, 30000));
-    check('sidecar 状态：enabled/state/pid/version/degraded/error（无 token 明文）',
+    check('运行状态卡：mode/state/degraded/error/version（不显示 token/PID）',
       await evalJs(`(() => {
         const s = document.querySelector('#settings-panel-runtime [data-rt-sidecar-status]');
         if (!s) return false;
         const text = s.textContent;
-        return /已启用/.test(text) && /状态/.test(text) && /就绪/.test(text) && /PID/.test(text)
+        return /模式/.test(text) && /状态/.test(text) && /就绪/.test(text)
           && /版本/.test(text) && /降级/.test(text) && /错误/.test(text)
-          && !/Bearer\\s+[A-Za-z0-9_-]{16,}/.test(text);
+          && !/PID/.test(text) && !/Bearer\\s+[A-Za-z0-9_-]{16,}/.test(text);
       })()`));
-    check('模型区：当前对话模型显示为宿主管理（不伪造全局开关）',
-      await evalJs(`(() => {
-        const host = document.querySelector('#settings-panel-runtime [data-rt-host-model]');
-        return Boolean(host) && /宿主管理/.test(host.textContent)
-          && !host.querySelector('button, input, select');
-      })()`));
-    check('本地模型卡：9B/27B/4B + 体积/内存/状态；不显示量化/线程/端口',
-      await evalJs(`(() => {
+    // 轻量模式：模型状态卡消失，高级模型来源禁用并说明。
+    await evalJs('document.querySelector("[data-rt-mode=lightweight]").click()');
+    check('切回轻量 MCP 走品牌确认（不迁移、不删除）',
+      await waitFor('document.querySelector("#modal")?.hidden === false && /切回|轻量|保留|删除/.test(document.querySelector("#modal-body")?.textContent ?? "")'));
+    await evalJs('document.querySelector("#modal-confirm").click()');
+    check('轻量模式：状态为轻量 MCP，模型配置隐藏',
+      await waitFor(`(() => {
         const p = document.querySelector('#settings-panel-runtime');
-        const text = p?.textContent ?? '';
-        return /Qwen 9B/.test(text) && /Qwen 27B/.test(text) && /Qwen 4B/.test(text)
-          && /下载体积/.test(text) && /内存要求/.test(text) && /状态/.test(text)
-          && !/Q4_K_M|量化|线程|端口/.test(text);
-      })()`));
-    await evalJs('(() => { const d = document.querySelector("#runtime-advanced-fold"); if (d) d.open = true; })()');
-    check('Sidecar 诊断折叠：只读状态与托管信息，不再渲染旧 runtime.* 字段',
-      await evalJs(`(() => {
-        const p = document.querySelector('#runtime-advanced-fold');
-        if (!p) return false;
-        const text = p.textContent;
-        return /Sidecar 诊断/.test(p.querySelector('summary')?.textContent ?? '')
-          && /由 MCP 托管/.test(text) && /命令来源/.test(text) && /重启次数/.test(text)
-          && p.querySelectorAll('[data-rt-path]').length === 0;
-      })()`));
+        return /轻量 MCP/.test(p?.querySelector('[data-rt-mode-chip]')?.textContent ?? '')
+          && !p?.querySelector('[data-rt-model-status]');
+      })()`, 30000));
+    await evalJs('document.querySelector("[data-settings-tab=advanced]").click()');
+    check('轻量模式：高级模型来源禁用并说明',
+      await waitFor(`(() => {
+        const section = document.querySelector('#settings-panel-advanced [data-settings-section=model-source]');
+        const s = section?.querySelector('[data-rt-model-source]');
+        return Boolean(s) && s.disabled === true && /轻量 MCP/.test(section.textContent)
+          && !/endpoint|keyRef|token|Raw/i.test(section.textContent);
+      })()`, 30000));
+    await evalJs('document.querySelector("#settings-close").click()');
+    await evalJs('document.querySelector("#view-nav li:nth-of-type(5) button").click()');
+    check('轻量模式：轨迹显示未启用（不是 501/错误弹窗），普通记录数量不变',
+      await waitFor(`(() => {
+        const head = document.querySelector('#runtime-head-mode')?.textContent ?? '';
+        const traces = document.querySelector('#runtime-traces')?.textContent ?? '';
+        return /轻量 MCP/.test(head) && /记忆运行时未启用/.test(traces)
+          && document.querySelectorAll('#runtime-timeline .mem-row[data-rt-kind=memory]').length === ${beforeModeSwitch};
+      })()`, 30000));
+    // 重新开启沉浸式：设置里的模式开关热生效。
+    await evalJs('document.querySelector("#open-settings").click()');
+    await evalJs('document.querySelector("[data-settings-tab=runtime]").click()');
+    await evalJs('document.querySelector("[data-rt-mode=immersive]").click()');
+    await waitFor('document.querySelector("#modal")?.hidden === false');
+    await evalJs('document.querySelector("#modal-confirm").click()');
+    check('重新开启沉浸式：模式热生效，模型状态卡恢复',
+      await waitFor(`(() => {
+        const p = document.querySelector('#settings-panel-runtime');
+        return /沉浸式/.test(p?.querySelector('[data-rt-mode-chip]')?.textContent ?? '')
+          && Boolean(p?.querySelector('[data-rt-model-status]'));
+      })()`, 30000));
+    await waitFor(`/就绪/.test(document.querySelector('#settings-panel-runtime [data-rt-sidecar-status]')?.textContent ?? '')`, 30000);
+    // 唯一新增控件 2：高级 · 模型来源（仅下拉；不显示 endpoint/key/path）。
+    await evalJs('document.querySelector("[data-settings-tab=advanced]").click()');
+    check('高级模型来源：5 个来源、默认 heuristic、无 endpoint/key/path 明文',
+      await waitFor(`(() => {
+        const section = document.querySelector('#settings-panel-advanced [data-settings-section=model-source]');
+        const s = section?.querySelector('[data-rt-model-source]');
+        if (!s || s.disabled) return false;
+        const values = [...s.options].map((o) => o.value);
+        return values.join(',') === 'heuristic,local,host,api,auto'
+          && s.value === 'heuristic'
+          && /模型来源/.test(section.textContent) && /立即应用|下次启动/.test(section.textContent)
+          && !/endpoint|keyRef|api key|token|Raw|模型路径/i.test(section.textContent);
+      })()`, 30000));
+    await evalJs(`(() => {
+      const s = document.querySelector('#rt-model-source');
+      s.value = 'auto';
+      s.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    check('模型来源写入并回读为 auto（配置读写路径可用）',
+      await waitFor(`(async () => {
+        const res = await fetch('/admin/api/memory-runtime/model-source').then((r) => r.json()).catch(() => null);
+        return res?.source === 'auto' && document.querySelector('#rt-model-source')?.value === 'auto'
+          && !/endpoint|keyRef|token|Raw/i.test(JSON.stringify(res));
+      })()`, 30000));
     await evalJs('document.querySelector("[data-settings-tab=assistants]").click()');
     // U-3 症状①：背板/设置框不滚，只有页签下的 .settings-scroll 滚动；页面滚动锁定
     check('U-3 设置壳：提示在标题下 + 仅内容区滚动 + 右上角 X + 滚动条贴边',
@@ -1247,7 +1269,7 @@ async function main() {
       return { count: details.length, keys: details.map((d) => d.dataset.settingsFold ?? d.className) };
     })()`);
     check('U1 设置折叠预算：≤5 且均为允许类型（邀请无折叠）', Boolean(foldAudit) && foldAudit.count <= 5
-      && foldAudit.keys.every((key) => ['mcp-danger', 'diagnostics', 'about-runtime', 'runtime-advanced', 'assistants'].includes(key)),
+      && foldAudit.keys.every((key) => ['mcp-danger', 'diagnostics', 'about-runtime', 'assistants'].includes(key)),
       JSON.stringify(foldAudit));
     check('U-1 设置无退役配置项/引导签发者/授权·签发·参与',
       await evalJs(`(() => {
@@ -1401,11 +1423,12 @@ async function main() {
         const p = document.querySelector('#settings-panel-advanced');
         const sections = [...(p?.querySelectorAll(':scope > .settings-section') ?? [])];
         const ids = sections.map((s) => s.dataset.settingsSection).join(',');
-        return Boolean(p) && ids === 'resident,network,automation'
+        return Boolean(p) && ids === 'resident,network,automation,model-source'
           && sections.every((s) => Boolean(s.querySelector('h3')) && Boolean(s.querySelector('.settings-section-desc')))
           && Boolean(p.querySelector('[data-cfg-path="joinService.enabled"]'))
           && Boolean(p.querySelector('[data-cfg-path="network.enabled"]'))
           && Boolean(p.querySelector('[data-cfg-path="sync.antiEntropy.enabled"]'))
+          && Boolean(p.querySelector('#rt-model-source'))
           && !p.querySelector('[data-task]') && !p.querySelector('[data-cfg-path="mcp.http.host"]')
           && !p.querySelector('[data-cfg-path="sync.peerWhitelist"]');
       })()`));
@@ -2214,7 +2237,7 @@ async function main() {
       .map((el) => el.dataset.settingsFold ?? el.className))()`);
     check('U-1 全域折叠预算：设置 + 关于 ≤5 且均为白名单类型（邀请无折叠）', Array.isArray(allFoldKeys)
       && allFoldKeys.length <= 5
-      && allFoldKeys.every((key) => ['mcp-danger', 'diagnostics', 'about-runtime', 'runtime-advanced', 'assistants'].includes(key)),
+      && allFoldKeys.every((key) => ['mcp-danger', 'diagnostics', 'about-runtime', 'assistants'].includes(key)),
       JSON.stringify(allFoldKeys));
     check('E1 邀请面板无「去设置启用」旧指路（未启用时就地一键启用）',
       await evalJs(`(() => {
@@ -3070,9 +3093,9 @@ async function main() {
         service: /Resident/.test(full.common),
         securitySections: /Security level/.test(full.security) && /Authenticator seed/.test(full.security) && /Recovery code/.test(full.security),
         assistants: /Add assistant/.test(full.assistants),
-        runtime: /Memory runtime/.test(full.runtime) && /Enable immersive/.test(full.runtime) && /Memory model/.test(full.runtime) && /Host-managed/.test(full.runtime) && !/Third-party API/.test(full.runtime),
+        runtime: /Memory mode/.test(full.runtime) && /Lightweight MCP/.test(full.runtime) && /Immersive/.test(full.runtime) && /Model status/.test(full.runtime) && !/Third-party API/.test(full.runtime),
         mcp: /Connection/.test(full.mcp) && /TLS/.test(full.mcp) && /Risks and recovery/.test(full.mcp),
-        advanced: /Resident service/.test(full.advanced) && /Network/.test(full.advanced) && /Automation/.test(full.advanced) && /Diagnostics and recovery/.test(full.advanced),
+        advanced: /Resident service/.test(full.advanced) && /Network/.test(full.advanced) && /Automation/.test(full.advanced) && /Model source/.test(full.advanced) && /Diagnostics and recovery/.test(full.advanced),
         diagnostics: /Version and service status/.test(diag) && /Recovery guide/.test(diag) && /Full configuration/.test(diag),
       };
       document.querySelector('[data-settings-tab=common]')?.click();

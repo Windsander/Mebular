@@ -29,6 +29,13 @@ import {
   MemoryRuntimeSupervisor,
   disabledMemoryRuntimeStatus,
 } from './memory-runtime-supervisor.mjs';
+import {
+  DEFAULT_MEMORY_RUNTIME_MODEL_SOURCE,
+  MEMORY_RUNTIME_MODEL_SOURCES,
+  MemoryRuntimeConfigError,
+  readMemoryRuntimeModelSource,
+  writeMemoryRuntimeModelSource,
+} from './memory-runtime-config.mjs';
 import { APP_VERSION } from './version.mjs';
 import { resolveStaticAssetRoots } from './asset-roots.mjs';
 
@@ -1286,6 +1293,7 @@ export async function startHttpServer({
     const builder = READ_ROUTES[path];
     const memoryRuntimeTrace = /^\/admin\/api\/memory-runtime\/traces\/([^/]+)$/.exec(path);
     const memoryRuntimeRead = path === '/admin/api/memory-runtime/status'
+      || path === '/admin/api/memory-runtime/model-source'
       || path === '/admin/api/memory-runtime/traces'
       || memoryRuntimeTrace !== null;
     if (!builder && !memoryRuntimeRead) return false;
@@ -1305,7 +1313,49 @@ export async function startHttpServer({
         const status = memoryRuntimeSupervisor
           ? await memoryRuntimeSupervisor.status().catch(() => memoryRuntimeSupervisor.snapshot())
           : disabledMemoryRuntimeStatus();
-        return sendJson(res, 200, status);
+        const detail = memoryRuntimeSupervisor
+          ? await memoryRuntimeSupervisor.readStatus().catch(() => null)
+          : null;
+        // 只合并模式/版本/模型状态；host token、endpoint、keyRef、模型路径永不出服务端。
+        return sendJson(res, 200, {
+          ...status,
+          mode: status.enabled ? 'immersive' : 'lightweight',
+          runtimeVersion: status.runtimeVersion ?? detail?.runtimeVersion ?? null,
+          model: detail?.model ?? null,
+        });
+      }
+      if (path === '/admin/api/memory-runtime/model-source') {
+        let configView;
+        try {
+          configView = await readMemoryRuntimeModelSource({ home });
+        } catch (error) {
+          configView = {
+            source: DEFAULT_MEMORY_RUNTIME_MODEL_SOURCE,
+            defaultSource: DEFAULT_MEMORY_RUNTIME_MODEL_SOURCE,
+            values: [...MEMORY_RUNTIME_MODEL_SOURCES],
+            exists: false,
+            warnings: [error?.code ?? 'config_unreadable'],
+          };
+        }
+        const enabled = memoryRuntimeSupervisor?.isEnabled() === true;
+        const detail = enabled && memoryRuntimeSupervisor
+          ? await memoryRuntimeSupervisor.readStatus().catch(() => null)
+          : null;
+        const snapshot = memoryRuntimeSupervisor?.snapshot() ?? disabledMemoryRuntimeStatus();
+        const available = detail?.available === true;
+        const canApplyHot = enabled && available && snapshot.managed === true && snapshot.attached !== true;
+        return sendJson(res, 200, {
+          ok: true,
+          ...configView,
+          enabled,
+          available,
+          state: detail?.state ?? snapshot.state,
+          degraded: detail?.degraded === true,
+          reason: detail?.reason ?? null,
+          error: detail?.error ?? null,
+          model: detail?.model ?? null,
+          applies: canApplyHot ? 'hot' : 'next_start',
+        });
       }
       if (!memoryRuntimeSupervisor) {
         if (memoryRuntimeTrace) {
@@ -1536,6 +1586,8 @@ export async function startHttpServer({
     /^\/admin\/api\/(?:models|inference)\/(select|download|pause|resume|cancel|import|uninstall|remove|start|stop|test)$/,
     // 0.3 记忆运行时：召回反馈经 MCP 薄代理转发 sidecar；host token 不出服务端。
     /^\/admin\/api\/memory-runtime\/feedback$/,
+    // 0.3 高级模型来源：只写 <home>/memory-runtime/config.json 的 model.source。
+    /^\/admin\/api\/memory-runtime\/model-source$/,
   ];
 
   // P2：UNINITIALIZED 仅开放本机助手配置所需的读写动作（列表 / 预览 / 接入 / 验证 / 重探）。
@@ -2085,6 +2137,55 @@ export async function startHttpServer({
 
     // 自动修复：客户端接入修复，**不**经 securityWriteGate（不写记忆/安全状态）。
     if (path === '/admin/api/repair') return handleRepair(req, res);
+
+    // 0.3 高级模型来源：轻量模式不创建 sidecar 目录，也不接受写入。
+    if (path === '/admin/api/memory-runtime/model-source') {
+      if (memoryRuntimeSupervisor?.isEnabled() !== true) {
+        return sendJson(res, 409, {
+          ok: false,
+          error: 'memory_runtime_disabled',
+          enabled: false,
+          state: 'stopped',
+          message: '记忆模式为轻量 MCP：切换到沉浸式后才能调整模型来源',
+        });
+      }
+      const input = parseJsonBody(body);
+      if (!input) {
+        return sendJson(res, 400, { ok: false, error: 'bad_request', message: '需要 JSON 请求体' });
+      }
+      let written;
+      try {
+        written = await writeMemoryRuntimeModelSource({ home, source: input.source });
+      } catch (error) {
+        const code = error instanceof MemoryRuntimeConfigError ? error.code : 'config_write_failed';
+        return sendJson(res, code === 'invalid_model_source' || code === 'config_invalid' ? 400 : 409, {
+          ok: false,
+          error: code,
+          message: error?.message ?? '模型来源保存失败',
+        });
+      }
+      const snapshot = await memoryRuntimeSupervisor.status().catch(() => memoryRuntimeSupervisor.snapshot());
+      const detail = await memoryRuntimeSupervisor.readStatus().catch(() => null);
+      const canApplyHot = detail?.available === true
+        && snapshot.managed === true
+        && snapshot.attached !== true;
+      if (canApplyHot) {
+        // sidecar 重启后读取新的 model.source；失败只降级，不阻塞对话。
+        void memoryRuntimeSupervisor.restart({ includeAttached: false, force: false }).catch(() => undefined);
+      }
+      return sendJson(res, 200, {
+        ok: true,
+        ...written,
+        enabled: true,
+        available: detail?.available === true,
+        state: snapshot.state,
+        degraded: detail?.degraded === true,
+        reason: detail?.reason ?? null,
+        error: null,
+        model: detail?.model ?? null,
+        applies: canApplyHot ? 'hot' : 'next_start',
+      });
+    }
 
     // 0.3 记忆运行时：召回反馈经 MCP 薄代理转发 sidecar（host token 只在服务端使用）。
     if (path === '/admin/api/memory-runtime/feedback') {
@@ -3612,6 +3713,7 @@ export async function startHttpServer({
         }
         if (req.method === 'GET' && (READ_ROUTES[path]
           || path === '/admin/api/memory-runtime/status'
+          || path === '/admin/api/memory-runtime/model-source'
           || path === '/admin/api/memory-runtime/traces'
           || /^\/admin\/api\/memory-runtime\/traces\/[^/]+$/.test(path))) {
           return handleAdminRead(req, res, path, url);

@@ -9,7 +9,7 @@
 import { StarStage, namespaceColor, shortId, buildHoverRoutes, buildNetworkScene, normalizeFleetEvent, resolveTaskNamespace, summarizeHoverRoutes } from './starfield.js';
 import { initialViewFromSearch } from './deep-link.js';
 import { createWizardState, wizardReduce, WIZARD_STEPS } from './wizard.js';
-import { IA_TABS, IA_ADVANCED_SECTIONS, IA_MCP_SECTIONS, IA_FIELD_COPY, IA_SETTINGS_EXTRA, IA_SETTINGS_FOLDS, IA_SECURITY_SECTIONS, IA_MCP_DANGER_LINE_KEYS, INVITE_TTL_OPTIONS, INVITE_TTL_DEFAULT_MS, SECURITY_LEVEL_LABEL, SECURITY_LEVEL_TITLE_KEY, SECURITY_LEVEL_NOTE_KEY, SECURITY_BOUNDARY_KEY, SCHEMA_CONFIGURED_VALUE, localizeSchemaReason, refreshCsrfToken, withCsrfRetry, filterRuntimeTimeline, runtimeTimelineKind, memoryRuntimeEnabledOf, runtimeSidecarStateKey, runtimePackStateKey, runtimePackProgress, formatByteSize } from './settings-ia.js';
+import { IA_TABS, IA_ADVANCED_SECTIONS, IA_MCP_SECTIONS, IA_FIELD_COPY, IA_SETTINGS_EXTRA, IA_SETTINGS_FOLDS, IA_SECURITY_SECTIONS, IA_MCP_DANGER_LINE_KEYS, INVITE_TTL_OPTIONS, INVITE_TTL_DEFAULT_MS, SECURITY_LEVEL_LABEL, SECURITY_LEVEL_TITLE_KEY, SECURITY_LEVEL_NOTE_KEY, SECURITY_BOUNDARY_KEY, SCHEMA_CONFIGURED_VALUE, localizeSchemaReason, refreshCsrfToken, withCsrfRetry, filterRuntimeTimeline, runtimeTimelineKind, memoryRuntimeEnabledOf, runtimeSidecarStateKey, memoryRuntimeModeOf, runtimeShowsModelSettings, runtimeModelSourceOf, runtimeModelSourceAvailable, runtimeModelSourceReady, IA_RUNTIME_MODEL_SOURCES, IA_RUNTIME_MODEL_SOURCE_DEFAULT } from './settings-ia.js';
 import { assistantsPanelHtml, serviceRowHtml, wizardRowHtml, repairRowHtml, statusPillHtml, attentionItems, assistantAddFormHtml } from './assistants.js';
 import { reconcileAssistantUi } from './assistant-status.js';
 import { createConsoleHost, markEmbeddedDocument } from './host.js';
@@ -58,7 +58,8 @@ const state = {
   // 0.3：记忆运行时（状态 / 治理 / 模型 / 轨迹）；数据只在相关视图/设置页按需加载。
   runtime: {
     status: null,
-    models: null,
+    // 高级 · 模型来源（GET /admin/api/memory-runtime/model-source；浏览器不接触 sidecar 配置）
+    modelSource: null,
     traces: null,
     traceMeta: null,
     traceDetails: {},
@@ -1509,7 +1510,7 @@ function renderMcpSections() {
   }).join('');
 }
 
-// ---------- 0.3 · 设置 · 记忆运行时（单开关 + sidecar 状态 + 模型） ----------
+// ---------- 0.3 · 设置 · 记忆模式 / 高级模型来源 ----------
 
 function runtimeStatusStateLabel(status) {
   if (!status) return t('runtime.loadingShort');
@@ -1520,178 +1521,138 @@ function runtimeStatusStateLabel(status) {
 function runtimeStatusErrorText(status) {
   const error = status?.error;
   if (!error) return '';
-  return error.message || error.code || String(error);
+  return String(error.message || error.code || error)
+    .replace(/\b(Bearer)\s+[A-Za-z0-9._~+/=-]+/gi, '$1 <redacted>')
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, 'sk-<redacted>')
+    .replace(/\b(?:host|capability)[-_ ]?token(?:File)?\b/gi, '运行时凭据')
+    .replace(/\btoken(?:File)?\b/gi, '凭据')
+    .replace(/\bdiscovery\b/gi, '运行时发现')
+    .replace(/\bsidecar\b/gi, '记忆运行时');
 }
 
-function runtimeSidecarFactsHtml(status) {
+function runtimeModelSourceLabel(source) {
+  const raw = String(source ?? '').trim().toLowerCase();
+  if (!raw) return '—';
+  const key = `runtime.modelSource.${raw}`;
+  return t.has(key) ? t(key) : raw;
+}
+
+function runtimeModelReasonLabel(reason) {
+  if (!reason) return '—';
+  const key = `runtime.modelReason.${String(reason).replace(/[^a-z0-9_]/gi, '_')}`;
+  return t.has(key) ? t(key) : t('runtime.modelReason.unknown');
+}
+
+/** 运行状态只读卡：mode / state / degraded / error / version；不显示 token、pid 或配置路径。 */
+function runtimeStatusFactsHtml(status) {
   if (!status) return `<p class="muted">${escapeHtml(t('runtime.loading'))}</p>`;
   const error = runtimeStatusErrorText(status);
   const stateLabel = runtimeStatusStateLabel(status);
+  const enabled = memoryRuntimeEnabledOf(status, currentConfigFile());
   return `<dl class="runtime-kv" data-rt-sidecar-status>
-    <dt>${escapeHtml(t('runtime.sidecar.enabled'))}</dt><dd>${escapeHtml(status.enabled ? t('runtime.sidecar.on') : t('runtime.sidecar.off'))}</dd>
+    <dt>${escapeHtml(t('runtime.status.mode'))}</dt><dd><span class="crt-tag ${enabled ? 'crt-tag-ok' : ''}">${escapeHtml(enabled ? t('runtime.sidecar.immersive') : t('runtime.sidecar.lightweight'))}</span></dd>
     <dt>${escapeHtml(t('runtime.sidecar.state'))}</dt><dd><span class="crt-tag ${status.state === 'ready' ? 'crt-tag-ok' : status.degraded || status.state === 'failed' ? 'crt-tag-warn' : ''}">${escapeHtml(stateLabel)}</span></dd>
-    <dt>${escapeHtml(t('runtime.sidecar.pid'))}</dt><dd>${escapeHtml(status.pid ?? '—')}</dd>
-    <dt>${escapeHtml(t('runtime.sidecar.version'))}</dt><dd>${escapeHtml(status.runtimeVersion ?? '—')}</dd>
     <dt>${escapeHtml(t('runtime.sidecar.degraded'))}</dt><dd>${escapeHtml(status.degraded ? t('runtime.sidecar.degradedYes') : t('runtime.sidecar.degradedNo'))}</dd>
     <dt>${escapeHtml(t('runtime.sidecar.error'))}</dt><dd>${error ? escapeHtml(error) : '—'}</dd>
+    <dt>${escapeHtml(t('runtime.sidecar.version'))}</dt><dd>${escapeHtml(status.runtimeVersion ?? '—')}</dd>
   </dl>`;
-}
-
-function runtimeSidecarDetailsHtml(status) {
-  if (!status) return '';
-  const rows = [
-    [t('runtime.sidecar.available'), status.available ? t('runtime.sidecar.on') : t('runtime.sidecar.off')],
-    [t('runtime.sidecar.managed'), status.managed ? t('runtime.sidecar.on') : t('runtime.sidecar.off')],
-    [t('runtime.sidecar.attached'), status.attached ? t('runtime.sidecar.on') : t('runtime.sidecar.off')],
-    [t('runtime.sidecar.commandSource'), status.commandSource ?? '—'],
-    [t('runtime.sidecar.restarts'), String(status.restarts ?? 0)],
-    [t('runtime.sidecar.reason'), status.reason ?? '—'],
-  ];
-  return `<dl class="runtime-kv">${rows.map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(String(value))}</dd>`).join('')}</dl>`;
 }
 
 function runtimeModeSettingsHtml() {
   const status = state.runtime.status;
-  const enabled = memoryRuntimeEnabledOf(status, currentConfigFile());
+  const mode = memoryRuntimeModeOf(status, currentConfigFile());
+  const enabled = mode === 'immersive';
   const disabled = !state.features.writes || MOCK;
+  const option = (value, labelKey, descKey) => `<button class="btn btn-small btn-crt" type="button" data-rt-mode="${value}" aria-pressed="${mode === value}" ${disabled ? 'disabled' : ''}>
+    <span>${escapeHtml(t(labelKey))}</span>
+    <span class="runtime-model-desc">${escapeHtml(t(descKey))}</span>
+  </button>`;
   return settingsSectionHtml({
-    id: 'runtime-access',
-    title: t('settings.runtime.access.title'),
-    desc: t('settings.runtime.access.desc'),
-    chip: `<span class="crt-tag ${enabled ? 'crt-tag-ok' : ''}" data-rt-enabled-chip>${escapeHtml(enabled ? t('runtime.sidecar.immersive') : t('runtime.sidecar.lightweight'))}</span>`,
-    body: `<label class="runtime-switch-row crt-surface">
-      <span class="runtime-switch-copy">
-        <span class="runtime-model-name">${escapeHtml(t('settings.runtime.access.enabled'))}</span>
-        <span class="runtime-model-desc">${escapeHtml(t('settings.runtime.access.enabledDesc'))}</span>
-      </span>
-      <input type="checkbox" data-rt-enabled ${enabled ? 'checked' : ''} ${disabled ? 'disabled' : ''}>
-    </label>
-    <div class="runtime-sidecar-block">
-      <h4>${escapeHtml(t('runtime.sidecar.title'))}</h4>
-      ${runtimeSidecarFactsHtml(status)}
+    id: 'runtime-mode',
+    title: t('settings.runtime.mode.title'),
+    desc: t('settings.runtime.mode.desc'),
+    chip: `<span class="crt-tag ${enabled ? 'crt-tag-ok' : ''}" data-rt-mode-chip>${escapeHtml(enabled ? t('runtime.sidecar.immersive') : t('runtime.sidecar.lightweight'))}</span>`,
+    body: `<div class="runtime-mode-actions" role="group" aria-label="${escapeHtml(t('settings.runtime.mode.title'))}" data-rt-mode-group>
+      ${option('lightweight', 'settings.runtime.mode.lightweight', 'settings.runtime.mode.lightDesc')}
+      ${option('immersive', 'settings.runtime.mode.immersive', 'settings.runtime.mode.immersiveDesc')}
     </div>
-    <p class="settings-section-foot muted">${escapeHtml(enabled ? t('settings.runtime.access.onHint') : t('settings.runtime.access.offHint'))}</p>`,
+    <p class="settings-section-foot muted">${escapeHtml(enabled ? t('settings.runtime.mode.onHint') : t('settings.runtime.mode.offHint'))}</p>`,
   });
 }
 
-function runtimeModelSettingsHtml() {
-  const models = state.runtime.models;
-  const selectedPack = (models?.packs ?? []).find((pack) => pack.selected) ?? null;
+function runtimeModelStatusHtml(status) {
+  const model = status?.model ?? null;
+  const rows = model
+    ? [
+      [t('settings.runtime.modelStatus.configured'), runtimeModelSourceLabel(model.configured)],
+      [t('settings.runtime.modelStatus.active'), runtimeModelSourceLabel(model.active)],
+      [t('settings.runtime.modelStatus.degraded'), model.degraded ? t('runtime.sidecar.degradedYes') : t('runtime.sidecar.degradedNo')],
+      [t('settings.runtime.modelStatus.reason'), runtimeModelReasonLabel(model.reason)],
+      [t('settings.runtime.modelStatus.sources'), (model.sources ?? []).map(runtimeModelSourceLabel).join(t('common.listSeparator')) || '—'],
+    ]
+    : [[t('settings.runtime.modelStatus.state'), t('settings.runtime.modelStatus.unavailable')]];
   return settingsSectionHtml({
-    id: 'runtime-model',
-    title: t('settings.runtime.model.title'),
-    desc: t('settings.runtime.model.desc'),
-    chip: selectedPack ? `<span class="crt-tag">${escapeHtml(t('settings.runtime.model.localSelected'))}</span>` : '',
-    body: `<div class="runtime-host-model" data-rt-host-model>
-      <div class="runtime-host-title"><span>${escapeHtml(t('settings.runtime.model.host'))}</span><span class="crt-tag">${escapeHtml(t('settings.runtime.model.hostManaged'))}</span></div>
-      <p class="muted">${escapeHtml(t('settings.runtime.model.hostDesc'))}</p>
-    </div>
-    <div class="runtime-host-model" data-rt-local-model>
-      <div class="runtime-host-title"><span>${escapeHtml(t('settings.runtime.model.local'))}</span><span class="crt-tag">${escapeHtml(t('settings.runtime.model.localManaged'))}</span></div>
-      <p class="muted">${escapeHtml(selectedPack
-        ? t('settings.runtime.model.localCurrent', { pack: runtimePackLabel(selectedPack) })
-        : t('settings.runtime.model.noPack'))}</p>
-      <p class="muted">${escapeHtml(t('settings.runtime.model.localDesc'))}</p>
-    </div>
-    <p class="muted">${escapeHtml(t('settings.runtime.model.activeHost'))}</p>`,
+    id: 'runtime-model-status',
+    title: t('settings.runtime.modelStatus.title'),
+    desc: t('settings.runtime.modelStatus.desc'),
+    body: `<dl class="runtime-kv" data-rt-model-status>${rows.map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(String(value))}</dd>`).join('')}</dl>
+      <p class="settings-section-foot muted">${escapeHtml(t('settings.runtime.modelStatus.foot'))}</p>`,
   });
 }
 
-function runtimePackCard(pack) {
-  const stateName = pack.state ?? (pack.installed ? 'installed' : 'not_installed');
-  const download = pack.download;
-  const progress = runtimePackProgress(download);
-  const busy = ['downloading', 'verifying', 'installing'].includes(stateName);
-  const paused = stateName === 'paused';
-  const failed = stateName === 'failed' || stateName === 'corrupt';
-  const installed = stateName === 'installed' || pack.installed === true;
-  const selected = pack.selected === true;
-  const disabled = !state.features.writes || MOCK;
-  const stateClass = installed ? 'crt-tag-ok' : failed ? 'crt-tag-error' : busy || paused ? 'crt-tag-warn' : '';
-  const requirements = pack.requirements ?? {};
-  const memoryText = requirements.minMemoryBytes
-    ? t('settings.runtime.local.memoryValue', {
-      min: formatByteSize(requirements.minMemoryBytes),
-      recommended: formatByteSize(requirements.recommendedMemoryBytes ?? requirements.minMemoryBytes),
-    })
-    : '—';
-  const actions = [];
-  const button = (action, label, extra = '') => `<button class="btn btn-small btn-crt" type="button" data-rt-pack-action="${action}" data-rt-pack="${escapeHtml(pack.packId)}" ${disabled ? 'disabled' : ''} ${extra}>${escapeHtml(label)}</button>`;
-  if (busy) {
-    actions.push(button('pause', t('settings.runtime.local.pause')));
-    actions.push(button('cancel', t('settings.runtime.local.cancel')));
-  } else if (paused) {
-    actions.push(button('resume', t('settings.runtime.local.resume')));
-    actions.push(button('cancel', t('settings.runtime.local.cancel')));
-  } else if (failed) {
-    actions.push(button('download', t('settings.runtime.local.download')));
-    actions.push(button('cancel', t('settings.runtime.local.cancel')));
-  } else if (installed) {
-    if (!selected) actions.push(button('select', t('settings.runtime.local.select')));
-    actions.push(button('uninstall', t('settings.runtime.local.uninstall')));
-  } else {
-    actions.push(button('download', t('settings.runtime.local.download')));
-  }
-  const progressHtml = (busy || paused)
-    ? `<div class="runtime-progress" aria-hidden="true"><span style="--rt-progress:${progress.percent === null ? 0 : progress.percent.toFixed(1)}"></span></div>
-       <p class="muted">${escapeHtml(progress.totalBytes > 0
-         ? t('settings.runtime.progress', { done: formatByteSize(progress.downloadedBytes), total: formatByteSize(progress.totalBytes) })
-         : t('settings.runtime.local.preparing'))}</p>`
-    : '';
-  return `<article class="runtime-pack crt-surface" data-runtime-pack="${escapeHtml(pack.packId)}">
-    <h4>${escapeHtml(runtimePackLabel(pack))} ${pack.default ? `<span class="crt-tag">${escapeHtml(t('settings.runtime.local.default'))}</span>` : ''}${selected ? `<span class="crt-tag crt-tag-ok">${escapeHtml(t('settings.runtime.local.selected'))}</span>` : ''}</h4>
-    <p class="muted">${escapeHtml(runtimePackDescription(pack))}</p>
-    <dl class="runtime-pack-meta">
-      <dt>${escapeHtml(t('settings.runtime.local.size'))}</dt><dd>${escapeHtml(formatByteSize(pack.estimatedDownloadBytes))}</dd>
-      <dt>${escapeHtml(t('settings.runtime.local.memory'))}</dt><dd>${escapeHtml(memoryText)}</dd>
-      <dt>${escapeHtml(t('settings.runtime.local.state'))}</dt><dd><span class="crt-tag ${stateClass}">${escapeHtml(runtimePackStateLabel(stateName))}</span>${pack.installedBytes ? ` · ${escapeHtml(formatByteSize(pack.installedBytes))}` : ''}</dd>
-    </dl>
-    ${download?.error?.code ? `<p class="crt-warn"><code>${escapeHtml(download.error.code)}</code></p>` : ''}
-    ${progressHtml}
-    <div class="runtime-pack-actions">${actions.join('')}</div>
-  </article>`;
-}
-
-function runtimeLocalModelsHtml() {
-  const models = state.runtime.models;
-  const error = state.runtime.errors.models;
-  if (!models) {
-    return settingsSectionHtml({
-      id: 'runtime-local-models',
-      title: t('settings.runtime.local.title'),
-      desc: t('settings.runtime.local.desc'),
-      body: `<p class="muted">${escapeHtml(error ? t('runtime.modelUnavailable', { message: error }) : t('runtime.loading'))}</p>`,
-    });
-  }
-  const order = { default: 0, quality: 1, light: 2 };
-  const packs = [...(models.packs ?? [])].sort((a, b) => (order[a.tier] ?? 9) - (order[b.tier] ?? 9));
+function runtimeModelSourceSectionHtml() {
+  const meta = state.runtime.modelSource;
+  const status = state.runtime.status;
+  const enabled = memoryRuntimeModeOf(status, currentConfigFile()) === 'immersive';
+  const source = runtimeModelSourceOf(meta?.source ?? IA_RUNTIME_MODEL_SOURCE_DEFAULT);
+  const model = meta?.model ?? status?.model ?? null;
+  const values = Array.isArray(meta?.values) && meta.values.length > 0 ? meta.values : IA_RUNTIME_MODEL_SOURCES;
+  const ready = enabled && runtimeModelSourceReady(meta);
+  const disabled = !state.features.writes || MOCK || !ready;
+  const note = !enabled
+    ? t('settings.runtime.modelSource.light')
+    : !meta
+      ? t('settings.runtime.modelSource.loading')
+      : meta.available !== true
+        ? t('settings.runtime.modelSource.notReady')
+        : meta.applies === 'next_start'
+          ? t('settings.runtime.modelSource.nextStartHint')
+          : t('settings.runtime.modelSource.hotHint');
+  const options = values.map((value) => {
+    const normalized = runtimeModelSourceOf(value);
+    const unavailable = !runtimeModelSourceAvailable(normalized, model) && normalized !== source;
+    return `<option value="${escapeHtml(normalized)}" ${normalized === source ? 'selected' : ''} ${unavailable ? 'disabled' : ''}>${escapeHtml(runtimeModelSourceLabel(normalized))}${unavailable ? ` · ${escapeHtml(t('settings.runtime.modelSource.unavailableOption'))}` : ''}</option>`;
+  }).join('');
   return settingsSectionHtml({
-    id: 'runtime-local-models',
-    title: t('settings.runtime.local.title'),
-    desc: t('settings.runtime.local.desc'),
-    chip: `<span class="crt-tag">${escapeHtml(String(packs.length))}</span>`,
-    body: packs.length > 0
-      ? `<div class="runtime-pack-grid">${packs.map(runtimePackCard).join('')}</div>`
-      : `<p class="muted">${escapeHtml(t('settings.runtime.local.empty'))}</p>`,
+    id: 'model-source',
+    title: t('settings.runtime.modelSource.title'),
+    desc: t('settings.runtime.modelSource.desc'),
+    body: `<div class="cfg-row">
+      <label class="cfg-label" for="rt-model-source">${escapeHtml(t('settings.runtime.modelSource.selectLabel'))}</label>
+      <div class="cfg-control">
+        <select id="rt-model-source" class="crt-input" data-rt-model-source ${disabled ? 'disabled' : ''}>${options}</select>
+        <p class="cfg-help muted" data-rt-model-source-note>${escapeHtml(note)}</p>
+      </div>
+    </div>
+    <p class="settings-section-foot muted">${escapeHtml(t('settings.runtime.modelSource.foot'))}</p>`,
   });
 }
 
 function renderRuntimeSettings() {
   const status = state.runtime.status;
   const statusError = state.runtime.errors.status;
+  const enabled = runtimeShowsModelSettings(status, currentConfigFile());
   return `
     ${!status && statusError ? `<p class="crt-warn" role="alert">${escapeHtml(t('settings.runtime.error', { message: statusError }))}</p>` : ''}
     ${!status && !statusError ? `<p class="muted">${escapeHtml(t('settings.runtime.loading'))}</p>` : ''}
     ${runtimeModeSettingsHtml()}
-    ${runtimeModelSettingsHtml()}
-    ${runtimeLocalModelsHtml()}
-    <details class="settings-fold" id="runtime-advanced-fold" data-settings-fold="runtime-advanced">
-      <summary>${escapeHtml(foldLabel('runtime-advanced'))}</summary>
-      <div class="runtime-advanced-fields">
-        ${runtimeSidecarDetailsHtml(status)}
-        <p class="settings-note muted">${escapeHtml(t('settings.runtime.sidecar.advancedNote'))}</p>
-      </div>
-    </details>
+    ${settingsSectionHtml({
+      id: 'runtime-status-card',
+      title: t('runtime.status.title'),
+      desc: t('runtime.status.desc'),
+      body: runtimeStatusFactsHtml(status),
+    })}
+    ${enabled ? runtimeModelStatusHtml(status) : ''}
     <p class="settings-note muted">${escapeHtml(t('settings.runtime.scope.desc'))}</p>
   `;
 }
@@ -1764,7 +1725,8 @@ function settingsSignature(activeTab) {
       state.runtime.status?.runtimeVersion ?? null,
       state.runtime.status?.degraded ?? null,
       state.runtime.status?.error?.code ?? null,
-      state.runtime.models?.packs?.map((pack) => [pack.packId, pack.state, pack.selected, pack.installed, pack.download?.downloadedBytes ?? 0, pack.download?.totalBytes ?? 0, pack.download?.error?.code ?? null]) ?? null,
+      state.runtime.status?.model ?? null,
+      state.runtime.modelSource ?? null,
       state.runtime.traceMeta ?? null,
       state.runtime.errors ?? null,
       state.runtime.timelineFilter ?? null,
@@ -1802,10 +1764,10 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
     renderLockedSettings(body);
     return;
   }
-  if (activeTab === 'runtime' && !state.runtime.loading && Date.now() - state.runtime.loadedAt > RUNTIME_REFRESH_MS) {
+  if (['runtime', 'advanced'].includes(activeTab) && !state.runtime.loading && Date.now() - state.runtime.loadedAt > RUNTIME_REFRESH_MS) {
     void ensureRuntimeData({ force: true }).then(() => {
       lastSettingsSignature = null;
-      if (!$('#settings').hidden && (state.settingsTab ?? 'common') === 'runtime') renderSettings('runtime');
+      if (!$('#settings').hidden && (state.settingsTab ?? 'common') === activeTab) renderSettings(activeTab);
     });
   }
   // 轮询时内容未变则跳过重建，避免原生 <select> 弹层/焦点/选择被销毁
@@ -1891,6 +1853,7 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
     `)}
     ${panel('advanced', `
       ${renderAdvancedSections()}
+      ${runtimeModelSourceSectionHtml()}
       <details class="settings-fold" id="diag-fold" data-settings-fold="diagnostics">
         <summary>${escapeHtml(foldLabel('diagnostics'))}</summary>
         ${renderDiagnostics()}
@@ -3421,31 +3384,16 @@ function renderMemories() {
 }
 
 // ---------- 0.3 · 记忆运行时：状态 / 治理 / 模型 ----------
-// 数据面：GET /admin/api/memory-runtime/status|traces、/admin/api/memories、/admin/api/models；
-// 写面：POST /admin/api/config（memoryRuntime.enabled）、/admin/api/memory-runtime/feedback、
-// /admin/api/models/<action>、/admin/api/memories/<id>/(archive|unarchive|delete)。
-// 浏览器不接触 sidecar host token；sidecar 不可用时状态/轨迹失败开放为 disabled/未就绪。
+// 数据面：GET /admin/api/memory-runtime/status|traces|model-source、/admin/api/memories；
+// 写面：POST /admin/api/config（memoryRuntime.enabled）、/admin/api/memory-runtime/feedback|model-source、
+// /admin/api/memories/<id>/(archive|unarchive|delete)。
+// 浏览器不接触 sidecar host token / endpoint / keyRef；sidecar 不可用时状态/轨迹失败开放为 disabled/未就绪。
 
 const RUNTIME_REFRESH_MS = 8000;
 
 function runtimeIsVisible() {
   return state.view === 'runtime'
-    || (!$('#settings')?.hidden && state.settingsTab === 'runtime');
-}
-
-function runtimePackStateLabel(state) {
-  return t(runtimePackStateKey(state));
-}
-
-function runtimePackLabel(pack) {
-  const size = pack?.tier === 'quality' ? '27B' : pack?.tier === 'light' ? '4B' : '9B';
-  const key = `settings.runtime.local.tier.${pack?.tier ?? 'default'}`;
-  return `Qwen ${size}${t.has(key) ? ` · ${t(key)}` : ''}`;
-}
-
-function runtimePackDescription(pack) {
-  const key = `settings.runtime.local.desc.${pack?.tier ?? 'default'}`;
-  return t.has(key) ? t(key) : '';
+    || (!$('#settings')?.hidden && ['runtime', 'advanced'].includes(state.settingsTab));
 }
 
 function runtimeSidecarReady(status = state.runtime.status) {
@@ -3458,7 +3406,7 @@ async function ensureRuntimeData({ force = false } = {}) {
   if (MOCK) {
     const mock = mockRuntimeData(Date.now());
     state.runtime.status = mock.status;
-    state.runtime.models = mock.models;
+    state.runtime.modelSource = mock.modelSource;
     state.runtime.traces = mock.traces;
     state.runtime.traceMeta = { available: true, disabled: false, state: 'ready' };
     state.runtime.memories = mock.memories;
@@ -3472,10 +3420,10 @@ async function ensureRuntimeData({ force = false } = {}) {
 
   state.runtime.loading = true;
   const wantTimeline = state.view === 'runtime';
-  const keys = ['status', 'models', ...(wantTimeline ? ['traces', 'memories'] : [])];
+  const keys = ['status', 'modelSource', ...(wantTimeline ? ['traces', 'memories'] : [])];
   const requests = keys.map((key) => {
     if (key === 'status') return api('/admin/api/memory-runtime/status');
-    if (key === 'models') return api('/admin/api/models');
+    if (key === 'modelSource') return api('/admin/api/memory-runtime/model-source');
     if (key === 'traces') return api('/admin/api/memory-runtime/traces?limit=20');
     const internal = state.runtime.includeInternal === true ? '&includeInternal=1' : '';
     return api(`/admin/api/memories?limit=200${internal}`);
@@ -3489,7 +3437,7 @@ async function ensureRuntimeData({ force = false } = {}) {
       return;
     }
     if (key === 'status') state.runtime.status = result.value;
-    else if (key === 'models') state.runtime.models = result.value;
+    else if (key === 'modelSource') state.runtime.modelSource = result.value;
     else if (key === 'traces') {
       state.runtime.traces = Array.isArray(result.value?.traces) ? result.value.traces : [];
       state.runtime.traceMeta = {
@@ -3536,56 +3484,57 @@ async function saveRuntimePatch(patch, successKey) {
   }
 }
 
-async function setMemoryRuntimeEnabled(enabled) {
+async function setMemoryRuntimeMode(mode) {
   if (MOCK) { showToast(t('common.mockReadOnly')); return; }
   if (!state.features.writes) { showToast(t('settings.runtime.readonly')); return; }
-  const current = memoryRuntimeEnabledOf(state.runtime.status, currentConfigFile());
-  if (current === enabled) return;
+  const enabled = mode === 'immersive';
+  const current = memoryRuntimeModeOf(state.runtime.status, currentConfigFile());
+  if ((current === 'immersive') === enabled) return;
   const ok = await confirmModal({
     title: t(enabled ? 'runtime.enable.confirmTitle' : 'runtime.disable.confirmTitle'),
     body: t(enabled ? 'runtime.enable.confirmBody' : 'runtime.disable.confirmBody'),
     confirmLabel: t(enabled ? 'runtime.enable.confirm' : 'runtime.disable.confirm'),
   });
-  if (!ok) return;
+  if (!ok) {
+    lastSettingsSignature = null;
+    if (!$('#settings')?.hidden) renderSettings(state.settingsTab ?? 'common');
+    return;
+  }
   const saved = await saveRuntimePatch({ memoryRuntime: { enabled } }, enabled ? 'runtime.enable.on' : 'runtime.disable.off');
   if (saved && state.runtime.status) {
     state.runtime.status.enabled = enabled;
+    state.runtime.status.mode = enabled ? 'immersive' : 'lightweight';
     if (!enabled) {
       state.runtime.status.state = 'stopped';
       state.runtime.status.available = false;
       state.runtime.status.degraded = false;
-      state.runtime.status.pid = null;
+      state.runtime.status.model = null;
+      state.runtime.modelSource = null;
     }
     renderRuntime();
   }
 }
 
-async function runtimeModelAction(action, packId) {
-  if (!action || !packId) return;
+/** 高级 · 模型来源：只写 sidecar config.json 的 model.source；失败只降级，不影响对话。 */
+async function setRuntimeModelSource(value) {
   if (MOCK) { showToast(t('common.mockReadOnly')); return; }
   if (!state.features.writes) { showToast(t('settings.runtime.readonly')); return; }
-  if (action === 'uninstall' || action === 'remove') {
-    const ok = await confirmModal({
-      title: t('settings.runtime.local.uninstallTitle'),
-      body: t('settings.runtime.local.uninstallBody', { pack: packId }),
-      confirmLabel: t('settings.runtime.local.uninstall'),
-    });
-    if (!ok) return;
-  }
+  const source = runtimeModelSourceOf(value);
+  if (runtimeModelSourceOf(state.runtime.modelSource?.source) === source) return;
   try {
-    await api(`/admin/api/models/${action}`, { method: 'POST', body: { pack: packId } });
-    const messageKey = action === 'download' || action === 'resume'
-      ? (action === 'download' ? 'settings.runtime.local.done' : 'settings.runtime.local.resumed')
-      : action === 'pause' ? 'settings.runtime.local.paused'
-        : action === 'cancel' ? 'settings.runtime.local.cancelled'
-          : action === 'select' ? 'settings.runtime.local.activated'
-            : 'settings.runtime.local.uninstalled';
-    showToast(t(messageKey));
+    const res = await api('/admin/api/memory-runtime/model-source', { method: 'POST', body: { source } });
+    state.runtime.modelSource = { ...(state.runtime.modelSource ?? {}), ...res, source: res?.source ?? source };
     state.runtime.loadedAt = 0;
+    showToast(t(res?.applies === 'hot'
+      ? 'settings.runtime.modelSource.hotSaved'
+      : 'settings.runtime.modelSource.nextStartSaved', { source: runtimeModelSourceLabel(source) }));
     await ensureRuntimeData({ force: true });
     await refresh();
   } catch (error) {
-    showToast(t('settings.runtime.local.failed', { message: localizeError(error, 'errors.unknown') }));
+    showToast(t('settings.runtime.modelSource.failed', { message: localizeError(error, 'errors.unknown') }));
+  } finally {
+    lastSettingsSignature = null;
+    if (!$('#settings')?.hidden) renderSettings(state.settingsTab ?? 'common');
   }
 }
 
@@ -3681,44 +3630,30 @@ function renderRuntimeStatus() {
     if (error) return `<section class="runtime-card crt-surface"><p class="crt-warn">${escapeHtml(t('runtime.error', { message: error }))}</p></section>`;
     return `<section class="runtime-card crt-surface"><p class="muted">${escapeHtml(t('runtime.loading'))}</p></section>`;
   }
-  const enabled = memoryRuntimeEnabledOf(status, currentConfigFile());
-  const toggleDisabled = !state.features.writes || MOCK;
+  const enabled = memoryRuntimeModeOf(status, currentConfigFile()) === 'immersive';
   const stateLabel = runtimeStatusStateLabel(status);
-  const statusError = runtimeStatusErrorText(status);
-  const selectedPack = (state.runtime.models?.packs ?? []).find((pack) => pack.selected) ?? null;
-  const stateTone = status.state === 'ready' ? 'crt-tag-ok' : status.degraded || status.state === 'failed' ? 'crt-tag-warn' : '';
+  const model = status.model ?? null;
+  const modelRows = model
+    ? [
+      [t('settings.runtime.modelStatus.configured'), runtimeModelSourceLabel(model.configured)],
+      [t('settings.runtime.modelStatus.active'), runtimeModelSourceLabel(model.active)],
+      [t('settings.runtime.modelStatus.degraded'), model.degraded ? t('runtime.sidecar.degradedYes') : t('runtime.sidecar.degradedNo')],
+      [t('settings.runtime.modelStatus.reason'), runtimeModelReasonLabel(model.reason)],
+    ]
+    : [[t('settings.runtime.modelStatus.state'), t('settings.runtime.modelStatus.unavailable')]];
   return `
     ${runtimeStatusCard(t('runtime.access.title'), enabled ? t('runtime.sidecar.immersive') : t('runtime.sidecar.lightweight'), `
-      <label class="runtime-switch-row crt-surface">
-        <span class="runtime-switch-copy">
-          <span class="runtime-model-name">${escapeHtml(t('runtime.access.toggle'))}</span>
-          <span class="runtime-model-desc">${escapeHtml(t('runtime.access.toggleDesc'))}</span>
-        </span>
-        <input type="checkbox" data-rt-enabled ${enabled ? 'checked' : ''} ${toggleDisabled ? 'disabled' : ''}>
-      </label>
       <p class="muted">${escapeHtml(enabled ? t('runtime.access.onHint') : t('runtime.access.offHint'))}</p>
+      <p class="runtime-mode-settings-hint muted">${escapeHtml(t('runtime.access.settingsHint'))}</p>
     `)}
-    ${runtimeStatusCard(t('runtime.sidecar.title'), stateLabel, `
-      <dl class="runtime-kv" data-rt-sidecar-status>
-        <dt>${escapeHtml(t('runtime.sidecar.enabled'))}</dt><dd>${escapeHtml(enabled ? t('runtime.sidecar.on') : t('runtime.sidecar.off'))}</dd>
-        <dt>${escapeHtml(t('runtime.sidecar.state'))}</dt><dd><span class="crt-tag ${stateTone}">${escapeHtml(stateLabel)}</span></dd>
-        <dt>${escapeHtml(t('runtime.sidecar.pid'))}</dt><dd>${escapeHtml(status.pid ?? '—')}</dd>
-        <dt>${escapeHtml(t('runtime.sidecar.version'))}</dt><dd>${escapeHtml(status.runtimeVersion ?? '—')}</dd>
-        <dt>${escapeHtml(t('runtime.sidecar.degraded'))}</dt><dd>${escapeHtml(status.degraded ? t('runtime.sidecar.degradedYes') : t('runtime.sidecar.degradedNo'))}</dd>
-        <dt>${escapeHtml(t('runtime.sidecar.error'))}</dt><dd>${statusError ? escapeHtml(statusError) : '—'}</dd>
-      </dl>
+    ${runtimeStatusCard(t('runtime.status.title'), stateLabel, `
+      ${runtimeStatusFactsHtml(status)}
       ${!status.available && enabled ? `<p class="runtime-pending">${escapeHtml(t('runtime.sidecar.notReady'))}</p>` : ''}
     `)}
-    ${runtimeStatusCard(t('runtime.model.title'), t('runtime.model.hostManaged'), `
-      <div class="runtime-host-model" data-rt-host-model>
-        <div class="runtime-host-title"><span>${escapeHtml(t('settings.runtime.model.host'))}</span><span class="crt-tag">${escapeHtml(t('settings.runtime.model.hostManaged'))}</span></div>
-        <p class="muted">${escapeHtml(t('settings.runtime.model.hostDesc'))}</p>
-      </div>
-      <p class="muted">${escapeHtml(selectedPack
-        ? t('runtime.model.localSelected', { pack: runtimePackLabel(selectedPack) })
-        : t('runtime.model.localNone'))}</p>
-      <p class="muted">${escapeHtml(t('runtime.model.localManaged'))}</p>
-    `)}
+    ${enabled ? runtimeStatusCard(t('runtime.model.title'), model?.degraded ? t('runtime.sidecar.degraded') : '', `
+      <dl class="runtime-kv" data-rt-model-status>${modelRows.map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(String(value))}</dd>`).join('')}</dl>
+      <p class="muted">${escapeHtml(t('runtime.model.note'))}</p>
+    `) : ''}
   `;
 }
 
@@ -5224,11 +5159,6 @@ $('#runtime-view')?.addEventListener('click', (event) => {
   }
 });
 $('#runtime-view')?.addEventListener('change', (event) => {
-  const enabled = event.target.closest('[data-rt-enabled]');
-  if (enabled) {
-    void setMemoryRuntimeEnabled(enabled.checked === true);
-    return;
-  }
   const internal = event.target.closest('[data-rt-internal-toggle]');
   if (!internal) return;
   state.runtime.includeInternal = internal.checked === true;
@@ -5524,11 +5454,11 @@ $('#cloud-switch-close')?.addEventListener('click', () => { $('#cloud-switch').h
 $('#settings-close').addEventListener('click', () => {
   $('#settings').hidden = true;
 });
-// 记忆运行时：开关 change 即保存（服务端热生效）；不再有 runtime.* 草稿字段。
+// 记忆模式 / 模型来源：change/click 即保存（服务端热生效）；不再有 runtime.* 草稿字段。
 $('#settings-body').addEventListener('change', (event) => {
-  const enabled = event.target.closest('[data-rt-enabled]');
-  if (!enabled) return;
-  void setMemoryRuntimeEnabled(enabled.checked === true);
+  const source = event.target.closest('[data-rt-model-source]');
+  if (!source) return;
+  void setRuntimeModelSource(source.value);
 });
 // Tab 切换 + AI 助手专区动作（事件委托：renderSettings 会整体替换 body）
 $('#settings-body').addEventListener('click', (event) => {
@@ -5536,16 +5466,16 @@ $('#settings-body').addEventListener('click', (event) => {
   if (tab) {
     const next = tab.dataset.settingsTab;
     renderSettings(next);
-    if (next === 'runtime') {
+    if (next === 'runtime' || next === 'advanced') {
       void ensureRuntimeData({ force: true }).then(() => {
         lastSettingsSignature = null;
-        if (!$('#settings').hidden && (state.settingsTab ?? 'common') === 'runtime') renderSettings('runtime');
+        if (!$('#settings').hidden && (state.settingsTab ?? 'common') === next) renderSettings(next);
       });
     }
     return;
   }
-  const runtimePackButton = event.target.closest('[data-rt-pack-action]');
-  if (runtimePackButton) { void runtimeModelAction(runtimePackButton.dataset.rtPackAction, runtimePackButton.dataset.rtPack); return; }
+  const runtimeMode = event.target.closest('[data-rt-mode]');
+  if (runtimeMode) { void setMemoryRuntimeMode(runtimeMode.dataset.rtMode); return; }
   // UX-2：附加导航「关于本机」→ 打开既有 about 弹层
   const extra = event.target.closest('[data-settings-extra]');
   if (extra) { $('#about').hidden = false; renderAbout(); return; }
@@ -6812,10 +6742,10 @@ function mockSecurity(now) {
 }
 
 function mockRuntimeData(now) {
-  const gib = 1024 ** 3;
   return {
     status: {
       enabled: false,
+      mode: 'lightweight',
       state: 'stopped',
       available: false,
       degraded: false,
@@ -6834,17 +6764,19 @@ function mockRuntimeData(now) {
       reason: 'disabled',
       error: null,
       lock: null,
+      model: null,
     },
-    models: {
+    modelSource: {
       ok: true,
-      selectedPack: 'qwen3.5-9b-instruct-q4_k_m',
-      effectivePack: 'qwen3.5-9b-instruct-q4_k_m',
-      packs: [
-        { packId: 'qwen3.5-9b-instruct-q4_k_m', tier: 'default', default: true, state: 'installed', installed: true, selected: true, estimatedDownloadBytes: 6_300_000_000, installedBytes: 6_300_000_000, requirements: { minMemoryBytes: 16 * gib, recommendedMemoryBytes: 24 * gib } },
-        { packId: 'qwen3.5-27b-instruct-q4_k_m', tier: 'quality', default: false, state: 'not_installed', installed: false, selected: false, estimatedDownloadBytes: 17_600_000_000, requirements: { minMemoryBytes: 40 * gib, recommendedMemoryBytes: 64 * gib } },
-        { packId: 'qwen3.5-4b-instruct-q4_k_m', tier: 'light', default: false, state: 'paused', installed: false, selected: false, estimatedDownloadBytes: 2_900_000_000, requirements: { minMemoryBytes: 8 * gib, recommendedMemoryBytes: 12 * gib }, download: { state: 'paused', downloadedBytes: 1_200_000_000, totalBytes: 2_900_000_000 } },
-      ],
-      warnings: [],
+      source: 'heuristic',
+      defaultSource: 'heuristic',
+      values: ['heuristic', 'local', 'host', 'api', 'auto'],
+      exists: false,
+      enabled: false,
+      available: false,
+      state: 'stopped',
+      applies: 'next_start',
+      model: null,
     },
     traces: [{
       id: 'tr_mock000000000000000000001',

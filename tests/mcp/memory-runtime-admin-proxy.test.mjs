@@ -1,7 +1,8 @@
-// W5d：Console 经 MCP admin 只读代理访问 Memory Runtime sidecar。
+// W5d/C5：Console 经 MCP admin 薄代理访问 Memory Runtime sidecar。
 //
 // 覆盖：auth / CSRF / Origin；轻量模式明确 disabled；status/traces/detail/feedback；
-// host token 只在服务端使用，不出现在任何浏览器响应里。
+// 高级模型来源只读写 `<home>/memory-runtime/config.json` 的 model.source；
+// host token、endpoint、keyRef、模型路径不出现在任何浏览器响应里。
 
 import { describe, it, expect, afterEach } from '@jest/globals';
 import { existsSync } from 'node:fs';
@@ -167,7 +168,98 @@ describe('MCP admin · Memory Runtime sidecar 只读代理', () => {
     // 轻量模式零副作用：不创建 sidecar 数据目录/discovery/token。
     expect(existsSync(join(home, 'memory-runtime'))).toBe(false);
     expect(existsSync(join(home, 'memory-runtime.json'))).toBe(false);
+
+    // 高级模型来源：轻量模式只读默认 heuristic；写入 409，仍不创建目录。
+    const modelSource = await fetch(`${base}/admin/api/memory-runtime/model-source`);
+    expect(modelSource.status).toBe(200);
+    const modelSourceBody = await modelSource.json();
+    expect(modelSourceBody).toMatchObject({
+      ok: true,
+      source: 'heuristic',
+      defaultSource: 'heuristic',
+      enabled: false,
+      applies: 'next_start',
+    });
+    expect(modelSourceBody.values).toEqual(['heuristic', 'local', 'host', 'api', 'auto']);
+    expect(JSON.stringify(modelSourceBody)).not.toMatch(/tokenFile|host-token|keyRef|baseUrl|modelPath/);
+
+    const csrfLight = await csrf(base);
+    const writeLight = await fetch(`${base}/admin/api/memory-runtime/model-source`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-mebular-csrf': csrfLight.token,
+        cookie: csrfLight.cookie,
+      },
+      body: JSON.stringify({ source: 'auto' }),
+    });
+    expect(writeLight.status).toBe(409);
+    expect(await writeLight.json()).toMatchObject({
+      ok: false,
+      error: 'memory_runtime_disabled',
+      enabled: false,
+    });
+    expect(existsSync(join(home, 'memory-runtime'))).toBe(false);
   });
+
+  it('高级模型来源：读取默认值；写入 model.source 保留其他字段且不泄漏密钥/路径', async () => {
+    const { home, base } = await start({ enabled: true });
+    await readyStatus(base);
+    const configPath = join(home, 'memory-runtime', 'config.json');
+
+    const initial = await fetch(`${base}/admin/api/memory-runtime/model-source`);
+    expect(initial.status).toBe(200);
+    const initialBody = await initial.json();
+    expect(initialBody).toMatchObject({ ok: true, source: 'heuristic', enabled: true });
+    expect(JSON.stringify(initialBody)).not.toMatch(/tokenFile|host-token|keyRef|baseUrl|modelPath/);
+
+    // 预置无关字段与密钥引用：写入只改 model.source，响应不返回这些细节。
+    await writeFile(configPath, JSON.stringify({
+      schema: 1,
+      detail: { stagingHours: 12 },
+      model: {
+        source: 'heuristic',
+        api: { keyRef: 'env:TEST_MODEL_KEY', baseUrl: 'https://example.invalid/v1', model: 'example' },
+      },
+    }, null, 2), { encoding: 'utf-8', mode: 0o600 });
+
+    const { token, cookie } = await csrf(base);
+    const write = await fetch(`${base}/admin/api/memory-runtime/model-source`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-mebular-csrf': token,
+        cookie,
+      },
+      body: JSON.stringify({ source: 'host' }),
+    });
+    expect(write.status).toBe(200);
+    const written = await write.json();
+    expect(written).toMatchObject({ ok: true, source: 'host', enabled: true });
+    expect(['hot', 'next_start']).toContain(written.applies);
+    expect(JSON.stringify(written)).not.toMatch(/tokenFile|host-token|keyRef|baseUrl|modelPath|TEST_MODEL_KEY/);
+
+    const onDisk = JSON.parse(await readFile(configPath, 'utf-8'));
+    expect(onDisk.model.source).toBe('host');
+    expect(onDisk.detail.stagingHours).toBe(12);
+    expect(onDisk.model.api).toMatchObject({ keyRef: 'env:TEST_MODEL_KEY', model: 'example' });
+    expect(existsSync(`${configPath}.bak`)).toBe(true);
+
+    const reread = await (await fetch(`${base}/admin/api/memory-runtime/model-source`)).json();
+    expect(reread.source).toBe('host');
+
+    const bad = await fetch(`${base}/admin/api/memory-runtime/model-source`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-mebular-csrf': token,
+        cookie,
+      },
+      body: JSON.stringify({ source: 'not-a-source' }),
+    });
+    expect(bad.status).toBe(400);
+    expect((await readFile(configPath, 'utf-8')).includes('"source": "host"')).toBe(true);
+  }, 30000);
 
   it('enabled：服务端用 host token 转发 traces/detail/feedback，响应不泄漏 token', async () => {
     const outDir = await tempDir('memory-runtime-admin-out-');
@@ -288,6 +380,10 @@ describe('MCP admin · Memory Runtime sidecar 只读代理', () => {
       headers: { authorization: `Bearer ${readToken}` },
     });
     expect(read.status).toBe(200);
+    const modelSource = await fetch(`${base}/admin/api/memory-runtime/model-source`, {
+      headers: { authorization: `Bearer ${readToken}` },
+    });
+    expect(modelSource.status).toBe(200);
 
     const write = await fetch(`${base}/admin/api/memory-runtime/feedback`, {
       method: 'POST',

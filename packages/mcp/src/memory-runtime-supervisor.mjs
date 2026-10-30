@@ -686,6 +686,59 @@ export class MemoryRuntimeSupervisor {
   }
 
   /**
+   * 只读 sidecar `/status` 的最小视图：模式、版本、模型来源/降级。
+   * 不返回 host token、keyRef、endpoint、模型路径或配置正文。
+   */
+  async readStatus() {
+    const result = await this.#proxyHostApi('status');
+    if (!result.available) {
+      return {
+        ok: !result.error,
+        enabled: result.enabled,
+        available: false,
+        disabled: result.disabled === true,
+        state: result.state,
+        reason: result.reason ?? null,
+        error: result.error ?? null,
+        mode: null,
+        runtimeVersion: null,
+        degraded: result.state === 'degraded',
+        model: null,
+      };
+    }
+    const data = result.body?.data ?? result.body ?? {};
+    const model = isObject(data.model)
+      ? {
+          configured: typeof data.model.configured === 'string' ? data.model.configured : null,
+          active: typeof data.model.active === 'string' ? data.model.active : null,
+          degraded: data.model.degraded === true,
+          reason: typeof data.model.reason === 'string' ? data.model.reason : null,
+          sources: Array.isArray(data.model.sources)
+            ? data.model.sources.filter((source) => typeof source === 'string')
+            : [],
+        }
+      : null;
+    return {
+      ok: result.ok !== false,
+      enabled: true,
+      available: true,
+      disabled: false,
+      state: result.state,
+      reason: null,
+      error: result.ok === false
+        ? publicError(
+            data?.error?.code ?? result.body?.error?.code ?? 'sidecar_request_failed',
+            proxyErrorMessage(data, proxyErrorMessage(result.body, '读取记忆运行时状态失败')),
+          )
+        : null,
+      mode: typeof data.mode === 'string' ? data.mode : null,
+      runtimeVersion: typeof data.runtimeVersion === 'string' ? data.runtimeVersion : null,
+      degraded: data.degraded === true || result.body?.degraded === true,
+      model,
+    };
+  }
+
+  /**
    * Console 只读代理：服务端读取 host token，浏览器只拿到脱敏后的 sidecar 视图。
    * 轻量模式/未就绪时返回明确状态，不启动进程、不创建 token。
    */

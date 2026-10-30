@@ -1644,29 +1644,28 @@ try {
       `tabs=${tabIds} labels=${tabLabels}`);
     const runtimeFieldsMapped = ia.IA_RUNTIME_FIELDS.every((path) => ia.IA_MIGRATION[path] === 'runtime');
     const memQueryBlock = consoleSrc2.match(/function memQuery\(\) \{[\s\S]*?\n\}/)?.[0] ?? '';
-    const modelCardBlock = consoleSrc2.slice(
-      consoleSrc2.indexOf('function runtimePackCard('),
-      consoleSrc2.indexOf('function runtimeLocalModelsHtml('),
-    );
-    check('0.3 记忆运行时：memoryRuntime.enabled 单开关 + sidecar 状态/模型/轨迹代理',
+    check('0.3 记忆运行时：仅 memoryRuntime.enabled 模式开关 + 模型来源两个产品增量',
       ia.IA_RUNTIME_CONTROL_PATHS.join(',') === 'memoryRuntime.enabled'
+        && ia.IA_RUNTIME_MODEL_SOURCES.join(',') === 'heuristic,local,host,api,auto'
         && runtimeFieldsMapped
         && consoleSrc2.includes("api('/admin/api/memory-runtime/status')")
+        && consoleSrc2.includes("api('/admin/api/memory-runtime/model-source')")
         && consoleSrc2.includes("api('/admin/api/memory-runtime/traces?limit=20')")
         && consoleSrc2.includes("api('/admin/api/memory-runtime/feedback'")
         && consoleSrc2.includes("api(`/admin/api/memory-runtime/traces/${encodeURIComponent(id)}`)")
-        && consoleSrc2.includes("api('/admin/api/models')")
-        && consoleSrc2.includes('includeInternal=1')
+        && consoleSrc2.includes('data-rt-mode')
+        && consoleSrc2.includes('data-rt-model-source')
+        && !consoleSrc2.includes("api('/admin/api/models')")
+        && !/runtimePack|data-rt-pack|settings\.runtime\.local/.test(consoleSrc2)
         && !consoleSrc2.includes('/runtime/v1')
         && memQueryBlock.length > 0 && !memQueryBlock.includes('includeInternal')
         && htmlSrc.includes('id="runtime-view"') && htmlSrc.includes('id="runtime-timeline"') && htmlSrc.includes('id="runtime-traces"'),
       `runtimeFields=${ia.IA_RUNTIME_FIELDS.length} memQueryInternal=${memQueryBlock.includes('includeInternal')}`);
-    check('0.3 本地模型卡只显示体积/内存/状态（不暴露量化/上下文/线程/端口）',
-      modelCardBlock.length > 0
-        && !/quantization|contextLength|threads|\bport\b/.test(modelCardBlock)
-        && modelCardBlock.includes('settings.runtime.local.size')
-        && modelCardBlock.includes('settings.runtime.local.memory'),
-      `chars=${modelCardBlock.length}`);
+    check('0.3 运行状态卡只显示 mode/state/degraded/error/version（不显示 token/tokenFile）',
+      ['runtime.status.mode', 'runtime.sidecar.state', 'runtime.sidecar.degraded', 'runtime.sidecar.error', 'runtime.sidecar.version']
+        .every((key) => consoleSrc2.includes(key))
+        && !/tokenFile|hostToken|host-token/.test(consoleSrc2),
+      '运行状态字段白名单');
     // A：编辑器字段改由服务端 schema 驱动（不再在控制台重复声明）；C：一键重启接线
     check('A 编辑器由单一真源驱动（configSchema）且不再内置字段表',
       consoleSrc2.includes('configSchema') && consoleSrc2.includes('rebuildConfigFields')
@@ -1772,12 +1771,12 @@ try {
 
     const iaFolds = (await import('../settings-ia.js')).IA_SETTINGS_FOLDS;
     const foldIds = iaFolds.map((fold) => fold.id);
-    const renderedFolds = ['mcp-danger', 'diagnostics', 'about-runtime', 'runtime-advanced'].filter((id) => jsSrc.includes(`data-settings-fold="${id}"`));
+    const renderedFolds = ['mcp-danger', 'diagnostics', 'about-runtime'].filter((id) => jsSrc.includes(`data-settings-fold="${id}"`));
     check('U-1 折叠白名单：≤5 且设置/关于只渲染白名单内类型（邀请无详情）',
-      iaFolds.length <= 5 && renderedFolds.length === 4
+      iaFolds.length <= 5 && renderedFolds.length === 3
         && !jsSrc.includes('cfg-more') && !jsSrc.includes('task-card-more') && !jsSrc.includes('page-more')
         && !/<details/.test(jsSrc.slice(jsSrc.indexOf('function renderCfgField'), jsSrc.indexOf('function fieldOf')))
-        && foldIds.every((id) => ['mcp-danger', 'diagnostics', 'about-runtime', 'runtime-advanced', 'assistants'].includes(id)),
+        && foldIds.every((id) => ['mcp-danger', 'diagnostics', 'about-runtime', 'assistants'].includes(id)),
       `folds=${JSON.stringify(foldIds)} rendered=${JSON.stringify(renderedFolds)}`);
 
     const codeOnly = jsSrc.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').map((line) => line.replace(/\/\/.*$/, '')).join('\n');

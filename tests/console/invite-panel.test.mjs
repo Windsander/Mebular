@@ -51,7 +51,7 @@ describe('邀请面板 · TTL 档位与两栏结构', () => {
     expect(panel).not.toContain('默认记忆域');
     expect(panel).not.toContain('兑换只建立入网信任');
     expect(consoleJs).not.toContain("foldLabel('invite')");
-    expect(IA_SETTINGS_FOLDS.map((fold) => fold.id)).toEqual(['mcp-danger', 'diagnostics', 'about-runtime', 'runtime-advanced']);
+    expect(IA_SETTINGS_FOLDS.map((fold) => fold.id)).toEqual(['mcp-danger', 'diagnostics', 'about-runtime']);
   });
 
   it('两栏结构：左二维码（150–160px），右引导 + 令牌 + TTL 控件', () => {

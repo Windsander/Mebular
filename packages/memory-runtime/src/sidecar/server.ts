@@ -74,6 +74,15 @@ export interface SidecarStatusModel {
   active: string;
   degraded: boolean;
   reason: string | null;
+  /** 可选的模型告警；不包含密钥、prompt 或响应体。 */
+  warnings?: string[];
+  /** 只报告 credential 是否存在与来源，不报告 keyRef 或密钥。 */
+  credential?: {
+    configured: boolean;
+    source: 'env' | 'file' | 'keychain' | null;
+  };
+  /** 本设备当前可用的模型来源。 */
+  sources?: string[];
 }
 
 export interface SidecarStatusCounts {
@@ -197,6 +206,8 @@ export interface SidecarServerOptions {
   hostToken: string;
   identity?: Partial<SidecarStatusIdentity>;
   getStatus?: () => SidecarStatusSnapshot | Promise<SidecarStatusSnapshot>;
+  /** `/version` 的模型状态；缺省从 getStatus().model 读取。 */
+  getModelStatus?: () => SidecarStatusModel | Promise<SidecarStatusModel>;
   ingest?: SidecarIngestApi;
   namespaces?: SidecarNamespacesApi;
   recall?: SidecarRecallApi;
@@ -349,6 +360,7 @@ export class SidecarServer {
 
   private readonly identity: SidecarStatusIdentity;
   private readonly getStatus?: () => SidecarStatusSnapshot | Promise<SidecarStatusSnapshot>;
+  private readonly getModelStatus?: () => SidecarStatusModel | Promise<SidecarStatusModel>;
   private readonly ingest?: SidecarIngestApi;
   private readonly namespaces?: SidecarNamespacesApi;
   private readonly recall?: SidecarRecallApi;
@@ -369,6 +381,7 @@ export class SidecarServer {
       hostId: options.identity?.hostId ?? null,
     };
     this.getStatus = options.getStatus;
+    this.getModelStatus = options.getModelStatus;
     this.ingest = options.ingest;
     this.namespaces = options.namespaces;
     this.recall = options.recall;
@@ -567,12 +580,55 @@ export class SidecarServer {
     return { ok: true };
   }
 
+  private async modelPayload(): Promise<SidecarStatusModel> {
+    let model: SidecarStatusModel | null = null;
+    if (this.getModelStatus) {
+      const provided = await this.getModelStatus();
+      if (isObject(provided)) model = provided as SidecarStatusModel;
+    } else if (this.getStatus) {
+      const snapshot = await this.getStatus();
+      if (isObject(snapshot?.model)) model = snapshot.model as SidecarStatusModel;
+    }
+    const configured = typeof model?.configured === 'string' ? model.configured : 'heuristic';
+    const active = typeof model?.active === 'string' ? model.active : 'heuristic';
+    const credential = isObject(model?.credential)
+      ? {
+        configured: model.credential.configured === true,
+        source: model.credential.source === 'env' || model.credential.source === 'file'
+          || model.credential.source === 'keychain'
+          ? model.credential.source
+          : null,
+      }
+      : { configured: false, source: null as 'env' | 'file' | 'keychain' | null };
+    return {
+      configured,
+      active,
+      degraded: model?.degraded === true,
+      reason: typeof model?.reason === 'string' ? model.reason : null,
+      warnings: Array.isArray(model?.warnings)
+        ? model.warnings.filter((warning): warning is string => typeof warning === 'string')
+        : [],
+      credential,
+      sources: Array.isArray(model?.sources)
+        ? model.sources.filter((source): source is string => typeof source === 'string')
+        : ['heuristic', 'host'],
+    };
+  }
+
   private async statusPayload(): Promise<SidecarStatus> {
     const fallback: SidecarStatusSnapshot = {
       mode: 'immersive',
       identity: { ...this.identity },
       capability: { reachable: false, version: null, lastOkAt: null, error: null },
-      model: { configured: 'heuristic', active: 'heuristic', degraded: false, reason: null },
+      model: {
+        configured: 'heuristic',
+        active: 'heuristic',
+        degraded: false,
+        reason: null,
+        warnings: [],
+        credential: { configured: false, source: null },
+        sources: ['heuristic', 'host'],
+      },
       counts: {
         rawChunks: 0,
         traces: 0,
@@ -609,6 +665,7 @@ export class SidecarServer {
     }
     return {
       ...snapshot,
+      model: { ...fallback.model, ...(snapshot.model ?? {}) },
       counts: { ...fallback.counts, ...(snapshot.counts ?? {}) },
       state: this.state,
       degraded: this.currentDegraded(),
@@ -684,6 +741,7 @@ export class SidecarServer {
           this.sendError(res, 405, requestId, 'method_not_allowed', 'version 仅接受 GET');
           return;
         }
+        const model = await this.modelPayload();
         this.send(res, 200, this.envelope(requestId, {
           runtimeVersion: this.runtimeVersion,
           apiVersion: this.apiVersion,
@@ -694,6 +752,7 @@ export class SidecarServer {
           degraded: this.currentDegraded(),
           pid: process.pid,
           startedAt: this.startedAt,
+          model,
           capabilities: {
             ingest: Boolean(this.ingest),
             recall: Boolean(this.recall),
@@ -703,7 +762,7 @@ export class SidecarServer {
             checkpoint: Boolean(this.objects),
             compact: Boolean(this.objects),
             self: Boolean(this.objects),
-            models: ['heuristic', 'host'],
+            models: model.sources ?? ['heuristic', 'host'],
           },
         }, [], this.currentDegraded()));
         return;

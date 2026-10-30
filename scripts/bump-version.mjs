@@ -166,6 +166,26 @@ export function bumpVersion({
     log(`  MCP APP_VERSION -> ${version}  packages/mcp/src/version.mjs`);
   }
 
+  // ---- Memory Runtime sidecar 对外版本 ----
+  const sidecarVersionFile = join(root, 'packages/memory-runtime/src/sidecar/config.ts');
+  if (!existsSync(sidecarVersionFile)) {
+    throw new Error('packages/memory-runtime/src/sidecar/config.ts 不存在；sidecar 版本必须同步');
+  }
+  const sidecarBefore = readFileSync(sidecarVersionFile, 'utf8');
+  const sidecarAfter = replaceOnce(
+    sidecarBefore,
+    /(export const SIDECAR_RUNTIME_VERSION = ')[^']+(';)/,
+    `$1${version}$2`,
+    'packages/memory-runtime/src/sidecar/config.ts',
+  );
+  if (sidecarAfter === sidecarBefore) {
+    log(`  sidecar SIDECAR_RUNTIME_VERSION 已是 ${version}，跳过`);
+  } else {
+    writeFileSync(sidecarVersionFile, sidecarAfter, 'utf8');
+    changes.push(`packages/memory-runtime/src/sidecar/config.ts SIDECAR_RUNTIME_VERSION -> ${version}`);
+    log(`  SIDECAR_RUNTIME_VERSION -> ${version}  packages/memory-runtime/src/sidecar/config.ts`);
+  }
+
   // ---- CHANGELOG 章节占位 ----
   const clFile = join(root, 'CHANGELOG.md');
   const HEADER =

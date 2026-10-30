@@ -10,6 +10,7 @@ export * from './token.js';
 export * from './capability-client.js';
 export * from './domains.js';
 export * from './heuristic.js';
+export * from './model.js';
 export * from './cue.js';
 export * from './text.js';
 export * from './recall.js';

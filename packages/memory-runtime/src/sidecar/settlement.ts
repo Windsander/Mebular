@@ -28,6 +28,7 @@ import {
 } from './ingest.js';
 import { MemoryObjectService } from './internal-objects.js';
 import type { SidecarLocalLayer } from './local-layer.js';
+import type { SidecarModelRuntime } from './model.js';
 import { OutboxReplayer } from './outbox-replayer.js';
 import {
   RecallService,
@@ -50,6 +51,7 @@ export interface SettlementRuntimeOptions {
   client: CapabilityClient | null;
   identity: SettlementIdentity;
   policy?: SidecarPolicy | null;
+  modelRuntime?: SidecarModelRuntime | null;
   policyPath?: string;
   now?: () => number;
   replayerIntervalMs?: number;
@@ -143,6 +145,7 @@ export class SettlementRuntime {
   readonly objects: MemoryObjectService;
 
   private readonly client: CapabilityClient | null;
+  private readonly modelRuntime: SidecarModelRuntime | null;
   private policy: SidecarPolicy;
   private readonly policyPath?: string;
 
@@ -151,6 +154,7 @@ export class SettlementRuntime {
     this.local = options.local;
     this.identity = options.identity;
     this.client = options.client;
+    this.modelRuntime = options.modelRuntime ?? null;
     this.policy = options.policy ?? { schema: 1, agents: {} };
     this.policyPath = options.policyPath;
     const ingestOptions: IngestServiceOptions = {
@@ -164,6 +168,7 @@ export class SettlementRuntime {
         ...(options.identity.userId !== undefined ? { userId: options.identity.userId } : {}),
       },
       policy: this.policy,
+      ...(this.modelRuntime ? { modelRuntime: this.modelRuntime } : {}),
       ...(options.now ? { now: options.now } : {}),
     };
     this.ingest = new IngestService(ingestOptions);
@@ -179,6 +184,7 @@ export class SettlementRuntime {
       },
       policy: this.policy,
       getPolicy: () => this.policy,
+      ...(this.modelRuntime ? { modelRuntime: this.modelRuntime } : {}),
       ...(options.now ? { now: options.now } : {}),
     });
     this.objects = new MemoryObjectService({
@@ -192,6 +198,7 @@ export class SettlementRuntime {
         ...(options.identity.userId !== undefined ? { userId: options.identity.userId } : {}),
       },
       policy: this.policy,
+      ...(this.modelRuntime ? { modelRuntime: this.modelRuntime } : {}),
       ...(options.now ? { now: options.now } : {}),
     });
     this.replayer = new OutboxReplayer({
@@ -231,7 +238,10 @@ export class SettlementRuntime {
   }
 
   get degraded(): boolean {
-    return this.ingest.isDegraded || this.recall.isDegraded || this.objects.isDegraded;
+    return this.ingest.isDegraded
+      || this.recall.isDegraded
+      || this.objects.isDegraded
+      || this.modelRuntime?.currentStatus().degraded === true;
   }
 
   get stats(): IngestStatsSnapshot {

@@ -80,6 +80,11 @@ function buildFixture() {
   write(root, 'packages/mcp/src/version.mjs', "export const APP_VERSION = '0.1.1';\n");
   write(
     root,
+    'packages/memory-runtime/src/sidecar/config.ts',
+    "export const SIDECAR_RUNTIME_VERSION = '0.1.1';\n",
+  );
+  write(
+    root,
     'packages/mcp/src/serve.mjs',
     [
       "import { APP_VERSION } from './version.mjs';",
@@ -157,6 +162,9 @@ describe('bump-version：七包 + MCP 版本源', () => {
     );
     expect(readFileSync(join(root, 'packages/mcp/src/version.mjs'), 'utf8')).toContain(
       "APP_VERSION = '0.2.0'",
+    );
+    expect(readFileSync(join(root, 'packages/memory-runtime/src/sidecar/config.ts'), 'utf8')).toContain(
+      "SIDECAR_RUNTIME_VERSION = '0.2.0'",
     );
 
     const fleet = JSON.parse(readFileSync(join(root, 'packages/fleet/package.json'), 'utf8'));

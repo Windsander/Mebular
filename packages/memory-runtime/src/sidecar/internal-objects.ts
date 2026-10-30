@@ -27,6 +27,7 @@ import {
 } from './domains.js';
 import { SidecarSettlementError } from './errors.js';
 import { LocalLayerError, type OutboxItem, type SidecarLocalLayer } from './local-layer.js';
+import type { SidecarModelRuntime } from './model.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MAX_COMPACT_SOURCES = 200;
@@ -150,6 +151,7 @@ export interface MemoryObjectServiceOptions {
     userId?: string | null;
   };
   policy?: SidecarPolicy | null;
+  modelRuntime?: SidecarModelRuntime | null;
   now?: () => number;
 }
 
@@ -469,6 +471,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
   readonly identity: MemoryObjectServiceOptions['identity'];
 
   private readonly client: CapabilityClient | null;
+  private readonly models: SidecarModelRuntime | null;
   private readonly now: () => number;
   private readonly serial = new KeyedSerial();
   private policy: SidecarPolicy;
@@ -480,6 +483,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
     this.config = options.config;
     this.local = options.local;
     this.client = options.client;
+    this.models = options.modelRuntime ?? null;
     this.identity = options.identity;
     this.policy = options.policy ?? { schema: 1, agents: {} };
     this.now = options.now ?? Date.now;
@@ -1003,6 +1007,63 @@ export class MemoryObjectService implements SidecarObjectsApi {
       );
       const effectiveHashes = loaded.sourceHashes;
       const warnings = [...loaded.warnings];
+      let summary = built.summary;
+      let tokenCount = built.tokenCount;
+      let summaryExtractor: 'heuristic' | 'local' | 'api' = 'heuristic';
+      let summaryModel: string | null = 'heuristic';
+      let modelDegraded = false;
+      const allowRemote = body.allowRemote === true;
+
+      // compact 摘要可选模型；失败保留确定性摘要，不丢源记录、不回退到第三方。
+      if (strategy === 'summary' && this.models) {
+        const selection = await this.models.selectOptionalSource(allowRemote);
+        for (const warning of selection.warnings) {
+          if (!warnings.includes(warning)) warnings.push(warning);
+        }
+        modelDegraded = selection.degraded;
+        if (selection.source) {
+          let outcome;
+          try {
+            outcome = await this.models.summarize({
+              source: selection.source,
+              text: built.summary,
+              allowRemote,
+            });
+          } catch {
+            outcome = {
+              ok: false,
+              degraded: true,
+              reason: 'model_unavailable',
+              warnings: ['model_unavailable'],
+              latencyMs: 0,
+            };
+          }
+          if (outcome.ok && outcome.summary) {
+            summary = outcome.summary.slice(0, MAX_SUMMARY_CHARS);
+            tokenCount = estimateTokens(summary);
+            summaryExtractor = selection.source;
+            summaryModel = outcome.model ?? selection.source;
+            modelDegraded = modelDegraded || outcome.degraded;
+            for (const warning of outcome.warnings) {
+              if (!warnings.includes(warning)) warnings.push(warning);
+            }
+            this.models.clearFailure(selection.source);
+          } else {
+            for (const warning of [...outcome.warnings, outcome.reason ?? 'model_unavailable', 'compact_fallback_heuristic']) {
+              if (warning && !warnings.includes(warning)) warnings.push(warning);
+            }
+            modelDegraded = true;
+            this.models.noteFailure(
+              selection.source,
+              outcome.reason ?? 'model_unavailable',
+              outcome.warnings.length > 0 ? outcome.warnings : ['model_unavailable'],
+            );
+          }
+        } else if (selection.degraded) {
+          if (!warnings.includes('compact_fallback_heuristic')) warnings.push('compact_fallback_heuristic');
+        }
+      }
+
       const base = {
         compactId: null as string | null,
         status: dryRun ? 'dry_run' : 'pending',
@@ -1010,8 +1071,8 @@ export class MemoryObjectService implements SidecarObjectsApi {
         namespace: domain,
         sourceIds: loaded.sourceIds,
         sourceHashes: effectiveHashes,
-        tokenCount: built.tokenCount,
-        summary: built.summary,
+        tokenCount,
+        summary,
         stale: false,
         strategy,
         dryRun,
@@ -1027,7 +1088,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
             queued: false,
           },
           warnings,
-          degraded: loaded.degraded,
+          degraded: loaded.degraded || modelDegraded,
         };
       }
 
@@ -1043,16 +1104,16 @@ export class MemoryObjectService implements SidecarObjectsApi {
         kind: 'compact',
         op: 'upsert',
         domain,
-        summary: built.summary,
+        summary,
         sourceIds: loaded.sourceIds,
         ...(effectiveHashes.length === loaded.sourceIds.length ? { sourceHashes: effectiveHashes } : {}),
         strategy,
-        tokenCount: built.tokenCount,
-        model: { extractor: 'heuristic', model: 'heuristic', version: '0.3.0' },
+        tokenCount,
+        model: { extractor: summaryExtractor, model: summaryModel, version: '0.3.0' },
         provenance: {
           source: 'runtime',
-          extractor: 'heuristic',
-          model: 'heuristic',
+          extractor: summaryExtractor,
+          model: summaryModel,
           ...(threadId ? { threadId } : {}),
         },
       };
@@ -1100,13 +1161,13 @@ export class MemoryObjectService implements SidecarObjectsApi {
             status: 'completed',
             sourceIds: Array.isArray(object.sourceIds) ? object.sourceIds : loaded.sourceIds,
             sourceHashes: Array.isArray(object.sourceHashes) ? object.sourceHashes : effectiveHashes,
-            tokenCount: typeof object.tokenCount === 'number' ? object.tokenCount : built.tokenCount,
+            tokenCount: typeof object.tokenCount === 'number' ? object.tokenCount : tokenCount,
             stale: object.stale === true,
             compact: object,
             queued: false,
           },
           warnings: [...warnings, ...response.warnings],
-          degraded: response.degraded || loaded.degraded,
+          degraded: response.degraded || loaded.degraded || modelDegraded,
         };
       } catch (error) {
         if (retryableCapabilityError(error)) {

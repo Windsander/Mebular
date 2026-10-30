@@ -48,6 +48,11 @@ import {
   SidecarLocalLayer,
   type SidecarLocalLayerOptions,
 } from './local-layer.js';
+import {
+  createSidecarModelRuntime,
+  type SidecarModelRuntime,
+  type SidecarModelStatus,
+} from './model.js';
 import { SettlementRuntime } from './settlement.js';
 import {
   SidecarServer,
@@ -124,6 +129,7 @@ export interface SidecarHandle {
   paths: SidecarPaths;
   config: SidecarConfig;
   local: SidecarLocalLayer;
+  model: SidecarModelRuntime;
   settlement: SettlementRuntime;
   server: SidecarServer;
   discovery: SidecarDiscovery;
@@ -422,6 +428,27 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
 
   const identity = mergeIdentity(paths.home, options.identity, capabilityIdentity);
 
+  const model = createSidecarModelRuntime(config.model, {
+    homeDir: paths.home,
+    modelsDir: paths.modelsDir,
+    env,
+    now,
+  });
+  let modelStatus: SidecarModelStatus;
+  try {
+    modelStatus = await model.status();
+  } catch {
+    modelStatus = {
+      configured: config.model.source,
+      active: 'heuristic',
+      degraded: true,
+      reason: 'model_unavailable',
+      warnings: ['model_unavailable'],
+      credential: { configured: false, source: null },
+      sources: ['heuristic', 'host'],
+    };
+  }
+
   let hostToken;
   try {
     hostToken = await ensureHostToken({
@@ -446,6 +473,7 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
       client,
       identity,
       policyPath: paths.policyPath,
+      modelRuntime: model,
       now,
     });
     await settlement.init();
@@ -457,30 +485,39 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
     );
   }
 
-  const statusSnapshot = async (): Promise<SidecarStatusSnapshot> => settlement.statusSnapshot({
-    mode: 'immersive',
-    identity: { ...identity },
-    capability: { ...capability },
-    model: {
-      configured: 'heuristic',
-      active: 'heuristic',
-      degraded: false,
-      reason: null,
-    },
-    limits: {
-      maxChunkBytes: config.limits.maxChunkBytes,
-      maxContextTokens: config.limits.maxContextTokens,
-      maxRecall: config.limits.maxRecall,
-    },
-    warnings: [...warnings],
-  });
+  const statusSnapshot = async (): Promise<SidecarStatusSnapshot> => {
+    try {
+      modelStatus = await model.status();
+    } catch {
+      // 模型状态探测失败只影响展示，不阻塞 status；沿用最近一次不可用状态。
+    }
+    const mergedWarnings = [...warnings];
+    for (const warning of modelStatus.warnings) {
+      if (!mergedWarnings.includes(warning)) mergedWarnings.push(warning);
+    }
+    return settlement.statusSnapshot({
+      mode: 'immersive',
+      identity: { ...identity },
+      capability: { ...capability },
+      model: modelStatus,
+      limits: {
+        maxChunkBytes: config.limits.maxChunkBytes,
+        maxContextTokens: config.limits.maxContextTokens,
+        maxRecall: config.limits.maxRecall,
+      },
+      warnings: mergedWarnings,
+    });
+  };
 
-  const degraded = (!options.skipHandshake && !capability.reachable) || settlement.degraded;
+  const degraded = (!options.skipHandshake && !capability.reachable)
+    || settlement.degraded
+    || modelStatus.degraded;
   const server = new SidecarServer({
     config,
     hostToken: hostToken.token,
     identity,
     getStatus: statusSnapshot,
+    getModelStatus: () => model.status(),
     ingest: settlement,
     namespaces: settlement,
     recall: settlement,
@@ -526,7 +563,7 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
         checkpoint: true,
         compact: true,
         self: true,
-        models: ['heuristic', 'host'],
+        models: modelStatus.sources,
       },
     });
     await writeDiscovery(paths.discoveryPath, discovery);
@@ -569,7 +606,11 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
         try {
           await heartbeatTask;
           server.setState('stopping');
-          await settlement.stop();
+          try {
+            await settlement.stop();
+          } finally {
+            await model.dispose();
+          }
           await server.close();
         } catch {
           // 停止路径不阻塞退出；discovery/token 仍在 finally 清理。
@@ -600,6 +641,7 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
     paths,
     config,
     local,
+    model,
     settlement,
     server,
     discovery,
@@ -738,7 +780,7 @@ export function getSidecarVersion(): SidecarVersionResult {
       checkpoint: true,
       compact: true,
       self: true,
-      models: ['heuristic', 'host'],
+      models: ['heuristic', 'host', 'local', 'api'],
     },
   };
 }

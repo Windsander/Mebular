@@ -15,6 +15,7 @@ import { randomUUID } from 'node:crypto';
 import { CapabilityClient, CapabilityClientError } from './capability-client.js';
 import type { SidecarConfig } from './config.js';
 import {
+  agentDomain,
   isValidAgentId,
   isValidThreadId,
   normalizeDomain,
@@ -33,6 +34,11 @@ import {
 import { SidecarSettlementError } from './errors.js';
 import { heuristicCandidates } from './heuristic.js';
 import { LocalLayerError, type SidecarLocalLayer } from './local-layer.js';
+import type {
+  SidecarModelExtractionResult,
+  SidecarModelExtractionSourceSelection,
+  SidecarModelRuntime,
+} from './model.js';
 import type { RawChunk } from '../runtime/types.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -49,6 +55,7 @@ const EXTRACTORS = ['auto', 'heuristic', 'local', 'host', 'api'] as const;
 
 export type IngestCapture = (typeof CAPTURES)[number];
 export type IngestExtractor = (typeof EXTRACTORS)[number];
+export type IngestExtractorKind = 'heuristic' | 'local' | 'api' | 'host';
 
 export interface IngestChunkInput {
   id?: string;
@@ -92,7 +99,7 @@ export interface IngestRecordView {
 export interface IngestExtractionView {
   id: string;
   status: 'pending' | 'completed' | 'failed';
-  extractor: 'heuristic' | 'host';
+  extractor: IngestExtractorKind;
   model?: string;
   records: IngestRecordView[];
   warnings: string[];
@@ -159,6 +166,7 @@ export interface IngestServiceOptions {
     userId?: string | null;
   };
   policy?: SidecarPolicy | null;
+  modelRuntime?: SidecarModelRuntime | null;
   now?: () => number;
   idempotencyTtlMs?: number;
   extractionTtlMs?: number;
@@ -168,7 +176,7 @@ interface StoredExtraction {
   version: 1;
   id: string;
   status: 'pending' | 'completed' | 'failed';
-  extractor: 'heuristic' | 'host';
+  extractor: IngestExtractorKind;
   model?: string;
   records: IngestRecordView[];
   warnings: string[];
@@ -206,7 +214,7 @@ interface CandidateContext {
   threadId: string | null;
   messageIds: string[];
   rawChunkIds: string[];
-  extractor: 'heuristic' | 'host';
+  extractor: IngestExtractorKind;
   model: string | null;
   source: 'runtime' | 'host';
 }
@@ -278,6 +286,12 @@ function nowView(at: number, code: string, message: string): IngestErrorView {
   return { code, message, at };
 }
 
+function appendWarnings(target: string[], values: readonly string[]): void {
+  for (const value of values) {
+    if (value.length > 0 && !target.includes(value)) target.push(value);
+  }
+}
+
 function errorView(error: unknown, at: number): IngestErrorView {
   if (error instanceof SidecarSettlementError) {
     return nowView(at, error.code, error.message);
@@ -309,6 +323,7 @@ export class IngestService {
   readonly identity: IngestServiceOptions['identity'];
 
   private readonly client: CapabilityClient | null;
+  private readonly models: SidecarModelRuntime | null;
   private policy: SidecarPolicy | null;
   private readonly now: () => number;
   private readonly idempotencyTtlMs: number;
@@ -326,6 +341,7 @@ export class IngestService {
     this.config = options.config;
     this.local = options.local;
     this.client = options.client;
+    this.models = options.modelRuntime ?? null;
     this.identity = options.identity;
     this.policy = options.policy ?? null;
     this.now = options.now ?? Date.now;
@@ -442,7 +458,7 @@ export class IngestService {
     const explicitThreadId = this.threadIdOf(input.threadId);
     const capture = enumValue(input.capture, CAPTURES, 'capture', this.config.capture);
     const extractor = enumValue(input.extractor, EXTRACTORS, 'extractor', 'auto');
-    optionalBoolean(input.allowRemote, 'allowRemote');
+    const allowRemote = optionalBoolean(input.allowRemote, 'allowRemote');
     const requestDomain = this.domainOf(input.domain);
     const warnings: string[] = [];
 
@@ -469,8 +485,13 @@ export class IngestService {
 
     this.ingested += 1;
 
-    // 宿主明确要求 host 抽取但没有候选：不偷偷换模型，返回 pending。
-    if (routedHost.length === 0 && extractor === 'host') {
+    // 宿主明确要求 host 抽取但没有候选（或配置来源就是 host）：
+    // 不偷偷换模型，返回 pending。
+    const hostPending = routedHost.length === 0 && (
+      extractor === 'host'
+      || (extractor === 'auto' && this.config.model.source === 'host')
+    );
+    if (hostPending) {
       const rawChunkIds = await this.captureRaw({
         agentId,
         threadId,
@@ -506,24 +527,114 @@ export class IngestService {
       return { status: 202, data, warnings: data.warnings, degraded: false };
     }
 
-    let routed: RoutedCandidate[] = routedHost;
-    let resolvedExtractor: 'heuristic' | 'host' = 'host';
-    let model: string | null = 'host-provided';
-    let degraded = false;
+    // 先落 Raw（capture=local 时），确保模型失败/超时不会丢原始材料。
+    const rawChunkIds = await this.captureRaw({
+      agentId,
+      threadId,
+      capture,
+      chunks,
+      warnings,
+    });
 
-    if (routed.length === 0) {
-      if (extractor === 'local' || extractor === 'api') {
-        // W4a 不实现模型层：失败只回退 heuristic，不自动换供应商。
-        warnings.push('model_unavailable');
-        degraded = true;
+    let routed: RoutedCandidate[] = routedHost;
+    let resolvedExtractor: IngestExtractorKind = 'host';
+    let model: string | null = routedHost.length > 0 ? 'host-provided' : null;
+    let degraded = false;
+    let modelSucceeded = false;
+
+    if (routedHost.length > 0) {
+      this.models?.noteHostCandidates();
+    } else if (extractor !== 'heuristic') {
+      const selection = await this.selectExtractionSource(extractor, allowRemote);
+      appendWarnings(warnings, selection.warnings);
+      degraded = selection.degraded;
+
+      if (selection.source === 'local' || selection.source === 'api') {
+        let outcome: SidecarModelExtractionResult;
+        try {
+          outcome = this.models
+            ? await this.models.extractCandidates({
+              source: selection.source,
+              chunks: chunks.map((chunk) => ({
+                text: chunk.text,
+                ...(chunk.role ? { role: chunk.role } : {}),
+                ...(chunk.messageId ? { messageId: chunk.messageId } : {}),
+                ...(typeof chunk.at === 'number' ? { at: chunk.at } : {}),
+              })),
+              domain: requestDomain ?? agentDomain(agentId),
+              agentId,
+              ...(explicitThreadId ? { threadId: explicitThreadId } : {}),
+              allowRemote,
+            })
+            : {
+              ok: false,
+              candidates: [],
+              extractor: selection.source,
+              degraded: true,
+              reason: 'model_unavailable',
+              warnings: ['model_unavailable'],
+              latencyMs: 0,
+            };
+        } catch {
+          // 模型层异常不能让 ingest 失败，也不能丢 Raw。
+          outcome = {
+            ok: false,
+            candidates: [],
+            extractor: selection.source,
+            degraded: true,
+            reason: 'model_unavailable',
+            warnings: ['model_unavailable'],
+            latencyMs: 0,
+          };
+        }
+
+        if (outcome.ok) {
+          const checked = validateCandidates(outcome.candidates);
+          appendWarnings(warnings, checked.warnings);
+          if (outcome.candidates.length > 0 && checked.candidates.length === 0) {
+            // 模型输出不可信：全部非法时回退 heuristic，绝不把原始形状写图。
+            appendWarnings(warnings, ['model_invalid_candidates', 'model_unavailable']);
+            degraded = true;
+            this.models?.noteFailure(selection.source, 'model_invalid_candidates', [
+              'model_invalid_candidates',
+              'model_unavailable',
+            ]);
+          } else {
+            routed = checked.candidates.map((candidate) => routeCandidate(candidate, {
+              agentId,
+              threadId: explicitThreadId,
+              requestDomain,
+              policy: this.policy,
+            }));
+            for (const candidate of routed) appendWarnings(warnings, candidate.warnings);
+            resolvedExtractor = selection.source;
+            model = outcome.model ?? null;
+            degraded = outcome.degraded;
+            modelSucceeded = true;
+            if (routed.length === 0) appendWarnings(warnings, ['no_extractable_memory']);
+            this.models?.clearFailure(selection.source);
+          }
+        } else {
+          degraded = true;
+          appendWarnings(warnings, outcome.warnings);
+          if (outcome.reason) appendWarnings(warnings, [outcome.reason]);
+          this.models?.noteFailure(
+            selection.source,
+            outcome.reason ?? 'model_unavailable',
+            outcome.warnings.length > 0 ? outcome.warnings : ['model_unavailable'],
+          );
+        }
       }
+    }
+
+    if (!modelSucceeded && routed.length === 0) {
       const heuristic = heuristicCandidates(chunks.map((chunk) => ({
         role: chunk.role,
         text: chunk.text,
         at: chunk.at,
         threadId,
       })));
-      warnings.push(...heuristic.warnings);
+      appendWarnings(warnings, heuristic.warnings);
       const heuristicInputs: CandidateInput[] = heuristic.candidates.map((candidate) => ({
         kind: candidate.kind,
         content: candidate.content,
@@ -538,18 +649,10 @@ export class IngestService {
         requestDomain,
         policy: this.policy,
       }));
-      for (const candidate of routed) warnings.push(...candidate.warnings);
+      for (const candidate of routed) appendWarnings(warnings, candidate.warnings);
       resolvedExtractor = 'heuristic';
       model = null;
     }
-
-    const rawChunkIds = await this.captureRaw({
-      agentId,
-      threadId,
-      capture,
-      chunks,
-      warnings,
-    });
 
     const context: CandidateContext = {
       agentId,
@@ -644,6 +747,7 @@ export class IngestService {
         policy: this.policy,
       }));
       for (const candidate of routed) warnings.push(...candidate.warnings);
+      this.models?.noteHostCandidates();
 
       const outcome = await this.settle(routed, {
         agentId: extraction.agentId,
@@ -686,6 +790,24 @@ export class IngestService {
 
   private cloudKey(): string {
     return this.identity.cloudId ?? 'cl_local';
+  }
+
+  private async selectExtractionSource(
+    extractor: IngestExtractor,
+    allowRemote: boolean,
+  ): Promise<SidecarModelExtractionSourceSelection> {
+    if (!this.models) {
+      if (extractor === 'local' || extractor === 'api') {
+        return {
+          source: 'heuristic',
+          warnings: ['model_unavailable'],
+          degraded: true,
+          reason: 'model_unavailable',
+        };
+      }
+      return { source: 'heuristic', warnings: [], degraded: false };
+    }
+    return this.models.selectExtractionSource(extractor, allowRemote);
   }
 
   private idempotencyCacheKey(key: string): string {
@@ -1073,7 +1195,7 @@ export class IngestService {
   private async saveExtraction(input: {
     id?: string;
     status: 'pending' | 'completed' | 'failed';
-    extractor: 'heuristic' | 'host';
+    extractor: IngestExtractorKind;
     model?: string;
     records: IngestRecordView[];
     warnings: string[];

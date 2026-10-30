@@ -28,6 +28,7 @@ import {
 } from './domains.js';
 import { SidecarSettlementError } from './errors.js';
 import type { SidecarLocalLayer } from './local-layer.js';
+import type { SidecarModelRuntime } from './model.js';
 import {
   extractCue,
   exactTokensOf,
@@ -178,6 +179,8 @@ export interface RecallRequestView {
   turnKind?: 'human' | 'tool' | 'system';
   mute?: boolean;
   recallMode?: 'fragmented' | 'records';
+  /** API 模型请求级逐次允许；缺省 false。 */
+  allowRemote?: boolean;
 }
 
 export interface ContextBlock {
@@ -247,6 +250,7 @@ export interface RecallServiceOptions {
   };
   policy?: SidecarPolicy | null;
   getPolicy?: () => SidecarPolicy | null;
+  modelRuntime?: SidecarModelRuntime | null;
   now?: () => number;
 }
 
@@ -278,6 +282,7 @@ interface NormalizedRequest {
   turnKind: 'human' | 'tool' | 'system';
   mute: boolean;
   recallMode: 'fragmented' | 'records';
+  allowRemote: boolean;
 }
 
 interface RawCandidate {
@@ -305,6 +310,7 @@ interface RecallRun {
   request: NormalizedRequest;
   cue: Cue;
   recallId: string;
+  queryPlan: { source: 'heuristic' | 'local' | 'api'; model?: string };
   domains: string[];
   warnings: string[];
   degraded: boolean;
@@ -931,6 +937,7 @@ export class RecallService {
   readonly identity: RecallServiceOptions['identity'];
 
   private readonly client: CapabilityClient | null;
+  private readonly models: SidecarModelRuntime | null;
   private readonly getPolicy?: () => SidecarPolicy | null;
   private policy: SidecarPolicy | null;
   private readonly now: () => number;
@@ -949,6 +956,7 @@ export class RecallService {
     this.config = options.config;
     this.local = options.local;
     this.client = options.client;
+    this.models = options.modelRuntime ?? null;
     this.identity = options.identity;
     this.policy = options.policy ?? null;
     this.getPolicy = options.getPolicy;
@@ -1227,6 +1235,7 @@ export class RecallService {
       turnKind,
       mute: request.mute === true,
       recallMode,
+      allowRemote: request.allowRemote === true,
     };
   }
 
@@ -1256,6 +1265,57 @@ export class RecallService {
     const recallId = shortId('rr');
     const warnings: string[] = [];
     let degraded = false;
+    let searchQuery = request.query;
+    let queryPlan: RecallRun['queryPlan'] = { source: 'heuristic' };
+
+    // 可选模型 query plan：只影响检索词；失败保留原 query，不阻塞召回。
+    if (this.config.recall.queryPlan === 'model' && this.models && !request.mute
+      && request.turnKind === 'human' && request.query.trim().length > 0) {
+      const selection = await this.models.selectOptionalSource(request.allowRemote);
+      for (const warning of selection.warnings) pushWarning(warnings, warning);
+      degraded = degraded || selection.degraded;
+      if (selection.source) {
+        let plan;
+        try {
+          plan = await this.models.planQuery({
+            source: selection.source,
+            query: request.query,
+            allowRemote: request.allowRemote,
+          });
+        } catch {
+          plan = {
+            ok: false,
+            degraded: true,
+            reason: 'model_unavailable',
+            warnings: ['model_unavailable'],
+            latencyMs: 0,
+          };
+        }
+        if (plan.ok && plan.query) {
+          searchQuery = plan.query;
+          queryPlan = {
+            source: selection.source,
+            ...(plan.model ? { model: plan.model } : {}),
+          };
+          degraded = degraded || plan.degraded;
+          for (const warning of plan.warnings) pushWarning(warnings, warning);
+          this.models.clearFailure(selection.source);
+        } else {
+          degraded = true;
+          for (const warning of [...plan.warnings, plan.reason ?? 'model_unavailable', 'query_plan_fallback_heuristic']) {
+            if (warning) pushWarning(warnings, warning);
+          }
+          this.models.noteFailure(
+            selection.source,
+            plan.reason ?? 'model_unavailable',
+            plan.warnings.length > 0 ? plan.warnings : ['model_unavailable'],
+          );
+        }
+      } else if (selection.degraded) {
+        pushWarning(warnings, 'query_plan_fallback_heuristic');
+      }
+    }
+
     const cueStart = this.now();
     const cue = extractCue({
       query: request.query,
@@ -1277,6 +1337,7 @@ export class RecallService {
       request,
       cue,
       recallId,
+      queryPlan,
       domains: [],
       warnings,
       degraded,
@@ -1324,7 +1385,7 @@ export class RecallService {
     const fuzzyStart = this.now();
     let rawRecords: RawCandidate[] = [];
     try {
-      const collected = await this.collectCandidates(request, cue, domains, rawCache, warnings);
+      const collected = await this.collectCandidates(request, cue, domains, rawCache, warnings, searchQuery);
       rawRecords = collected.records;
       degraded = degraded || collected.degraded;
       run.degraded = degraded;
@@ -1507,6 +1568,7 @@ export class RecallService {
     domains: string[],
     rawCache: Map<string, RawChunk[]>,
     warnings: string[],
+    query: string = request.query,
   ): Promise<{ records: RawCandidate[]; degraded: boolean }> {
     const client = this.client;
     if (!client) return { records: [], degraded: false };
@@ -1523,10 +1585,10 @@ export class RecallService {
       ...(request.threadId ? { threadId: request.threadId } : {}),
     };
 
-    if (request.query.length > 0) {
+    if (query.length > 0) {
       tasks.push(client.query<Record<string, unknown>>({
         ...base,
-        query: request.query,
+        query,
         types: [...RECORD_TYPES],
         limit,
         offset: 0,
@@ -1540,7 +1602,7 @@ export class RecallService {
 
       tasks.push(client.search<Record<string, unknown>>({
         ...base,
-        query: request.query,
+        query,
         types: [...RECORD_TYPES],
         limit: Math.min(20, limit),
         includeRelations: false,
@@ -1572,8 +1634,8 @@ export class RecallService {
 
     const wantsProfile = domains.includes('user')
       && (cue.ownerHint === 'user'
-        || request.query.length === 0
-        || /偏好|喜欢|主题|profile|preference/i.test(request.query));
+        || query.length === 0
+        || /偏好|喜欢|主题|profile|preference/i.test(query));
     if (wantsProfile) {
       tasks.push(client.profile<Record<string, unknown>>({
         actor,
@@ -1589,12 +1651,12 @@ export class RecallService {
 
     const wantsSkills = cue.detailIntent.reasons.includes('command_request')
       || cue.detailIntent.reasons.includes('exact_value')
-      || /技能|步骤|命令|脚本|部署|skill/i.test(request.query);
+      || /技能|步骤|命令|脚本|部署|skill/i.test(query);
     if (wantsSkills) {
       tasks.push(client.skills<Record<string, unknown>>({
         actor,
         domains: domains.filter((domain) => domain !== 'system'),
-        ...(request.query ? { search: request.query } : {}),
+        ...(query ? { search: query } : {}),
         limit: Math.min(20, limit),
         includeArchived: false,
       }).then((response) => ({
@@ -2495,7 +2557,7 @@ export class RecallService {
       },
       timing,
       tookMs: timing.totalMs,
-      model: { extractor: 'heuristic' },
+      model: { query: run.queryPlan.source, extractor: 'heuristic' },
       degraded,
       warnings: [...warnings],
     };

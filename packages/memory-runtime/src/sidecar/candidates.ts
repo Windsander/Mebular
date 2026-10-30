@@ -570,7 +570,7 @@ export function routeCandidate(candidate: CandidateInput, context: RouteContext)
 
 export interface WriteProvenance {
   source: 'runtime' | 'host';
-  extractor: 'heuristic' | 'host';
+  extractor: 'heuristic' | 'local' | 'host' | 'api';
   model: string | null;
   threadId?: string;
   messageIds: string[];

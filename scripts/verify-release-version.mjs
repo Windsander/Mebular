@@ -153,6 +153,17 @@ export function verifyReleaseVersion({ root = SCRIPT_ROOT, version, tag = `v${ve
     );
   });
 
+  safe('packages/memory-runtime/src/sidecar/config.ts SIDECAR_RUNTIME_VERSION', () => {
+    const file = join(root, 'packages/memory-runtime/src/sidecar/config.ts');
+    if (!existsSync(file)) {
+      add('packages/memory-runtime/src/sidecar/config.ts', false, '不存在');
+      return;
+    }
+    const source = readText(file);
+    const value = /export const SIDECAR_RUNTIME_VERSION = '([^']+)'/.exec(source)?.[1];
+    add('packages/memory-runtime/src/sidecar/config.ts SIDECAR_RUNTIME_VERSION', value === version, `${value} != ${version}`);
+  });
+
   for (const rel of ['packages/mcp/src/server.mjs', 'packages/mcp/src/client.mjs']) {
     safe(`${rel} 版本来源`, () => {
       const source = readText(join(root, rel));

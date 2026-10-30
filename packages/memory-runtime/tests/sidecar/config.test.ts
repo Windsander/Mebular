@@ -144,4 +144,37 @@ describe('sidecar config', () => {
     expect(isMcpVersionCompatible('0.3.1')).toBe(true);
     expect(isMcpVersionCompatible('0.4.0')).toBe(false);
   });
+
+  it('模型配置按设备解析：local.enginePath、api keyRef 只允许引用、recall.queryPlan', () => {
+    const normalized = normalizeSidecarConfig({
+      model: {
+        source: 'local',
+        local: { pack: 'qwen-9b', threads: 6, enginePath: '/opt/llama-server' },
+        api: { keyRef: 'env:MODEL_KEY', allowRemote: true, timeoutMs: 2500 },
+      },
+      recall: { queryPlan: 'model' },
+    });
+    expect(normalized.model.local).toEqual({
+      pack: 'qwen-9b',
+      path: null,
+      threads: 6,
+      enginePath: '/opt/llama-server',
+    });
+    expect(normalized.model.api.keyRef).toBe('env:MODEL_KEY');
+    expect(normalized.recall.queryPlan).toBe('model');
+
+    expect(normalizeSidecarConfig({ model: { api: { keyRef: 'file:secrets/runtime-model.key' } } })
+      .model.api.keyRef).toBe('file:secrets/runtime-model.key');
+    expect(normalizeSidecarConfig({ model: { api: { keyRef: 'keychain:mebular-runtime/cl_test' } } })
+      .model.api.keyRef).toBe('keychain:mebular-runtime/cl_test');
+
+    expect(() => normalizeSidecarConfig({ model: { api: { keyRef: 'sk-plaintext-secret' } } }))
+      .toThrow(SidecarConfigError);
+    expect(() => normalizeSidecarConfig({ model: { api: { keyRef: 'file:../outside.key' } } }))
+      .toThrow(SidecarConfigError);
+    expect(() => normalizeSidecarConfig({ model: { api: { keyRef: 'env:' } } }))
+      .toThrow(SidecarConfigError);
+    expect(() => normalizeSidecarConfig({ model: { source: 'other' } })).toThrow(SidecarConfigError);
+    expect(() => normalizeSidecarConfig({ recall: { queryPlan: 'always' } })).toThrow(SidecarConfigError);
+  });
 });

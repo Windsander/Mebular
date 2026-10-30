@@ -54,10 +54,13 @@ export interface SidecarModelSettings {
     pack: string | null;
     path: string | null;
     threads: number;
+    /** 显式 llama-server 可执行文件；缺省走 PATH。 */
+    enginePath: string | null;
   };
   api: {
     baseUrl: string | null;
     model: string | null;
+    /** 只接受 env:/file:/keychain: 引用；不接受明文密钥。 */
     keyRef: string | null;
     allowRemote: boolean;
     timeoutMs: number;
@@ -77,6 +80,8 @@ export interface SidecarRecallSettings {
   injectionBudgetBytes: number;
   injectionBudgetTokens: number;
   timeoutMs: number;
+  /** heuristic（默认）| model；model 仅在模型可用时做 query plan，失败保留原 query。 */
+  queryPlan: 'heuristic' | 'model';
 }
 
 export interface SidecarContextSettings {
@@ -140,7 +145,7 @@ export function defaultSidecarConfig(): SidecarConfig {
     retention: { rawDays: 7, traceDays: 7, checkpointDays: 30 },
     model: {
       source: 'heuristic',
-      local: { pack: null, path: null, threads: 4 },
+      local: { pack: null, path: null, threads: 4, enginePath: null },
       api: {
         baseUrl: null,
         model: null,
@@ -161,6 +166,7 @@ export function defaultSidecarConfig(): SidecarConfig {
       injectionBudgetBytes: 8192,
       injectionBudgetTokens: 2000,
       timeoutMs: 800,
+      queryPlan: 'heuristic',
     },
     context: { maxTokens: 12_000, maxFragments: 3 },
     queue: { concurrency: 1 },
@@ -221,6 +227,55 @@ function stringOrNullOf(input: Record<string, unknown>, key: string, fallback: s
   if (value === null) return null;
   if (typeof value === 'string') return value.trim().length > 0 ? value.trim() : null;
   throw new SidecarConfigError('config_invalid', `${key} 必须是字符串或 null`);
+}
+
+const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const KEYCHAIN_REF_RE = /^[A-Za-z0-9._:@-]+(?:\/[A-Za-z0-9._:@-]+)?$/;
+
+/**
+ * 模型密钥只保存引用：env:NAME、file:relative/path、keychain:service[/account]。
+ * 明文或未知前缀在配置阶段直接拒绝，避免写入 config.json。
+ */
+export function normalizeModelKeyRef(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string') {
+    throw new SidecarConfigError('config_invalid', 'model.api.keyRef 必须是字符串或 null');
+  }
+  const ref = value.trim();
+  if (ref.length === 0) return null;
+  if (ref.startsWith('env:')) {
+    const name = ref.slice('env:'.length);
+    if (!ENV_KEY_RE.test(name)) {
+      throw new SidecarConfigError('config_invalid', 'model.api.keyRef 的 env: 变量名非法');
+    }
+    return `env:${name}`;
+  }
+  if (ref.startsWith('file:')) {
+    const relative = ref.slice('file:'.length).trim();
+    if (
+      relative.length === 0
+      || relative.startsWith('/')
+      || relative.startsWith('\\')
+      || /^[A-Za-z]:/.test(relative)
+      || relative.split(/[\\/]/).includes('..')
+      || /[\u0000-\u001f\u007f]/.test(relative)
+    ) {
+      throw new SidecarConfigError('config_invalid', 'model.api.keyRef 的 file: 必须是安全的相对路径');
+    }
+    return `file:${relative}`;
+  }
+  if (ref.startsWith('keychain:')) {
+    const rest = ref.slice('keychain:'.length).trim();
+    if (rest.length === 0 || rest.length > 256 || !KEYCHAIN_REF_RE.test(rest)
+      || rest.startsWith('-') || rest.includes('/-')) {
+      throw new SidecarConfigError('config_invalid', 'model.api.keyRef 的 keychain: 引用非法');
+    }
+    return `keychain:${rest}`;
+  }
+  throw new SidecarConfigError(
+    'config_invalid',
+    'model.api.keyRef 只接受 env:/file:/keychain: 引用，不接受明文密钥',
+  );
 }
 
 /** 判断 host 是否为本机回环地址（localhost 解析为 loopback）。 */
@@ -378,11 +433,12 @@ export function normalizeSidecarConfig(raw: unknown): SidecarConfig {
         pack: stringOrNullOf(local, 'pack', defaults.model.local.pack),
         path: stringOrNullOf(local, 'path', defaults.model.local.path),
         threads: intOf(local, 'threads', defaults.model.local.threads, { min: 1 }),
+        enginePath: stringOrNullOf(local, 'enginePath', defaults.model.local.enginePath),
       },
       api: {
         baseUrl: stringOrNullOf(api, 'baseUrl', defaults.model.api.baseUrl),
         model: stringOrNullOf(api, 'model', defaults.model.api.model),
-        keyRef: stringOrNullOf(api, 'keyRef', defaults.model.api.keyRef),
+        keyRef: normalizeModelKeyRef(api.keyRef ?? defaults.model.api.keyRef),
         allowRemote: boolOf(api, 'allowRemote', defaults.model.api.allowRemote),
         timeoutMs: intOf(api, 'timeoutMs', defaults.model.api.timeoutMs, { min: 1 }),
       },
@@ -399,6 +455,7 @@ export function normalizeSidecarConfig(raw: unknown): SidecarConfig {
       injectionBudgetBytes: intOf(recall, 'injectionBudgetBytes', defaults.recall.injectionBudgetBytes, { min: 1 }),
       injectionBudgetTokens: intOf(recall, 'injectionBudgetTokens', defaults.recall.injectionBudgetTokens, { min: 1 }),
       timeoutMs: intOf(recall, 'timeoutMs', defaults.recall.timeoutMs, { min: 1 }),
+      queryPlan: enumOf(recall, 'queryPlan', ['heuristic', 'model'] as const, defaults.recall.queryPlan),
     },
     context: {
       maxTokens: intOf(context, 'maxTokens', defaults.context.maxTokens, { min: 1 }),

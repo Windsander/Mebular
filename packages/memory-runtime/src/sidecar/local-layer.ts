@@ -46,6 +46,8 @@ export interface OutboxItem {
   attempts: number;
   lastAttemptAt: number | null;
   lastError: string | null;
+  /** 指数退避后的下次可尝试时间；缺省表示立即可尝试。 */
+  nextAttemptAt?: number;
 }
 
 export interface OutboxEnqueueInput {
@@ -290,6 +292,46 @@ export class BoundedOutbox {
       await writeJsonAtomic(this.deadPathFor(id), dead);
       await rm(path, { force: true });
       return true;
+    });
+  }
+
+  /** 记录一次失败尝试；retryDelayMs 为 0 时立即允许下一次重放。 */
+  async recordAttempt(id: string, { error, retryDelayMs = 0 }: { error: string; retryDelayMs?: number }): Promise<OutboxItem | null> {
+    return this.exclusive(async () => {
+      const path = this.pathFor(id);
+      const item = await readJsonFile<OutboxItem>(path);
+      if (!isOutboxItem(item)) return null;
+      const now = this.now();
+      const updated: OutboxItem = {
+        ...item,
+        attempts: item.attempts + 1,
+        lastAttemptAt: now,
+        lastError: error,
+        nextAttemptAt: now + Math.max(0, Math.floor(retryDelayMs)),
+      };
+      await writeJsonAtomic(path, updated);
+      return updated;
+    });
+  }
+
+  /** 清理超过保留期的 dead letter；返回删除数量。 */
+  async cleanupDead(now = this.now(), retentionDays = 30): Promise<number> {
+    return this.exclusive(async () => {
+      await this.init();
+      const entries = await readdir(this.deadRoot, { withFileTypes: true }).catch(() => []);
+      const cutoff = now - Math.max(0, retentionDays) * 24 * 60 * 60 * 1000;
+      let removed = 0;
+      for (const entry of entries) {
+        if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+        const path = join(this.deadRoot, entry.name);
+        const item = await readJsonFile<OutboxItem & { deadAt?: number }>(path);
+        const deadAt = typeof item?.deadAt === 'number' ? item.deadAt : null;
+        if (deadAt === null || deadAt < cutoff) {
+          await rm(path, { force: true });
+          removed += 1;
+        }
+      }
+      return removed;
     });
   }
 

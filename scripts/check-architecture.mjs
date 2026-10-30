@@ -119,11 +119,43 @@ async function checkRuntime(errors) {
   }
 }
 
+const SIDECAR_SRC = join(RUNTIME_SRC, 'sidecar');
+const SIDECAR_FORBIDDEN_IMPORT = /(^|\/)(GraphStore|EventLog|SyncManager|MemoryService)(\/|$|\.)/;
+
+/**
+ * W4a 架构守卫：sidecar 只能通过 capability client 访问记忆。
+ * 不得 import core / MCP 内部模块，也不得直接打开图/事件日志/同步服务。
+ */
+async function checkSidecar(errors) {
+  for (const file of await listSourceFiles(SIDECAR_SRC)) {
+    const text = await readFile(file, 'utf-8');
+    const relFile = relativeId(ROOT, file);
+    for (const spec of importSpecifiers(text)) {
+      if (spec === '@mebular/core' || spec.startsWith('@mebular/core/')) {
+        errors.push(`${relFile} 的 sidecar 不得 import @mebular/core：${spec}`);
+        continue;
+      }
+      if (spec === '@mebular/mcp' || spec.startsWith('@mebular/mcp/')) {
+        errors.push(`${relFile} 的 sidecar 不得 import @mebular/mcp：${spec}`);
+        continue;
+      }
+      if (spec.includes('packages/mcp') || spec.startsWith('src/graph') || spec.startsWith('src/memory')) {
+        errors.push(`${relFile} 的 sidecar 不得 import MCP/core 内部路径：${spec}`);
+        continue;
+      }
+      if (SIDECAR_FORBIDDEN_IMPORT.test(spec)) {
+        errors.push(`${relFile} 的 sidecar 不得 import 图/事件/同步/记忆服务：${spec}`);
+      }
+    }
+  }
+}
+
 /** @returns {Promise<string[]>} 架构违规列表；空数组表示通过。 */
 export async function checkArchitecture() {
   const errors = [];
   await checkCore(errors);
   await checkRuntime(errors);
+  await checkSidecar(errors);
   return errors;
 }
 

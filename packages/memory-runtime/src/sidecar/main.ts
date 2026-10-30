@@ -48,6 +48,7 @@ import {
   SidecarLocalLayer,
   type SidecarLocalLayerOptions,
 } from './local-layer.js';
+import { SettlementRuntime } from './settlement.js';
 import {
   SidecarServer,
   SidecarServerError,
@@ -123,6 +124,7 @@ export interface SidecarHandle {
   paths: SidecarPaths;
   config: SidecarConfig;
   local: SidecarLocalLayer;
+  settlement: SettlementRuntime;
   server: SidecarServer;
   discovery: SidecarDiscovery;
   capability: SidecarStatusCapability;
@@ -425,47 +427,54 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
     );
   }
 
-  const statusSnapshot = async (): Promise<SidecarStatusSnapshot> => {
-    const [stats, outbox] = await Promise.all([local.stats(), local.outbox.stats()]);
-    return {
-      mode: 'immersive',
-      identity: { ...identity },
-      capability: { ...capability },
-      model: {
-        configured: 'heuristic',
-        active: 'heuristic',
-        degraded: false,
-        reason: null,
-      },
-      counts: {
-        rawChunks: stats.rawChunks,
-        traces: stats.traces,
-        cachedRecords: stats.cacheEntries,
-        outbox: stats.outboxItems,
-        deadLetter: stats.deadLetter,
-      },
-      outbox: {
-        items: outbox.items,
-        bytes: outbox.bytes,
-        oldestAt: outbox.oldestAt,
-      },
-      limits: {
-        maxChunkBytes: config.limits.maxChunkBytes,
-        maxContextTokens: config.limits.maxContextTokens,
-        maxRecall: config.limits.maxRecall,
-      },
-      warnings: [...warnings],
-    };
-  };
+  let settlement: SettlementRuntime;
+  try {
+    settlement = new SettlementRuntime({
+      config,
+      local,
+      client,
+      identity,
+      policyPath: paths.policyPath,
+      now,
+    });
+    await settlement.init();
+  } catch (error) {
+    throw new SidecarStartupError(
+      'storage_unavailable',
+      6,
+      `沉降本地层不可用（${(error as NodeJS.ErrnoException)?.code ?? 'storage_error'}）`,
+    );
+  }
 
-  const degraded = !options.skipHandshake && !capability.reachable;
+  const statusSnapshot = async (): Promise<SidecarStatusSnapshot> => settlement.statusSnapshot({
+    mode: 'immersive',
+    identity: { ...identity },
+    capability: { ...capability },
+    model: {
+      configured: 'heuristic',
+      active: 'heuristic',
+      degraded: false,
+      reason: null,
+    },
+    limits: {
+      maxChunkBytes: config.limits.maxChunkBytes,
+      maxContextTokens: config.limits.maxContextTokens,
+      maxRecall: config.limits.maxRecall,
+    },
+    warnings: [...warnings],
+  });
+
+  const degraded = (!options.skipHandshake && !capability.reachable) || settlement.degraded;
   const server = new SidecarServer({
     config,
     hostToken: hostToken.token,
     identity,
     getStatus: statusSnapshot,
+    ingest: settlement,
+    namespaces: settlement,
+    getDegraded: () => settlement.degraded,
     state: 'starting',
-    degraded,
+    degraded: degraded || settlement.degraded,
     now,
     startedAt,
   });
@@ -474,6 +483,7 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
   try {
     listened = await server.listen();
   } catch (error) {
+    await settlement.stop().catch(() => undefined);
     await removeHostTokenIfMatches(paths.hostTokenPath, hostToken.token).catch(() => undefined);
     throw startupFromUnknown(error);
   }
@@ -497,17 +507,18 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
       startedAt,
       updatedAt: now(),
       capabilities: {
-        ingest: false,
+        ingest: true,
         recall: false,
         context: false,
         checkpoint: false,
         compact: false,
         self: false,
-        models: ['heuristic'],
+        models: ['heuristic', 'host'],
       },
     });
     await writeDiscovery(paths.discoveryPath, discovery);
   } catch (error) {
+    await settlement.stop().catch(() => undefined);
     await server.close().catch(() => undefined);
     await removeHostTokenIfMatches(paths.hostTokenPath, hostToken.token).catch(() => undefined);
     throw new SidecarStartupError(
@@ -525,7 +536,7 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
       pid: process.pid,
       now: now(),
       state: server.state,
-      degraded: server.degraded,
+      degraded: server.currentDegraded(),
     }).then(() => undefined).catch(() => undefined);
   }, heartbeatMs);
   heartbeat.unref?.();
@@ -544,6 +555,8 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
         if (parentWatch !== null) clearInterval(parentWatch);
         try {
           await heartbeatTask;
+          server.setState('stopping');
+          await settlement.stop();
           await server.close();
         } catch {
           // 停止路径不阻塞退出；discovery/token 仍在 finally 清理。
@@ -574,6 +587,7 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
     paths,
     config,
     local,
+    settlement,
     server,
     discovery,
     capability,

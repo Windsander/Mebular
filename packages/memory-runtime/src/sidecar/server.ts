@@ -27,13 +27,18 @@ import {
   type SidecarConfig,
 } from './config.js';
 import type { SidecarState } from './discovery.js';
+import type {
+  IngestExtractionResult,
+  IngestExtractionView,
+  IngestHttpResult,
+} from './ingest.js';
+import { SidecarSettlementError } from './errors.js';
+import type { NamespacesView } from './settlement.js';
 
 const REQUEST_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
+const MAX_BODY_BYTES = 2 * 1024 * 1024;
 const UNIMPLEMENTED_ROUTES = new Set([
-  'namespaces',
   'mode',
-  'ingest',
-  'extractions',
   'recall',
   'context',
   'checkpoints',
@@ -83,6 +88,14 @@ export interface SidecarStatusCounts {
   cachedRecords: number;
   outbox: number;
   deadLetter: number;
+  /** 本地 Raw 数量（契约 W4a `/status` 明确字段）。 */
+  localRawChunks: number;
+  /** 本地 Trace 数量。 */
+  localTraces: number;
+  /** 已接受的 ingest 请求数（不含幂等重放）。 */
+  ingested: number;
+  /** 已成功沉降到 capability 的记录数（含重复确认）。 */
+  settled: number;
 }
 
 export interface SidecarStatusOutbox {
@@ -97,6 +110,12 @@ export interface SidecarStatusLimits {
   maxRecall: number;
 }
 
+export interface SidecarStatusError {
+  code: string;
+  message: string;
+  at: number;
+}
+
 export interface SidecarStatusSnapshot {
   mode: 'immersive';
   identity: SidecarStatusIdentity;
@@ -106,6 +125,8 @@ export interface SidecarStatusSnapshot {
   outbox: SidecarStatusOutbox;
   limits: SidecarStatusLimits;
   warnings: string[];
+  /** 最近的沉降错误；不包含正文/token。 */
+  lastError: SidecarStatusError | null;
 }
 
 export interface SidecarStatus extends SidecarStatusSnapshot {
@@ -115,11 +136,25 @@ export interface SidecarStatus extends SidecarStatusSnapshot {
   uptimeMs: number;
 }
 
+export interface SidecarIngestApi {
+  handleIngest(request: unknown, options: { idempotencyKey?: string | null }): Promise<IngestHttpResult>;
+  getExtraction(id: string): Promise<IngestExtractionView | null>;
+  completeExtraction(id: string, candidates: unknown): Promise<IngestExtractionResult>;
+}
+
+export interface SidecarNamespacesApi {
+  getNamespaces(agentId: string | null): Promise<NamespacesView>;
+}
+
 export interface SidecarServerOptions {
   config: SidecarConfig;
   hostToken: string;
   identity?: Partial<SidecarStatusIdentity>;
   getStatus?: () => SidecarStatusSnapshot | Promise<SidecarStatusSnapshot>;
+  ingest?: SidecarIngestApi;
+  namespaces?: SidecarNamespacesApi;
+  /** 动态降级标记（沉降/outbox）；与显式 degraded 取或。 */
+  getDegraded?: () => boolean;
   state?: SidecarState;
   degraded?: boolean;
   now?: () => number;
@@ -214,6 +249,43 @@ export function isLoopbackOrigin(origin: string | undefined, localPort?: number)
   return true;
 }
 
+/**
+ * 读取 JSON 请求体；超过 2 MiB 返回 413，不无限缓冲。
+ * 超限后继续排空请求，避免客户端收到连接重置而不是错误信封。
+ */
+async function readJsonBody(req: IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  let tooLarge = false;
+  for await (const chunk of req) {
+    const buffer = Buffer.from(chunk);
+    size += buffer.length;
+    if (size > maxBytes) {
+      tooLarge = true;
+      chunks.length = 0;
+      continue;
+    }
+    if (!tooLarge) chunks.push(buffer);
+  }
+  if (tooLarge) {
+    throw new SidecarSettlementError('payload_too_large', '请求体超过 2 MiB', { status: 413 });
+  }
+  const text = Buffer.concat(chunks).toString('utf8');
+  if (text.trim().length === 0) {
+    throw new SidecarSettlementError('invalid_request', '请求体必须是 JSON 对象', { status: 400 });
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text) as unknown;
+  } catch {
+    throw new SidecarSettlementError('invalid_request', '请求体不是合法 JSON', { status: 400 });
+  }
+  if (!isObject(parsed)) {
+    throw new SidecarSettlementError('invalid_request', '请求体必须是 JSON 对象', { status: 400 });
+  }
+  return parsed;
+}
+
 export class SidecarServer {
   readonly config: SidecarConfig;
   readonly hostToken: string;
@@ -229,6 +301,9 @@ export class SidecarServer {
 
   private readonly identity: SidecarStatusIdentity;
   private readonly getStatus?: () => SidecarStatusSnapshot | Promise<SidecarStatusSnapshot>;
+  private readonly ingest?: SidecarIngestApi;
+  private readonly namespaces?: SidecarNamespacesApi;
+  private readonly getDegraded?: () => boolean;
   private readonly now: () => number;
   private server: Server | null = null;
   private host = '';
@@ -244,6 +319,9 @@ export class SidecarServer {
       hostId: options.identity?.hostId ?? null,
     };
     this.getStatus = options.getStatus;
+    this.ingest = options.ingest;
+    this.namespaces = options.namespaces;
+    this.getDegraded = options.getDegraded;
     this.state = options.state ?? 'starting';
     this.degraded = options.degraded === true;
     this.now = options.now ?? Date.now;
@@ -253,6 +331,11 @@ export class SidecarServer {
     this.capabilityApiVersion = options.capabilityApiVersion ?? SIDECAR_CAPABILITY_API_VERSION;
     this.minMcpVersion = options.minMcpVersion ?? SIDECAR_MIN_MCP_VERSION;
     this.maxMcpVersion = options.maxMcpVersion ?? SIDECAR_MAX_MCP_VERSION;
+  }
+
+  /** 当前降级状态：显式标记或沉降/outbox 动态状态。 */
+  currentDegraded(): boolean {
+    return this.degraded || this.getDegraded?.() === true;
   }
 
   get isListening(): boolean {
@@ -404,7 +487,7 @@ export class SidecarServer {
     res.statusCode = status;
     res.setHeader('content-type', 'application/json; charset=utf-8');
     res.setHeader('cache-control', 'no-store');
-    res.setHeader('x-mebular-degraded', String(this.degraded));
+    res.setHeader('x-mebular-degraded', String(this.currentDegraded()));
     res.end(JSON.stringify(body));
   }
 
@@ -438,7 +521,17 @@ export class SidecarServer {
       identity: { ...this.identity },
       capability: { reachable: false, version: null, lastOkAt: null, error: null },
       model: { configured: 'heuristic', active: 'heuristic', degraded: false, reason: null },
-      counts: { rawChunks: 0, traces: 0, cachedRecords: 0, outbox: 0, deadLetter: 0 },
+      counts: {
+        rawChunks: 0,
+        traces: 0,
+        cachedRecords: 0,
+        outbox: 0,
+        deadLetter: 0,
+        localRawChunks: 0,
+        localTraces: 0,
+        ingested: 0,
+        settled: 0,
+      },
       outbox: { items: 0, bytes: 0, oldestAt: null },
       limits: {
         maxChunkBytes: this.config.limits.maxChunkBytes,
@@ -446,6 +539,7 @@ export class SidecarServer {
         maxRecall: this.config.limits.maxRecall,
       },
       warnings: [],
+      lastError: null,
     };
     let snapshot = fallback;
     if (this.getStatus) {
@@ -455,7 +549,7 @@ export class SidecarServer {
     return {
       ...snapshot,
       state: this.state,
-      degraded: this.degraded,
+      degraded: this.currentDegraded(),
       pid: process.pid,
       uptimeMs: Math.max(0, this.now() - this.startedAt),
     };
@@ -483,6 +577,7 @@ export class SidecarServer {
       const pathname = url.pathname;
       const method = req.method ?? 'GET';
       const isGet = method === 'GET' || method === 'HEAD';
+      const isPost = method === 'POST';
 
       if (pathname === `${SIDECAR_API_PREFIX}/health`) {
         if (!isGet) {
@@ -495,7 +590,7 @@ export class SidecarServer {
           apiVersion: this.apiVersion,
           state: this.state,
           ready: this.state === 'ready' && !this.stopping,
-          degraded: this.degraded,
+          degraded: this.currentDegraded(),
           pid: process.pid,
           runtimeVersion: this.runtimeVersion,
           capabilityApiVersion: this.capabilityApiVersion,
@@ -533,10 +628,10 @@ export class SidecarServer {
           minMcpVersion: this.minMcpVersion,
           maxMcpVersion: this.maxMcpVersion,
           state: this.state,
-          degraded: this.degraded,
+          degraded: this.currentDegraded(),
           pid: process.pid,
           startedAt: this.startedAt,
-        }, [], this.degraded));
+        }, [], this.currentDegraded()));
         return;
       }
 
@@ -556,6 +651,95 @@ export class SidecarServer {
         return;
       }
 
+      if (relative === 'ingest') {
+        if (!isPost) {
+          req.resume();
+          this.sendError(res, 405, requestId, 'method_not_allowed', 'ingest 仅接受 POST');
+          return;
+        }
+        if (this.state === 'stopping') {
+          req.resume();
+          this.sendError(res, 503, requestId, 'stopping', 'sidecar 正在停止', undefined, true);
+          return;
+        }
+        if (!this.ingest) {
+          req.resume();
+          this.sendError(res, 501, requestId, 'not_implemented', 'ingest 尚未启用');
+          return;
+        }
+        const body = await readJsonBody(req);
+        const header = req.headers['idempotency-key'];
+        const idempotencyKey = typeof header === 'string'
+          ? header
+          : Array.isArray(header) ? header[0] ?? null : null;
+        const result = await this.ingest.handleIngest(body, { idempotencyKey });
+        this.send(res, result.status, this.envelope(requestId, result.data, result.warnings, result.degraded));
+        return;
+      }
+
+      if (relative.startsWith('extractions/')) {
+        const id = relative.slice('extractions/'.length);
+        if (id.length === 0 || id.includes('/')) {
+          req.resume();
+          this.sendError(res, 404, requestId, 'not_found', '未知抽取任务');
+          return;
+        }
+        if (!this.ingest) {
+          req.resume();
+          this.sendError(res, 501, requestId, 'not_implemented', 'extractions 尚未启用');
+          return;
+        }
+        if (isGet) {
+          const extraction = await this.ingest.getExtraction(id);
+          if (!extraction) {
+            this.sendError(res, 404, requestId, 'not_found', '抽取任务不存在或已过期');
+            return;
+          }
+          this.send(res, 200, this.envelope(requestId, extraction, extraction.warnings, extraction.degraded));
+          return;
+        }
+        if (!isPost) {
+          req.resume();
+          this.sendError(res, 405, requestId, 'method_not_allowed', 'extractions 仅接受 GET/POST');
+          return;
+        }
+        if (this.state === 'stopping') {
+          req.resume();
+          this.sendError(res, 503, requestId, 'stopping', 'sidecar 正在停止', undefined, true);
+          return;
+        }
+        const body = await readJsonBody(req);
+        const candidates = isObject(body) ? body.candidates : undefined;
+        if (!Array.isArray(candidates)) {
+          this.sendError(res, 400, requestId, 'invalid_request', 'candidates 必须是数组');
+          return;
+        }
+        const result = await this.ingest.completeExtraction(id, candidates);
+        this.send(
+          res,
+          result.queued ? 202 : 200,
+          this.envelope(requestId, result, result.warnings, result.degraded),
+        );
+        return;
+      }
+
+      if (relative === 'namespaces') {
+        if (!isGet) {
+          req.resume();
+          this.sendError(res, 405, requestId, 'method_not_allowed', 'namespaces 仅接受 GET');
+          return;
+        }
+        if (!this.namespaces) {
+          req.resume();
+          this.sendError(res, 501, requestId, 'not_implemented', 'namespaces 尚未启用');
+          return;
+        }
+        const agentId = url.searchParams.get('agentId');
+        const view = await this.namespaces.getNamespaces(agentId && agentId.length > 0 ? agentId : null);
+        this.send(res, 200, this.envelope(requestId, view, view.warnings, view.degraded));
+        return;
+      }
+
       const head = relative.split('/')[0] ?? '';
       if (UNIMPLEMENTED_ROUTES.has(head)) {
         req.resume();
@@ -572,7 +756,23 @@ export class SidecarServer {
 
       req.resume();
       this.sendError(res, 404, requestId, 'not_found', '未知路径');
-    } catch {
+    } catch (error) {
+      if (error instanceof SidecarSettlementError) {
+        if (!res.headersSent) {
+          this.sendError(
+            res,
+            error.status,
+            requestId,
+            error.code,
+            error.message,
+            error.details,
+            error.retryable,
+          );
+        } else if (!res.writableEnded) {
+          res.destroy();
+        }
+        return;
+      }
       if (!res.headersSent) {
         this.sendError(res, 500, requestId, 'internal', 'sidecar 内部错误');
       } else if (!res.writableEnded) {

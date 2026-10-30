@@ -24,10 +24,21 @@ function statusSnapshot(): SidecarStatusSnapshot {
     identity: { cloudId: 'cl_test', profileId: 'default', hostId: 'h_test' },
     capability: { reachable: true, version: 1, lastOkAt: 1000, error: null },
     model: { configured: 'heuristic', active: 'heuristic', degraded: false, reason: null },
-    counts: { rawChunks: 2, traces: 1, cachedRecords: 3, outbox: 0, deadLetter: 0 },
+    counts: {
+      rawChunks: 2,
+      traces: 1,
+      cachedRecords: 3,
+      outbox: 0,
+      deadLetter: 0,
+      localRawChunks: 2,
+      localTraces: 1,
+      ingested: 4,
+      settled: 3,
+    },
     outbox: { items: 0, bytes: 0, oldestAt: null },
     limits: { maxChunkBytes: 262144, maxContextTokens: 12000, maxRecall: 50 },
     warnings: [],
+    lastError: null,
   };
 }
 
@@ -124,7 +135,16 @@ describe('SidecarServer', () => {
     const status = await fetch(`${server.url}/status`, { headers: auth() });
     expect(status.status).toBe(200);
     const statusBody = await status.json() as any;
-    expect(statusBody.data.counts).toMatchObject({ rawChunks: 2, traces: 1, cachedRecords: 3 });
+    expect(statusBody.data.counts).toMatchObject({
+      rawChunks: 2,
+      traces: 1,
+      cachedRecords: 3,
+      localRawChunks: 2,
+      localTraces: 1,
+      ingested: 4,
+      settled: 3,
+    });
+    expect(statusBody.data.lastError).toBeNull();
     expect(statusBody.data.identity).toMatchObject({ cloudId: 'cl_test', profileId: 'default' });
     expect(statusBody.data.capability.reachable).toBe(true);
     expect(JSON.stringify(statusBody)).not.toContain('host-token');
@@ -151,7 +171,7 @@ describe('SidecarServer', () => {
     expect(good.body.accessControlAllowOrigin).toBeUndefined();
   });
 
-  it('W3a 业务端点返回 501，未知路径 404，错误方法 405', async () => {
+  it('未注入沉降服务时业务端点返回 501，未知路径 404，错误方法 405', async () => {
     const server = await startServer();
     const ingest = await rawRequest(`${server.url}/ingest`, {
       method: 'POST',
@@ -159,7 +179,7 @@ describe('SidecarServer', () => {
       body: JSON.stringify({ agentId: 'test' }),
     });
     expect(ingest.status).toBe(501);
-    expect(ingest.body.error).toMatchObject({ code: 'not_implemented', details: { plannedIn: 'W4' } });
+    expect(ingest.body.error).toMatchObject({ code: 'not_implemented' });
 
     const unknown = await rawRequest(`${server.url}/nope`, { headers: auth() });
     expect(unknown.status).toBe(404);

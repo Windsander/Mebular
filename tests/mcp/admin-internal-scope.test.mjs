@@ -28,7 +28,7 @@ const nodes = [
   {
     id: 'compact-internal', type: 'compact', content: { summary: 'internal' },
     createdAt: at, updatedAt: at, namespace: 'notes', tags: [],
-    metadata: { runtime: { schema: 1, kind: 'compact', internal: true } },
+    metadata: { internal: true, internalObject: { schema: 1, kind: 'compact' } },
   },
 ];
 
@@ -39,6 +39,14 @@ const app = {
 };
 const service = {
   status: async () => ({ running: true, nodeCount: nodes.length, pendingEventCount: 0, peerId: null }),
+  // 本测试只关心 scope；管理读面的过滤语义由 admin-internal-filter.test.mjs 覆盖。
+  listRecords: async ({ includeInternal = false } = {}) => {
+    const visible = includeInternal
+      ? nodes
+      : nodes.filter((node) => node.metadata?.internal !== true
+        && !(typeof node.namespace === 'string' && node.namespace.startsWith('__')));
+    return { total: visible.length, nodes: visible };
+  },
 };
 
 async function setup() {

@@ -92,8 +92,10 @@
 - `MemoryService.status()`（deviceId/peerId/listenAddrs/nodeCount/edgeCount/
   stateHashByNamespace/pendingEventCount）。
 - 事件作者：`app.eventLog.listEvents()` 的 `author`（补全 known devices）。
-- 本机 namespace 统计：聚合 `app.storage.listNodes()`（含 namespace 计数与
-  最近更新时间）。
+- 本机 namespace 统计：`MemoryService.namespaceStats()`（与 `stats()` 共用
+  聚合规则；含 namespace 计数、记忆记录数、内部对象数与最近更新时间）。
+- 记忆列表：`MemoryService.listRecords()`（默认隐藏内部对象/归档/墓碑，
+  `include*` 显式开启；Console 只做预览映射）。
 
 ## API 契约（D1 只读）
 

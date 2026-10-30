@@ -248,6 +248,39 @@ async function checkTaskSurface(errors) {
   }
 }
 
+const ADMIN_SOURCE = join(ROOT, 'packages', 'mcp', 'src', 'admin.mjs');
+const SERVE_SOURCE = join(ROOT, 'packages', 'mcp', 'src', 'serve.mjs');
+const RAW_GRAPH_DEBUG_MARKER = '[raw-graph-debug]';
+
+/**
+ * W10b 守卫：Console 管理读面必须走 MemoryService 统一读接口。
+ * `admin.mjs` 不得再直接 listNodes 做记忆列表/域统计；原始图调试端点
+ * （serve.mjs `/app/nodes`）保留，但必须显式标注 `[raw-graph-debug]`。
+ */
+async function checkAdminMemoryReadPath(errors) {
+  const adminText = await readFile(ADMIN_SOURCE, 'utf-8');
+  for (const match of adminText.matchAll(/\.(?:storage|graph)\.listNodes\s*\(/g)) {
+    const line = adminText.slice(0, match.index).split('\n').length;
+    errors.push(
+      `packages/mcp/src/admin.mjs:${line} 记忆列表/域统计必须走 MemoryService.listRecords/namespaceStats，不得直接 listNodes`,
+    );
+  }
+  if (!/service\.listRecords\s*\(/.test(adminText)) {
+    errors.push('packages/mcp/src/admin.mjs 的 buildMemories 必须委托 MemoryService.listRecords');
+  }
+  if (!/service\.namespaceStats\s*\(/.test(adminText)) {
+    errors.push('packages/mcp/src/admin.mjs 的 buildNamespaces 必须委托 MemoryService.namespaceStats');
+  }
+
+  const serveText = await readFile(SERVE_SOURCE, 'utf-8');
+  if (/\.(?:storage|graph)\.listNodes\s*\(/.test(serveText)
+    && !serveText.includes(RAW_GRAPH_DEBUG_MARKER)) {
+    errors.push(
+      `packages/mcp/src/serve.mjs 原始图 listNodes 必须标注 ${RAW_GRAPH_DEBUG_MARKER}（调试例外，不是普通记忆读路径）`,
+    );
+  }
+}
+
 /**
  * A8：产品源码不得再提供 0.3 原型 `/runtime/v1`。
  * 只扫产品目录；docs/design、tests、验证脚本和构建产物不在范围内。
@@ -275,6 +308,7 @@ export async function checkArchitecture() {
   await checkSidecar(errors);
   await checkMemoryCapabilityWritePath(errors);
   await checkTaskSurface(errors);
+  await checkAdminMemoryReadPath(errors);
   await checkLegacyRuntimePath(errors);
   return errors;
 }

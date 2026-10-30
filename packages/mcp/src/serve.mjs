@@ -3657,6 +3657,10 @@ export async function startHttpServer({
           );
           return sendJson(res, 200, { ok: true, node: { id: node.id, type: node.type, namespace: node.namespace ?? 'default' } });
         }
+        // [raw-graph-debug] 原始图调试/接入端点（调试例外）：不做内部对象、归档或
+        // 墓碑过滤，仅供 daemon/fleet 原始图读写与排障。普通记忆列表与域统计必须走
+        // MemoryService.listRecords()/namespaceStats()（Console 见 admin.mjs），
+        // 不得把这里当作普通记忆读路径。
         if (path === '/app/nodes' && req.method === 'GET') {
           const filter = {};
           const ns = url.searchParams.get('namespace');

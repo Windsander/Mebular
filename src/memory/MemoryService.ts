@@ -18,6 +18,7 @@ import { isInternalNode } from './visibility.js';
 import { ValidationError, ErrorCodes, MebularError, SyncError } from '../errors.js';
 import type { Edge, Node, TraverseOptions, TraverseResult } from '../types/index.js';
 import { domainOfNamespace, matchesNamespace } from '../core/namespace.js';
+import type { NamespaceFilter } from '../core/namespace.js';
 import { computeStateHash, computeStateHashByNamespace } from '../core/stateHash.js';
 import { createBuiltinAdapterRegistry } from '../exchange/index.js';
 import type { AdapterImportReport, AdapterSource } from '../exchange/adapter.js';
@@ -141,6 +142,36 @@ export interface MemoryDomainStats {
   internalObjects: number;
   internalKinds: Record<string, number>;
   lastUpdatedAt: number;
+}
+
+/**
+ * 管理读面（Console /admin/api/memories、排障与审计）的统一记录列表选项。
+ *
+ * 默认可见性与公共查询一致：内部对象、归档、墓碑都隐藏；只有显式 flag 才返回。
+ * `namespace` 支持单域或域列表，归一化/匹配复用 core 规则。
+ */
+export interface MemoryRecordListOptions {
+  includeDeleted?: boolean;
+  includeArchived?: boolean;
+  includeInternal?: boolean;
+  namespace?: NamespaceFilter;
+  /** 截断过滤后的列表；`total` 仍是过滤后的完整计数。 */
+  limit?: number;
+}
+
+/** 管理读面统一记录列表：`total` 不随 `limit` 截断。 */
+export interface MemoryRecordList {
+  total: number;
+  nodes: Node[];
+}
+
+/** 管理面域统计选项。 */
+export interface NamespaceStatsOptions {
+  /**
+   * 是否包含 `__*` 保留域（默认 false，与 stats() / capability 一致）。
+   * Console 域列表沿用「显示本机所有 namespace」的旧行为时显式开启。
+   */
+  includeReserved?: boolean;
 }
 
 export interface MemoryStats {
@@ -461,6 +492,35 @@ export class MemoryService {
     };
   }
 
+  /**
+   * 管理读面统一记录列表（Console /admin/api/memories 与管理排障共用）。
+   *
+   * 过滤只使用 core 的生命周期/可见性规则：`deletedAt`、`isArchived`、`isInternalNode`；
+   * 不复制任何 Runtime 类型名或管理面自定义规则。默认与公共查询一致，
+   * 显式 `includeDeleted` / `includeArchived` / `includeInternal` 才放开对应集合。
+   * 排序与旧 Console 读面一致（createdAt 倒序），`limit` 在过滤/排序后截断。
+   */
+  async listRecords(options: MemoryRecordListOptions = {}): Promise<MemoryRecordList> {
+    const nodes = await this.allStorageNodes();
+    const filtered = nodes.filter((node) => {
+      if (!options.includeDeleted && node.deletedAt) return false;
+      if (!options.includeArchived && isArchived(node)) return false;
+      if (!options.includeInternal && isInternalNode(node)) return false;
+      if (options.namespace !== undefined && !matchesNamespace(node.namespace, options.namespace)) {
+        return false;
+      }
+      return true;
+    });
+    filtered.sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
+    const limit = typeof options.limit === 'number' && Number.isFinite(options.limit)
+      ? Math.max(0, Math.trunc(options.limit))
+      : undefined;
+    return {
+      total: filtered.length,
+      nodes: limit !== undefined ? filtered.slice(0, limit) : filtered,
+    };
+  }
+
   // ---------- 画像 / 技能 / 历史 ----------
 
   async profile(options: LifecycleOptions & ReadScopeOptions = {}): Promise<UserProfile> {
@@ -658,42 +718,24 @@ export class MemoryService {
   }
 
   /**
+   * 按域统计（管理读面，与 `stats()` 共用同一聚合规则）。
+   *
+   * 默认与 `stats()`/capability 一致，排除 `__*` 保留域；Console 域列表需要
+   * 保留旧行为（本机所有 namespace 都显示）时显式传 `includeReserved: true`，
+   * 避免静默丢掉保留域行。
+   */
+  async namespaceStats(options: NamespaceStatsOptions = {}): Promise<MemoryDomainStats[]> {
+    const nodes = await this.allStorageNodes();
+    return domainStatsFromNodes(nodes, { includeReserved: options.includeReserved === true });
+  }
+
+  /**
    * 统一状态/域统计（公共 `memory_status`、capability `/status` `/namespaces` 共用）。
    * 只读取一次图快照；不按域/类型复制第二套统计规则。
    */
   async stats(): Promise<MemoryStats> {
     const { nodes, edges } = await this.snapshot();
-    const domains = new Map<string, MemoryDomainStats>();
-    for (const node of nodes) {
-      const domain = domainOfNamespace(node.namespace);
-      // `__policy__` 与其他 `__*` 保留域不是记忆域；capability 不读写。
-      if (domain.startsWith('__')) continue;
-      let entry = domains.get(domain);
-      if (!entry) {
-        entry = {
-          domain,
-          count: 0,
-          memoryRecords: 0,
-          internalObjects: 0,
-          internalKinds: {},
-          lastUpdatedAt: 0,
-        };
-        domains.set(domain, entry);
-      }
-      entry.count += 1;
-      if (isInternalNode(node)) {
-        entry.internalObjects += 1;
-        const kind = internalObjectKindOf(node);
-        if (kind) entry.internalKinds[kind] = (entry.internalKinds[kind] ?? 0) + 1;
-      } else if (MEMORY_NODE_TYPES.has(node.type)) {
-        entry.memoryRecords += 1;
-      }
-      entry.lastUpdatedAt = Math.max(
-        entry.lastUpdatedAt,
-        typeof node.updatedAt === 'number' ? node.updatedAt : 0,
-      );
-    }
-    const list = [...domains.values()];
+    const list = domainStatsFromNodes(nodes, { includeReserved: false });
     const counts = {
       nodes: 0,
       memoryRecords: 0,
@@ -1055,9 +1097,13 @@ export class MemoryService {
     return { node, vectorIndexed };
   }
 
+  private async allStorageNodes(): Promise<Node[]> {
+    return this.mebular.storage.listNodes();
+  }
+
   private async snapshot(): Promise<{ nodes: Node[]; edges: Edge[] }> {
     const [nodes, edges] = await Promise.all([
-      this.mebular.storage.listNodes(),
+      this.allStorageNodes(),
       this.mebular.storage.listEdges(),
     ]);
     return { nodes, edges };
@@ -1130,6 +1176,44 @@ function factContentFrom(content: Record<string, unknown>): {
 }
 
 // ---------- 映射（与既有 provider 输出保持同形） ----------
+
+/**
+ * 统一域聚合：`stats()` 与管理面 `namespaceStats()` 共用，避免两套计数规则。
+ * `count` 保留历史口径（域内全部节点，含归档/墓碑）；`memoryRecords` 排除内部对象。
+ */
+function domainStatsFromNodes(nodes: Node[], options: { includeReserved: boolean }): MemoryDomainStats[] {
+  const domains = new Map<string, MemoryDomainStats>();
+  for (const node of nodes) {
+    const domain = domainOfNamespace(node.namespace);
+    // `__policy__` 与其他 `__*` 保留域不是记忆域；capability 默认不读写。
+    if (!options.includeReserved && domain.startsWith('__')) continue;
+    let entry = domains.get(domain);
+    if (!entry) {
+      entry = {
+        domain,
+        count: 0,
+        memoryRecords: 0,
+        internalObjects: 0,
+        internalKinds: {},
+        lastUpdatedAt: 0,
+      };
+      domains.set(domain, entry);
+    }
+    entry.count += 1;
+    if (isInternalNode(node)) {
+      entry.internalObjects += 1;
+      const kind = internalObjectKindOf(node);
+      if (kind) entry.internalKinds[kind] = (entry.internalKinds[kind] ?? 0) + 1;
+    } else if (MEMORY_NODE_TYPES.has(node.type)) {
+      entry.memoryRecords += 1;
+    }
+    entry.lastUpdatedAt = Math.max(
+      entry.lastUpdatedAt,
+      typeof node.updatedAt === 'number' ? node.updatedAt : 0,
+    );
+  }
+  return [...domains.values()];
+}
 
 function internalObjectKindOf(node: Node): string | null {
   const metadata = node.metadata?.internalObject;

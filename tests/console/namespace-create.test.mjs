@@ -25,7 +25,6 @@ const dir = await mkdtemp(join(tmpdir(), 'console-new-ns-'));
 const storagePath = join(dir, 'store.jsonl');
 const master = await Mebular.generateUserMasterKey();
 const encryption = { userMasterKey: master.publicKey, userMasterPrivateKey: master.privateKey };
-const service = { status: async () => ({ stateHashByNamespace: {} }) };
 
 const open = () => new Mebular({
   storagePath,
@@ -36,21 +35,23 @@ const open = () => new Mebular({
 });
 
 let app = open();
+let service;
 try {
   await app.initialize();
+  service = new MemoryService(app);
   await app.declareNamespace({ namespace: 'ledger' });
   await app.subscribeNamespace('ledger');
   const rows = await buildNamespaces({ app, service, config: { sync: { namespaces: ['ledger'] } } });
   const empty = rows.find((row) => row.namespace === 'ledger');
 
-  const memories = new MemoryService(app);
-  await memories.write([{ type: 'fact', content: 'first', metadata: { namespace: 'ledger' } }]);
+  await service.write([{ type: 'fact', content: 'first', metadata: { namespace: 'ledger' } }]);
   const afterRows = await buildNamespaces({ app, service, config: { sync: { namespaces: ['ledger'] } } });
   const after = afterRows.find((row) => row.namespace === 'ledger');
 
   await app.shutdown();
   app = open();
   await app.initialize();
+  service = new MemoryService(app);
   const reopenedRows = await buildNamespaces({ app, service, config: { sync: { namespaces: ['ledger'] } } });
   const reopened = reopenedRows.find((row) => row.namespace === 'ledger');
 

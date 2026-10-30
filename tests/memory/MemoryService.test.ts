@@ -123,6 +123,84 @@ describe('MemoryService', () => {
     await app.shutdown();
   });
 
+  it('listRecords / namespaceStats：管理读面统一过滤、分页与域统计', async () => {
+    const { app, service } = await makeService();
+    const [keep, note, archived, deleted] = await service.write([
+      { type: 'fact', content: '保留记录' },
+      { type: 'fact', content: '笔记记录', metadata: { namespace: 'notes' } },
+      { type: 'fact', content: '归档记录', metadata: { namespace: 'notes' } },
+      { type: 'fact', content: '墓碑记录', metadata: { namespace: 'notes' } },
+    ]);
+    await service.archive([archived!.id], true);
+    await service.delete([deleted!.id]);
+    const internal = await app.graph.createNode('compact', { summary: '内部摘要' }, undefined, {
+      namespace: 'notes',
+    });
+    await app.graph.updateNode(internal.id, {
+      metadata: { internal: true, internalObject: { schema: 1, kind: 'compact' } },
+    });
+    const reserved = await app.graph.createNode('fact', {
+      subject: 'user', predicate: 'debug', object: 'raw',
+    }, undefined, { namespace: '__raw__' });
+
+    const ids = (result: { nodes: Array<{ id: string }> }) => result.nodes.map((node) => node.id).sort();
+    const plain = await service.listRecords();
+    expect(plain.total).toBe(2);
+    expect(ids(plain)).toEqual([keep!.id, note!.id].sort());
+
+    const withArchived = await service.listRecords({ includeArchived: true });
+    expect(withArchived.total).toBe(3);
+    expect(ids(withArchived)).toContain(archived!.id);
+
+    const withDeleted = await service.listRecords({ includeDeleted: true });
+    expect(withDeleted.total).toBe(3);
+    expect(ids(withDeleted)).toContain(deleted!.id);
+
+    const withInternal = await service.listRecords({ includeInternal: true });
+    expect(withInternal.total).toBe(4);
+    expect(ids(withInternal)).toEqual(expect.arrayContaining([internal.id, reserved.id]));
+
+    const all = await service.listRecords({
+      includeArchived: true,
+      includeDeleted: true,
+      includeInternal: true,
+    });
+    expect(all.total).toBe(6);
+
+    const notesOnly = await service.listRecords({ namespace: 'notes' });
+    expect(notesOnly.total).toBe(1);
+    expect(ids(notesOnly)).toEqual([note!.id]);
+
+    const notesHistory = await service.listRecords({
+      namespace: 'notes',
+      includeArchived: true,
+      includeDeleted: true,
+      includeInternal: true,
+    });
+    expect(notesHistory.total).toBe(4);
+
+    const limited = await service.listRecords({ includeInternal: true, limit: 1 });
+    expect(limited.total).toBe(4);
+    expect(limited.nodes).toHaveLength(1);
+
+    // 公共 query 默认可见性不受管理读接口影响。
+    expect((await service.query({})).totalMatches).toBe(2);
+
+    const reservedStats = await service.namespaceStats({ includeReserved: true });
+    const notesStats = reservedStats.find((entry) => entry.domain === 'notes');
+    expect(notesStats).toMatchObject({
+      count: 4,
+      memoryRecords: 3,
+      internalObjects: 1,
+      internalKinds: { compact: 1 },
+    });
+    expect(reservedStats.some((entry) => entry.domain === '__raw__')).toBe(true);
+    expect((await service.namespaceStats()).some((entry) => entry.domain === '__raw__')).toBe(false);
+    expect((await service.stats()).domains).toEqual(await service.namespaceStats());
+
+    await app.shutdown();
+  });
+
   it('status：设备/计数/状态哈希/开关字段', async () => {
     const { app, service } = await makeService();
     await service.write([{ type: 'fact', content: 'x' }]);

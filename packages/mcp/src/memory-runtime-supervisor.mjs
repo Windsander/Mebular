@@ -1284,6 +1284,3 @@ export function memoryRuntimeStatusExitCode(status) {
   if (status?.state === 'ready' || status?.state === 'degraded' || status?.state === 'stopped') return 0;
   return 1;
 }
-
-
-

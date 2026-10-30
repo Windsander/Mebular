@@ -230,7 +230,8 @@ npm run verify:release-version                  # 只读校验；也可带 --ver
 npm ci
 npm run build
 npm run lint
-npm run test:coverage          # 覆盖率门槛在 package.json#jest.coverageThreshold
+npm run test:coverage          # core/fleet/service + memory-runtime 非 sidecar 覆盖率门槛
+npm run test:coverage:sidecar  # sidecar 独立覆盖率门槛（不能靠排除保持全局绿）
 npm run verify:mcp:publish     # 6 个 lockstep 包 npm pack + tarball 冒烟（dsh-plugin 由 verify:dsh-plugin 覆盖）
 npm run verify:dsh-plugin      # 插件契约 + tarball
 npm run verify:dsh:e2e:min     # 真实 DSH 最低支持版本 E2E

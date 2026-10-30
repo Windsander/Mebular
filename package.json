@@ -137,7 +137,8 @@
     "desktop:smoke": "npm --prefix apps/desktop run smoke",
     "verify:console:ui": "node packages/console/scripts/verify-console-ui.mjs",
     "verify:console:subscription-ui": "node packages/console/scripts/verify-subscription-ui.mjs",
-    "verify:invite": "node scripts/verify-invite.mjs"
+    "verify:invite": "node scripts/verify-invite.mjs",
+    "test:coverage:sidecar": "node scripts/test-sidecar-coverage.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.3.1",

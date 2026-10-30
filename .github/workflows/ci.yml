@@ -46,6 +46,9 @@ jobs:
       - name: Test with coverage gates
         run: npm run test:coverage
 
+      - name: Sidecar coverage gates
+        run: npm run test:coverage:sidecar
+
       - name: Lint
         run: npm run lint
 

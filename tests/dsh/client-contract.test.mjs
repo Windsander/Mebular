@@ -64,6 +64,12 @@ describe('P2 @mebular/dsh-plugin client：静态契约', () => {
     expect(source).toContain("key: 'mebular'");
   });
 
+  it('暗色首帧：root/iframe 使用暗色 fallback 与 color-scheme:dark', () => {
+    expect(source).toContain("var(--dsw-alias-bg-layer-1, #0a0a12)");
+    expect(source).toContain("var(--dsw-alias-bg-layer-2, #0a0a12)");
+    expect(source).toMatch(/colorScheme:\s*'dark'/);
+  });
+
   it('iframe 使用 embed=dsh、sandbox 白名单与固定发现路由', () => {
     expect(source).toContain("/mebular/embed-info");
     expect(source).toContain('?embed=dsh');

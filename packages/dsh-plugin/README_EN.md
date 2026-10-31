@@ -12,10 +12,8 @@ A distributed memory network for your AI assistants. Memory and tasks stay on yo
 
 *No hosted account · No central coordinator*
 
-The App and the DSH Plugin are two entries to the same local Mebular runtime.
-The Plugin defaults to `attach`; installing it never starts or downloads Mebular
-silently. It attaches to an existing App/CLI; when no runtime exists, the panel
-asks before installing a pinned shared runtime.
+The App and the DSH Plugin are two entries to the same local runtime.
+The Plugin defaults to `attach`; it never starts or downloads Mebular silently.
 
 </div>
 
@@ -37,6 +35,31 @@ asks before installing a pinned shared runtime.
     <td width="25%"><img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-en-settings.jpg" alt="The Mebular settings view inside dark DeepSeek Harness (demo data)" width="100%"><br><sub>Settings and keep-running</sub></td>
   </tr>
 </table>
+
+## Memory Runtime
+
+<div align="center">
+
+![Memory Runtime: lightweight MCP and immersive access share one graph.](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/memory-runtime-en.svg)
+
+*0.3 · Default off. Lightweight MCP and immersive share one graph.*
+
+[Memory Runtime guide](https://github.com/Windsander/Mebular/blob/main/docs/guides/MEMORY_RUNTIME.md) · [DSH integration](https://github.com/Windsander/Mebular/blob/main/docs/integrations/DSH.md)
+
+</div>
+
+<details>
+<summary>Discovery &amp; auth</summary>
+
+| Item | Rule |
+| --- | --- |
+| Sidecar base | `memoryRuntime.url` > env > `memory-runtime.json`; endpoint `/memory-runtime/v1` |
+| Token | `MEBULAR_MEMORY_RUNTIME_TOKEN` > `tokenFile` > discovery; POSIX `0600` |
+| Injection | `role='user'` + `source.kind='mebular-memory'`; one per human turn; silence on no hits |
+| Mode | No per-host capture switch; lightweight = zero sidecar requests; immersive = auto |
+
+DSH durable logs may retain source-tagged snapshots (platform limit), never rendered as user bubbles.
+</details>
 
 ## DSH integration
 
@@ -67,7 +90,7 @@ An existing Mebular app or CLI attaches automatically; when no runtime exists, o
 
 ```bash
 # Install the plugin (it never starts or downloads Mebular silently)
-dsh plugin --profile web add @mebular/dsh-plugin@0.2.4
+dsh plugin --profile web add @mebular/dsh-plugin@0.3.0
 
 # Development install
 dsh plugin --profile web add ./packages/dsh-plugin
@@ -79,62 +102,18 @@ dsh plugin --profile web remove @mebular/dsh-plugin
 
 </details>
 
-## Memory Runtime (opt-in)
-
-Starting with 0.3.0 the host plugin can bridge an independent Memory Runtime sidecar (`/memory-runtime/v1`) alongside the existing MCP bridge. It is **off by default**: when disabled it registers no listeners, reads no discovery file, starts no timer and performs no request, so attach/managed/panel/MCP behaviour is unchanged. The sidecar is a separate process: the plugin never treats the MCP `daemonUrl` as the sidecar URL and never guesses a port.
-
-```yaml
-- id: mebular
-  name: '@mebular/dsh-plugin'
-  config:
-    lifecycle: attach
-    panel: true
-    memoryRuntime:
-      enabled: true
-      # Optional: explicit sidecar base; otherwise env / <home>/memory-runtime.json.
-      # url: 'http://127.0.0.1:7341/memory-runtime/v1'
-      # Optional: host token; otherwise tokenFile / env / discovery tokenFile.
-      # tokenFile: '~/.mebular/memory-runtime/host-token'
-      # Optional: these default to true; maintenance defaults to false.
-      recall: true
-      ingest: true
-      checkpoints: true
-      hideMemoryTools: true
-      maintenance: false
-      # Domain hints (the sidecar decides the final domain when omitted).
-      domains: ['user', 'agent:dsh', 'default']
-      # Governance allowlist (these memory_* tools stay visible); task_* is always kept.
-      governanceTools: []
-      # Memory-butler presets/session ids are exempt from tool masking.
-      memoryAgentPresets: ['mebular-memory']
-      # Sidecar Host API auth: auto (default, bearer when a token exists) / bearer / none.
-      auth: auto
-      # Host token env var (default MEBULAR_MEMORY_RUNTIME_TOKEN).
-      tokenEnv: MEBULAR_MEMORY_RUNTIME_TOKEN
-      # token: '...'
-```
-
-- Discovery: `memoryRuntime.url` > `MEBULAR_MEMORY_RUNTIME_URL` > `<home>/memory-runtime.json` (`state=ready|degraded`, heartbeat ≤15s, `apiVersion=1`). Without a usable discovery the immersive path stays disabled and failure-open; it never blindly connects to 7341/7331.
-- Token: `memoryRuntime.token` > `MEBULAR_MEMORY_RUNTIME_TOKEN` > `memoryRuntime.tokenFile` > discovery `tokenFile` > `<home>/memory-runtime/host-token`. POSIX token files must be `0600`; the value never enters URLs, logs, errors or `getState()`.
-- `recall`: calls `POST /memory-runtime/v1/context` only on the first step of a new human turn (explicitly falls back to `/recall` when an older sidecar has no `/context`). No hits, timeout or failure passes through unchanged; a hit injects one `role='user'` + `source.kind='mebular-memory'` context injection (DSH does not render it as a user bubble; `source.kind='user'` is never used), deduped by surface + session query + turn. The block is capped at 8 KiB and escaped as untrusted background data.
-- `ingest`: batches user/assistant/tool events to `POST /memory-runtime/v1/ingest`, skips the fork/resume inherited prefix and the plugin's own recall injection, dedupes by `(sessionId, seq)`, uses a bounded queue and never blocks the loop. Network errors, timeouts, 429 and 5xx retry at most twice by default (exponential backoff; `ingestRetries` / `ingestRetryBaseMs`); dispose cancels the backoff. Retries reuse one `requestId` and `Idempotency-Key`, failures surface as warning/status, and events are not re-enqueued.
-- `auth`: `auto` (default) sends `Authorization: Bearer` when a token exists; `bearer` forces bearer, `none` never sends. A 401 refreshes the cached token once and retries once; if it still fails the request is failure-open and recorded as warning/status.
-- `checkpoints`: folds `compaction/start → summary → replacement → end` into a ContextCheckpoint and `PUT /memory-runtime/v1/checkpoints/:threadId` (`domain=task:<threadId>`, no legacy `sync`); a failure or interruption is never reported as committed.
-- `hideMemoryTools`: dynamically hides currently visible `mcp__mebular__memory_*` from ordinary agents, keeps `task_*` and `governanceTools`, and replays through `agent.ctx.tools.restrict` + `tools/change` without hardcoding unknown names.
-- `maintenance`: off by default; when enabled, on idle it asks the current session model for candidates and submits them to `POST /memory-runtime/v1/ingest` (`extractor='host'`); no tools, capped maxTokens, timeout, silent failure and no direct graph write.
-
 ## MCP tools
 
 DSH reaches the same daemon at `/mcp` through the official MCP client; tools appear as `mcp__mebular__*`.
 
 | Area | Tools | MCP behavior |
 | --- | --- | --- |
-| Memory write | `memory_write` `memory_write_batch` | Write one or many facts, preferences, episodes and skills; every write is signed and synced |
-| Memory recall | `memory_query` `memory_search` `memory_graph` | Semantic/keyword recall and graph traversal; filter by time and relation |
-| Profile and history | `memory_profile` `memory_skills` `memory_history` | Read user preferences, skill inventory and session episodes |
-| Memory maintenance | `memory_import` `memory_status` `memory_sync` `memory_delete` `memory_archive` | Import, status, sync, tombstone delete, archive/unarchive |
-| Task dispatch | `task_submit` `task_submit_batch` `task_cancel` `task_retry` `task_status` `task_list` `task_history` `task_children` `task_summarize` | Dispatch, cancel, retry and query the task DAG |
-| Collaboration | `task_subscribe` `task_negotiate` `chatter_send` `chatter_inbox` `task_quota` `task_targets` `board_create` | Change subscription, negotiate, quota chatter, targets and task boards |
+| Memory write | `memory_write` `memory_write_batch` | Write facts, preferences, episodes and skills; signed and synced |
+| Memory recall | `memory_query` `memory_search` `memory_graph` | Semantic/keyword recall and graph traversal |
+| Profile and history | `memory_profile` `memory_skills` `memory_history` | Preferences, skills and session episodes |
+| Memory maintenance | `memory_import` `memory_status` `memory_sync` `memory_delete` `memory_archive` | Import, status, sync, delete, archive |
+| Task dispatch | `task_submit` `task_submit_batch` `task_cancel` `task_retry` `task_status` `task_list` `task_history` `task_children` `task_summarize` | Dispatch, cancel, retry, query tasks |
+| Collaboration | `task_subscribe` `task_negotiate` `chatter_send` `chatter_inbox` `task_quota` `task_targets` `board_create` | Subscribe, negotiate, chatter, targets, boards |
 
 ## Docs
 
@@ -150,16 +129,16 @@ DSH reaches the same daemon at `/mcp` through the official MCP client; tools app
 
 | Case | Resolution |
 | --- | --- |
-| Shared runtime available | Prefer shared runtime resolve (App / CLI / shared provider + dynamic URL) |
-| Legacy environment without a shared CLI | `daemonUrl > MEBULAR_HTTP_PORT > runtime.json > 7331` |
+| Shared runtime available | Shared runtime resolve (App / CLI / shared) |
+| Legacy / no shared CLI | `daemonUrl > MEBULAR_HTTP_PORT > runtime.json > 7331` |
 | Memory Runtime sidecar | `memoryRuntime.url > MEBULAR_MEMORY_RUNTIME_URL > <home>/memory-runtime.json` (never guesses a port) |
-| `MEBULAR_HOME` | Locates the MCP daemon `runtime.json` and the sidecar `memory-runtime.json` |
-| Mebular app | Keeps running independently; the plugin connects to the same daemon |
+| `MEBULAR_HOME` | Locates daemon and sidecar discovery files |
+| Mebular app | Independent; connects to the same daemon |
 
 </details>
 
 <div align="center">
 
-v0.2.4 · early · MIT · © 2026 Sobert Li
+v0.3.0 · early · MIT · © 2026 Sobert Li
 
 </div>

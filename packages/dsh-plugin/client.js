@@ -231,9 +231,10 @@ window.__ModuleLoader__.load({
         flexDirection: 'column',
         minHeight: 0,
         height: '100%',
-        background: 'var(--dsw-alias-bg-layer-1, transparent)',
+        background: 'var(--dsw-alias-bg-layer-1, #0a0a12)',
         color: 'var(--dsw-alias-label-primary, inherit)',
         font: 'inherit',
+        colorScheme: 'dark',
       },
       header: {
         display: 'flex',
@@ -248,7 +249,7 @@ window.__ModuleLoader__.load({
         paddingBottom: 0,
         paddingLeft: 20,
         borderBottom: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.25))',
-        background: 'var(--dsw-alias-bg-layer-2, transparent)',
+        background: 'var(--dsw-alias-bg-layer-2, #0a0a12)',
         // Match the DSH titlebar: dragging the panel heading moves the window,
         // and a drag must not start a text selection.
         WebkitAppRegion: 'drag',
@@ -338,7 +339,7 @@ window.__ModuleLoader__.load({
         flex: 'none',
         padding: '6px 12px',
         borderBottom: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.25))',
-        background: 'var(--dsw-alias-bg-layer-2, rgba(128,128,128,.08))',
+        background: 'var(--dsw-alias-bg-layer-2, #0a0a12)',
         fontSize: 11,
         color: 'var(--dsw-alias-label-secondary, #aaa)',
       },
@@ -377,6 +378,7 @@ window.__ModuleLoader__.load({
         position: 'relative',
         display: 'flex',
         background: '#0a0a12',
+        colorScheme: 'dark',
       },
       frame: {
         flex: 1,
@@ -385,6 +387,7 @@ window.__ModuleLoader__.load({
         border: 0,
         display: 'block',
         background: '#0a0a12',
+        colorScheme: 'dark',
       },
       frameOverlay: {
         position: 'absolute',

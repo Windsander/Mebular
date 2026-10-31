@@ -170,7 +170,7 @@ artifacts 包括：`scenario.json`、`seed.json`、`dsh-log.txt`、`daemon-log.t
 - Node 22.19 是 **nightly-only** 行为：PR 与 release gate 不跑这一档，避免每次 PR 增加成本。
 - 缺 pnpm / Chrome / 构建产物时显式失败，不静默 SKIP。
 - 失败上传 `scenario-*/artifacts` 与 harness 日志；成功清理固定根目录。
-- `.github/workflows/publish.yml` 的 `publish` / `release` 依赖 DSH E2E；E2E 失败不发六个
+- `.github/workflows/publish.yml` 的 `publish` / `release` 依赖 DSH E2E；E2E 失败不发八个
   npm 包，也不创建 GitHub Release。dry-run 同样执行 E2E，但保持不发布。
 - PR 的首次真实 runner 运行属于验收的一部分；本地全绿不替代它，本文不预先声称 CI 已绿。
 - negative control 是手动 test-of-test，不在 CI 矩阵中，也不参与 release gate。

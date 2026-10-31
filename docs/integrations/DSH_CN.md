@@ -386,7 +386,7 @@ npm run verify:runtime:coexistence
 
 ## 发布与版本
 
-- 版本：`0.3.0`，随统一 Mebular v0.3.0 release train（六个 lockstep npm 包加独立的 `dsh-plugin` 同版本）
+- 版本：`0.3.0`，随统一 Mebular v0.3.0 release train（七个 lockstep npm 包加独立的 `dsh-plugin` 同版本）
 - npm：`@mebular/dsh-plugin@0.3.0`
 - 插件是独立适配器：代码隔离在 `packages/dsh-plugin`，由独立 npm job 发布；插件运行时从
   自己的 `package.json` 读取 pinned runtime 版本，发布 bump 不需要改插件源码。

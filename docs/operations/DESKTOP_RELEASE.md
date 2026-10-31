@@ -1,16 +1,16 @@
 # 桌面安装包发布
 
-面向 Mebular v0.2.4 的桌面安装包构建、验收与后续签名计划。发布流程总览见
+面向 Mebular v0.3.0 的桌面安装包构建、验收与后续签名计划。发布流程总览见
 [`RELEASE.md`](RELEASE.md)。
 
-## 0. v0.2.4 范围
+## 0. v0.3.0 范围
 
 | 平台 | 目标 | 架构 | 产物 |
 | --- | --- | --- | --- |
-| macOS | DMG | Universal（arm64 + x64） | `Mebular-0.2.4-universal.dmg` |
-| Windows | NSIS | x64 | `Mebular-Setup-0.2.4.exe` |
-| Linux | AppImage | x64 | `Mebular-0.2.4-x86_64.AppImage` |
-| Linux | deb | x64 | `Mebular-0.2.4-amd64.deb` |
+| macOS | DMG | Universal（arm64 + x64） | `Mebular-0.3.0-universal.dmg` |
+| Windows | NSIS | x64 | `Mebular-Setup-0.3.0.exe` |
+| Linux | AppImage | x64 | `Mebular-0.3.0-x86_64.AppImage` |
+| Linux | deb | x64 | `Mebular-0.3.0-amd64.deb` |
 
 - 全部为 **unsigned** 发布；不做代码签名、公证或自动更新。
 - 每个安装包都自带 Electron 和一份完整的 Mebular runtime，**不需要本机 Node.js**，也不依赖
@@ -23,14 +23,15 @@
 安装包里的业务代码不是从仓库 `packages/*` 复制的，而是从**发布的 npm tarball** 安装出来的：
 
 ```text
-release tarballs（verify 产出，7 个）
+release tarballs（verify 产出，8 个）
   mebular-core-<version>.tgz
   mebular-fleet-<version>.tgz
   mebular-service-<version>.tgz
   mebular-mcp-<version>.tgz
   mebular-memory-runtime-<version>.tgz
   mebular-skill-<version>.tgz
-  mebular-dsh-plugin-<version>.tgz   # 只用于 npm，不进入桌面 runtime
+  mebular-opencode-plugin-<version>.tgz  # 只用于 npm，不进入桌面 runtime
+  mebular-dsh-plugin-<version>.tgz       # 只用于 npm，不进入桌面 runtime
         │
         ▼
 prepare-runtime.mjs
@@ -89,13 +90,14 @@ rm -rf release-pack
 mkdir -p release-pack
 ROOT="$PWD"
 npm pack --pack-destination "$ROOT/release-pack"
-for p in packages/fleet packages/service packages/mcp packages/memory-runtime packages/skill packages/dsh-plugin; do
+for p in packages/fleet packages/service packages/mcp packages/memory-runtime packages/skill packages/opencode-plugin packages/dsh-plugin; do
   (cd "$p" && npm pack --pack-destination "$ROOT/release-pack")
 done
 ls -lh release-pack
 ```
 
-应得到 7 个 `.tgz`。`prepare-runtime` 只使用前 6 个；DSH 插件 tarball 供 npm 发布。
+应得到 8 个 `.tgz`。`prepare-runtime` 只使用前 6 个运行时包；
+`opencode-plugin` 与 DSH 插件 tarball 只供 npm 发布，不进入桌面 runtime。
 
 ### 2.3 安装 runtime
 
@@ -159,26 +161,26 @@ electron-builder 的 `artifactName` 固定为：
 
 | 平台 | 配置 | 最终文件名 |
 | --- | --- | --- |
-| macOS | `Mebular-${version}-${arch}.${ext}` + `--universal` | `Mebular-0.2.4-universal.dmg` |
-| Windows | `Mebular-Setup-${version}.${ext}` | `Mebular-Setup-0.2.4.exe` |
-| Linux AppImage | `Mebular-${version}-${arch}.${ext}` + x64 | `Mebular-0.2.4-x86_64.AppImage` |
-| Linux deb | 同上；deb 的 arch 宏为 `amd64` | `Mebular-0.2.4-amd64.deb` |
+| macOS | `Mebular-${version}-${arch}.${ext}` + `--universal` | `Mebular-0.3.0-universal.dmg` |
+| Windows | `Mebular-Setup-${version}.${ext}` | `Mebular-Setup-0.3.0.exe` |
+| Linux AppImage | `Mebular-${version}-${arch}.${ext}` + x64 | `Mebular-0.3.0-x86_64.AppImage` |
+| Linux deb | 同上；deb 的 arch 宏为 `amd64` | `Mebular-0.3.0-amd64.deb` |
 
 `SHA256SUMS.txt` 由 release job 在 Linux 上生成，只包含安装包，按文件名 `LC_ALL=C sort`
 排序，例如：
 
 ```text
-<hash>  Mebular-0.2.4-amd64.deb
-<hash>  Mebular-0.2.4-universal.dmg
-<hash>  Mebular-0.2.4-x86_64.AppImage
-<hash>  Mebular-Setup-0.2.4.exe
+<hash>  Mebular-0.3.0-amd64.deb
+<hash>  Mebular-0.3.0-universal.dmg
+<hash>  Mebular-0.3.0-x86_64.AppImage
+<hash>  Mebular-Setup-0.3.0.exe
 ```
 
 dry-run 不会生成这个文件；它只在正式 `release` job 创建 GitHub Release 时产生。
 
 ## 4. unsigned 安装体验
 
-v0.2.4 没有 Apple Developer ID、公证或 Windows 代码签名证书。用户会看到系统安全提示，
+v0.3.0 没有 Apple Developer ID、公证或 Windows 代码签名证书。用户会看到系统安全提示，
 这是预期行为，不是安装包损坏。
 
 ### 4.1 先校验
@@ -204,17 +206,17 @@ Windows 可用 PowerShell 的 `Get-FileHash -Algorithm SHA256` 对照 `SHA256SUM
 
 ### 4.3 Windows SmartScreen
 
-1. 运行 `Mebular-Setup-0.2.4.exe`。
+1. 运行 `Mebular-Setup-0.3.0.exe`。
 2. 出现「Windows 已保护你的电脑」时点「更多信息」，再点「仍要运行」。
 
 ### 4.4 Linux
 
 ```bash
-chmod +x Mebular-0.2.4-x86_64.AppImage
-./Mebular-0.2.4-x86_64.AppImage
+chmod +x Mebular-0.3.0-x86_64.AppImage
+./Mebular-0.3.0-x86_64.AppImage
 
 # Debian / Ubuntu
-sudo apt install ./Mebular-0.2.4-amd64.deb
+sudo apt install ./Mebular-0.3.0-amd64.deb
 ```
 
 AppImage 需要 FUSE；没有 FUSE 时可使用 `--appimage-extract-and-run`。deb 安装后从应用菜单
@@ -224,24 +226,24 @@ AppImage 需要 FUSE；没有 FUSE 时可使用 `--appimage-extract-and-run`。d
 
 | 项目 | `workflow_dispatch` dry-run | push `release/v*` 正式发布 |
 | --- | --- | --- |
-| verify（6 tarballs） | ✅ | ✅ |
+| verify（8 tarballs） | ✅ | ✅ |
 | preflight（npm whoami） | ❌ | ✅ |
 | desktop matrix（三平台） | ✅ | ✅ |
-| npm publish（5 + 1） | ❌ | ✅ |
-| npm visibility gate（6 包 + latest） | ❌ | ✅ |
+| npm publish（7 + 1） | ❌ | ✅ |
+| npm visibility gate（8 包 + latest） | ❌ | ✅ |
 | GitHub Release + 资产 | ❌ | ✅ |
 | `SHA256SUMS.txt` | ❌（仅 artifacts） | ✅ |
 | 版本来源 | prep 分支根 `package.json` | 分支名 `release/vX.Y.Z` |
 
 dry-run 的 artifacts：
 
-- `release-tarballs`：7 个 `.tgz`，保留 7 天；
+- `release-tarballs`：8 个 `.tgz`，保留 7 天；
 - `desktop-macos`：DMG；
 - `desktop-windows`：NSIS `.exe`；
 - `desktop-linux`：AppImage + deb。
 
 正式流水线中，`publish` / `publish-dsh` 依赖三个 desktop job 全部成功，因此**安装包没全绿
-就不会发 npm**。`visibility` job 再确认七包均可 `npm view` 且 `dist-tags.latest` 指向本次
+就不会发 npm**。`visibility` job 再确认八包均可 `npm view` 且 `dist-tags.latest` 指向本次
 版本；只有它通过后，`release` job 才下载三平台 artifacts，校验每种扩展名恰好 1 个，生成
 `SHA256SUMS.txt`，创建/更新 GitHub Release 并 `--clobber` 上传。
 
@@ -261,7 +263,7 @@ node apps/desktop/scripts/smoke-runtime.mjs --runtime apps/desktop/dist/linux-un
 
 ## 6. 签名、公证与自动更新（后续）
 
-v0.2.4 明确不签名。后续版本的建议顺序：
+v0.3.0 明确不签名。后续版本的建议顺序：
 
 1. **macOS**：申请 Developer ID Application 证书；在 CI 注入 `CSC_LINK` /
    `CSC_KEY_PASSWORD`，移除 `electron-builder.yml` 的 `identity: null`；用
@@ -280,7 +282,7 @@ v0.2.4 明确不签名。后续版本的建议顺序：
 
 | 现象 | 处理 |
 | --- | --- |
-| `缺少 @mebular/core 的发布 tarball` | 先在仓库根 `npm pack` 6 个 lockstep 包到 `release-pack`；确认文件名版本与根 `package.json` 一致。 |
+| `缺少 @mebular/core 的发布 tarball` | 先在仓库根 `npm pack` 6 个运行时 lockstep 包到 `release-pack`；确认文件名版本与根 `package.json` 一致。 |
 | `找到多个 ... tarball，无法确定使用哪一个` | `release-pack` 混入了旧版本；清空后重新 pack。 |
 | `apps/desktop/package.json 版本 ... 不一致` | 桌面版本未随 lockstep 更新；跑 `bump_version.sh` 或手工同步后重试。 |
 | `runtime 缺少必需文件` | 根包 `files` 或构建产物不完整；先 `npm run build`，再重新 pack。 |

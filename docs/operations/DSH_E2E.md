@@ -234,7 +234,7 @@ verify
 
 效果：
 
-- DSH E2E 任一阵列失败，`publish` 不运行，六个 npm 包都不会发布；
+- DSH E2E 任一阵列失败，`publish` 不运行，八个 npm 包都不会发布；
   `publish-dsh` / `visibility` / `release` 因依赖链同样不运行，GitHub Release 不会创建。
 - `workflow_dispatch` packaging dry-run **也跑** E2E，但不发布 npm / Release；这样
   `release-prep` 的 dry-run 与正式发布覆盖同一道门。

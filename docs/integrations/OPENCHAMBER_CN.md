@@ -62,8 +62,9 @@ Mebular 与 OpenChamber 的记忆保持分离：
 
 ### 沉浸式插件
 
-`packages/opencode-plugin` 是 OpenCode V2 服务端插件。它只走 HTTP：不 import
-`@mebular/core`，不读 Mebular 配置或密钥，也不碰 OpenChamber 原生记忆。
+`@mebular/opencode-plugin`（源码在 `packages/opencode-plugin`）是独立 npm 包形式的
+OpenCode V2 服务端插件。它只走 HTTP：不 import `@mebular/core`，不读 Mebular 配置或
+密钥，也不碰 OpenChamber 原生记忆。
 
 前置条件：
 
@@ -87,14 +88,20 @@ Mebular 与 OpenChamber 的记忆保持分离：
   MCP 不会自动下载它。自动启动属于 HTTP MCP daemon（`mebular serve`），stdio
   `mebular mcp` 不会启动 sidecar。
 
-把插件目录加入 OpenCode global 的 `~/.config/opencode/opencode.json`（不要写
-OpenChamber 的 `opencode.managed.json`）：
+`@mebular/opencode-plugin` 是**独立 npm 包**，不随 `@mebular/core` 安装。发布后先从 npm
+安装，再把包名（或本地 checkout 路径）加入 OpenCode global 的
+`~/.config/opencode/opencode.json`（不要写 OpenChamber 的 `opencode.managed.json`）：
+
+```bash
+npm install @mebular/opencode-plugin
+# 或全局安装：npm install -g @mebular/opencode-plugin
+```
 
 ```jsonc
 {
   "plugins": [
     {
-      "package": "/absolute/path/to/mebular/packages/opencode-plugin",
+      "package": "@mebular/opencode-plugin",
       "options": {
         "agentId": "opencode"
         // runtimeUrl 可选；不写时读取 <home>/memory-runtime.json，绝不猜端口。
@@ -105,6 +112,8 @@ OpenChamber 的 `opencode.managed.json`）：
 }
 ```
 
+OpenChamber 复用同一份 global 配置；OpenCode 在启动或重载时加载包，单独执行
+`npm install` 不会启动任何进程。本地开发可以把 `package` 换成插件目录的绝对路径。
 由你自己重载/重启 OpenChamber；Mebular 不会向运行中的宿主发 `opencode reload`。
 
 ## 插件做什么

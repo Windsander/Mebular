@@ -30,6 +30,7 @@ const INTERNAL = {
   '@mebular/memory-runtime': 'packages/memory-runtime',
   '@mebular/service': 'packages/service',
   '@mebular/skill': 'packages/skill',
+  '@mebular/opencode-plugin': 'packages/opencode-plugin',
 };
 
 const DEP_FIELDS = ['dependencies', 'optionalDependencies', 'peerDependencies', 'devDependencies'];

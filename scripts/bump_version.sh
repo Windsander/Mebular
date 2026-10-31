@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
-# 一键同步版本号（lockstep：7 个可发布包共用同一版本；dsh-plugin 仍走独立发布 job）。
+# 一键同步版本号（lockstep：8 个可发布包共用同一版本；dsh-plugin 仍走独立发布 job）。
 #
 #   bash scripts/bump_version.sh v0.2.0
 #
 # 具体改写逻辑在 scripts/bump-version.mjs（可被测试直接 import）：
-#   1. package.json × 7（root @mebular/core + fleet / mcp / memory-runtime / service / skill / dsh-plugin）；
+#   1. package.json × 8（root @mebular/core + fleet / mcp / memory-runtime / service / skill /
+#      opencode-plugin / dsh-plugin）；
 #   2. 这些 manifest 中“已是版本号区间”的内部 @mebular/* 依赖 -> ^<new version>；
 #   3. 根 package-lock.json 与 apps/desktop/package-lock.json；
 #   4. apps/desktop/src/main/daemon.mjs 的 APP_VERSION；
 #   5. packages/mcp/src/version.mjs（MCP 对外版本唯一真源）；
-#   6. CHANGELOG.md 插入 `## [vX.Y.Z] - <date>` 章节占位（幂等）。
+#   6. packages/opencode-plugin/index.js 的 PACKAGE_VERSION；
+#   7. CHANGELOG.md 插入 `## [vX.Y.Z] - <date>` 章节占位（幂等）。
 #
 # 发布分支命名（版本 SSOT）：release/vX.Y.Z，工作流据此校验版本一致。
 

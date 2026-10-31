@@ -1,16 +1,17 @@
 # Changelog
 
 All notable changes to Mebular are documented here.
-Mebular uses a single-version umbrella: the seven npm packages (`core`, `service`, `skill`, `mcp`,
-`fleet`, `memory-runtime`, `dsh-plugin`) share one release version. `@mebular/dsh-plugin` is an
-isolated adapter published by its own npm job, and it follows the same unified release train.
+Mebular uses a single-version umbrella: the eight npm packages (`core`, `service`, `skill`, `mcp`,
+`fleet`, `memory-runtime`, `opencode-plugin`, `dsh-plugin`) share one release version.
+`@mebular/dsh-plugin` is an isolated adapter published by its own npm job, and it follows the same
+unified release train.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 > Version headings carry the `v` prefix (`## [vX.Y.Z]`) because it is the release SSOT:
-> the branch name (`release/vX.Y.Z`), the seven `package.json` versions, the locks, the MCP
-> and sidecar version sources, and the Git tag must all agree with this section.
+> the branch name (`release/vX.Y.Z`), the eight `package.json` versions, the locks, the MCP,
+> sidecar and OpenCode plugin version sources, and the Git tag must all agree with this section.
 
 The GitHub Release body is extracted from this file: everything between the release's
 `## [vX.Y.Z]` heading and the next `## [` heading. Keep that section self-contained.
@@ -43,7 +44,7 @@ The MCP surface stays compatible at 29 tools; every runtime capability is opt-in
 - **Memory Runtime configuration is device-local** — MCP only owns `memoryRuntime.*` lifecycle keys; sidecar settings (model packs, API credentials, raw/trace retention) live in `<home>/memory-runtime/config.json` and do not enter shared memory or sync. SelfRecord and Checkpoint always go through capability with logical `agentId` filtering.
 - **Internal objects are filtered by default** — default queries, graph traversal and the Console memory list skip `metadata.internal=true` and reserved `__*` namespaces. Older clients see ordinary 0.2 data.
 - **OpenChamber reuse** — OpenChamber is treated as an OpenCode host: one global MCP entry, read-only native-memory detection, and no writes to `opencode.managed.json` or per-instance copies.
-- **Release train** — all seven npm packages, the desktop app and the isolated DSH plugin are aligned at `0.3.0`.
+- **Release train** — all eight npm packages (including the isolated DSH plugin) and the desktop app are aligned at `0.3.0`.
 
 ### Fixed
 
@@ -57,7 +58,7 @@ The MCP surface stays compatible at 29 tools; every runtime capability is opt-in
 - **Acceptance report** — [0.3.0 Memory Runtime acceptance report](docs/quality/0.3.0-memory-runtime-acceptance.md) records recall quality, security and performance for a real sidecar with a fake capability: heuristic only, no model, no external network. The matrix covers gist-only broad recall, detail expansion, conflicts, cross-device raw degradation, silence, budgets, security boundaries and bounded resources.
 - **Three-host E2E** — real DSH, Hermes and OpenChamber/OpenCode adapters run against a real `/memory-runtime/v1`, real capability API and real graph with temporary homes, heuristic extraction and no real LLM. The recorded run is 113/113 DSH, 35/35 Hermes and 38/38 OpenCode checks; see [`tests/integration/host-e2e/README.md`](tests/integration/host-e2e/README.md) for covered paths and explicit boundaries.
 - **Sidecar and host suites** — sidecar, inference, Console, DSH, Hermes and OpenChamber coverage lives in `packages/memory-runtime/tests`, `tests/mcp`, `tests/console`, `tests/dsh`, `tests/opencode-plugin` and `tests/integration/host-e2e`.
-- **Seven-package release train** — six lockstep packages (`core`, `service`, `skill`, `mcp`, `fleet`, `memory-runtime`) plus the isolated `dsh-plugin` job share `0.3.0`; verify produces seven tarballs, and the visibility gate checks all seven packages and `dist-tags.latest`.
+- **Eight-package release train** — seven lockstep packages (`core`, `service`, `skill`, `mcp`, `fleet`, `memory-runtime`, `opencode-plugin`) plus the isolated `dsh-plugin` job share `0.3.0`; verify produces eight tarballs, and the visibility gate checks all eight packages and `dist-tags.latest`.
 - **Docs** — `npm run check:docs`, `npm run check:i18n` and `npm run check:cleanliness` pass.
 
 ### Notes

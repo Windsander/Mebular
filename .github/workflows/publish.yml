@@ -1,14 +1,14 @@
 name: Publish
 
 # 发布顺序（push 到 release/v*）：
-#   verify（版本 SSOT + lint/test + 7 个发布 tarball）
+#   verify（版本 SSOT + lint/test + 8 个发布 tarball）
 #     → dsh-e2e（复用 dsh-e2e.yml：真实 DSH 最低版 + latest；失败即阻断发布）
 #     → preflight（npm token 可用性；失败则后续全部不启动）
 #     → desktop-macos / desktop-windows / desktop-linux
 #         （同一批 tarball → runtime → 安装包 → packaged runtime smoke）
-#     → publish（直接发布 verify 产出的 6 个 lockstep tarball）
+#     → publish（直接发布 verify 产出的 7 个 lockstep tarball）
 #     → publish-dsh（dsh-plugin tarball）
-#     → visibility（七个包均可 npm view + latest 指向本次版本才继续）
+#     → visibility（八个包均可 npm view + latest 指向本次版本才继续）
 #     → release（三平台安装包 + SHA256SUMS.txt，幂等上传）
 #
 # workflow_dispatch 是 packaging dry-run：跑 verify + dsh-e2e + desktop matrix 并上传 artifacts，
@@ -32,7 +32,7 @@ concurrency:
 
 jobs:
   verify:
-    name: verify (SSOT / lint / test / 7 tarballs)
+    name: verify (SSOT / lint / test / 8 tarballs)
     runs-on: ubuntu-latest
     timeout-minutes: 40
     outputs:
@@ -88,10 +88,10 @@ jobs:
           if [ "$MODE" = "dry-run" ]; then
             echo "::notice title=Packaging dry-run::$TAG · 只构建三平台安装包并上传 artifacts；不发布 npm、不创建 GitHub Release。"
           else
-            echo "::notice title=Release::$TAG · 安装包全部通过后发布 npm，七个包（6 lockstep + dsh-plugin）可见后上传 GitHub Release 资产。"
+            echo "::notice title=Release::$TAG · 安装包全部通过后发布 npm，八个包（7 lockstep + dsh-plugin）可见后上传 GitHub Release 资产。"
           fi
 
-      - name: Verify version SSOT (branch / 7 manifests / locks / MCP / CHANGELOG)
+      - name: Verify version SSOT (branch / 8 manifests / locks / MCP / OpenCode / CHANGELOG)
         shell: bash
         run: node scripts/verify-release-version.mjs --version "$VERSION" --tag "$TAG"
 
@@ -110,11 +110,15 @@ jobs:
       - name: Test with coverage gates
         run: npm run test:coverage
 
-      - name: Pack smoke (6 packages + tarball install)
-        run: npm run verify:mcp:publish
+      - name: Pack smoke (6 runtime tarballs + OpenCode plugin)
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run verify:mcp:publish
+          npm run verify:opencode:publish
 
       # 只 pack 一次：desktop matrix 与 npm publish 都使用这里的 tarball，保证“测什么发什么”。
-      - name: Pack release tarballs (6 lockstep + dsh-plugin)
+      - name: Pack release tarballs (7 lockstep + dsh-plugin)
         shell: bash
         run: |
           set -euo pipefail
@@ -122,12 +126,12 @@ jobs:
           mkdir -p release-pack
           ROOT="$PWD"
           npm pack --pack-destination "$ROOT/release-pack"
-          for p in packages/fleet packages/service packages/mcp packages/memory-runtime packages/skill packages/dsh-plugin; do
+          for p in packages/fleet packages/service packages/mcp packages/memory-runtime packages/skill packages/opencode-plugin packages/dsh-plugin; do
             (cd "$p" && npm pack --pack-destination "$ROOT/release-pack")
           done
           ls -lh release-pack
 
-      - name: Check tarball set (exactly 7, versions match)
+      - name: Check tarball set (exactly 8, versions match)
         shell: bash
         run: |
           node - <<'NODE'
@@ -140,6 +144,7 @@ jobs:
             'packages/mcp',
             'packages/memory-runtime',
             'packages/skill',
+            'packages/opencode-plugin',
             'packages/dsh-plugin',
           ];
           let ok = true;
@@ -157,12 +162,12 @@ jobs:
             console.log(`✓ ${filename}（${(fs.statSync(file).size / 1024).toFixed(0)} KiB）`);
           }
           const tgz = fs.readdirSync('release-pack').filter((name) => name.endsWith('.tgz'));
-          if (tgz.length !== 7) {
-            console.error(`✗ release-pack 应恰好 7 个 tgz，实际 ${tgz.length}：${tgz.join(', ')}`);
+          if (tgz.length !== 8) {
+            console.error(`✗ release-pack 应恰好 8 个 tgz，实际 ${tgz.length}：${tgz.join(', ')}`);
             ok = false;
           }
           if (!ok) process.exit(1);
-          console.log('release-pack OK：6 个 lockstep + 1 个 dsh-plugin');
+          console.log('release-pack OK：7 个 lockstep + 1 个 dsh-plugin');
           NODE
 
       - name: Upload release tarballs
@@ -448,7 +453,7 @@ jobs:
           name: release-tarballs
           path: release-pack
 
-      # 直接发布 verify 产出的 tarball（不重新 pack）；顺序：core -> service -> memory-runtime -> skill -> mcp -> fleet。
+      # 直接发布 verify 产出的 tarball（不重新 pack）；顺序：core -> service -> memory-runtime -> skill -> mcp -> fleet -> opencode-plugin。
       - name: Publish lockstep tarballs (idempotent, skip published)
         shell: bash
         run: |
@@ -479,8 +484,9 @@ jobs:
           publish "release-pack/mebular-skill-${VERSION}.tgz"          "@mebular/skill"
           publish "release-pack/mebular-mcp-${VERSION}.tgz"            "@mebular/mcp"
           publish "release-pack/mebular-fleet-${VERSION}.tgz"          "@mebular/fleet"
+          publish "release-pack/mebular-opencode-plugin-${VERSION}.tgz" "@mebular/opencode-plugin"
 
-  # 插件仍由独立 job 发布；发布版本必须与七包 SSOT 一致（verify:release-version 校验）。
+  # dsh-plugin 仍由独立 job 发布；发布版本必须与八包 SSOT 一致（verify:release-version 校验）。
   publish-dsh:
     name: npm publish dsh-plugin tarball (push only)
     needs: publish
@@ -530,9 +536,9 @@ jobs:
             npm publish "$(realpath "$FILE")" --access public --tag latest
           fi
 
-  # 发布后 gate：七个包都能 npm view，且 dist-tags.latest 指向本次版本后才创建 GitHub Release。
+  # 发布后 gate：八个包都能 npm view，且 dist-tags.latest 指向本次版本后才创建 GitHub Release。
   visibility:
-    name: npm visibility gate (7 packages + latest, push only)
+    name: npm visibility gate (8 packages + latest, push only)
     needs: [verify, publish, publish-dsh]
     if: github.event_name == 'push' && needs.publish.result == 'success' && needs.publish-dsh.result == 'success'
     runs-on: ubuntu-latest
@@ -550,7 +556,7 @@ jobs:
         with:
           node-version: 24
 
-      - name: Wait for seven npm packages (6 lockstep + dsh-plugin) + latest tag
+      - name: Wait for eight npm packages (7 lockstep + dsh-plugin) + latest tag
         shell: bash
         run: |
           set -euo pipefail

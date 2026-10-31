@@ -100,6 +100,7 @@
     "verify:mcp:cross:selftest": "node scripts/verify-mcp-cross.mjs --selftest",
     "verify:mcp:skill": "node scripts/verify-mcp-skill.mjs",
     "verify:mcp:publish": "node scripts/verify-mcp-publish.mjs",
+    "verify:opencode:publish": "node scripts/verify-opencode-publish.mjs",
     "verify:dsh-plugin": "node scripts/verify-dsh-plugin.mjs",
     "verify:dsh:e2e": "node scripts/verify-dsh-e2e.mjs",
     "verify:immersive-journey": "node tests/integration/host-e2e/immersive-journey.mjs",

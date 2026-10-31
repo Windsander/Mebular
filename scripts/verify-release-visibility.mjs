@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 发布后 npm 可见性 gate：七个包（6 个 lockstep + dsh-plugin）都必须在 registry 可见，
+// 发布后 npm 可见性 gate：八个包（7 个 lockstep + dsh-plugin）都必须在 registry 可见，
 // 且 dist-tags.latest 指向本次发布版本。
 //
 // 背景：v0.1.1 的 npm publish job 成功时，@mebular/mcp 的 latest 仍短暂指向旧版本 /
@@ -11,7 +11,7 @@
 //   node scripts/verify-release-visibility.mjs --version 0.2.0 --dsh-version 0.2.0
 //   node scripts/verify-release-visibility.mjs --timeout-seconds 600 --interval-seconds 10
 //
-// 退出码：0 = 七包可见且 latest 正确；1 = 超时/状态不符；2 = 参数或本地 manifest 错误。
+// 退出码：0 = 八包可见且 latest 正确；1 = 超时/状态不符；2 = 参数或本地 manifest 错误。
 
 import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
@@ -30,6 +30,7 @@ export const LOCKSTEP_PACKAGES = [
   '@mebular/skill',
   '@mebular/mcp',
   '@mebular/fleet',
+  '@mebular/opencode-plugin',
 ];
 export const DSH_PACKAGE = '@mebular/dsh-plugin';
 
@@ -215,7 +216,7 @@ function parseArgs(argv) {
 function usage() {
   return [
     '用法：node scripts/verify-release-visibility.mjs [选项]',
-    '  --version <x.y.z>         6 个 lockstep 包版本（默认根 package.json）',
+    `  --version <x.y.z>         ${LOCKSTEP_PACKAGES.length} 个 lockstep 包版本（默认根 package.json）`,
     '  --dsh-version <x.y.z>     @mebular/dsh-plugin 版本（默认其 package.json）',
     '  --timeout-seconds <n>     总超时，默认 600',
     '  --interval-seconds <n>    轮询间隔，默认 10',

@@ -24,14 +24,23 @@ Mebular Memory Runtime 的 OpenCode V2 服务端插件（OpenChamber 使用）�
 
 ## 安装
 
-把插件目录加入 OpenCode global `~/.config/opencode/opencode.json` 的
-`plugins` 数组（**不要**写 OpenChamber 的 `opencode.managed.json`）：
+`@mebular/opencode-plugin` 是**独立 npm 包**，不随 `@mebular/core` 安装，也不依赖
+Mebular 的其他包。发布后从 npm 安装：
+
+```bash
+npm install @mebular/opencode-plugin
+# 或全局安装：npm install -g @mebular/opencode-plugin
+```
+
+然后把包加入 OpenCode global `~/.config/opencode/opencode.json` 的 `plugins` 数组
+（**不要**写 OpenChamber 的 `opencode.managed.json`）。OpenChamber 复用同一份 global
+配置；OpenCode 启动或重载时加载插件，单独执行 `npm install` 不会启动任何进程：
 
 ```jsonc
 {
   "plugins": [
     {
-      "package": "/absolute/path/to/mebular/packages/opencode-plugin",
+      "package": "@mebular/opencode-plugin",
       "options": {
         "agentId": "opencode"
       }
@@ -40,7 +49,8 @@ Mebular Memory Runtime 的 OpenCode V2 服务端插件（OpenChamber 使用）�
 }
 ```
 
-也可以发布后使用包名 `@mebular/opencode-plugin`。插件目录必须带
+本地开发也可以把 `package` 换成插件目录的绝对路径
+（例如 `/absolute/path/to/mebular/packages/opencode-plugin`）。插件目录必须带
 `package.json` + `exports`（本包已提供）。
 
 ## 配置

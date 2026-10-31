@@ -1,6 +1,6 @@
 # Mebular 桌面 App（apps/desktop）
 
-> v0.2.4：**壳 + 守护托管 + 内嵌控制台 + 发布 tarball 运行时 + 三平台 unsigned 安装包**。
+> v0.3.0：**壳 + 守护托管 + 内嵌控制台 + 发布 tarball 运行时 + 三平台 unsigned 安装包**。
 > 安装包 runtime 来自与 npm 发布同一批 verify tarball；签名、公证与自动更新留到后续版本。
 > 发布操作见 [`docs/operations/DESKTOP_RELEASE.md`](../../docs/operations/DESKTOP_RELEASE.md)。
 
@@ -13,7 +13,7 @@ Electron 薄壳：把**既有控制台**（`127.0.0.1:<port>/console`）装进�
 
 ```
 apps/desktop/
-├── package.json            # private + 0.2.1（与六个 npm 包同版本）
+├── package.json            # private + 0.3.0（与八个 npm 包同版本）
 ├── electron-builder.yml    # 安装包配置（runtime/node_modules → resources/node_modules）
 ├── runtime/                # 发布 tarball 安装出的运行时（不入库）
 ├── src/main/               # Electron 主进程：daemon.mjs（托管逻辑，纯可测）/ index.mjs（壳）/ ipc.mjs / tray-icons.mjs
@@ -127,8 +127,8 @@ Electron。
   `npm run build` → `npm ci --prefix apps/desktop` → pack 5 个 tarball →
   `prepare-runtime` → `smoke:runtime` → `dist:dir` → packaged runtime smoke →
   `npm run smoke`（无 GUI；`ELECTRON_SKIP_BINARY_DOWNLOAD=1` 时自动 SKIP 二进制冒烟）。
-- **Publish（`.github/workflows/publish.yml`）**：`verify` 只 pack 一次 6 个 tarball，三个
-  desktop job 分别用同一批 tarball 构建安装包：
+- **Publish（`.github/workflows/publish.yml`）**：`verify` 只 pack 一次 8 个 tarball，三个
+  desktop job 分别用同一批 tarball 构建安装包（其中 6 个运行时包进入桌面 runtime）：
   - `desktop-macos`（macos-latest）：Universal DMG + packaged smoke；
   - `desktop-windows`（windows-latest）：NSIS x64 + `win-unpacked` resources smoke；
   - `desktop-linux`（ubuntu-latest）：AppImage + deb x64 + `linux-unpacked` resources smoke。
@@ -136,5 +136,6 @@ Electron。
   `SHA256SUMS.txt`。手动 `workflow_dispatch` 是 dry-run：只构建并上传 artifacts，不发布。
 
 版本 SSOT：`apps/desktop/package.json`、`package-lock.json` 根 version 与
-`src/main/daemon.mjs` 的 `APP_VERSION` 必须与六个 npm 包（含 `dsh-plugin`）一致；
-`prepare-runtime.mjs` 校验 runtime 使用的五个包，Publish verify 校验六个包与桌面版本。
+`src/main/daemon.mjs` 的 `APP_VERSION` 必须与八个 npm 包（含 `opencode-plugin` 与
+`dsh-plugin`）一致；`prepare-runtime.mjs` 校验 runtime 使用的六个包，Publish verify
+校验八个包与桌面版本。

@@ -1,17 +1,19 @@
 #!/usr/bin/env node
-// 发布版本号同步（lockstep：7 个可发布包共用同一版本；dsh-plugin 仍走独立发布 job）。
+// 发布版本号同步（lockstep：8 个可发布包共用同一版本；dsh-plugin 仍走独立发布 job）。
 //
 // 通常通过 scripts/bump_version.sh 调用；也可以直接运行：
 //   node scripts/bump-version.mjs --root . --version 0.2.0 --tag v0.2.0
 //
 // 同步内容：
-//   1. package.json × 7（root @mebular/core + fleet / mcp / memory-runtime / service / skill / dsh-plugin）；
+//   1. package.json × 8（root @mebular/core + fleet / mcp / memory-runtime / service / skill /
+//      opencode-plugin / dsh-plugin）；
 //   2. 这些 manifest 中任何“已是版本号区间”的内部 @mebular/* 依赖 -> ^<new version>
 //      （file: 本地链接留给 pack 期由 publish-manifest 改写）；
-//   3. package-lock.json 根 version / packages[""] / 7 个 workspace 条目；
+//   3. package-lock.json 根 version / packages[""] / 8 个 workspace 条目；
 //   4. apps/desktop/package.json、apps/desktop/package-lock.json、main 进程 APP_VERSION；
 //   5. packages/mcp/src/version.mjs（MCP 对外版本唯一真源）；
-//   6. CHANGELOG.md 插入 `## [vX.Y.Z] - <date>` 章节占位（幂等）。
+//   6. packages/opencode-plugin/index.js 的 PACKAGE_VERSION（OpenCode 插件对外版本）；
+//   7. CHANGELOG.md 插入 `## [vX.Y.Z] - <date>` 章节占位（幂等）。
 //
 // 发布分支命名（版本 SSOT）：release/vX.Y.Z，工作流据此校验版本一致。
 
@@ -28,6 +30,7 @@ export const RELEASE_PACKAGES = [
   { rel: 'packages/memory-runtime', name: '@mebular/memory-runtime' },
   { rel: 'packages/service', name: '@mebular/service' },
   { rel: 'packages/skill', name: '@mebular/skill' },
+  { rel: 'packages/opencode-plugin', name: '@mebular/opencode-plugin' },
   { rel: 'packages/dsh-plugin', name: '@mebular/dsh-plugin' },
 ];
 
@@ -59,7 +62,7 @@ export function bumpVersion({
   const changes = [];
   let changedDeps = 0;
 
-  // ---- 7 个可发布包 manifest + 内部依赖区间 ----
+  // ---- 所有可发布包 manifest + 内部依赖区间 ----
   for (const target of RELEASE_PACKAGES) {
     const file = join(root, target.rel, 'package.json');
     const pkg = readJson(file);
@@ -186,6 +189,26 @@ export function bumpVersion({
     log(`  SIDECAR_RUNTIME_VERSION -> ${version}  packages/memory-runtime/src/sidecar/config.ts`);
   }
 
+  // ---- OpenCode 插件对外版本 ----
+  const opencodeVersionFile = join(root, 'packages/opencode-plugin/index.js');
+  if (!existsSync(opencodeVersionFile)) {
+    throw new Error('packages/opencode-plugin/index.js 不存在；OpenCode 插件版本必须同步');
+  }
+  const opencodeBefore = readFileSync(opencodeVersionFile, 'utf8');
+  const opencodeAfter = replaceOnce(
+    opencodeBefore,
+    /(export const PACKAGE_VERSION = ')[^']+(';)/,
+    `$1${version}$2`,
+    'packages/opencode-plugin/index.js',
+  );
+  if (opencodeAfter === opencodeBefore) {
+    log(`  OpenCode plugin PACKAGE_VERSION 已是 ${version}，跳过`);
+  } else {
+    writeFileSync(opencodeVersionFile, opencodeAfter, 'utf8');
+    changes.push(`packages/opencode-plugin/index.js PACKAGE_VERSION -> ${version}`);
+    log(`  PACKAGE_VERSION -> ${version}  packages/opencode-plugin/index.js`);
+  }
+
   // ---- CHANGELOG 章节占位 ----
   const clFile = join(root, 'CHANGELOG.md');
   const HEADER =
@@ -276,7 +299,7 @@ async function main(argv) {
       log: (line) => console.log(line),
     });
     console.log(
-      `✓ 已同步为 ${result.tag}（7 个 npm 包 + 根 lock + 桌面 App + MCP 版本源 + CHANGELOG）`,
+      `✓ 已同步为 ${result.tag}（${RELEASE_PACKAGES.length} 个 npm 包 + 根 lock + 桌面 App + MCP/OpenCode 版本源 + CHANGELOG）`,
     );
     return 0;
   } catch (error) {

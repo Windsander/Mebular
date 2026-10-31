@@ -1,6 +1,11 @@
 <div align="center">
 
-![Mebular — 分布式记忆网络](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-hero.svg)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-hero-light.svg">
+    <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-hero-dark.svg" alt="Mebular — 分布式记忆网络">
+  </picture>
+</p>
 
 **一份记忆，每个助手，每台设备。**
 
@@ -40,7 +45,12 @@ App 与 DSH Plugin 是同一套本机 runtime 的两个入口。插件默认 `at
 
 <div align="center">
 
-![记忆运行时：轻量 MCP 与沉浸式两种接入，共用同一张图。](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/memory-runtime-cn.svg)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/memory-runtime-cn-light.svg">
+    <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/memory-runtime-cn.svg" alt="记忆运行时：轻量 MCP 与沉浸式两种接入，共用同一张图。">
+  </picture>
+</p>
 
 *0.3 · 默认关闭；轻量 MCP 与沉浸式共用同一张图。*
 
@@ -65,9 +75,19 @@ DSH durable log 可能留下 source-tagged 快照（平台限制），但不会�
 
 <div align="center">
 
-![一张记忆图：两台机器，每台一个 Mebular 节点；机器 A 连接 DSH、Hermes、Codex，机器 B 连接 Pi、OpenCode、Cursor；两个节点直接同步同一张图。](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-memory-mesh-cn.svg)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-memory-mesh-cn-light.svg">
+    <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-memory-mesh-cn-dark.svg" alt="一张记忆图：两台机器，每台一个 Mebular 节点；机器 A 连接 DSH、Hermes、Codex，机器 B 连接 Pi、OpenCode、Cursor；两个节点直接同步同一张图。">
+  </picture>
+</p>
 
-![DSH 里得到什么：侧边栏共享 Console、官方 MCP 工具、状态点、attach / managed / auto 生命周期与按需安装更新；panel: false 只保留 MCP。](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-capabilities-cn.svg)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-capabilities-cn-light.svg">
+    <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-capabilities-cn-dark.svg" alt="DSH 里得到什么：侧边栏共享 Console、官方 MCP 工具、状态点、attach / managed / auto 生命周期与按需安装更新；panel: false 只保留 MCP。">
+  </picture>
+</p>
 
 </div>
 
@@ -75,11 +95,26 @@ DSH durable log 可能留下 source-tagged 快照（平台限制），但不会�
 
 <div align="center">
 
-![三步接入：安装插件、重启 DSH；已有 App/CLI 自动连接，没有 runtime 时面板显式安装共享 runtime。](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-quickstart-cn.svg)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-quickstart-cn-light.svg">
+    <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-quickstart-cn-dark.svg" alt="三步接入：安装插件、重启 DSH；已有 App/CLI 自动连接，没有 runtime 时面板显式安装共享 runtime。">
+  </picture>
+</p>
 
-![DSH 接入：DSH Web 通过 iframe 加载 /console/?embed=dsh，官方 MCP client 连接同一个 daemon 的 /mcp；通过共享 runtime resolve 解析 App/CLI/shared provider 与动态 URL。](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-connection-cn.svg)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-connection-cn-light.svg">
+    <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-connection-cn-dark.svg" alt="DSH 接入：DSH Web 通过 iframe 加载 /console/?embed=dsh，官方 MCP client 连接同一个 daemon 的 /mcp；通过共享 runtime resolve 解析 App/CLI/shared provider 与动态 URL。">
+  </picture>
+</p>
 
-![状态点：绿色已连接，琥珀色启动/安装/更新中，红色未运行，灰色等待首次检查。](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-status-cn.svg)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-status-cn-light.svg">
+    <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-status-cn-dark.svg" alt="状态点：绿色已连接，琥珀色启动/安装/更新中，红色未运行，灰色等待首次检查。">
+  </picture>
+</p>
 
 </div>
 

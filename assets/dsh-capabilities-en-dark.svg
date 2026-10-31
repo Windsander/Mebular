@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="300" viewBox="0 0 1080 300" role="img" aria-label="What you get in DSH: shared Console, official MCP tools, status, attach / managed / auto lifecycle, and on-demand install/update.">
+  <title>CAPABILITIES</title>
+  <desc>What you get in DSH: shared Console, official MCP tools, status, attach / managed / auto lifecycle, and on-demand install/update.</desc>
+  <defs>
+    <style>
+      .theme-light { display: none; }
+      @media (prefers-color-scheme: light) {
+        .theme-dark { display: none; }
+        .theme-light { display: block; }
+      }
+    </style>
+  </defs>
+  <g class="theme-dark">
+    <rect width="1080" height="300" fill="#03050a"/>
+    <defs><radialGradient id="glow-theme-dark" cx="50%" cy="36%" r="72%">
+      <stop offset="0%" stop-color="#0d2140" stop-opacity="0.85"/>
+      <stop offset="100%" stop-color="#03050a" stop-opacity="0"/>
+    </radialGradient></defs>
+    <ellipse cx="540" cy="156" rx="620" ry="165" fill="url(#glow-theme-dark)"/>
+    <text x="40" y="44" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="21" fill="#e2ecff" font-weight="700" text-anchor="start" letter-spacing="1.2">CAPABILITIES</text>
+    <text x="40" y="72" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="13" fill="#8aa8c8" font-weight="400" text-anchor="start">One Console. Official MCP tools. Visible lifecycle and install/update.</text>
+    <rect x="40" y="100" width="320" height="150" rx="16" fill="#081322" stroke="#1a3a60" stroke-width="1.2"/>
+    <rect x="60" y="120" width="46" height="34" rx="8" fill="#0d1e35" stroke="#4a8acf" stroke-width="1.2"/><line x1="74" y1="124" x2="74" y2="150" stroke="#4a8acf" stroke-width="1"/><circle cx="67" cy="137" r="2" fill="#8ac8ff"/><line x1="81" y1="132" x2="98" y2="132" stroke="#8ac8ff" stroke-width="1.2" opacity="0.7"/><line x1="81" y1="140" x2="92" y2="140" stroke="#8ac8ff" stroke-width="1.2" opacity="0.45"/>
+    <text x="122" y="142" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="16" fill="#e2ecff" font-weight="700" text-anchor="start">Shared Console</text>
+    <text x="60" y="188" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="11.5" fill="#8ac8ff" font-weight="400" text-anchor="start">sidebar · ?embed=dsh</text>
+    <text x="60" y="210" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#8aa8c8" font-weight="400" text-anchor="start">same UI · loopback only</text>
+    <rect x="380" y="100" width="320" height="150" rx="16" fill="#081322" stroke="#1a3a60" stroke-width="1.2"/>
+    <circle cx="423" cy="137" r="4" fill="#8ac8ff"/><circle cx="408" cy="127" r="3" fill="none" stroke="#8ac8ff" stroke-width="1.2"/><circle cx="438" cy="127" r="3" fill="none" stroke="#8ac8ff" stroke-width="1.2"/><circle cx="408" cy="148" r="3" fill="none" stroke="#8ac8ff" stroke-width="1.2"/><line x1="411" y1="129" x2="420" y2="134" stroke="#8ac8ff" stroke-width="1" opacity="0.7"/><line x1="435" y1="129" x2="426" y2="134" stroke="#8ac8ff" stroke-width="1" opacity="0.7"/><line x1="411" y1="146" x2="420" y2="141" stroke="#8ac8ff" stroke-width="1" opacity="0.7"/>
+    <text x="462" y="142" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="16" fill="#e2ecff" font-weight="700" text-anchor="start">Official MCP tools</text>
+    <text x="400" y="188" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="11.5" fill="#8ac8ff" font-weight="400" text-anchor="start">mcp__mebular__*</text>
+    <text x="400" y="210" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#8aa8c8" font-weight="400" text-anchor="start">official MCP peer</text>
+    <rect x="720" y="100" width="320" height="150" rx="16" fill="#081322" stroke="#1a3a60" stroke-width="1.2"/>
+    <circle cx="748" cy="137" r="4" fill="#3fb950"/><circle cx="762" cy="137" r="4" fill="#d29922"/><circle cx="776" cy="137" r="4" fill="#f85149"/><line x1="742" y1="150" x2="783" y2="150" stroke="#4a8acf" stroke-width="1" opacity="0.5"/>
+    <text x="802" y="142" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="16" fill="#e2ecff" font-weight="700" text-anchor="start">Status + lifecycle</text>
+    <text x="740" y="188" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="11.5" fill="#8ac8ff" font-weight="400" text-anchor="start">green / amber / red / gray</text>
+    <text x="740" y="210" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#8aa8c8" font-weight="400" text-anchor="start">attach / managed / auto · update</text>
+    <text x="540" y="284" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#8aa8c8" font-weight="400" text-anchor="middle">App / CLI / panel can install &amp; update</text>
+  </g>
+  <g class="theme-light">
+    <rect width="1080" height="300" fill="#ffffff"/>
+    <defs><radialGradient id="glow-theme-light" cx="50%" cy="36%" r="72%">
+      <stop offset="0%" stop-color="#dceaff" stop-opacity="0.7"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient></defs>
+    <ellipse cx="540" cy="156" rx="620" ry="165" fill="url(#glow-theme-light)"/>
+    <text x="40" y="44" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="21" fill="#0b1a33" font-weight="700" text-anchor="start" letter-spacing="1.2">CAPABILITIES</text>
+    <text x="40" y="72" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="13" fill="#5a7290" font-weight="400" text-anchor="start">One Console. Official MCP tools. Visible lifecycle and install/update.</text>
+    <rect x="40" y="100" width="320" height="150" rx="16" fill="#f7faff" stroke="#c9d8ee" stroke-width="1.2"/>
+    <rect x="60" y="120" width="46" height="34" rx="8" fill="#ffffff" stroke="#7fa6d9" stroke-width="1.2"/><line x1="74" y1="124" x2="74" y2="150" stroke="#7fa6d9" stroke-width="1"/><circle cx="67" cy="137" r="2" fill="#2f6fce"/><line x1="81" y1="132" x2="98" y2="132" stroke="#2f6fce" stroke-width="1.2" opacity="0.7"/><line x1="81" y1="140" x2="92" y2="140" stroke="#2f6fce" stroke-width="1.2" opacity="0.45"/>
+    <text x="122" y="142" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="16" fill="#0b1a33" font-weight="700" text-anchor="start">Shared Console</text>
+    <text x="60" y="188" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="11.5" fill="#2f6fce" font-weight="400" text-anchor="start">sidebar · ?embed=dsh</text>
+    <text x="60" y="210" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#5a7290" font-weight="400" text-anchor="start">same UI · loopback only</text>
+    <rect x="380" y="100" width="320" height="150" rx="16" fill="#f7faff" stroke="#c9d8ee" stroke-width="1.2"/>
+    <circle cx="423" cy="137" r="4" fill="#2f6fce"/><circle cx="408" cy="127" r="3" fill="none" stroke="#2f6fce" stroke-width="1.2"/><circle cx="438" cy="127" r="3" fill="none" stroke="#2f6fce" stroke-width="1.2"/><circle cx="408" cy="148" r="3" fill="none" stroke="#2f6fce" stroke-width="1.2"/><line x1="411" y1="129" x2="420" y2="134" stroke="#2f6fce" stroke-width="1" opacity="0.7"/><line x1="435" y1="129" x2="426" y2="134" stroke="#2f6fce" stroke-width="1" opacity="0.7"/><line x1="411" y1="146" x2="420" y2="141" stroke="#2f6fce" stroke-width="1" opacity="0.7"/>
+    <text x="462" y="142" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="16" fill="#0b1a33" font-weight="700" text-anchor="start">Official MCP tools</text>
+    <text x="400" y="188" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="11.5" fill="#2f6fce" font-weight="400" text-anchor="start">mcp__mebular__*</text>
+    <text x="400" y="210" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#5a7290" font-weight="400" text-anchor="start">official MCP peer</text>
+    <rect x="720" y="100" width="320" height="150" rx="16" fill="#f7faff" stroke="#c9d8ee" stroke-width="1.2"/>
+    <circle cx="748" cy="137" r="4" fill="#1a7f37"/><circle cx="762" cy="137" r="4" fill="#9a6700"/><circle cx="776" cy="137" r="4" fill="#cf222e"/><line x1="742" y1="150" x2="783" y2="150" stroke="#7fa6d9" stroke-width="1" opacity="0.5"/>
+    <text x="802" y="142" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="16" fill="#0b1a33" font-weight="700" text-anchor="start">Status + lifecycle</text>
+    <text x="740" y="188" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="11.5" fill="#2f6fce" font-weight="400" text-anchor="start">green / amber / red / gray</text>
+    <text x="740" y="210" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#5a7290" font-weight="400" text-anchor="start">attach / managed / auto · update</text>
+    <text x="540" y="284" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#5a7290" font-weight="400" text-anchor="middle">App / CLI / panel can install &amp; update</text>
+  </g>
+<style>.theme-light{display:none !important}.theme-dark{display:inline !important}</style>
+</svg>

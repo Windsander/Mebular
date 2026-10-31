@@ -899,6 +899,69 @@ describe('sidecar model runtime service', () => {
     await expect(resolver.resolve('../escape')).rejects.toMatchObject({ code: 'invalid_request' });
   });
 
+  it('settings：heuristic 停引擎、清 active 并持久化 source，保留上次 pack', async () => {
+    const harness = await createService();
+    await harness.service.activate(PACK_ID);
+    expect(harness.engine.running).toBe(true);
+
+    const view = await harness.service.updateSettings({ source: 'heuristic' });
+    expect(view).toMatchObject({
+      config: { source: 'heuristic' },
+      active: { source: 'heuristic', packId: null },
+    });
+    expect(harness.engine.running).toBe(false);
+    expect(harness.model.reconfigures.at(-1)?.source).toBe('heuristic');
+    const persisted = JSON.parse(await readFile(join(harness.home, 'config.json'), 'utf8')) as any;
+    expect(persisted.model).toMatchObject({
+      source: 'heuristic',
+      local: { pack: PACK_ID },
+    });
+    expect(JSON.stringify(view)).not.toContain(SECRET);
+    expect(JSON.stringify(view)).not.toContain(SECRET_PATH);
+  });
+
+  it('settings：host/api/auto 先停 local 引擎再热切换，不重启 sidecar', async () => {
+    const harness = await createService();
+    await harness.service.activate(PACK_ID);
+    const startCalls = harness.engine.startCalls;
+    for (const source of ['host', 'api', 'auto'] as const) {
+      const view = await harness.service.updateSettings({ source });
+      expect(view.config.source).toBe(source);
+      expect(view.active.source).toBe(source);
+      expect(harness.engine.running).toBe(false);
+      expect(harness.model.reconfigures.at(-1)?.source).toBe(source);
+      const persisted = JSON.parse(await readFile(join(harness.home, 'config.json'), 'utf8')) as any;
+      expect(persisted.model.source).toBe(source);
+    }
+    expect(harness.engine.startCalls).toBe(startCalls);
+  });
+
+  it('settings：local 被拒绝并返回 pack_required，既有 local 引擎不受影响', async () => {
+    const harness = await createService();
+    await harness.service.activate(PACK_ID);
+    await expect(harness.service.updateSettings({ source: 'local' } as any)).rejects.toMatchObject({
+      code: 'pack_required',
+      status: 400,
+    });
+    expect(harness.engine.running).toBe(true);
+    expect((await harness.service.settings()).config.source).toBe('local');
+  });
+
+  it('settings：持久化 source 时保留 config 其他字段', async () => {
+    const harness = await createService();
+    await writeFile(join(harness.home, 'config.json'), JSON.stringify({
+      schema: 1,
+      detail: { stagingHours: 12 },
+      model: { source: 'heuristic', local: { pack: PACK_ID, threads: 6 } },
+    }), 'utf8');
+    await harness.service.updateSettings({ source: 'host' });
+    const persisted = JSON.parse(await readFile(join(harness.home, 'config.json'), 'utf8')) as any;
+    expect(persisted).toMatchObject({
+      detail: { stagingHours: 12 },
+      model: { source: 'host', local: { pack: PACK_ID, threads: 6 } },
+    });
+  });
+
   it('init 按配置恢复 local target，但不提前启动引擎', async () => {
     const harness = await createService({
       source: 'local',

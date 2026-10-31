@@ -202,7 +202,7 @@ describe('MCP admin · Memory Runtime sidecar 只读代理', () => {
     expect(existsSync(join(home, 'memory-runtime'))).toBe(false);
   });
 
-  it('高级模型来源：读取默认值；写入 model.source 保留其他字段且不泄漏密钥/路径', async () => {
+  it('高级模型来源：读取/写入都走 sidecar；MCP 不直接写 config.json，不泄漏密钥/路径', async () => {
     const { home, base } = await start({ enabled: true });
     await readyStatus(base);
     const configPath = join(home, 'memory-runtime', 'config.json');
@@ -210,18 +210,19 @@ describe('MCP admin · Memory Runtime sidecar 只读代理', () => {
     const initial = await fetch(`${base}/admin/api/memory-runtime/model-source`);
     expect(initial.status).toBe(200);
     const initialBody = await initial.json();
-    expect(initialBody).toMatchObject({ ok: true, source: 'heuristic', enabled: true });
+    expect(initialBody).toMatchObject({ ok: true, source: 'heuristic', enabled: true, applies: 'hot' });
     expect(JSON.stringify(initialBody)).not.toMatch(/tokenFile|host-token|keyRef|baseUrl|modelPath/);
 
-    // 预置无关字段与密钥引用：写入只改 model.source，响应不返回这些细节。
-    await writeFile(configPath, JSON.stringify({
+    // 预置无关字段与密钥引用：MCP 代理写来源时必须保持文件原样（真值在 sidecar）。
+    const original = JSON.stringify({
       schema: 1,
       detail: { stagingHours: 12 },
       model: {
         source: 'heuristic',
         api: { keyRef: 'env:TEST_MODEL_KEY', baseUrl: 'https://example.invalid/v1', model: 'example' },
       },
-    }, null, 2), { encoding: 'utf-8', mode: 0o600 });
+    }, null, 2);
+    await writeFile(configPath, original, { encoding: 'utf-8', mode: 0o600 });
 
     const { token, cookie } = await csrf(base);
     const write = await fetch(`${base}/admin/api/memory-runtime/model-source`, {
@@ -235,15 +236,11 @@ describe('MCP admin · Memory Runtime sidecar 只读代理', () => {
     });
     expect(write.status).toBe(200);
     const written = await write.json();
-    expect(written).toMatchObject({ ok: true, source: 'host', enabled: true });
-    expect(['hot', 'next_start']).toContain(written.applies);
+    expect(written).toMatchObject({ ok: true, source: 'host', enabled: true, applies: 'hot' });
     expect(JSON.stringify(written)).not.toMatch(/tokenFile|host-token|keyRef|baseUrl|modelPath|TEST_MODEL_KEY/);
 
-    const onDisk = JSON.parse(await readFile(configPath, 'utf-8'));
-    expect(onDisk.model.source).toBe('host');
-    expect(onDisk.detail.stagingHours).toBe(12);
-    expect(onDisk.model.api).toMatchObject({ keyRef: 'env:TEST_MODEL_KEY', model: 'example' });
-    expect(existsSync(`${configPath}.bak`)).toBe(true);
+    expect(await readFile(configPath, 'utf-8')).toBe(original);
+    expect(existsSync(`${configPath}.bak`)).toBe(false);
 
     const reread = await (await fetch(`${base}/admin/api/memory-runtime/model-source`)).json();
     expect(reread.source).toBe('host');
@@ -258,7 +255,7 @@ describe('MCP admin · Memory Runtime sidecar 只读代理', () => {
       body: JSON.stringify({ source: 'not-a-source' }),
     });
     expect(bad.status).toBe(400);
-    expect((await readFile(configPath, 'utf-8')).includes('"source": "host"')).toBe(true);
+    expect(await readFile(configPath, 'utf-8')).toBe(original);
   }, 30000);
 
   it('enabled：服务端用 host token 转发 traces/detail/feedback，响应不泄漏 token', async () => {

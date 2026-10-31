@@ -253,6 +253,17 @@ export interface InferenceStatusView {
   warnings: string[];
 }
 
+/** `/inference` 视图：状态 + 当前持久化的 config.model.source + provider 可用性。 */
+export interface InferenceSettingsView extends InferenceStatusView {
+  config: { source: ModelActiveView['source'] };
+  providers: ModelProvider[];
+}
+
+/** settings 只接受非 local 来源；local 必须通过 `POST /models/:pack/activate`。 */
+export interface UpdateInferenceSettingsInput {
+  source: 'heuristic' | 'host' | 'api' | 'auto';
+}
+
 export interface InferenceCapabilities {
   install: boolean;
   activate: boolean;
@@ -274,11 +285,16 @@ export interface InferenceApi {
   stopEngine(packId: string): Promise<ModelEngineActionView>;
   removeModel(packId: string): Promise<ModelRemoveView>;
   status(): Promise<InferenceStatusView>;
+  /** 当前来源/引擎/安装/推荐视图；不包含 token、keyRef 或路径。 */
+  settings(): Promise<InferenceSettingsView>;
+  /** 进程内切换非 local 来源；不重启 sidecar。 */
+  updateSettings(input: UpdateInferenceSettingsInput): Promise<InferenceSettingsView>;
   dispose(): Promise<void>;
 }
 
 export type InferenceErrorCode =
   | 'invalid_request'
+  | 'pack_required'
   | 'unknown_pack'
   | 'not_installed'
   | 'already_installed'

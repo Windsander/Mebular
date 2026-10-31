@@ -1,17 +1,15 @@
-// Memory Runtime sidecar 用户级配置：只暴露模型来源。
+// Memory Runtime sidecar 用户级配置：只读模型来源（轻量/未就绪时的展示回退）。
 //
 // 契约（0.3.0 immersive product contract §1.4 / §1.5 / §4.3）：
 // - 用户在「高级」只选择 model.source（heuristic/local/host/api/auto）；
-// - 配置真值在 `<home>/memory-runtime/config.json` 的 `model.source`；
+// - 配置真值在 sidecar；MCP 不再写 `<home>/memory-runtime/config.json`；
 // - 浏览器不接触 sidecar host token / endpoint / API key / keyRef / 模型路径；
-// - 读取不创建目录；写入只做原子更新 + `.bak`，保留文件内其他字段。
+// - 读取不创建目录。
 //
 // 本模块不 import sidecar 业务实现，也不读写图/事件日志。
 
-import { randomBytes } from 'node:crypto';
-import { chmod, copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { resolveMemoryRuntimePaths } from './memory-runtime-supervisor.mjs';
 
 export const MEMORY_RUNTIME_MODEL_SOURCES = Object.freeze([
@@ -84,43 +82,5 @@ export async function readMemoryRuntimeModelSource({ home, env = process.env } =
     values: [...MEMORY_RUNTIME_MODEL_SOURCES],
     exists,
     ...(model.source !== undefined && normalized === null ? { warnings: ['invalid_model_source'] } : {}),
-  };
-}
-
-async function writeJsonAtomic(path, data) {
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  const tmp = `${path}.tmp-${process.pid}-${randomBytes(5).toString('hex')}`;
-  try {
-    await writeFile(tmp, `${JSON.stringify(data, null, 2)}\n`, { encoding: 'utf-8', mode: 0o600 });
-    if (existsSync(path)) await copyFile(path, `${path}.bak`).catch(() => undefined);
-    await rename(tmp, path);
-    await chmod(path, 0o600).catch(() => undefined);
-  } catch (error) {
-    await rm(tmp, { force: true }).catch(() => undefined);
-    throw error;
-  }
-}
-
-/**
- * 写入 `model.source`，保留 config.json 的其他字段。
- * 非法来源在落盘前拒绝；已有 JSON 损坏时拒绝覆盖（避免破坏用户配置）。
- */
-export async function writeMemoryRuntimeModelSource({ home, env = process.env, source } = {}) {
-  const normalized = normalizeMemoryRuntimeModelSource(source);
-  if (!normalized) {
-    throw new MemoryRuntimeConfigError('invalid_model_source', '模型来源不合法');
-  }
-  const path = memoryRuntimeConfigPath({ home, env });
-  const { raw, exists } = await readRawConfig(path);
-  const next = JSON.parse(JSON.stringify(raw));
-  next.model = isObject(next.model) ? next.model : {};
-  next.model.source = normalized;
-  await writeJsonAtomic(path, next);
-  return {
-    source: normalized,
-    defaultSource: DEFAULT_MEMORY_RUNTIME_MODEL_SOURCE,
-    values: [...MEMORY_RUNTIME_MODEL_SOURCES],
-    exists: true,
-    created: !exists,
   };
 }

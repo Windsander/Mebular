@@ -14,8 +14,10 @@ import {
   type ModelRemoveView,
   type InferenceApi,
   type InferenceCapabilities,
+  type InferenceSettingsView,
   type InferenceStatusView,
   type ModelStatusView,
+  type UpdateInferenceSettingsInput,
 } from '../../src/sidecar/inference/types.js';
 
 const TEST_PACK = CURATED_MODEL_PACKS.find((pack) => pack.tier === 'light') ?? CURATED_MODEL_PACKS[0]!;
@@ -229,6 +231,28 @@ class FakeModelApi implements InferenceApi {
     };
   }
 
+  async settings(): Promise<InferenceSettingsView> {
+    this.calls.push('settings');
+    return { ...await this.status(), config: { source: 'heuristic' }, providers: [] };
+  }
+
+  async updateSettings(input: UpdateInferenceSettingsInput): Promise<InferenceSettingsView> {
+    this.calls.push(`settings-update:${input.source}`);
+    const source = (input as { source: string }).source;
+    if (source === 'local') {
+      throw new InferenceError('pack_required', 'local 来源必须通过模型包激活设置', { status: 400 });
+    }
+    if (!['heuristic', 'host', 'api', 'auto'].includes(source)) {
+      throw new InferenceError('invalid_request', 'source 必须是 heuristic/host/api/auto', { status: 400 });
+    }
+    return {
+      ...await this.status(),
+      config: { source: input.source },
+      active: { ...(await this.status()).active, source: input.source },
+      providers: [],
+    };
+  }
+
   async dispose(): Promise<void> {}
 }
 
@@ -286,8 +310,15 @@ function auth(): Record<string, string> {
   return { authorization: 'Bearer host-token' };
 }
 
-async function post(url: string): Promise<{ status: number; body: any }> {
-  const response = await fetch(url, { method: 'POST', headers: auth() });
+async function post(url: string, body?: unknown): Promise<{ status: number; body: any }> {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      ...auth(),
+      ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
+    },
+    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+  });
   return { status: response.status, body: await response.json() };
 }
 
@@ -331,6 +362,41 @@ describe('sidecar model runtime HTTP', () => {
       install: { jobId: 'job_http', phase: 'model' },
       engine: { installed: true, binaryReady: true, release: 'b12017' },
     });
+  });
+
+  it('inference 设置端点：GET 返回来源/引擎/安装/推荐，POST 热切换且拒绝 local', async () => {
+    const api = new FakeModelApi();
+    const server = await startServer(api);
+
+    const settings = await fetch(`${server.url}/inference`, { headers: auth() });
+    const settingsBody = await settings.json() as any;
+    expect(settings.status).toBe(200);
+    expect(settingsBody.data).toMatchObject({
+      config: { source: 'heuristic' },
+      active: { source: 'heuristic', packId: null },
+      engine: { state: 'stopped' },
+      install: { jobId: 'job_http' },
+      recommended: null,
+      installedPackIds: [PACK_ID],
+    });
+    expect(JSON.stringify(settingsBody)).not.toContain('host-token');
+    expect(JSON.stringify(settingsBody)).not.toContain('/secret');
+
+    const updated = await post(`${server.url}/inference/settings`, { source: 'host' });
+    expect(updated.status).toBe(200);
+    expect(updated.body.data.config.source).toBe('host');
+    expect(api.calls).toContain('settings-update:host');
+
+    const local = await post(`${server.url}/inference/settings`, { source: 'local' });
+    expect(local.status).toBe(400);
+    expect(local.body).toMatchObject({
+      ok: false,
+      error: { code: 'pack_required' },
+    });
+
+    const invalid = await post(`${server.url}/inference/settings`, { source: 'nope' });
+    expect(invalid.status).toBe(400);
+    expect(invalid.body.error.code).toBe('invalid_request');
   });
 
   it('安装任务：202 + jobId、查询进度、取消与未知任务 404', async () => {

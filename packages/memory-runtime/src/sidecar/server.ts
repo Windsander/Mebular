@@ -894,6 +894,53 @@ export class SidecarServer {
         return;
       }
 
+      if (relative === 'inference') {
+        if (!isGet) {
+          req.resume();
+          this.sendError(res, 405, requestId, 'method_not_allowed', 'inference 仅接受 GET');
+          return;
+        }
+        if (!this.inference) {
+          req.resume();
+          this.sendError(res, 501, requestId, 'not_implemented', 'inference 尚未启用');
+          return;
+        }
+        const settings = await this.inference.settings();
+        this.send(
+          res,
+          200,
+          this.envelope(
+            requestId,
+            settings,
+            settings.warnings,
+            settings.active.engine.state === 'crashed' || settings.active.engine.state === 'circuit_open',
+          ),
+        );
+        return;
+      }
+
+      if (relative === 'inference/settings') {
+        if (!isPost) {
+          req.resume();
+          this.sendError(res, 405, requestId, 'method_not_allowed', 'inference settings 仅接受 POST');
+          return;
+        }
+        if (!this.inference) {
+          req.resume();
+          this.sendError(res, 501, requestId, 'not_implemented', 'inference 尚未启用');
+          return;
+        }
+        if (this.state === 'stopping') {
+          req.resume();
+          this.sendError(res, 503, requestId, 'stopping', 'sidecar 正在停止', undefined, true);
+          return;
+        }
+        const body = await readJsonBody(req);
+        const settings = await this.inference.updateSettings(body as { source: 'heuristic' | 'host' | 'api' | 'auto' });
+        this.send(res, 200, this.envelope(requestId, settings, settings.warnings, false));
+        return;
+      }
+
       if (relative === 'models') {
         if (!isGet) {
           req.resume();

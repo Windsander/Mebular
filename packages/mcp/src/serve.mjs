@@ -32,9 +32,8 @@ import {
 import {
   DEFAULT_MEMORY_RUNTIME_MODEL_SOURCE,
   MEMORY_RUNTIME_MODEL_SOURCES,
-  MemoryRuntimeConfigError,
+  normalizeMemoryRuntimeModelSource,
   readMemoryRuntimeModelSource,
-  writeMemoryRuntimeModelSource,
 } from './memory-runtime-config.mjs';
 import { APP_VERSION } from './version.mjs';
 import { resolveStaticAssetRoots } from './asset-roots.mjs';
@@ -903,54 +902,8 @@ export async function startHttpServer({
   // 失败只记录状态/日志，不阻断 MCP；关闭时显式清理，避免测试/宿主进程残留 timer。
   const detailMaintenance = createDetailMaintenance({ getService: () => service });
 
-  // 0.3 设备级模型选择：config 显式 pack 优先；否则 <home>/inference.json.selectedPack。
-  // 这里只改内存中的 runtime.model.local，不写盘、不进忆云；显式选择失败也不会被换成别的包。
-  const applyInferenceSelection = async (value) => {
-    const base = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
-    const local = base?.runtime?.model?.local;
-    const configPack = local && typeof local.pack === 'string' && local.pack.length > 0 ? local.pack : null;
-    const configPath = local && typeof local.path === 'string' && local.path.length > 0 ? local.path : null;
-    const clone = () => JSON.parse(JSON.stringify(base));
-    const withPath = () => {
-      const next = clone();
-      next.runtime = next.runtime && typeof next.runtime === 'object' ? next.runtime : {};
-      next.runtime.model = next.runtime.model && typeof next.runtime.model === 'object' ? next.runtime.model : {};
-      next.runtime.model.local = next.runtime.model.local && typeof next.runtime.model.local === 'object'
-        ? next.runtime.model.local
-        : {};
-      return next;
-    };
-    if (configPack && configPath) return base;
-    if (configPack) {
-      // 显式 config pack 但未写 path：设备 store 默认在 <home>/models/<pack>，
-      // 默认设备模型目录固定为 <home>/models/<pack>。
-      try {
-        const next = withPath();
-        next.runtime.model.local.path = join(home, 'models', configPack);
-        return next;
-      } catch {
-        return base;
-      }
-    }
-    try {
-      const { readInferenceState } = await import('./inference-store.mjs');
-      const read = await readInferenceState(home, { init: false });
-      const selected = read?.state?.selectedPack;
-      if (typeof selected !== 'string' || selected.length === 0) return base;
-      const next = withPath();
-      next.runtime.model.local.pack = selected;
-      next.runtime.model.local.path = join(home, 'models', selected);
-      // inference.json 的 selectedPack 本身就是显式选择；默认 heuristic 时切到 local，
-      // 避免“选了模型但 Runtime 仍走 heuristic”。host/api/auto 保持用户显式值。
-      if (next.runtime.model.source === undefined || next.runtime.model.source === 'heuristic') {
-        next.runtime.model.source = 'local';
-      }
-      return next;
-    } catch {
-      return base;
-    }
-  };
-  config = await applyInferenceSelection(config);
+  // 0.3 模型目录/安装/引擎/来源全部由 Memory Runtime sidecar 拥有。
+  // MCP 不再读取 <home>/models 或 <home>/inference.json，也不改写 runtime.model。
   let deviceId = initialDeviceId;
   let namespace = initialNamespace;
   let joinEndpoint = initialJoinEndpoint;
@@ -989,7 +942,7 @@ export async function startHttpServer({
     if (!next?.app || !next?.service) throw new Error('初始化结果缺少 app/service');
     app = next.app;
     service = next.service;
-    config = await applyInferenceSelection(next.config ?? {});
+    config = next.config ?? {};
     runtime = next.runtime ?? null;
     deviceId = next.deviceId ?? null;
     namespace = next.namespace ?? 'tasks';
@@ -1067,22 +1020,520 @@ export async function startHttpServer({
     })
     : null;
 
-  // 模型选择/卸载后刷新内存中的设备模型配置（管理面状态读取同一份配置）。
-  const refreshInferenceRuntime = async () => {
-    try {
-      const { readDeviceConfig } = await import('./inference-store.mjs');
-      const disk = await readDeviceConfig(home);
-      const diskModel = disk?.runtime?.model;
-      if (diskModel && typeof diskModel === 'object') {
-        config = await applyInferenceSelection({
-          ...config,
-          runtime: { ...(config?.runtime ?? {}), model: diskModel },
-        });
-      }
-    } catch {
-      // 读盘失败时保留当前内存配置；下一次启动会重新解析。
-    }
+  // ---------- 0.3 模型薄代理：模型目录/安装/引擎/来源全部由 sidecar 拥有 ----------
+  // 浏览器只看到 sidecar 的脱敏视图；host token 只在服务端使用。
+  function uniqueStrings(values) {
+    return [...new Set(values.filter((value) => typeof value === 'string' && value.length > 0))];
+  }
+
+  function proxyFailure(result, fallbackMessage) {
+    const error = result?.error && typeof result.error === 'object'
+      ? result.error
+      : { code: 'sidecar_request_failed', message: fallbackMessage, retryable: false };
+    const status = Number.isInteger(result?.status) ? result.status : 503;
+    return {
+      status,
+      body: {
+        ok: false,
+        error: {
+          code: error.code,
+          message: error.message ?? fallbackMessage,
+          retryable: error.retryable === true,
+          ...(error.details ? { details: error.details } : {}),
+        },
+        code: error.code,
+        message: error.message ?? fallbackMessage,
+        enabled: result?.enabled === true,
+        state: result?.state ?? 'stopped',
+        ...(result?.disabled === true ? { disabled: true } : {}),
+      },
+    };
+  }
+
+  const modelPackId = (input) => {
+    const value = input?.pack ?? input?.packId ?? input?.id;
+    return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
   };
+
+  function modelDownloadView(install) {
+    if (!install || typeof install !== 'object') return null;
+    return {
+      pack: install.packId ?? null,
+      packId: install.packId ?? null,
+      state: install.state ?? null,
+      phase: install.phase ?? null,
+      progress: install.progress ?? 0,
+      downloadedBytes: install.downloadedBytes ?? 0,
+      totalBytes: install.totalBytes ?? 0,
+      speedBytesPerSecond: install.speedBytesPerSecond ?? 0,
+      etaMs: install.etaMs ?? null,
+      updatedAt: install.updatedAt ?? null,
+      ...(install.error ? { error: install.error } : {}),
+    };
+  }
+
+  function modelPackView(pack) {
+    return {
+      ...pack,
+      selected: pack?.active === true,
+      manifestAvailable: pack?.manifest?.available === true,
+      ...(pack?.install ? { download: modelDownloadView(pack.install) } : {}),
+    };
+  }
+
+  function modelListBody(catalog) {
+    const data = catalog ?? {};
+    const active = data.active ?? {};
+    return {
+      ok: true,
+      schema: 1,
+      selectedPack: active.packId ?? null,
+      effectivePack: active.packId ?? null,
+      selectionSource: 'sidecar',
+      runtime: {
+        source: active.source ?? 'heuristic',
+        pack: active.packId ?? null,
+        selectionSource: 'sidecar',
+      },
+      packs: Array.isArray(data.packs) ? data.packs.map(modelPackView) : [],
+      hardware: data.hardware ?? null,
+      recommended: data.recommended ?? null,
+      active,
+      providers: Array.isArray(data.providers) ? data.providers : [],
+      install: data.install ?? null,
+      engine: data.engine ?? null,
+      warnings: Array.isArray(data.warnings) ? data.warnings : [],
+    };
+  }
+
+  function modelStatusBody(catalog, inference) {
+    const data = catalog ?? {};
+    const runtime = inference ?? {};
+    const active = runtime.active ?? data.active ?? {};
+    const recommended = runtime.recommended ?? data.recommended ?? null;
+    const warnings = uniqueStrings([
+      ...(Array.isArray(data.warnings) ? data.warnings : []),
+      ...(Array.isArray(runtime.warnings) ? runtime.warnings : []),
+    ]);
+    return {
+      ok: true,
+      schema: 1,
+      selectedPack: active.packId ?? null,
+      effectivePack: active.packId ?? null,
+      selectionSource: 'sidecar',
+      runtime: {
+        source: active.source ?? 'heuristic',
+        pack: active.packId ?? null,
+        selectionSource: 'sidecar',
+      },
+      engine: runtime.engine ?? data.engine ?? null,
+      hardware: data.hardware ?? null,
+      recommendation: recommended,
+      install: runtime.install ?? data.install ?? null,
+      active,
+      installedPackIds: Array.isArray(runtime.installedPackIds)
+        ? runtime.installedPackIds
+        : (Array.isArray(data.packs) ? data.packs.filter((pack) => pack?.installed === true).map((pack) => pack.packId) : []),
+      packs: Array.isArray(data.packs)
+        ? data.packs.map((pack) => ({
+          packId: pack.packId,
+          modelId: pack.modelId,
+          tier: pack.tier,
+          state: pack.state,
+          selected: pack.active === true,
+          installed: pack.installed === true,
+          installedBytes: pack.installedBytes ?? 0,
+          expectedBytes: pack.expectedBytes ?? 0,
+        }))
+        : [],
+      downloads: [],
+      warnings,
+    };
+  }
+
+  async function modelListResponse() {
+    if (!memoryRuntimeSupervisor) {
+      return proxyFailure({
+        status: 409,
+        enabled: false,
+        disabled: true,
+        state: 'stopped',
+        error: { code: 'memory_runtime_disabled', message: '记忆运行时未启用', retryable: false },
+      }, '记忆运行时未启用');
+    }
+    const result = await memoryRuntimeSupervisor.listModels();
+    if (!result.ok) return proxyFailure(result, '模型列表不可用');
+    return { status: 200, body: modelListBody(result.data) };
+  }
+
+  async function modelStatusResponse() {
+    if (!memoryRuntimeSupervisor) {
+      return proxyFailure({
+        status: 409,
+        enabled: false,
+        disabled: true,
+        state: 'stopped',
+        error: { code: 'memory_runtime_disabled', message: '记忆运行时未启用', retryable: false },
+      }, '记忆运行时未启用');
+    }
+    const [catalog, inference] = await Promise.all([
+      memoryRuntimeSupervisor.listModels(),
+      memoryRuntimeSupervisor.inferenceStatus(),
+    ]);
+    if (!catalog.ok) return proxyFailure(catalog, '模型目录不可用');
+    return {
+      status: 200,
+      body: modelStatusBody(catalog.data, inference.ok ? inference.data : null),
+    };
+  }
+
+  function modelActionSuccess(result, extra = {}) {
+    const data = result.data ?? {};
+    return {
+      status: Number.isInteger(result.status) && result.status >= 200 && result.status < 300 ? result.status : 200,
+      body: {
+        ok: true,
+        ...data,
+        ...extra,
+        warnings: Array.isArray(data.warnings) ? data.warnings : [],
+      },
+    };
+  }
+
+  async function handleModelAction(action, input) {
+    const rawAction = typeof action === 'string' ? action : '';
+    const name = rawAction === 'uninstall' ? 'remove'
+      : rawAction === 'download' ? 'install'
+        : rawAction;
+    if (name === 'pause' || name === 'resume' || name === 'import') {
+      return {
+        status: 501,
+        body: {
+          ok: false,
+          error: {
+            code: 'unsupported',
+            message: `${rawAction} 由 sidecar 模型安装任务取代：请使用 cancel 或重新 install`,
+            retryable: false,
+          },
+          code: 'unsupported',
+          message: `${rawAction} 暂不支持`,
+        },
+      };
+    }
+    if (!['install', 'select', 'cancel', 'remove', 'start', 'stop', 'test'].includes(name)) {
+      return {
+        status: 404,
+        body: {
+          ok: false,
+          error: { code: 'unknown_action', message: `未知模型操作：${rawAction}`, retryable: false },
+          code: 'unknown_action',
+          message: `未知模型操作：${rawAction}`,
+        },
+      };
+    }
+    if (!memoryRuntimeSupervisor) {
+      return proxyFailure({
+        status: 409,
+        enabled: false,
+        disabled: true,
+        state: 'stopped',
+        error: { code: 'memory_runtime_disabled', message: '记忆运行时未启用', retryable: false },
+      }, '记忆运行时未启用');
+    }
+    const pack = modelPackId(input);
+
+    if (name === 'install') {
+      if (!pack) {
+        return {
+          status: 400,
+          body: { ok: false, error: { code: 'invalid_request', message: '缺少 pack', retryable: false } },
+        };
+      }
+      const result = await memoryRuntimeSupervisor.installModel(pack, {
+        force: input?.force === true || input?.force === 'true' || input?.force === '1',
+      });
+      if (!result.ok) return proxyFailure(result, '模型安装失败');
+      const job = result.data ?? {};
+      return {
+        status: result.status === 202 ? 202 : 200,
+        body: {
+          ok: true,
+          accepted: result.status === 202,
+          pack: job.packId ?? pack,
+          job,
+          ...job,
+          warnings: Array.isArray(job.warnings) ? job.warnings : [],
+        },
+      };
+    }
+
+    if (name === 'select') {
+      if (!pack) {
+        return {
+          status: 400,
+          body: { ok: false, error: { code: 'invalid_request', message: '缺少 pack', retryable: false } },
+        };
+      }
+      const result = await memoryRuntimeSupervisor.activateModel(pack);
+      if (!result.ok) return proxyFailure(result, '模型激活失败');
+      const data = result.data ?? {};
+      return {
+        status: 200,
+        body: {
+          ok: true,
+          selected: data.activated === true,
+          selectedPack: data.packId ?? pack,
+          activated: data.activated === true,
+          active: data.active ?? 'heuristic',
+          runtime: {
+            source: data.active ?? 'heuristic',
+            pack: data.active === 'local' ? (data.packId ?? pack) : null,
+            selectionSource: 'sidecar',
+          },
+          requiresRestart: false,
+          warnings: Array.isArray(data.warnings) ? data.warnings : [],
+        },
+      };
+    }
+
+    if (name === 'cancel') {
+      let jobId = typeof input?.jobId === 'string' ? input.jobId.trim() : '';
+      if (jobId.length === 0) {
+        const status = await memoryRuntimeSupervisor.inferenceStatus();
+        if (status.ok && typeof status.data?.install?.jobId === 'string') {
+          jobId = status.data.install.jobId;
+        }
+      }
+      if (jobId.length === 0) {
+        return {
+          status: 409,
+          body: { ok: false, error: { code: 'install_not_running', message: '没有正在进行的安装任务', retryable: false } },
+        };
+      }
+      const result = await memoryRuntimeSupervisor.cancelInstall(jobId);
+      if (!result.ok) return proxyFailure(result, '取消安装失败');
+      return modelActionSuccess(result, {
+        pack,
+        cancelled: result.data?.state === 'cancelled',
+      });
+    }
+
+    if (name === 'test') {
+      const inference = await memoryRuntimeSupervisor.inferenceStatus();
+      if (!inference.ok) return proxyFailure(inference, '模型状态检查失败');
+      let status = null;
+      if (pack) {
+        status = await memoryRuntimeSupervisor.modelStatus(pack);
+        if (!status.ok) return proxyFailure(status, '模型状态检查失败');
+      }
+      return {
+        status: 200,
+        body: {
+          ok: true,
+          tested: true,
+          pack: pack ?? inference.data?.active?.packId ?? null,
+          state: status?.data?.state ?? null,
+          installed: status?.data?.installed ?? null,
+          engine: inference.data?.engine ?? null,
+          active: inference.data?.active ?? null,
+          warnings: uniqueStrings([
+            ...(Array.isArray(inference.warnings) ? inference.warnings : []),
+            ...(Array.isArray(status?.warnings) ? status.warnings : []),
+          ]),
+        },
+      };
+    }
+
+    if (!pack) {
+      return {
+        status: 400,
+        body: { ok: false, error: { code: 'invalid_request', message: '缺少 pack', retryable: false } },
+      };
+    }
+    const result = name === 'remove'
+      ? await memoryRuntimeSupervisor.removeModel(pack)
+      : name === 'start'
+        ? await memoryRuntimeSupervisor.startEngine(pack)
+        : await memoryRuntimeSupervisor.stopEngine(pack);
+    if (!result.ok) return proxyFailure(result, `模型 ${name} 失败`);
+    if (name === 'remove') {
+      return modelActionSuccess(result, {
+        pack: result.data?.packId ?? pack,
+        removed: result.data?.removed === true,
+      });
+    }
+    return modelActionSuccess(result, { pack: result.data?.packId ?? pack });
+  }
+
+  function modelSourceModelView(data) {
+    const active = data?.active ?? {};
+    const providers = Array.isArray(data?.providers) ? data.providers : [];
+    return {
+      configured: data?.config?.source ?? active.source ?? null,
+      active: active.source ?? null,
+      degraded: data?.degraded === true,
+      reason: null,
+      sources: providers.map((provider) => provider.id).filter((id) => typeof id === 'string'),
+    };
+  }
+
+  function modelSourceSuccess(result, source) {
+    const data = result.data ?? {};
+    return {
+      status: 200,
+      body: {
+        ok: true,
+        source,
+        defaultSource: DEFAULT_MEMORY_RUNTIME_MODEL_SOURCE,
+        values: [...MEMORY_RUNTIME_MODEL_SOURCES],
+        exists: true,
+        enabled: true,
+        available: true,
+        state: result.state,
+        degraded: result.degraded === true,
+        reason: null,
+        error: null,
+        model: modelSourceModelView(data),
+        applies: 'hot',
+      },
+    };
+  }
+
+  async function readModelSourceResponse() {
+    const enabled = memoryRuntimeSupervisor?.isEnabled() === true;
+    if (enabled) {
+      const result = await memoryRuntimeSupervisor.inferenceStatus();
+      if (result.ok) {
+        const data = result.data ?? {};
+        const source = normalizeMemoryRuntimeModelSource(data?.config?.source)
+          ?? normalizeMemoryRuntimeModelSource(data?.active?.source)
+          ?? DEFAULT_MEMORY_RUNTIME_MODEL_SOURCE;
+        return modelSourceSuccess(result, source);
+      }
+      // 未就绪时仍返回可读视图；写入会返回结构化 unavailable。
+      const fallback = await readMemoryRuntimeModelSource({ home }).catch(() => null);
+      const snapshot = memoryRuntimeSupervisor.snapshot();
+      return {
+        status: 200,
+        body: {
+          ok: true,
+          source: fallback?.source ?? DEFAULT_MEMORY_RUNTIME_MODEL_SOURCE,
+          defaultSource: DEFAULT_MEMORY_RUNTIME_MODEL_SOURCE,
+          values: [...MEMORY_RUNTIME_MODEL_SOURCES],
+          exists: fallback?.exists === true,
+          enabled: true,
+          available: false,
+          state: snapshot.state,
+          degraded: snapshot.state === 'degraded',
+          reason: snapshot.reason ?? null,
+          error: result.error,
+          model: null,
+          applies: 'next_start',
+        },
+      };
+    }
+    let fallback;
+    try {
+      fallback = await readMemoryRuntimeModelSource({ home });
+    } catch (error) {
+      fallback = {
+        source: DEFAULT_MEMORY_RUNTIME_MODEL_SOURCE,
+        defaultSource: DEFAULT_MEMORY_RUNTIME_MODEL_SOURCE,
+        values: [...MEMORY_RUNTIME_MODEL_SOURCES],
+        exists: false,
+        warnings: [error?.code ?? 'config_unreadable'],
+      };
+    }
+    return {
+      status: 200,
+      body: {
+        ok: true,
+        ...fallback,
+        enabled: false,
+        available: false,
+        state: 'stopped',
+        degraded: false,
+        reason: 'disabled',
+        error: null,
+        model: null,
+        applies: 'next_start',
+      },
+    };
+  }
+
+  // model-source 保持既有 `error: '<code>'` 信封（Console 兼容）；模型操作使用 error 对象。
+  function modelSourceFailure(result, fallbackCode, fallbackMessage) {
+    const code = typeof result?.error?.code === 'string' ? result.error.code : fallbackCode;
+    const message = typeof result?.error?.message === 'string' ? result.error.message : fallbackMessage;
+    const status = Number.isInteger(result?.status) ? result.status : 503;
+    return {
+      status,
+      body: {
+        ok: false,
+        error: code,
+        code,
+        message,
+        enabled: result?.enabled === true,
+        state: result?.state ?? 'stopped',
+        ...(result?.disabled === true ? { disabled: true } : {}),
+      },
+    };
+  }
+
+  async function writeModelSourceResponse(input) {
+    const source = normalizeMemoryRuntimeModelSource(input?.source);
+    if (!source) {
+      return {
+        status: 400,
+        body: {
+          ok: false,
+          error: 'invalid_model_source',
+          code: 'invalid_model_source',
+          message: '模型来源不合法',
+        },
+      };
+    }
+    if (!memoryRuntimeSupervisor || memoryRuntimeSupervisor.isEnabled() !== true) {
+      return modelSourceFailure({
+        status: 409,
+        enabled: false,
+        disabled: true,
+        state: 'stopped',
+        error: { code: 'memory_runtime_disabled', message: '记忆模式为轻量 MCP：切换到沉浸式后才能调整模型来源', retryable: false },
+      }, 'memory_runtime_disabled', '记忆模式为轻量 MCP');
+    }
+    if (source === 'local') {
+      const pack = modelPackId(input);
+      if (!pack) {
+        return {
+          status: 400,
+          body: {
+            ok: false,
+            error: 'pack_required',
+            code: 'pack_required',
+            message: 'source=local 需要 pack，并通过模型包激活设置',
+          },
+        };
+      }
+      const result = await memoryRuntimeSupervisor.activateModel(pack);
+      if (!result.ok) return modelSourceFailure(result, 'model_activation_failed', '模型激活失败');
+      const data = result.data ?? {};
+      const response = modelSourceSuccess(result, normalizeMemoryRuntimeModelSource(data.active) ?? source);
+      return {
+        ...response,
+        body: {
+          ...response.body,
+          selectedPack: data.packId ?? pack,
+          activated: data.activated === true,
+          requiresRestart: false,
+          warnings: Array.isArray(data.warnings) ? data.warnings : [],
+        },
+      };
+    }
+    const result = await memoryRuntimeSupervisor.updateInferenceSettings({ source });
+    if (!result.ok) return modelSourceFailure(result, 'model_source_failed', '模型来源保存失败');
+    return modelSourceSuccess(result, source);
+  }
 
   const mcpSessions = new Map(); // sessionId → { transport, server }
   async function transportFor(sessionId) {
@@ -1292,7 +1743,12 @@ export async function startHttpServer({
   async function handleAdminRead(req, res, path, url) {
     const builder = READ_ROUTES[path];
     const memoryRuntimeTrace = /^\/admin\/api\/memory-runtime\/traces\/([^/]+)$/.exec(path);
-    const memoryRuntimeRead = path === '/admin/api/memory-runtime/status'
+    const modelRead = path === '/admin/api/models'
+      || path === '/admin/api/models/status'
+      || path === '/admin/api/inference/models'
+      || path === '/admin/api/inference/status';
+    const memoryRuntimeRead = modelRead
+      || path === '/admin/api/memory-runtime/status'
       || path === '/admin/api/memory-runtime/model-source'
       || path === '/admin/api/memory-runtime/traces'
       || memoryRuntimeTrace !== null;
@@ -1309,6 +1765,12 @@ export async function startHttpServer({
     }
     if (memoryRuntimeRead) {
       // 只读薄代理：浏览器不接触 sidecar host token；轻量模式返回明确 disabled/stopped。
+      if (modelRead) {
+        const result = path.endsWith('/status')
+          ? await modelStatusResponse()
+          : await modelListResponse();
+        return sendJson(res, result.status, result.body);
+      }
       if (path === '/admin/api/memory-runtime/status') {
         const status = memoryRuntimeSupervisor
           ? await memoryRuntimeSupervisor.status().catch(() => memoryRuntimeSupervisor.snapshot())
@@ -1325,37 +1787,8 @@ export async function startHttpServer({
         });
       }
       if (path === '/admin/api/memory-runtime/model-source') {
-        let configView;
-        try {
-          configView = await readMemoryRuntimeModelSource({ home });
-        } catch (error) {
-          configView = {
-            source: DEFAULT_MEMORY_RUNTIME_MODEL_SOURCE,
-            defaultSource: DEFAULT_MEMORY_RUNTIME_MODEL_SOURCE,
-            values: [...MEMORY_RUNTIME_MODEL_SOURCES],
-            exists: false,
-            warnings: [error?.code ?? 'config_unreadable'],
-          };
-        }
-        const enabled = memoryRuntimeSupervisor?.isEnabled() === true;
-        const detail = enabled && memoryRuntimeSupervisor
-          ? await memoryRuntimeSupervisor.readStatus().catch(() => null)
-          : null;
-        const snapshot = memoryRuntimeSupervisor?.snapshot() ?? disabledMemoryRuntimeStatus();
-        const available = detail?.available === true;
-        const canApplyHot = enabled && available && snapshot.managed === true && snapshot.attached !== true;
-        return sendJson(res, 200, {
-          ok: true,
-          ...configView,
-          enabled,
-          available,
-          state: detail?.state ?? snapshot.state,
-          degraded: detail?.degraded === true,
-          reason: detail?.reason ?? null,
-          error: detail?.error ?? null,
-          model: detail?.model ?? null,
-          applies: canApplyHot ? 'hot' : 'next_start',
-        });
+        const result = await readModelSourceResponse();
+        return sendJson(res, result.status, result.body);
       }
       if (!memoryRuntimeSupervisor) {
         if (memoryRuntimeTrace) {
@@ -1582,11 +2015,11 @@ export async function startHttpServer({
     /^\/admin\/api\/assistants$/,
     /^\/admin\/api\/assistants\/([^/]+)$/,
     /^\/admin\/api\/assistants\/([^/]+)\/remove$/,
-    // 0.3 本地模型：设备级 store；同走 Origin + CSRF + memory.admin。
-    /^\/admin\/api\/(?:models|inference)\/(select|download|pause|resume|cancel|import|uninstall|remove|start|stop|test)$/,
+    // 0.3 本地模型：sidecar 薄代理；同走 Origin + CSRF + memory.admin。
+    /^\/admin\/api\/(?:models|inference)\/(install|select|download|pause|resume|cancel|import|uninstall|remove|start|stop|test)$/,
     // 0.3 记忆运行时：召回反馈经 MCP 薄代理转发 sidecar；host token 不出服务端。
     /^\/admin\/api\/memory-runtime\/feedback$/,
-    // 0.3 高级模型来源：只写 <home>/memory-runtime/config.json 的 model.source。
+    // 0.3 高级模型来源：经 sidecar `/inference/settings` 或 `/models/:pack/activate`。
     /^\/admin\/api\/memory-runtime\/model-source$/,
   ];
 
@@ -2138,53 +2571,15 @@ export async function startHttpServer({
     // 自动修复：客户端接入修复，**不**经 securityWriteGate（不写记忆/安全状态）。
     if (path === '/admin/api/repair') return handleRepair(req, res);
 
-    // 0.3 高级模型来源：轻量模式不创建 sidecar 目录，也不接受写入。
+    // 0.3 高级模型来源：sidecar 拥有 config.model.source；MCP 只做薄代理。
+    // local 必须带 pack 并通过 sidecar activate；不直接写 config.json、不重启 sidecar。
     if (path === '/admin/api/memory-runtime/model-source') {
-      if (memoryRuntimeSupervisor?.isEnabled() !== true) {
-        return sendJson(res, 409, {
-          ok: false,
-          error: 'memory_runtime_disabled',
-          enabled: false,
-          state: 'stopped',
-          message: '记忆模式为轻量 MCP：切换到沉浸式后才能调整模型来源',
-        });
-      }
       const input = parseJsonBody(body);
       if (!input) {
         return sendJson(res, 400, { ok: false, error: 'bad_request', message: '需要 JSON 请求体' });
       }
-      let written;
-      try {
-        written = await writeMemoryRuntimeModelSource({ home, source: input.source });
-      } catch (error) {
-        const code = error instanceof MemoryRuntimeConfigError ? error.code : 'config_write_failed';
-        return sendJson(res, code === 'invalid_model_source' || code === 'config_invalid' ? 400 : 409, {
-          ok: false,
-          error: code,
-          message: error?.message ?? '模型来源保存失败',
-        });
-      }
-      const snapshot = await memoryRuntimeSupervisor.status().catch(() => memoryRuntimeSupervisor.snapshot());
-      const detail = await memoryRuntimeSupervisor.readStatus().catch(() => null);
-      const canApplyHot = detail?.available === true
-        && snapshot.managed === true
-        && snapshot.attached !== true;
-      if (canApplyHot) {
-        // sidecar 重启后读取新的 model.source；失败只降级，不阻塞对话。
-        void memoryRuntimeSupervisor.restart({ includeAttached: false, force: false }).catch(() => undefined);
-      }
-      return sendJson(res, 200, {
-        ok: true,
-        ...written,
-        enabled: true,
-        available: detail?.available === true,
-        state: snapshot.state,
-        degraded: detail?.degraded === true,
-        reason: detail?.reason ?? null,
-        error: null,
-        model: detail?.model ?? null,
-        applies: canApplyHot ? 'hot' : 'next_start',
-      });
+      const result = await writeModelSourceResponse(input);
+      return sendJson(res, result.status, result.body);
     }
 
     // 0.3 记忆运行时：召回反馈经 MCP 薄代理转发 sidecar（host token 只在服务端使用）。
@@ -2209,20 +2604,13 @@ export async function startHttpServer({
       return sendJson(res, result.statusCode, result.body);
     }
 
-    // 0.3 本地模型：设备级 store，不经 securityWriteGate（不写记忆/安全状态）。
+    // 0.3 本地模型：只代理 sidecar；不经 securityWriteGate（不写记忆/安全状态）。
     const modelAction = path.match(/^\/admin\/api\/(?:models|inference)\/([^/]+)$/);
     if (modelAction) {
-      const { handleModelsWrite } = await import('./inference-admin.mjs');
-      const result = await handleModelsWrite({
-        home,
-        config,
-        action: decodeURIComponent(modelAction[1]),
-        input: parseJsonBody(body) ?? {},
-      });
-      if (result.status < 400 && ['select', 'remove', 'uninstall', 'stop'].includes(modelAction[1])) {
-        // stop 同时释放设备模型引擎，避免“admin stop 之后模型仍被占用”。
-        await refreshInferenceRuntime();
-      }
+      const result = await handleModelAction(
+        decodeURIComponent(modelAction[1]),
+        parseJsonBody(body) ?? {},
+      );
       return sendJson(res, result.status, result.body);
     }
 
@@ -3712,6 +4100,10 @@ export async function startHttpServer({
           return sendJson(res, out.status, out.body);
         }
         if (req.method === 'GET' && (READ_ROUTES[path]
+          || path === '/admin/api/models'
+          || path === '/admin/api/models/status'
+          || path === '/admin/api/inference/models'
+          || path === '/admin/api/inference/status'
           || path === '/admin/api/memory-runtime/status'
           || path === '/admin/api/memory-runtime/model-source'
           || path === '/admin/api/memory-runtime/traces'
@@ -3952,10 +4344,7 @@ export async function startHttpServer({
       } finally {
         // 4) 无论前面如何都要清理；pid 守卫保证不误删新实例的 runtime.json。
         await clearRuntimeFile(home, { pid: process.pid }).catch(() => undefined);
-        // 5) 本地模型子进程先停，避免 daemon 退出后留下孤儿 llama-server。
-        await import('./inference-admin.mjs')
-          .then(({ disposeInferenceManager }) => disposeInferenceManager(home))
-          .catch(() => undefined);
+        // 5) 本地模型进程由 sidecar 拥有；MCP 不持有推理引擎，无需本地清理。
         // 6) 保留最新 main 的生命周期收尾：root 单活锁 + 热初始化上下文（app/join/广播）。
         //    先停止本进程启动的 sidecar（attach 的不动），再撤销 capability token。
         await memoryRuntimeSupervisor?.dispose().catch(() => undefined);

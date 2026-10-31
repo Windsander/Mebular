@@ -1,30 +1,29 @@
-// `mebular models ... --json`：稳定 JSON/退出码；install 用小文件本地 HTTP，不下载真实模型。
+// `mebular models ... --json`：只走 MCP admin -> sidecar 薄代理；无 daemon 时结构化失败。
+// 不下载真实模型、不启动引擎、不写 <home>/models。
 
 import { describe, it, expect, afterEach } from '@jest/globals';
 import { spawn } from 'node:child_process';
-import { chmod, readFile, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import {
-  PACK_4B,
-  cleanupDirs,
-  makeManifest,
-  putManifest,
-  tempDir,
-  writeImportPack,
-} from '../../packages/memory-runtime/tests/inference/mcp-helpers.mjs';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const CLI = join(ROOT, 'packages', 'mcp', 'bin', 'mebular.mjs');
+const PACK_4B = 'qwen3-4b-instruct-q4_k_m';
 const tempDirs = [];
 const servers = [];
 
 afterEach(async () => {
   for (const server of servers.splice(0)) {
-    await new Promise((resolve) => server.close(resolve));
+    await new Promise((resolve) => {
+      server.close(resolve);
+      server.closeAllConnections?.();
+    });
   }
-  await cleanupDirs(tempDirs);
+  while (tempDirs.length > 0) await rm(tempDirs.pop(), { recursive: true, force: true });
 });
 
 function runCli(home, args, extraEnv = {}) {
@@ -51,110 +50,252 @@ function safeJson(text) {
 }
 
 async function makeHome() {
-  const home = await tempDir('mebular-inference-cli-');
+  const home = await mkdtemp(join(tmpdir(), 'mebular-inference-cli-'));
   tempDirs.push(home);
   return home;
 }
 
-async function writeFakeLlama(dir) {
-  const path = join(dir, 'llama-server');
-  await writeFile(path, `#!/usr/bin/env node
-import { createServer } from 'node:http';
-const args = process.argv.slice(2);
-const get = (name) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : null; };
-const port = Number(get('--port'));
-const server = createServer((req, res) => {
-  let body = '';
-  req.on('data', (chunk) => { body += chunk; });
-  req.on('end', () => {
-    if (req.url === '/health') { res.end(JSON.stringify({ status: 'ok' })); return; }
-    if (req.url === '/v1/chat/completions') {
+async function startFakeAdmin() {
+  const calls = [];
+  const server = createServer((req, res) => {
+    let raw = '';
+    req.on('data', (chunk) => { raw += chunk; });
+    req.on('end', () => {
+      const body = raw.length > 0 ? safeJson(raw) : null;
+      if (req.method === 'POST') calls.push({ method: req.method, path: req.url, body });
+      if (req.url === '/healthz') {
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify({ ok: true, ready: true }));
+        return;
+      }
+      if (req.url === '/console/') {
+        res.statusCode = 200;
+        res.setHeader('x-mebular-csrf', 'csrf-token');
+        res.setHeader('set-cookie', 'mebular_csrf=csrf-cookie; Path=/; HttpOnly');
+        res.setHeader('content-type', 'text/html');
+        res.end('<html></html>');
+        return;
+      }
       res.setHeader('content-type', 'application/json');
-      res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: JSON.stringify({ ok: true }) } }] }));
-      return;
-    }
-    res.statusCode = 404;
-    res.end('{}');
+      if (req.url === '/admin/api/models') {
+        res.end(JSON.stringify({
+          ok: true,
+          effectivePack: null,
+          runtime: { source: 'heuristic', pack: null },
+          packs: [{ packId: PACK_4B, state: 'installed', selected: false }],
+        }));
+        return;
+      }
+      if (req.url === '/admin/api/models/status') {
+        res.end(JSON.stringify({
+          ok: true,
+          install: {
+            jobId: 'job_cli_1',
+            packId: PACK_4B,
+            state: 'completed',
+            progress: 1,
+            downloadedBytes: 100,
+            totalBytes: 100,
+            warnings: [],
+          },
+          recommendation: { kind: 'local', packId: PACK_4B },
+          packs: [{ packId: PACK_4B, state: 'installed' }],
+        }));
+        return;
+      }
+      if (req.url === '/admin/api/models/install') {
+        res.statusCode = 202;
+        res.end(JSON.stringify({
+          ok: true,
+          accepted: true,
+          job: { jobId: 'job_cli_1', packId: PACK_4B, state: 'downloading' },
+        }));
+        return;
+      }
+      if (req.url === '/admin/api/models/select') {
+        res.end(JSON.stringify({ ok: true, selectedPack: PACK_4B, activated: true, active: 'local' }));
+        return;
+      }
+      if (req.url === '/admin/api/models/remove') {
+        res.end(JSON.stringify({ ok: true, removed: true, pack: PACK_4B }));
+        return;
+      }
+      if (req.url === '/admin/api/models/start') {
+        res.end(JSON.stringify({ ok: true, pack: PACK_4B, started: true, engine: { state: 'running' } }));
+        return;
+      }
+      if (req.url === '/admin/api/models/stop') {
+        res.end(JSON.stringify({ ok: true, pack: PACK_4B, stopped: true, engine: { state: 'stopped' } }));
+        return;
+      }
+      res.statusCode = 404;
+      res.end(JSON.stringify({ ok: false, error: { code: 'not_found', message: 'not found' } }));
+    });
   });
-});
-server.listen(port, '127.0.0.1');
-const stop = () => server.close(() => process.exit(0));
-process.on('SIGTERM', stop);
-process.on('SIGINT', stop);
-`, 'utf-8');
-  await chmod(path, 0o755);
-  return path;
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  servers.push(server);
+  return { port: server.address().port, calls };
+}
+
+async function writeRuntime(home, port) {
+  await mkdir(home, { recursive: true });
+  await writeFile(join(home, 'runtime.json'), JSON.stringify({
+    version: '0.3.0',
+    pid: process.pid,
+    http: { host: '127.0.0.1', port },
+    consolePath: '/console',
+    mcpPath: '/mcp',
+    embedProtocol: 1,
+  }), { encoding: 'utf-8', mode: 0o600 });
 }
 
 describe('mebular models CLI', () => {
-  it('list/status/import/select/remove 稳定 JSON；未启动 daemon 时 start 返回 daemon_unavailable', async () => {
+  it('无 daemon：list/status/install/select/remove/start/stop 都返回 daemon_unavailable', async () => {
     const home = await makeHome();
+    for (const args of [
+      ['list'],
+      ['status'],
+      ['install', PACK_4B],
+      ['select', PACK_4B],
+      ['remove', PACK_4B],
+      ['start', PACK_4B],
+      ['stop', PACK_4B],
+    ]) {
+      const result = await runCli(home, args);
+      expect(result.code).toBe(2);
+      expect(result.json).toMatchObject({
+        ok: false,
+        command: `models.${args[0]}`,
+        error: { code: 'daemon_unavailable' },
+      });
+      expect(JSON.stringify(result.json)).not.toMatch(/token|host-token/i);
+    }
+    expect(existsSync(join(home, 'models'))).toBe(false);
+    expect(existsSync(join(home, 'inference.json'))).toBe(false);
+  });
+
+  it('import/test/pause/resume 明确 unsupported，即使 daemon 可用', async () => {
+    const home = await makeHome();
+    const { port, calls } = await startFakeAdmin();
+    await writeRuntime(home, port);
+    for (const args of [
+      ['import', '/tmp/pack'],
+      ['test', PACK_4B],
+      ['pause', PACK_4B],
+      ['resume', PACK_4B],
+    ]) {
+      const result = await runCli(home, args);
+      expect(result.code).toBe(2);
+      expect(result.json).toMatchObject({
+        ok: false,
+        command: `models.${args[0]}`,
+        error: { code: 'unsupported' },
+      });
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  it('daemon 可用：list/status/install/select/remove/start/stop 走 admin proxy，--json 稳定', async () => {
+    const home = await makeHome();
+    const { port, calls } = await startFakeAdmin();
+    await writeRuntime(home, port);
+
     const list = await runCli(home, ['list']);
     expect(list.code).toBe(0);
     expect(list.json).toMatchObject({ ok: true, command: 'models.list' });
-    expect(list.json.packs).toHaveLength(4);
+    expect(list.json.packs).toHaveLength(1);
 
-    const status = await runCli(home, ['status'], {
-      MEBULAR_MODEL_HARDWARE_JSON: JSON.stringify({
-        platform: 'darwin', arch: 'arm64', osVersion: 'test', cpuCores: 8,
-        totalMemoryBytes: 16 * 1024 ** 3, freeMemoryBytes: 8 * 1024 ** 3,
-        disk: { path: '/tmp', availableBytes: 100 * 1024 ** 3 },
-        gpu: { vendor: 'apple', unifiedMemory: true }, detectedAt: 0, warnings: [],
-      }),
-    });
+    const status = await runCli(home, ['status']);
     expect(status.code).toBe(0);
-    expect(status.json).toMatchObject({ ok: true, recommendation: { kind: 'local' } });
+    expect(status.json).toMatchObject({ ok: true, recommendation: { kind: 'local', packId: PACK_4B } });
 
-    const source = await tempDir('mebular-inference-cli-src-');
-    tempDirs.push(source);
-    await writeImportPack(source, makeManifest());
-    const imported = await runCli(home, ['import', source]);
-    expect(imported.code).toBe(0);
-    expect(imported.json).toMatchObject({ ok: true, imported: true, pack: PACK_4B });
+    const install = await runCli(home, ['install', PACK_4B]);
+    expect(install.code).toBe(0);
+    expect(install.json).toMatchObject({
+      ok: true,
+      command: 'models.install',
+      pack: PACK_4B,
+      state: 'installed',
+      job: { jobId: 'job_cli_1', state: 'completed' },
+    });
 
-    const selected = await runCli(home, ['select', PACK_4B, '--source', 'local']);
-    expect(selected.code).toBe(0);
-    expect(selected.json).toMatchObject({ ok: true, selectedPack: PACK_4B });
+    const select = await runCli(home, ['select', PACK_4B]);
+    expect(select.code).toBe(0);
+    expect(select.json).toMatchObject({ ok: true, selectedPack: PACK_4B });
 
-    const refused = await runCli(home, ['remove', PACK_4B]);
-    expect(refused.code).toBe(2);
-    expect(refused.json).toMatchObject({ ok: false, error: { code: 'selection_in_use' } });
-
-    const removed = await runCli(home, ['remove', PACK_4B, '--force']);
-    expect(removed.code).toBe(0);
-    expect(removed.json).toMatchObject({ ok: true, removed: true });
+    const remove = await runCli(home, ['remove', PACK_4B]);
+    expect(remove.code).toBe(0);
+    expect(remove.json).toMatchObject({ ok: true, removed: true, pack: PACK_4B });
 
     const start = await runCli(home, ['start', PACK_4B]);
-    expect(start.code).toBe(2);
-    expect(start.json).toMatchObject({ ok: false, error: { code: 'daemon_unavailable' } });
+    expect(start.code).toBe(0);
+    expect(start.json).toMatchObject({ ok: true, started: true });
+
+    const stop = await runCli(home, ['stop', PACK_4B]);
+    expect(stop.code).toBe(0);
+    expect(stop.json).toMatchObject({ ok: true, stopped: true });
+
+    expect(calls.map((call) => call.path)).toEqual([
+      '/admin/api/models/install',
+      '/admin/api/models/select',
+      '/admin/api/models/remove',
+      '/admin/api/models/start',
+      '/admin/api/models/stop',
+    ]);
+    expect(calls[0].body).toMatchObject({ pack: PACK_4B });
+    expect(existsSync(join(home, 'models'))).toBe(false);
+    expect(existsSync(join(home, 'inference.json'))).toBe(false);
+    const serialized = JSON.stringify([list.json, status.json, install.json, select.json, remove.json, start.json, stop.json]);
+    expect(serialized).not.toMatch(/token|host-token/i);
+  }, 30000);
+
+  it('daemon 返回 409 memory_runtime_disabled 时保留结构化错误', async () => {
+    const home = await makeHome();
+    const server = createServer((req, res) => {
+      res.setHeader('content-type', 'application/json');
+      if (req.url === '/healthz') {
+        res.end(JSON.stringify({ ok: true, ready: true }));
+        return;
+      }
+      if (req.url === '/console/') {
+        res.setHeader('x-mebular-csrf', 'csrf-token');
+        res.setHeader('set-cookie', 'mebular_csrf=csrf-cookie; Path=/; HttpOnly');
+        res.end('<html></html>');
+        return;
+      }
+      res.statusCode = 409;
+      res.end(JSON.stringify({
+        ok: false,
+        error: { code: 'memory_runtime_disabled', message: '记忆运行时未启用', retryable: false },
+      }));
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    servers.push(server);
+    await writeRuntime(home, server.address().port);
+
+    const list = await runCli(home, ['list']);
+    expect(list.code).toBe(2);
+    expect(list.json).toMatchObject({
+      ok: false,
+      error: { code: 'memory_runtime_disabled' },
+    });
   });
 
-  it('install 通过本地 HTTP 小文件完成；test 用假 llama-server 后自动停止', async () => {
-    if (process.platform === 'win32') return;
+  it('daemon 不可达（runtime.json 存在但 healthz 失败）返回 daemon_unavailable', async () => {
     const home = await makeHome();
-    const content = Buffer.from('tiny-model-bytes');
-    const manifest = makeManifest({ files: [{ path: 'model.gguf', content }] });
-    await putManifest(home, manifest);
+    await writeRuntime(home, 9);
+    const list = await runCli(home, ['list']);
+    expect(list.code).toBe(2);
+    expect(list.json).toMatchObject({ ok: false, error: { code: 'daemon_unavailable' } });
+  });
 
-    const server = createServer((req, res) => {
-      res.writeHead(200, { 'content-length': content.length, etag: '"tiny"' });
-      res.end(content);
-    });
-    servers.push(server);
-    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-    const base = `http://127.0.0.1:${server.address().port}/pack`;
-
-    const install = await runCli(home, ['install', PACK_4B, '--mirror', base]);
-    expect(install.code).toBe(0);
-    expect(install.json).toMatchObject({ ok: true, pack: PACK_4B, state: 'installed' });
-
-    const binDir = await tempDir('mebular-inference-cli-bin-');
-    tempDirs.push(binDir);
-    const binary = await writeFakeLlama(binDir);
-    const test = await runCli(home, ['test', PACK_4B], { MEBULAR_LLAMA_SERVER: binary });
-    expect(test.code).toBe(0);
-    expect(test.json).toMatchObject({ ok: true, pack: PACK_4B, startedByTest: true });
-    const state = JSON.parse(await readFile(join(home, 'inference.json'), 'utf-8'));
-    expect(state.installs[PACK_4B]).toBeTruthy();
+  it('runtime.json 指向的 daemon 不写任何设备模型文件', async () => {
+    const home = await makeHome();
+    const { port } = await startFakeAdmin();
+    await writeRuntime(home, port);
+    await runCli(home, ['status']);
+    const runtime = JSON.parse(await readFile(join(home, 'runtime.json'), 'utf-8'));
+    expect(runtime.http.port).toBe(port);
+    expect(existsSync(join(home, 'models'))).toBe(false);
   });
 });

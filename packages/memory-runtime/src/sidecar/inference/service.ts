@@ -39,8 +39,10 @@ import {
   type ModelRemoveView,
   type InferenceApi,
   type InferenceCapabilities,
+  type InferenceSettingsView,
   type InferenceStatusView,
   type ModelStatusView,
+  type UpdateInferenceSettingsInput,
 } from './types.js';
 import { recommendModel } from '../../inference/detect.js';
 
@@ -691,6 +693,44 @@ export class InferenceService implements InferenceApi {
     };
   }
 
+  async settings(): Promise<InferenceSettingsView> {
+    return this.settingsView();
+  }
+
+  /**
+   * 进程内切换非 local 推理来源。
+   *
+   * - heuristic：停引擎、清 active，保留 local.pack 作为“上次选择”；
+   * - host/api/auto：local 正在运行时先停引擎，再切换 provider；
+   * - local 只允许 `POST /models/:pack/activate`，这里返回 400 pack_required；
+   * - 全程不重启 sidecar，配置持久化失败只返回 warning。
+   */
+  async updateSettings(input: UpdateInferenceSettingsInput): Promise<InferenceSettingsView> {
+    const source = (input as { source?: unknown } | undefined)?.source;
+    if (source === 'local') {
+      throw new InferenceError('pack_required', 'local 来源必须通过模型包激活设置', {
+        status: 400,
+        details: { hint: 'POST /memory-runtime/v1/models/:packId/activate' },
+      });
+    }
+    if (source !== 'heuristic' && source !== 'host' && source !== 'api' && source !== 'auto') {
+      throw new InferenceError('invalid_request', 'source 必须是 heuristic/host/api/auto', {
+        status: 400,
+      });
+    }
+    return this.serialized(async () => {
+      const engineRunning = this.engineAdapter.isRunning();
+      if (source === 'heuristic' || this.activePackId !== null || engineRunning) {
+        await this.engineAdapter.stop().catch(() => undefined);
+      }
+      this.activePackId = null;
+      this.config.model.source = source;
+      await this.reconfigure();
+      const warnings = await this.persistModelSource(source);
+      return this.settingsView(warnings);
+    });
+  }
+
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
@@ -709,6 +749,16 @@ export class InferenceService implements InferenceApi {
     const next = this.actionQueue.then(fn, fn);
     this.actionQueue = next.then(() => undefined, () => undefined);
     return next;
+  }
+
+  private async settingsView(extraWarnings: string[] = []): Promise<InferenceSettingsView> {
+    const status = await this.status();
+    return {
+      ...status,
+      config: { source: this.config.model.source },
+      providers: this.providers(activeSource(this.config, this.activePackId)),
+      warnings: unique([...status.warnings, ...extraWarnings]),
+    };
   }
 
   private activeView(): ModelActiveView {
@@ -973,6 +1023,27 @@ export class InferenceService implements InferenceApi {
     this.config.model.local.path = null;
     await this.reconfigure();
     return this.persistModelConfig('local', packId);
+  }
+
+  /** 只更新 config.model.source，保留 local/api 等用户配置；失败只 warning。 */
+  private async persistModelSource(source: SidecarConfig['model']['source']): Promise<string[]> {
+    try {
+      let raw: Record<string, unknown> = {};
+      try {
+        const text = await readFile(this.paths.configPath, 'utf8');
+        const parsed: unknown = JSON.parse(text);
+        if (isObject(parsed)) raw = parsed;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') return ['config_persist_failed'];
+      }
+      const model = isObject(raw.model) ? { ...raw.model } : {};
+      model.source = source;
+      raw.model = model;
+      await writeJsonAtomic(this.paths.configPath, raw);
+      return [];
+    } catch {
+      return ['config_persist_failed'];
+    }
   }
 
   /** 持久化 source/pack，保证 sidecar 重启后仍按同一模型配置启动；失败只 warning。 */

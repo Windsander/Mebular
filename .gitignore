@@ -76,3 +76,7 @@ examples/quickstart/.data/
 
 # WAN NAT 仿真临时状态
 .wan-nat/
+
+# Python 測試/工具產物
+__pycache__/
+*.py[cod]

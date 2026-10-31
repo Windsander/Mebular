@@ -24,6 +24,22 @@ node scripts/verify-dsh-e2e.mjs --scenario happy-path --plugin-tarball ./bad.tgz
 CI 触发、矩阵、artifacts 与 release gate 见
 [`docs/operations/DSH_E2E.md`](../../../docs/operations/DSH_E2E.md)。
 
+## Memory Runtime E2E（fake Runtime，无外部模型）
+
+```bash
+npm run verify:dsh:memory-runtime                 # enabled + disabled
+npm run verify:dsh:memory-runtime -- --scenario enabled
+npm run verify:dsh:memory-runtime -- --scenario disabled --keep
+```
+
+复用 `scripts/lib/dsh-e2e-world.mjs` 的真实 DSH Web profile，但把 Memory Runtime
+sidecar 换成本地 `tests/dsh/e2e/fake-runtime-server.mjs`：不启动模型、不读写用户
+home。覆盖 pre-step `/context` 注入/anchor 去重、工具遮蔽与 `tools/change` 重放、
+compaction checkpoint、ingest 重试/幂等、bearer 认证，以及 `memoryRuntime` 关闭时零
+`/memory-runtime/v1` 请求。前置仍是构建产物、Mebular CLI、pnpm 和可安装的
+`@deepseek-ai/dsh`；不需要 Chrome。CI 中它是 `.github/workflows/dsh-e2e.yml` 的独立
+`memory-runtime` job，不影响真实 DSH 矩阵的时长。
+
 ## Negative control（test-of-test）
 
 ```bash

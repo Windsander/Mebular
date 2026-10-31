@@ -6,7 +6,7 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homeDir } from '../src/home.mjs';
 import { serviceBuildSha } from '../src/build-sha.mjs';
@@ -1117,6 +1117,287 @@ async function runCloud(action, args, flags) {
   process.exit(2);
 }
 
+// ---------- 本地模型：mebular models list/status/install/import/remove/start/stop/test ----------
+
+function modelsUsage() {
+  return '用法：mebular models <list|status|install|import|select|remove|start|stop|test> [--json] [--pack P] [--manifest FILE] [--mirror URL] [--path DIR] [--force] [--threads N] [--token T]';
+}
+
+async function modelsDaemonBase(home) {
+  const { readRuntimeFile } = await import('../src/runtime-file.mjs');
+  const record = await readRuntimeFile(home).catch(() => null);
+  const host = record?.http?.host;
+  const port = record?.http?.port;
+  if (typeof host !== 'string' || !Number.isInteger(port)) return null;
+  const displayHost = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
+  const base = `http://${displayHost}:${port}`;
+  try {
+    const response = await fetch(`${base}/healthz`, { signal: AbortSignal.timeout(1200) });
+    return response.ok ? base : null;
+  } catch {
+    return null;
+  }
+}
+
+async function modelsAdminCsrf(base) {
+  const response = await fetch(`${base}/console/`, { signal: AbortSignal.timeout(3000) });
+  const token = response.headers.get('x-mebular-csrf');
+  const cookies = typeof response.headers.getSetCookie === 'function' ? response.headers.getSetCookie() : [];
+  const cookie = cookies.find((value) => value.startsWith('mebular_csrf='))?.split(';')[0] ?? null;
+  return token && cookie ? { token, cookie } : null;
+}
+
+async function modelsAdminRequest(base, { method = 'GET', path, body = null, flags = {} } = {}) {
+  const headers = { accept: 'application/json' };
+  const token = typeof flags.token === 'string'
+    ? flags.token
+    : process.env.MEBULAR_ADMIN_TOKEN;
+  if (typeof token === 'string' && token.length > 0) headers.authorization = `Bearer ${token}`;
+  if (method !== 'GET') {
+    const csrf = await modelsAdminCsrf(base).catch(() => null);
+    if (!csrf) {
+      return { status: 403, body: { ok: false, error: { code: 'csrf_unavailable', message: '无法从守护获取 CSRF token' } } };
+    }
+    headers['x-mebular-csrf'] = csrf.token;
+    headers.cookie = csrf.cookie;
+    headers['content-type'] = 'application/json';
+  }
+  const response = await fetch(`${base}${path}`, {
+    method,
+    headers,
+    ...(body !== null ? { body: JSON.stringify(body) } : {}),
+    signal: AbortSignal.timeout(10 * 60_000),
+  });
+  const data = await response.json().catch(() => null);
+  if (!data || typeof data !== 'object') {
+    return { status: response.status, body: { ok: false, error: { code: 'invalid_response', message: '守护返回了非 JSON 响应' } } };
+  }
+  // 现有 admin 门禁返回 { error: 'unauthorized', message }；CLI 统一成结构化 error。
+  if (typeof data.ok !== 'boolean' && typeof data.error === 'string') {
+    return {
+      status: response.status,
+      body: {
+        ...data,
+        ok: false,
+        error: { code: data.error, message: typeof data.message === 'string' ? data.message : data.error },
+        code: data.error,
+      },
+    };
+  }
+  return { status: response.status, body: data };
+}
+
+function modelCliError(error) {
+  if (error && typeof error.toBody === 'function') return error.toBody();
+  if (error?.code && typeof error.code === 'string') {
+    return {
+      ok: false,
+      error: { code: error.code, message: String(error.message ?? error), retryable: false },
+      code: error.code,
+      message: String(error.message ?? error),
+    };
+  }
+  return {
+    ok: false,
+    error: { code: 'models_failed', message: String(error?.message ?? error), retryable: false },
+    code: 'models_failed',
+    message: String(error?.message ?? error),
+  };
+}
+
+function printModelsResult(command, body, { json = false } = {}) {
+  const payload = body && typeof body === 'object' ? { ...body, command } : { ok: false, command, error: { code: 'models_failed', message: '空响应' } };
+  if (json) {
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+  if (payload.ok !== true) {
+    console.error(`✗ ${payload.error?.code ?? 'models_failed'}：${payload.error?.message ?? payload.message ?? '失败'}`);
+    return;
+  }
+  if (command === 'models.list' || command === 'models.status') {
+    const packs = Array.isArray(payload.packs) ? payload.packs : [];
+    console.log(`selected: ${payload.effectivePack ?? payload.selectedPack ?? '(none)'}`);
+    for (const pack of packs) {
+      console.log(`${pack.packId}\t${pack.state}${pack.selected ? '\tselected' : ''}`);
+    }
+    return;
+  }
+  console.log(JSON.stringify(payload, null, 2));
+}
+
+async function runModels(args, flags) {
+  const sub = typeof args[0] === 'string' ? args[0] : 'list';
+  const json = flags.json === true;
+  const home = homeDir();
+  const command = `models.${sub}`;
+  try {
+    const { createInferenceManager } = await import('../src/inference-admin.mjs');
+    const { readDeviceConfig } = await import('../src/inference-store.mjs');
+    const config = await readDeviceConfig(home);
+    const daemon = await modelsDaemonBase(home);
+
+    if (sub === 'list' || sub === 'status') {
+      if (daemon) {
+        const result = await modelsAdminRequest(daemon, {
+          path: sub === 'status' ? '/admin/api/models/status' : '/admin/api/models',
+          flags,
+        });
+        printModelsResult(command, result.body, { json });
+        if (result.status >= 400) process.exit(2);
+        return;
+      }
+      const manager = createInferenceManager({ home });
+      const body = sub === 'status'
+        ? await manager.status({ config })
+        : await manager.list({ config });
+      await manager.dispose().catch(() => undefined);
+      printModelsResult(command, body, { json });
+      return;
+    }
+
+    if (sub === 'install' || sub === 'download') {
+      const pack = args[1] ?? flags.pack;
+      const input = {
+        pack,
+        ...(typeof flags.manifest === 'string' ? { manifestPath: flags.manifest } : {}),
+        ...(typeof flags.mirror === 'string' ? { mirrors: flags.mirror } : {}),
+        ...(flags.force === true ? { force: true } : {}),
+        wait: true,
+      };
+      if (daemon) {
+        const result = await modelsAdminRequest(daemon, { method: 'POST', path: '/admin/api/models/download', body: input, flags });
+        printModelsResult(command, result.body, { json });
+        if (result.status >= 400 || result.body?.ok === false) process.exit(2);
+        return;
+      }
+      const manager = createInferenceManager({ home });
+      const body = await manager.download(input, { config });
+      await manager.dispose().catch(() => undefined);
+      printModelsResult(command, body, { json });
+      if (body?.ok === false) process.exit(2);
+      return;
+    }
+
+    if (sub === 'import') {
+      const input = {
+        path: args[1] ?? flags.path,
+        ...(typeof flags.pack === 'string' ? { pack: flags.pack } : {}),
+        ...(flags.force === true ? { force: true } : {}),
+      };
+      if (daemon) {
+        const result = await modelsAdminRequest(daemon, { method: 'POST', path: '/admin/api/models/import', body: input, flags });
+        printModelsResult(command, result.body, { json });
+        if (result.status >= 400) process.exit(2);
+        return;
+      }
+      const manager = createInferenceManager({ home });
+      const body = await manager.importPack(input, { config });
+      await manager.dispose().catch(() => undefined);
+      printModelsResult(command, body, { json });
+      return;
+    }
+
+    if (sub === 'select') {
+      const input = {
+        pack: args[1] ?? flags.pack,
+        ...(typeof flags.source === 'string' ? { source: flags.source } : {}),
+        ...(flags['allow-missing'] === true ? { allowMissing: true } : {}),
+      };
+      if (daemon) {
+        const result = await modelsAdminRequest(daemon, { method: 'POST', path: '/admin/api/models/select', body: input, flags });
+        printModelsResult(command, result.body, { json });
+        if (result.status >= 400) process.exit(2);
+        return;
+      }
+      const manager = createInferenceManager({ home });
+      const body = await manager.select(input, { config });
+      await manager.dispose().catch(() => undefined);
+      printModelsResult(command, body, { json });
+      return;
+    }
+
+    if (sub === 'remove' || sub === 'uninstall') {
+      const input = {
+        pack: args[1] ?? flags.pack,
+        ...(flags.force === true ? { force: true } : {}),
+      };
+      if (daemon) {
+        const result = await modelsAdminRequest(daemon, { method: 'POST', path: '/admin/api/models/uninstall', body: input, flags });
+        printModelsResult(command, result.body, { json });
+        if (result.status >= 400) process.exit(2);
+        return;
+      }
+      const manager = createInferenceManager({ home });
+      const body = await manager.remove(input, { config });
+      await manager.dispose().catch(() => undefined);
+      printModelsResult(command, body, { json });
+      return;
+    }
+
+    if (sub === 'start') {
+      if (!daemon) {
+        throw Object.assign(new Error('models start 需要常驻 mebular serve 持有本地模型子进程；请先启动 serve'), { code: 'daemon_unavailable' });
+      }
+      const threads = typeof flags.threads === 'string' ? Number(flags.threads) : null;
+      const input = {
+        pack: args[1] ?? flags.pack,
+        ...(Number.isInteger(threads) && threads > 0 ? { threads } : {}),
+      };
+      const result = await modelsAdminRequest(daemon, { method: 'POST', path: '/admin/api/models/start', body: input, flags });
+      printModelsResult(command, result.body, { json });
+      if (result.status >= 400) process.exit(2);
+      return;
+    }
+
+    if (sub === 'stop') {
+      if (daemon) {
+        const result = await modelsAdminRequest(daemon, { method: 'POST', path: '/admin/api/models/stop', body: { pack: args[1] ?? flags.pack }, flags });
+        printModelsResult(command, result.body, { json });
+        if (result.status >= 400) process.exit(2);
+        return;
+      }
+      const manager = createInferenceManager({ home });
+      const body = await manager.stop({ pack: args[1] ?? flags.pack });
+      await manager.dispose().catch(() => undefined);
+      printModelsResult(command, { ...body, reason: 'daemon_not_running' }, { json });
+      return;
+    }
+
+    if (sub === 'test') {
+      if (daemon) {
+        const timeoutMs = typeof flags.timeout === 'string' ? Number(flags.timeout) : null;
+        const input = {
+          pack: args[1] ?? flags.pack,
+          ...(typeof flags.prompt === 'string' ? { prompt: flags.prompt } : {}),
+          ...(Number.isFinite(timeoutMs) && timeoutMs > 0 ? { timeoutMs } : {}),
+        };
+        const result = await modelsAdminRequest(daemon, { method: 'POST', path: '/admin/api/models/test', body: input, flags });
+        printModelsResult(command, result.body, { json });
+        if (result.status >= 400) process.exit(2);
+        return;
+      }
+      // 无守护时 test 仍安全：启动 → 极小 self-test → 必定停止。
+      const manager = createInferenceManager({ home });
+      const timeoutMs = typeof flags.timeout === 'string' ? Number(flags.timeout) : null;
+      const body = await manager.test({
+        pack: args[1] ?? flags.pack,
+        ...(typeof flags.prompt === 'string' ? { prompt: flags.prompt } : {}),
+        ...(Number.isFinite(timeoutMs) && timeoutMs > 0 ? { timeoutMs } : {}),
+      }, { config });
+      await manager.dispose().catch(() => undefined);
+      printModelsResult(command, body, { json });
+      if (body?.ok === false) process.exit(2);
+      return;
+    }
+
+    throw Object.assign(new Error(modelsUsage()), { code: 'USAGE' });
+  } catch (error) {
+    printModelsResult(command, modelCliError(error), { json });
+    process.exit(2);
+  }
+}
+
 // ---------- 共享 runtime：resolve / ensure / status + provider 注册表 ----------
 
 function runtimeCliError(error) {
@@ -1503,6 +1784,110 @@ async function runRuntimeUpgrade(flags) {
   printRuntimeJson(result, result.ok ? 0 : 2);
 }
 
+// ---------- Memory Runtime sidecar（`mebular memory-runtime ...`） ----------
+//
+// 与 `mebular runtime ...`（MCP daemon）严格分离：这里只管理 `mebular-memory-runtime serve`。
+// 输出稳定 JSON，不返回 host token / capability token / tokenFile。
+
+async function readMemoryRuntimeConfig(home) {
+  try {
+    const file = process.env.MEBULAR_CONFIG ?? join(home, 'config.json');
+    return JSON.parse(await readFile(file, 'utf-8'));
+  } catch {
+    return {};
+  }
+}
+
+function memoryRuntimeHome(flags) {
+  const explicit = typeof flags.home === 'string' && flags.home.length > 0 ? flags.home : null;
+  return explicit ? resolve(explicit) : resolve(homeDir());
+}
+
+function memoryRuntimeTimeout(flags) {
+  if (flags.timeout === undefined) return 5000;
+  const value = Number(flags.timeout);
+  if (!Number.isInteger(value) || value < 0 || value > 120_000) {
+    const error = new Error('--timeout 必须是 0–120000 的整数（毫秒）');
+    error.code = 'USAGE';
+    throw error;
+  }
+  return value;
+}
+
+function printMemoryRuntime(value, exitCode = 0) {
+  console.log(JSON.stringify(value, null, 2));
+  process.exit(exitCode);
+}
+
+async function runMemoryRuntime(action, flags) {
+  const usage = '用法：mebular memory-runtime <status|start|stop|restart> [--json] [--home DIR] [--timeout MS]';
+  try {
+    if (!['status', 'start', 'stop', 'restart'].includes(action)) {
+      const error = new Error(usage);
+      error.code = 'USAGE';
+      throw error;
+    }
+    const home = memoryRuntimeHome(flags);
+    const config = await readMemoryRuntimeConfig(home);
+    const timeoutMs = memoryRuntimeTimeout(flags);
+    const {
+      MemoryRuntimeSupervisor,
+      inspectMemoryRuntimeStatus,
+      memoryRuntimeStatusExitCode,
+    } = await import('../src/memory-runtime-supervisor.mjs');
+
+    if (action === 'status') {
+      const status = await inspectMemoryRuntimeStatus({ home, config, env: process.env });
+      printMemoryRuntime({
+        ok: true,
+        kind: 'memory-runtime',
+        action,
+        ...status,
+      }, 0);
+      return;
+    }
+
+    const supervisor = new MemoryRuntimeSupervisor({
+      home,
+      config,
+      env: process.env,
+    });
+
+    if (action === 'stop') {
+      const status = await supervisor.stop({ includeAttached: true, timeoutMs });
+      printMemoryRuntime({
+        ok: true,
+        kind: 'memory-runtime',
+        action,
+        ...status,
+      }, 0);
+      return;
+    }
+
+    const status = action === 'restart'
+      ? await supervisor.restart({ includeAttached: true, timeoutMs, manual: true })
+      : await supervisor.start({ force: true, manual: true });
+    const ok = status.state === 'ready' || status.state === 'degraded';
+    printMemoryRuntime({
+      ok,
+      kind: 'memory-runtime',
+      action,
+      ...status,
+    }, ok ? 0 : memoryRuntimeStatusExitCode(status));
+  } catch (error) {
+    const code = error?.code === 'USAGE' ? 'usage' : (error?.code ?? 'error');
+    printMemoryRuntime({
+      ok: false,
+      kind: 'memory-runtime',
+      action: action ?? null,
+      error: {
+        code,
+        message: error?.message ?? String(error),
+      },
+    }, code === 'usage' ? 2 : 1);
+  }
+}
+
 async function runRuntime(action, args, flags) {
   try {
     if (action === 'provider') {
@@ -1670,6 +2055,14 @@ async function main() {
       await runRuntime(argv[1], argv.slice(2), flags);
       return;
     }
+    case 'memory-runtime': {
+      await runMemoryRuntime(argv[1], flags);
+      return;
+    }
+    case 'models': {
+      await runModels(argv.slice(1), flags);
+      return;
+    }
     case 'token': {
       await runToken(argv[1], flags, argv[2]);
       return;
@@ -1698,6 +2091,8 @@ async function main() {
           '  runtime current show|set|clear [--version V --runtime-path P --cli C --provider shared --owner O --installed-at ISO]  current 指针（非敏感）',
           '  runtime service install|uninstall|restart|status [--json]  共享 mebular-serve 所有权/生命周期',
           '  runtime provider list|add|remove [--kind app|cli|shared --path P --version V --capabilities a,b --id ID]  runtime provider 注册表',
+          '  memory-runtime status|start|stop|restart [--json] [--home DIR]   记忆运行时 sidecar（独立于 MCP daemon runtime）',
+          '  models list|status|install|import|select|remove|start|stop|test [--json] [--pack P] [--manifest FILE] [--mirror URL]  本地 Qwen 模型（设备级，不同步）',
           '  token grant|list|revoke [--scope a,b] [--id x] [--tokens-file p]   bearer 令牌管理',
           '  token client add|list|remove [--redirect uri] [--scope a,b] [--id x]   OAuth 客户端预注册',
           '  token consent [--scope a,b] [--ttl sec]   生成一次性本地同意码（/authorize 用）',

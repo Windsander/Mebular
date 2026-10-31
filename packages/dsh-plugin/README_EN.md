@@ -79,6 +79,50 @@ dsh plugin --profile web remove @mebular/dsh-plugin
 
 </details>
 
+## Memory Runtime (opt-in)
+
+Starting with 0.3.0 the host plugin can bridge an independent Memory Runtime sidecar (`/memory-runtime/v1`) alongside the existing MCP bridge. It is **off by default**: when disabled it registers no listeners, reads no discovery file, starts no timer and performs no request, so attach/managed/panel/MCP behaviour is unchanged. The sidecar is a separate process: the plugin never treats the MCP `daemonUrl` as the sidecar URL and never guesses a port.
+
+```yaml
+- id: mebular
+  name: '@mebular/dsh-plugin'
+  config:
+    lifecycle: attach
+    panel: true
+    memoryRuntime:
+      enabled: true
+      # Optional: explicit sidecar base; otherwise env / <home>/memory-runtime.json.
+      # url: 'http://127.0.0.1:7341/memory-runtime/v1'
+      # Optional: host token; otherwise tokenFile / env / discovery tokenFile.
+      # tokenFile: '~/.mebular/memory-runtime/host-token'
+      # Optional: these default to true; maintenance defaults to false.
+      recall: true
+      ingest: true
+      checkpoints: true
+      hideMemoryTools: true
+      maintenance: false
+      # Domain hints (the sidecar decides the final domain when omitted).
+      domains: ['user', 'agent:dsh', 'default']
+      # Governance allowlist (these memory_* tools stay visible); task_* is always kept.
+      governanceTools: []
+      # Memory-butler presets/session ids are exempt from tool masking.
+      memoryAgentPresets: ['mebular-memory']
+      # Sidecar Host API auth: auto (default, bearer when a token exists) / bearer / none.
+      auth: auto
+      # Host token env var (default MEBULAR_MEMORY_RUNTIME_TOKEN).
+      tokenEnv: MEBULAR_MEMORY_RUNTIME_TOKEN
+      # token: '...'
+```
+
+- Discovery: `memoryRuntime.url` > `MEBULAR_MEMORY_RUNTIME_URL` > `<home>/memory-runtime.json` (`state=ready|degraded`, heartbeat ≤15s, `apiVersion=1`). Without a usable discovery the immersive path stays disabled and failure-open; it never blindly connects to 7341/7331.
+- Token: `memoryRuntime.token` > `MEBULAR_MEMORY_RUNTIME_TOKEN` > `memoryRuntime.tokenFile` > discovery `tokenFile` > `<home>/memory-runtime/host-token`. POSIX token files must be `0600`; the value never enters URLs, logs, errors or `getState()`.
+- `recall`: calls `POST /memory-runtime/v1/context` only on the first step of a new human turn (explicitly falls back to `/recall` when an older sidecar has no `/context`). No hits, timeout or failure passes through unchanged; a hit injects one `role='user'` + `source.kind='mebular-memory'` context injection (DSH does not render it as a user bubble; `source.kind='user'` is never used), deduped by surface + session query + turn. The block is capped at 8 KiB and escaped as untrusted background data.
+- `ingest`: batches user/assistant/tool events to `POST /memory-runtime/v1/ingest`, skips the fork/resume inherited prefix and the plugin's own recall injection, dedupes by `(sessionId, seq)`, uses a bounded queue and never blocks the loop. Network errors, timeouts, 429 and 5xx retry at most twice by default (exponential backoff; `ingestRetries` / `ingestRetryBaseMs`); dispose cancels the backoff. Retries reuse one `requestId` and `Idempotency-Key`, failures surface as warning/status, and events are not re-enqueued.
+- `auth`: `auto` (default) sends `Authorization: Bearer` when a token exists; `bearer` forces bearer, `none` never sends. A 401 refreshes the cached token once and retries once; if it still fails the request is failure-open and recorded as warning/status.
+- `checkpoints`: folds `compaction/start → summary → replacement → end` into a ContextCheckpoint and `PUT /memory-runtime/v1/checkpoints/:threadId` (`domain=task:<threadId>`, no legacy `sync`); a failure or interruption is never reported as committed.
+- `hideMemoryTools`: dynamically hides currently visible `mcp__mebular__memory_*` from ordinary agents, keeps `task_*` and `governanceTools`, and replays through `agent.ctx.tools.restrict` + `tools/change` without hardcoding unknown names.
+- `maintenance`: off by default; when enabled, on idle it asks the current session model for candidates and submits them to `POST /memory-runtime/v1/ingest` (`extractor='host'`); no tools, capped maxTokens, timeout, silent failure and no direct graph write.
+
 ## MCP tools
 
 DSH reaches the same daemon at `/mcp` through the official MCP client; tools appear as `mcp__mebular__*`.
@@ -108,7 +152,8 @@ DSH reaches the same daemon at `/mcp` through the official MCP client; tools app
 | --- | --- |
 | Shared runtime available | Prefer shared runtime resolve (App / CLI / shared provider + dynamic URL) |
 | Legacy environment without a shared CLI | `daemonUrl > MEBULAR_HTTP_PORT > runtime.json > 7331` |
-| `MEBULAR_HOME` | Locates `runtime.json` only |
+| Memory Runtime sidecar | `memoryRuntime.url > MEBULAR_MEMORY_RUNTIME_URL > <home>/memory-runtime.json` (never guesses a port) |
+| `MEBULAR_HOME` | Locates the MCP daemon `runtime.json` and the sidecar `memory-runtime.json` |
 | Mebular app | Keeps running independently; the plugin connects to the same daemon |
 
 </details>

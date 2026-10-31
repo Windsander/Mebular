@@ -5,7 +5,7 @@
 // 会**再跑一次 build**，随之覆盖安装前手工 `chmod +x` 的结果 → 裸 `fleet` 报
 // `permission denied`。因此把 +x 放在**构建的最后一步**，让 prepare（=build）自身保证它。
 //
-// 覆盖：根 package.json 的 `bin` + 各 workspace 包的 `bin`（本仓为 packages/fleet）。
+// 覆盖：根 package.json 的 `bin` + 各 workspace 包的 `bin`（packages/fleet、packages/memory-runtime）。
 // 仅用 Node 内建 fs（Windows/Linux/macOS 通用）；Windows 上 chmod 近似无效，忽略失败。
 //
 // **输出必须走 stderr**：本脚本会作为 `prepare`（`npm run build` 的一步）在
@@ -33,6 +33,7 @@ function binTargets(manifestPath, baseDir) {
 const targets = new Set([
   ...binTargets(join(ROOT, 'package.json'), ROOT),
   ...binTargets(join(ROOT, 'packages', 'fleet', 'package.json'), join(ROOT, 'packages', 'fleet')),
+  ...binTargets(join(ROOT, 'packages', 'memory-runtime', 'package.json'), join(ROOT, 'packages', 'memory-runtime')),
 ]);
 
 let changed = 0;

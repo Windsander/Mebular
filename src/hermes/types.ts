@@ -187,6 +187,8 @@ export interface Skill {
 export interface SearchQuery {
   query: string;
   types?: string[];
+  /** 是否包含已结束有效期的历史事实（默认 false，只返回当前事实）。 */
+  includeHistory?: boolean;
   filters?: {
     tags?: string[];
     createdAfter?: number;

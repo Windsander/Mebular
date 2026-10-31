@@ -1,0 +1,47 @@
+{
+  "name": "@mebular/memory-runtime",
+  "version": "0.3.0",
+  "description": "Mebular Memory Runtime sidecar：staging/cache/outbox、详情沉降、候选抽取、召回与模型编排",
+  "license": "MIT",
+  "author": {
+    "name": "Sobert Li (Windsander)",
+    "email": "Windsander@users.noreply.github.com",
+    "url": "https://github.com/Windsander"
+  },
+  "private": false,
+  "type": "module",
+  "bin": {
+    "mebular-memory-runtime": "./bin/mebular-memory-runtime.mjs"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./sidecar": {
+      "types": "./dist/sidecar/index.d.ts",
+      "import": "./dist/sidecar/index.js"
+    }
+  },
+  "files": [
+    "bin",
+    "src",
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepack": "node ../../scripts/publish-manifest.mjs set",
+    "postpack": "node ../../scripts/publish-manifest.mjs restore"
+  },
+  "dependencies": {
+    "ulid": "^3.0.2"
+  }
+}

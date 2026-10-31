@@ -1,6 +1,6 @@
 {
   "name": "@mebular/core",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "description": "本地优先的图式记忆系统：为 Hermes 等 Agent 提供跨设备、可离线、可验证的记忆共享层",
   "license": "MIT",
   "author": {
@@ -21,6 +21,10 @@
     "packages/mcp/bin",
     "packages/mcp/src",
     "packages/mcp/package.json",
+    "packages/memory-runtime/src",
+    "packages/memory-runtime/dist",
+    "packages/memory-runtime/bin",
+    "packages/memory-runtime/package.json",
     "packages/console",
     "packages/fleet/dist",
     "packages/fleet/protocol",
@@ -63,8 +67,9 @@
     }
   },
   "scripts": {
-    "build": "node scripts/clean-dist.mjs && tsc && tsc -p packages/service/tsconfig.json && tsc -p packages/fleet/tsconfig.json && node scripts/gen-fleet-version.mjs && node scripts/chmod-bins.mjs",
+    "build": "node scripts/check-architecture.mjs && node scripts/clean-dist.mjs && tsc && tsc -p packages/memory-runtime/tsconfig.json && tsc -p packages/service/tsconfig.json && tsc -p packages/fleet/tsconfig.json && node scripts/gen-fleet-version.mjs && node scripts/chmod-bins.mjs",
     "build:fleet": "tsc -p packages/fleet/tsconfig.json",
+    "build:memory-runtime": "tsc -p packages/memory-runtime/tsconfig.json",
     "build:service": "tsc -p packages/service/tsconfig.json",
     "prepare": "node scripts/prepare-install.mjs",
     "build:watch": "tsc --watch",
@@ -72,6 +77,7 @@
     "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --coverage",
     "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --watch",
     "lint": "eslint src tests tests-semantic scripts packages apps/desktop --ext .ts,.mjs",
+    "check:architecture": "node scripts/check-architecture.mjs",
     "check:cleanliness": "node scripts/check-cleanliness.mjs",
     "check:surface-parity": "node scripts/check-surface-parity.mjs",
     "check:i18n": "node scripts/check-i18n.mjs",
@@ -96,10 +102,12 @@
     "verify:mcp:publish": "node scripts/verify-mcp-publish.mjs",
     "verify:dsh-plugin": "node scripts/verify-dsh-plugin.mjs",
     "verify:dsh:e2e": "node scripts/verify-dsh-e2e.mjs",
+    "verify:immersive-journey": "node tests/integration/host-e2e/immersive-journey.mjs",
     "verify:runtime:coexistence": "node scripts/verify-runtime-coexistence.mjs",
     "verify:dsh:e2e:min": "node scripts/verify-dsh-e2e.mjs --dsh-version minimum",
     "verify:dsh:e2e:latest": "node scripts/verify-dsh-e2e.mjs --dsh-version latest",
     "verify:dsh:e2e:negative": "node tests/dsh/e2e/negative-control.mjs",
+    "verify:dsh:memory-runtime": "node tests/dsh/e2e/memory-runtime-e2e.mjs",
     "verify:release-version": "node scripts/verify-release-version.mjs",
     "verify:release-visibility": "node scripts/verify-release-visibility.mjs",
     "branches:merged": "node scripts/prune-merged-branches.mjs",
@@ -130,7 +138,8 @@
     "desktop:smoke": "npm --prefix apps/desktop run smoke",
     "verify:console:ui": "node packages/console/scripts/verify-console-ui.mjs",
     "verify:console:subscription-ui": "node packages/console/scripts/verify-subscription-ui.mjs",
-    "verify:invite": "node scripts/verify-invite.mjs"
+    "verify:invite": "node scripts/verify-invite.mjs",
+    "test:coverage:sidecar": "node scripts/test-sidecar-coverage.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.3.1",
@@ -217,6 +226,7 @@
       "^src/(.*)\\.js$": "<rootDir>/src/$1.ts",
       "^tests/(.*)\\.js$": "<rootDir>/tests/$1.ts",
       "^@mebular/core$": "<rootDir>/src/index.ts",
+      "^@mebular/memory-runtime$": "<rootDir>/packages/memory-runtime/src/index.ts",
       "^@mebular/service$": "<rootDir>/packages/service/src/index.ts",
       "^(\\.{1,2}/.*)\\.js$": "$1"
     },
@@ -229,6 +239,9 @@
       "!src/**/*.d.ts",
       "packages/fleet/src/**/*.ts",
       "!packages/fleet/src/**/*.d.ts",
+      "packages/memory-runtime/src/**/*.ts",
+      "!packages/memory-runtime/src/**/*.d.ts",
+      "!packages/memory-runtime/src/sidecar/**",
       "packages/service/src/**/*.ts",
       "!packages/service/src/**/*.d.ts"
     ],

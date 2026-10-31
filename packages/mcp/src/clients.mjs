@@ -25,7 +25,7 @@ import { chmod, copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs
 import { exec, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { homedir, tmpdir } from 'node:os';
-import { delimiter, dirname, join, sep } from 'node:path';
+import { basename, delimiter, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { APP_VERSION } from './version.mjs';
 
@@ -235,7 +235,13 @@ function shapeFor(format, options = {}) {
 export function mebularEntry(format, options = {}) {
   const adapter = adapterFor(format);
   if (!adapter) return { command: 'mebular', args: ['mcp'] };
-  return entryForShape(shapeFor(format, options), options.url) ?? { command: 'mebular', args: ['mcp'] };
+  const entry = entryForShape(shapeFor(format, options), options.url) ?? { command: 'mebular', args: ['mcp'] };
+  // descriptor 的固定字段（如 OpenChamber remote 条目的 oauth:false / codemode:false）。
+  // 只在 HTTP 形态应用；stdio 回落保持最小形状。
+  if (options.url && options.entryDefaults && entry !== null && typeof entry === 'object' && !Array.isArray(entry)) {
+    return { ...entry, ...options.entryDefaults };
+  }
+  return entry;
 }
 
 /** 各客户端 MCP 片段（与 `mebular print-config --client …` 同源）；有 `url` → HTTP 形态。 */
@@ -298,6 +304,93 @@ export function assistantUserHome(options = {}) {
   return homedir();
 }
 
+// ---------------------------------------------------------------------------
+// OpenChamber 原生 memory 共存探测（只读；不读 entries / 不写 / 不注册工具）
+// ---------------------------------------------------------------------------
+
+const NATIVE_MEMORY_TRUTHY = new Set(['1', 'true', 'yes', 'on']);
+
+/** OpenChamber 数据根：`OPENCHAMBER_DATA_DIR` 优先，否则 `~/.config/openchamber`。 */
+export function openChamberDataDir(options = {}) {
+  const env = options.env ?? process.env;
+  const raw = typeof env.OPENCHAMBER_DATA_DIR === 'string' ? env.OPENCHAMBER_DATA_DIR.trim() : '';
+  if (raw.length > 0) return resolve(raw);
+  return join(assistantUserHome(options), '.config', 'openchamber');
+}
+
+/**
+ * 原生 memory 共存守卫（**只读**）：
+ * - 读 env `OPENCHAMBER_MEMORY_ENABLE`（与 OpenChamber 同 truthy 集合）；
+ * - 读 `settings.json` 的 `agentMemoryToolEnabled` 布尔值；
+ * - 只 `exists`/列目录判断 `memory.json` 是否存在（global + projects/*），**绝不读取条目**。
+ *
+ * 不导入、不替换、不双写，也不注册任何 OpenChamber 原生 memory 工具。原生 memory 开启时
+ * Mebular 沉浸式默认 `tool-only`，必须由用户显式 opt-in；状态里如实给出 summary/证据。
+ */
+export function detectOpenChamberNativeMemory(options = {}) {
+  const env = options.env ?? process.env;
+  const dataDir = openChamberDataDir(options);
+  const settingsPath = join(dataDir, 'settings.json');
+  const rawFlag = typeof env.OPENCHAMBER_MEMORY_ENABLE === 'string' ? env.OPENCHAMBER_MEMORY_ENABLE : '';
+  const featureEnabled = NATIVE_MEMORY_TRUTHY.has(rawFlag.trim().toLowerCase());
+
+  let settingsRead = false;
+  let toolEnabled = false;
+  try {
+    const settings = JSON.parse(readFileSync(settingsPath, 'utf-8'));
+    settingsRead = true;
+    toolEnabled = settings?.agentMemoryToolEnabled === true;
+  } catch {
+    // 文件不存在/不可读/损坏都按「未开启」处理；不修改、不创建。
+  }
+
+  const globalMemoryFileExists = existsSync(join(dataDir, 'memory.json'));
+  let projectMemoryFiles = 0;
+  try {
+    const projectsDir = join(dataDir, 'projects');
+    for (const entry of readdirSync(projectsDir, { withFileTypes: true })) {
+      if (entry.isDirectory() && existsSync(join(projectsDir, entry.name, 'memory.json'))) {
+        projectMemoryFiles += 1;
+      }
+    }
+  } catch {
+    // 无 projects/ 目录：正常（尚未使用原生 memory）。
+  }
+  const memoryFileExists = globalMemoryFileExists || projectMemoryFiles > 0;
+  const enabled = featureEnabled && toolEnabled;
+  const summary = enabled
+    ? (memoryFileExists
+      ? 'OpenChamber 原生 memory 已开启且检测到 memory.json；Mebular 沉浸式默认 tool-only，需显式 opt-in（不导入/不替换/不双写）'
+      : 'OpenChamber 原生 memory 已开启（尚无 memory.json）；Mebular 沉浸式默认 tool-only，需显式 opt-in（不导入/不替换/不双写）')
+    : (featureEnabled || toolEnabled || memoryFileExists
+      ? 'OpenChamber 原生 memory 未完全开启；Mebular 沉浸式默认 tool-only，需显式 opt-in（不写入原生 memory）'
+      : '未检测到 OpenChamber 原生 memory；Mebular 沉浸式仍需显式 opt-in');
+
+  return {
+    kind: 'openchamber-native-memory',
+    readOnly: true,
+    featureFlag: 'OPENCHAMBER_MEMORY_ENABLE',
+    featureEnabled,
+    setting: 'agentMemoryToolEnabled',
+    toolEnabled,
+    settingsRead,
+    settingsPath,
+    dataDir,
+    memoryFileExists,
+    memoryFiles: { global: globalMemoryFileExists, projects: projectMemoryFiles },
+    enabled,
+    active: enabled,
+    immersiveDefault: 'tool-only',
+    requiresExplicitOptIn: true,
+    summary,
+    signals: {
+      env: 'OPENCHAMBER_MEMORY_ENABLE',
+      setting: 'agentMemoryToolEnabled',
+      memoryFile: 'memory.json',
+    },
+  };
+}
+
 /** 桌面壳/守护常驻的 opencode 捆绑目录（存在才注入 PATH）。 */
 export const OPENCODE_BUNDLE_BIN = '/Applications/OpenChamber.app/Contents/Resources/opencode-cli';
 
@@ -337,15 +430,21 @@ export function builtinAssistants(options = {}) {
       : (env.XDG_CONFIG_HOME ?? join(userHome, '.config'));
   const opencodePath = expandHome(HOME_OPENCODE, userHome);
   const hermesPath = expandHome(HOME_HERMES, userHome);
+  const openChamberDir = join(userHome, '.config', 'openchamber');
 
   return [
     {
       id: 'openchamber', name: 'OpenChamber', kind: 'file', format: 'opencode-json',
+      description: '复用 OpenCode global 配置：只写 mcp.servers.mebular（remote /mcp）；不接管原生 memory',
       landing: {
         primaryPath: opencodePath,
         keyPath: 'mcp.servers.mebular',
-        forbiddenPaths: [join(userHome, '.config', 'openchamber', 'opencode.managed.json')],
+        // App 私有 managed config（含每次启动 run/instances/* 下的副本）只读、禁写。
+        forbiddenPaths: [join(openChamberDir, 'opencode.managed.json')],
+        forbiddenBasenames: ['opencode.managed.json'],
+        forbiddenRoots: [join(openChamberDir, 'run', 'instances')],
         format: 'opencode-json',
+        entryDefaults: { oauth: false, codemode: false },
       },
       probe: {
         signals: [
@@ -359,12 +458,26 @@ export function builtinAssistants(options = {}) {
       verify: { cli: { command: 'opencode mcp list', expect: 'mebular', timeoutMs: 4000 }, configReadback: true },
       activation: { kind: 'user-reload', note: 'OpenChamber：由用户在 App 侧重载/重启生效；产品不得发 opencode reload 干扰运行服务' },
       risks: [
-        'opencode.managed.json 为 App 所有且会被重写，禁写',
+        'opencode.managed.json（含 run/instances/*）为 App 所有且会被重写，禁写',
         'opencode mcp list 经运行服务回答，只读但勿频繁调用',
+        '原生 memory 开启时，Mebular 沉浸式默认 tool-only，需显式 opt-in；不导入、不替换、不双写',
       ],
+      nativeMemoryProbe: 'openchamber',
+      coexistence: {
+        nativeMemory: {
+          detect: 'openchamber',
+          readOnly: true,
+          inputs: ['OPENCHAMBER_MEMORY_ENABLE', 'agentMemoryToolEnabled', 'memory.json'],
+          neverImport: true,
+          neverReplace: true,
+          neverWrite: true,
+          neverRegisterTool: true,
+        },
+        immersive: { defaultMode: 'tool-only', requiresExplicitOptIn: true },
+      },
       skillsDirs: [join(userHome, '.config', 'opencode', 'skills'), join(cwd, '.opencode', 'skills')],
       reuseOf: 'opencode',
-      note: 'OpenChamber 复用 OpenCode 的 global 配置（接一次即可）',
+      note: 'OpenChamber 复用 OpenCode 的 global 配置（接一次即可）；原生 memory 只读共存，不导入/不替换/不双写',
     },
     {
       id: 'hermes', name: 'Hermes', kind: 'file', format: 'hermes-yaml',
@@ -597,6 +710,8 @@ export function clientDescriptors(options = {}) {
     skillsDirs: a.skillsDirs ?? [],
     requiresRestart: a.activation.kind === 'user-reload',
     reuseOf: a.reuseOf ?? null, note: a.note ?? null,
+    description: a.description ?? null,
+    coexistence: a.coexistence ?? null,
   }));
 }
 
@@ -626,11 +741,165 @@ function walkGet(root, path) {
   return { value: node };
 }
 
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+/** 扫描 JSON 字符串（text[start] === '"'）返回结束位置（不含引号之后）。 */
+function scanJsonString(text, start) {
+  let i = start + 1;
+  while (i < text.length) {
+    if (text[i] === '\\') { i += 2; continue; }
+    if (text[i] === '"') return i + 1;
+    i += 1;
+  }
+  throw new Error('unterminated JSON string');
+}
+
+/** 轻量 JSON 区间解析（仅用于已有合法 JSON 的「只替换 mebular」写入，保留其他字节）。 */
+function parseJsonRanges(text) {
+  let i = 0;
+  const skip = () => { while (i < text.length && /\s/.test(text[i])) i += 1; };
+  const value = () => {
+    skip();
+    const start = i;
+    const ch = text[i];
+    if (ch === '{') {
+      i += 1;
+      const members = [];
+      skip();
+      if (text[i] === '}') { i += 1; return { type: 'object', start, end: i, members }; }
+      for (;;) {
+        skip();
+        const keyStart = i;
+        if (text[i] !== '"') throw new Error('object key expected');
+        i = scanJsonString(text, i);
+        const key = JSON.parse(text.slice(keyStart, i));
+        skip();
+        if (text[i] !== ':') throw new Error('colon expected');
+        i += 1;
+        const child = value();
+        members.push({ key, keyStart, value: child });
+        skip();
+        if (text[i] === ',') { i += 1; continue; }
+        if (text[i] === '}') { i += 1; break; }
+        throw new Error('object delimiter expected');
+      }
+      return { type: 'object', start, end: i, members };
+    }
+    if (ch === '[') {
+      i += 1;
+      const items = [];
+      skip();
+      if (text[i] === ']') { i += 1; return { type: 'array', start, end: i, items }; }
+      for (;;) {
+        items.push(value());
+        skip();
+        if (text[i] === ',') { i += 1; continue; }
+        if (text[i] === ']') { i += 1; break; }
+        throw new Error('array delimiter expected');
+      }
+      return { type: 'array', start, end: i, items };
+    }
+    if (ch === '"') {
+      const end = scanJsonString(text, i);
+      i = end;
+      return { type: 'string', start, end };
+    }
+    while (i < text.length && !/[\s,\]}]/.test(text[i])) i += 1;
+    return { type: 'primitive', start, end: i };
+  };
+  return value();
+}
+
+function lineIndentAt(text, index) {
+  const lineStart = text.lastIndexOf('\n', Math.max(0, index - 1)) + 1;
+  const match = /^[ \t]*/.exec(text.slice(lineStart));
+  return match ? match[0] : '';
+}
+
+function indentJsonValue(value, text, start, indent) {
+  const target = indent ?? ' '.repeat(Math.max(0, start - (text.lastIndexOf('\n', Math.max(0, start - 1)) + 1)));
+  return JSON.stringify(value, null, 2).split('\n').join(`\n${target}`);
+}
+
+/** 把 `keys` 逐层包成对象（用于补齐缺失的中间键）。 */
+function nestedJsonValue(keys, value) {
+  let out = value;
+  for (let index = keys.length - 1; index >= 0; index -= 1) {
+    out = { [keys[index]]: out };
+  }
+  return out;
+}
+
+/** 在已有 JSON 对象的最后一个成员之后插入一个属性（其他字节不动）。 */
+function insertJsonProperty(text, node, key, value) {
+  const indent = `${lineIndentAt(text, node.start)}  `;
+  const property = `${JSON.stringify(key)}: ${indentJsonValue(value, text, node.start + 1, indent)}`;
+  if (node.members.length > 0) {
+    const at = node.members[node.members.length - 1].value.end;
+    return text.slice(0, at) + `,\n${indent}${property}` + text.slice(at);
+  }
+  return text.slice(0, node.start + 1)
+    + `\n${indent}${property}\n${lineIndentAt(text, node.start)}`
+    + text.slice(node.start + 1);
+}
+
+/**
+ * 只改 `<keyPath>` 的 JSON 文本：已有条目 → 原位替换 value；缺失 → 插入父对象
+ * （中间键缺失时一并补齐）；删除 → 摘除成员。其余字节（其他键、缩进、换行）原样保留。
+ * 结构异常 → null（调用方回落到整体序列化）。
+ */
+function spliceJsonEntry(text, path, value) {
+  const root = parseJsonRanges(text);
+  let node = root;
+  for (let depth = 0; depth < path.length - 1; depth += 1) {
+    const key = path[depth];
+    if (node.type !== 'object') return null;
+    const member = node.members.find((item) => item.key === key);
+    if (!member) {
+      if (value === undefined) return text;
+      return insertJsonProperty(text, node, key, nestedJsonValue(path.slice(depth + 1), value));
+    }
+    node = member.value;
+  }
+  if (node.type !== 'object') return null;
+  const leaf = path[path.length - 1];
+  const index = node.members.findIndex((item) => item.key === leaf);
+
+  if (value === undefined) {
+    if (index < 0) return text;
+    const member = node.members[index];
+    if (node.members.length === 1) {
+      return text.slice(0, node.start + 1) + text.slice(node.end - 1);
+    }
+    if (index > 0) {
+      const previous = node.members[index - 1];
+      return text.slice(0, previous.value.end) + text.slice(member.value.end);
+    }
+    const next = node.members[index + 1];
+    return text.slice(0, member.keyStart) + text.slice(next.keyStart);
+  }
+
+  if (index >= 0) {
+    const member = node.members[index];
+    return text.slice(0, member.value.start)
+      + indentJsonValue(value, text, member.value.start)
+      + text.slice(member.value.end);
+  }
+
+  return insertJsonProperty(text, node, leaf, value);
+}
+
 /**
  * JSON 合并：设置或删除 `<keyPath>`（默认含叶子 `mebular`），保留其余键。
  * 中间键存在但非对象 → error（结构未知，不自动改写）。
+ *
+ * `preserveEntryFields`：已有 Mebular 条目是对象时，仅覆盖新条目提供的字段（保留 headers、
+ * timeout、protocol 等用户字段；local → remote 升级时移除 command/cwd/environment）。
+ * `preserveFormatting`：用区间替换只动 mebular 文本，其他配置键字节不变（失败回落整体序列化）。
  */
-export function mergeJsonEntry(existingText, { format, entry, keyPath } = {}) {
+export function mergeJsonEntry(existingText, { format, entry, keyPath, preserveEntryFields = false, preserveFormatting = false } = {}) {
   const path = keyPathOf(format, keyPath);
   let parsed;
   if (existingText === null || existingText === undefined || existingText.trim() === '') {
@@ -660,10 +929,33 @@ export function mergeJsonEntry(existingText, { format, entry, keyPath } = {}) {
     }
     cursor = cursor[key];
   }
-  const changed = JSON.stringify(cursor[leaf] ?? null) !== JSON.stringify(entry ?? null);
+  const previous = cursor[leaf];
+  let nextEntry = entry;
+  if (preserveEntryFields && entry !== undefined && isPlainObject(previous) && isPlainObject(entry)) {
+    nextEntry = { ...previous, ...entry };
+    if (entry.type === 'remote' && previous.type !== 'remote') {
+      // local → remote：移除只对 stdio/local 有意义的字段，其他用户字段保留。
+      delete nextEntry.command;
+      delete nextEntry.cwd;
+      delete nextEntry.environment;
+    }
+  }
+  const changed = JSON.stringify(previous ?? null) !== JSON.stringify(nextEntry ?? null);
   if (entry === undefined) delete cursor[leaf];
-  else cursor[leaf] = entry;
-  return { changed, next, text: `${JSON.stringify(next, null, 2)}\n` };
+  else cursor[leaf] = nextEntry;
+
+  let text = `${JSON.stringify(next, null, 2)}\n`;
+  if (!changed && typeof existingText === 'string') {
+    text = existingText;
+  } else if (preserveFormatting && typeof existingText === 'string' && existingText.trim() !== '') {
+    try {
+      const spliced = spliceJsonEntry(existingText, path, nextEntry);
+      if (spliced !== null) text = spliced;
+    } catch {
+      // 区间解析失败：保持整体序列化的安全回落。
+    }
+  }
+  return { changed, next, text };
 }
 
 /** 只替换 DSH mebular 条目里的 `url:` 行（保留其他插件与键）。 */
@@ -995,7 +1287,12 @@ function builtinsCount(reg, options) {
 function entryOptionsFor(assistant, options = {}) {
   const url = options.mcpUrl ?? null;
   const httpShape = assistant.landing?.httpShape;
-  return { ...(url ? { url } : {}), ...(httpShape ? { httpShape } : {}) };
+  const entryDefaults = assistant.landing?.entryDefaults;
+  return {
+    ...(url ? { url } : {}),
+    ...(httpShape ? { httpShape } : {}),
+    ...(url && entryDefaults ? { entryDefaults } : {}),
+  };
 }
 
 function buildStateItem(assistant, signals, landing, options = {}) {
@@ -1015,6 +1312,23 @@ function buildStateItem(assistant, signals, landing, options = {}) {
   else state = 'not-connected';
   const STATE_LABEL = { 'not-installed': '未安装', 'not-connected': '未接入', connected: '已接入 ✓', manual: '需手动', 'detect-failed': '检测失败', stale: '已写入·需升级为直连', 'needs-confirmation': '需要修复/请确认' };
   const staleReason = needsConfirmation || staleUrl ? (landing.staleReason ?? 'MCP 地址与当前端点不一致，请确认或手动修复') : null;
+  const nativeMemory = assistant.nativeMemoryProbe === 'openchamber'
+    ? detectOpenChamberNativeMemory(options)
+    : null;
+  const coexistence = assistant.coexistence
+    ? {
+        ...assistant.coexistence,
+        nativeMemory: nativeMemory
+          ? { ...(assistant.coexistence.nativeMemory ?? {}), ...nativeMemory }
+          : (assistant.coexistence.nativeMemory ?? null),
+        immersive: {
+          ...(assistant.coexistence.immersive ?? {}),
+          defaultMode: 'tool-only',
+          requiresExplicitOptIn: true,
+          nativeMemoryActive: nativeMemory?.enabled === true,
+        },
+      }
+    : null;
   return {
     id: assistant.id,
     name: assistant.name,
@@ -1029,6 +1343,9 @@ function buildStateItem(assistant, signals, landing, options = {}) {
       primaryPath: assistant.landing?.primaryPath ?? null,
       keyPath: assistant.landing?.keyPath ?? null,
       forbiddenPaths: assistant.landing?.forbiddenPaths ?? [],
+      forbiddenBasenames: assistant.landing?.forbiddenBasenames ?? [],
+      forbiddenRoots: assistant.landing?.forbiddenRoots ?? [],
+      entryDefaults: assistant.landing?.entryDefaults ?? null,
       format: assistant.landing?.format ?? assistant.format,
       strategy,
       present: landing.present,
@@ -1055,6 +1372,9 @@ function buildStateItem(assistant, signals, landing, options = {}) {
     configPath: assistant.landing?.primaryPath ?? null,
     reuseOf: assistant.reuseOf ?? null,
     note: assistant.note ?? null,
+    description: assistant.description ?? null,
+    nativeMemory,
+    coexistence,
     snippet: snippetFor(assistant.format, entryOptionsFor(assistant, options)),
     mcpUrl: options.mcpUrl ?? null,
     // 陈旧配置诊断（顶层投影，UI/脚本无需深入 landing）
@@ -1179,16 +1499,24 @@ async function atomicWrite(path, text) {
 }
 
 function isForbidden(assistant, path) {
-  const forbidden = assistant.landing?.forbiddenPaths ?? [];
-  return forbidden.some((f) => f === path);
+  const landing = assistant.landing ?? {};
+  if ((landing.forbiddenPaths ?? []).some((f) => f === path)) return true;
+  // App 私有 managed config 的任何副本（如 run/instances/<id>/opencode.managed.json）。
+  if ((landing.forbiddenBasenames ?? []).includes(basename(path))) return true;
+  const roots = landing.forbiddenRoots ?? [];
+  return roots.some((root) => path === root || path.startsWith(root.endsWith(sep) ? root : `${root}${sep}`));
 }
 
 function computeMerged(assistant, existing, options = {}) {
   if (assistant.format === 'dsh') return mergeDsh(existing, entryOptionsFor(assistant, options));
+  const adapter = adapterFor(assistant.landing?.format ?? assistant.format);
+  const preserve = adapter?.serialization === 'json';
   return mergeJsonEntry(existing, {
     format: assistant.format,
     entry: mebularEntry(assistant.format, entryOptionsFor(assistant, options)),
     keyPath: keyPathOf(assistant.landing?.format ?? assistant.format),
+    preserveEntryFields: preserve,
+    preserveFormatting: preserve,
   });
 }
 
@@ -1338,7 +1666,9 @@ async function reconcileJsonMebularUrl(assistant, mcpUrl) {
   let node = parsed;
   for (const key of path.slice(0, -1)) node = node?.[key];
   if (node === null || typeof node !== 'object') return { ok: false, reason: 'mebular 父级结构未知（不自动改写）' };
-  node[path[path.length - 1]] = { ...stored, url: mcpUrl };
+  const defaults = assistant.landing?.entryDefaults ?? {};
+  // 只补缺失的固定字段（oauth:false / codemode:false），已有字段一律保留。
+  node[path[path.length - 1]] = { ...defaults, ...stored, url: mcpUrl };
   const backupPath = `${primary}.bak-${tsStamp()}`;
   await copyFile(primary, backupPath);
   try {
@@ -1447,7 +1777,13 @@ export async function rollbackClient(id, options = {}) {
   return { ok: true, restoredFrom: target, backupPath: safety, removed: false };
   }
   if (assistant.format === 'dsh') return { ok: false, reason: 'DSH 无备份可回滚：请按片段人工移除' };
-  const merged = mergeJsonEntry(existing, { format: assistant.format, entry: undefined, keyPath: keyPathOf(assistant.landing?.format ?? assistant.format) });
+  const adapter = adapterFor(assistant.landing?.format ?? assistant.format);
+  const merged = mergeJsonEntry(existing, {
+    format: assistant.format,
+    entry: undefined,
+    keyPath: keyPathOf(assistant.landing?.format ?? assistant.format),
+    preserveFormatting: adapter?.serialization === 'json',
+  });
   if (merged.error) return { ok: false, reason: merged.error };
   await atomicWrite(primary, merged.text);
   clearAssistantsCache();

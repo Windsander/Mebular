@@ -8,9 +8,11 @@
   // 两份 Mebular，触发 private property 类型冲突。这里用 paths 统一指向 src。
   "extends": "./tsconfig.json",
   "compilerOptions": {
+    "rootDir": ".",
     "baseUrl": ".",
     "paths": {
       "@mebular/core": ["src/index.ts"],
+      "@mebular/memory-runtime": ["packages/memory-runtime/src/index.ts"],
       "@mebular/service": ["packages/service/src/index.ts"]
     }
   }

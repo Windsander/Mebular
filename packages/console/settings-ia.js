@@ -28,6 +28,7 @@ export const IA_TABS = [
   { id: 'common', label: '常用', labelKey: 'settings.tab.common' },
   { id: 'security', label: '安全', labelKey: 'settings.tab.security' },
   { id: 'assistants', label: 'AI 助手', labelKey: 'settings.tab.assistants' },
+  { id: 'runtime', label: '记忆运行时', labelKey: 'settings.tab.runtime' },
   { id: 'mcp', label: 'MCP 接入', labelKey: 'settings.tab.mcp' },
   { id: 'advanced', label: '高级', labelKey: 'settings.tab.advanced' },
 ];
@@ -40,6 +41,7 @@ export const IA_SETTINGS_EXTRA = [
 /**
  * 折叠白名单（设置/关于共用；≤5，当前 3）。
  * 设置内 2 个（MCP 危险与自救 / 诊断与恢复）；关于本机 1 个（运行状态）。
+ * 0.3 记忆运行时不提供用户可操作的诊断折叠：状态卡只读，避免暴露实现细节。
  * 邀请面板不再有详情折叠。每项必须带 data-settings-fold，UI 断言据此防回归。
  * labelKey 是用户可见文案真源；label 只作 catalog 缺 key 时的中文兜底。
  */
@@ -225,6 +227,73 @@ export const IA_ADVANCED_FIELDS = IA_ADVANCED_SECTIONS.flatMap((section) => sect
 export const IA_MCP_FIELDS = IA_MCP_SECTIONS.flatMap((section) => section.fields);
 
 /**
+ * 0.3 记忆运行时：普通用户只面对两个产品增量：
+ * 1. 设置 · 记忆模式 = MCP 配置 memoryRuntime.enabled（轻量 MCP / 沉浸式）；
+ * 2. 高级 · 模型来源 = sidecar config.json 的 model.source（仅此一个下拉）。
+ * 旧 runtime.* 字段不再属于 Console 设置面。
+ */
+export const IA_RUNTIME_CONTROL_PATHS = ['memoryRuntime.enabled'];
+export const IA_RUNTIME_FIELDS = [];
+/** Runtime 字段文案（当前没有由 schema 编辑器渲染的 runtime 字段）。 */
+export const IA_RUNTIME_FIELD_COPY = {};
+
+/** 模型来源：唯一第二个产品增量；不暴露 endpoint / key / keyRef / 模型路径。 */
+export const IA_RUNTIME_MODEL_SOURCES = Object.freeze(['heuristic', 'local', 'host', 'api', 'auto']);
+export const IA_RUNTIME_MODEL_SOURCE_DEFAULT = 'heuristic';
+
+export function runtimeModelSourceOf(value) {
+  const source = String(value ?? '').trim().toLowerCase();
+  return IA_RUNTIME_MODEL_SOURCES.includes(source) ? source : IA_RUNTIME_MODEL_SOURCE_DEFAULT;
+}
+
+/**
+ * 某一来源当前是否可用：
+ * - heuristic / auto 总是可选；
+ * - local / api 需要 sidecar 报告已配置（sources 包含对应项）；
+ * - host 总是基础来源，但无候选时 sidecar 会降级到 heuristic。
+ */
+export function runtimeModelSourceAvailable(source, model = null) {
+  const normalized = runtimeModelSourceOf(source);
+  if (normalized === 'heuristic' || normalized === 'auto') return true;
+  const sources = Array.isArray(model?.sources) ? model.sources : [];
+  if (normalized === 'host') return sources.length === 0 || sources.includes('host');
+  return sources.includes(normalized);
+}
+
+/** 记忆模式真值：MCP 配置 memoryRuntime.enabled；lightweight=轻量 MCP，immersive=沉浸式。 */
+export function memoryRuntimeModeOf(status, config) {
+  return memoryRuntimeEnabledOf(status, config) ? 'immersive' : 'lightweight';
+}
+
+/** 轻量模式不显示模型配置，也不读取/写入 sidecar 配置。 */
+export function runtimeShowsModelSettings(status, config) {
+  return memoryRuntimeModeOf(status, config) === 'immersive';
+}
+
+/** 模型来源控件只在沉浸式且记忆运行时可用时启用；轻量/未就绪均禁用。 */
+export function runtimeModelSourceReady(meta) {
+  return meta?.enabled === true && meta?.available === true;
+}
+
+/** sidecar 生命周期状态 → Console 文案 key（未知状态按 stopped 展示，不暴露原始码）。 */
+export const RUNTIME_SIDECAR_STATES = Object.freeze([
+  'disabled', 'not_installed', 'stopped', 'starting', 'ready', 'degraded', 'stopping', 'failed',
+]);
+
+export function runtimeSidecarStateKey(state) {
+  const value = String(state ?? '');
+  return RUNTIME_SIDECAR_STATES.includes(value)
+    ? `runtime.sidecar.state.${value}`
+    : 'runtime.sidecar.state.stopped';
+}
+
+/** memoryRuntime.enabled：状态优先（服务端热生效后的真值），配置兜底，默认关闭。 */
+export function memoryRuntimeEnabledOf(status, config) {
+  if (typeof status?.enabled === 'boolean') return status.enabled;
+  return config?.memoryRuntime?.enabled === true;
+}
+
+/**
  * 只读面（status-only）：值由运行时 / 自动推导（relay 池、LAN 发现、桥、打洞、广播、join、TLS、）。
  * 与 config-schema.mjs 的 STATUS_ONLY_PATHS 逐项一致（E1 防漂移断言；多/少即红）。
  */
@@ -265,6 +334,9 @@ export const IA_INFO_BLOCKS = {
 export const IA_MIGRATION = {
   ...Object.fromEntries(IA_ADVANCED_FIELDS.map((p) => [p, 'advanced'])),
   ...Object.fromEntries(IA_MCP_FIELDS.map((p) => [p, 'mcp'])),
+  // 0.3 记忆运行时：两条主轴的字段与高级折叠同属「记忆运行时」tab
+  ...Object.fromEntries(IA_RUNTIME_FIELDS.map((p) => [p, 'runtime'])),
+  ...Object.fromEntries(IA_RUNTIME_CONTROL_PATHS.map((p) => [p, 'runtime'])),
   // 内容管理：订阅域 → 主页「记忆共享」
   'sync.namespaces': 'domains',
   // 只读面：自动同步 / 写入即推（默认常开）+ relay 池 / LAN / 桥 / 打洞 / 广播 / join / TLS
@@ -393,6 +465,45 @@ export function localizeSchemaReason(path, reason, translate) {
 
 /** config-schema `effective` 的「已配置」哨兵值（文本字段只读展示用）。 */
 export const SCHEMA_CONFIGURED_VALUE = '（已配置）';
+
+/** 内部对象判定（与 core 通用可见性 + 0.3 内部类型同义；用于 Console 时间线过滤）。 */
+export const RUNTIME_INTERNAL_NODE_TYPES = Object.freeze([
+  'compact', 'context_checkpoint', 'self_record', 'raw_chunk', 'recall_trace',
+]);
+
+const RUNTIME_INTERNAL_TYPE_SET = new Set(RUNTIME_INTERNAL_NODE_TYPES);
+
+export function isInternalRuntimeMemory(memory) {
+  if (!memory) return false;
+  if (RUNTIME_INTERNAL_TYPE_SET.has(memory.type)) return true;
+  if (memory.internal === true) return true;
+  if (memory.metadata?.internal === true) return true;
+  // 0.3 原型数据兼容：发布版不再写入 metadata.runtime.internal。
+  if (memory.metadata?.runtime?.internal === true) return true;
+  return typeof memory.namespace === 'string'
+    && memory.namespace.startsWith('__')
+    && memory.namespace !== '__policy__';
+}
+
+/** 时间线分类：memory / compact / checkpoint / self / other（other 仍属内部）。 */
+export function runtimeTimelineKind(memory) {
+  if (memory?.type === 'compact') return 'compact';
+  if (memory?.type === 'context_checkpoint') return 'checkpoint';
+  if (memory?.type === 'self_record') return 'self';
+  if (isInternalRuntimeMemory(memory)) return 'other';
+  return 'memory';
+}
+
+/** 默认只显示普通记录；includeInternal 打开后可按 kind 筛选。 */
+export function filterRuntimeTimeline(memories, { filter = 'memory', includeInternal = false } = {}) {
+  const list = Array.isArray(memories) ? memories : [];
+  return list.filter((memory) => {
+    const kind = runtimeTimelineKind(memory);
+    if (!includeInternal && kind !== 'memory') return false;
+    if (filter === 'all') return true;
+    return kind === filter;
+  });
+}
 
 // ---------- U-1 · CSRF 403 自愈（与 IA 同处共享纯逻辑模块：无 DOM、零依赖） ----------
 // 长开页面 / 守护重启后旧 token 失效时，重取一次 /console/ 的 token（响应头 + cookie），

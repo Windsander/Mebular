@@ -79,7 +79,13 @@ export type MemoryNode = EntityNode | FactNode | EpisodeNode | SkillNode | MetaN
 
 // ---------- 输入类型（写入侧） ----------
 
-export type EntityInput = EntityContent & { tags?: string[]; labels?: string[]; namespace?: string };
+export type EntityInput = EntityContent & {
+  validFrom?: number;
+  validTo?: number;
+  tags?: string[];
+  labels?: string[];
+  namespace?: string;
+};
 
 export interface FactInput {
   subject: string;
@@ -94,9 +100,21 @@ export interface FactInput {
   namespace?: string;
 }
 
-export type EpisodeInput = EpisodeContent & { tags?: string[]; labels?: string[]; namespace?: string };
+export type EpisodeInput = EpisodeContent & {
+  validFrom?: number;
+  validTo?: number;
+  tags?: string[];
+  labels?: string[];
+  namespace?: string;
+};
 
-export type SkillInput = SkillContent & { tags?: string[]; labels?: string[]; namespace?: string };
+export type SkillInput = SkillContent & {
+  validFrom?: number;
+  validTo?: number;
+  tags?: string[];
+  labels?: string[];
+  namespace?: string;
+};
 
 export type MetaInput = MetaContent & { tags?: string[]; labels?: string[]; namespace?: string };
 

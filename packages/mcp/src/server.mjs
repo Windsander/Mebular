@@ -376,6 +376,7 @@ export async function startServeServer(options = {}) {
       runtime: current?.runtime ?? null,
       // D2：写端点默认开启（仍需 memory.admin scope + CSRF 双提交）；`MEBULAR_CONSOLE_WRITES=0` 可降级为 D1 只读
       writesEnabled: options.writesEnabled ?? process.env.MEBULAR_CONSOLE_WRITES !== '0',
+      manageMemoryRuntime: true,
       provision: provisionStart,
       initializeRuntime: async ({ action, result, server }) => {
         const next = await startRuntime({ action, result, serverContext: server, hot: true });

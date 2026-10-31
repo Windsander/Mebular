@@ -1,0 +1,12 @@
+{
+  "name": "@mebular/dsh-fake-llm",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Test-only DSH LLM adapter that records requests without a model or network",
+  "license": "MIT",
+  "type": "module",
+  "main": "index.js",
+  "files": [
+    "index.js"
+  ]
+}

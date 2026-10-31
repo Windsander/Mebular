@@ -111,6 +111,54 @@ export class GraphStore {
     return updated;
   }
 
+  /**
+   * 受控更新时间有效性（仅用于修正/替代路径）。
+   *
+   * 普通 `updateNode` 保持 `validFrom/validTo` 不可变；记录级修正需要把旧事实
+   * `validTo` 结束在新事实 `validFrom`，但同样必须经过事件日志与同步。
+   * 这里是唯一允许修改 `validTo` 的入口，调用方（MemoryService）负责校验
+   * 记录类型、时间窗口与权限。
+   */
+  async updateNodeValidity(id: string, validTo: number): Promise<Node | null> {
+    const existing = await this.storage.getNode(id);
+    if (!existing) {
+      return null;
+    }
+    if (typeof validTo !== 'number' || !Number.isFinite(validTo)) {
+      return null;
+    }
+
+    const now = Date.now();
+    const updated: Node = {
+      ...existing,
+      id,
+      validTo,
+      updatedAt: now,
+      updatedBy: this.author,
+      createdAt: existing.createdAt,
+      validFrom: existing.validFrom,
+      tags: existing.tags,
+      vectorClock: this.clock.toJSON(),
+    };
+
+    this.clock.increment(this.author);
+    updated.clocks = this.clock.toJSON();
+    updated.vectorClock = this.clock.toJSON();
+
+    if (this.eventLog) {
+      const event = await this.eventLog.append({
+        type: 'node_updated',
+        data: { nodeId: id, newVersion: { ...updated } },
+        namespace: updated.namespace,
+      });
+      updated.clocks = { ...event.vectorClock };
+      updated.vectorClock = { ...event.vectorClock };
+    }
+
+    await this.storage.putNode(updated);
+    return updated;
+  }
+
   async deleteNode(id: string): Promise<boolean> {
     const existing = await this.storage.getNode(id);
     if (!existing) {

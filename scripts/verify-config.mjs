@@ -275,10 +275,11 @@ async function main() {
         && !configPaths.includes('network.libp2p.relayServers')
         && !configPaths.includes('network.libp2p.relayUnlimited')
         && !statusPaths.includes('network.libp2p.relayUnlimited'));
-    // 简化轮：writable-internal（反熵节奏/快照阈值/召回阈值/relayUnlimited）也进诊断三元组——API 可写即可生效/待重启，排查要看得到
-    check(`S2 三元组覆盖 = editable ∪ status-only ∪ writable-internal（实得 ${effectivePaths.length}）`,
-      effectivePaths.length === 29
-        && JSON.stringify(effectivePaths) === JSON.stringify([...schema.EDITABLE_PATHS, ...schema.STATUS_ONLY_PATHS, ...schema.WRITABLE_INTERNAL_PATHS].sort()));
+    // 简化轮：writable-internal（反熵节奏/快照阈值/召回阈值/relayUnlimited/运行时配置）也进诊断三元组——API 可写即可生效/待重启，排查要看得到
+    const expectedEffective = [...schema.EDITABLE_PATHS, ...schema.STATUS_ONLY_PATHS, ...schema.WRITABLE_INTERNAL_PATHS].sort();
+    check(`S2 三元组覆盖 = editable ∪ status-only ∪ writable-internal（实得 ${effectivePaths.length}，应为 ${expectedEffective.length}）`,
+      effectivePaths.length === expectedEffective.length
+        && JSON.stringify(effectivePaths) === JSON.stringify(expectedEffective));
   }
 
   // ---------------- S3 自锁防护（不写盘 / 不重启） ----------------

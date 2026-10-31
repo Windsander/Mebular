@@ -19,6 +19,23 @@ import { attachFleetEvents, resolveFleetNamespace } from './fleet-events.mjs';
 import { READ_ROUTES, buildHandoffPlan } from './admin.mjs';
 import { configPath } from './config.mjs';
 import { createServiceFacade } from './service-facade.mjs';
+import { createDetailMaintenance } from './detail-maintenance.mjs';
+import {
+  createMemoryCapabilityHandler,
+  isMemoryCapabilityPath,
+  isMemoryRuntimeEnabled,
+} from './memory-capability.mjs';
+import {
+  MemoryRuntimeSupervisor,
+  disabledMemoryRuntimeStatus,
+} from './memory-runtime-supervisor.mjs';
+import {
+  DEFAULT_MEMORY_RUNTIME_MODEL_SOURCE,
+  MEMORY_RUNTIME_MODEL_SOURCES,
+  MemoryRuntimeConfigError,
+  readMemoryRuntimeModelSource,
+  writeMemoryRuntimeModelSource,
+} from './memory-runtime-config.mjs';
 import { APP_VERSION } from './version.mjs';
 import { resolveStaticAssetRoots } from './asset-roots.mjs';
 
@@ -872,12 +889,68 @@ export async function startHttpServer({
   initializeRuntime = null,
   // 关闭钩子：热初始化后由 server.mjs 关闭 app / join / 广播计时器（HTTP server 本身由本函数关闭）
   onClose = null,
+  // Memory Runtime sidecar 生命周期：只在 MCP daemon（HTTP 模式）启用。
+  // 测试可直接关掉；生产入口 server.mjs 显式传 true。
+  manageMemoryRuntime = true,
 }) {
   // P1：生命周期状态。所有路由共用**可变**上下文；create/join 成功后就地切换，不重启进程 / 端口。
   let app = initialApp;
   let service = initialService;
   let config = initialConfig ?? {};
   let runtime = initialRuntime;
+
+  // 0.3 详情保留维护：service 就绪后启动（启动一次 + 每 24h），热切换复用同一 timer。
+  // 失败只记录状态/日志，不阻断 MCP；关闭时显式清理，避免测试/宿主进程残留 timer。
+  const detailMaintenance = createDetailMaintenance({ getService: () => service });
+
+  // 0.3 设备级模型选择：config 显式 pack 优先；否则 <home>/inference.json.selectedPack。
+  // 这里只改内存中的 runtime.model.local，不写盘、不进忆云；显式选择失败也不会被换成别的包。
+  const applyInferenceSelection = async (value) => {
+    const base = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    const local = base?.runtime?.model?.local;
+    const configPack = local && typeof local.pack === 'string' && local.pack.length > 0 ? local.pack : null;
+    const configPath = local && typeof local.path === 'string' && local.path.length > 0 ? local.path : null;
+    const clone = () => JSON.parse(JSON.stringify(base));
+    const withPath = () => {
+      const next = clone();
+      next.runtime = next.runtime && typeof next.runtime === 'object' ? next.runtime : {};
+      next.runtime.model = next.runtime.model && typeof next.runtime.model === 'object' ? next.runtime.model : {};
+      next.runtime.model.local = next.runtime.model.local && typeof next.runtime.model.local === 'object'
+        ? next.runtime.model.local
+        : {};
+      return next;
+    };
+    if (configPack && configPath) return base;
+    if (configPack) {
+      // 显式 config pack 但未写 path：设备 store 默认在 <home>/models/<pack>，
+      // 默认设备模型目录固定为 <home>/models/<pack>。
+      try {
+        const next = withPath();
+        next.runtime.model.local.path = join(home, 'models', configPack);
+        return next;
+      } catch {
+        return base;
+      }
+    }
+    try {
+      const { readInferenceState } = await import('./inference-store.mjs');
+      const read = await readInferenceState(home, { init: false });
+      const selected = read?.state?.selectedPack;
+      if (typeof selected !== 'string' || selected.length === 0) return base;
+      const next = withPath();
+      next.runtime.model.local.pack = selected;
+      next.runtime.model.local.path = join(home, 'models', selected);
+      // inference.json 的 selectedPack 本身就是显式选择；默认 heuristic 时切到 local，
+      // 避免“选了模型但 Runtime 仍走 heuristic”。host/api/auto 保持用户显式值。
+      if (next.runtime.model.source === undefined || next.runtime.model.source === 'heuristic') {
+        next.runtime.model.source = 'local';
+      }
+      return next;
+    } catch {
+      return base;
+    }
+  };
+  config = await applyInferenceSelection(config);
   let deviceId = initialDeviceId;
   let namespace = initialNamespace;
   let joinEndpoint = initialJoinEndpoint;
@@ -916,7 +989,7 @@ export async function startHttpServer({
     if (!next?.app || !next?.service) throw new Error('初始化结果缺少 app/service');
     app = next.app;
     service = next.service;
-    config = next.config ?? {};
+    config = await applyInferenceSelection(next.config ?? {});
     runtime = next.runtime ?? null;
     deviceId = next.deviceId ?? null;
     namespace = next.namespace ?? 'tasks';
@@ -927,6 +1000,8 @@ export async function startHttpServer({
     cloudId = cloud.available ? await profileIdForHome(cloud.root, home).catch(() => null) : null;
     phase = 'READY';
     if (viaHotInit) hotInitialized = true;
+    // 热初始化：同一个 scheduler 动态读取新 service；当天已成功扫过则不重复。
+    detailMaintenance.start();
     return { phase, cloudId };
   }
 
@@ -955,6 +1030,60 @@ export async function startHttpServer({
   // 热初始化后同一会话内的 tools/call 直接转发到真实 MemoryService（不重连、不重新 initialize）。
   const runtimeReady = () => phase === 'READY' && Boolean(service);
   const serviceFacade = createServiceFacade({ getService: () => service, isReady: runtimeReady });
+
+  // 0.3 Memory Capability API：内部接口 `/internal/memory/v1`（读 + 写 + 内部对象 + sync）。
+  // 只有 memoryRuntime.enabled=true 时挂载/生成 token；轻量模式零目录/文件/进程副作用。
+  // capability 不是公共 MCP 工具；29 工具面不变。
+  const memoryCapability = createMemoryCapabilityHandler({
+    home,
+    getConfig: () => config,
+    getService: () => service,
+    getApp: () => app,
+    getIdentity: () => ({
+      // /healthz 的 cloudId 是既有 profile 语义；capability 的稳定 cloudTrustId 暂不可得。
+      cloudId: null,
+      cloudTrustId: null,
+      profileId: cloudId,
+      userId: 'user',
+      deviceId: app?.deviceId ?? null,
+    }),
+    ttlMs: (() => {
+      const raw = Number(process.env.MEBULAR_CAPABILITY_TOKEN_TTL_MS ?? '');
+      return Number.isFinite(raw) && raw > 0 ? raw : undefined;
+    })(),
+  });
+
+  // 0.3 Memory Runtime sidecar 生命周期适配：只 spawn/health/stop，不 import sidecar 业务。
+  // 轻量模式（enabled=false）不会创建目录/token/进程/端口；自动启动在 listen 后异步进行，
+  // 不阻塞 MCP READY/29 工具。关闭时只停止本进程启动的 sidecar（attach 的不动）。
+  const memoryRuntimeSupervisor = manageMemoryRuntime
+    ? new MemoryRuntimeSupervisor({
+      home,
+      config: () => config,
+      env: process.env,
+      profileId: () => cloudId,
+      cloudId: () => null,
+      mcpUrl: () => origin,
+    })
+    : null;
+
+  // 模型选择/卸载后刷新内存中的设备模型配置（管理面状态读取同一份配置）。
+  const refreshInferenceRuntime = async () => {
+    try {
+      const { readDeviceConfig } = await import('./inference-store.mjs');
+      const disk = await readDeviceConfig(home);
+      const diskModel = disk?.runtime?.model;
+      if (diskModel && typeof diskModel === 'object') {
+        config = await applyInferenceSelection({
+          ...config,
+          runtime: { ...(config?.runtime ?? {}), model: diskModel },
+        });
+      }
+    } catch {
+      // 读盘失败时保留当前内存配置；下一次启动会重新解析。
+    }
+  };
+
   const mcpSessions = new Map(); // sessionId → { transport, server }
   async function transportFor(sessionId) {
     if (sessionId) return mcpSessions.get(sessionId)?.transport ?? null;
@@ -1162,7 +1291,12 @@ export async function startHttpServer({
 
   async function handleAdminRead(req, res, path, url) {
     const builder = READ_ROUTES[path];
-    if (!builder) return false;
+    const memoryRuntimeTrace = /^\/admin\/api\/memory-runtime\/traces\/([^/]+)$/.exec(path);
+    const memoryRuntimeRead = path === '/admin/api/memory-runtime/status'
+      || path === '/admin/api/memory-runtime/model-source'
+      || path === '/admin/api/memory-runtime/traces'
+      || memoryRuntimeTrace !== null;
+    if (!builder && !memoryRuntimeRead) return false;
     // P2：助手列表只读本机配置，UNINITIALIZED 也开放；其余 admin 读数据面仍需 READY。
     if ((!app || !service) && path !== '/admin/api/clients') {
       return sendJson(res, 503, { error: 'console_unavailable', message: 'Mebular 尚未初始化' });
@@ -1172,6 +1306,104 @@ export async function startHttpServer({
       res.statusCode = check.status;
       if (check.challenge) res.setHeader('www-authenticate', check.challenge);
       return sendJson(res, check.status, { error: 'unauthorized', message: check.message });
+    }
+    if (memoryRuntimeRead) {
+      // 只读薄代理：浏览器不接触 sidecar host token；轻量模式返回明确 disabled/stopped。
+      if (path === '/admin/api/memory-runtime/status') {
+        const status = memoryRuntimeSupervisor
+          ? await memoryRuntimeSupervisor.status().catch(() => memoryRuntimeSupervisor.snapshot())
+          : disabledMemoryRuntimeStatus();
+        const detail = memoryRuntimeSupervisor
+          ? await memoryRuntimeSupervisor.readStatus().catch(() => null)
+          : null;
+        // 只合并模式/版本/模型状态；host token、endpoint、keyRef、模型路径永不出服务端。
+        return sendJson(res, 200, {
+          ...status,
+          mode: status.enabled ? 'immersive' : 'lightweight',
+          runtimeVersion: status.runtimeVersion ?? detail?.runtimeVersion ?? null,
+          model: detail?.model ?? null,
+        });
+      }
+      if (path === '/admin/api/memory-runtime/model-source') {
+        let configView;
+        try {
+          configView = await readMemoryRuntimeModelSource({ home });
+        } catch (error) {
+          configView = {
+            source: DEFAULT_MEMORY_RUNTIME_MODEL_SOURCE,
+            defaultSource: DEFAULT_MEMORY_RUNTIME_MODEL_SOURCE,
+            values: [...MEMORY_RUNTIME_MODEL_SOURCES],
+            exists: false,
+            warnings: [error?.code ?? 'config_unreadable'],
+          };
+        }
+        const enabled = memoryRuntimeSupervisor?.isEnabled() === true;
+        const detail = enabled && memoryRuntimeSupervisor
+          ? await memoryRuntimeSupervisor.readStatus().catch(() => null)
+          : null;
+        const snapshot = memoryRuntimeSupervisor?.snapshot() ?? disabledMemoryRuntimeStatus();
+        const available = detail?.available === true;
+        const canApplyHot = enabled && available && snapshot.managed === true && snapshot.attached !== true;
+        return sendJson(res, 200, {
+          ok: true,
+          ...configView,
+          enabled,
+          available,
+          state: detail?.state ?? snapshot.state,
+          degraded: detail?.degraded === true,
+          reason: detail?.reason ?? null,
+          error: detail?.error ?? null,
+          model: detail?.model ?? null,
+          applies: canApplyHot ? 'hot' : 'next_start',
+        });
+      }
+      if (!memoryRuntimeSupervisor) {
+        if (memoryRuntimeTrace) {
+          return sendJson(res, 200, {
+            ok: true,
+            enabled: false,
+            available: false,
+            disabled: true,
+            state: 'stopped',
+            reason: 'disabled',
+            trace: null,
+            error: null,
+          });
+        }
+        return sendJson(res, 200, {
+          ok: true,
+          enabled: false,
+          available: false,
+          disabled: true,
+          state: 'stopped',
+          reason: 'disabled',
+          traces: [],
+          total: 0,
+          degraded: false,
+          warnings: [],
+        });
+      }
+      if (memoryRuntimeTrace) {
+        const trace = await memoryRuntimeSupervisor.readTrace(decodeURIComponent(memoryRuntimeTrace[1]));
+        return sendJson(res, 200, trace);
+      }
+      const traces = await memoryRuntimeSupervisor.readTraces({ limit: url.searchParams.get('limit') ?? 20 });
+      return sendJson(res, 200, traces);
+    }
+    // 内部对象只在管理面显式调试时可见；includeInternal 不能由普通读 token 打开。
+    if (path === '/admin/api/memories') {
+      const includeInternal = url.searchParams.get('includeInternal');
+      if (includeInternal === '1' || includeInternal === 'true') {
+        const adminCheck = await authenticate(req, Buffer.alloc(0), 'memory.admin');
+        if (!adminCheck.ok) {
+          res.statusCode = adminCheck.status;
+          if (adminCheck.challenge) res.setHeader('www-authenticate', adminCheck.challenge);
+          return sendJson(res, adminCheck.status, {
+            error: 'forbidden',
+            message: 'includeInternal 需要 memory.admin scope',
+          });
+        }
+      }
     }
     // 注意：CSRF token 只在 /console/ 页面加载时签发。若在 overview 轮询里重新签发，
     // cookie 会被每次轮询改写，与并发的写请求竞争（读 cookie 后、发出写之前又来一次
@@ -1193,6 +1425,10 @@ export async function startHttpServer({
     }
     if (path === '/admin/api/overview') {
       payload.features = { writes: Boolean(writesEnabled) };
+      // 只读状态；不包含 token/tokenFile。禁用/未安装/失败都明确呈现，失败开放。
+      payload.memoryRuntime = memoryRuntimeSupervisor
+        ? await memoryRuntimeSupervisor.status().catch(() => memoryRuntimeSupervisor.snapshot())
+        : disabledMemoryRuntimeStatus();
     }
     return sendJson(res, 200, payload);
   }
@@ -1346,6 +1582,12 @@ export async function startHttpServer({
     /^\/admin\/api\/assistants$/,
     /^\/admin\/api\/assistants\/([^/]+)$/,
     /^\/admin\/api\/assistants\/([^/]+)\/remove$/,
+    // 0.3 本地模型：设备级 store；同走 Origin + CSRF + memory.admin。
+    /^\/admin\/api\/(?:models|inference)\/(select|download|pause|resume|cancel|import|uninstall|remove|start|stop|test)$/,
+    // 0.3 记忆运行时：召回反馈经 MCP 薄代理转发 sidecar；host token 不出服务端。
+    /^\/admin\/api\/memory-runtime\/feedback$/,
+    // 0.3 高级模型来源：只写 <home>/memory-runtime/config.json 的 model.source。
+    /^\/admin\/api\/memory-runtime\/model-source$/,
   ];
 
   // P2：UNINITIALIZED 仅开放本机助手配置所需的读写动作（列表 / 预览 / 接入 / 验证 / 重探）。
@@ -1896,6 +2138,94 @@ export async function startHttpServer({
     // 自动修复：客户端接入修复，**不**经 securityWriteGate（不写记忆/安全状态）。
     if (path === '/admin/api/repair') return handleRepair(req, res);
 
+    // 0.3 高级模型来源：轻量模式不创建 sidecar 目录，也不接受写入。
+    if (path === '/admin/api/memory-runtime/model-source') {
+      if (memoryRuntimeSupervisor?.isEnabled() !== true) {
+        return sendJson(res, 409, {
+          ok: false,
+          error: 'memory_runtime_disabled',
+          enabled: false,
+          state: 'stopped',
+          message: '记忆模式为轻量 MCP：切换到沉浸式后才能调整模型来源',
+        });
+      }
+      const input = parseJsonBody(body);
+      if (!input) {
+        return sendJson(res, 400, { ok: false, error: 'bad_request', message: '需要 JSON 请求体' });
+      }
+      let written;
+      try {
+        written = await writeMemoryRuntimeModelSource({ home, source: input.source });
+      } catch (error) {
+        const code = error instanceof MemoryRuntimeConfigError ? error.code : 'config_write_failed';
+        return sendJson(res, code === 'invalid_model_source' || code === 'config_invalid' ? 400 : 409, {
+          ok: false,
+          error: code,
+          message: error?.message ?? '模型来源保存失败',
+        });
+      }
+      const snapshot = await memoryRuntimeSupervisor.status().catch(() => memoryRuntimeSupervisor.snapshot());
+      const detail = await memoryRuntimeSupervisor.readStatus().catch(() => null);
+      const canApplyHot = detail?.available === true
+        && snapshot.managed === true
+        && snapshot.attached !== true;
+      if (canApplyHot) {
+        // sidecar 重启后读取新的 model.source；失败只降级，不阻塞对话。
+        void memoryRuntimeSupervisor.restart({ includeAttached: false, force: false }).catch(() => undefined);
+      }
+      return sendJson(res, 200, {
+        ok: true,
+        ...written,
+        enabled: true,
+        available: detail?.available === true,
+        state: snapshot.state,
+        degraded: detail?.degraded === true,
+        reason: detail?.reason ?? null,
+        error: null,
+        model: detail?.model ?? null,
+        applies: canApplyHot ? 'hot' : 'next_start',
+      });
+    }
+
+    // 0.3 记忆运行时：召回反馈经 MCP 薄代理转发 sidecar（host token 只在服务端使用）。
+    if (path === '/admin/api/memory-runtime/feedback') {
+      const input = parseJsonBody(body);
+      if (!input) {
+        return sendJson(res, 400, { ok: false, error: 'bad_request', message: '需要 JSON 请求体' });
+      }
+      const traceId = typeof input.traceId === 'string' ? input.traceId : '';
+      const result = memoryRuntimeSupervisor
+        ? await memoryRuntimeSupervisor.submitRecallFeedback(traceId, input)
+        : {
+            statusCode: 409,
+            body: {
+              ok: false,
+              error: 'memory_runtime_disabled',
+              enabled: false,
+              state: 'stopped',
+              message: '记忆运行时未启用',
+            },
+          };
+      return sendJson(res, result.statusCode, result.body);
+    }
+
+    // 0.3 本地模型：设备级 store，不经 securityWriteGate（不写记忆/安全状态）。
+    const modelAction = path.match(/^\/admin\/api\/(?:models|inference)\/([^/]+)$/);
+    if (modelAction) {
+      const { handleModelsWrite } = await import('./inference-admin.mjs');
+      const result = await handleModelsWrite({
+        home,
+        config,
+        action: decodeURIComponent(modelAction[1]),
+        input: parseJsonBody(body) ?? {},
+      });
+      if (result.status < 400 && ['select', 'remove', 'uninstall', 'stop'].includes(modelAction[1])) {
+        // stop 同时释放设备模型引擎，避免“admin stop 之后模型仍被占用”。
+        await refreshInferenceRuntime();
+      }
+      return sendJson(res, result.status, result.body);
+    }
+
     // S2：安全三档写端点门禁（medium 动态码 / high 会签或恢复码；low 放行）。
     const gateInput = parseJsonBody(body) ?? {};
     const gate = await securityWriteGate({ app, home, path, input: gateInput, namespace });
@@ -2388,6 +2718,33 @@ export async function startHttpServer({
       await rename(tmp, cfgFile);
       const backup = existsSync(`${cfgFile}.bak`) ? `${cfgFile}.bak` : null;
       const base = { ok: true, applied: changedPaths, backup, path: cfgFile, config: merged };
+
+      // memoryRuntime.enabled 是热开关：同步内存配置，立即生成/撤销 capability token，
+      // 并启动/停止 sidecar（sidecar 失败不影响配置写入与 MCP 本身）。
+      if (changedPaths.some((changed) => changed === 'memoryRuntime' || changed.startsWith('memoryRuntime.'))) {
+        if (merged?.memoryRuntime === undefined) {
+          const next = { ...(config ?? {}) };
+          delete next.memoryRuntime;
+          config = next;
+        } else {
+          config = { ...(config ?? {}), memoryRuntime: merged.memoryRuntime };
+        }
+        if (isMemoryRuntimeEnabled(config)) {
+          await memoryCapability.prepare();
+          if (memoryRuntimeSupervisor) {
+            const commandChanged = changedPaths.some((changed) => changed === 'memoryRuntime.command'
+              || changed === 'memoryRuntime.startTimeoutMs');
+            if (commandChanged) {
+              void memoryRuntimeSupervisor.restart({ includeAttached: true, force: false }).catch(() => undefined);
+            } else {
+              void memoryRuntimeSupervisor.start().catch(() => undefined);
+            }
+          }
+        } else {
+          await memoryRuntimeSupervisor?.stop({ includeAttached: false }).catch(() => undefined);
+          await memoryCapability.revoke();
+        }
+      }
 
       // G1：全部即时生效项 → 不重启，就地生效（前端随即刷新 effective）
       if (restartPaths.length === 0) {
@@ -2983,6 +3340,11 @@ export async function startHttpServer({
         res.setHeader('cache-control', 'no-store');
         return sendJson(res, 200, buildEmbedInfo({ origin, loopback: isLoopback }));
       }
+      // 0.3 Memory Capability API（内部）：loopback + capability token，独立于 /mcp 鉴权。
+      // 轻量模式（memoryRuntime.enabled=false）返回 404 capability_disabled，不创建 token/目录。
+      if (isMemoryCapabilityPath(path)) {
+        return memoryCapability({ req, res, url, body });
+      }
       if (auth === 'oauth') {
         if (path === '/.well-known/oauth-protected-resource' && req.method === 'GET') {
           return sendJson(res, 200, metadata.protectedResource);
@@ -3349,7 +3711,13 @@ export async function startHttpServer({
           const out = await buildHandoffPlan({ app }, decodeURIComponent(planMatch[1]), successor);
           return sendJson(res, out.status, out.body);
         }
-        if (req.method === 'GET' && READ_ROUTES[path]) return handleAdminRead(req, res, path, url);
+        if (req.method === 'GET' && (READ_ROUTES[path]
+          || path === '/admin/api/memory-runtime/status'
+          || path === '/admin/api/memory-runtime/model-source'
+          || path === '/admin/api/memory-runtime/traces'
+          || /^\/admin\/api\/memory-runtime\/traces\/[^/]+$/.test(path))) {
+          return handleAdminRead(req, res, path, url);
+        }
         // 写端点路径：任何方法都交给 handleAdminWrite（非 POST/PUT/PATCH → 405；Origin/CSRF/scope 同处校验）
         if (WRITE_PATTERNS.some((re) => re.test(path))) {
           const done = await handleAdminWrite(req, res, path, body);
@@ -3375,8 +3743,10 @@ export async function startHttpServer({
           });
         }
         if (path === '/app/namespaces' && req.method === 'GET') {
-          const nodes = await app.graph.listNodes({});
-          const namespaces = [...new Set(nodes.map((n) => n.namespace ?? 'default'))].sort();
+          const stats = service && typeof service.stats === 'function' ? await service.stats() : null;
+          const namespaces = stats
+            ? stats.domains.map((entry) => entry.domain).sort()
+            : (await app.getNamespaceDirectory()).sort();
           return sendJson(res, 200, { ok: true, namespaces, count: namespaces.length });
         }
         if (path === '/app/nodes' && req.method === 'POST') {
@@ -3396,6 +3766,10 @@ export async function startHttpServer({
           );
           return sendJson(res, 200, { ok: true, node: { id: node.id, type: node.type, namespace: node.namespace ?? 'default' } });
         }
+        // [raw-graph-debug] 原始图调试/接入端点（调试例外）：不做内部对象、归档或
+        // 墓碑过滤，仅供 daemon/fleet 原始图读写与排障。普通记忆列表与域统计必须走
+        // MemoryService.listRecords()/namespaceStats()（Console 见 admin.mjs），
+        // 不得把这里当作普通记忆读路径。
         if (path === '/app/nodes' && req.method === 'GET') {
           const filter = {};
           const ns = url.searchParams.get('namespace');
@@ -3490,6 +3864,9 @@ export async function startHttpServer({
     ? await acquireActiveLock({ root: cloud.root, home, profileId: cloudId })
     : null;
 
+  // capability token 在监听前生成（sidecar 首次握手可读）；监听失败由下方 catch 撤销。
+  if (isMemoryRuntimeEnabled(config)) await memoryCapability.prepare();
+
   let server;
   try {
     if (tls) {
@@ -3502,6 +3879,7 @@ export async function startHttpServer({
       server.listen(port, host, () => resolve());
     });
   } catch (error) {
+    await memoryCapability.dispose().catch(() => undefined);
     await activeLock?.release?.().catch(() => undefined);
     throw error;
   }
@@ -3520,12 +3898,23 @@ export async function startHttpServer({
   }).catch((error) => {
     console.error(`RUNTIME_FILE_WRITE_FAILED ${error?.code ?? 'ERROR'}`);
   });
+  // MCP 已就绪后再异步拉起 sidecar：失败只影响沉浸式记忆，不阻塞 READY/29 工具。
+  if (memoryRuntimeSupervisor && isMemoryRuntimeEnabled(config)) {
+    void memoryRuntimeSupervisor.start().catch((error) => {
+      console.error(`MEMORY_RUNTIME_START_FAILED ${error?.code ?? 'ERROR'}`);
+    });
+  }
+  // 详情保留维护同样在 listen 后异步启动：过期扫描失败只记录状态，不影响 MCP。
+  detailMaintenance.start();
   let closePromise = null;
   const close = () => {
     if (closePromise) return closePromise;
     closePromise = (async () => {
       // 优雅停止的顺序很重要：MCP/SSE/keep-alive 连接不会自己断，
       // 先收 MCP sessions，再主动结束连接，最后才等 listener（带有限超时）。
+      // 详情维护先停 timer；进行中的 prune 最多等一个 session 预算，不拖死关闭。
+      detailMaintenance.stop();
+      await settleWithin(detailMaintenance.idle(), SESSION_CLOSE_TIMEOUT_MS);
       const deadline = Date.now() + CLOSE_TIMEOUT_MS;
       try {
         // 1) 先让每个 MCP session 的 transport/server 正常收尾。
@@ -3563,7 +3952,14 @@ export async function startHttpServer({
       } finally {
         // 4) 无论前面如何都要清理；pid 守卫保证不误删新实例的 runtime.json。
         await clearRuntimeFile(home, { pid: process.pid }).catch(() => undefined);
-        // 5) 保留最新 main 的生命周期收尾：root 单活锁 + 热初始化上下文（app/join/广播）。
+        // 5) 本地模型子进程先停，避免 daemon 退出后留下孤儿 llama-server。
+        await import('./inference-admin.mjs')
+          .then(({ disposeInferenceManager }) => disposeInferenceManager(home))
+          .catch(() => undefined);
+        // 6) 保留最新 main 的生命周期收尾：root 单活锁 + 热初始化上下文（app/join/广播）。
+        //    先停止本进程启动的 sidecar（attach 的不动），再撤销 capability token。
+        await memoryRuntimeSupervisor?.dispose().catch(() => undefined);
+        await memoryCapability.dispose().catch(() => undefined);
         await activeLock?.release?.().catch(() => undefined);
         await onClose?.().catch(() => undefined);
       }
@@ -3577,6 +3973,15 @@ export async function startHttpServer({
     auth,
     issuer,
     close,
-    getState: () => ({ phase, hotInitialized, app, service, config, runtime, deviceId }),
+    getState: () => ({
+      phase,
+      hotInitialized,
+      app,
+      service,
+      config,
+      runtime,
+      deviceId,
+      detailMaintenance: detailMaintenance.status(),
+    }),
   };
 }

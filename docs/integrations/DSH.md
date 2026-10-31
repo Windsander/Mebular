@@ -13,6 +13,10 @@ local Mebular runtime**: one daemon, one `mebular-serve`, one active
 profile/home and one data root. The Plugin defaults to `attach`; only an
 explicit `managed`/`auto` choice or a panel install starts/installs the runtime.
 
+0.3.0 adds an optional Memory Runtime bridge next to MCP. It is off by default,
+so existing attach/managed/panel/MCP behaviour is unchanged until you opt in.
+See [Memory Runtime (opt-in)](#memory-runtime-opt-in) below.
+
 ## Two entries, one runtime
 
 | Surface | Responsibility |
@@ -29,7 +33,7 @@ resolve`/`supervise`) and daemon HTTP endpoints.
 Install from npm into the DSH web profile:
 
 ```bash
-dsh plugin --profile web add @mebular/dsh-plugin@0.2.4
+dsh plugin --profile web add @mebular/dsh-plugin@0.3.0
 ```
 
 For development:
@@ -133,6 +137,168 @@ Full config:
 
 Invalid values fall back safely with a warning; activation does not fail.
 
+## Memory Runtime (automatic mode following)
+
+0.3.0 can attach the independent Memory Runtime sidecar next to MCP. They are two layers
+and two processes:
+
+| Layer | Default | What it does |
+| --- | --- | --- |
+| **MCP** | On when the daemon is up | The official client mounts `mcp__mebular__*`; 29 tools unchanged |
+| **Memory Runtime sidecar** | Follows the Mebular mode | `/memory-runtime/v1` context, ingest, compaction checkpoints, optional host maintenance |
+
+The sidecar is **not** the MCP daemon runtime. DSH never reuses `daemonUrl`, the MCP
+`runtime.json` or port 7331 as the sidecar address, and never blindly connects to 7341.
+The adapter reads `<home>/memory-runtime.json` (`mode` / `state` / `capabilities`). In
+light MCP there is no discovery file, so it sends no sidecar request and keeps the 0.2
+tool surface. There is **no per-host `memoryRuntime.enabled` or collection switch**;
+legacy values are ignored with a warning.
+
+### Switch the device mode
+
+The only product switch is the Mebular memory mode (`轻量 MCP` / `沉浸式`). The host
+adapter follows the resulting sidecar discovery automatically.
+
+1. Enable the MCP setting `memoryRuntime.enabled` (Console memory-runtime switch, or
+   `<home>/config.json`):
+
+   ```jsonc
+   {
+     "memoryRuntime": {
+       "enabled": true
+     }
+   }
+   ```
+
+   The HTTP MCP daemon (`mebular serve`) then starts the installed sidecar and publishes
+   `<home>/memory-runtime.json` plus a host token at
+   `<home>/memory-runtime/host-token`. Stdio `mebular mcp` does not start it. MCP does not
+   download the sidecar automatically; install `@mebular/memory-runtime` or use the
+   desktop bundle.
+
+2. Verify the sidecar before enabling the DSH group:
+
+   ```bash
+   mebular memory-runtime status --json
+   ```
+
+3. No host opt-in is required. The `memoryRuntime` group below is only for explicit
+   troubleshooting/tests; omit it for normal use:
+
+   ```yaml
+   - id: mebular
+     name: '@mebular/dsh-plugin'
+     config:
+       lifecycle: attach
+       panel: true
+       memoryRuntime:
+         # Optional diagnostic overrides; default to true, maintenance defaults to false.
+         recall: true
+         ingest: true
+         checkpoints: true
+         hideMemoryTools: true
+         maintenance: false
+         # Governance allowlist; task_* is always kept.
+         governanceTools: []
+         memoryAgentPresets: ['mebular-memory']
+         auth: auto                 # auto | bearer | none
+         tokenEnv: MEBULAR_MEMORY_RUNTIME_TOKEN
+         # url: 'http://127.0.0.1:7341/memory-runtime/v1'
+         # tokenFile: '~/.mebular/memory-runtime/host-token'
+         # token: '...'
+   ```
+
+- **Discovery:** `memoryRuntime.url` > `MEBULAR_MEMORY_RUNTIME_URL` >
+  `<home>/memory-runtime.json`. `<home>` follows `MEBULAR_HOME`, otherwise
+  `MEBULAR_CLOUD_ROOT`, then the current profile. Discovery must be `ready`/`degraded`,
+  `mode` not `mcp`, with a heartbeat no older than 15 s and `apiVersion=1`; otherwise
+  the immersive path stays disabled with a reason and no request is sent.
+- **Auth:** `memoryRuntime.token` > the env var named by `tokenEnv` (default
+  `MEBULAR_MEMORY_RUNTIME_TOKEN`) > `memoryRuntime.tokenFile` > discovery `tokenFile` >
+  `<home>/memory-runtime/host-token`. This is the sidecar **host token**, not the MCP
+  capability token. `auto` sends `Authorization: Bearer` when a token is available;
+  `bearer` requires one; `none` never sends a header and is only for a local test sidecar
+  that explicitly disables auth. A 401 refreshes the token cache and retries once. The
+  token never appears in logs, URLs, errors or `getState()`.
+- **Recall:** only on `agent/pre-step` with `step===1` and `decision.kind==='enter'`, for
+  a new human turn. Calls `POST /memory-runtime/v1/context` (falls back to `/recall` only
+  on an explicit 404/405 from an older sidecar). A hit appends **one request-scoped
+  context message** with `role:'user'` and `source.kind='mebular-memory'`; DSH renders it
+  as context injection, not a user bubble. It never uses `source.kind='user'`, never
+  fabricates a new human turn, never writes session history, and is de-duplicated per
+  `(agentId, surface, query, turn)` for 30 minutes. No hit, timeout or failure leaves the
+  decision unchanged.
+- **Ingest:** listens to live own `session/event` entries and batches user/assistant/tool
+  events to `POST /memory-runtime/v1/ingest`; inherited fork/resume prefixes and the
+  adapter's own injection are skipped. The queue is bounded (256), batches are 16 events
+  or 250 ms, and network errors, timeouts, 429 and 5xx are retried at most twice with a
+  stable `requestId`/`Idempotency-Key`. DSH has **no durable ingest spool**: after the
+  bounded retries a failed batch is dropped with a warning and is not re-enqueued.
+- **Checkpoints:** folds `compaction/start → summary → replacement → end` into one
+  ContextCheckpoint and `PUT`s it to `/memory-runtime/v1/checkpoints/:threadId` with
+  `domain=task:<threadId>` (or the configured task domain). Only a complete summary plus
+  the replacement message is submitted; a failure, interruption or incomplete fold is
+  never reported as committed. There is no durable checkpoint spool; failed state is
+  visible in adapter status and the next compaction can write a new checkpoint. No
+  `sync` field is sent.
+- **Tool surface:** MCP stays at 29 tools and there are no `runtime_*` tools.
+  `hideMemoryTools` removes currently visible `mcp__mebular__memory_*` from ordinary
+  agents; `task_*` and the governance allowlist (`governanceTools`, plus agents in
+  `memoryAgentPresets`) remain. The adapter itself only talks HTTP and registers no
+  memory tools.
+- **Model / maintenance:** DSH does not run or configure local Qwen or a third-party API;
+  choose those in Mebular Console. DSH can supply its current session model only through
+  `maintenance.enabled`: on idle it asks that model for candidates and submits them with
+  `extractor='host'`. It never reads DSH credentials and never calls the model as a
+  Mebular API. With maintenance off, DSH supplies no host candidates: if the sidecar is
+  configured for `host`, those ingests may stay pending until candidates are supplied;
+  otherwise the configured local, API or heuristic source applies. No source silently
+  calls another model.
+
+### Real boundaries
+
+- The recall block is a source-tagged context message, not a fake user turn. If a future
+  DSH preview changes this channel, the adapter is expected to disable injection with
+  `injection_channel_unsupported` rather than fall back to `source.kind='user'`.
+- DSH exposes no compaction summary guarantee beyond the events it emits; the adapter
+  never invents one. An interrupted compaction is not a committed checkpoint.
+- DSH does not expose its LLM credentials, and this adapter does not read them.
+- DSH has no durable spool for ingest or checkpoints. Only the Hermes provider has a
+  durable `queue.jsonl`; DSH failures are bounded and visible in status.
+
+See the [Memory Runtime guide](../guides/MEMORY_RUNTIME.md) for the data boundaries
+and model fallback rules.
+
+## Upgrade from 0.2 / old prototype
+
+- **No forced migration.** 0.2 records keep their IDs, namespaces, tags and events. The
+  old `default` namespace is preserved as the third/Other fallback (`domain=default`); it
+  is not rewritten to `user`.
+- MCP keeps only lifecycle keys (`memoryRuntime.enabled`, `memoryRuntime.command`,
+  `memoryRuntime.startTimeoutMs`). Detail/staging, model, trace and retention settings belong to
+  `<home>/memory-runtime/config.json`, not to MCP `runtime.*` keys.
+- Checkpoints and SelfRecords have no local/cloud switch. There is no `sync=cloud`,
+  `checkpoint.sync` or `self.sync`; all durable objects go through MCP and existing cloud
+  sync.
+- `/runtime/v1` is not served and has no compatibility layer. A newer DSH adapter uses
+  `/memory-runtime/v1`; an old adapter pointed at `/runtime/v1` cannot reach the sidecar,
+  while MCP and the DSH panel keep working.
+- Prototype data under `<home>/runtime/` is not read or migrated. Do not delete
+  `<cloudRoot>/runtime/`; that is the MCP daemon install root, not sidecar data.
+- To turn the sidecar off, switch the Mebular memory mode back to light MCP (or run
+  `mebular memory-runtime stop`). The adapter sees discovery disappear and stops
+  ingest/recall/checkpoint without host configuration; 29 MCP tools and settled memories
+  remain. `<home>/memory-runtime/` may be kept or deleted; deleting it does not delete
+  settled memories.
+
+## Lightweight MCP is unchanged
+
+With no sidecar/discovery, DSH is exactly the 0.2 experience: the
+same 29 `mcp__mebular__*` tools, the same attach/managed lifecycle, panel and Console.
+There is no `mebular-memory-runtime` process, no new `<home>/memory-runtime/` directory
+or files, no `memory-runtime.json`, no host token and no port 7341 listener. If the
+directory exists from an earlier immersive session, lightweight mode does not modify it.
+
 ## Status and panel
 
 `GET /mebular/embed-info` is loopback-only and returns non-sensitive state.
@@ -149,9 +315,9 @@ iframe share this state.
   "runtimeMode": "reused",
   "managed": false,
   "panel": true,
-  "version": "0.2.4",
+  "version": "0.3.0",
   "profile": { "id": "default", "name": "My Cloud" },
-  "provider": { "kind": "app", "source": "registry", "version": "0.2.4" },
+  "provider": { "kind": "app", "source": "registry", "version": "0.3.0" },
   "service": { "registered": false, "running": false, "foreign": false },
   "downloadRequired": false,
   "install": { "state": "idle", "allowed": true },
@@ -260,13 +426,13 @@ single daemon, service, update locks and upgrade rollback are covered by CI and
 
 ## Release and version
 
-- Version: `0.2.4`, on the unified Mebular v0.2.4 release train (all six npm
-  packages share the same version).
-- npm: `@mebular/dsh-plugin@0.2.4`.
+- Version: `0.3.0`, on the unified Mebular v0.3.0 release train (six lockstep npm
+  packages plus the isolated `dsh-plugin` share the same version).
+- npm: `@mebular/dsh-plugin@0.3.0`.
 - The Plugin is an isolated adapter in `packages/dsh-plugin`, published by its
   own npm job. It reads the pinned runtime version from its own `package.json`,
   so a release bump needs no Plugin source edit.
-- Publish `@mebular/core@0.2.4` before `@mebular/dsh-plugin@0.2.4`; see
+- Publish `@mebular/core@0.3.0` before `@mebular/dsh-plugin@0.3.0`; see
   [Release SOP](../operations/RELEASE.md).
 - Listed in the `memory` category of
   [awesome-dsh-plugin](https://awesome-dsh-plugin.com/p/Windsander/Mebular--packages-dsh-plugin/).

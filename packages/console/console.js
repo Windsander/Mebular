@@ -9,7 +9,7 @@
 import { StarStage, namespaceColor, shortId, buildHoverRoutes, buildNetworkScene, normalizeFleetEvent, resolveTaskNamespace, summarizeHoverRoutes } from './starfield.js';
 import { initialViewFromSearch } from './deep-link.js';
 import { createWizardState, wizardReduce, WIZARD_STEPS } from './wizard.js';
-import { IA_TABS, IA_ADVANCED_SECTIONS, IA_MCP_SECTIONS, IA_FIELD_COPY, IA_SETTINGS_EXTRA, IA_SETTINGS_FOLDS, IA_SECURITY_SECTIONS, IA_MCP_DANGER_LINE_KEYS, INVITE_TTL_OPTIONS, INVITE_TTL_DEFAULT_MS, SECURITY_LEVEL_LABEL, SECURITY_LEVEL_TITLE_KEY, SECURITY_LEVEL_NOTE_KEY, SECURITY_BOUNDARY_KEY, SCHEMA_CONFIGURED_VALUE, localizeSchemaReason, refreshCsrfToken, withCsrfRetry } from './settings-ia.js';
+import { IA_TABS, IA_ADVANCED_SECTIONS, IA_MCP_SECTIONS, IA_FIELD_COPY, IA_SETTINGS_EXTRA, IA_SETTINGS_FOLDS, IA_SECURITY_SECTIONS, IA_MCP_DANGER_LINE_KEYS, INVITE_TTL_OPTIONS, INVITE_TTL_DEFAULT_MS, SECURITY_LEVEL_LABEL, SECURITY_LEVEL_TITLE_KEY, SECURITY_LEVEL_NOTE_KEY, SECURITY_BOUNDARY_KEY, SCHEMA_CONFIGURED_VALUE, localizeSchemaReason, refreshCsrfToken, withCsrfRetry, filterRuntimeTimeline, runtimeTimelineKind, memoryRuntimeEnabledOf, runtimeSidecarStateKey, memoryRuntimeModeOf, runtimeShowsModelSettings, runtimeModelSourceOf, runtimeModelSourceAvailable, runtimeModelSourceReady, IA_RUNTIME_MODEL_SOURCES, IA_RUNTIME_MODEL_SOURCE_DEFAULT } from './settings-ia.js';
 import { assistantsPanelHtml, serviceRowHtml, wizardRowHtml, repairRowHtml, statusPillHtml, attentionItems, assistantAddFormHtml } from './assistants.js';
 import { reconcileAssistantUi } from './assistant-status.js';
 import { createConsoleHost, markEmbeddedDocument } from './host.js';
@@ -55,6 +55,23 @@ const state = {
   // G-ML-1：记忆生命周期视图（动作式；默认过滤已删除/已归档）
   memories: null,
   memoryFilters: { archived: false, deleted: false, namespace: '' },
+  // 0.3：记忆运行时（状态 / 治理 / 模型 / 轨迹）；数据只在相关视图/设置页按需加载。
+  runtime: {
+    status: null,
+    // 高级 · 模型来源（GET /admin/api/memory-runtime/model-source；浏览器不接触 sidecar 配置）
+    modelSource: null,
+    traces: null,
+    traceMeta: null,
+    traceDetails: {},
+    memories: null,
+    errors: {},
+    loading: false,
+    loadedAt: 0,
+    timelineFilter: 'memory',
+    includeInternal: false,
+    traceOpen: {},
+    objectDetail: null,
+  },
   settings: null,
   // E2-A2：忆云列表/卡片与加入弹层（clouds 端点旧守护可能没有 → 卡片显示升级提示）
   clouds: null,
@@ -259,6 +276,7 @@ async function refreshOnce() {
     state.features = { writes: false };
     state.error = null;
     state.degraded = mock.degraded;
+    await ensureRuntimeData();
     render();
     return;
   }
@@ -320,6 +338,7 @@ async function refreshOnce() {
   state.degraded = computeDegraded();
   // 若加入弹层在首轮数据到达前已打开：补齐当前忆云名与默认名字（不覆盖用户已输入内容）。
   syncCloudJoinMeta();
+  await ensureRuntimeData();
   render();
 }
 
@@ -423,6 +442,7 @@ function render() {
   renderDomains();
   renderAudit();
   renderMemories();
+  renderRuntime();
   renderOverlays();
   if (!$('#settings').hidden) renderSettings();
   if (!$('#about').hidden) renderAbout();
@@ -1490,6 +1510,153 @@ function renderMcpSections() {
   }).join('');
 }
 
+// ---------- 0.3 · 设置 · 记忆模式 / 高级模型来源 ----------
+
+function runtimeStatusStateLabel(status) {
+  if (!status) return t('runtime.loadingShort');
+  if (status.enabled === false) return t('runtime.sidecar.state.disabled');
+  return t(runtimeSidecarStateKey(status.state));
+}
+
+function runtimeStatusErrorText(status) {
+  const error = status?.error;
+  if (!error) return '';
+  return String(error.message || error.code || error)
+    .replace(/\b(Bearer)\s+[A-Za-z0-9._~+/=-]+/gi, '$1 <redacted>')
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, 'sk-<redacted>')
+    .replace(/\b(?:host|capability)[-_ ]?token(?:File)?\b/gi, '运行时凭据')
+    .replace(/\btoken(?:File)?\b/gi, '凭据')
+    .replace(/\bdiscovery\b/gi, '运行时发现')
+    .replace(/\bsidecar\b/gi, '记忆运行时');
+}
+
+function runtimeModelSourceLabel(source) {
+  const raw = String(source ?? '').trim().toLowerCase();
+  if (!raw) return '—';
+  const key = `runtime.modelSource.${raw}`;
+  return t.has(key) ? t(key) : raw;
+}
+
+function runtimeModelReasonLabel(reason) {
+  if (!reason) return '—';
+  const key = `runtime.modelReason.${String(reason).replace(/[^a-z0-9_]/gi, '_')}`;
+  return t.has(key) ? t(key) : t('runtime.modelReason.unknown');
+}
+
+/** 运行状态只读卡：mode / state / degraded / error / version；不显示 token、pid 或配置路径。 */
+function runtimeStatusFactsHtml(status) {
+  if (!status) return `<p class="muted">${escapeHtml(t('runtime.loading'))}</p>`;
+  const error = runtimeStatusErrorText(status);
+  const stateLabel = runtimeStatusStateLabel(status);
+  const enabled = memoryRuntimeEnabledOf(status, currentConfigFile());
+  return `<dl class="runtime-kv" data-rt-sidecar-status>
+    <dt>${escapeHtml(t('runtime.status.mode'))}</dt><dd><span class="crt-tag ${enabled ? 'crt-tag-ok' : ''}">${escapeHtml(enabled ? t('runtime.sidecar.immersive') : t('runtime.sidecar.lightweight'))}</span></dd>
+    <dt>${escapeHtml(t('runtime.sidecar.state'))}</dt><dd><span class="crt-tag ${status.state === 'ready' ? 'crt-tag-ok' : status.degraded || status.state === 'failed' ? 'crt-tag-warn' : ''}">${escapeHtml(stateLabel)}</span></dd>
+    <dt>${escapeHtml(t('runtime.sidecar.degraded'))}</dt><dd>${escapeHtml(status.degraded ? t('runtime.sidecar.degradedYes') : t('runtime.sidecar.degradedNo'))}</dd>
+    <dt>${escapeHtml(t('runtime.sidecar.error'))}</dt><dd>${error ? escapeHtml(error) : '—'}</dd>
+    <dt>${escapeHtml(t('runtime.sidecar.version'))}</dt><dd>${escapeHtml(status.runtimeVersion ?? '—')}</dd>
+  </dl>`;
+}
+
+function runtimeModeSettingsHtml() {
+  const status = state.runtime.status;
+  const mode = memoryRuntimeModeOf(status, currentConfigFile());
+  const enabled = mode === 'immersive';
+  const disabled = !state.features.writes || MOCK;
+  const option = (value, labelKey, descKey) => `<button class="btn btn-small btn-crt" type="button" data-rt-mode="${value}" aria-pressed="${mode === value}" ${disabled ? 'disabled' : ''}>
+    <span>${escapeHtml(t(labelKey))}</span>
+    <span class="runtime-model-desc">${escapeHtml(t(descKey))}</span>
+  </button>`;
+  return settingsSectionHtml({
+    id: 'runtime-mode',
+    title: t('settings.runtime.mode.title'),
+    desc: t('settings.runtime.mode.desc'),
+    chip: `<span class="crt-tag ${enabled ? 'crt-tag-ok' : ''}" data-rt-mode-chip>${escapeHtml(enabled ? t('runtime.sidecar.immersive') : t('runtime.sidecar.lightweight'))}</span>`,
+    body: `<div class="runtime-mode-actions" role="group" aria-label="${escapeHtml(t('settings.runtime.mode.title'))}" data-rt-mode-group>
+      ${option('lightweight', 'settings.runtime.mode.lightweight', 'settings.runtime.mode.lightDesc')}
+      ${option('immersive', 'settings.runtime.mode.immersive', 'settings.runtime.mode.immersiveDesc')}
+    </div>
+    <p class="settings-section-foot muted">${escapeHtml(enabled ? t('settings.runtime.mode.onHint') : t('settings.runtime.mode.offHint'))}</p>`,
+  });
+}
+
+function runtimeModelStatusHtml(status) {
+  const model = status?.model ?? null;
+  const rows = model
+    ? [
+      [t('settings.runtime.modelStatus.configured'), runtimeModelSourceLabel(model.configured)],
+      [t('settings.runtime.modelStatus.active'), runtimeModelSourceLabel(model.active)],
+      [t('settings.runtime.modelStatus.degraded'), model.degraded ? t('runtime.sidecar.degradedYes') : t('runtime.sidecar.degradedNo')],
+      [t('settings.runtime.modelStatus.reason'), runtimeModelReasonLabel(model.reason)],
+      [t('settings.runtime.modelStatus.sources'), (model.sources ?? []).map(runtimeModelSourceLabel).join(t('common.listSeparator')) || '—'],
+    ]
+    : [[t('settings.runtime.modelStatus.state'), t('settings.runtime.modelStatus.unavailable')]];
+  return settingsSectionHtml({
+    id: 'runtime-model-status',
+    title: t('settings.runtime.modelStatus.title'),
+    desc: t('settings.runtime.modelStatus.desc'),
+    body: `<dl class="runtime-kv" data-rt-model-status>${rows.map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(String(value))}</dd>`).join('')}</dl>
+      <p class="settings-section-foot muted">${escapeHtml(t('settings.runtime.modelStatus.foot'))}</p>`,
+  });
+}
+
+function runtimeModelSourceSectionHtml() {
+  const meta = state.runtime.modelSource;
+  const status = state.runtime.status;
+  const enabled = memoryRuntimeModeOf(status, currentConfigFile()) === 'immersive';
+  const source = runtimeModelSourceOf(meta?.source ?? IA_RUNTIME_MODEL_SOURCE_DEFAULT);
+  const model = meta?.model ?? status?.model ?? null;
+  const values = Array.isArray(meta?.values) && meta.values.length > 0 ? meta.values : IA_RUNTIME_MODEL_SOURCES;
+  const ready = enabled && runtimeModelSourceReady(meta);
+  const disabled = !state.features.writes || MOCK || !ready;
+  const note = !enabled
+    ? t('settings.runtime.modelSource.light')
+    : !meta
+      ? t('settings.runtime.modelSource.loading')
+      : meta.available !== true
+        ? t('settings.runtime.modelSource.notReady')
+        : meta.applies === 'next_start'
+          ? t('settings.runtime.modelSource.nextStartHint')
+          : t('settings.runtime.modelSource.hotHint');
+  const options = values.map((value) => {
+    const normalized = runtimeModelSourceOf(value);
+    const unavailable = !runtimeModelSourceAvailable(normalized, model) && normalized !== source;
+    return `<option value="${escapeHtml(normalized)}" ${normalized === source ? 'selected' : ''} ${unavailable ? 'disabled' : ''}>${escapeHtml(runtimeModelSourceLabel(normalized))}${unavailable ? ` · ${escapeHtml(t('settings.runtime.modelSource.unavailableOption'))}` : ''}</option>`;
+  }).join('');
+  return settingsSectionHtml({
+    id: 'model-source',
+    title: t('settings.runtime.modelSource.title'),
+    desc: t('settings.runtime.modelSource.desc'),
+    body: `<div class="cfg-row">
+      <label class="cfg-label" for="rt-model-source">${escapeHtml(t('settings.runtime.modelSource.selectLabel'))}</label>
+      <div class="cfg-control">
+        <select id="rt-model-source" class="crt-input" data-rt-model-source ${disabled ? 'disabled' : ''}>${options}</select>
+        <p class="cfg-help muted" data-rt-model-source-note>${escapeHtml(note)}</p>
+      </div>
+    </div>
+    <p class="settings-section-foot muted">${escapeHtml(t('settings.runtime.modelSource.foot'))}</p>`,
+  });
+}
+
+function renderRuntimeSettings() {
+  const status = state.runtime.status;
+  const statusError = state.runtime.errors.status;
+  const enabled = runtimeShowsModelSettings(status, currentConfigFile());
+  return `
+    ${!status && statusError ? `<p class="crt-warn" role="alert">${escapeHtml(t('settings.runtime.error', { message: statusError }))}</p>` : ''}
+    ${!status && !statusError ? `<p class="muted">${escapeHtml(t('settings.runtime.loading'))}</p>` : ''}
+    ${runtimeModeSettingsHtml()}
+    ${settingsSectionHtml({
+      id: 'runtime-status-card',
+      title: t('runtime.status.title'),
+      desc: t('runtime.status.desc'),
+      body: runtimeStatusFactsHtml(status),
+    })}
+    ${enabled ? runtimeModelStatusHtml(status) : ''}
+    <p class="settings-note muted">${escapeHtml(t('settings.runtime.scope.desc'))}</p>
+  `;
+}
+
 /**
  * P3：锁定态设置页 = 排错入口（不请求 admin 数据面，不白屏）。
  * 给出状态真值 + 两个入口；可复制诊断信息给支持人员。
@@ -1550,6 +1717,21 @@ function settingsSignature(activeTab) {
     state.cloudsError ?? null,
     state.cloudRename?.id ?? null,
     state.cloudRenameError ?? '',
+    state.runtime ? [
+      state.runtime.status?.enabled ?? null,
+      state.runtime.status?.state ?? null,
+      state.runtime.status?.available ?? null,
+      state.runtime.status?.pid ?? null,
+      state.runtime.status?.runtimeVersion ?? null,
+      state.runtime.status?.degraded ?? null,
+      state.runtime.status?.error?.code ?? null,
+      state.runtime.status?.model ?? null,
+      state.runtime.modelSource ?? null,
+      state.runtime.traceMeta ?? null,
+      state.runtime.errors ?? null,
+      state.runtime.timelineFilter ?? null,
+      state.runtime.includeInternal ?? null,
+    ] : null,
     // AI 助手专区依赖：只取稳定投影（整对象序列化会因服务端易变字段导致每 3s 重建）
     (state.clients ?? null) && (state.clients ?? []).map((c) => [c.id, Boolean(c.installed), Boolean(c.connected), c.state ?? null]),
     state.service ? [Boolean(state.service.registered), Boolean(state.service.running)] : null,
@@ -1582,12 +1764,19 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
     renderLockedSettings(body);
     return;
   }
+  if (['runtime', 'advanced'].includes(activeTab) && !state.runtime.loading && Date.now() - state.runtime.loadedAt > RUNTIME_REFRESH_MS) {
+    void ensureRuntimeData({ force: true }).then(() => {
+      lastSettingsSignature = null;
+      if (!$('#settings').hidden && (state.settingsTab ?? 'common') === activeTab) renderSettings(activeTab);
+    });
+  }
   // 轮询时内容未变则跳过重建，避免原生 <select> 弹层/焦点/选择被销毁
   const signature = settingsSignature(activeTab);
   if (signature === lastSettingsSignature && body.childElementCount > 0) return;
   lastSettingsSignature = signature;
   const prevActive = document.activeElement;
   const prevPath = prevActive?.dataset?.cfgPath ?? null;
+  const prevRtPath = prevActive?.dataset?.rtPath ?? null;
   const prevStart = prevActive?.selectionStart ?? null;
   const prevEnd = prevActive?.selectionEnd ?? null;
   // 轮 C/U-3：只有提示下划线以下的内容滚动；重建时保留同一 Tab 的滚动位与折叠展开态
@@ -1615,6 +1804,7 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
           ${panel('common', `<section class="settings-section" data-settings-common-status><h3>${escapeHtml(t('settings.mock.commonTitle'))} <span class="badge badge-muted">${escapeHtml(t('settings.common.readonly'))}</span></h3><p class="muted">${escapeHtml(t('settings.mock.commonNote'))}</p></section>`)}
           ${panel('security', `<section id="settings-security-slot" class="settings-slot" data-settings-slot="security" data-security-level="${escapeHtml(state.security?.level ?? 'low')}" tabindex="-1">${securityCardHtml()}</section>`)}
           ${panel('assistants', `<p class="muted">${escapeHtml(t('settings.mock.assistants'))}</p>`)}
+          ${panel('runtime', renderRuntimeSettings())}
           ${panel('mcp', `<p class="muted">${escapeHtml(t('settings.mock.config'))}</p>`)}
           ${panel('advanced', `<p class="muted">${escapeHtml(t('settings.mock.config'))}</p>`)}
         </div>
@@ -1653,6 +1843,7 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
     `)}
     ${panel('security', `<section id="settings-security-slot" class="settings-slot" data-settings-slot="security" data-security-level="${escapeHtml(state.security?.level ?? 'low')}" tabindex="-1">${securityCardHtml()}</section>`)}
     ${panel('assistants', `<div id="assistants-panel">${assistantsPanelHtml({ clients: state.clients, ui: { ...state, addForm: state.addForm ? assistantAddFormHtml(state.addForm) : '' } })}</div>`)}
+    ${panel('runtime', renderRuntimeSettings())}
     ${panel('mcp', `
       ${renderMcpSections()}
       <details class="settings-fold" id="mcp-danger-fold" data-settings-fold="mcp-danger">
@@ -1662,6 +1853,7 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
     `)}
     ${panel('advanced', `
       ${renderAdvancedSections()}
+      ${runtimeModelSourceSectionHtml()}
       <details class="settings-fold" id="diag-fold" data-settings-fold="diagnostics">
         <summary>${escapeHtml(foldLabel('diagnostics'))}</summary>
         ${renderDiagnostics()}
@@ -1685,6 +1877,15 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
   enhanceSelects(body);
   if (prevPath) {
     const el = body.querySelector(`[data-cfg-path="${CSS.escape(prevPath)}"]`);
+    if (el && typeof el.focus === 'function') {
+      el.focus();
+      if (prevStart !== null && typeof el.setSelectionRange === 'function' && el.type === 'text') {
+        try { el.setSelectionRange(prevStart, prevEnd ?? prevStart); } catch { /* 忽略 */ }
+      }
+    }
+  }
+  if (prevRtPath) {
+    const el = body.querySelector(`[data-rt-path="${CSS.escape(prevRtPath)}"]`);
     if (el && typeof el.focus === 'function') {
       el.focus();
       if (prevStart !== null && typeof el.setSelectionRange === 'function' && el.type === 'text') {
@@ -3182,6 +3383,533 @@ function renderMemories() {
   }).join('');
 }
 
+// ---------- 0.3 · 记忆运行时：状态 / 治理 / 模型 ----------
+// 数据面：GET /admin/api/memory-runtime/status|traces|model-source、/admin/api/memories；
+// 写面：POST /admin/api/config（memoryRuntime.enabled）、/admin/api/memory-runtime/feedback|model-source、
+// /admin/api/memories/<id>/(archive|unarchive|delete)。
+// 浏览器不接触 sidecar host token / endpoint / keyRef；sidecar 不可用时状态/轨迹失败开放为 disabled/未就绪。
+
+const RUNTIME_REFRESH_MS = 8000;
+
+function runtimeIsVisible() {
+  return state.view === 'runtime'
+    || (!$('#settings')?.hidden && ['runtime', 'advanced'].includes(state.settingsTab));
+}
+
+function runtimeSidecarReady(status = state.runtime.status) {
+  return status?.enabled === true && ['ready', 'degraded'].includes(status?.state);
+}
+
+/** 仅在相关视图/设置页可见时加载；force 用于动作后立即刷新。 */
+async function ensureRuntimeData({ force = false } = {}) {
+  if (state.locked) return;
+  if (MOCK) {
+    const mock = mockRuntimeData(Date.now());
+    state.runtime.status = mock.status;
+    state.runtime.modelSource = mock.modelSource;
+    state.runtime.traces = mock.traces;
+    state.runtime.traceMeta = { available: true, disabled: false, state: 'ready' };
+    state.runtime.memories = mock.memories;
+    state.runtime.errors = {};
+    state.runtime.loadedAt = Date.now();
+    return;
+  }
+  if (!runtimeIsVisible() && !force) return;
+  if (state.runtime.loading) return;
+  if (!force && Date.now() - state.runtime.loadedAt < RUNTIME_REFRESH_MS) return;
+
+  state.runtime.loading = true;
+  const wantTimeline = state.view === 'runtime';
+  const keys = ['status', 'modelSource', ...(wantTimeline ? ['traces', 'memories'] : [])];
+  const requests = keys.map((key) => {
+    if (key === 'status') return api('/admin/api/memory-runtime/status');
+    if (key === 'modelSource') return api('/admin/api/memory-runtime/model-source');
+    if (key === 'traces') return api('/admin/api/memory-runtime/traces?limit=20');
+    const internal = state.runtime.includeInternal === true ? '&includeInternal=1' : '';
+    return api(`/admin/api/memories?limit=200${internal}`);
+  });
+  const results = await Promise.allSettled(requests);
+  const errors = {};
+  results.forEach((result, index) => {
+    const key = keys[index];
+    if (result.status !== 'fulfilled') {
+      errors[key] = localizeError(result.reason, 'errors.unknown');
+      return;
+    }
+    if (key === 'status') state.runtime.status = result.value;
+    else if (key === 'modelSource') state.runtime.modelSource = result.value;
+    else if (key === 'traces') {
+      state.runtime.traces = Array.isArray(result.value?.traces) ? result.value.traces : [];
+      state.runtime.traceMeta = {
+        available: result.value?.available === true,
+        disabled: result.value?.disabled === true,
+        state: result.value?.state ?? null,
+        reason: result.value?.reason ?? null,
+        error: result.value?.error ?? null,
+      };
+    } else if (key === 'memories') state.runtime.memories = result.value;
+  });
+  state.runtime.errors = errors;
+  state.runtime.loading = false;
+  state.runtime.loadedAt = Date.now();
+}
+
+async function saveRuntimePatch(patch, successKey) {
+  if (MOCK) {
+    showToast(t('common.mockReadOnly'));
+    return false;
+  }
+  if (!state.features.writes) {
+    showToast(t('settings.runtime.readonly'));
+    return false;
+  }
+  try {
+    const res = await submitConfigPatch(patch);
+    if (res?.config) {
+      state.rawConfig = { path: res.path, exists: true, parseError: null, config: res.config };
+    }
+    state.runtime.loadedAt = 0;
+    showToast(t(successKey));
+    await ensureRuntimeData({ force: true });
+    await refresh();
+    return true;
+  } catch (error) {
+    if (!error?.uiHandled) {
+      showToast(t('settings.runtime.saveFailed', { message: localizeError(error, 'errors.unknown') }));
+    }
+    return false;
+  } finally {
+    lastSettingsSignature = null;
+    if (!$('#settings')?.hidden) renderSettings(state.settingsTab ?? 'common');
+  }
+}
+
+async function setMemoryRuntimeMode(mode) {
+  if (MOCK) { showToast(t('common.mockReadOnly')); return; }
+  if (!state.features.writes) { showToast(t('settings.runtime.readonly')); return; }
+  const enabled = mode === 'immersive';
+  const current = memoryRuntimeModeOf(state.runtime.status, currentConfigFile());
+  if ((current === 'immersive') === enabled) return;
+  const ok = await confirmModal({
+    title: t(enabled ? 'runtime.enable.confirmTitle' : 'runtime.disable.confirmTitle'),
+    body: t(enabled ? 'runtime.enable.confirmBody' : 'runtime.disable.confirmBody'),
+    confirmLabel: t(enabled ? 'runtime.enable.confirm' : 'runtime.disable.confirm'),
+  });
+  if (!ok) {
+    lastSettingsSignature = null;
+    if (!$('#settings')?.hidden) renderSettings(state.settingsTab ?? 'common');
+    return;
+  }
+  const saved = await saveRuntimePatch({ memoryRuntime: { enabled } }, enabled ? 'runtime.enable.on' : 'runtime.disable.off');
+  if (saved && state.runtime.status) {
+    state.runtime.status.enabled = enabled;
+    state.runtime.status.mode = enabled ? 'immersive' : 'lightweight';
+    if (!enabled) {
+      state.runtime.status.state = 'stopped';
+      state.runtime.status.available = false;
+      state.runtime.status.degraded = false;
+      state.runtime.status.model = null;
+      state.runtime.modelSource = null;
+    }
+    renderRuntime();
+  }
+}
+
+/** 高级 · 模型来源：只写 sidecar config.json 的 model.source；失败只降级，不影响对话。 */
+async function setRuntimeModelSource(value) {
+  if (MOCK) { showToast(t('common.mockReadOnly')); return; }
+  if (!state.features.writes) { showToast(t('settings.runtime.readonly')); return; }
+  const source = runtimeModelSourceOf(value);
+  if (runtimeModelSourceOf(state.runtime.modelSource?.source) === source) return;
+  try {
+    const res = await api('/admin/api/memory-runtime/model-source', { method: 'POST', body: { source } });
+    state.runtime.modelSource = { ...(state.runtime.modelSource ?? {}), ...res, source: res?.source ?? source };
+    state.runtime.loadedAt = 0;
+    showToast(t(res?.applies === 'hot'
+      ? 'settings.runtime.modelSource.hotSaved'
+      : 'settings.runtime.modelSource.nextStartSaved', { source: runtimeModelSourceLabel(source) }));
+    await ensureRuntimeData({ force: true });
+    await refresh();
+  } catch (error) {
+    showToast(t('settings.runtime.modelSource.failed', { message: localizeError(error, 'errors.unknown') }));
+  } finally {
+    lastSettingsSignature = null;
+    if (!$('#settings')?.hidden) renderSettings(state.settingsTab ?? 'common');
+  }
+}
+
+async function runtimeTraceFeedback(traceId, useful) {
+  if (MOCK) { showToast(t('common.mockReadOnly')); return; }
+  if (!state.features.writes) { showToast(t('settings.runtime.readonly')); return; }
+  if (!runtimeSidecarReady()) { showToast(t('runtime.trace.feedbackMode')); return; }
+  try {
+    await api('/admin/api/memory-runtime/feedback', {
+      method: 'POST',
+      body: { traceId, useful },
+    });
+    const trace = (state.runtime.traces ?? []).find((entry) => entry.id === traceId);
+    if (trace) trace.feedback = { useful, at: Date.now() };
+    const detail = state.runtime.traceDetails?.[traceId]?.trace;
+    if (detail) detail.feedback = { useful, at: Date.now() };
+    showToast(t(useful ? 'runtime.trace.feedbackUseful' : 'runtime.trace.feedbackNotUseful'));
+    renderRuntime();
+  } catch (error) {
+    showToast(t('runtime.trace.feedbackFailed', { message: localizeError(error, 'errors.unknown') }));
+  }
+}
+
+async function loadRuntimeTrace(id) {
+  if (!id) return;
+  if (state.runtime.traceDetails?.[id]?.loading) return;
+  state.runtime.traceDetails = state.runtime.traceDetails ?? {};
+  state.runtime.traceDetails[id] = { loading: true, trace: null, error: null };
+  renderRuntimeTraces();
+  if (MOCK) {
+    const trace = (state.runtime.traces ?? []).find((entry) => entry.id === id) ?? null;
+    state.runtime.traceDetails[id] = { loading: false, trace, error: trace ? null : t('runtime.trace.detailUnavailable') };
+    renderRuntimeTraces();
+    return;
+  }
+  try {
+    const res = await api(`/admin/api/memory-runtime/traces/${encodeURIComponent(id)}`);
+    state.runtime.traceDetails[id] = {
+      loading: false,
+      trace: res?.trace ?? null,
+      error: res?.ok === false ? (res?.error?.message ?? res?.error?.code ?? t('runtime.trace.detailUnavailable')) : null,
+    };
+  } catch (error) {
+    state.runtime.traceDetails[id] = {
+      loading: false,
+      trace: null,
+      error: localizeError(error, 'errors.unknown'),
+    };
+  }
+  renderRuntimeTraces();
+}
+
+function toggleRuntimeObject(id) {
+  state.runtime.objectDetail = state.runtime.objectDetail?.id === id ? null : { id };
+  renderRuntimeTimeline();
+}
+
+async function runtimeMemoryAction(id, action) {
+  if (MOCK) { showToast(t('common.mockReadOnly')); return; }
+  if (!state.features.writes) { showToast(t('settings.runtime.readonly')); return; }
+  if (action === 'delete') {
+    const ok = await confirmModal({
+      title: t('memories.delete.title'),
+      body: t('memories.delete.body', { id }),
+      confirmLabel: t('memories.action.delete'),
+    });
+    if (!ok) return;
+  }
+  try {
+    await api(`/admin/api/memories/${encodeURIComponent(id)}/${action}`, { method: 'POST', body: {} });
+    showToast(action === 'delete'
+      ? t('memories.toast.deleted', { id })
+      : action === 'archive' ? t('memories.toast.archived', { id }) : t('memories.toast.unarchived', { id }));
+    state.runtime.loadedAt = 0;
+    await ensureRuntimeData({ force: true });
+    await refresh();
+  } catch (error) {
+    showToast(t('runtime.timeline.actionFailed', { message: localizeError(error, 'errors.unknown') }));
+  }
+}
+
+function runtimeStatusCard(title, chip, body) {
+  return `<section class="runtime-card crt-surface">
+    <div class="runtime-card-head"><h3>${escapeHtml(title)}</h3>${chip ? `<span class="crt-tag">${escapeHtml(chip)}</span>` : ''}</div>
+    ${body}
+  </section>`;
+}
+
+function renderRuntimeStatus() {
+  const status = state.runtime.status;
+  const error = state.runtime.errors.status;
+  if (!status) {
+    if (error) return `<section class="runtime-card crt-surface"><p class="crt-warn">${escapeHtml(t('runtime.error', { message: error }))}</p></section>`;
+    return `<section class="runtime-card crt-surface"><p class="muted">${escapeHtml(t('runtime.loading'))}</p></section>`;
+  }
+  const enabled = memoryRuntimeModeOf(status, currentConfigFile()) === 'immersive';
+  const stateLabel = runtimeStatusStateLabel(status);
+  const model = status.model ?? null;
+  const modelRows = model
+    ? [
+      [t('settings.runtime.modelStatus.configured'), runtimeModelSourceLabel(model.configured)],
+      [t('settings.runtime.modelStatus.active'), runtimeModelSourceLabel(model.active)],
+      [t('settings.runtime.modelStatus.degraded'), model.degraded ? t('runtime.sidecar.degradedYes') : t('runtime.sidecar.degradedNo')],
+      [t('settings.runtime.modelStatus.reason'), runtimeModelReasonLabel(model.reason)],
+    ]
+    : [[t('settings.runtime.modelStatus.state'), t('settings.runtime.modelStatus.unavailable')]];
+  return `
+    ${runtimeStatusCard(t('runtime.access.title'), enabled ? t('runtime.sidecar.immersive') : t('runtime.sidecar.lightweight'), `
+      <p class="muted">${escapeHtml(enabled ? t('runtime.access.onHint') : t('runtime.access.offHint'))}</p>
+      <p class="runtime-mode-settings-hint muted">${escapeHtml(t('runtime.access.settingsHint'))}</p>
+    `)}
+    ${runtimeStatusCard(t('runtime.status.title'), stateLabel, `
+      ${runtimeStatusFactsHtml(status)}
+      ${!status.available && enabled ? `<p class="runtime-pending">${escapeHtml(t('runtime.sidecar.notReady'))}</p>` : ''}
+    `)}
+    ${enabled ? runtimeStatusCard(t('runtime.model.title'), model?.degraded ? t('runtime.sidecar.degraded') : '', `
+      <dl class="runtime-kv" data-rt-model-status>${modelRows.map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(String(value))}</dd>`).join('')}</dl>
+      <p class="muted">${escapeHtml(t('runtime.model.note'))}</p>
+    `) : ''}
+  `;
+}
+
+function runtimeTimelineControlsHtml() {
+  const includeInternal = state.runtime.includeInternal === true;
+  const filter = state.runtime.timelineFilter;
+  const canInternal = state.features.writes && !MOCK;
+  const filters = [
+    ['all', 'runtime.timeline.all'],
+    ['memory', 'runtime.timeline.memory'],
+    ['compact', 'runtime.timeline.compact'],
+    ['checkpoint', 'runtime.timeline.checkpoint'],
+    ['self', 'runtime.timeline.self'],
+  ];
+  return `${filters.map(([value, key]) => {
+    const disabled = !includeInternal && value !== 'all' && value !== 'memory';
+    return `<button class="btn btn-small btn-crt" type="button" data-rt-filter="${value}" aria-pressed="${filter === value}" ${disabled || !canInternal ? 'disabled' : ''}>${escapeHtml(t(key))}</button>`;
+  }).join('')}
+  <label class="runtime-internal-toggle"><input type="checkbox" data-rt-internal-toggle ${includeInternal ? 'checked' : ''} ${canInternal ? '' : 'disabled'}> ${escapeHtml(t('runtime.timeline.internalToggle'))}</label>
+  <p class="runtime-internal-hint muted">${escapeHtml(t('runtime.timeline.internalHint'))}</p>`;
+}
+
+function runtimeObjectDetailHtml(memory) {
+  if (!memory) return '';
+  const rows = [
+    [t('runtime.timeline.type'), String(memory.type ?? '—')],
+    [t('runtime.timeline.namespace'), String(memory.namespace ?? 'default')],
+    [t('runtime.timeline.created'), formatTime(memory.createdAt)],
+    [t('runtime.timeline.updated'), formatTime(memory.updatedAt)],
+  ];
+  if (Array.isArray(memory.tags) && memory.tags.length > 0) {
+    rows.push([t('runtime.timeline.tags'), memory.tags.join(' · ')]);
+  }
+  return `<div class="runtime-detail" data-runtime-object="${escapeHtml(memory.id)}">
+    <dl class="runtime-kv">${rows.map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`).join('')}</dl>
+    <p class="mem-preview">${escapeHtml(memory.preview || t('memories.emptyPreview'))}</p>
+    ${runtimeTimelineKind(memory) !== 'memory' ? `<p class="muted">${escapeHtml(t('runtime.timeline.internalBadge'))} · ${escapeHtml(String(memory.namespace ?? '—'))}</p>` : ''}
+  </div>`;
+}
+
+function renderRuntimeTimeline() {
+  const list = $('#runtime-timeline');
+  const controls = $('#runtime-timeline-controls');
+  if (!list) return;
+  if (controls) controls.innerHTML = runtimeTimelineControlsHtml();
+  const data = state.runtime.memories;
+  const error = state.runtime.errors.memories;
+  if (!data) {
+    list.innerHTML = `<p class="muted">${escapeHtml(error ? t('runtime.timeline.error', { message: error }) : t('runtime.timeline.loading'))}</p>`;
+    return;
+  }
+  const rows = filterRuntimeTimeline(data.memories, {
+    filter: state.runtime.timelineFilter,
+    includeInternal: state.runtime.includeInternal,
+  });
+  if (rows.length === 0) {
+    list.innerHTML = `<p class="muted">${escapeHtml(t('runtime.timeline.empty'))}</p>`;
+    return;
+  }
+  list.innerHTML = rows.map((memory) => {
+    const kind = runtimeTimelineKind(memory);
+    const internal = kind !== 'memory';
+    const badges = [
+      memory.archived ? `<span class="crt-tag crt-tag-warn">${escapeHtml(t('memories.badge.archived'))}</span>` : '',
+      memory.deleted ? `<span class="crt-tag crt-tag-error">${escapeHtml(t('memories.badge.deleted'))}</span>` : '',
+      internal ? `<span class="crt-tag crt-tag-warn">${escapeHtml(t('runtime.timeline.internalBadge'))}</span>` : '',
+    ].filter(Boolean).join(' ');
+    const open = state.runtime.objectDetail?.id === memory.id;
+    const writable = state.features.writes && !MOCK;
+    const actions = [
+      `<button class="btn btn-small btn-crt" type="button" data-rt-object="${escapeHtml(memory.id)}">${escapeHtml(open ? t('runtime.timeline.hide') : t('runtime.timeline.view'))}</button>`,
+      ...(writable ? [
+        `<button class="btn btn-small btn-crt" type="button" data-rt-mem-action="${memory.archived ? 'unarchive' : 'archive'}" data-rt-mem-id="${escapeHtml(memory.id)}">${escapeHtml(memory.archived ? t('memories.action.unarchive') : t('memories.action.archive'))}</button>`,
+        `<button class="btn btn-small btn-crt" type="button" data-rt-mem-action="delete" data-rt-mem-id="${escapeHtml(memory.id)}">${escapeHtml(t('memories.action.delete'))}</button>`,
+      ] : []),
+    ].join(' ');
+    return `<article class="mem-row runtime-timeline-row crt-surface" data-rt-mem-row="${escapeHtml(memory.id)}" data-rt-kind="${escapeHtml(kind)}">
+      <div class="mem-main">
+        <div class="mem-head">
+          <span class="crt-tag">${escapeHtml(t(`runtime.timeline.${kind}`))}</span>
+          <span class="crt-tag">${escapeHtml(String(memory.namespace ?? 'default'))}</span>
+          ${badges}
+          <code class="mem-id">${escapeHtml(memory.id)}</code>
+        </div>
+        <p class="mem-preview">${escapeHtml(memory.preview || t('memories.emptyPreview'))}</p>
+        <p class="muted mem-meta">${escapeHtml(t('memories.meta.created', { time: formatTime(memory.createdAt) }))}</p>
+        ${open ? runtimeObjectDetailHtml(memory) : ''}
+      </div>
+      <div class="mem-actions">${actions}</div>
+    </article>`;
+  }).join('');
+}
+
+function runtimeTraceCitationIds(entry) {
+  const list = Array.isArray(entry?.citations) ? entry.citations : [];
+  return list
+    .map((citation) => (typeof citation === 'string' ? citation : citation?.id))
+    .filter((id) => typeof id === 'string' && id.length > 0);
+}
+
+function runtimeTraceOwnerText(entry) {
+  const owner = entry?.owner;
+  if (!owner || typeof owner !== 'object') return '';
+  return [
+    owner.role ?? owner.ownerType,
+    owner.ownerId ?? owner.agentId,
+    owner.agentName,
+    owner.domain,
+  ].filter((part) => typeof part === 'string' && part.length > 0).join(' · ');
+}
+
+function runtimeTraceProvenanceText(entry) {
+  const source = entry?.provenance;
+  if (!source || typeof source !== 'object') return '';
+  return [
+    source.source,
+    source.writerType,
+    source.extractor,
+    source.model,
+    source.hostId,
+    source.threadId,
+  ].filter((part) => typeof part === 'string' && part.length > 0).join(' · ');
+}
+
+function runtimeTraceDetailHtml(trace, detail) {
+  if (!detail) return '';
+  if (detail.loading) return `<p class="runtime-detail muted">${escapeHtml(t('runtime.trace.detailLoading'))}</p>`;
+  if (detail.error) return `<p class="runtime-detail crt-warn">${escapeHtml(t('runtime.trace.detailError', { message: detail.error }))}</p>`;
+  const data = detail.trace ?? trace;
+  if (!data) return `<p class="runtime-detail muted">${escapeHtml(t('runtime.trace.detailUnavailable'))}</p>`;
+  const hits = Array.isArray(data.hits) ? data.hits : [];
+  const candidates = Array.isArray(data.candidates) ? data.candidates : [];
+  const injected = Array.isArray(data.injected) ? data.injected : [];
+  const cue = data.cue && typeof data.cue === 'object' ? data.cue : {};
+  const reasons = [];
+  const topics = Array.isArray(cue.topics) ? cue.topics.filter((topic) => typeof topic === 'string') : [];
+  if (topics.length > 0) reasons.push(t('runtime.trace.reasonTopics', { topics: topics.join(' · ') }));
+  const entities = Array.isArray(cue.entities) ? cue.entities.map((entity) => entity?.name).filter(Boolean) : [];
+  if (entities.length > 0) reasons.push(t('runtime.trace.reasonEntities', { entities: entities.join(' · ') }));
+  for (const expansion of Array.isArray(data.expansions) ? data.expansions : []) {
+    if (typeof expansion?.reason === 'string' && expansion.reason.length > 0) {
+      reasons.push(t('runtime.trace.reasonExpansion', { reason: expansion.reason, id: expansion.sourceId ?? '—' }));
+    }
+  }
+  if (typeof data.silenceReason === 'string' && data.silenceReason.length > 0) {
+    reasons.push(t('runtime.trace.reasonSilence', { reason: data.silenceReason }));
+  }
+  const citations = new Set([
+    ...runtimeTraceCitationIds(data),
+    ...injected.flatMap(runtimeTraceCitationIds),
+    ...candidates.flatMap(runtimeTraceCitationIds),
+  ]);
+  const contextRows = [];
+  for (const entry of [...injected, ...candidates]) {
+    if (!entry || typeof entry !== 'object') continue;
+    const score = typeof entry.score === 'number' ? entry.score.toFixed(2) : null;
+    const confidence = typeof entry.confidence === 'number' ? entry.confidence.toFixed(2) : score;
+    const domain = entry.domain ?? entry.owner?.domain ?? '—';
+    const owner = runtimeTraceOwnerText(entry) || '—';
+    const provenance = runtimeTraceProvenanceText(entry) || '—';
+    const cited = runtimeTraceCitationIds(entry);
+    const key = entry.fragmentId ?? entry.sourceId ?? entry.id ?? '—';
+    contextRows.push(`<li class="runtime-trace-context" data-rt-trace-context>
+      <code>${escapeHtml(String(key))}</code>
+      <span>${escapeHtml(t('runtime.trace.confidence', { confidence: confidence ?? '—' }))}</span>
+      <span>${escapeHtml(t('runtime.trace.domain', { domain: String(domain) }))}</span>
+      <span>${escapeHtml(t('runtime.trace.owner', { owner }))}</span>
+      <span>${escapeHtml(t('runtime.trace.provenance', { provenance }))}</span>
+      ${cited.length > 0 ? `<span>${escapeHtml(t('runtime.trace.citations', { citations: cited.join(' · ') }))}</span>` : ''}
+    </li>`);
+  }
+  const hitHtml = hits.length > 0
+    ? `<ul class="runtime-trace-hits">${hits.map((hit) => {
+      const score = typeof hit.score === 'number' ? hit.score.toFixed(2) : '—';
+      return `<li>${escapeHtml(t('runtime.trace.hit', { rank: hit.rank ?? '—', type: hit.type ?? '—', score }))} <code>${escapeHtml(hit.id ?? '')}</code></li>`;
+    }).join('')}</ul>`
+    : `<p class="muted">${escapeHtml(t('runtime.trace.noHits'))}</p>`;
+  return `<div class="runtime-detail runtime-trace-detail" data-runtime-trace="${escapeHtml(data.id ?? trace.id)}">
+    ${reasons.length > 0 ? `<ul class="runtime-trace-why">${reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join('')}</ul>` : ''}
+    ${hitHtml}
+    ${citations.size > 0 ? `<p class="mem-preview">${escapeHtml(t('runtime.trace.citations', { citations: [...citations].join(' · ') }))}</p>` : ''}
+    ${contextRows.length > 0 ? `<ul class="runtime-trace-context-list">${contextRows.join('')}</ul>` : ''}
+  </div>`;
+}
+
+function renderRuntimeTraces() {
+  const list = $('#runtime-traces');
+  if (!list) return;
+  const data = state.runtime.traces;
+  const error = state.runtime.errors.traces;
+  const meta = state.runtime.traceMeta;
+  if (meta?.disabled) {
+    list.innerHTML = `<p class="muted" data-rt-traces-disabled>${escapeHtml(t('runtime.trace.disabled'))}</p>`;
+    return;
+  }
+  if (meta && meta.available === false) {
+    list.innerHTML = `<p class="muted" data-rt-traces-unavailable>${escapeHtml(t('runtime.trace.unavailable', { state: t(runtimeSidecarStateKey(meta.state)) }))}</p>`;
+    return;
+  }
+  if (!data) {
+    list.innerHTML = `<p class="muted">${escapeHtml(error ? t('runtime.trace.error', { message: error }) : t('runtime.loading'))}</p>`;
+    return;
+  }
+  if (data.length === 0) {
+    list.innerHTML = `<p class="muted">${escapeHtml(t('runtime.trace.empty'))}</p>`;
+    return;
+  }
+  const canFeedback = state.features.writes && !MOCK && runtimeSidecarReady();
+  list.innerHTML = data.map((trace) => {
+    const open = state.runtime.traceOpen?.[trace.id] === true;
+    const detail = state.runtime.traceDetails?.[trace.id];
+    const feedback = detail?.trace?.feedback ?? trace.feedback;
+    const counts = trace.counts ?? {};
+    const candidateCount = Number.isInteger(counts.candidates) ? counts.candidates : 0;
+    const injectedCount = Number.isInteger(counts.injected) ? counts.injected : 0;
+    const tookMs = trace.timing?.totalMs ?? trace.tookMs ?? 0;
+    const model = trace.model?.query ?? trace.model?.embedding ?? trace.model?.extractor ?? '—';
+    const domains = Array.isArray(trace.domains) ? trace.domains : Array.isArray(trace.namespaces) ? trace.namespaces : [];
+    return `<article class="mem-row runtime-trace-row crt-surface" data-rt-trace-row="${escapeHtml(trace.id)}">
+      <div class="mem-main">
+        <div class="mem-head">
+          <span class="crt-tag">${escapeHtml(formatTime(trace.at))}</span>
+          ${trace.degraded ? `<span class="crt-tag crt-tag-warn">${escapeHtml(t('runtime.trace.degraded'))}</span>` : ''}
+          ${feedback ? `<span class="crt-tag ${feedback.useful ? 'crt-tag-ok' : 'crt-tag-error'}">${escapeHtml(t(feedback.useful ? 'runtime.trace.feedbackUseful' : 'runtime.trace.feedbackNotUseful'))}</span>` : ''}
+          <code class="mem-id">${escapeHtml(trace.id)}</code>
+        </div>
+        <p class="mem-preview">${escapeHtml(trace.queryPreview || t('runtime.trace.noQuery'))}</p>
+        <p class="muted mem-meta">${escapeHtml(t('runtime.trace.took', { ms: tookMs }))} · ${escapeHtml(t('runtime.trace.hits', { count: candidateCount }))} · ${escapeHtml(t('runtime.trace.injected', { count: injectedCount }))} · ${escapeHtml(t('runtime.trace.model', { model }))}</p>
+        ${domains.length > 0 ? `<p class="muted mem-meta">${escapeHtml(t('runtime.trace.domains', { domains: domains.join(', ') }))}</p>` : ''}
+        ${open ? runtimeTraceDetailHtml(trace, detail) : ''}
+        <div class="runtime-trace-actions">
+          <button class="btn btn-small btn-crt" type="button" data-rt-trace="${escapeHtml(trace.id)}">${escapeHtml(open ? t('runtime.timeline.hide') : t('runtime.trace.why'))}</button>
+          <button class="btn btn-small btn-crt" type="button" data-rt-trace-useful="${escapeHtml(trace.id)}" data-useful="true" ${canFeedback ? '' : 'disabled'} title="${escapeHtml(canFeedback ? '' : t('runtime.trace.feedbackMode'))}">${escapeHtml(t('runtime.trace.useful'))}</button>
+          <button class="btn btn-small btn-crt" type="button" data-rt-trace-useful="${escapeHtml(trace.id)}" data-useful="false" ${canFeedback ? '' : 'disabled'} title="${escapeHtml(canFeedback ? '' : t('runtime.trace.feedbackMode'))}">${escapeHtml(t('runtime.trace.notUseful'))}</button>
+        </div>
+      </div>
+    </article>`;
+  }).join('');
+}
+
+function renderRuntime() {
+  if (state.view !== 'runtime') return;
+  const root = $('#runtime-status');
+  if (!root) return;
+  const badge = $('#runtime-head-mode');
+  const status = state.runtime.status;
+  if (badge) {
+    badge.hidden = !status;
+    const enabled = status ? memoryRuntimeEnabledOf(status, currentConfigFile()) : false;
+    badge.textContent = status ? t(enabled ? 'runtime.sidecar.immersive' : 'runtime.sidecar.lightweight') : '';
+  }
+  root.innerHTML = renderRuntimeStatus();
+  renderRuntimeTimeline();
+  renderRuntimeTraces();
+}
+
 // ---------- H-1/UX-2：设置 · AI 助手专区（单列表）+ 首屏只读叠加层 ----------
 // 连接页已收编进「设置 · AI 助手」（?view=connect 为别名重定向）；构建器见 assistants.js。
 
@@ -3442,6 +4170,14 @@ async function assistantSubmitForm() {
     if (!res?.ok) { state.addForm = { ...(state.addForm ?? {}), error: localizeReasonText(res?.reason, 'errors.unknown') || t('assistants.registerFailed') }; rerenderAssistants(); return; }
     state.addForm = null;
     await refresh();
+    // 保存后立即重取一次 clients，避免单飞 refresh 复用到写前响应而短暂丢行。
+    refreshSeq += 1;
+    try {
+      const clientsView = await api('/admin/api/clients');
+      if (Array.isArray(clientsView?.clients)) state.clients = clientsView.clients;
+    } catch {
+      // 即时刷新失败时保留当前列表；后续轮询会收敛。
+    }
     if ($('#settings') && !$('#settings').hidden) { lastSettingsSignature = null; renderSettings('assistants'); }
   } catch (error) {
     state.addForm = { ...(state.addForm ?? {}), error: t('assistants.form.failed', { message: localizeError(error, 'errors.unknown') }) };
@@ -4327,6 +5063,7 @@ function setView(view) {
   $('#domains-view').hidden = view !== 'domains';
   $('#audit-view').hidden = view !== 'audit';
   $('#memories-view').hidden = view !== 'memories';
+  $('#runtime-view').hidden = view !== 'runtime';
   $('#stage').style.visibility = view === 'map' ? 'visible' : 'hidden';
   // 走查修复：顶部「守护」气泡 /「需要注意」卡只属星图——切出视图即时隐藏
   //（此前仅在 3s 轮询里更新，切走后要滞留最多一个轮询周期才消失）
@@ -4335,6 +5072,9 @@ function setView(view) {
   if (asideEl) asideEl.classList.toggle('is-open', view === 'map' && Boolean(state.selected));
   // 设备卡空壳处理：面板视图（记忆共享/审计/记忆）整体隐藏右栏，窄屏不再占底部一行
   document.querySelector('.layout')?.classList.toggle('is-panel-view', view !== 'map');
+  if (view === 'runtime') {
+    void ensureRuntimeData({ force: true }).then(() => renderRuntime());
+  }
   syncStageActivity();
 }
 
@@ -4384,6 +5124,50 @@ $('#memories-list')?.addEventListener('click', (event) => {
   const button = event.target.closest('[data-mem-action]');
   if (!button) return;
   void memAction(button.dataset.memId, button.dataset.memAction);
+});
+
+// 0.3 · 记忆运行时视图：启用开关、时间线、轨迹详情、反馈
+$('#runtime-refresh')?.addEventListener('click', () => {
+  void (async () => {
+    state.runtime.loadedAt = 0;
+    await ensureRuntimeData({ force: true });
+    renderRuntime();
+  })();
+});
+$('#runtime-view')?.addEventListener('click', (event) => {
+  const filter = event.target.closest('[data-rt-filter]');
+  if (filter) {
+    state.runtime.timelineFilter = filter.dataset.rtFilter;
+    renderRuntimeTimeline();
+    return;
+  }
+  const object = event.target.closest('[data-rt-object]');
+  if (object) { toggleRuntimeObject(object.dataset.rtObject); return; }
+  const memActionButton = event.target.closest('[data-rt-mem-action]');
+  if (memActionButton) { void runtimeMemoryAction(memActionButton.dataset.rtMemId, memActionButton.dataset.rtMemAction); return; }
+  const traceToggle = event.target.closest('[data-rt-trace]');
+  if (traceToggle) {
+    const id = traceToggle.dataset.rtTrace;
+    state.runtime.traceOpen[id] = !state.runtime.traceOpen[id];
+    if (state.runtime.traceOpen[id] && !state.runtime.traceDetails?.[id]) void loadRuntimeTrace(id);
+    else renderRuntimeTraces();
+    return;
+  }
+  const feedback = event.target.closest('[data-rt-trace-useful]');
+  if (feedback) {
+    void runtimeTraceFeedback(feedback.dataset.rtTraceUseful, feedback.dataset.useful === 'true');
+  }
+});
+$('#runtime-view')?.addEventListener('change', (event) => {
+  const internal = event.target.closest('[data-rt-internal-toggle]');
+  if (!internal) return;
+  state.runtime.includeInternal = internal.checked === true;
+  state.runtime.timelineFilter = state.runtime.includeInternal ? 'all' : 'memory';
+  state.runtime.loadedAt = 0;
+  void (async () => {
+    await ensureRuntimeData({ force: true });
+    renderRuntime();
+  })();
 });
 
 // UX-2「需要注意」浮卡：点击直达处理位（助手 → 设置·AI 助手；对端 → 设备卡）
@@ -4670,10 +5454,28 @@ $('#cloud-switch-close')?.addEventListener('click', () => { $('#cloud-switch').h
 $('#settings-close').addEventListener('click', () => {
   $('#settings').hidden = true;
 });
+// 记忆模式 / 模型来源：change/click 即保存（服务端热生效）；不再有 runtime.* 草稿字段。
+$('#settings-body').addEventListener('change', (event) => {
+  const source = event.target.closest('[data-rt-model-source]');
+  if (!source) return;
+  void setRuntimeModelSource(source.value);
+});
 // Tab 切换 + AI 助手专区动作（事件委托：renderSettings 会整体替换 body）
 $('#settings-body').addEventListener('click', (event) => {
   const tab = event.target.closest('[data-settings-tab]');
-  if (tab) { renderSettings(tab.dataset.settingsTab); return; }
+  if (tab) {
+    const next = tab.dataset.settingsTab;
+    renderSettings(next);
+    if (next === 'runtime' || next === 'advanced') {
+      void ensureRuntimeData({ force: true }).then(() => {
+        lastSettingsSignature = null;
+        if (!$('#settings').hidden && (state.settingsTab ?? 'common') === next) renderSettings(next);
+      });
+    }
+    return;
+  }
+  const runtimeMode = event.target.closest('[data-rt-mode]');
+  if (runtimeMode) { void setMemoryRuntimeMode(runtimeMode.dataset.rtMode); return; }
   // UX-2：附加导航「关于本机」→ 打开既有 about 弹层
   const extra = event.target.closest('[data-settings-extra]');
   if (extra) { $('#about').hidden = false; renderAbout(); return; }
@@ -5936,6 +6738,88 @@ function mockSecurity(now) {
     }],
     recentApprovals: [],
     rejections: [{ eventId: 'e-sec-reject-1', reason: 'missing-proof' }],
+  };
+}
+
+function mockRuntimeData(now) {
+  return {
+    status: {
+      enabled: false,
+      mode: 'lightweight',
+      state: 'stopped',
+      available: false,
+      degraded: false,
+      managed: false,
+      attached: false,
+      pid: null,
+      url: null,
+      runtimeVersion: null,
+      apiVersion: null,
+      capabilityApiVersion: null,
+      commandSource: null,
+      installed: false,
+      startedAt: null,
+      lastOkAt: null,
+      restarts: 0,
+      reason: 'disabled',
+      error: null,
+      lock: null,
+      model: null,
+    },
+    modelSource: {
+      ok: true,
+      source: 'heuristic',
+      defaultSource: 'heuristic',
+      values: ['heuristic', 'local', 'host', 'api', 'auto'],
+      exists: false,
+      enabled: false,
+      available: false,
+      state: 'stopped',
+      applies: 'next_start',
+      model: null,
+    },
+    traces: [{
+      id: 'tr_mock000000000000000000001',
+      recallId: 'rr_mock000000000000000000001',
+      schema: 2,
+      at: now - 60_000,
+      agentId: 'opencode',
+      threadId: 'th_mock',
+      queryPreview: '演示召回：主题偏好',
+      domains: ['notes'],
+      namespaces: ['notes'],
+      silenceReason: null,
+      counts: { candidates: 2, expansions: 1, injected: 2, tokens: 24 },
+      timing: { totalMs: 12 },
+      tookMs: 12,
+      degraded: false,
+      feedback: null,
+      hits: [
+        { id: '01MOCKMEMORY000000000000001', type: 'fact', score: 0.91, rank: 1 },
+        { id: '01MOCKMEMORY000000000000003', type: 'fact', score: 0.74, rank: 2 },
+      ],
+      cue: { topics: ['主题偏好'], entities: [{ name: 'Mebular', type: 'product' }] },
+      candidates: [
+        { id: '01MOCKMEMORY000000000000001', type: 'fact', domain: 'user', score: 0.91, confidence: 0.91, rank: 1, owner: { role: 'user', ownerId: 'u_mock', domain: 'user' }, provenance: { source: 'runtime', extractor: 'heuristic', hostId: 'h_mock' }, citations: ['01MOCKMEMORY000000000000001'] },
+        { id: '01MOCKMEMORY000000000000003', type: 'fact', domain: 'default', score: 0.74, confidence: 0.74, rank: 2, owner: { role: 'other', ownerId: 'default', domain: 'default' }, provenance: { source: 'runtime', extractor: 'heuristic', hostId: 'h_mock' }, citations: ['01MOCKMEMORY000000000000003'] },
+      ],
+      expansions: [{ sourceId: '01MOCKMEMORY000000000000001', reason: 'exact_value', status: 'ok' }],
+      injected: [
+        { fragmentId: 'mf_mock_1', sourceId: '01MOCKMEMORY000000000000001', layer: 'detail', tokens: 12, citations: ['01MOCKMEMORY000000000000001'], confidence: 0.91, owner: { role: 'user', ownerId: 'u_mock', domain: 'user' }, provenance: { source: 'runtime', extractor: 'heuristic', hostId: 'h_mock' } },
+        { fragmentId: 'mf_mock_2', sourceId: '01MOCKMEMORY000000000000003', layer: 'fuzzy', tokens: 12, citations: ['01MOCKMEMORY000000000000003'], confidence: 0.74, owner: { role: 'other', ownerId: 'default', domain: 'default' }, provenance: { source: 'runtime', extractor: 'heuristic', hostId: 'h_mock' } },
+      ],
+      model: { query: 'heuristic' },
+    }],
+    memories: {
+      total: 5,
+      memories: [
+        { id: '01MOCKMEMORY000000000000001', type: 'fact', namespace: 'notes', preview: '演示记忆：偏好深色主题', createdAt: now - 240_000, archived: false, deleted: false },
+        { id: '01MOCKMEMORY000000000000003', type: 'episode', namespace: 'default', preview: '演示对话情节', createdAt: now - 360_000, archived: false, deleted: false },
+        { id: '01MOCKCOMPACT00000000000001', type: 'compact', namespace: 'notes', preview: '摘要：两条偏好的合并视图', createdAt: now - 180_000, archived: false, deleted: false },
+        { id: '01MOCKCHECKPOINT000000000001', type: 'context_checkpoint', namespace: '__checkpoint__', preview: '任务 checkpoint · revision 3', createdAt: now - 120_000, archived: false, deleted: false },
+        { id: '01MOCKSELF00000000000000001', type: 'self_record', namespace: '__self__', preview: 'OpenCode 的自我记录', createdAt: now - 90_000, archived: false, deleted: false },
+      ],
+    },
   };
 }
 

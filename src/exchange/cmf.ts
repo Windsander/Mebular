@@ -20,6 +20,7 @@ import { normalizeNamespace } from '../core/namespace.js';
 import type { GraphStore } from '../core/GraphStore.js';
 import type { MemoryStore } from '../memory/MemoryStore.js';
 import type { Edge, Node } from '../types/index.js';
+import { isInternalNode } from '../memory/visibility.js';
 
 export const CMF_FORMAT = 'cmf';
 export const CMF_VERSION = 1;
@@ -263,6 +264,8 @@ export interface CmfExportOptions {
   source?: CmfSource;
   /** 是否包含已删除（墓碑）节点/边，默认否 */
   includeDeleted?: boolean;
+  /** 是否包含内部对象（metadata.internal / 保留 namespace），默认否 */
+  includeInternal?: boolean;
   /** 自定义节点投影；默认原样拷贝核心字段 */
   projectNode?: (node: Node) => CmfNode | null;
 }
@@ -302,6 +305,7 @@ export async function exportGraphToCmf(
   const keptIds = new Set<string>();
   for (const node of await graph.listNodes()) {
     if (!options.includeDeleted && node.deletedAt) continue;
+    if (options.includeInternal !== true && isInternalNode(node)) continue;
     const projected = project(node);
     if (!projected) continue;
     nodes.push(projected);

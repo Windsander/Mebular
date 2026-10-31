@@ -2,7 +2,7 @@
 // Mebular 桌面 App · 准备发布 runtime
 //
 // 从 npm pack 产出的发布 tarball 安装一份**与仓库源码目录无关**的运行时：
-//   <out>/node_modules/@mebular/{core,fleet,service,mcp,skill}
+//   <out>/node_modules/@mebular/{core,fleet,service,mcp,memory-runtime,skill}
 // electron-builder 再把它作为 extraResources/node_modules 原样装进安装包。
 //
 // 用法（默认值适用于仓库内 `npm run dist:*`）：
@@ -11,7 +11,7 @@
 //
 // 约束：
 //   - 安装前先清空 out（默认 apps/desktop/runtime；该目录不入 git）；
-//   - 一次 npm install 安装 5 个 tarball，--ignore-scripts 避免执行发布包的安装钩子；
+//   - 一次 npm install 安装 6 个 tarball，--ignore-scripts 避免执行发布包的安装钩子；
 //   - 安装后断言版本与关键文件，失败以非 0 退出并给出中文原因。
 
 import { spawnSync } from 'node:child_process';
@@ -28,6 +28,7 @@ const PACKAGES = [
   { name: '@mebular/fleet', suffix: 'fleet', label: '@mebular/fleet' },
   { name: '@mebular/service', suffix: 'service', label: '@mebular/service' },
   { name: '@mebular/mcp', suffix: 'mcp', label: '@mebular/mcp' },
+  { name: '@mebular/memory-runtime', suffix: 'memory-runtime', label: '@mebular/memory-runtime' },
   { name: '@mebular/skill', suffix: 'skill', label: '@mebular/skill' },
 ];
 
@@ -126,7 +127,7 @@ function findTarball(pkg) {
   fail(`找到 ${pkg.label} tarball ${only}，但版本 ${version} 与仓库根版本 ${repoVersion} 不一致。\n  请先 npm run build 并重新 npm pack。`);
 }
 
-// 先确认 5 个 tarball 都在，再删除旧 runtime（失败时保留可排查的上一份产物）。
+// 先确认 6 个 tarball 都在，再删除旧 runtime（失败时保留可排查的上一份产物）。
 const tarballs = PACKAGES.map(findTarball);
 
 console.log(`[desktop:runtime] tarballs: ${relative(process.cwd(), tarballDir) || tarballDir}`);
@@ -165,7 +166,7 @@ function runNpm(args) {
   });
 }
 
-console.log('[desktop:runtime] npm install（5 个发布 tarball，omit=dev / ignore-scripts）…');
+console.log('[desktop:runtime] npm install（6 个发布 tarball，omit=dev / ignore-scripts）…');
 const install = runNpm([
   'install',
   '--omit=dev',
@@ -259,6 +260,6 @@ requireFile(
 const topLevelCount = readdirSync(modulesDir).filter((name) => !name.startsWith('.')).length;
 const coreManifest = readInstalledManifest('core');
 console.log('[desktop:runtime] ✓ runtime 已准备');
-console.log(`  @mebular/core@${coreManifest.version}（fleet/service/mcp/skill 同版本）`);
+console.log(`  @mebular/core@${coreManifest.version}（fleet/service/mcp/memory-runtime/skill 同版本）`);
 console.log(`  CLI: ${relative(outDir, cliBin)}`);
 console.log(`  node_modules 顶层条目: ${topLevelCount}`);

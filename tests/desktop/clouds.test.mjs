@@ -638,7 +638,7 @@ describe('Phase 5a · 云切换/迁移使用共享 current service', () => {
       expect(existsSync(legacyUnit)).toBe(false);
       expect(existsSync(legacyManifest)).toBe(false);
     }
-  });
+  }, 30000);
 
   it('切换失败回滚：重新安装旧 home service 仍使用 shared current', async () => {
     const { root, defaultHome, p2Home } = await makeRoot();

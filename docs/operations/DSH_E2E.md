@@ -17,7 +17,8 @@ nightly 信号、相关路径 PR 检查和发布门禁。另有测试专用的 n
 | `tests/dsh/e2e/versions.json` | 最低 / 当前 DSH 版本 |
 | `tests/dsh/e2e/fixtures/probe-plugin` | 仅测试用的 DSH probe 插件 |
 | `tests/dsh/e2e/negative-control.mjs` | 故障注入（test-of-test）：坏插件必须让 E2E 判红 |
-| `.github/workflows/dsh-e2e.yml` | nightly / PR / push main / reusable workflow |
+| `tests/dsh/e2e/memory-runtime-e2e.mjs` | Memory Runtime E2E（fake Runtime，无 Chrome/外部模型） |
+| `.github/workflows/dsh-e2e.yml` | nightly / PR / push main / reusable workflow；含独立的 memory-runtime job |
 | `.github/workflows/publish.yml` | 发布门禁：`publish` / `release` 依赖 DSH E2E |
 
 ## 1. 本地运行
@@ -49,6 +50,10 @@ npm run verify:dsh:e2e -- --scenario daemon-down-recovery --keep
 
 # 故障注入：故意破坏插件的 panel 注册，E2E 必须变红
 npm run verify:dsh:e2e:negative
+
+# Memory Runtime E2E（fake Runtime，无 Chrome；默认跑 enabled + disabled）
+npm run verify:dsh:memory-runtime
+npm run verify:dsh:memory-runtime -- --scenario enabled --keep
 
 # 列出场景
 npm run verify:dsh:e2e -- --list
@@ -156,6 +161,9 @@ negative control 是 test-of-test，**不放进 nightly / release**（会让 E2E
 - Node 22.19 smoke 在 `pull_request` / `push main` / `workflow_call` 上跳过，只在 nightly
   和手动 dispatch 运行。
 - 单 job `timeout-minutes: 45`。
+- 独立的 `memory-runtime` job 只跑 fake Runtime（无 Chrome），用
+  `npm run verify:dsh:memory-runtime` 覆盖插件 recall/ingest/checkpoint/auth；不复用也不延长
+  上面的真实 DSH 矩阵。
 - 每个 job 准备 pnpm（`dsh plugin add` 需要；CI 固定精确版本 `12.15.0`）和 Chrome/Chromium。
   Chrome 直接探测 `ubuntu-latest` 预装的 `google-chrome` / `google-chrome-stable` /
   `chromium` / `chromium-browser`，不引入第三方 action；缺少时显式 `::error::` 并退出，

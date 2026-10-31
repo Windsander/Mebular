@@ -1,8 +1,9 @@
 // 控制台只读 API 的数据组装（D1）
 //
-// 只使用 @mebular/core 的公共 API：eventLog / storage / node / sync / 门面
-// 只读入口（getSubscriptions / getBlockedDevices / 域公告）与 MemoryService.status()。
-// 这里不做任何写入，也不替其他设备做决定——只回答「本机给谁看什么」「与谁连接」。
+// 只使用 @mebular/core 的公共 API：eventLog / node / sync / 门面只读入口
+// （getSubscriptions / getBlockedDevices / 域公告）与 MemoryService 统一读面
+// （status / listRecords / namespaceStats）。这里不做任何写入，也不替其他设备
+// 做决定——只回答「本机给谁看什么」「与谁连接」。
 //
 // 契约（见 docs/console/interaction-draft.md）：
 //   GET /admin/api/overview   { device, status, onlinePeers[], revokedCount }
@@ -16,6 +17,7 @@ import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { POLICY_NAMESPACE, normalizeNamespace } from '@mebular/core';
 import { configPath } from './config.mjs';
+import { buildModelsList, buildModelsStatus } from './inference-admin.mjs';
 import { cloudError, displayPath, readRegistry, resolveCloudRoot } from './profiles.mjs';
 import { TOOL_NAMES } from './tools.mjs';
 import { hotPaths, readApplyPending, readApplyResult } from './config-apply.mjs';
@@ -30,6 +32,9 @@ import {
 } from './config-schema.mjs';
 
 export const POLICY_NS = POLICY_NAMESPACE;
+
+// 记忆列表/域统计的过滤与聚合统一在 MemoryService.listRecords()/namespaceStats()；
+// 这里只做 Console 展示映射，不再识别内部类型或自行统计。
 
 /** hex → Uint8Array（证书 devicePublicKey 为 hex 编码） */
 export function hexToBytes(hex) {
@@ -709,10 +714,17 @@ export async function buildPolicy({ app }) {
   return policy.timeline;
 }
 
-/** GET /admin/api/namespaces：目录 = 域公告 ∪ 本地节点（未订阅也显示）。 */
+/**
+ * GET /admin/api/namespaces：目录 = 域公告 ∪ 本机域统计（未订阅也显示）。
+ *
+ * 计数/最近更新时间/记忆记录/内部对象统一来自 MemoryService.namespaceStats()，
+ * 与 stats()/capability 共用同一聚合规则。显式 includeReserved 保留 Console
+ * 旧行为：本机 `__*` 内部域仍然列出（不静默丢域）；公共 stats/capability 默认
+ * 仍排除它们。
+ */
 export async function buildNamespaces({ app, service, config }) {
-  const [nodes, status, policy] = await Promise.all([
-    app.storage.listNodes(),
+  const [domains, status, policy] = await Promise.all([
+    service.namespaceStats({ includeReserved: true }),
     service.status(),
     collectPolicy(app),
   ]);
@@ -721,26 +733,30 @@ export async function buildNamespaces({ app, service, config }) {
     byNamespace.set(declaration.namespace, {
       namespace: declaration.namespace,
       count: 0,
+      memoryRecords: 0,
+      internalObjects: 0,
       lastUpdatedAt: 0,
       declared: true,
       declaredAt: declaration.at,
       declaredBy: declaration.issuer,
     });
   }
-  for (const node of nodes) {
-    const namespace = nsOf(node.namespace);
-    const entry = byNamespace.get(namespace) ?? {
-      namespace,
+  for (const domain of domains) {
+    const entry = byNamespace.get(domain.domain) ?? {
+      namespace: domain.domain,
       count: 0,
+      memoryRecords: 0,
+      internalObjects: 0,
       lastUpdatedAt: 0,
       declared: false,
       declaredAt: null,
       declaredBy: null,
     };
-    entry.count += 1;
-    const at = Math.max(node.updatedAt ?? 0, node.createdAt ?? 0);
-    if (at > entry.lastUpdatedAt) entry.lastUpdatedAt = at;
-    byNamespace.set(namespace, entry);
+    entry.count = domain.count;
+    entry.memoryRecords = domain.memoryRecords;
+    entry.internalObjects = domain.internalObjects;
+    entry.lastUpdatedAt = domain.lastUpdatedAt;
+    byNamespace.set(domain.domain, entry);
   }
   const hashes = status.stateHashByNamespace ?? {};
   const subscription = app.sync?.getSubscriptionNamespaces?.()
@@ -1151,31 +1167,34 @@ export async function buildConfigView({ config, home }) {
 
 /**
  * G-ML-1：记忆列表（动作式 GUI 的读面）。
- * 默认**过滤已删除（墓碑）与已归档**；`includeDeleted=1` / `includeArchived=1` 可切换查看。
- * 只读、脱敏（只给预览，不回显完整 metadata）。
+ * 默认**过滤已删除（墓碑）、已归档与 Runtime 内部对象**；对应 include* 参数可切换查看。
+ * 过滤/排序/分页统一由 MemoryService.listRecords() 执行；这里只做脱敏展示映射
+ * （只给预览，不回显完整 metadata）。
  */
-export async function buildMemories({ app, url }) {
+export async function buildMemories({ service, url }) {
   const params = url?.searchParams ?? new URLSearchParams();
   const flag = (name) => params.get(name) === '1' || params.get(name) === 'true';
   const includeArchived = flag('includeArchived');
   const includeDeleted = flag('includeDeleted');
+  // 0.3：Runtime 内部对象默认隐藏；includeInternal=1 仅管理面调试使用。
+  const includeInternal = flag('includeInternal');
   const namespace = params.get('namespace') ?? undefined;
   const limitRaw = Number(params.get('limit') ?? '50');
   const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 200) : 50;
 
   const archivedOf = (node) => typeof node?.metadata?.archivedAt === 'number';
-  let nodes = [];
+  let records = { total: 0, nodes: [] };
   try {
-    nodes = await app.storage.listNodes();
+    records = await service.listRecords({
+      includeDeleted,
+      includeArchived,
+      includeInternal,
+      ...(namespace !== undefined ? { namespace } : {}),
+      limit,
+    });
   } catch {
-    nodes = [];
+    records = { total: 0, nodes: [] };
   }
-  const filtered = nodes.filter((node) => {
-    if (!includeDeleted && node.deletedAt) return false;
-    if (!includeArchived && archivedOf(node)) return false;
-    if (namespace !== undefined && (node.namespace ?? 'default') !== namespace) return false;
-    return true;
-  });
   const previewOf = (node) => {
     const content = node?.content ?? {};
     if (typeof content === 'string') return content.slice(0, 160);
@@ -1188,28 +1207,25 @@ export async function buildMemories({ app, url }) {
     const text = content.content ?? content.name ?? content.description ?? content.value ?? '';
     return String(text).slice(0, 160);
   };
-  const memories = filtered
-    .slice()
-    .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
-    .slice(0, limit)
-    .map((node) => ({
-      id: node.id,
-      type: node.type,
-      namespace: node.namespace ?? 'default',
-      preview: previewOf(node),
-      createdAt: node.createdAt ?? null,
-      updatedAt: node.updatedAt ?? null,
-      archived: archivedOf(node),
-      archivedAt: node.metadata?.archivedAt ?? null,
-      deleted: Boolean(node.deletedAt),
-      deletedAt: node.deletedAt ?? null,
-      tags: Array.isArray(node.tags) ? node.tags : [],
-    }));
+  const memories = records.nodes.map((node) => ({
+    id: node.id,
+    type: node.type,
+    namespace: node.namespace ?? 'default',
+    preview: previewOf(node),
+    createdAt: node.createdAt ?? null,
+    updatedAt: node.updatedAt ?? null,
+    archived: archivedOf(node),
+    archivedAt: node.metadata?.archivedAt ?? null,
+    deleted: Boolean(node.deletedAt),
+    deletedAt: node.deletedAt ?? null,
+    tags: Array.isArray(node.tags) ? node.tags : [],
+  }));
   return {
-    total: filtered.length,
+    total: records.total,
     limit,
     includeArchived,
     includeDeleted,
+    includeInternal,
     ...(namespace !== undefined ? { namespace } : {}),
     memories,
   };
@@ -1338,4 +1354,9 @@ export const READ_ROUTES = {
   '/admin/api/net': buildNetStatusView,
   '/admin/api/service': buildServiceView,
   '/admin/api/clients': buildClientsView,
+  // 0.3 本地模型：设备级 store，不进忆云；写端点见 serve.mjs WRITE_PATTERNS。
+  '/admin/api/models': (ctx) => buildModelsList(ctx),
+  '/admin/api/models/status': (ctx) => buildModelsStatus(ctx),
+  '/admin/api/inference/models': (ctx) => buildModelsList(ctx),
+  '/admin/api/inference/status': (ctx) => buildModelsStatus(ctx),
 };

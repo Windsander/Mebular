@@ -1,0 +1,6 @@
+name: mebular-companion
+version: 0.3.0
+description: "Optional Mebular companion — host-model memory candidate extraction via ctx.llm (not a memory provider)."
+kind: standalone
+provides_hooks:
+  - pre_llm_call

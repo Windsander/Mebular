@@ -8,6 +8,7 @@ import type { GraphStore } from '../core/GraphStore.js';
 import type { Node, NodeFilter } from '../types/index.js';
 import type { NamespaceFilter } from '../core/namespace.js';
 import { ValidationError } from '../errors.js';
+import { isInternalNode } from './visibility.js';
 import type { VectorIndex } from './VectorIndex.js';
 import { nodeMatchesKeyword } from './text.js';
 import {
@@ -31,6 +32,16 @@ import {
   type SkillNode,
 } from './types.js';
 
+/**
+ * 写入收尾选项（MemoryService 统一写入路径使用）。
+ *
+ * `deferVectorIndex`：先落图/元数据/标签，等调用方合并完 metadata 与 relatedTo 后
+ * 再统一刷新一次向量索引，避免同一节点被重复索引。
+ */
+export interface MemoryWriteOptions {
+  deferVectorIndex?: boolean;
+}
+
 export interface MemoryListFilter {
   tags?: string[];
   createdAfter?: number;
@@ -43,6 +54,11 @@ export interface MemoryListFilter {
   includeArchived?: boolean;
   /** 单分区或分区列表；缺省不过滤 */
   namespace?: NamespaceFilter;
+  /**
+   * 内部对象（`metadata.internal=true` 或保留 namespace）默认排除。
+   * 仅管理面/调试面显式 true；普通记忆查询不得开启。
+   */
+  includeInternal?: boolean;
   limit?: number;
 }
 
@@ -75,7 +91,7 @@ export class MemoryStore {
 
   // ---------- 写入 ----------
 
-  async addEntity(input: EntityInput): Promise<EntityNode> {
+  async addEntity(input: EntityInput, options: MemoryWriteOptions = {}): Promise<EntityNode> {
     requireNonEmpty(input.name, 'entity.name');
     if (!ENTITY_TYPES.includes(input.entityType)) {
       throw new ValidationError(`非法 entityType：${input.entityType}`, { entityType: input.entityType });
@@ -87,6 +103,8 @@ export class MemoryStore {
     if (input.description !== undefined) content.description = input.description;
     if (input.properties !== undefined) content.properties = input.properties;
     const node = await this.graph.createNode('entity', content, input.labels, {
+      ...(input.validFrom !== undefined ? { validFrom: input.validFrom } : {}),
+      ...(input.validTo !== undefined ? { validTo: input.validTo } : {}),
       ...(input.namespace !== undefined ? { namespace: input.namespace } : {}),
     });
     if (input.tags?.length) {
@@ -94,10 +112,10 @@ export class MemoryStore {
         await this.graph.addTag(node.id, tag);
       }
     }
-    return this.finishWrite<EntityNode>(node.id);
+    return this.finishWrite<EntityNode>(node.id, options);
   }
 
-  async addFact(input: FactInput): Promise<FactNode> {
+  async addFact(input: FactInput, options: MemoryWriteOptions = {}): Promise<FactNode> {
     requireNonEmpty(input.subject, 'fact.subject');
     requireNonEmpty(input.predicate, 'fact.predicate');
     requireNonEmpty(input.object, 'fact.object');
@@ -128,10 +146,10 @@ export class MemoryStore {
         await this.graph.addTag(node.id, tag);
       }
     }
-    return this.finishWrite<FactNode>(node.id);
+    return this.finishWrite<FactNode>(node.id, options);
   }
 
-  async addEpisode(input: EpisodeInput): Promise<EpisodeNode> {
+  async addEpisode(input: EpisodeInput, options: MemoryWriteOptions = {}): Promise<EpisodeNode> {
     requireNonEmpty(input.content, 'episode.content');
     if (!EPISODE_TYPES.includes(input.episodeType)) {
       throw new ValidationError(`非法 episodeType：${input.episodeType}`, { episodeType: input.episodeType });
@@ -146,6 +164,8 @@ export class MemoryStore {
     if (input.endTime !== undefined) content.endTime = input.endTime;
     if (input.context !== undefined) content.context = input.context;
     const node = await this.graph.createNode('episode', content, input.labels, {
+      ...(input.validFrom !== undefined ? { validFrom: input.validFrom } : {}),
+      ...(input.validTo !== undefined ? { validTo: input.validTo } : {}),
       ...(input.namespace !== undefined ? { namespace: input.namespace } : {}),
     });
     if (input.tags?.length) {
@@ -153,10 +173,10 @@ export class MemoryStore {
         await this.graph.addTag(node.id, tag);
       }
     }
-    return this.finishWrite<EpisodeNode>(node.id);
+    return this.finishWrite<EpisodeNode>(node.id, options);
   }
 
-  async addSkill(input: SkillInput): Promise<SkillNode> {
+  async addSkill(input: SkillInput, options: MemoryWriteOptions = {}): Promise<SkillNode> {
     requireNonEmpty(input.name, 'skill.name');
     requireNonEmpty(input.description, 'skill.description');
     requireNonEmpty(input.category, 'skill.category');
@@ -171,6 +191,8 @@ export class MemoryStore {
     if (input.prerequisites !== undefined) content.prerequisites = input.prerequisites;
     if (input.relatedEntities !== undefined) content.relatedEntities = input.relatedEntities;
     const node = await this.graph.createNode('skill', content, input.labels, {
+      ...(input.validFrom !== undefined ? { validFrom: input.validFrom } : {}),
+      ...(input.validTo !== undefined ? { validTo: input.validTo } : {}),
       ...(input.namespace !== undefined ? { namespace: input.namespace } : {}),
     });
     if (input.tags?.length) {
@@ -178,7 +200,7 @@ export class MemoryStore {
         await this.graph.addTag(node.id, tag);
       }
     }
-    return this.finishWrite<SkillNode>(node.id);
+    return this.finishWrite<SkillNode>(node.id, options);
   }
 
   async addMeta(input: MetaInput): Promise<MetaNode> {
@@ -197,6 +219,48 @@ export class MemoryStore {
       }
     }
     return this.finishWrite<MetaNode>(node.id);
+  }
+
+  /**
+   * 合并节点 metadata（写入服务在节点创建后附加 kind/provenance/contentHash 等）。
+   * 走 GraphStore.updateNode → `node_updated` 事件；默认同时刷新向量索引，可按需延后。
+   */
+  async mergeMetadata(
+    id: string,
+    metadata: Record<string, unknown>,
+    options: MemoryWriteOptions = {},
+  ): Promise<Node> {
+    const existing = await this.graph.getNode(id);
+    if (!existing) {
+      throw new ValidationError('节点写入后读取失败', { id });
+    }
+    const merged = { ...(existing.metadata ?? {}), ...metadata };
+    await this.graph.updateNode(id, { metadata: merged });
+    return this.finishWrite<Node>(id, options);
+  }
+
+  /**
+   * 刷新单个节点的向量索引；返回是否索引成功。
+   * `tolerateFailure=true` 时向量索引失败不抛出（图数据已写入），并标记索引待重建。
+   */
+  async indexNode(id: string, { tolerateFailure = false } = {}): Promise<boolean> {
+    const node = await this.graph.getNode(id);
+    if (!node) {
+      throw new ValidationError('节点写入后读取失败', { id });
+    }
+    if (!this.vectorIndex) {
+      return true;
+    }
+    try {
+      await this.vectorIndex.index(node);
+      return true;
+    } catch (error) {
+      this.vectorIndexStale = true;
+      if (tolerateFailure) {
+        return false;
+      }
+      throw error;
+    }
   }
 
   // ---------- 查询 ----------
@@ -238,6 +302,10 @@ export class MemoryStore {
       if (!filter.includeDeleted && node.deletedAt) {
         return false;
       }
+      // 内部对象默认不可见（metadata.internal + 保留域；core 不认识具体类型）
+      if (!filter.includeInternal && isInternalNode(node)) {
+        return false;
+      }
       // G-ML-1：归档默认不参与召回（显式 includeArchived 才可见）；墓碑与归档相互独立
       if (!filter.includeArchived && isArchived(node)) {
         return false;
@@ -259,6 +327,37 @@ export class MemoryStore {
     return facts
       .filter((node) => (node.validFrom ?? 0) <= now && (node.validTo ?? Infinity) > now)
       .map((node) => node as FactNode);
+  }
+
+  /**
+   * 受控结束 fact 的有效期（修正/替代路径；普通 updateNode 保持时间字段不可变）。
+   * 只允许缩短窗口，不允许把已结束的事实重新打开。
+   */
+  async updateFactValidity(id: string, validTo: number): Promise<FactNode> {
+    const existing = await this.graph.getNode(id);
+    if (!existing || existing.type !== 'fact' || existing.deletedAt || isInternalNode(existing)) {
+      throw new ValidationError('事实记录不存在或不可更新', { id });
+    }
+    if (typeof validTo !== 'number' || !Number.isFinite(validTo)) {
+      throw new ValidationError('validTo 必须是有限数字', { id, validTo });
+    }
+    const validFrom = existing.validFrom ?? 0;
+    if (validTo < validFrom) {
+      throw new ValidationError('validTo 早于 validFrom', { id, validFrom, validTo });
+    }
+    const currentValidTo = existing.validTo ?? 9999999999999;
+    if (currentValidTo <= Date.now() && validTo > currentValidTo) {
+      throw new ValidationError('已结束的事实不能重新打开', {
+        id,
+        code: 'temporal_resurrection',
+        validTo: currentValidTo,
+      });
+    }
+    const node = await this.graph.updateNodeValidity(id, validTo);
+    if (!node) {
+      throw new ValidationError('事实记录更新时间有效性失败', { id });
+    }
+    return node as FactNode;
   }
 
   // ---------- 检索 ----------
@@ -307,7 +406,7 @@ export class MemoryStore {
   async vectorQuery(
     text: string,
     k = 10,
-    options: { includeArchived?: boolean } = {},
+    options: { includeArchived?: boolean; includeInternal?: boolean } = {},
   ): Promise<Array<{ node: Node; score: number }>> {
     if (!this.vectorIndex) {
       return [];
@@ -317,11 +416,13 @@ export class MemoryStore {
     const results: Array<{ node: Node; score: number }> = [];
     for (const hit of hits) {
       const node = await this.graph.getNode(hit.nodeId);
+      const internalHidden = node !== null && options.includeInternal !== true && isInternalNode(node);
       // G-ML-1：归档节点默认可留在索引里（可逆），但**默认不出现在召回结果**中
-      if (node && !node.deletedAt && (options.includeArchived === true || !isArchived(node))) {
+      if (node && !node.deletedAt && !internalHidden
+        && (options.includeArchived === true || !isArchived(node))) {
         results.push({ node, score: hit.score });
       } else if (node && !node.deletedAt) {
-        continue; // 归档但被过滤：保留索引条目（解除归档即可再召回）
+        continue; // 归档/内部对象被过滤：保留索引条目，不进入结果
       } else {
         // 墓碑/缺失节点：从索引移除，避免陈旧向量驻留（G2-R）
         await this.vectorIndex.remove(hit.nodeId);
@@ -405,20 +506,20 @@ export class MemoryStore {
     const node = await this.graph.getNode(id);
     // 排除墓碑：与 listByType 默认（includeDeleted=false）行为一致（Phase 6.1 修复）
     // G-ML-1：归档同样默认不可取（显式列表路径可用 includeArchived 查看）
-    if (!node || node.type !== type || node.deletedAt || isArchived(node)) {
+    if (!node || node.type !== type || node.deletedAt || isArchived(node) || isInternalNode(node)) {
       return null;
     }
     return node as T;
   }
 
   /** 写入收尾：读回节点、（配置后）更新向量索引 */
-  private async finishWrite<T extends Node>(id: string): Promise<T> {
+  private async finishWrite<T extends Node>(id: string, options: MemoryWriteOptions = {}): Promise<T> {
     const node = await this.graph.getNode(id);
     if (!node) {
       throw new ValidationError('节点写入后读取失败');
     }
-    if (this.vectorIndex) {
-      await this.vectorIndex.index(node);
+    if (!options.deferVectorIndex) {
+      await this.indexNode(id);
     }
     return node as T;
   }

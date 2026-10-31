@@ -84,6 +84,7 @@ function urlToken(url) {
  *   dshVersion: string,
  *   pluginTarball: { path: string, filename: string },
  *   probeTarball: { path: string, filename: string },
+ *   extraPlugins?: Array<{ specifier: string, tarball: { path: string, filename: string } }>,
  * }} options
  */
 export async function createWorld(options) {
@@ -296,6 +297,11 @@ export async function createWorld(options) {
     if (withProbe) {
       await runProfileCommand('dsh plugin add probe', [
         'plugin', '--profile', 'web', 'add', options.probeTarball.path,
+      ]);
+    }
+    for (const extra of options.extraPlugins ?? []) {
+      await runProfileCommand(`dsh plugin add ${extra.specifier}`, [
+        'plugin', '--profile', 'web', 'add', extra.tarball.path,
       ]);
     }
 

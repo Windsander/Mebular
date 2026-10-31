@@ -64,6 +64,14 @@ async function makeRoot({ current = 'default' } = {}) {
     deviceId: 'device-test',
     mcp: { http: { host: '127.0.0.1', port, auth: 'none' } },
   }, null, 2), 'utf-8');
+  // A delegated profile has its own home/config. Give it the same isolated port,
+  // otherwise resolve falls back to 7331 and can collide with a real local daemon.
+  const profileHome = join(root, 'profiles', 'p_a');
+  await mkdir(profileHome, { recursive: true });
+  await writeFile(join(profileHome, 'config.json'), JSON.stringify({
+    deviceId: 'device-test',
+    mcp: { http: { host: '127.0.0.1', port, auth: 'none' } },
+  }, null, 2), 'utf-8');
   await writeRegistry(root, {
     v: 1,
     current,

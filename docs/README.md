@@ -11,11 +11,17 @@ main [`README.md`](../README.md); this index only describes document structure.
 
 - [README](../README.md) · [中文 README](../README_CN.md)
 - [Quickstart](getting-started/QUICKSTART.md) · [快速上手](getting-started/QUICKSTART_CN.md)
+- [Memory Runtime guide (0.3.0)](guides/MEMORY_RUNTIME.md) · [Memory Runtime 用户指南（0.3.0）](guides/MEMORY_RUNTIME_CN.md)
 - [Roadmap](../ROADMAP.md) · [路线图](../ROADMAP_CN.md) — public themes, current focus and exploration
-- [DSH integration](integrations/DSH.md) · [DSH 集成](integrations/DSH_CN.md)
 - [Contributing & quality gates](../CONTRIBUTING.md)
 - [Security policy](../SECURITY.md)
 - [Developer Certificate of Origin](DCO.md)
+
+## Integrations
+
+- [DSH](integrations/DSH.md) · [DSH 集成](integrations/DSH_CN.md)
+- [Hermes](integrations/HERMES.md) · [Hermes 集成](integrations/HERMES_CN.md)
+- [OpenChamber / OpenCode](integrations/OPENCHAMBER.md) · [OpenChamber / OpenCode 集成](integrations/OPENCHAMBER_CN.md)
 
 ## Architecture
 
@@ -51,6 +57,10 @@ main [`README.md`](../README.md); this index only describes document structure.
 
 ## Design
 
+- [Memory Runtime guide (0.3.0)](guides/MEMORY_RUNTIME.md) · [中文](guides/MEMORY_RUNTIME_CN.md) — user-facing guide to modes, models, host boundaries and privacy
+- [Memory Runtime 0.3.0 contract](design/0.3.0-memory-runtime-contract-v2.md) — frozen sidecar and capability contract (Chinese)
+- [Memory Runtime sidecar lifecycle](design/0.3.0-memory-runtime-sidecar.md) — process, discovery, tokens, local data and failure behaviour (Chinese)
+- [0.3.0 acceptance report](quality/0.3.0-memory-runtime-acceptance.md) — recall quality, security and performance evidence
 - [DSH plugin v1](design/dsh-plugin-v1.md) — historical v0.1 design; current guide is [DSH integration](integrations/DSH.md)
 - [Configuration journey v1](design/config-journey-v1.md) — Historical record of the v1 setup flow
 - [HTML prototype](design/prototype/README.md) — Historical record of the early prototype

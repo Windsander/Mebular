@@ -587,6 +587,13 @@ export const CONFIG_SCHEMA = [
     effective: (s) => (s?.mcp?.tls === true ? 'on' : 'off'),
     reason: (ctx) => (ctx.settings?.mcp?.tls ? '已生效：TLS 实际启用' : '未启用：明文 HTTP（仅回环安全）'),
   },
+  // ------------------------------------------------------------------ Memory Runtime（device-local；0.3 默认关闭 = 轻量 MCP）
+  // 只承载 MCP 侧生命周期开关；sidecar 自己的设置放 <home>/memory-runtime/config.json。
+  // 热生效（requiresRestart:false）：切换会动态生成/撤销 capability token。
+  { path: 'memoryRuntime.enabled', read: (c) => c?.memoryRuntime?.enabled === true, kind: 'bool', exposure: 'internal', writable: true, requiresRestart: false, default: false, ui: { group: '记忆运行时', type: 'bool', label: '启用记忆运行时（sidecar）' }, effective: (s) => s?.memoryRuntime?.enabled === true },
+  { path: 'memoryRuntime.command', read: (c) => c?.memoryRuntime?.command ?? null, kind: 'string', spec: { nonEmpty: true, empty: 'delete' }, exposure: 'internal', writable: true, requiresRestart: false, default: null, ui: { group: '记忆运行时', type: 'text', label: 'sidecar 可执行文件' }, effective: (s) => s?.memoryRuntime?.command ?? null },
+  { path: 'memoryRuntime.startTimeoutMs', read: (c) => c?.memoryRuntime?.startTimeoutMs ?? 5000, kind: 'int', spec: { min: 100, nullable: true }, exposure: 'internal', writable: true, requiresRestart: false, default: 5000, ui: { group: '记忆运行时', type: 'number', label: 'sidecar 启动超时（ms）' }, effective: (s) => s?.memoryRuntime?.startTimeoutMs ?? 5000 },
+
   // ------------------------------------------------------------------ internal（GUI 不渲染；API 仍可写）
   { path: 'network.libp2p.relayUnlimited', read: (c) => c?.network?.libp2p?.relayUnlimited === true, kind: 'bool', exposure: 'internal', writable: true, requiresRestart: true, default: false, ui: { type: 'bool', label: 'Relay 不做限额' } },
   { path: 'network.libp2p.relayServer', kind: 'bool', exposure: 'internal', requiresRestart: true, default: false, ui: { type: 'bool', label: '本机充当 relay 服务端' } },

@@ -1,14 +1,14 @@
 #!/usr/bin/env node
-// 发布版本号同步（lockstep：6 个可发布包共用同一版本）。
+// 发布版本号同步（lockstep：7 个可发布包共用同一版本；dsh-plugin 仍走独立发布 job）。
 //
 // 通常通过 scripts/bump_version.sh 调用；也可以直接运行：
 //   node scripts/bump-version.mjs --root . --version 0.2.0 --tag v0.2.0
 //
 // 同步内容：
-//   1. package.json × 6（root @mebular/core + fleet / mcp / service / skill / dsh-plugin）；
+//   1. package.json × 7（root @mebular/core + fleet / mcp / memory-runtime / service / skill / dsh-plugin）；
 //   2. 这些 manifest 中任何“已是版本号区间”的内部 @mebular/* 依赖 -> ^<new version>
 //      （file: 本地链接留给 pack 期由 publish-manifest 改写）；
-//   3. package-lock.json 根 version / packages[""] / 6 个 workspace 条目；
+//   3. package-lock.json 根 version / packages[""] / 7 个 workspace 条目；
 //   4. apps/desktop/package.json、apps/desktop/package-lock.json、main 进程 APP_VERSION；
 //   5. packages/mcp/src/version.mjs（MCP 对外版本唯一真源）；
 //   6. CHANGELOG.md 插入 `## [vX.Y.Z] - <date>` 章节占位（幂等）。
@@ -25,6 +25,7 @@ export const RELEASE_PACKAGES = [
   { rel: '.', name: '@mebular/core' },
   { rel: 'packages/fleet', name: '@mebular/fleet' },
   { rel: 'packages/mcp', name: '@mebular/mcp' },
+  { rel: 'packages/memory-runtime', name: '@mebular/memory-runtime' },
   { rel: 'packages/service', name: '@mebular/service' },
   { rel: 'packages/skill', name: '@mebular/skill' },
   { rel: 'packages/dsh-plugin', name: '@mebular/dsh-plugin' },
@@ -58,7 +59,7 @@ export function bumpVersion({
   const changes = [];
   let changedDeps = 0;
 
-  // ---- 6 个可发布包 manifest + 内部依赖区间 ----
+  // ---- 7 个可发布包 manifest + 内部依赖区间 ----
   for (const target of RELEASE_PACKAGES) {
     const file = join(root, target.rel, 'package.json');
     const pkg = readJson(file);
@@ -165,6 +166,26 @@ export function bumpVersion({
     log(`  MCP APP_VERSION -> ${version}  packages/mcp/src/version.mjs`);
   }
 
+  // ---- Memory Runtime sidecar 对外版本 ----
+  const sidecarVersionFile = join(root, 'packages/memory-runtime/src/sidecar/config.ts');
+  if (!existsSync(sidecarVersionFile)) {
+    throw new Error('packages/memory-runtime/src/sidecar/config.ts 不存在；sidecar 版本必须同步');
+  }
+  const sidecarBefore = readFileSync(sidecarVersionFile, 'utf8');
+  const sidecarAfter = replaceOnce(
+    sidecarBefore,
+    /(export const SIDECAR_RUNTIME_VERSION = ')[^']+(';)/,
+    `$1${version}$2`,
+    'packages/memory-runtime/src/sidecar/config.ts',
+  );
+  if (sidecarAfter === sidecarBefore) {
+    log(`  sidecar SIDECAR_RUNTIME_VERSION 已是 ${version}，跳过`);
+  } else {
+    writeFileSync(sidecarVersionFile, sidecarAfter, 'utf8');
+    changes.push(`packages/memory-runtime/src/sidecar/config.ts SIDECAR_RUNTIME_VERSION -> ${version}`);
+    log(`  SIDECAR_RUNTIME_VERSION -> ${version}  packages/memory-runtime/src/sidecar/config.ts`);
+  }
+
   // ---- CHANGELOG 章节占位 ----
   const clFile = join(root, 'CHANGELOG.md');
   const HEADER =
@@ -255,7 +276,7 @@ async function main(argv) {
       log: (line) => console.log(line),
     });
     console.log(
-      `✓ 已同步为 ${result.tag}（6 个 npm 包 + 根 lock + 桌面 App + MCP 版本源 + CHANGELOG）`,
+      `✓ 已同步为 ${result.tag}（7 个 npm 包 + 根 lock + 桌面 App + MCP 版本源 + CHANGELOG）`,
     );
     return 0;
   } catch (error) {

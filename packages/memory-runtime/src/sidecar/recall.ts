@@ -34,7 +34,7 @@ import {
 } from './domains.js';
 import { SidecarSettlementError } from './errors.js';
 import type { SidecarLocalLayer } from './local-layer.js';
-import type { SidecarModelRuntime } from './model.js';
+import type { SidecarInferenceProvider } from './inference-provider.js';
 import {
   extractCue,
   exactTokensOf,
@@ -302,7 +302,7 @@ export interface RecallServiceOptions {
   };
   policy?: SidecarPolicy | null;
   getPolicy?: () => SidecarPolicy | null;
-  modelRuntime?: SidecarModelRuntime | null;
+  inference?: SidecarInferenceProvider | null;
   checkpointSource?: {
     getCheckpoint(threadId: string, options?: {
       agentId?: string | null;
@@ -1073,7 +1073,7 @@ export class RecallService {
   readonly identity: RecallServiceOptions['identity'];
 
   private readonly client: CapabilityClient | null;
-  private readonly models: SidecarModelRuntime | null;
+  private readonly models: SidecarInferenceProvider | null;
   private readonly checkpointSource: RecallServiceOptions['checkpointSource'];
   private readonly getPolicy?: () => SidecarPolicy | null;
   private policy: SidecarPolicy | null;
@@ -1093,7 +1093,7 @@ export class RecallService {
     this.config = options.config;
     this.local = options.local;
     this.client = options.client;
-    this.models = options.modelRuntime ?? null;
+    this.models = options.inference ?? null;
     this.checkpointSource = options.checkpointSource ?? null;
     this.identity = options.identity;
     this.policy = options.policy ?? null;

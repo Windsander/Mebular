@@ -426,7 +426,7 @@ single daemon, service, update locks and upgrade rollback are covered by CI and
 
 ## Release and version
 
-- Version: `0.3.0`, on the unified Mebular v0.3.0 release train (six lockstep npm
+- Version: `0.3.0`, on the unified Mebular v0.3.0 release train (seven lockstep npm
   packages plus the isolated `dsh-plugin` share the same version).
 - npm: `@mebular/dsh-plugin@0.3.0`.
 - The Plugin is an isolated adapter in `packages/dsh-plugin`, published by its

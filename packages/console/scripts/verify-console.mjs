@@ -1644,7 +1644,7 @@ try {
       `tabs=${tabIds} labels=${tabLabels}`);
     const runtimeFieldsMapped = ia.IA_RUNTIME_FIELDS.every((path) => ia.IA_MIGRATION[path] === 'runtime');
     const memQueryBlock = consoleSrc2.match(/function memQuery\(\) \{[\s\S]*?\n\}/)?.[0] ?? '';
-    check('0.3 记忆运行时：仅 memoryRuntime.enabled 模式开关 + 模型来源两个产品增量',
+    check('0.3 记忆运行时：仅 memoryRuntime.enabled 模式开关 + 模型来源两个产品增量（含本地模型列表）',
       ia.IA_RUNTIME_CONTROL_PATHS.join(',') === 'memoryRuntime.enabled'
         && ia.IA_RUNTIME_MODEL_SOURCES.join(',') === 'heuristic,local,host,api,auto'
         && runtimeFieldsMapped
@@ -1653,9 +1653,15 @@ try {
         && consoleSrc2.includes("api('/admin/api/memory-runtime/traces?limit=20')")
         && consoleSrc2.includes("api('/admin/api/memory-runtime/feedback'")
         && consoleSrc2.includes("api(`/admin/api/memory-runtime/traces/${encodeURIComponent(id)}`)")
+        && consoleSrc2.includes("api('/admin/api/models')")
+        && consoleSrc2.includes("api('/admin/api/models/status')")
+        && consoleSrc2.includes("api('/admin/api/models/download'")
+        && consoleSrc2.includes("api('/admin/api/models/select'")
+        && consoleSrc2.includes("api('/admin/api/models/cancel'")
+        && consoleSrc2.includes("api('/admin/api/models/remove'")
         && consoleSrc2.includes('data-rt-mode')
         && consoleSrc2.includes('data-rt-model-source')
-        && !consoleSrc2.includes("api('/admin/api/models')")
+        && consoleSrc2.includes('data-rt-model-list')
         && !/runtimePack|data-rt-pack|settings\.runtime\.local/.test(consoleSrc2)
         && !consoleSrc2.includes('/runtime/v1')
         && memQueryBlock.length > 0 && !memQueryBlock.includes('includeInternal')

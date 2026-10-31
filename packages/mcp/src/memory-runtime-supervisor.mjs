@@ -739,6 +739,167 @@ export class MemoryRuntimeSupervisor {
   }
 
   /**
+   * 统一 host API 代理：服务端读取 host token，调用方只拿到脱敏数据。
+   *
+   * 返回扁平结果，不抛异常：
+   *   { ok, status, enabled, available, disabled, state, data, warnings, degraded, error }
+   * 轻量模式 → memory_runtime_disabled；未就绪 → memory_runtime_unavailable。
+   */
+  async request(path, { method = 'GET', body = null, timeoutMs = 5000 } = {}) {
+    const relative = typeof path === 'string' ? path.replace(/^\/+/, '') : '';
+    if (relative.length === 0 || relative.includes('..') || relative.includes('\\')) {
+      return {
+        ok: false,
+        status: 400,
+        enabled: this.isEnabled(),
+        available: false,
+        disabled: false,
+        state: this.statusState.state,
+        data: null,
+        warnings: [],
+        degraded: false,
+        error: { code: 'invalid_request', message: 'sidecar 请求路径非法', retryable: false },
+      };
+    }
+    const result = await this.#proxyHostApi(relative, {
+      method: String(method).toUpperCase(),
+      body,
+      timeoutMs,
+    });
+    if (!result.available) {
+      const disabled = result.disabled === true;
+      return {
+        ok: false,
+        status: disabled ? 409 : 503,
+        enabled: result.enabled === true,
+        available: false,
+        disabled,
+        state: result.state,
+        data: null,
+        warnings: [],
+        degraded: result.state === 'degraded',
+        error: {
+          code: disabled ? 'memory_runtime_disabled' : 'memory_runtime_unavailable',
+          message: disabled ? '记忆运行时未启用' : 'Memory Runtime sidecar 未就绪',
+          retryable: !disabled,
+          ...(result.reason ? { reason: result.reason } : {}),
+        },
+      };
+    }
+    if (!result.ok) {
+      const envelope = isObject(result.body) ? result.body : {};
+      const rawError = isObject(envelope.error) ? envelope.error : {};
+      const code = typeof rawError.code === 'string'
+        ? rawError.code
+        : typeof envelope.error === 'string' ? envelope.error : 'sidecar_request_failed';
+      const statusCode = Number.isInteger(result.statusCode) ? result.statusCode : 502;
+      return {
+        ok: false,
+        status: statusCode >= 400 && statusCode < 500 ? statusCode : 502,
+        enabled: true,
+        available: true,
+        disabled: false,
+        state: result.state,
+        data: null,
+        warnings: Array.isArray(envelope.warnings) ? envelope.warnings : [],
+        degraded: envelope.degraded === true || result.state === 'degraded',
+        error: {
+          code,
+          message: proxyErrorMessage(envelope, 'sidecar 请求失败'),
+          retryable: rawError.retryable === true,
+          ...(isObject(rawError.details) ? { details: rawError.details } : {}),
+        },
+      };
+    }
+    const envelope = isObject(result.body) ? result.body : {};
+    const data = envelope.data ?? result.body ?? null;
+    return {
+      ok: true,
+      status: Number.isInteger(result.statusCode) ? result.statusCode : 200,
+      enabled: true,
+      available: true,
+      disabled: false,
+      state: result.state,
+      data,
+      warnings: Array.isArray(envelope.warnings) ? envelope.warnings : [],
+      degraded: envelope.degraded === true || result.state === 'degraded',
+      error: null,
+    };
+  }
+
+  async listModels() {
+    return this.request('models');
+  }
+
+  async modelStatus(packId) {
+    return this.request(`models/${encodeURIComponent(String(packId ?? ''))}/status`);
+  }
+
+  async installModel(packId, { force = false } = {}) {
+    const suffix = force === true ? '?force=true' : '';
+    return this.request(`models/${encodeURIComponent(String(packId ?? ''))}/install${suffix}`, {
+      method: 'POST',
+      timeoutMs: 10_000,
+    });
+  }
+
+  async getInstall(jobId) {
+    return this.request(`installs/${encodeURIComponent(String(jobId ?? ''))}`);
+  }
+
+  async cancelInstall(jobId) {
+    return this.request(`installs/${encodeURIComponent(String(jobId ?? ''))}/cancel`, {
+      method: 'POST',
+    });
+  }
+
+  async activateModel(packId) {
+    return this.request(`models/${encodeURIComponent(String(packId ?? ''))}/activate`, {
+      method: 'POST',
+      timeoutMs: 30_000,
+    });
+  }
+
+  async deactivateModel(packId) {
+    return this.request(`models/${encodeURIComponent(String(packId ?? ''))}/deactivate`, {
+      method: 'POST',
+      timeoutMs: 15_000,
+    });
+  }
+
+  async startEngine(packId) {
+    return this.request(`models/${encodeURIComponent(String(packId ?? ''))}/start`, {
+      method: 'POST',
+      timeoutMs: 30_000,
+    });
+  }
+
+  async stopEngine(packId) {
+    return this.request(`models/${encodeURIComponent(String(packId ?? ''))}/stop`, {
+      method: 'POST',
+      timeoutMs: 15_000,
+    });
+  }
+
+  async removeModel(packId) {
+    return this.request(`models/${encodeURIComponent(String(packId ?? ''))}/remove`, {
+      method: 'POST',
+      timeoutMs: 15_000,
+    });
+  }
+
+  async inferenceStatus() {
+    return this.request('inference');
+  }
+
+  async updateInferenceSettings(input) {
+    return this.request('inference/settings', {
+      method: 'POST',
+      body: isObject(input) ? input : {},
+    });
+  }
+
+  /**
    * Console 只读代理：服务端读取 host token，浏览器只拿到脱敏后的 sidecar 视图。
    * 轻量模式/未就绪时返回明确状态，不启动进程、不创建 token。
    */

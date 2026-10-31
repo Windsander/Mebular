@@ -90,14 +90,30 @@ Provider 需要 0.3 Memory Runtime sidecar 正在运行。只有 MCP 设置
    sidecar 就绪时存在 `<home>/memory-runtime.json`，其中包含 sidecar URL 和
    `tokenFile`（通常是 `<home>/memory-runtime/host-token`）。
 
-3. 安装目录必须叫 `plugins/mebular`，因为 Hermes 用目录名作为 `memory.provider` 的值：
+3. 从 Release 资产安装（**0.3.0 发布后**可用；发布前用下面的源码命令）。安装目录必须叫
+   `plugins/mebular`，因为 Hermes 用目录名作为 `memory.provider` 的值：
+
+   ```bash
+   gh release download v0.3.0 -p 'mebular-hermes-plugins-*.tar.gz'
+   mkdir -p mebular-hermes-plugins
+   tar -xzf mebular-hermes-plugins-0.3.0.tar.gz -C mebular-hermes-plugins
+   cd mebular-hermes-plugins
+
+   HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}" ./install.sh
+   hermes config set memory.provider mebular
+   ```
+
+   安装脚本把 provider 放到 `plugins/mebular`，把 companion 放到
+   `plugins/mebular-companion`。已有目录先备份为 `.bak-<timestamp>`；失败时非零退出并
+   恢复旧目录。目录名必须是 `mebular`，**不是** `mebular-memory`。
+
+   发布前从源码安装：
 
    ```bash
    HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
-
    mkdir -p "$HERMES_HOME/plugins"
-   rm -rf "$HERMES_HOME/plugins/mebular"
    cp -R integrations/hermes/mebular-memory "$HERMES_HOME/plugins/mebular"
+   cp -R integrations/hermes/mebular-companion "$HERMES_HOME/plugins/mebular-companion"
    hermes config set memory.provider mebular
    ```
 
@@ -112,11 +128,12 @@ provider 自动读取，并在 POSIX 上拒绝组/其他可读的 token 文件�
 `MEBULAR_MEMORY_RUNTIME_TOKEN` 只是测试/排障覆盖，**不是** MCP capability token；provider
 不读 MCP token、`tokens.json` 或 Hermes 模型凭据。
 
-可选 companion（宿主模型候选）：
+安装或启用 provider 不会导入、镜像或双写 Hermes 内置的 `MEMORY.md` / `USER.md`；内置
+记忆继续由 Hermes 维护。
+
+可选 companion（宿主模型候选，已由同一个 `install.sh` 安装）：
 
 ```bash
-rm -rf "$HERMES_HOME/plugins/mebular-companion"
-cp -R integrations/hermes/mebular-companion "$HERMES_HOME/plugins/mebular-companion"
 hermes plugins enable mebular-companion
 export MEBULAR_COMPANION_ENABLED=1
 ```

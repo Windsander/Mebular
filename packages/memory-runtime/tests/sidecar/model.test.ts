@@ -7,14 +7,14 @@ import { describe, it, expect, afterEach } from '@jest/globals';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { normalizeSidecarConfig, type SidecarModelSettings } from '../../src/sidecar/config.js';
+import { normalizeSidecarConfig, type InferenceSettings } from '../../src/sidecar/config.js';
 import {
-  createSidecarModelRuntime,
-  type SidecarModelEngine,
-  type SidecarModelEngineConnection,
-  type SidecarModelRuntime,
-  type SidecarModelRuntimeOptions,
-} from '../../src/sidecar/model.js';
+  createSidecarInferenceProvider,
+  type InferenceEngineFacade,
+  type InferenceEngineConnection,
+  type SidecarInferenceProvider,
+  type SidecarInferenceProviderOptions,
+} from '../../src/sidecar/inference-provider.js';
 import type { ChatFetch, ChatFetchResponse } from '../../src/inference/gateway.js';
 import type { LlamaServerEngineOptions } from '../../src/inference/engine.js';
 
@@ -22,7 +22,7 @@ const SECRET = 'sk-sidecar-secret-never-log';
 const NOW = 1_760_000_000_000;
 
 const dirs: string[] = [];
-const runtimes: SidecarModelRuntime[] = [];
+const runtimes: SidecarInferenceProvider[] = [];
 
 afterEach(async () => {
   for (const runtime of runtimes.splice(0)) await runtime.dispose().catch(() => undefined);
@@ -35,7 +35,7 @@ async function tempHome(): Promise<string> {
   return home;
 }
 
-function modelSettings(overrides: Record<string, unknown>): SidecarModelSettings {
+function modelSettings(overrides: Record<string, unknown>): InferenceSettings {
   return normalizeSidecarConfig({
     model: {
       source: 'heuristic',
@@ -44,7 +44,7 @@ function modelSettings(overrides: Record<string, unknown>): SidecarModelSettings
   }).model;
 }
 
-function apiSettings(overrides: Record<string, unknown> = {}): SidecarModelSettings {
+function apiSettings(overrides: Record<string, unknown> = {}): InferenceSettings {
   return modelSettings({
     source: 'api',
     api: {
@@ -58,7 +58,7 @@ function apiSettings(overrides: Record<string, unknown> = {}): SidecarModelSetti
   });
 }
 
-function localSettings(path: string, enginePath: string | null = null): SidecarModelSettings {
+function localSettings(path: string, enginePath: string | null = null): InferenceSettings {
   return modelSettings({
     source: 'local',
     local: { path, enginePath, threads: 2 },
@@ -103,10 +103,10 @@ function countFetch(handler: ChatFetch): { fetch: ChatFetch; calls: number } {
 }
 
 function runtime(
-  settings: SidecarModelSettings,
-  options: Partial<SidecarModelRuntimeOptions> & { homeDir: string },
-): SidecarModelRuntime {
-  const created = createSidecarModelRuntime(settings, {
+  settings: InferenceSettings,
+  options: Partial<SidecarInferenceProviderOptions> & { homeDir: string },
+): SidecarInferenceProvider {
+  const created = createSidecarInferenceProvider(settings, {
     env: { TEST_SIDECAR_KEY: SECRET },
     sleep: async () => undefined,
     retryDelayMs: 0,
@@ -118,9 +118,9 @@ function runtime(
 }
 
 function fakeEngine(
-  connection: SidecarModelEngineConnection | Error,
+  connection: InferenceEngineConnection | Error,
   seen: LlamaServerEngineOptions[] = [],
-): (options: LlamaServerEngineOptions) => SidecarModelEngine {
+): (options: LlamaServerEngineOptions) => InferenceEngineFacade {
   return (options) => {
     seen.push(options);
     return {
@@ -207,6 +207,53 @@ describe('sidecar model runtime', () => {
     expect(engines[0]).toMatchObject({ modelPath, binaryPath: enginePath, threads: 2 });
     expect(JSON.stringify(result)).not.toContain('engine-token');
     expect(JSON.stringify(await model.status())).not.toContain('engine-token');
+  });
+
+  it('reconfigure 在进程内切换 local→heuristic，停止自有旧引擎且不重启进程', async () => {
+    const home = await tempHome();
+    const modelPath = join(home, 'qwen-test.gguf');
+    await writeFile(modelPath, 'gguf-test', { mode: 0o600 });
+    const stops: string[] = [];
+    const model = runtime(localSettings(modelPath), {
+      homeDir: home,
+      fetch: async () => jsonResponse(validCandidates()),
+      createEngine: (options) => {
+        const engine = fakeEngine({
+          baseUrl: 'http://127.0.0.1:9999/v1',
+          apiKey: 'engine-token',
+          modelId: 'local-test',
+        })(options);
+        const stop = engine.stop;
+        engine.stop = async () => {
+          stops.push('stop');
+          await stop?.();
+        };
+        return engine;
+      },
+    });
+
+    const result = await model.extractCandidates({
+      source: 'local',
+      chunks: [{ text: '以后默认用深色主题', role: 'user' }],
+      domain: 'agent:opencode',
+      agentId: 'opencode',
+      allowRemote: false,
+    });
+    expect(result.ok).toBe(true);
+    expect(stops).toHaveLength(0);
+
+    const pid = process.pid;
+    await model.reconfigure(modelSettings({ source: 'heuristic' }));
+    expect(model.currentStatus()).toMatchObject({ configured: 'heuristic', active: 'heuristic' });
+    expect(stops).toHaveLength(1);
+    expect(process.pid).toBe(pid);
+    expect((await model.extractCandidates({
+      source: 'heuristic',
+      chunks: [{ text: '以后默认用深色主题', role: 'user' }],
+      domain: 'agent:opencode',
+      agentId: 'opencode',
+      allowRemote: false,
+    })).extractor).toBe('heuristic');
   });
 
   it('local 未安装/路径缺失：degraded + heuristic 选择，不启动 engine、不下载', async () => {

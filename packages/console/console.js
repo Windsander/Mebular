@@ -9,7 +9,7 @@
 import { StarStage, namespaceColor, shortId, buildHoverRoutes, buildNetworkScene, normalizeFleetEvent, resolveTaskNamespace, summarizeHoverRoutes } from './starfield.js';
 import { initialViewFromSearch } from './deep-link.js';
 import { createWizardState, wizardReduce, WIZARD_STEPS } from './wizard.js';
-import { IA_TABS, IA_ADVANCED_SECTIONS, IA_MCP_SECTIONS, IA_FIELD_COPY, IA_SETTINGS_EXTRA, IA_SETTINGS_FOLDS, IA_SECURITY_SECTIONS, IA_MCP_DANGER_LINE_KEYS, INVITE_TTL_OPTIONS, INVITE_TTL_DEFAULT_MS, SECURITY_LEVEL_LABEL, SECURITY_LEVEL_TITLE_KEY, SECURITY_LEVEL_NOTE_KEY, SECURITY_BOUNDARY_KEY, SCHEMA_CONFIGURED_VALUE, localizeSchemaReason, refreshCsrfToken, withCsrfRetry, filterRuntimeTimeline, runtimeTimelineKind, memoryRuntimeEnabledOf, runtimeSidecarStateKey, memoryRuntimeModeOf, runtimeShowsModelSettings, runtimeModelSourceOf, runtimeModelSourceAvailable, runtimeModelSourceReady, IA_RUNTIME_MODEL_SOURCES, IA_RUNTIME_MODEL_SOURCE_DEFAULT } from './settings-ia.js';
+import { IA_TABS, IA_ADVANCED_SECTIONS, IA_MCP_SECTIONS, IA_FIELD_COPY, IA_SETTINGS_EXTRA, IA_SETTINGS_FOLDS, IA_SECURITY_SECTIONS, IA_MCP_DANGER_LINE_KEYS, INVITE_TTL_OPTIONS, INVITE_TTL_DEFAULT_MS, SECURITY_LEVEL_LABEL, SECURITY_LEVEL_TITLE_KEY, SECURITY_LEVEL_NOTE_KEY, SECURITY_BOUNDARY_KEY, SCHEMA_CONFIGURED_VALUE, localizeSchemaReason, refreshCsrfToken, withCsrfRetry, filterRuntimeTimeline, runtimeTimelineKind, memoryRuntimeEnabledOf, runtimeSidecarStateKey, memoryRuntimeModeOf, runtimeShowsModelSettings, runtimeModelSourceOf, runtimeModelSourceAvailable, runtimeModelSourceReady, runtimeModelJobActive, runtimeModelStatusOf, runtimeModelActionOf, formatBytes, IA_RUNTIME_MODEL_SOURCES, IA_RUNTIME_MODEL_SOURCE_DEFAULT } from './settings-ia.js';
 import { assistantsPanelHtml, serviceRowHtml, wizardRowHtml, repairRowHtml, statusPillHtml, attentionItems, assistantAddFormHtml } from './assistants.js';
 import { reconcileAssistantUi } from './assistant-status.js';
 import { createConsoleHost, markEmbeddedDocument } from './host.js';
@@ -60,6 +60,15 @@ const state = {
     status: null,
     // 高级 · 模型来源（GET /admin/api/memory-runtime/model-source；浏览器不接触 sidecar 配置）
     modelSource: null,
+    // 高级 · 本地模型目录 / 当前安装任务 / 行内错误（GET /admin/api/models）
+    models: null,
+    modelJob: null,
+    modelError: null,
+    modelAction: null,
+    modelSourceBrowse: null,
+    pendingActivatePack: null,
+    modelPollTimer: null,
+    modelPollSeq: 0,
     traces: null,
     traceMeta: null,
     traceDetails: {},
@@ -1600,24 +1609,285 @@ function runtimeModelStatusHtml(status) {
   });
 }
 
+const RUNTIME_MODEL_POLL_MS = 2000;
+
+const RUNTIME_MODEL_STATUS_KEYS = Object.freeze({
+  not_installed: 'settings.runtime.models.status.not_installed',
+  downloading: 'settings.runtime.models.status.downloading',
+  verifying: 'settings.runtime.models.status.verifying',
+  installing: 'settings.runtime.models.status.installing',
+  installed: 'settings.runtime.models.status.installed',
+  enabled: 'settings.runtime.models.status.enabled',
+  unsupported: 'settings.runtime.models.status.unsupported',
+  failed: 'settings.runtime.models.status.failed',
+  cancelled: 'settings.runtime.models.status.cancelled',
+  interrupted: 'settings.runtime.models.status.interrupted',
+});
+
+const RUNTIME_MODEL_TIER_KEYS = Object.freeze({
+  light: 'settings.runtime.models.tier.light',
+  default: 'settings.runtime.models.tier.default',
+  quality: 'settings.runtime.models.tier.quality',
+  high: 'settings.runtime.models.tier.high',
+});
+
+function runtimeModelPacks() {
+  return Array.isArray(state.runtime.models?.packs) ? state.runtime.models.packs : [];
+}
+
+function runtimeModelName(pack) {
+  return String(pack?.displayName || pack?.modelId || pack?.packId || '—');
+}
+
+/** 用户正在浏览本地模型（尚未写 model.source=local）时也保持 local 选中。 */
+function runtimeModelSourceSelected() {
+  const actual = runtimeModelSourceOf(state.runtime.modelSource?.source ?? IA_RUNTIME_MODEL_SOURCE_DEFAULT);
+  if (actual === 'local') return 'local';
+  return state.runtime.modelSourceBrowse === 'local' ? 'local' : actual;
+}
+
+function runtimeModelSourceActual() {
+  return runtimeModelSourceOf(state.runtime.modelSource?.source ?? IA_RUNTIME_MODEL_SOURCE_DEFAULT);
+}
+
+function runtimeModelActivePackId() {
+  if (runtimeModelSourceActual() !== 'local') return null;
+  return state.runtime.models?.active?.packId ?? null;
+}
+
+function runtimeModelActivePack() {
+  const packId = runtimeModelActivePackId();
+  return packId ? runtimeModelPacks().find((pack) => pack.packId === packId) ?? null : null;
+}
+
+function runtimeModelTierLabel(tier) {
+  const key = RUNTIME_MODEL_TIER_KEYS[tier];
+  return key && t.has(key) ? t(key) : String(tier ?? '—');
+}
+
+function runtimeModelStatusLabel(pack, job = state.runtime.modelJob) {
+  const status = runtimeModelStatusOf(pack, job);
+  if (status === 'installing' && job?.packId === pack.packId && job.phase === 'engine') {
+    return t('settings.runtime.models.status.installingEngine');
+  }
+  return t(RUNTIME_MODEL_STATUS_KEYS[status] ?? RUNTIME_MODEL_STATUS_KEYS.not_installed);
+}
+
+function runtimeModelRequirementText(pack) {
+  const requirements = pack?.requirements ?? {};
+  const size = Number(pack?.estimatedDownloadBytes ?? pack?.expectedBytes ?? 0);
+  const memory = Number(requirements.minMemoryBytes ?? 0);
+  const disk = Number(requirements.minDiskBytes ?? 0);
+  const parts = [];
+  if (size > 0) parts.push(t('settings.runtime.models.meta.size', { size: formatBytes(size, { locale: getLocale() }) }));
+  if (memory > 0) parts.push(t('settings.runtime.models.meta.memory', { size: formatBytes(memory, { locale: getLocale() }) }));
+  if (disk > 0) parts.push(t('settings.runtime.models.meta.disk', { size: formatBytes(disk, { locale: getLocale() }) }));
+  return parts.join(' · ');
+}
+
+function runtimeModelHardwareText() {
+  const hardware = state.runtime.models?.hardware;
+  if (!hardware) return '';
+  const parts = [];
+  if (Number(hardware.totalMemoryBytes) > 0) {
+    parts.push(t('settings.runtime.models.hardware.memory', {
+      size: formatBytes(hardware.totalMemoryBytes, { locale: getLocale() }),
+    }));
+  }
+  if (Number(hardware.diskAvailableBytes) >= 0) {
+    parts.push(t('settings.runtime.models.hardware.disk', {
+      size: formatBytes(hardware.diskAvailableBytes, { locale: getLocale() }),
+    }));
+  }
+  if (hardware.platform) parts.push(`${String(hardware.platform)}/${String(hardware.arch ?? '—')}`);
+  return parts.join(' · ');
+}
+
+function runtimeModelReasonText(pack) {
+  const warnings = Array.isArray(pack?.warnings) ? pack.warnings : [];
+  const requirements = pack?.requirements ?? {};
+  if (warnings.includes('memory_insufficient')) {
+    return t('settings.runtime.models.reason.memory', {
+      memory: formatBytes(requirements.minMemoryBytes, { locale: getLocale() }),
+    });
+  }
+  if (warnings.includes('disk_insufficient')) {
+    return t('settings.runtime.models.reason.disk', {
+      disk: formatBytes(requirements.minDiskBytes, { locale: getLocale() }),
+    });
+  }
+  if (warnings.includes('platform_unsupported')) return t('settings.runtime.models.reason.platform');
+  if (warnings.includes('manifest_missing') || pack?.manifest?.available === false) {
+    return t('settings.runtime.models.reason.manifest');
+  }
+  if (pack?.supported === false) return t('settings.runtime.models.reason.generic');
+  return '';
+}
+
+function runtimeModelErrorText(error) {
+  const code = String(error?.code ?? error?.error?.code ?? error?.payload?.code ?? '');
+  const mapped = code === 'memory_insufficient' ? 'memory'
+    : code === 'disk_insufficient' ? 'disk'
+      : code === 'platform_unsupported' ? 'platform'
+        : ['manifest_missing', 'manifest_invalid', 'manifest_mismatch'].includes(code) ? 'manifest'
+          : ['install_in_progress', 'already_installed', 'install_not_running'].includes(code) ? 'busy'
+            : ['not_installed'].includes(code) ? 'notInstalled'
+              : ['model_corrupt', 'storage_unavailable'].includes(code) ? 'corrupt'
+                : code.startsWith('engine_') ? 'engine'
+                  : code === 'cancelled' ? 'cancelled'
+                    : code === 'interrupted' ? 'interrupted'
+                      : '';
+  if (mapped) return t(`settings.runtime.models.error.${mapped}`);
+  const localized = localizeError(error, 'settings.runtime.models.error.generic');
+  return localized && localized !== 'settings.runtime.models.error.generic'
+    ? localized
+    : t('settings.runtime.models.error.generic');
+}
+
+function runtimeModelEtaText(ms) {
+  const seconds = Math.max(1, Math.ceil(Number(ms) / 1000));
+  if (seconds < 60) return t('settings.runtime.models.eta.seconds', { seconds });
+  const minutes = Math.ceil(seconds / 60);
+  if (minutes < 60) return t('settings.runtime.models.eta.minutes', { minutes });
+  return t('settings.runtime.models.eta.hours', { hours: Math.ceil(minutes / 60) });
+}
+
+function runtimeModelProgressHtml(pack, job) {
+  if (!job || job.packId !== pack?.packId || !runtimeModelJobActive(job)) return '';
+  const progress = Math.max(0, Math.min(1, Number(job.progress) || 0));
+  const percent = Math.round(progress * 100);
+  const phaseKey = job.phase === 'engine'
+    ? 'settings.runtime.models.phase.engine'
+    : 'settings.runtime.models.phase.model';
+  const details = [];
+  const total = Number(job.totalBytes) || 0;
+  const done = Number(job.downloadedBytes) || 0;
+  if (total > 0) {
+    details.push(t('settings.runtime.models.bytes', {
+      done: formatBytes(done, { locale: getLocale() }),
+      total: formatBytes(total, { locale: getLocale() }),
+    }));
+  } else if (done > 0) {
+    details.push(formatBytes(done, { locale: getLocale() }));
+  }
+  if (Number(job.speedBytesPerSecond) > 0) {
+    details.push(t('settings.runtime.models.speed', {
+      speed: formatBytes(job.speedBytesPerSecond, { locale: getLocale() }),
+    }));
+  }
+  if (Number.isFinite(job.etaMs) && job.etaMs > 0) details.push(runtimeModelEtaText(job.etaMs));
+  return `<div class="runtime-model-progress" data-rt-model-progress="${escapeHtml(pack.packId)}">
+    <div class="runtime-model-progress-head">
+      <span>${escapeHtml(t('settings.runtime.models.progress', {
+        phase: t(phaseKey),
+        percent,
+      }))}</span>
+    </div>
+    <div class="runtime-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}"
+      aria-label="${escapeHtml(t('settings.runtime.models.progressLabel', { name: runtimeModelName(pack) }))}"><span style="--rt-progress:${percent}"></span></div>
+    <p class="runtime-model-progress-text" role="status" aria-live="polite">${escapeHtml(details.join(' · '))}</p>
+  </div>`;
+}
+
+function runtimeModelActionsHtml(pack) {
+  const action = runtimeModelActionOf(pack, state.runtime.modelJob);
+  const busy = state.runtime.modelAction?.pack === pack.packId;
+  const disabled = !state.features.writes || MOCK || busy;
+  const button = (name, key, extra = '') => `<button class="btn btn-small btn-crt${extra}" type="button"
+    data-rt-model-action="${name}" data-rt-model-pack="${escapeHtml(pack.packId)}" ${disabled ? 'disabled' : ''}>${escapeHtml(t(key))}</button>`;
+  const buttons = [];
+  if (action === 'cancel') buttons.push(button('cancel', 'settings.runtime.models.action.cancel'));
+  else if (action === 'disable') buttons.push(button('disable', 'settings.runtime.models.action.disable'));
+  else if (action === 'enable') buttons.push(button('enable', 'settings.runtime.models.action.enable'));
+  else if (action === 'download') buttons.push(button('download', 'settings.runtime.models.action.download'));
+  if (action !== 'cancel' && pack?.installed === true && pack?.active !== true) {
+    buttons.push(button('remove', 'settings.runtime.models.action.remove', ' btn-crt-danger'));
+  }
+  return buttons.length > 0 ? `<div class="runtime-model-actions">${buttons.join('')}</div>` : '';
+}
+
+function runtimeModelCardHtml(pack) {
+  const status = runtimeModelStatusOf(pack, state.runtime.modelJob);
+  const statusTone = status === 'enabled' ? ' crt-tag-ok'
+    : ['failed', 'unsupported', 'cancelled', 'interrupted'].includes(status) ? ' crt-tag-warn' : '';
+  const recommended = state.runtime.models?.recommended?.packId === pack.packId
+    || state.runtime.models?.recommendation?.packId === pack.packId;
+  const reason = runtimeModelReasonText(pack);
+  const error = state.runtime.modelError?.pack === pack.packId ? state.runtime.modelError : null;
+  const activating = state.runtime.modelAction?.pack === pack.packId
+    && state.runtime.modelAction.action === 'select';
+  const statusLabel = activating
+    ? t('settings.runtime.models.status.activating')
+    : runtimeModelStatusLabel(pack);
+  return `<article class="runtime-model-card crt-surface" data-rt-model-card="${escapeHtml(pack.packId)}">
+    <div class="runtime-model-card-head">
+      <p class="runtime-model-name">${escapeHtml(runtimeModelName(pack))}</p>
+      <span class="runtime-model-tags">
+        <span class="crt-tag">${escapeHtml(runtimeModelTierLabel(pack.tier))}</span>
+        <span class="crt-tag">${escapeHtml(String(pack.quantization ?? '—'))}</span>
+        ${recommended ? `<span class="crt-tag crt-tag-ok">${escapeHtml(t('settings.runtime.models.recommended'))}</span>` : ''}
+        ${pack.active === true ? `<span class="crt-tag crt-tag-ok">${escapeHtml(t('settings.runtime.models.current'))}</span>` : ''}
+      </span>
+    </div>
+    <p class="runtime-model-meta">${escapeHtml(runtimeModelRequirementText(pack))}</p>
+    <p class="runtime-model-state"><span class="crt-tag${statusTone}">${escapeHtml(statusLabel)}</span></p>
+    ${reason ? `<p class="runtime-model-reason">${escapeHtml(reason)}</p>` : ''}
+    ${runtimeModelProgressHtml(pack, state.runtime.modelJob)}
+    ${error ? `<p class="runtime-model-error" role="alert">${escapeHtml(error.message)}</p>` : ''}
+    ${runtimeModelActionsHtml(pack)}
+  </article>`;
+}
+
+function runtimeModelListBodyHtml() {
+  if (!state.runtime.models) {
+    const error = state.runtime.errors?.models;
+    return `<p class="runtime-model-empty">${escapeHtml(error
+      ? t('settings.runtime.models.loadFailed')
+      : t('settings.runtime.models.loading'))}</p>`;
+  }
+  const packs = runtimeModelPacks();
+  const active = runtimeModelActivePack();
+  const hardware = runtimeModelHardwareText();
+  const loadError = state.runtime.errors?.models ? `<p class="runtime-model-error" role="alert">${escapeHtml(t('settings.runtime.models.loadFailed'))}</p>` : '';
+  return `<div class="runtime-model-head"><h4>${escapeHtml(t('settings.runtime.models.heading'))}</h4></div>
+    <p class="runtime-model-intro muted">${escapeHtml(t('settings.runtime.models.intro'))}</p>
+    ${hardware ? `<p class="runtime-model-hardware">${escapeHtml(hardware)}</p>` : ''}
+    ${active ? `<p class="runtime-model-active" data-rt-model-active>${escapeHtml(t('settings.runtime.models.currentLine', { name: runtimeModelName(active) }))}</p>` : ''}
+    ${loadError}
+    ${packs.length === 0 ? `<p class="runtime-model-empty">${escapeHtml(t('settings.runtime.models.empty'))}</p>` : `<div class="runtime-model-grid">${packs.map(runtimeModelCardHtml).join('')}</div>`}`;
+}
+
+function runtimeModelSourceNote() {
+  const meta = state.runtime.modelSource;
+  const enabled = memoryRuntimeModeOf(state.runtime.status, currentConfigFile()) === 'immersive';
+  if (!enabled) return t('settings.runtime.modelSource.light');
+  if (!meta) return t('settings.runtime.modelSource.loading');
+  if (meta.available !== true) return t('settings.runtime.modelSource.notReady');
+  if (runtimeModelSourceSelected() === 'local') {
+    if (!state.runtime.models) return t('settings.runtime.models.note.loading');
+    if (runtimeModelJobActive(state.runtime.modelJob)) return t('settings.runtime.models.note.installing');
+    const active = runtimeModelActivePack();
+    if (active) return t('settings.runtime.models.note.active', { name: runtimeModelName(active) });
+    const installed = runtimeModelPacks().filter((pack) => pack.installed === true);
+    if (installed.length === 0) return t('settings.runtime.models.note.noInstalled');
+    return t('settings.runtime.models.note.choose');
+  }
+  return meta.applies === 'next_start'
+    ? t('settings.runtime.modelSource.nextStartHint')
+    : t('settings.runtime.modelSource.hotHint');
+}
+
 function runtimeModelSourceSectionHtml() {
   const meta = state.runtime.modelSource;
   const status = state.runtime.status;
   const enabled = memoryRuntimeModeOf(status, currentConfigFile()) === 'immersive';
-  const source = runtimeModelSourceOf(meta?.source ?? IA_RUNTIME_MODEL_SOURCE_DEFAULT);
+  const source = runtimeModelSourceSelected();
   const model = meta?.model ?? status?.model ?? null;
   const values = Array.isArray(meta?.values) && meta.values.length > 0 ? meta.values : IA_RUNTIME_MODEL_SOURCES;
   const ready = enabled && runtimeModelSourceReady(meta);
   const disabled = !state.features.writes || MOCK || !ready;
-  const note = !enabled
-    ? t('settings.runtime.modelSource.light')
-    : !meta
-      ? t('settings.runtime.modelSource.loading')
-      : meta.available !== true
-        ? t('settings.runtime.modelSource.notReady')
-        : meta.applies === 'next_start'
-          ? t('settings.runtime.modelSource.nextStartHint')
-          : t('settings.runtime.modelSource.hotHint');
+  const showModels = enabled && ready && source === 'local';
+  const note = runtimeModelSourceNote();
   const options = values.map((value) => {
     const normalized = runtimeModelSourceOf(value);
     const unavailable = !runtimeModelSourceAvailable(normalized, model) && normalized !== source;
@@ -1631,9 +1901,10 @@ function runtimeModelSourceSectionHtml() {
       <label class="cfg-label" for="rt-model-source">${escapeHtml(t('settings.runtime.modelSource.selectLabel'))}</label>
       <div class="cfg-control">
         <select id="rt-model-source" class="crt-input" data-rt-model-source ${disabled ? 'disabled' : ''}>${options}</select>
-        <p class="cfg-help muted" data-rt-model-source-note>${escapeHtml(note)}</p>
+        <p class="cfg-help muted is-visible" data-rt-model-source-note>${escapeHtml(note)}</p>
       </div>
     </div>
+    ${showModels ? `<div class="runtime-model-list" data-rt-model-list>${runtimeModelListBodyHtml()}</div>` : ''}
     <p class="settings-section-foot muted">${escapeHtml(t('settings.runtime.modelSource.foot'))}</p>`,
   });
 }
@@ -1703,6 +1974,9 @@ let lastSettingsSignature = null;
 // 覆盖渲染依赖：activeTab（即 settingsTab）、settings、rawConfig、writes、healthz、本机 deviceId、
 // AI 助手专区依赖（clients / service / 行内动作消息与展开态）。
 function settingsSignature(activeTab) {
+  // Runtime 状态只影响「记忆运行时 / 高级」面板；MCP/常用/安全 tab 不应因
+  // 模型状态/轨迹轮询而重建 DOM（否则原生 select 弹层会被销毁）。
+  const runtimeRelevant = activeTab === 'runtime' || activeTab === 'advanced';
   return JSON.stringify([
     activeTab,
     getLocale(),
@@ -1717,7 +1991,7 @@ function settingsSignature(activeTab) {
     state.cloudsError ?? null,
     state.cloudRename?.id ?? null,
     state.cloudRenameError ?? '',
-    state.runtime ? [
+    runtimeRelevant && state.runtime ? [
       state.runtime.status?.enabled ?? null,
       state.runtime.status?.state ?? null,
       state.runtime.status?.available ?? null,
@@ -1726,7 +2000,20 @@ function settingsSignature(activeTab) {
       state.runtime.status?.degraded ?? null,
       state.runtime.status?.error?.code ?? null,
       state.runtime.status?.model ?? null,
-      state.runtime.modelSource ?? null,
+      // 模型来源只取稳定投影：sidecar 状态里的 warnings/时间戳变化不应导致设置 DOM 重建。
+      state.runtime.modelSource ? [
+        state.runtime.modelSource.source ?? null,
+        state.runtime.modelSource.available ?? null,
+        state.runtime.modelSource.applies ?? null,
+        state.runtime.modelSource.enabled ?? null,
+        state.runtime.modelSource.state ?? null,
+        state.runtime.modelSource.degraded ?? null,
+        state.runtime.modelSource.model?.active ?? null,
+        state.runtime.modelSource.model?.configured ?? null,
+        state.runtime.modelSource.model?.degraded ?? null,
+        state.runtime.modelSource.model?.reason ?? null,
+      ] : null,
+      state.runtime.modelSourceBrowse ?? null,
       state.runtime.traceMeta ?? null,
       state.runtime.errors ?? null,
       state.runtime.timelineFilter ?? null,
@@ -1759,6 +2046,7 @@ function settingsFoldKey(el) {
 function renderSettings(activeTab = state.settingsTab ?? 'common') {
   const prevTab = state.settingsTab ?? 'common';
   state.settingsTab = activeTab;
+  if (activeTab !== 'advanced') stopRuntimeModelPolling();
   const body = $('#settings-body');
   if (state.locked) {
     renderLockedSettings(body);
@@ -1895,6 +2183,7 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
   }
   const nextScroller = body.querySelector('.settings-scroll');
   if (nextScroller && prevScrollTop > 0) nextScroller.scrollTop = prevScrollTop;
+  if (activeTab === 'advanced' && runtimeModelJobActive(state.runtime.modelJob)) startRuntimeModelPolling();
 }
 
 // ---------- S3 · 安全三档（安全卡 / 三操作改道 / 批准侧 / 恢复码） ----------
@@ -3400,6 +3689,319 @@ function runtimeSidecarReady(status = state.runtime.status) {
   return status?.enabled === true && ['ready', 'degraded'].includes(status?.state);
 }
 
+/** 模型目录只在设置 advanced/runtime 或运行时视图可见时加载；动作后可直接 reload。 */
+function runtimeWantsModelCatalog() {
+  if (MOCK) return true;
+  if (state.view === 'runtime') return true;
+  return !$('#settings')?.hidden && ['runtime', 'advanced'].includes(state.settingsTab ?? '');
+}
+
+/** 轮询只在「设置 · 高级」且正在浏览本地模型、页面可见时进行。 */
+function runtimeModelPollingWanted() {
+  if (MOCK || document.hidden) return false;
+  if ($('#settings')?.hidden) return false;
+  if (state.settingsTab !== 'advanced') return false;
+  if (memoryRuntimeModeOf(state.runtime.status, currentConfigFile()) !== 'immersive') return false;
+  return runtimeModelSourceSelected() === 'local';
+}
+
+function stopRuntimeModelPolling() {
+  state.runtime.modelPollSeq += 1;
+  if (state.runtime.modelPollTimer) {
+    clearTimeout(state.runtime.modelPollTimer);
+    state.runtime.modelPollTimer = null;
+  }
+}
+
+function applyRuntimeModelStatus(status) {
+  if (!status) return;
+  const models = state.runtime.models ?? { packs: [] };
+  const byId = new Map((Array.isArray(status.packs) ? status.packs : []).map((pack) => [pack.packId, pack]));
+  models.packs = (Array.isArray(models.packs) ? models.packs : []).map((pack) => {
+    const next = byId.get(pack.packId);
+    if (!next) return pack;
+    return {
+      ...pack,
+      state: next.state ?? pack.state,
+      installed: next.installed === true,
+      active: next.selected === true || next.active === true,
+      installedBytes: next.installedBytes ?? pack.installedBytes ?? 0,
+      expectedBytes: next.expectedBytes ?? pack.expectedBytes ?? 0,
+    };
+  });
+  models.install = status.install ?? null;
+  models.active = status.active ?? models.active ?? null;
+  models.engine = status.engine ?? models.engine ?? null;
+  models.installedPackIds = Array.isArray(status.installedPackIds)
+    ? status.installedPackIds
+    : models.installedPackIds;
+  models.recommendation = status.recommendation ?? models.recommendation ?? null;
+  state.runtime.models = models;
+  state.runtime.modelJob = status.install ?? state.runtime.modelJob ?? null;
+}
+
+async function reloadRuntimeModels({ patch = true } = {}) {
+  try {
+    const models = await api('/admin/api/models');
+    state.runtime.models = models;
+    state.runtime.modelJob = models?.install ?? null;
+    if (state.runtime.errors?.models) {
+      const { models: _ignored, ...rest } = state.runtime.errors;
+      state.runtime.errors = rest;
+    }
+    if (runtimeModelJobActive(state.runtime.modelJob)) startRuntimeModelPolling();
+    if (patch) patchRuntimeModelList();
+    return models;
+  } catch (error) {
+    state.runtime.errors = {
+      ...(state.runtime.errors ?? {}),
+      models: localizeError(error, 'settings.runtime.models.loadFailed'),
+    };
+    if (patch) patchRuntimeModelList();
+    return null;
+  }
+}
+
+async function pollRuntimeModelJob(seq) {
+  state.runtime.modelPollTimer = null;
+  if (seq !== state.runtime.modelPollSeq || !runtimeModelPollingWanted()) return;
+  try {
+    const status = await api('/admin/api/models/status');
+    if (seq !== state.runtime.modelPollSeq || !runtimeModelPollingWanted()) return;
+    applyRuntimeModelStatus(status);
+    patchRuntimeModelList();
+    const job = status?.install ?? null;
+    if (!job) {
+      const previous = state.runtime.modelJob;
+      await finishRuntimeModelJob(runtimeModelJobActive(previous)
+        ? { ...previous, state: 'interrupted' }
+        : null);
+      return;
+    }
+    if (!runtimeModelJobActive(job)) {
+      await finishRuntimeModelJob(job);
+      return;
+    }
+  } catch (error) {
+    if (seq !== state.runtime.modelPollSeq) return;
+    state.runtime.errors = {
+      ...(state.runtime.errors ?? {}),
+      models: localizeError(error, 'settings.runtime.models.loadFailed'),
+    };
+    patchRuntimeModelList();
+  }
+  if (seq === state.runtime.modelPollSeq && runtimeModelPollingWanted()) {
+    state.runtime.modelPollTimer = setTimeout(() => void pollRuntimeModelJob(seq), RUNTIME_MODEL_POLL_MS);
+  }
+}
+
+function startRuntimeModelPolling() {
+  if (!runtimeModelJobActive(state.runtime.modelJob)) return;
+  if (!runtimeModelPollingWanted()) return;
+  stopRuntimeModelPolling();
+  const seq = state.runtime.modelPollSeq;
+  state.runtime.modelPollTimer = setTimeout(() => void pollRuntimeModelJob(seq), RUNTIME_MODEL_POLL_MS);
+}
+
+async function finishRuntimeModelJob(job) {
+  if (!job) {
+    patchRuntimeModelList();
+    return;
+  }
+  state.runtime.modelJob = job;
+  const packId = state.runtime.pendingActivatePack ?? job.packId ?? null;
+  if (job.state === 'completed') {
+    state.runtime.pendingActivatePack = null;
+    state.runtime.modelError = null;
+    const models = await reloadRuntimeModels({ patch: false });
+    if (packId && models) {
+      const currentActive = runtimeModelActivePackId();
+      if (currentActive !== packId) {
+        await activateRuntimeModel(packId, { afterInstall: true });
+        return;
+      }
+    }
+    showToast(t('settings.runtime.models.installCompleted', {
+      name: runtimeModelName(runtimeModelPacks().find((pack) => pack.packId === job.packId) ?? { packId: job.packId }),
+    }));
+    patchRuntimeModelList();
+    return;
+  }
+  if (job.state === 'failed') {
+    state.runtime.pendingActivatePack = null;
+    const message = runtimeModelErrorText(job.error);
+    state.runtime.modelError = { pack: job.packId, message };
+    showToast(t('settings.runtime.models.installFailed', { message }));
+    patchRuntimeModelList();
+    return;
+  }
+  if (job.state === 'cancelled' || job.state === 'interrupted') {
+    state.runtime.pendingActivatePack = null;
+    const key = job.state === 'cancelled'
+      ? 'settings.runtime.models.error.cancelled'
+      : 'settings.runtime.models.error.interrupted';
+    state.runtime.modelError = { pack: job.packId, message: t(key) };
+    await reloadRuntimeModels({ patch: false });
+    patchRuntimeModelList();
+    return;
+  }
+  patchRuntimeModelList();
+}
+
+async function installRuntimeModel(packId) {
+  if (MOCK) { showToast(t('common.mockReadOnly')); return; }
+  if (!state.features.writes) { showToast(t('settings.runtime.readonly')); return; }
+  if (!packId) return;
+  const pack = runtimeModelPacks().find((entry) => entry.packId === packId) ?? { packId };
+  state.runtime.modelAction = { pack: packId, action: 'install' };
+  state.runtime.pendingActivatePack = packId;
+  state.runtime.modelError = null;
+  try {
+    const res = await api('/admin/api/models/download', { method: 'POST', body: { pack: packId } });
+    const job = res?.job ?? res ?? null;
+    state.runtime.modelJob = job;
+    if (state.runtime.models) state.runtime.models.install = job;
+    showToast(t('settings.runtime.models.downloadStarted', { name: runtimeModelName(pack) }));
+    patchRuntimeModelList();
+    if (runtimeModelJobActive(job)) startRuntimeModelPolling();
+    else await finishRuntimeModelJob(job);
+  } catch (error) {
+    state.runtime.pendingActivatePack = null;
+    const message = runtimeModelErrorText(error);
+    state.runtime.modelError = { pack: packId, message };
+    showToast(t('settings.runtime.models.actionFailed', { message }));
+  } finally {
+    state.runtime.modelAction = null;
+    patchRuntimeModelList();
+  }
+}
+
+async function activateRuntimeModel(packId, { afterInstall = false } = {}) {
+  if (MOCK) { showToast(t('common.mockReadOnly')); return; }
+  if (!state.features.writes) { showToast(t('settings.runtime.readonly')); return; }
+  if (!packId) return;
+  const pack = runtimeModelPacks().find((entry) => entry.packId === packId) ?? { packId };
+  state.runtime.modelAction = { pack: packId, action: 'select' };
+  state.runtime.modelError = null;
+  try {
+    const res = await api('/admin/api/models/select', { method: 'POST', body: { pack: packId } });
+    if (res?.activated === false) {
+      const message = runtimeModelErrorText({ code: res?.reason ?? 'engine_unavailable' });
+      state.runtime.modelError = { pack: packId, message };
+      showToast(t(afterInstall ? 'settings.runtime.models.autoEnableFailed' : 'settings.runtime.models.actionFailed', { message }));
+      return;
+    }
+    state.runtime.pendingActivatePack = null;
+    showToast(t('settings.runtime.models.enabled', { name: runtimeModelName(pack) }));
+    await ensureRuntimeData({ force: true });
+  } catch (error) {
+    const message = runtimeModelErrorText(error);
+    state.runtime.modelError = { pack: packId, message };
+    showToast(t(afterInstall ? 'settings.runtime.models.autoEnableFailed' : 'settings.runtime.models.actionFailed', { message }));
+  } finally {
+    state.runtime.modelAction = null;
+    patchRuntimeModelList();
+  }
+}
+
+async function cancelRuntimeModel(packId) {
+  if (MOCK) { showToast(t('common.mockReadOnly')); return; }
+  if (!state.features.writes) { showToast(t('settings.runtime.readonly')); return; }
+  if (!packId) return;
+  state.runtime.modelAction = { pack: packId, action: 'cancel' };
+  stopRuntimeModelPolling();
+  try {
+    const res = await api('/admin/api/models/cancel', { method: 'POST', body: { pack: packId } });
+    const job = res?.job ?? res ?? null;
+    state.runtime.modelJob = job;
+    if (job?.state === 'completed') {
+      state.runtime.pendingActivatePack = packId;
+      await finishRuntimeModelJob(job);
+      return;
+    }
+    state.runtime.pendingActivatePack = null;
+    state.runtime.modelError = { pack: packId, message: t('settings.runtime.models.error.cancelled') };
+    showToast(t('settings.runtime.models.cancelled', {
+      name: runtimeModelName(runtimeModelPacks().find((pack) => pack.packId === packId) ?? { packId }),
+    }));
+    await reloadRuntimeModels({ patch: false });
+  } catch (error) {
+    const message = runtimeModelErrorText(error);
+    state.runtime.modelError = { pack: packId, message };
+    showToast(t('settings.runtime.models.actionFailed', { message }));
+    startRuntimeModelPolling();
+  } finally {
+    state.runtime.modelAction = null;
+    patchRuntimeModelList();
+  }
+}
+
+async function disableRuntimeModel() {
+  state.runtime.modelSourceBrowse = null;
+  await setRuntimeModelSource('heuristic');
+}
+
+async function removeRuntimeModel(packId) {
+  if (MOCK) { showToast(t('common.mockReadOnly')); return; }
+  if (!state.features.writes) { showToast(t('settings.runtime.readonly')); return; }
+  if (!packId) return;
+  const pack = runtimeModelPacks().find((entry) => entry.packId === packId) ?? { packId };
+  const ok = await confirmModal({
+    title: t('settings.runtime.models.removeTitle'),
+    body: t('settings.runtime.models.removeBody', { name: runtimeModelName(pack) }),
+    confirmLabel: t('settings.runtime.models.removeConfirm'),
+  });
+  if (!ok) return;
+  state.runtime.modelAction = { pack: packId, action: 'remove' };
+  state.runtime.modelError = null;
+  try {
+    await api('/admin/api/models/remove', { method: 'POST', body: { pack: packId } });
+    showToast(t('settings.runtime.models.removed', { name: runtimeModelName(pack) }));
+    await ensureRuntimeData({ force: true });
+  } catch (error) {
+    const message = runtimeModelErrorText(error);
+    state.runtime.modelError = { pack: packId, message };
+    showToast(t('settings.runtime.models.actionFailed', { message }));
+  } finally {
+    state.runtime.modelAction = null;
+    patchRuntimeModelList();
+  }
+}
+
+/** 来源下拉：local 只展开模型列表；其余来源沿用既有 model-source 写路径。 */
+async function changeRuntimeModelSource(value) {
+  const source = runtimeModelSourceOf(value);
+  if (source !== 'local') {
+    state.runtime.modelSourceBrowse = null;
+    await setRuntimeModelSource(source);
+    return;
+  }
+  if (runtimeModelSourceActual() === 'local') {
+    state.runtime.modelSourceBrowse = null;
+    patchRuntimeModelList();
+    return;
+  }
+  state.runtime.modelSourceBrowse = 'local';
+  state.runtime.modelError = null;
+  lastSettingsSignature = null;
+  if (!$('#settings')?.hidden && state.settingsTab === 'advanced') renderSettings('advanced');
+  const models = await reloadRuntimeModels({ patch: false });
+  if (models) {
+    const installed = runtimeModelPacks().filter((pack) => pack.installed === true);
+    if (installed.length === 0 && !runtimeModelJobActive(state.runtime.modelJob)) {
+      showToast(t('settings.runtime.models.localNoInstalledToast'));
+    }
+  }
+  patchRuntimeModelList();
+}
+
+function patchRuntimeModelList() {
+  const host = document.querySelector('#settings-panel-advanced [data-rt-model-list]');
+  if (host) host.innerHTML = runtimeModelListBodyHtml();
+  const note = document.querySelector('#settings-panel-advanced [data-rt-model-source-note]');
+  if (note) note.textContent = runtimeModelSourceNote();
+}
+
 /** 仅在相关视图/设置页可见时加载；force 用于动作后立即刷新。 */
 async function ensureRuntimeData({ force = false } = {}) {
   if (state.locked) return;
@@ -3407,6 +4009,9 @@ async function ensureRuntimeData({ force = false } = {}) {
     const mock = mockRuntimeData(Date.now());
     state.runtime.status = mock.status;
     state.runtime.modelSource = mock.modelSource;
+    state.runtime.models = mock.models;
+    state.runtime.modelJob = mock.models?.install ?? null;
+    state.runtime.modelSourceBrowse = null;
     state.runtime.traces = mock.traces;
     state.runtime.traceMeta = { available: true, disabled: false, state: 'ready' };
     state.runtime.memories = mock.memories;
@@ -3420,10 +4025,12 @@ async function ensureRuntimeData({ force = false } = {}) {
 
   state.runtime.loading = true;
   const wantTimeline = state.view === 'runtime';
-  const keys = ['status', 'modelSource', ...(wantTimeline ? ['traces', 'memories'] : [])];
+  const wantModels = runtimeWantsModelCatalog();
+  const keys = ['status', 'modelSource', ...(wantModels ? ['models'] : []), ...(wantTimeline ? ['traces', 'memories'] : [])];
   const requests = keys.map((key) => {
     if (key === 'status') return api('/admin/api/memory-runtime/status');
     if (key === 'modelSource') return api('/admin/api/memory-runtime/model-source');
+    if (key === 'models') return api('/admin/api/models');
     if (key === 'traces') return api('/admin/api/memory-runtime/traces?limit=20');
     const internal = state.runtime.includeInternal === true ? '&includeInternal=1' : '';
     return api(`/admin/api/memories?limit=200${internal}`);
@@ -3438,7 +4045,10 @@ async function ensureRuntimeData({ force = false } = {}) {
     }
     if (key === 'status') state.runtime.status = result.value;
     else if (key === 'modelSource') state.runtime.modelSource = result.value;
-    else if (key === 'traces') {
+    else if (key === 'models') {
+      state.runtime.models = result.value;
+      state.runtime.modelJob = result.value?.install ?? state.runtime.modelJob ?? null;
+    } else if (key === 'traces') {
       state.runtime.traces = Array.isArray(result.value?.traces) ? result.value.traces : [];
       state.runtime.traceMeta = {
         available: result.value?.available === true,
@@ -3452,6 +4062,7 @@ async function ensureRuntimeData({ force = false } = {}) {
   state.runtime.errors = errors;
   state.runtime.loading = false;
   state.runtime.loadedAt = Date.now();
+  if (runtimeModelJobActive(state.runtime.modelJob)) startRuntimeModelPolling();
 }
 
 async function saveRuntimePatch(patch, successKey) {
@@ -3505,11 +4116,13 @@ async function setMemoryRuntimeMode(mode) {
     state.runtime.status.enabled = enabled;
     state.runtime.status.mode = enabled ? 'immersive' : 'lightweight';
     if (!enabled) {
+      stopRuntimeModelPolling();
       state.runtime.status.state = 'stopped';
       state.runtime.status.available = false;
       state.runtime.status.degraded = false;
       state.runtime.status.model = null;
       state.runtime.modelSource = null;
+      state.runtime.modelSourceBrowse = null;
     }
     renderRuntime();
   }
@@ -3520,10 +4133,17 @@ async function setRuntimeModelSource(value) {
   if (MOCK) { showToast(t('common.mockReadOnly')); return; }
   if (!state.features.writes) { showToast(t('settings.runtime.readonly')); return; }
   const source = runtimeModelSourceOf(value);
-  if (runtimeModelSourceOf(state.runtime.modelSource?.source) === source) return;
+  if (source !== 'local') stopRuntimeModelPolling();
+  if (runtimeModelSourceActual() === source) {
+    state.runtime.modelSourceBrowse = null;
+    lastSettingsSignature = null;
+    if (!$('#settings')?.hidden) renderSettings(state.settingsTab ?? 'common');
+    return;
+  }
   try {
     const res = await api('/admin/api/memory-runtime/model-source', { method: 'POST', body: { source } });
     state.runtime.modelSource = { ...(state.runtime.modelSource ?? {}), ...res, source: res?.source ?? source };
+    state.runtime.modelSourceBrowse = null;
     state.runtime.loadedAt = 0;
     showToast(t(res?.applies === 'hot'
       ? 'settings.runtime.modelSource.hotSaved'
@@ -3531,6 +4151,7 @@ async function setRuntimeModelSource(value) {
     await ensureRuntimeData({ force: true });
     await refresh();
   } catch (error) {
+    state.runtime.modelSourceBrowse = null;
     showToast(t('settings.runtime.modelSource.failed', { message: localizeError(error, 'errors.unknown') }));
   } finally {
     lastSettingsSignature = null;
@@ -5055,6 +5676,7 @@ $('#view-nav').addEventListener('click', (event) => {
 
 function setView(view) {
   state.view = view;
+  if (view !== 'runtime') stopRuntimeModelPolling();
   document.querySelectorAll('.view-btn').forEach((b) => {
     b.classList.toggle('is-active', b.dataset.view === view);
   });
@@ -5086,7 +5708,8 @@ function syncStageActivity() {
 document.addEventListener('visibilitychange', () => {
   syncStageActivity();
   if (document.hidden === true) {
-    // 隐藏时断开 SSE：客户端不再被 2.5s 状态脉冲唤醒，守护侧的连接保活定时器也随之释放
+    // 隐藏时断开 SSE 并停掉模型安装轮询（任务在服务端继续，回来后再续上）
+    stopRuntimeModelPolling();
     if (eventSource) {
       eventSource.close();
       eventSource = null;
@@ -5096,6 +5719,9 @@ document.addEventListener('visibilitychange', () => {
   // 回到前台：重连 SSE 并立即补一次刷新（隐藏期间轮询与 SSE 脉冲均被闸门拦下）
   startEvents();
   scheduleRefresh();
+  if (runtimeModelJobActive(state.runtime.modelJob) && runtimeModelPollingWanted()) {
+    void ensureRuntimeData({ force: true }).then(() => patchRuntimeModelList());
+  }
 });
 
 $('#audit-filter-action').addEventListener('change', renderAudit);
@@ -5318,6 +5944,7 @@ function dismissModal(el) {
   if (el.id === 'wizard') { closeWizard(); return true; }
   if (el.id === 'security-action') { closeSecurityAction(); return true; }
   if (el.id === 'auth-token') { settleAuthToken(null); return true; }
+  if (el.id === 'settings') stopRuntimeModelPolling();
   el.hidden = true;
   if (el.id === 'handoff') {
     handoffNs = null;
@@ -5452,19 +6079,31 @@ $('#onboard-join-submit')?.addEventListener('click', () => { void submitOnboard(
 $('#cloud-join-close')?.addEventListener('click', () => closeCloudJoin());
 $('#cloud-switch-close')?.addEventListener('click', () => { $('#cloud-switch').hidden = true; });
 $('#settings-close').addEventListener('click', () => {
+  stopRuntimeModelPolling();
   $('#settings').hidden = true;
 });
 // 记忆模式 / 模型来源：change/click 即保存（服务端热生效）；不再有 runtime.* 草稿字段。
 $('#settings-body').addEventListener('change', (event) => {
   const source = event.target.closest('[data-rt-model-source]');
   if (!source) return;
-  void setRuntimeModelSource(source.value);
+  void changeRuntimeModelSource(source.value);
 });
 // Tab 切换 + AI 助手专区动作（事件委托：renderSettings 会整体替换 body）
 $('#settings-body').addEventListener('click', (event) => {
+  const modelAction = event.target.closest('[data-rt-model-action]');
+  if (modelAction) {
+    const pack = modelAction.dataset.rtModelPack;
+    if (modelAction.dataset.rtModelAction === 'download') void installRuntimeModel(pack);
+    else if (modelAction.dataset.rtModelAction === 'enable') void activateRuntimeModel(pack);
+    else if (modelAction.dataset.rtModelAction === 'cancel') void cancelRuntimeModel(pack);
+    else if (modelAction.dataset.rtModelAction === 'disable') void disableRuntimeModel();
+    else if (modelAction.dataset.rtModelAction === 'remove') void removeRuntimeModel(pack);
+    return;
+  }
   const tab = event.target.closest('[data-settings-tab]');
   if (tab) {
     const next = tab.dataset.settingsTab;
+    if (next !== 'advanced') stopRuntimeModelPolling();
     renderSettings(next);
     if (next === 'runtime' || next === 'advanced') {
       void ensureRuntimeData({ force: true }).then(() => {
@@ -6741,6 +7380,58 @@ function mockSecurity(now) {
   };
 }
 
+function mockRuntimeModels(now) {
+  const pack = (packId, modelId, tier, name, size, memory, disk, installed = false) => ({
+    packId,
+    modelId,
+    displayName: name,
+    description: '',
+    tier,
+    quantization: 'Q4_K_M',
+    contextLength: 32768,
+    estimatedDownloadBytes: size,
+    requirements: {
+      platforms: ['darwin', 'win32', 'linux'],
+      architectures: null,
+      minMemoryBytes: memory,
+      recommendedMemoryBytes: memory * 1.5,
+      minDiskBytes: disk,
+      gpu: 'optional',
+    },
+    state: installed ? 'installed' : 'not_installed',
+    installed,
+    installedBytes: installed ? size : 0,
+    expectedBytes: size,
+    verifiedAt: installed ? now : null,
+    manifest: { available: true, error: null },
+    supported: true,
+    active: false,
+    install: null,
+    warnings: [],
+  });
+  return {
+    hardware: {
+      platform: 'darwin', arch: 'arm64', osVersion: null, cpuModel: 'Apple M3', cpuCores: 8,
+      totalMemoryBytes: 16 * 1024 ** 3, freeMemoryBytes: 8 * 1024 ** 3,
+      diskAvailableBytes: 120 * 1000 ** 3, diskTotalBytes: 500 * 1000 ** 3,
+      gpu: { vendor: 'apple', name: 'Apple M3', vramBytes: null, unifiedMemory: true },
+      detectedAt: now, warnings: [],
+    },
+    recommended: { kind: 'local', packId: 'qwen3-8b-instruct-q4_k_m', modelId: 'qwen3-8b-instruct', tier: 'default', reason: 'default', warnings: [], alternatives: [] },
+    packs: [
+      pack('qwen3-8b-instruct-q4_k_m', 'qwen3-8b-instruct', 'default', 'Qwen3 8B（默认）', 5_027_783_488, 16 * 1024 ** 3, 7 * 1000 ** 3),
+      pack('qwen3-4b-instruct-q4_k_m', 'qwen3-4b-instruct', 'light', 'Qwen3 4B（轻量）', 2_497_280_256, 8 * 1024 ** 3, 4 * 1000 ** 3, true),
+      pack('qwen3-14b-instruct-q4_k_m', 'qwen3-14b-instruct', 'quality', 'Qwen3 14B（高质量）', 9_001_752_960, 24 * 1024 ** 3, 12 * 1000 ** 3),
+      pack('qwen3-30b-a3b-instruct-q4_k_m', 'qwen3-30b-a3b-instruct', 'high', 'Qwen3 30B-A3B（高端 MoE）', 18_556_685_824, 48 * 1024 ** 3, 24 * 1000 ** 3),
+    ],
+    active: { source: 'heuristic', packId: null, modelId: null, engine: null },
+    providers: [],
+    install: null,
+    engine: null,
+    warnings: [],
+  };
+}
+
 function mockRuntimeData(now) {
   return {
     status: {
@@ -6778,6 +7469,7 @@ function mockRuntimeData(now) {
       applies: 'next_start',
       model: null,
     },
+    models: mockRuntimeModels(now),
     traces: [{
       id: 'tr_mock000000000000000000001',
       recallId: 'rr_mock000000000000000000001',

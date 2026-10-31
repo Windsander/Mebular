@@ -11,16 +11,16 @@ import {
   defaultSidecarConfig,
   normalizeSidecarConfig,
   type SidecarConfig,
-  type SidecarModelSettings,
+  type InferenceSettings,
 } from '../../src/sidecar/config.js';
 import { defaultSidecarPolicy } from '../../src/sidecar/domains.js';
 import { IngestService } from '../../src/sidecar/ingest.js';
 import { SidecarLocalLayer } from '../../src/sidecar/local-layer.js';
 import {
-  createSidecarModelRuntime,
-  type SidecarModelEngine,
-  type SidecarModelRuntime,
-} from '../../src/sidecar/model.js';
+  createSidecarInferenceProvider,
+  type InferenceEngineFacade,
+  type SidecarInferenceProvider,
+} from '../../src/sidecar/inference-provider.js';
 import type { ChatFetch, ChatFetchResponse } from '../../src/inference/gateway.js';
 import type { LlamaServerEngineOptions } from '../../src/inference/engine.js';
 import { startFakeCapability, type FakeCapabilityServer } from './fake-capability.js';
@@ -32,13 +32,13 @@ interface Harness {
   home: string;
   local: SidecarLocalLayer;
   fake: FakeCapabilityServer;
-  model: SidecarModelRuntime;
+  model: SidecarInferenceProvider;
   service: IngestService;
   config: SidecarConfig;
 }
 
 const harnesses: Harness[] = [];
-const runtimes: SidecarModelRuntime[] = [];
+const runtimes: SidecarInferenceProvider[] = [];
 const extraDirs: string[] = [];
 
 afterEach(async () => {
@@ -50,7 +50,7 @@ afterEach(async () => {
   for (const dir of extraDirs.splice(0)) await rm(dir, { recursive: true, force: true });
 });
 
-function settings(overrides: Record<string, unknown>): SidecarModelSettings {
+function settings(overrides: Record<string, unknown>): InferenceSettings {
   return normalizeSidecarConfig({
     model: {
       source: 'heuristic',
@@ -59,7 +59,7 @@ function settings(overrides: Record<string, unknown>): SidecarModelSettings {
   }).model;
 }
 
-function configWith(model: SidecarModelSettings): SidecarConfig {
+function configWith(model: InferenceSettings): SidecarConfig {
   const config = defaultSidecarConfig();
   config.model = model;
   config.http.port = 0;
@@ -90,7 +90,7 @@ function countFetch(handler: ChatFetch): { fetch: ChatFetch; calls: number } {
 
 function fakeEngine(connection: { baseUrl: string; apiKey: string; modelId?: string }): (
   options: LlamaServerEngineOptions,
-) => SidecarModelEngine {
+) => InferenceEngineFacade {
   return () => ({
     async acquire() {
       return connection;
@@ -103,10 +103,10 @@ function fakeEngine(connection: { baseUrl: string; apiKey: string; modelId?: str
 }
 
 async function setup(
-  model: SidecarModelSettings,
+  model: InferenceSettings,
   options: {
     fetch?: ChatFetch;
-    createEngine?: (options: LlamaServerEngineOptions) => SidecarModelEngine;
+    createEngine?: (options: LlamaServerEngineOptions) => InferenceEngineFacade;
     modelPath?: string;
   } = {},
 ): Promise<Harness> {
@@ -121,7 +121,7 @@ async function setup(
     retryDelayMs: 0,
   });
   const config = configWith(model);
-  const modelRuntime = createSidecarModelRuntime(model, {
+  const inference = createSidecarInferenceProvider(model, {
     homeDir: home,
     modelsDir: join(home, 'memory-runtime', 'models'),
     env: { TEST_SIDECAR_KEY: SECRET },
@@ -131,18 +131,18 @@ async function setup(
     ...(options.fetch ? { fetch: options.fetch } : {}),
     ...(options.createEngine ? { createEngine: options.createEngine } : {}),
   });
-  runtimes.push(modelRuntime);
+  runtimes.push(inference);
   const service = new IngestService({
     config,
     local,
     client,
     identity: { cloudId: 'cl_test', profileId: 'default', hostId: 'h_test' },
     policy: defaultSidecarPolicy(),
-    modelRuntime,
+    inference,
     now: () => NOW,
   });
   await service.init();
-  const harness = { home, local, fake, model: modelRuntime, service, config };
+  const harness = { home, local, fake, model: inference, service, config };
   harnesses.push(harness);
   return harness;
 }

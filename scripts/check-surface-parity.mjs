@@ -111,6 +111,8 @@ check(
 
 // ② 孤儿检测：源码/帮助文本里的 tool-like 命令必须都在注册表内
 const known = new Set([...fleetReg.map((t) => t.tool), ...mcpReg.map((t) => t.tool)].concat(['tools']));
+// 与工具同前缀、但语义是错误码/配置值的 token，不是工具名。
+const NON_TOOL_TOKENS = new Set(['memory_insufficient']);
 const TOOL_LIKE = /(?:^|[\s|'`(])((?:task|chatter|board|memory)_[a-z_]+)/g;
 const orphans = new Set();
 // H5：第三表面——控制台脚本与 docs/console 里的 tool-like 名也必须在注册表
@@ -133,7 +135,7 @@ const extraFiles = [];
 for (const file of ['packages/fleet/src/cli.ts', 'packages/mcp/bin/mebular.mjs', ...extraFiles]) {
   const text = readFileSync(file, 'utf-8');
   for (const m of text.matchAll(TOOL_LIKE)) {
-    if (!known.has(m[1])) orphans.add(`${file}:${m[1]}`);
+    if (!known.has(m[1]) && !NON_TOOL_TOKENS.has(m[1])) orphans.add(`${file}:${m[1]}`);
   }
 }
 check('无孤儿工具类命令（帮助/分发中的 tool-like 名均在注册表）', orphans.size === 0, { orphans: [...orphans] });

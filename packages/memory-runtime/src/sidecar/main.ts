@@ -49,10 +49,16 @@ import {
   type SidecarLocalLayerOptions,
 } from './local-layer.js';
 import {
-  createSidecarModelRuntime,
-  type SidecarModelRuntime,
-  type SidecarModelStatus,
-} from './model.js';
+  createSidecarInferenceProvider,
+  type SidecarInferenceProvider,
+  type InferenceStatus,
+} from './inference-provider.js';
+import { ModelStore } from '../inference/store.js';
+import {
+  EngineInstaller,
+  LlamaCppInferenceEngine,
+  InferenceService,
+} from './inference/index.js';
 import { SettlementRuntime } from './settlement.js';
 import {
   SidecarServer,
@@ -129,7 +135,8 @@ export interface SidecarHandle {
   paths: SidecarPaths;
   config: SidecarConfig;
   local: SidecarLocalLayer;
-  model: SidecarModelRuntime;
+  model: SidecarInferenceProvider;
+  inferenceService: InferenceService;
   settlement: SettlementRuntime;
   server: SidecarServer;
   discovery: SidecarDiscovery;
@@ -174,7 +181,15 @@ export interface SidecarVersionResult {
     checkpoint: boolean;
     compact: boolean;
     self: boolean;
-    models: string[];
+    models: {
+      install: boolean;
+      activate: boolean;
+      catalog: boolean;
+    };
+    inference: {
+      engine: boolean;
+      sources: string[];
+    };
   };
   details: {
     stagingHours: number;
@@ -459,13 +474,53 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
 
   const identity = mergeIdentity(paths.home, options.identity, capabilityIdentity);
 
-  const model = createSidecarModelRuntime(config.model, {
+  const engineInstaller = new EngineInstaller({
+    dataDir: paths.dataDir,
+    platform: process.platform,
+    arch: process.arch,
+    now,
+  });
+  const engineAdapter = new LlamaCppInferenceEngine({
+    env,
+    now,
+    binaryPathProvider: () => engineInstaller.binaryPath(),
+    requireBinaryPath: true,
+  });
+  const inferenceHolder: { current: InferenceService | null } = { current: null };
+  const model = createSidecarInferenceProvider(config.model, {
     homeDir: paths.home,
     modelsDir: paths.modelsDir,
     env,
     now,
+    localEngine: engineAdapter.asModelEngine(),
+    createGateway: (options) => {
+      if (!inferenceHolder.current) throw new Error('inference is not initialized');
+      return inferenceHolder.current.createGateway(options);
+    },
   });
-  let modelStatus: SidecarModelStatus;
+  const inferenceService = new InferenceService({
+    paths: {
+      dataDir: paths.dataDir,
+      modelsDir: paths.modelsDir,
+      configPath: paths.configPath,
+    },
+    config,
+    inference: model,
+    store: new ModelStore({ rootDir: paths.modelsDir, now }),
+    engineAdapter,
+    engineInstaller,
+    now,
+    platform: process.platform,
+    arch: process.arch,
+  });
+  inferenceHolder.current = inferenceService;
+  try {
+    await inferenceService.init();
+  } catch {
+    // inference 是可选能力；初始化失败只影响本地模型，不影响对话。
+    configWarnings.push('inference_init_failed');
+  }
+  let modelStatus: InferenceStatus;
   try {
     modelStatus = await model.status();
   } catch {
@@ -504,7 +559,7 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
       client,
       identity,
       policyPath: paths.policyPath,
-      modelRuntime: model,
+      inference: model,
       now,
     });
     await settlement.init();
@@ -526,11 +581,18 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
     for (const warning of modelStatus.warnings) {
       if (!mergedWarnings.includes(warning)) mergedWarnings.push(warning);
     }
+    const inferenceStatus = await inferenceService.status().catch(() => null);
+    if (inferenceStatus) {
+      for (const warning of inferenceStatus.warnings) {
+        if (!mergedWarnings.includes(warning)) mergedWarnings.push(warning);
+      }
+    }
     return settlement.statusSnapshot({
       mode: 'immersive',
       identity: { ...identity },
       capability: { ...capability },
       model: modelStatus,
+      ...(inferenceStatus ? { inference: inferenceStatus } : {}),
       limits: {
         maxChunkBytes: config.limits.maxChunkBytes,
         maxContextTokens: config.limits.maxContextTokens,
@@ -566,6 +628,7 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
     namespaces: settlement,
     recall: settlement,
     objects: settlement,
+    inference: inferenceService,
     getDegraded: () => settlement.degraded,
     state: 'starting',
     degraded: degraded || settlement.degraded,
@@ -655,6 +718,7 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
           try {
             await settlement.stop();
           } finally {
+            await inferenceService.dispose().catch(() => undefined);
             await model.dispose();
           }
           await server.close();
@@ -688,6 +752,7 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
     config,
     local,
     model,
+    inferenceService,
     settlement,
     server,
     discovery,
@@ -828,7 +893,15 @@ export function getSidecarVersion(): SidecarVersionResult {
       checkpoint: true,
       compact: true,
       self: true,
-      models: ['heuristic', 'host', 'local', 'api'],
+      models: {
+        install: true,
+        activate: true,
+        catalog: true,
+      },
+      inference: {
+        engine: true,
+        sources: ['heuristic', 'host', 'local', 'api'],
+      },
     },
     details: {
       stagingHours: 24,

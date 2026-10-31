@@ -66,9 +66,10 @@ already exists from an earlier immersive session, it is neither read nor modifie
 
 ### Immersive plugin
 
-`packages/opencode-plugin` is an OpenCode V2 server plugin. It is HTTP-only: it does not
-import `@mebular/core`, does not read Mebular config or secrets, and does not touch
-OpenChamber's native memory.
+`@mebular/opencode-plugin` (source: `packages/opencode-plugin`) is an OpenCode V2 server
+plugin distributed as an independent npm package. It is HTTP-only: it does not import
+`@mebular/core`, does not read Mebular config or secrets, and does not touch OpenChamber's
+native memory.
 
 Requirements:
 
@@ -94,14 +95,21 @@ Requirements:
   or the desktop bundle); MCP does not download it. Automatic startup belongs to the HTTP
   MCP daemon (`mebular serve`); stdio `mebular mcp` does not start the sidecar.
 
-Add the plugin directory to OpenCode's global `~/.config/opencode/opencode.json` (not
+`@mebular/opencode-plugin` is a **separate npm package**; it is not part of
+`@mebular/core`. After this release is published, install it from npm, then add it (or a
+local checkout path) to OpenCode's global `~/.config/opencode/opencode.json` (not
 OpenChamber's `opencode.managed.json`):
+
+```bash
+npm install @mebular/opencode-plugin
+# or: npm install -g @mebular/opencode-plugin
+```
 
 ```jsonc
 {
   "plugins": [
     {
-      "package": "/absolute/path/to/mebular/packages/opencode-plugin",
+      "package": "@mebular/opencode-plugin",
       "options": {
         "agentId": "opencode"
         // runtimeUrl is optional; without it the plugin reads
@@ -113,8 +121,10 @@ OpenChamber's `opencode.managed.json`):
 }
 ```
 
-Reload/restart OpenChamber yourself; Mebular does not send an `opencode reload` to a
-running host.
+OpenChamber reuses the same global config, and OpenCode loads the package on start or
+reload; `npm install` alone starts nothing. For local development, `package` may be the
+plugin directory's absolute path instead of the npm name. Reload/restart OpenChamber
+yourself; Mebular does not send an `opencode reload` to a running host.
 
 ## What the plugin does
 

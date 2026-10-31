@@ -46,7 +46,11 @@ function readJsonEnv(name, fallback) {
 function recordAuth(req) {
   const out = env.FAKE_SIDECAR_AUTH_OUT;
   if (typeof out !== 'string' || out.length === 0) return;
-  appendFileSync(out, `${JSON.stringify({ path: req.url, authorization: req.headers.authorization ?? null })}\n`);
+  try {
+    appendFileSync(out, `${JSON.stringify({ path: req.url, authorization: req.headers.authorization ?? null })}\n`);
+  } catch {
+    // 测试临时目录可能已清理；记录失败不影响 sidecar 响应。
+  }
 }
 
 function authorized(req) {
@@ -73,6 +77,244 @@ function readBody(req) {
     });
     req.on('error', () => resolve({}));
   });
+}
+
+function recordAdmin(req, body) {
+  const out = env.FAKE_SIDECAR_ADMIN_OUT;
+  if (typeof out !== 'string' || out.length === 0) return;
+  try {
+    appendFileSync(out, `${JSON.stringify({ method: req.method, path: req.url, body: body ?? null })}\n`);
+  } catch {
+    // 测试临时目录可能已清理；记录失败不影响 sidecar 响应。
+  }
+}
+
+const GIB = 1024 ** 3;
+const MODEL_PACKS = [
+  { packId: 'qwen3-8b-instruct-q4_k_m', modelId: 'qwen3-8b-instruct', tier: 'default', displayName: 'Qwen3 8B', sizeBytes: 5_027_783_488, minMemoryBytes: 16 * GIB, minDiskBytes: 7 * GIB },
+  { packId: 'qwen3-4b-instruct-q4_k_m', modelId: 'qwen3-4b-instruct', tier: 'light', displayName: 'Qwen3 4B', sizeBytes: 2_497_280_256, minMemoryBytes: 8 * GIB, minDiskBytes: 4 * GIB },
+  { packId: 'qwen3-14b-instruct-q4_k_m', modelId: 'qwen3-14b-instruct', tier: 'quality', displayName: 'Qwen3 14B', sizeBytes: 9_001_752_960, minMemoryBytes: 24 * GIB, minDiskBytes: 12 * GIB },
+  { packId: 'qwen3-30b-a3b-instruct-q4_k_m', modelId: 'qwen3-30b-a3b-instruct', tier: 'high', displayName: 'Qwen3 30B-A3B', sizeBytes: 18_556_685_824, minMemoryBytes: 48 * GIB, minDiskBytes: 24 * GIB },
+];
+const ACTIVE_PACK = 'qwen3-4b-instruct-q4_k_m';
+let inferenceSource = env.FAKE_SIDECAR_MODEL_SOURCE ?? 'heuristic';
+let engineState = 'stopped';
+let currentInstall = null;
+let currentInstallStartedAt = 0;
+const installedPacks = new Set([ACTIVE_PACK]);
+let activePackId = ACTIVE_PACK;
+const installAutocompleteMs = Math.max(0, Number(env.FAKE_SIDECAR_INSTALL_AUTOCOMPLETE_MS ?? 0));
+const installFailPacks = new Set(String(env.FAKE_SIDECAR_INSTALL_FAIL_PACKS ?? '')
+  .split(',')
+  .map((value) => value.trim())
+  .filter(Boolean));
+
+function packInstalled(packId) {
+  return installedPacks.has(packId);
+}
+
+function progressInstall() {
+  if (!currentInstall) return currentInstall;
+  if (!['downloading', 'verifying', 'installing'].includes(currentInstall.state)) return currentInstall;
+  const elapsed = Math.max(0, Date.now() - currentInstallStartedAt);
+  const failAfter = installAutocompleteMs > 0 ? Math.min(900, installAutocompleteMs) : 900;
+  if (installFailPacks.has(currentInstall.packId) && elapsed >= failAfter) {
+    currentInstall = {
+      ...currentInstall,
+      state: 'failed',
+      phase: 'engine',
+      progress: 0.6,
+      downloadedBytes: currentInstall.totalBytes,
+      updatedAt: Date.now(),
+      error: { code: 'engine_install_failed', message: '推理引擎准备失败', retryable: true },
+    };
+    return currentInstall;
+  }
+  if (installAutocompleteMs > 0 && elapsed >= installAutocompleteMs) {
+    installedPacks.add(currentInstall.packId);
+    currentInstall = {
+      ...currentInstall,
+      state: 'completed',
+      phase: 'engine',
+      progress: 1,
+      downloadedBytes: currentInstall.totalBytes,
+      updatedAt: Date.now(),
+      completedAt: Date.now(),
+      warnings: ['model_installed', 'engine_ready'],
+    };
+    return currentInstall;
+  }
+  if (installAutocompleteMs > 0) {
+    const ratio = Math.min(0.98, elapsed / installAutocompleteMs);
+    const progress = Math.max(currentInstall.progress, ratio);
+    const phase = ratio < 0.85 ? 'model' : 'engine';
+    const state = ratio < 0.55 ? 'downloading' : ratio < 0.85 ? 'verifying' : 'installing';
+    currentInstall = {
+      ...currentInstall,
+      state,
+      phase,
+      progress,
+      downloadedBytes: Math.round(currentInstall.totalBytes * progress),
+      speedBytesPerSecond: Math.max(1, Math.round(currentInstall.totalBytes / (installAutocompleteMs / 1000))),
+      etaMs: Math.max(0, installAutocompleteMs - elapsed),
+      updatedAt: Date.now(),
+    };
+  }
+  return currentInstall;
+}
+
+function engineView() {
+  return {
+    state: engineState,
+    health: engineState === 'running' ? 'ok' : 'unknown',
+    packId: engineState === 'running' ? activePackId : null,
+    modelId: engineState === 'running'
+      ? MODEL_PACKS.find((pack) => pack.packId === activePackId)?.modelId ?? null
+      : null,
+    crashCount: 0,
+    restartCount: 0,
+    lastError: null,
+    installed: true,
+    release: 'b12017',
+    platform: 'darwin',
+    arch: 'arm64',
+    binaryReady: true,
+    reason: null,
+  };
+}
+
+function activeView() {
+  return {
+    source: inferenceSource,
+    packId: inferenceSource === 'local' ? activePackId : null,
+    modelId: inferenceSource === 'local'
+      ? MODEL_PACKS.find((pack) => pack.packId === activePackId)?.modelId ?? null
+      : null,
+    engine: engineView(),
+  };
+}
+
+function installJob(state = 'downloading', packId = ACTIVE_PACK) {
+  const pack = MODEL_PACKS.find((entry) => entry.packId === packId);
+  return {
+    schema: 1,
+    jobId: 'job_fake_0001',
+    packId,
+    modelId: pack?.modelId ?? 'qwen3-4b-instruct',
+    state,
+    phase: 'model',
+    progress: state === 'completed' ? 1 : 0.25,
+    totalBytes: pack?.sizeBytes ?? 100,
+    downloadedBytes: Math.round((pack?.sizeBytes ?? 100) * (state === 'completed' ? 1 : 0.25)),
+    speedBytesPerSecond: 10_485_760,
+    etaMs: 7500,
+    startedAt: Date.now(),
+    updatedAt: Date.now(),
+    completedAt: state === 'completed' ? Date.now() : null,
+    error: null,
+    warnings: [],
+  };
+}
+
+function catalogView() {
+  progressInstall();
+  return {
+    hardware: {
+      platform: 'darwin',
+      arch: 'arm64',
+      osVersion: 'test',
+      cpuModel: 'Apple M3',
+      cpuCores: 8,
+      totalMemoryBytes: 16 * 1024 ** 3,
+      freeMemoryBytes: 8 * 1024 ** 3,
+      diskAvailableBytes: 100 * 1024 ** 3,
+      diskTotalBytes: 500 * 1024 ** 3,
+      gpu: { vendor: 'apple', name: 'Apple M3', vramBytes: null, unifiedMemory: true },
+      detectedAt: 0,
+      warnings: [],
+    },
+    recommended: {
+      kind: 'local',
+      packId: 'qwen3-8b-instruct-q4_k_m',
+      modelId: 'qwen3-8b-instruct',
+      tier: 'default',
+      reason: 'default',
+      warnings: [],
+      alternatives: [],
+    },
+    packs: MODEL_PACKS.map((pack) => ({
+      ...pack,
+      description: '',
+      quantization: 'Q4_K_M',
+      contextLength: 32768,
+      estimatedDownloadBytes: pack.sizeBytes,
+      requirements: {
+        platforms: ['darwin', 'linux', 'win32'],
+        architectures: null,
+        minMemoryBytes: pack.minMemoryBytes,
+        recommendedMemoryBytes: pack.minMemoryBytes * 1.5,
+        minDiskBytes: pack.minDiskBytes,
+        gpu: 'optional',
+      },
+      state: packInstalled(pack.packId) ? 'installed' : 'not_installed',
+      installed: packInstalled(pack.packId),
+      installedBytes: packInstalled(pack.packId) ? pack.sizeBytes : 0,
+      expectedBytes: pack.sizeBytes,
+      verifiedAt: null,
+      manifest: { available: true, error: null },
+      supported: true,
+      active: inferenceSource === 'local' && pack.packId === activePackId,
+      install: currentInstall,
+      warnings: [],
+    })),
+    active: activeView(),
+    providers: [
+      { id: 'heuristic', kind: 'builtin', configured: true, available: true, active: inferenceSource === 'heuristic', reason: null },
+      { id: 'host', kind: 'host', configured: true, available: true, active: inferenceSource === 'host', reason: null },
+      { id: 'local', kind: 'local-engine', configured: true, available: true, active: inferenceSource === 'local', reason: null },
+      { id: 'api', kind: 'remote', configured: false, available: false, active: inferenceSource === 'api', reason: 'api_not_configured' },
+    ],
+    install: currentInstall,
+    engine: {
+      state: 'installed',
+      installed: true,
+      release: 'b12017',
+      platform: 'darwin',
+      arch: 'arm64',
+      asset: 'llama-b12017-bin-macos-arm64.tar.gz',
+      binaryReady: true,
+      reason: null,
+      progress: 1,
+      installedAt: 0,
+      verifiedAt: 0,
+      supported: true,
+    },
+    warnings: [],
+  };
+}
+
+function statusView() {
+  progressInstall();
+  return {
+    active: activeView(),
+    engine: engineView(),
+    install: currentInstall,
+    recommended: catalogView().recommended,
+    installedPackIds: [...installedPacks],
+    warnings: [],
+  };
+}
+
+function sendEnvelope(res, status, data, warnings = []) {
+  res.statusCode = status;
+  res.setHeader('content-type', 'application/json');
+  res.end(JSON.stringify({ ok: true, data, warnings, degraded: false }));
+}
+
+function sendError(res, status, code, message) {
+  res.statusCode = status;
+  res.setHeader('content-type', 'application/json');
+  res.end(JSON.stringify({ ok: false, error: { code, message, retryable: false } }));
 }
 
 const defaultTrace = {
@@ -231,6 +473,175 @@ if (mode === 'hang') {
       }
       const pathname = new URL(path, 'http://127.0.0.1').pathname;
       const relative = pathname.slice(pathname.indexOf('/memory-runtime/v1/') + '/memory-runtime/v1/'.length);
+      if (relative === 'models') {
+        recordAdmin(req);
+        sendEnvelope(res, 200, catalogView());
+        return;
+      }
+      if (relative === 'inference') {
+        recordAdmin(req);
+        sendEnvelope(res, 200, {
+          ...statusView(),
+          config: { source: inferenceSource },
+          providers: catalogView().providers,
+        });
+        return;
+      }
+      if (relative === 'inference/settings') {
+        const body = await readBody(req);
+        recordAdmin(req, body);
+        if (body?.source === 'local') {
+          sendError(res, 400, 'pack_required', 'local 来源必须通过模型包激活设置');
+          return;
+        }
+        if (!['heuristic', 'host', 'api', 'auto'].includes(body?.source)) {
+          sendError(res, 400, 'invalid_request', 'source 必须是 heuristic/host/api/auto');
+          return;
+        }
+        inferenceSource = body.source;
+        if (inferenceSource !== 'local') engineState = 'stopped';
+        sendEnvelope(res, 200, {
+          ...statusView(),
+          config: { source: inferenceSource },
+          providers: catalogView().providers,
+        });
+        return;
+      }
+      if (relative.startsWith('models/')) {
+        const parts = relative.split('/');
+        const packId = decodeURIComponent(parts[1] ?? '');
+        const action = parts[2] ?? 'status';
+        if (!MODEL_PACKS.some((pack) => pack.packId === packId)) {
+          sendError(res, 404, 'unknown_pack', '未知模型包');
+          return;
+        }
+        if (action === 'status') {
+          recordAdmin(req);
+          progressInstall();
+          const pack = MODEL_PACKS.find((entry) => entry.packId === packId);
+          sendEnvelope(res, 200, {
+            packId,
+            modelId: pack.modelId,
+            displayName: pack.displayName,
+            state: packInstalled(packId) ? 'installed' : 'not_installed',
+            installed: packInstalled(packId),
+            installedBytes: packInstalled(packId) ? pack.sizeBytes : 0,
+            expectedBytes: pack.sizeBytes,
+            verified: null,
+            verifiedAt: null,
+            manifest: { available: true, error: null },
+            supported: true,
+            active: inferenceSource === 'local' && packId === activePackId,
+            install: currentInstall,
+            engine: engineView(),
+            warnings: [],
+          });
+          return;
+        }
+        const body = await readBody(req);
+        recordAdmin(req, body);
+        if (action === 'install') {
+          currentInstall = installJob('downloading', packId);
+          currentInstallStartedAt = Date.now();
+          sendEnvelope(res, 202, currentInstall);
+          return;
+        }
+        if (action === 'activate') {
+          if (!packInstalled(packId)) {
+            sendError(res, 409, 'not_installed', '模型包未安装');
+            return;
+          }
+          inferenceSource = 'local';
+          activePackId = packId;
+          engineState = 'running';
+          sendEnvelope(res, 200, {
+            activated: true,
+            active: 'local',
+            packId,
+            modelId: MODEL_PACKS.find((entry) => entry.packId === packId)?.modelId ?? null,
+            reason: null,
+            warnings: [],
+            engine: engineView(),
+            restartRequired: false,
+          });
+          return;
+        }
+        if (action === 'deactivate') {
+          inferenceSource = 'heuristic';
+          if (activePackId === packId) activePackId = ACTIVE_PACK;
+          engineState = 'stopped';
+          sendEnvelope(res, 200, {
+            activated: false,
+            active: 'heuristic',
+            packId,
+            modelId: null,
+            reason: null,
+            warnings: [],
+            engine: engineView(),
+            restartRequired: false,
+          });
+          return;
+        }
+        if (action === 'start') {
+          engineState = 'running';
+          sendEnvelope(res, 200, {
+            packId,
+            started: true,
+            stopped: false,
+            reason: null,
+            warnings: [],
+            engine: engineView(),
+          });
+          return;
+        }
+        if (action === 'stop') {
+          engineState = 'stopped';
+          sendEnvelope(res, 200, {
+            packId,
+            started: false,
+            stopped: true,
+            reason: null,
+            warnings: [],
+            engine: engineView(),
+          });
+          return;
+        }
+        if (action === 'remove') {
+          const wasActive = inferenceSource === 'local' && packId === activePackId;
+          installedPacks.delete(packId);
+          if (wasActive) {
+            inferenceSource = 'heuristic';
+            activePackId = ACTIVE_PACK;
+            engineState = 'stopped';
+          }
+          sendEnvelope(res, 200, {
+            packId,
+            removed: true,
+            wasActive,
+            warnings: [],
+          });
+          return;
+        }
+        sendError(res, 404, 'not_found', '未知模型操作');
+        return;
+      }
+      if (relative.startsWith('installs/')) {
+        const parts = relative.split('/');
+        const jobId = decodeURIComponent(parts[1] ?? '');
+        if (parts[2] === 'cancel') {
+          recordAdmin(req);
+          currentInstall = installJob('cancelled', currentInstall?.packId ?? ACTIVE_PACK);
+          sendEnvelope(res, 200, currentInstall);
+          return;
+        }
+        if (currentInstall && currentInstall.jobId === jobId) {
+          progressInstall();
+          sendEnvelope(res, 200, currentInstall);
+          return;
+        }
+        sendError(res, 404, 'install_not_found', '安装任务不存在');
+        return;
+      }
       if (relative === 'traces') {
         const traces = readJsonEnv('FAKE_SIDECAR_TRACES_FILE', [defaultTrace]);
         const list = Array.isArray(traces) ? traces : Array.isArray(traces?.traces) ? traces.traces : [];

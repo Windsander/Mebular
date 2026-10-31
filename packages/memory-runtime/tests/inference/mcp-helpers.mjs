@@ -5,9 +5,10 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-export const PACK_4B = 'qwen3.5-4b-instruct-q4_k_m';
-export const PACK_9B = 'qwen3.5-9b-instruct-q4_k_m';
-export const PACK_27B = 'qwen3.5-27b-instruct-q4_k_m';
+export const PACK_4B = 'qwen3-4b-instruct-q4_k_m';
+export const PACK_8B = 'qwen3-8b-instruct-q4_k_m';
+export const PACK_14B = 'qwen3-14b-instruct-q4_k_m';
+export const PACK_30B = 'qwen3-30b-a3b-instruct-q4_k_m';
 
 export function sha256(data) {
   return createHash('sha256').update(data).digest('hex');
@@ -21,7 +22,7 @@ export async function cleanupDirs(dirs) {
   await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 }
 
-export function makeManifest({ packId = PACK_4B, modelId = 'qwen3.5-4b-instruct', content = 'tiny-model-bytes', files = null } = {}) {
+export function makeManifest({ packId = PACK_4B, modelId = 'qwen3-4b-instruct', content = 'tiny-model-bytes', files = null } = {}) {
   const data = typeof content === 'string' ? Buffer.from(content) : content;
   const list = files ?? [{ path: 'model.gguf', content: data }];
   return {

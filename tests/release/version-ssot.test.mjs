@@ -39,6 +39,7 @@ function buildFixture() {
     },
     'packages/service': { name: '@mebular/service' },
     'packages/skill': { name: '@mebular/skill' },
+    'packages/opencode-plugin': { name: '@mebular/opencode-plugin' },
     'packages/dsh-plugin': { name: '@mebular/dsh-plugin' },
   };
 
@@ -84,6 +85,11 @@ function buildFixture() {
   );
   write(
     root,
+    'packages/opencode-plugin/index.js',
+    "export const PACKAGE_VERSION = '0.1.1';\n",
+  );
+  write(
+    root,
     'packages/mcp/src/serve.mjs',
     [
       "import { APP_VERSION } from './version.mjs';",
@@ -124,6 +130,17 @@ function buildFixture() {
 
   write(
     root,
+    'integrations/hermes/mebular-memory/plugin.yaml',
+    'name: mebular\nversion: 0.1.1\n',
+  );
+  write(
+    root,
+    'integrations/hermes/mebular-companion/plugin.yaml',
+    'name: mebular-companion\nversion: 0.1.1\nkind: standalone\n',
+  );
+
+  write(
+    root,
     'CHANGELOG.md',
     '# Changelog\n\n## [v0.1.1] - 2026-10-25\n\n- fixture\n',
   );
@@ -138,12 +155,12 @@ afterEach(() => {
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-describe('bump-version：七包 + MCP 版本源', () => {
-  it('同步 7 个 manifest、两个 lock、桌面 APP_VERSION、MCP version.mjs 与 CHANGELOG', () => {
+describe('bump-version：八包 + MCP/OpenCode 版本源', () => {
+  it('同步 8 个 manifest、两个 lock、桌面 APP_VERSION、MCP/OpenCode 版本源与 CHANGELOG', () => {
     const root = buildFixture();
     const result = bumpVersion({ root, version: '0.2.0', tag: 'v0.2.0', date: '2026-10-26' });
 
-    for (const rel of ['', 'packages/fleet', 'packages/mcp', 'packages/memory-runtime', 'packages/service', 'packages/skill', 'packages/dsh-plugin']) {
+    for (const rel of ['', 'packages/fleet', 'packages/mcp', 'packages/memory-runtime', 'packages/service', 'packages/skill', 'packages/opencode-plugin', 'packages/dsh-plugin']) {
       expect(readVersion(root, rel)).toBe('0.2.0');
     }
     const rootLock = JSON.parse(readFileSync(join(root, 'package-lock.json'), 'utf8'));
@@ -152,6 +169,7 @@ describe('bump-version：七包 + MCP 版本源', () => {
     expect(rootLock.packages['packages/dsh-plugin'].version).toBe('0.2.0');
     expect(rootLock.packages['packages/fleet'].version).toBe('0.2.0');
     expect(rootLock.packages['packages/memory-runtime'].version).toBe('0.2.0');
+    expect(rootLock.packages['packages/opencode-plugin'].version).toBe('0.2.0');
 
     const desktopLock = JSON.parse(readFileSync(join(root, 'apps/desktop/package-lock.json'), 'utf8'));
     expect(desktopLock.version).toBe('0.2.0');
@@ -164,6 +182,15 @@ describe('bump-version：七包 + MCP 版本源', () => {
     );
     expect(readFileSync(join(root, 'packages/memory-runtime/src/sidecar/config.ts'), 'utf8')).toContain(
       "SIDECAR_RUNTIME_VERSION = '0.2.0'",
+    );
+    expect(readFileSync(join(root, 'packages/opencode-plugin/index.js'), 'utf8')).toContain(
+      "PACKAGE_VERSION = '0.2.0'",
+    );
+    expect(readFileSync(join(root, 'integrations/hermes/mebular-memory/plugin.yaml'), 'utf8')).toContain(
+      'version: 0.2.0',
+    );
+    expect(readFileSync(join(root, 'integrations/hermes/mebular-companion/plugin.yaml'), 'utf8')).toContain(
+      'version: 0.2.0',
     );
 
     const fleet = JSON.parse(readFileSync(join(root, 'packages/fleet/package.json'), 'utf8'));
@@ -213,6 +240,32 @@ describe('verify-release-version：通过/失败定位', () => {
     const result = verifyReleaseVersion({ root, version: '0.2.0', tag: 'v0.2.0' });
     expect(result.ok).toBe(false);
     expect(result.checks.find((check) => check.label === '@mebular/dsh-plugin version')?.ok).toBe(false);
+  });
+
+  it('opencode-plugin PACKAGE_VERSION 落后时报错', () => {
+    const root = buildFixture();
+    bumpVersion({ root, version: '0.2.0', tag: 'v0.2.0', date: '2026-10-26' });
+    write(root, 'packages/opencode-plugin/index.js', "export const PACKAGE_VERSION = '0.1.1';\n");
+    const result = verifyReleaseVersion({ root, version: '0.2.0', tag: 'v0.2.0' });
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.label.includes('opencode-plugin/index.js PACKAGE_VERSION'))?.ok).toBe(false);
+  });
+
+  it('Hermes plugin.yaml 版本落后时报错', () => {
+    const root = buildFixture();
+    bumpVersion({ root, version: '0.2.0', tag: 'v0.2.0', date: '2026-10-26' });
+    write(
+      root,
+      'integrations/hermes/mebular-companion/plugin.yaml',
+      'name: mebular-companion\nversion: 0.1.1\nkind: standalone\n',
+    );
+    const result = verifyReleaseVersion({ root, version: '0.2.0', tag: 'v0.2.0' });
+    expect(result.ok).toBe(false);
+    expect(
+      result.checks.find(
+        (check) => check.label === 'integrations/hermes/mebular-companion/plugin.yaml version',
+      )?.ok,
+    ).toBe(false);
   });
 
   it('memory-runtime 若依赖 core 但 tarball 无法安装时报错', () => {

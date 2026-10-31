@@ -28,6 +28,25 @@ Hermes 侧 `MemoryProvider` 插件，把 Hermes 的每轮对话接到独立的 M
 
 前置：Mebular 0.3 Memory Runtime sidecar 已运行（桌面 App / MCP daemon 的沉浸式模式或 `mebular-memory-runtime serve`），本机存在 `~/.mebular/memory-runtime.json`（或 `MEBULAR_MEMORY_RUNTIME_HOME` 指向的 home），且 `/memory-runtime/v1/context` / `/ingest` / `/checkpoints` 可用。
 
+### 一键安装（Release 资产，发布后）
+
+0.3.0 发布后，GitHub Release 提供 `mebular-hermes-plugins-<version>.tar.gz`。它同时包含 provider 和可选 companion：
+
+```bash
+gh release download v0.3.0 -p 'mebular-hermes-plugins-*.tar.gz'
+mkdir -p mebular-hermes-plugins
+tar -xzf mebular-hermes-plugins-0.3.0.tar.gz -C mebular-hermes-plugins
+cd mebular-hermes-plugins
+
+HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}" ./install.sh
+hermes config set memory.provider mebular
+hermes memory status
+```
+
+`install.sh` 会把本目录安装为 `$HERMES_HOME/plugins/mebular`（已有目录备份为 `.bak-<timestamp>`），失败时非零退出并恢复旧目录。它不会修改 Hermes 配置，也不会启动 Hermes。
+
+### 源码安装（发布前 / 开发）
+
 ```bash
 # 1. 以目录名 mebular 安装（Hermes 用目录名做 memory.provider 的值）
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
@@ -47,17 +66,13 @@ hermes config set memory.provider mebular
 hermes memory status
 ```
 
-> Hermes 的 `memory.provider` 是外部 provider 的单选开关；内置 `MEMORY.md` / `USER.md` 仍然工作。安装本插件不会关闭它们。
+> Hermes 的 `memory.provider` 是外部 provider 的单选开关；内置 `MEMORY.md` / `USER.md` 仍然工作。安装本插件不会导入、镜像或双写它们，也不会关闭它们。
 
-### 安装目录名不一致时
+### 安装目录名必须一致
 
-如果保留 `plugins/mebular-memory/` 目录名，则必须设置：
+**目录名必须是 `mebular`**：Hermes 按 `$HERMES_HOME/plugins/<name>/` 发现 provider，`<name>` 就是 `memory.provider` 的值。仓库源码目录叫 `mebular-memory`，安装时必须改名为 `mebular`。
 
-```bash
-hermes config set memory.provider mebular-memory
-```
-
-但 `provider.name` 仍是 `mebular`。推荐直接安装为 `plugins/mebular`，避免混淆。
+如果保留 `plugins/mebular-memory/` 目录名，则必须设置 `memory.provider: mebular-memory`；但 `provider.name` 仍是 `mebular`，容易混淆。Release 的 `install.sh` 已按正确目录名安装。
 
 ## 配置
 

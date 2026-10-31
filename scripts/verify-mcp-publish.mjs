@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 // G6.5 發布驗證（E1）
 //
-// 1) 對可發布套件（@mebular/core / service / fleet / mcp / skill / memory-runtime）npm pack；
-//    檢驗 tarball 內容，且 mcp/fleet 內的 `@mebular/*` 已於 prepack 由 `file:` 改寫為
-//    `^<根 package.json version>`，pack 後本地依賴已還原、備份已清除。
+// 1) 對 6 個運行時 lockstep 套件（@mebular/core / service / fleet / mcp / skill /
+//    memory-runtime）npm pack；`@mebular/opencode-plugin` 由 verify-opencode-publish.mjs
+//    單獨覆蓋。檢驗 tarball 內容，且 mcp/fleet 內的 `@mebular/*` 已於 prepack 由 `file:`
+//    改寫為 `^<根 package.json version>`，pack 後本地依賴已還原、備份已清除。
 // 2) 用產出的 tarball 在乾淨目錄安裝；以安裝後的 `mebular status`、`mebular mcp`
 //    （真实 MCP client）、`fleet --version` 與 `@mebular/skill/scripts/install.mjs` 做冒煙。
 //    `qrcode-generator@2.0.4` 是 fleet/core 的普通 npm 依賴，安裝時由 registry 解析。

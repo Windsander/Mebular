@@ -27,8 +27,8 @@ function fakeClock() {
   };
 }
 
-describe('verify-release-visibility：七包与 latest gate', () => {
-  it('逐轮重试直到七包可见且 latest 全部指向发布版本', async () => {
+describe('verify-release-visibility：八包与 latest gate', () => {
+  it('逐轮重试直到八包可见且 latest 全部指向发布版本', async () => {
     const attempts = new Map();
     const viewPackage = async (name, version) => {
       const attempt = (attempts.get(name) ?? 0) + 1;
@@ -50,7 +50,7 @@ describe('verify-release-visibility：七包与 latest gate', () => {
     });
 
     expect(result.ok).toBe(true);
-    expect(result.packages).toHaveLength(7);
+    expect(result.packages).toHaveLength(8);
     expect(result.rounds).toBe(4);
     const mcp = result.packages.find((pkg) => pkg.name === '@mebular/mcp');
     expect(mcp).toMatchObject({ ok: true, attempts: 4, versionVisible: true, latest: VERSION });
@@ -111,10 +111,14 @@ describe('verify-release-visibility：七包与 latest gate', () => {
 });
 
 describe('verify-release-visibility：参数与输出解析', () => {
-  it('buildReleasePackages 为 6 个 lockstep + dsh-plugin 使用独立版本', () => {
+  it('buildReleasePackages 为 7 个 lockstep + dsh-plugin 使用独立版本', () => {
     const packages = buildReleasePackages({ version: '0.2.0', dshVersion: '0.2.1' });
-    expect(packages).toHaveLength(7);
-    expect(packages.filter((pkg) => pkg.version === '0.2.0')).toHaveLength(6);
+    expect(packages).toHaveLength(8);
+    expect(packages.filter((pkg) => pkg.version === '0.2.0')).toHaveLength(7);
+    expect(packages.find((pkg) => pkg.name === '@mebular/opencode-plugin')).toEqual({
+      name: '@mebular/opencode-plugin',
+      version: '0.2.0',
+    });
     expect(packages.find((pkg) => pkg.name === '@mebular/dsh-plugin')).toEqual({
       name: '@mebular/dsh-plugin',
       version: '0.2.1',

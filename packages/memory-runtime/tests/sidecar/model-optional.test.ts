@@ -16,10 +16,10 @@ import { defaultSidecarPolicy } from '../../src/sidecar/domains.js';
 import { MemoryObjectService } from '../../src/sidecar/internal-objects.js';
 import { SidecarLocalLayer } from '../../src/sidecar/local-layer.js';
 import {
-  createSidecarModelRuntime,
-  type SidecarModelEngine,
-  type SidecarModelRuntime,
-} from '../../src/sidecar/model.js';
+  createSidecarInferenceProvider,
+  type InferenceEngineFacade,
+  type SidecarInferenceProvider,
+} from '../../src/sidecar/inference-provider.js';
 import { RecallService } from '../../src/sidecar/recall.js';
 import type { ChatFetch, ChatFetchResponse } from '../../src/inference/gateway.js';
 import {
@@ -35,12 +35,12 @@ interface Harness {
   local: SidecarLocalLayer;
   fake: FakeCapabilityServer;
   client: CapabilityClient;
-  model: SidecarModelRuntime;
+  model: SidecarInferenceProvider;
   config: SidecarConfig;
 }
 
 const harnesses: Harness[] = [];
-const runtimes: SidecarModelRuntime[] = [];
+const runtimes: SidecarInferenceProvider[] = [];
 
 afterEach(async () => {
   for (const harness of harnesses.splice(0)) {
@@ -65,11 +65,19 @@ function modelFetch(options: {
   keywords?: string[];
   summary?: string;
   fail?: number;
+  onRequest?: (body: {
+    messages?: Array<{ content?: string }>;
+    chat_template_kwargs?: Record<string, unknown>;
+    max_tokens?: number;
+  }) => void;
 }): ChatFetch {
   return async (_url, init) => {
     const body = JSON.parse(init.body) as {
       messages?: Array<{ content?: string }>;
+      chat_template_kwargs?: Record<string, unknown>;
+      max_tokens?: number;
     };
+    options.onRequest?.(body);
     const system = body.messages?.[0]?.content ?? '';
     if (options.fail) return completion('upstream-body-should-not-leak', options.fail);
     if (system.includes('memory search query')) {
@@ -92,7 +100,7 @@ function modelSettings(path: string) {
   }).model;
 }
 
-function fakeEngine(): () => SidecarModelEngine {
+function fakeEngine(): () => InferenceEngineFacade {
   return () => ({
     async acquire() {
       return {
@@ -119,7 +127,7 @@ async function setup(options: { fetch: ChatFetch; mutateConfig?: (config: Sideca
   const config = defaultSidecarConfig();
   config.model = modelSettings(modelPath);
   options.mutateConfig?.(config);
-  const model = createSidecarModelRuntime(config.model, {
+  const model = createSidecarInferenceProvider(config.model, {
     homeDir: home,
     modelsDir: join(home, 'memory-runtime', 'models'),
     fetch: options.fetch,
@@ -169,7 +177,7 @@ describe('optional model integration', () => {
       client,
       identity: { cloudId: 'cl_test', profileId: 'default', hostId: 'h_test', deviceId: 'device-local' },
       policy: defaultSidecarPolicy(),
-      modelRuntime: model,
+      inference: model,
       now: () => NOW,
     });
 
@@ -191,6 +199,22 @@ describe('optional model integration', () => {
     expect(trace?.model).toMatchObject({ query: 'local' });
   });
 
+  it('本地 query plan 关闭 thinking 并给足结构化预算', async () => {
+    const bodies: Array<{
+      messages?: Array<{ content?: string }>;
+      chat_template_kwargs?: Record<string, unknown>;
+      max_tokens?: number;
+    }> = [];
+    const { model } = await setup({
+      fetch: modelFetch({ keywords: ['sidecar'], onRequest: (body) => bodies.push(body) }),
+    });
+    const result = await model.planQuery({ source: 'local', query: '项目端口', allowRemote: true });
+    expect(result.ok).toBe(true);
+    const request = bodies.find((body) => JSON.stringify(body.messages).includes('memory search query'));
+    expect(request?.chat_template_kwargs).toEqual({ enable_thinking: false });
+    expect(request?.max_tokens).toBeGreaterThanOrEqual(512);
+  });
+
   it('recall query plan 失败：保留原 query，degraded 可见但不阻塞召回', async () => {
     const { fake, client, local, model, config } = await setup({
       fetch: modelFetch({ fail: 503 }),
@@ -203,7 +227,7 @@ describe('optional model integration', () => {
       client,
       identity: { cloudId: 'cl_test', profileId: 'default', hostId: 'h_test', deviceId: 'device-local' },
       policy: defaultSidecarPolicy(),
-      modelRuntime: model,
+      inference: model,
       now: () => NOW,
     });
 
@@ -241,7 +265,7 @@ describe('optional model integration', () => {
       client,
       identity: { cloudId: 'cl_test', profileId: 'default', hostId: 'h_test' },
       policy: defaultSidecarPolicy(),
-      modelRuntime: model,
+      inference: model,
       now: () => NOW,
     });
 
@@ -274,7 +298,7 @@ describe('optional model integration', () => {
       client,
       identity: { cloudId: 'cl_test', profileId: 'default', hostId: 'h_test' },
       policy: defaultSidecarPolicy(),
-      modelRuntime: model,
+      inference: model,
       now: () => NOW,
     });
 

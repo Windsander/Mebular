@@ -28,7 +28,7 @@ import {
 import { LlamaServerEngine, type LlamaServerEngineOptions } from '../inference/engine.js';
 import { parseModelManifest, type EngineStatus } from '../inference/types.js';
 import { normalizeChatBaseUrl } from '../inference/url.js';
-import type { SidecarModelSettings } from './config.js';
+import type { InferenceSettings } from './config.js';
 import { heuristicCandidates, type HeuristicChunk } from './heuristic.js';
 
 const DEFAULT_LOCAL_TIMEOUT_MS = 30_000;
@@ -40,15 +40,15 @@ const MAX_TAGS = 32;
 const MAX_RELATED = 32;
 const MAX_STEPS = 64;
 
-export type SidecarModelSource = 'heuristic' | 'local' | 'host' | 'api';
-export type SidecarModelConfiguredSource = SidecarModelSource | 'auto';
+export type InferenceSource = 'heuristic' | 'local' | 'host' | 'api';
+export type InferenceConfiguredSource = InferenceSource | 'auto';
 
-export interface SidecarModelCredentialStatus {
+export interface InferenceCredentialStatus {
   configured: boolean;
   source: 'env' | 'keychain' | 'file' | null;
 }
 
-export interface SidecarModelLocalProbe {
+export interface InferenceLocalProbe {
   configured: boolean;
   available: boolean;
   model: string | null;
@@ -57,33 +57,33 @@ export interface SidecarModelLocalProbe {
   warnings: string[];
 }
 
-export interface SidecarModelApiProbe {
+export interface InferenceApiProbe {
   configured: boolean;
   available: boolean;
   allowRemote: boolean;
   baseUrlConfigured: boolean;
   model: string | null;
-  credential: SidecarModelCredentialStatus;
+  credential: InferenceCredentialStatus;
   reason: string | null;
   warnings: string[];
 }
 
-export interface SidecarModelProbe {
-  local: SidecarModelLocalProbe;
-  api: SidecarModelApiProbe;
+export interface InferenceProbe {
+  local: InferenceLocalProbe;
+  api: InferenceApiProbe;
 }
 
-export interface SidecarModelStatus {
-  configured: SidecarModelConfiguredSource;
-  active: SidecarModelSource;
+export interface InferenceStatus {
+  configured: InferenceConfiguredSource;
+  active: InferenceSource;
   degraded: boolean;
   reason: string | null;
   warnings: string[];
-  credential: SidecarModelCredentialStatus;
-  sources: SidecarModelSource[];
+  credential: InferenceCredentialStatus;
+  sources: InferenceSource[];
 }
 
-export interface SidecarModelExtractionRequest {
+export interface InferenceExtractionRequest {
   source: 'heuristic' | 'local' | 'api';
   chunks: Array<{ text: string; role?: string; messageId?: string; at?: number }>;
   domain: string;
@@ -93,11 +93,11 @@ export interface SidecarModelExtractionRequest {
   allowRemote: boolean;
 }
 
-export interface SidecarModelExtractionResult {
+export interface InferenceExtractionResult {
   ok: boolean;
   /** 原始候选；由 ingest 再次按 CandidateInput 校验后才可写图。 */
   candidates: unknown[];
-  extractor: SidecarModelSource;
+  extractor: InferenceSource;
   model?: string;
   degraded: boolean;
   reason?: string;
@@ -105,13 +105,13 @@ export interface SidecarModelExtractionResult {
   latencyMs: number;
 }
 
-export interface SidecarModelSummaryRequest {
+export interface InferenceSummaryRequest {
   source: 'heuristic' | 'local' | 'api';
   text: string;
   allowRemote: boolean;
 }
 
-export interface SidecarModelSummaryResult {
+export interface InferenceSummaryResult {
   ok: boolean;
   summary?: string;
   model?: string;
@@ -121,13 +121,13 @@ export interface SidecarModelSummaryResult {
   latencyMs: number;
 }
 
-export interface SidecarModelQueryPlanRequest {
+export interface InferenceQueryPlanRequest {
   source: 'heuristic' | 'local' | 'api';
   query: string;
   allowRemote: boolean;
 }
 
-export interface SidecarModelQueryPlanResult {
+export interface InferenceQueryPlanResult {
   ok: boolean;
   query?: string;
   model?: string;
@@ -144,7 +144,7 @@ export interface SidecarOptionalModelSelection {
   reason?: string;
 }
 
-export interface SidecarModelExtractionSourceSelection {
+export interface InferenceSourceSelection {
   source: 'heuristic' | 'local' | 'api';
   warnings: string[];
   degraded: boolean;
@@ -152,19 +152,24 @@ export interface SidecarModelExtractionSourceSelection {
 }
 
 /** ingest/recall/compact 只依赖这个接口；测试可注入假实现。 */
-export interface SidecarModelRuntime {
-  probe(): Promise<SidecarModelProbe>;
-  status(): Promise<SidecarModelStatus>;
+export interface SidecarInferenceProvider {
+  probe(): Promise<InferenceProbe>;
+  status(): Promise<InferenceStatus>;
   /** 同步读取最近一次 status/probe；用于 /health 的 degraded 标记。 */
-  currentStatus(): SidecarModelStatus;
+  currentStatus(): InferenceStatus;
+  /**
+   * 进程内热切换模型配置（source/local.pack/path/api）。
+   * 不重启 sidecar；旧的自有引擎按需停止。外部注入的引擎由 service 负责生命周期。
+   */
+  reconfigure(settings: InferenceSettings): Promise<void>;
   selectExtractionSource(
-    requested: SidecarModelConfiguredSource | 'heuristic' | 'local' | 'host' | 'api',
+    requested: InferenceConfiguredSource | 'heuristic' | 'local' | 'host' | 'api',
     allowRemote: boolean,
-  ): Promise<SidecarModelExtractionSourceSelection>;
+  ): Promise<InferenceSourceSelection>;
   selectOptionalSource(allowRemote: boolean): Promise<SidecarOptionalModelSelection>;
-  extractCandidates(request: SidecarModelExtractionRequest): Promise<SidecarModelExtractionResult>;
-  summarize(request: SidecarModelSummaryRequest): Promise<SidecarModelSummaryResult>;
-  planQuery(request: SidecarModelQueryPlanRequest): Promise<SidecarModelQueryPlanResult>;
+  extractCandidates(request: InferenceExtractionRequest): Promise<InferenceExtractionResult>;
+  summarize(request: InferenceSummaryRequest): Promise<InferenceSummaryResult>;
+  planQuery(request: InferenceQueryPlanRequest): Promise<InferenceQueryPlanResult>;
   /** 宿主提交过候选；/status 的 active=host 依据。 */
   noteHostCandidates(): void;
   noteFailure(source: 'local' | 'api', reason: string, warnings: string[]): void;
@@ -172,20 +177,20 @@ export interface SidecarModelRuntime {
   dispose(): Promise<void>;
 }
 
-export interface SidecarModelEngineConnection {
+export interface InferenceEngineConnection {
   baseUrl: string;
   apiKey: string;
   modelId?: string;
 }
 
-export interface SidecarModelEngine {
-  acquire(): Promise<SidecarModelEngineConnection>;
+export interface InferenceEngineFacade {
+  acquire(request?: { modelPath?: string; modelId?: string }): Promise<InferenceEngineConnection>;
   getStatus(): Pick<EngineStatus, 'state'>;
   resetCircuit?(): void;
   stop?(): Promise<void>;
 }
 
-export interface SidecarModelGateway {
+export interface InferenceGateway {
   completeJson<T>(
     request: ChatJsonRequest,
     fallback?: (failure: GatewayFailure) => T | Promise<T>,
@@ -193,19 +198,19 @@ export interface SidecarModelGateway {
   isCircuitOpen(nowMs?: number): boolean;
 }
 
-export interface SidecarKeychainCommand {
+export interface InferenceKeychainCommand {
   stdout: string;
   stderr?: string;
 }
 
 /** 测试注入点：生产默认调用 macOS `security`；不经过 shell。 */
-export type SidecarKeychainExec = (
+export type InferenceKeychainExec = (
   file: string,
   args: string[],
   options: { timeoutMs: number },
-) => Promise<SidecarKeychainCommand>;
+) => Promise<InferenceKeychainCommand>;
 
-export interface SidecarModelRuntimeOptions {
+export interface SidecarInferenceProviderOptions {
   /** Mebular home；`file:` keyRef 相对这里。 */
   homeDir: string;
   /** 本地模型包根目录；默认 `<homeDir>/memory-runtime/models`。 */
@@ -214,8 +219,13 @@ export interface SidecarModelRuntimeOptions {
   sleep?: (ms: number) => Promise<void>;
   env?: NodeJS.ProcessEnv;
   fetch?: ChatFetch;
-  createGateway?: (options: ChatGatewayOptions) => SidecarModelGateway;
-  createEngine?: (options: LlamaServerEngineOptions) => SidecarModelEngine;
+  createGateway?: (options: ChatGatewayOptions) => InferenceGateway;
+  createEngine?: (options: LlamaServerEngineOptions) => InferenceEngineFacade;
+  /**
+   * service 注入的单引擎 facade。提供后本层不再创建/缓存多个 engine；
+   * 引擎子进程生命周期由 service/adapter 持有。
+   */
+  localEngine?: InferenceEngineFacade;
   localTimeoutMs?: number;
   localStartupTimeoutMs?: number;
   circuitFailureThreshold?: number;
@@ -223,14 +233,14 @@ export interface SidecarModelRuntimeOptions {
   circuitCooldownMs?: number;
   retryDelayMs?: number;
   /** 系统钥匙串读取器；默认只在 macOS 调用 `security`。 */
-  keychainExec?: SidecarKeychainExec;
+  keychainExec?: InferenceKeychainExec;
   keychainTimeoutMs?: number;
   /** 测试注入平台；生产取 process.platform。 */
   platform?: NodeJS.Platform;
 }
 
 interface CredentialResult {
-  status: SidecarModelCredentialStatus;
+  status: InferenceCredentialStatus;
   key?: string;
   reason?: string;
   warnings: string[];
@@ -417,11 +427,28 @@ function sha256(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
 }
 
+function cloneSettings(settings: InferenceSettings): InferenceSettings {
+  return {
+    source: settings.source,
+    local: { ...settings.local },
+    api: { ...settings.api },
+  };
+}
+
+function localKeyOf(settings: InferenceSettings): string {
+  return [
+    settings.local.pack ?? '',
+    settings.local.path ?? '',
+    String(settings.local.threads),
+    settings.local.enginePath ?? '',
+  ].join('\u0000');
+}
+
 function defaultKeychainExec(
   file: string,
   args: string[],
   options: { timeoutMs: number },
-): Promise<SidecarKeychainCommand> {
+): Promise<InferenceKeychainCommand> {
   return new Promise((resolvePromise, rejectPromise) => {
     execFile(
       file,
@@ -501,7 +528,7 @@ function untrustedBlock(value: string): string {
   return `<untrusted_data>\n${escapeUntrusted(value)}\n</untrusted_data>`;
 }
 
-function credentialSource(ref: string | null): SidecarModelCredentialStatus {
+function credentialSource(ref: string | null): InferenceCredentialStatus {
   if (!ref) return { configured: false, source: null };
   if (ref.startsWith('env:')) return { configured: true, source: 'env' };
   if (ref.startsWith('file:')) return { configured: true, source: 'file' };
@@ -510,7 +537,7 @@ function credentialSource(ref: string | null): SidecarModelCredentialStatus {
 }
 
 /** 确定性 heuristic query plan：不改写 query，只返回规范化后的原文。 */
-export function heuristicQueryPlan(query: string): SidecarModelQueryPlanResult {
+export function heuristicQueryPlan(query: string): InferenceQueryPlanResult {
   const value = truncate(query.trim(), MAX_QUERY_CHARS);
   return {
     ok: value.length > 0,
@@ -523,7 +550,7 @@ export function heuristicQueryPlan(query: string): SidecarModelQueryPlanResult {
 }
 
 /** 确定性 heuristic 摘要；不做语义推断。 */
-export function heuristicSummary(text: string): SidecarModelSummaryResult {
+export function heuristicSummary(text: string): InferenceSummaryResult {
   const value = text.replace(/\s+/g, ' ').trim();
   if (value.length === 0) {
     return { ok: false, degraded: true, reason: 'empty_input', warnings: ['model_empty_input'], latencyMs: 0 };
@@ -541,7 +568,7 @@ export function heuristicSummary(text: string): SidecarModelSummaryResult {
 export function heuristicExtraction(
   chunks: Array<{ text: string; role?: string; at?: number }>,
   domain: string,
-): SidecarModelExtractionResult {
+): InferenceExtractionResult {
   const heuristicInput: HeuristicChunk[] = chunks.map((chunk) => ({
     role: chunk.role ?? 'user',
     text: chunk.text,
@@ -559,40 +586,41 @@ export function heuristicExtraction(
   };
 }
 
-export function createSidecarModelRuntime(
-  settings: SidecarModelSettings,
-  options: SidecarModelRuntimeOptions,
-): SidecarModelRuntime {
-  return new ManagedSidecarModelRuntime(settings, options);
+export function createSidecarInferenceProvider(
+  settings: InferenceSettings,
+  options: SidecarInferenceProviderOptions,
+): SidecarInferenceProvider {
+  return new ManagedInferenceProvider(settings, options);
 }
 
-class ManagedSidecarModelRuntime implements SidecarModelRuntime {
-  private readonly settings: SidecarModelSettings;
+class ManagedInferenceProvider implements SidecarInferenceProvider {
+  private settings: InferenceSettings;
   private readonly modelsDir: string;
   private readonly homeDir: string;
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly env: NodeJS.ProcessEnv;
   private readonly fetchImpl: ChatFetch | undefined;
-  private readonly createGateway: (options: ChatGatewayOptions) => SidecarModelGateway;
-  private readonly createEngine: (options: LlamaServerEngineOptions) => SidecarModelEngine;
+  private readonly createGateway: (options: ChatGatewayOptions) => InferenceGateway;
+  private readonly createEngine: (options: LlamaServerEngineOptions) => InferenceEngineFacade;
+  private readonly localEngine: InferenceEngineFacade | undefined;
   private readonly localTimeoutMs: number;
   private readonly localStartupTimeoutMs: number;
   private readonly circuitFailureThreshold: number | undefined;
   private readonly circuitWindowMs: number | undefined;
   private readonly circuitCooldownMs: number | undefined;
   private readonly retryDelayMs: number | undefined;
-  private readonly keychainExec: SidecarKeychainExec;
+  private readonly keychainExec: InferenceKeychainExec;
   private readonly keychainTimeoutMs: number;
   private readonly platform: NodeJS.Platform;
-  private readonly localEngines = new Map<string, SidecarModelEngine>();
-  private apiGateway: { cacheKey: string; gateway: SidecarModelGateway } | null = null;
+  private readonly localEngines = new Map<string, InferenceEngineFacade>();
+  private apiGateway: { cacheKey: string; gateway: InferenceGateway } | null = null;
   private hostCandidatesSeen = false;
   private failure: ModelFailure | null = null;
-  private statusSnapshot: SidecarModelStatus;
+  private statusSnapshot: InferenceStatus;
 
-  constructor(settings: SidecarModelSettings, options: SidecarModelRuntimeOptions) {
-    this.settings = settings;
+  constructor(settings: InferenceSettings, options: SidecarInferenceProviderOptions) {
+    this.settings = cloneSettings(settings);
     this.homeDir = options.homeDir;
     this.modelsDir = options.modelsDir ?? join(options.homeDir, 'memory-runtime', 'models');
     this.now = options.now ?? Date.now;
@@ -601,6 +629,7 @@ class ManagedSidecarModelRuntime implements SidecarModelRuntime {
     this.fetchImpl = options.fetch;
     this.createGateway = options.createGateway ?? ((gatewayOptions) => new ChatCompletionGateway(gatewayOptions));
     this.createEngine = options.createEngine ?? ((engineOptions) => new LlamaServerEngine(engineOptions));
+    this.localEngine = options.localEngine;
     this.localTimeoutMs = Math.max(1, options.localTimeoutMs ?? DEFAULT_LOCAL_TIMEOUT_MS);
     this.localStartupTimeoutMs = Math.max(1, options.localStartupTimeoutMs ?? DEFAULT_LOCAL_STARTUP_TIMEOUT_MS);
     this.circuitFailureThreshold = options.circuitFailureThreshold;
@@ -621,7 +650,7 @@ class ManagedSidecarModelRuntime implements SidecarModelRuntime {
     };
   }
 
-  async probe(): Promise<SidecarModelProbe> {
+  async probe(): Promise<InferenceProbe> {
     const [local, api] = await Promise.all([
       this.probeLocal(),
       this.probeApi(),
@@ -629,14 +658,14 @@ class ManagedSidecarModelRuntime implements SidecarModelRuntime {
     return { local, api };
   }
 
-  async status(): Promise<SidecarModelStatus> {
+  async status(): Promise<InferenceStatus> {
     const probe = await this.probe();
     const status = this.statusFromProbe(probe);
     this.statusSnapshot = status;
     return status;
   }
 
-  currentStatus(): SidecarModelStatus {
+  currentStatus(): InferenceStatus {
     return {
       ...this.statusSnapshot,
       warnings: [...this.statusSnapshot.warnings],
@@ -645,10 +674,41 @@ class ManagedSidecarModelRuntime implements SidecarModelRuntime {
     };
   }
 
-  private statusFromProbe(probe: SidecarModelProbe): SidecarModelStatus {
+  async reconfigure(settings: InferenceSettings): Promise<void> {
+    const previousLocalKey = this.localKey();
+    const next = cloneSettings(settings);
+    const nextLocalKey = localKeyOf(next);
+    this.settings = next;
+    if (previousLocalKey !== nextLocalKey) {
+      // 自有引擎：配置换了 pack/path/threads/enginePath，旧引擎必须停掉。
+      // 外部注入的引擎由 service/adapter 在调用 reconfigure 前负责切换。
+      if (!this.localEngine) {
+        const engines = [...this.localEngines.values()];
+        this.localEngines.clear();
+        await Promise.allSettled(engines.map((engine) => engine.stop?.() ?? Promise.resolve()));
+      }
+    }
+    this.apiGateway = null;
+    this.failure = null;
+    this.statusSnapshot = {
+      configured: next.source,
+      active: 'heuristic',
+      degraded: false,
+      reason: null,
+      warnings: [],
+      credential: credentialSource(next.api.keyRef),
+      sources: ['heuristic', 'host'],
+    };
+  }
+
+  private localKey(): string {
+    return localKeyOf(this.settings);
+  }
+
+  private statusFromProbe(probe: InferenceProbe): InferenceStatus {
     const configured = this.settings.source;
     const warnings: string[] = [];
-    let active: SidecarModelSource = 'heuristic';
+    let active: InferenceSource = 'heuristic';
     let reason: string | null = null;
     let degraded = false;
 
@@ -700,7 +760,7 @@ class ManagedSidecarModelRuntime implements SidecarModelRuntime {
       warnings.push(...this.failure.warnings);
     }
 
-    const sources: SidecarModelSource[] = ['heuristic', 'host'];
+    const sources: InferenceSource[] = ['heuristic', 'host'];
     if (probe.local.configured) sources.push('local');
     if (probe.api.configured) sources.push('api');
 
@@ -716,16 +776,16 @@ class ManagedSidecarModelRuntime implements SidecarModelRuntime {
   }
 
   async selectExtractionSource(
-    requested: SidecarModelConfiguredSource,
+    requested: InferenceConfiguredSource,
     allowRemote: boolean,
-  ): Promise<SidecarModelExtractionSourceSelection> {
+  ): Promise<InferenceSourceSelection> {
     if (requested === 'heuristic' || requested === 'host') {
       return { source: 'heuristic', warnings: [], degraded: false };
     }
     if (requested === 'local') return { source: 'local', warnings: [], degraded: false };
     if (requested === 'api') return { source: 'api', warnings: [], degraded: false };
 
-    let probe: SidecarModelProbe;
+    let probe: InferenceProbe;
     try {
       probe = await this.probe();
     } catch {
@@ -804,7 +864,7 @@ class ManagedSidecarModelRuntime implements SidecarModelRuntime {
     if (configured === 'heuristic' || configured === 'host') {
       return { source: null, warnings: [], degraded: false };
     }
-    let probe: SidecarModelProbe;
+    let probe: InferenceProbe;
     try {
       probe = await this.probe();
     } catch {
@@ -870,21 +930,21 @@ class ManagedSidecarModelRuntime implements SidecarModelRuntime {
     return { source: null, warnings: [], degraded: false };
   }
 
-  async extractCandidates(request: SidecarModelExtractionRequest): Promise<SidecarModelExtractionResult> {
+  async extractCandidates(request: InferenceExtractionRequest): Promise<InferenceExtractionResult> {
     if (request.source === 'local' || request.source === 'api') {
       return this.completeExtraction({ ...request, source: request.source });
     }
     return heuristicExtraction(request.chunks, request.domain);
   }
 
-  async summarize(request: SidecarModelSummaryRequest): Promise<SidecarModelSummaryResult> {
+  async summarize(request: InferenceSummaryRequest): Promise<InferenceSummaryResult> {
     if (request.source === 'local' || request.source === 'api') {
       return this.completeSummary({ ...request, source: request.source });
     }
     return heuristicSummary(request.text);
   }
 
-  async planQuery(request: SidecarModelQueryPlanRequest): Promise<SidecarModelQueryPlanResult> {
+  async planQuery(request: InferenceQueryPlanRequest): Promise<InferenceQueryPlanResult> {
     if (request.source === 'local' || request.source === 'api') {
       return this.completeQueryPlan({ ...request, source: request.source });
     }
@@ -919,8 +979,8 @@ class ManagedSidecarModelRuntime implements SidecarModelRuntime {
   }
 
   private async completeExtraction(
-    request: SidecarModelExtractionRequest & { source: 'local' | 'api' },
-  ): Promise<SidecarModelExtractionResult> {
+    request: InferenceExtractionRequest & { source: 'local' | 'api' },
+  ): Promise<InferenceExtractionResult> {
     const userText = request.chunks
       .filter((chunk) => chunk.role === undefined || chunk.role === 'user')
       .map((chunk) => chunk.text)
@@ -1016,8 +1076,8 @@ class ManagedSidecarModelRuntime implements SidecarModelRuntime {
   }
 
   private async completeSummary(
-    request: SidecarModelSummaryRequest & { source: 'local' | 'api' },
-  ): Promise<SidecarModelSummaryResult> {
+    request: InferenceSummaryRequest & { source: 'local' | 'api' },
+  ): Promise<InferenceSummaryResult> {
     const text = truncate(request.text.trim(), MAX_PROMPT_CHARS);
     if (!text) {
       return { ok: false, degraded: true, reason: 'empty_input', warnings: ['model_empty_input'], latencyMs: 0 };
@@ -1086,8 +1146,8 @@ class ManagedSidecarModelRuntime implements SidecarModelRuntime {
   }
 
   private async completeQueryPlan(
-    request: SidecarModelQueryPlanRequest & { source: 'local' | 'api' },
-  ): Promise<SidecarModelQueryPlanResult> {
+    request: InferenceQueryPlanRequest & { source: 'local' | 'api' },
+  ): Promise<InferenceQueryPlanResult> {
     const query = truncate(request.query.trim(), 1000);
     if (!query) {
       return { ok: false, degraded: true, reason: 'empty_input', warnings: ['model_empty_input'], latencyMs: 0 };
@@ -1103,7 +1163,8 @@ class ManagedSidecarModelRuntime implements SidecarModelRuntime {
           },
         ],
         temperature: 0,
-        maxTokens: 160,
+        // Qwen3 thinking 可能耗尽小预算；给结构化 query plan 留足空间。
+        maxTokens: 512,
         responseSchema: QUERY_PLAN_SCHEMA,
       },
       { keywords: [] },
@@ -1201,10 +1262,10 @@ class ManagedSidecarModelRuntime implements SidecarModelRuntime {
         warnings: unique([...local.warnings, 'model_unavailable']),
       };
     }
-    let connection: SidecarModelEngineConnection;
+    let connection: InferenceEngineConnection;
     try {
       const engine = this.engineFor(local.modelPath, local.modelId);
-      connection = await engine.acquire();
+      connection = await engine.acquire({ modelPath: local.modelPath, ...(local.modelId ? { modelId: local.modelId } : {}) });
     } catch {
       return {
         reason: 'engine_unavailable',
@@ -1226,7 +1287,16 @@ class ManagedSidecarModelRuntime implements SidecarModelRuntime {
       now: this.now,
       sleep: this.sleep,
     });
-    const outcome = await gateway.completeJson<T>(request, () => fallback);
+    // Qwen3 thinking 会占用结构化 JSON 的小预算；本地 memory 抽取/摘要/query plan
+    // 不需要思维链，显式关闭。远程 API 不发送该字段，避免不兼容。
+    const localRequest: ChatJsonRequest = {
+      ...request,
+      extraBody: {
+        ...(request.extraBody ?? {}),
+        chat_template_kwargs: { enable_thinking: false },
+      },
+    };
+    const outcome = await gateway.completeJson<T>(localRequest, () => fallback);
     return {
       outcome,
       model: connection.modelId ?? local.modelId,
@@ -1234,7 +1304,7 @@ class ManagedSidecarModelRuntime implements SidecarModelRuntime {
     };
   }
 
-  private apiGatewayFor(apiKey: string): SidecarModelGateway {
+  private apiGatewayFor(apiKey: string): InferenceGateway {
     const normalized = normalizeChatBaseUrl(this.settings.api.baseUrl);
     const baseUrl = normalized.ok ? normalized.url : '';
     const cacheKey = `${baseUrl}\u0000${this.settings.api.model ?? ''}\u0000${sha256(apiKey)}`;
@@ -1267,7 +1337,8 @@ class ManagedSidecarModelRuntime implements SidecarModelRuntime {
     return isAbsolute(configured) ? configured : resolve(this.homeDir, configured);
   }
 
-  private engineFor(modelPath: string, modelId?: string): SidecarModelEngine {
+  private engineFor(modelPath: string, modelId?: string): InferenceEngineFacade {
+    if (this.localEngine) return this.localEngine;
     const enginePath = this.resolvedEnginePath();
     const key = `${modelPath}\u0000${modelId ?? ''}\u0000${this.settings.local.threads}\u0000${enginePath ?? ''}`;
     const existing = this.localEngines.get(key);
@@ -1283,7 +1354,7 @@ class ManagedSidecarModelRuntime implements SidecarModelRuntime {
     return engine;
   }
 
-  private async probeLocal(): Promise<SidecarModelLocalProbe> {
+  private async probeLocal(): Promise<InferenceLocalProbe> {
     const resolved = await this.resolveLocalModel();
     const warnings = [...resolved.warnings];
     let reason = resolved.reason ?? null;
@@ -1302,7 +1373,10 @@ class ManagedSidecarModelRuntime implements SidecarModelRuntime {
     if (available && resolved.modelPath) {
       const enginePath = this.resolvedEnginePath();
       const key = `${resolved.modelPath}\u0000${resolved.modelId ?? ''}\u0000${this.settings.local.threads}\u0000${enginePath ?? ''}`;
-      if (this.localEngines.get(key)?.getStatus().state === 'circuit_open') {
+      const engineState = this.localEngine
+        ? this.localEngine.getStatus().state
+        : this.localEngines.get(key)?.getStatus().state;
+      if (engineState === 'circuit_open') {
         available = false;
         reason = 'circuit_open';
         warnings.push('model_circuit_open');
@@ -1318,13 +1392,13 @@ class ManagedSidecarModelRuntime implements SidecarModelRuntime {
     };
   }
 
-  private async probeApi(): Promise<SidecarModelApiProbe> {
+  private async probeApi(): Promise<InferenceApiProbe> {
     const baseUrl = this.settings.api.baseUrl;
     const normalizedBaseUrl = normalizeChatBaseUrl(baseUrl);
     const model = this.settings.api.model;
     const configured = Boolean(baseUrl && model);
     const credential = await this.resolveCredential();
-    const credentialStatus: SidecarModelCredentialStatus = credentialSource(this.settings.api.keyRef);
+    const credentialStatus: InferenceCredentialStatus = credentialSource(this.settings.api.keyRef);
     const allowRemote = this.settings.api.allowRemote;
     const warnings: string[] = [];
     let reason: string | null = null;

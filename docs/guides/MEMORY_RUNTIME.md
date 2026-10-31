@@ -132,8 +132,8 @@ or the `llama-server` binary. You install a curated pack explicitly:
 
 ```bash
 mebular models list
-mebular models install --pack qwen3.5-9b-instruct-q4_k_m
-mebular models select qwen3.5-9b-instruct-q4_k_m
+mebular models install --pack qwen3-8b-instruct-q4_k_m
+mebular models select qwen3-8b-instruct-q4_k_m
 ```
 
 The pack is verified against its manifest and SHA-256 before use, and is never downloaded

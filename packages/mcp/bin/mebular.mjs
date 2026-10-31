@@ -1120,7 +1120,7 @@ async function runCloud(action, args, flags) {
 // ---------- 本地模型：mebular models list/status/install/import/remove/start/stop/test ----------
 
 function modelsUsage() {
-  return '用法：mebular models <list|status|install|import|select|remove|start|stop|test> [--json] [--pack P] [--manifest FILE] [--mirror URL] [--path DIR] [--force] [--threads N] [--token T]';
+  return '用法：mebular models <list|status|install|download|select|remove|start|stop> [--json] [--pack P] [--force] [--token T]（需要 `mebular serve`；import/test/pause/resume 暂不支持）';
 }
 
 async function modelsDaemonBase(home) {
@@ -1226,168 +1226,173 @@ function printModelsResult(command, body, { json = false } = {}) {
   console.log(JSON.stringify(payload, null, 2));
 }
 
+const MODELS_UNSUPPORTED = new Set(['import', 'test', 'pause', 'resume']);
+const MODELS_SUPPORTED = new Set(['list', 'status', 'install', 'download', 'select', 'remove', 'uninstall', 'start', 'stop']);
+
+function daemonUnavailable(command) {
+  return {
+    ok: false,
+    command,
+    error: {
+      code: 'daemon_unavailable',
+      message: '模型目录/安装/引擎由 Memory Runtime sidecar 拥有；请先启动 `mebular serve`（沉浸式）',
+      retryable: false,
+    },
+    code: 'daemon_unavailable',
+    message: 'Memory Runtime sidecar 未运行',
+  };
+}
+
+function unsupportedModelCommand(command, sub) {
+  return {
+    ok: false,
+    command,
+    error: {
+      code: 'unsupported',
+      message: `models ${sub} 暂不支持：sidecar 当前只提供 list/status/install/select/remove/start/stop`,
+      retryable: false,
+    },
+    code: 'unsupported',
+    message: `models ${sub} 暂不支持`,
+  };
+}
+
+async function waitForModelInstall(daemon, jobId, flags) {
+  const deadline = Date.now() + 10 * 60_000;
+  for (;;) {
+    const status = await modelsAdminRequest(daemon, { path: '/admin/api/models/status', flags });
+    const job = status.body?.install;
+    if (job && typeof job === 'object' && job.jobId === jobId) {
+      if (job.state === 'completed') {
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            pack: job.packId,
+            state: 'installed',
+            job,
+            warnings: Array.isArray(job.warnings) ? job.warnings : [],
+          },
+        };
+      }
+      if (['failed', 'cancelled', 'interrupted'].includes(job.state)) {
+        return {
+          status: 409,
+          body: {
+            ok: false,
+            pack: job.packId,
+            state: job.state,
+            job,
+            error: job.error ?? {
+              code: `install_${job.state}`,
+              message: `模型安装${job.state}`,
+              retryable: job.state === 'interrupted',
+            },
+          },
+        };
+      }
+    }
+    if (Date.now() >= deadline) {
+      return {
+        status: 504,
+        body: {
+          ok: false,
+          pack: null,
+          jobId,
+          error: { code: 'install_timeout', message: '等待模型安装超时', retryable: true },
+        },
+      };
+    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
+  }
+}
+
 async function runModels(args, flags) {
   const sub = typeof args[0] === 'string' ? args[0] : 'list';
   const json = flags.json === true;
   const home = homeDir();
   const command = `models.${sub}`;
   try {
-    const { createInferenceManager } = await import('../src/inference-admin.mjs');
-    const { readDeviceConfig } = await import('../src/inference-store.mjs');
-    const config = await readDeviceConfig(home);
+    if (MODELS_UNSUPPORTED.has(sub)) {
+      printModelsResult(command, unsupportedModelCommand(command, sub), { json });
+      process.exit(2);
+    }
+    if (!MODELS_SUPPORTED.has(sub)) {
+      throw Object.assign(new Error(modelsUsage()), { code: 'USAGE' });
+    }
+
+    // 模型目录/下载/安装/引擎只由 sidecar 拥有；CLI 没有 daemon 时不再本地兜底。
     const daemon = await modelsDaemonBase(home);
+    if (!daemon) {
+      printModelsResult(command, daemonUnavailable(command), { json });
+      process.exit(2);
+    }
 
     if (sub === 'list' || sub === 'status') {
-      if (daemon) {
-        const result = await modelsAdminRequest(daemon, {
-          path: sub === 'status' ? '/admin/api/models/status' : '/admin/api/models',
-          flags,
-        });
-        printModelsResult(command, result.body, { json });
-        if (result.status >= 400) process.exit(2);
-        return;
-      }
-      const manager = createInferenceManager({ home });
-      const body = sub === 'status'
-        ? await manager.status({ config })
-        : await manager.list({ config });
-      await manager.dispose().catch(() => undefined);
-      printModelsResult(command, body, { json });
-      return;
-    }
-
-    if (sub === 'install' || sub === 'download') {
-      const pack = args[1] ?? flags.pack;
-      const input = {
-        pack,
-        ...(typeof flags.manifest === 'string' ? { manifestPath: flags.manifest } : {}),
-        ...(typeof flags.mirror === 'string' ? { mirrors: flags.mirror } : {}),
-        ...(flags.force === true ? { force: true } : {}),
-        wait: true,
-      };
-      if (daemon) {
-        const result = await modelsAdminRequest(daemon, { method: 'POST', path: '/admin/api/models/download', body: input, flags });
-        printModelsResult(command, result.body, { json });
-        if (result.status >= 400 || result.body?.ok === false) process.exit(2);
-        return;
-      }
-      const manager = createInferenceManager({ home });
-      const body = await manager.download(input, { config });
-      await manager.dispose().catch(() => undefined);
-      printModelsResult(command, body, { json });
-      if (body?.ok === false) process.exit(2);
-      return;
-    }
-
-    if (sub === 'import') {
-      const input = {
-        path: args[1] ?? flags.path,
-        ...(typeof flags.pack === 'string' ? { pack: flags.pack } : {}),
-        ...(flags.force === true ? { force: true } : {}),
-      };
-      if (daemon) {
-        const result = await modelsAdminRequest(daemon, { method: 'POST', path: '/admin/api/models/import', body: input, flags });
-        printModelsResult(command, result.body, { json });
-        if (result.status >= 400) process.exit(2);
-        return;
-      }
-      const manager = createInferenceManager({ home });
-      const body = await manager.importPack(input, { config });
-      await manager.dispose().catch(() => undefined);
-      printModelsResult(command, body, { json });
-      return;
-    }
-
-    if (sub === 'select') {
-      const input = {
-        pack: args[1] ?? flags.pack,
-        ...(typeof flags.source === 'string' ? { source: flags.source } : {}),
-        ...(flags['allow-missing'] === true ? { allowMissing: true } : {}),
-      };
-      if (daemon) {
-        const result = await modelsAdminRequest(daemon, { method: 'POST', path: '/admin/api/models/select', body: input, flags });
-        printModelsResult(command, result.body, { json });
-        if (result.status >= 400) process.exit(2);
-        return;
-      }
-      const manager = createInferenceManager({ home });
-      const body = await manager.select(input, { config });
-      await manager.dispose().catch(() => undefined);
-      printModelsResult(command, body, { json });
-      return;
-    }
-
-    if (sub === 'remove' || sub === 'uninstall') {
-      const input = {
-        pack: args[1] ?? flags.pack,
-        ...(flags.force === true ? { force: true } : {}),
-      };
-      if (daemon) {
-        const result = await modelsAdminRequest(daemon, { method: 'POST', path: '/admin/api/models/uninstall', body: input, flags });
-        printModelsResult(command, result.body, { json });
-        if (result.status >= 400) process.exit(2);
-        return;
-      }
-      const manager = createInferenceManager({ home });
-      const body = await manager.remove(input, { config });
-      await manager.dispose().catch(() => undefined);
-      printModelsResult(command, body, { json });
-      return;
-    }
-
-    if (sub === 'start') {
-      if (!daemon) {
-        throw Object.assign(new Error('models start 需要常驻 mebular serve 持有本地模型子进程；请先启动 serve'), { code: 'daemon_unavailable' });
-      }
-      const threads = typeof flags.threads === 'string' ? Number(flags.threads) : null;
-      const input = {
-        pack: args[1] ?? flags.pack,
-        ...(Number.isInteger(threads) && threads > 0 ? { threads } : {}),
-      };
-      const result = await modelsAdminRequest(daemon, { method: 'POST', path: '/admin/api/models/start', body: input, flags });
+      const result = await modelsAdminRequest(daemon, {
+        path: sub === 'status' ? '/admin/api/models/status' : '/admin/api/models',
+        flags,
+      });
       printModelsResult(command, result.body, { json });
       if (result.status >= 400) process.exit(2);
       return;
     }
 
-    if (sub === 'stop') {
-      if (daemon) {
-        const result = await modelsAdminRequest(daemon, { method: 'POST', path: '/admin/api/models/stop', body: { pack: args[1] ?? flags.pack }, flags });
+    if (sub === 'install' || sub === 'download') {
+      const pack = args[1] ?? flags.pack;
+      const result = await modelsAdminRequest(daemon, {
+        method: 'POST',
+        path: '/admin/api/models/install',
+        body: {
+          pack,
+          ...(flags.force === true ? { force: true } : {}),
+        },
+        flags,
+      });
+      if (result.status >= 400 || result.body?.ok === false) {
         printModelsResult(command, result.body, { json });
-        if (result.status >= 400) process.exit(2);
-        return;
+        process.exit(2);
       }
-      const manager = createInferenceManager({ home });
-      const body = await manager.stop({ pack: args[1] ?? flags.pack });
-      await manager.dispose().catch(() => undefined);
-      printModelsResult(command, { ...body, reason: 'daemon_not_running' }, { json });
+      const jobId = typeof result.body?.job?.jobId === 'string' ? result.body.job.jobId : null;
+      const final = jobId ? await waitForModelInstall(daemon, jobId, flags) : result;
+      printModelsResult(command, final.body, { json });
+      if (final.status >= 400 || final.body?.ok === false) process.exit(2);
       return;
     }
 
-    if (sub === 'test') {
-      if (daemon) {
-        const timeoutMs = typeof flags.timeout === 'string' ? Number(flags.timeout) : null;
-        const input = {
-          pack: args[1] ?? flags.pack,
-          ...(typeof flags.prompt === 'string' ? { prompt: flags.prompt } : {}),
-          ...(Number.isFinite(timeoutMs) && timeoutMs > 0 ? { timeoutMs } : {}),
-        };
-        const result = await modelsAdminRequest(daemon, { method: 'POST', path: '/admin/api/models/test', body: input, flags });
-        printModelsResult(command, result.body, { json });
-        if (result.status >= 400) process.exit(2);
-        return;
-      }
-      // 无守护时 test 仍安全：启动 → 极小 self-test → 必定停止。
-      const manager = createInferenceManager({ home });
-      const timeoutMs = typeof flags.timeout === 'string' ? Number(flags.timeout) : null;
-      const body = await manager.test({
-        pack: args[1] ?? flags.pack,
-        ...(typeof flags.prompt === 'string' ? { prompt: flags.prompt } : {}),
-        ...(Number.isFinite(timeoutMs) && timeoutMs > 0 ? { timeoutMs } : {}),
-      }, { config });
-      await manager.dispose().catch(() => undefined);
-      printModelsResult(command, body, { json });
-      if (body?.ok === false) process.exit(2);
+    if (sub === 'select') {
+      const result = await modelsAdminRequest(daemon, {
+        method: 'POST',
+        path: '/admin/api/models/select',
+        body: { pack: args[1] ?? flags.pack },
+        flags,
+      });
+      printModelsResult(command, result.body, { json });
+      if (result.status >= 400 || result.body?.ok === false) process.exit(2);
+      return;
+    }
+
+    if (sub === 'remove' || sub === 'uninstall') {
+      const result = await modelsAdminRequest(daemon, {
+        method: 'POST',
+        path: '/admin/api/models/remove',
+        body: { pack: args[1] ?? flags.pack },
+        flags,
+      });
+      printModelsResult(command, result.body, { json });
+      if (result.status >= 400 || result.body?.ok === false) process.exit(2);
+      return;
+    }
+
+    if (sub === 'start' || sub === 'stop') {
+      const result = await modelsAdminRequest(daemon, {
+        method: 'POST',
+        path: `/admin/api/models/${sub}`,
+        body: { pack: args[1] ?? flags.pack },
+        flags,
+      });
+      printModelsResult(command, result.body, { json });
+      if (result.status >= 400 || result.body?.ok === false) process.exit(2);
       return;
     }
 
@@ -2092,7 +2097,7 @@ async function main() {
           '  runtime service install|uninstall|restart|status [--json]  共享 mebular-serve 所有权/生命周期',
           '  runtime provider list|add|remove [--kind app|cli|shared --path P --version V --capabilities a,b --id ID]  runtime provider 注册表',
           '  memory-runtime status|start|stop|restart [--json] [--home DIR]   记忆运行时 sidecar（独立于 MCP daemon runtime）',
-          '  models list|status|install|import|select|remove|start|stop|test [--json] [--pack P] [--manifest FILE] [--mirror URL]  本地 Qwen 模型（设备级，不同步）',
+          '  models list|status|install|download|select|remove|start|stop [--json] [--pack P] [--force]  sidecar 模型（需 serve；不同步）',
           '  token grant|list|revoke [--scope a,b] [--id x] [--tokens-file p]   bearer 令牌管理',
           '  token client add|list|remove [--redirect uri] [--scope a,b] [--id x]   OAuth 客户端预注册',
           '  token consent [--scope a,b] [--ttl sec]   生成一次性本地同意码（/authorize 用）',

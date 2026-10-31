@@ -5,11 +5,13 @@
 //   node scripts/verify-release-version.mjs --version 0.2.0 --tag v0.2.0
 //
 // 校验：
-//   - 7 个 package manifest（core / fleet / mcp / memory-runtime / service / skill / dsh-plugin）；
-//   - 根 package-lock 与 7 个 workspace 条目；
+//   - RELEASE_PACKAGES 中的全部 package manifest（core / fleet / mcp / memory-runtime /
+//     service / skill / opencode-plugin / dsh-plugin）；
+//   - 根 package-lock 与对应的 workspace 条目；
 //   - memory-runtime 不依赖 core；若未来加回，依赖必须可随 tarball 安装；
 //   - apps/desktop package.json / package-lock / APP_VERSION；
 //   - packages/mcp/src/version.mjs，以及 MCP 其它版本使用点不再手写版本号；
+//   - packages/opencode-plugin/index.js 的 PACKAGE_VERSION；
 //   - CHANGELOG.md 含 `## [vX.Y.Z]` 章节。
 
 import { existsSync, readFileSync } from 'node:fs';
@@ -41,7 +43,7 @@ export function verifyReleaseVersion({ root = SCRIPT_ROOT, version, tag = `v${ve
     return { ok: false, version, tag: releaseTag, checks };
   }
 
-  // ---- 7 个可发布包 manifest ----
+  // ---- 所有可发布包 manifest ----
   for (const target of RELEASE_PACKAGES) {
     safe(`${target.name} manifest`, () => {
       const file = join(root, target.rel, 'package.json');
@@ -164,6 +166,34 @@ export function verifyReleaseVersion({ root = SCRIPT_ROOT, version, tag = `v${ve
     add('packages/memory-runtime/src/sidecar/config.ts SIDECAR_RUNTIME_VERSION', value === version, `${value} != ${version}`);
   });
 
+  // ---- Hermes 插件目录清单（Release tarball，不进 npm） ----
+  safe('Hermes plugin.yaml', () => {
+    for (const rel of [
+      'integrations/hermes/mebular-memory/plugin.yaml',
+      'integrations/hermes/mebular-companion/plugin.yaml',
+    ]) {
+      const file = join(root, rel);
+      if (!existsSync(file)) {
+        add(rel, false, '不存在');
+        continue;
+      }
+      const source = readText(file);
+      const value = /^version:\s*["']?([^"'\s#]+)["']?\s*(?:#.*)?$/m.exec(source)?.[1];
+      add(`${rel} version`, value === version, `${value} != ${version}`);
+    }
+  });
+
+  safe('packages/opencode-plugin/index.js PACKAGE_VERSION', () => {
+    const file = join(root, 'packages/opencode-plugin/index.js');
+    if (!existsSync(file)) {
+      add('packages/opencode-plugin/index.js', false, '不存在');
+      return;
+    }
+    const source = readText(file);
+    const value = /export const PACKAGE_VERSION = '([^']+)'/.exec(source)?.[1];
+    add('packages/opencode-plugin/index.js PACKAGE_VERSION', value === version, `${value} != ${version}`);
+  });
+
   for (const rel of ['packages/mcp/src/server.mjs', 'packages/mcp/src/client.mjs']) {
     safe(`${rel} 版本来源`, () => {
       const source = readText(join(root, rel));
@@ -271,7 +301,11 @@ async function main(argv) {
       console.log(`${check.ok ? 'ok  ' : 'FAIL'}  ${check.label}${check.detail ? `（${check.detail}）` : ''}`);
     }
     console.log('== verify:release-version ==');
-    console.log(result.ok ? `✓ ${result.tag} 版本 SSOT 一致` : `✗ ${result.tag} 版本 SSOT 不一致`);
+    console.log(
+      result.ok
+        ? `✓ ${result.tag} 版本 SSOT 一致（${RELEASE_PACKAGES.length} 个可发布包）`
+        : `✗ ${result.tag} 版本 SSOT 不一致（${RELEASE_PACKAGES.length} 个可发布包）`,
+    );
   }
   return result.ok ? 0 : 1;
 }

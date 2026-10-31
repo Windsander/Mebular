@@ -1,0 +1,149 @@
+{
+  "schema": 1,
+  "mode": "real-model-smoke",
+  "startedAt": "2026-10-31T04:02:15.323Z",
+  "outcome": "passed",
+  "environment": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "node": "v26.7.0",
+    "osRelease": "25.6.0",
+    "cpuModel": "Apple M4 Max",
+    "cpuCores": 16,
+    "totalMemoryBytes": 137438953472,
+    "freeMemoryBytes": 10459807744
+  },
+  "config": {
+    "packId": "qwen3-4b-instruct-q4_k_m",
+    "modelId": "qwen3-4b-instruct",
+    "quantization": "Q4_K_M",
+    "contextLength": 32768,
+    "modelFile": "Qwen3-4B-Q4_K_M.gguf",
+    "modelSha256": "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
+    "modelSizeBytes": 2497280256,
+    "engineRelease": "b12017",
+    "engineAsset": "llama-b12017-bin-macos-arm64.tar.gz",
+    "engineSha256": "4cfa51501cc3c602b404f43682e713405b4b946847876c5081d0a3f93ff26914",
+    "engineSizeBytes": 16508951,
+    "localTimeoutMs": 600000,
+    "localStartupTimeoutMs": 600000,
+    "threads": 4
+  },
+  "engine": {
+    "installerOk": true,
+    "version": "version: 0.8.0-dev (build 12017, commit 5047748f1)\nbuilt with AppleClang 21.0.0.21000101 for Darwin arm64",
+    "downloadAttempts": 1,
+    "error": null,
+    "downloadMs": 5681,
+    "verifyMs": 15,
+    "extractMs": 102,
+    "installMs": 5810,
+    "stopMs": 0,
+    "finalState": "stopped"
+  },
+  "model": {
+    "ok": true,
+    "transport": "node-https",
+    "error": null,
+    "downloadMs": 61575,
+    "verifyMs": 2,
+    "installMs": 1,
+    "downloadedBytes": 2497280256,
+    "expectedBytes": 2497280256,
+    "verifyOk": true,
+    "actualSha256": "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
+    "actualSizeBytes": 2497280256
+  },
+  "inference": {
+    "probe": {
+      "localAvailable": true,
+      "reason": null,
+      "warnings": []
+    },
+    "extract": {
+      "ok": true,
+      "extractor": "local",
+      "candidateCount": 5,
+      "latencyMs": 1396,
+      "wallMs": 1914,
+      "model": "qwen3-4b-instruct",
+      "degraded": false,
+      "reason": null,
+      "warnings": []
+    },
+    "summarize": {
+      "ok": true,
+      "summaryChars": 126,
+      "latencyMs": 388,
+      "wallMs": 388,
+      "model": "qwen3-4b-instruct",
+      "degraded": false,
+      "reason": null,
+      "warnings": []
+    },
+    "planQuery": {
+      "ok": true,
+      "queryChars": 50,
+      "latencyMs": 181,
+      "wallMs": 182,
+      "model": "qwen3-4b-instruct",
+      "degraded": false,
+      "reason": null,
+      "warnings": []
+    },
+    "status": {
+      "active": "local",
+      "degraded": false,
+      "reason": null,
+      "warnings": []
+    },
+    "engineStartupMs": 516,
+    "engineState": "running"
+  },
+  "phases": [
+    {
+      "name": "engine.install",
+      "ok": true,
+      "durationMs": 5810
+    },
+    {
+      "name": "model.download",
+      "ok": true,
+      "durationMs": 61579
+    },
+    {
+      "name": "model.verify",
+      "ok": true,
+      "durationMs": 903
+    },
+    {
+      "name": "provider.probe",
+      "ok": true,
+      "durationMs": 0
+    },
+    {
+      "name": "inference.extract",
+      "ok": true,
+      "durationMs": 1914
+    },
+    {
+      "name": "inference.summarize",
+      "ok": true,
+      "durationMs": 388
+    },
+    {
+      "name": "inference.planQuery",
+      "ok": true,
+      "durationMs": 182
+    },
+    {
+      "name": "provider.status",
+      "ok": true,
+      "durationMs": 0
+    }
+  ],
+  "cleanup": {
+    "kept": false
+  },
+  "durationMs": 72935
+}

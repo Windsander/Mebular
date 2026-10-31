@@ -1,16 +1,17 @@
 # Changelog
 
 All notable changes to Mebular are documented here.
-Mebular uses a single-version umbrella: the seven npm packages (`core`, `service`, `skill`, `mcp`,
-`fleet`, `memory-runtime`, `dsh-plugin`) share one release version. `@mebular/dsh-plugin` is an
-isolated adapter published by its own npm job, and it follows the same unified release train.
+Mebular uses a single-version umbrella: the eight npm packages (`core`, `service`, `skill`, `mcp`,
+`fleet`, `memory-runtime`, `opencode-plugin`, `dsh-plugin`) share one release version.
+`@mebular/dsh-plugin` is an isolated adapter published by its own npm job, and it follows the same
+unified release train.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 > Version headings carry the `v` prefix (`## [vX.Y.Z]`) because it is the release SSOT:
-> the branch name (`release/vX.Y.Z`), the seven `package.json` versions, the locks, the MCP
-> and sidecar version sources, and the Git tag must all agree with this section.
+> the branch name (`release/vX.Y.Z`), the eight `package.json` versions, the locks, the MCP,
+> sidecar and OpenCode plugin version sources, and the Git tag must all agree with this section.
 
 The GitHub Release body is extracted from this file: everything between the release's
 `## [vX.Y.Z]` heading and the next `## [` heading. Keep that section self-contained.
@@ -27,12 +28,12 @@ The MCP surface stays compatible at 29 tools; every runtime capability is opt-in
 - **Two access modes** — lightweight `mcp` (default) and immersive `immersive` (opt-in). Mode is device-local. Switching changes processing only: it does not migrate, copy, rewrite or delete nodes. Lightweight mode starts no sidecar, opens no sidecar port and creates no sidecar files.
 - **Runtime object model** — `MemoryRecord` reuses existing entity/fact/episode/skill nodes; `Compact` is a derived graph summary with source IDs and stale detection; `ContextCheckpoint` has revisions and leases and always goes through capability; `SelfRecord` is shared per logical agent and hidden from ordinary queries. `RawChunk` and `RecallTrace` live only under `<home>/memory-runtime/`, never in the graph, events or sync.
 - **Four model sources** — built-in `heuristic` rules (default, offline), curated local Qwen packs, host-provided `CandidateRecord`s, and one explicitly allowed OpenAI-compatible API. The runtime never reads host credentials, calls a host model or switches providers on its own; failures fall back to heuristic with `degraded` status and warnings.
-- **Curated local Qwen** — Qwen 9B as the default pack, 27B for high quality and 4B for low-memory devices. Packs are downloaded and selected explicitly, verified by manifest/checksum, run through a loopback `llama-server`, and are never installed or updated silently. `mebular models list|status|install|import|select|remove|start|stop|test` manage them from the CLI.
+- **Curated local Qwen** — Qwen3 8B as the default pack, 30B-A3B for high-end MoE, 14B for high quality and 4B for low-memory devices. Packs are downloaded and selected explicitly, verified by manifest/checksum, run through a loopback `llama-server`, and are never installed or updated silently. `mebular models list|status|install|import|select|remove|start|stop|test` manage them from the CLI.
 - **Model credentials and API safety** — API keys are stored only as `env:`, `keychain:` or `file:` references; plaintext keys never enter config, graph metadata, events, logs, Console or status. URLs reject non-HTTPS endpoints (loopback HTTP excepted), userinfo and cloud-metadata addresses; file keys must be private.
 - **Console Memory Runtime settings** — sidecar lifecycle, model source, curated pack download/selection, API configuration, raw capture, trace retention and local model status are available in Settings → 记忆运行时. Sidecar status, active model, degraded reasons and counts are exposed without secrets.
 - **Internal-object governance** — `compact`, `context_checkpoint`, `self_record` and defensive `raw_chunk`/`recall_trace` are hidden from default `memory_*` results, graph traversal and the Console memory list; `includeInternal=1` is admin-only. `memory_delete`/`memory_archive` reject internal objects and leave them to capability admin endpoints.
 - **DSH Memory Runtime bridge** — opt-in `memoryRuntime` with recall on the first step of a new human turn, batched event ingest with retries and idempotency, compaction checkpoints, optional tool hiding with a governance allowlist, and optional idle maintenance using the current DSH session model. When disabled it registers no listener, timer or request.
-- **Hermes MemoryProvider and companion** — `integrations/hermes/mebular-memory` adds automatic recall and turn/compaction ingest to Hermes while leaving built-in `MEMORY.md`/`USER.md` active and untouched. The optional `mebular-companion` uses Hermes `ctx.llm` to submit host candidates, separately from the single external-provider slot.
+- **Hermes MemoryProvider and companion** — `integrations/hermes/mebular-memory` adds automatic recall and turn/compaction ingest to Hermes while leaving built-in `MEMORY.md`/`USER.md` active and untouched. The optional `mebular-companion` uses Hermes `ctx.llm` to submit host candidates, separately from the single external-provider slot. The GitHub Release also ships `mebular-hermes-plugins-<version>.tar.gz` with `install.sh` (no PyPI; provider installed as `plugins/mebular`, existing directories backed up).
 - **OpenChamber / OpenCode integration** — Mebular's MCP path writes only the shared OpenCode `mcp.servers.mebular` entry and never OpenChamber's managed config. The opt-in `@mebular/opencode-plugin` adds request-only `<mebular_memory trust="untrusted">` recall, event ingest and compaction checkpoints for OpenCode >= 2.2; OpenChamber native memory is detected read-only and is never imported, replaced or dual-written.
 - **Documentation** — new English/Chinese [Memory Runtime guide](docs/guides/MEMORY_RUNTIME.md) covering modes, model sources, sidecar discovery, local data, privacy, troubleshooting and the 0.2 upgrade path; Hermes and OpenChamber integration guides, and an updated DSH guide covering modes, model sources, tool surface and boundaries.
 
@@ -43,7 +44,7 @@ The MCP surface stays compatible at 29 tools; every runtime capability is opt-in
 - **Memory Runtime configuration is device-local** — MCP only owns `memoryRuntime.*` lifecycle keys; sidecar settings (model packs, API credentials, raw/trace retention) live in `<home>/memory-runtime/config.json` and do not enter shared memory or sync. SelfRecord and Checkpoint always go through capability with logical `agentId` filtering.
 - **Internal objects are filtered by default** — default queries, graph traversal and the Console memory list skip `metadata.internal=true` and reserved `__*` namespaces. Older clients see ordinary 0.2 data.
 - **OpenChamber reuse** — OpenChamber is treated as an OpenCode host: one global MCP entry, read-only native-memory detection, and no writes to `opencode.managed.json` or per-instance copies.
-- **Release train** — all seven npm packages, the desktop app and the isolated DSH plugin are aligned at `0.3.0`.
+- **Release train** — all eight npm packages (including the isolated DSH plugin) and the desktop app are aligned at `0.3.0`.
 
 ### Fixed
 
@@ -57,7 +58,7 @@ The MCP surface stays compatible at 29 tools; every runtime capability is opt-in
 - **Acceptance report** — [0.3.0 Memory Runtime acceptance report](docs/quality/0.3.0-memory-runtime-acceptance.md) records recall quality, security and performance for a real sidecar with a fake capability: heuristic only, no model, no external network. The matrix covers gist-only broad recall, detail expansion, conflicts, cross-device raw degradation, silence, budgets, security boundaries and bounded resources.
 - **Three-host E2E** — real DSH, Hermes and OpenChamber/OpenCode adapters run against a real `/memory-runtime/v1`, real capability API and real graph with temporary homes, heuristic extraction and no real LLM. The recorded run is 113/113 DSH, 35/35 Hermes and 38/38 OpenCode checks; see [`tests/integration/host-e2e/README.md`](tests/integration/host-e2e/README.md) for covered paths and explicit boundaries.
 - **Sidecar and host suites** — sidecar, inference, Console, DSH, Hermes and OpenChamber coverage lives in `packages/memory-runtime/tests`, `tests/mcp`, `tests/console`, `tests/dsh`, `tests/opencode-plugin` and `tests/integration/host-e2e`.
-- **Seven-package release train** — six lockstep packages (`core`, `service`, `skill`, `mcp`, `fleet`, `memory-runtime`) plus the isolated `dsh-plugin` job share `0.3.0`; verify produces seven tarballs, and the visibility gate checks all seven packages and `dist-tags.latest`.
+- **Eight-package release train** — seven lockstep packages (`core`, `service`, `skill`, `mcp`, `fleet`, `memory-runtime`, `opencode-plugin`) plus the isolated `dsh-plugin` job share `0.3.0`; verify produces eight npm tarballs plus the Hermes plugin tarball, and the visibility gate checks all eight npm packages and `dist-tags.latest`. `verify:hermes:package` installs the Hermes bundle into a temporary `HERMES_HOME`, checks both Python entry points, and verifies backup/rollback behaviour.
 - **Docs** — `npm run check:docs`, `npm run check:i18n` and `npm run check:cleanliness` pass.
 
 ### Notes

@@ -27,7 +27,7 @@ import {
 } from './domains.js';
 import { SidecarSettlementError } from './errors.js';
 import { LocalLayerError, type OutboxItem, type SidecarLocalLayer } from './local-layer.js';
-import type { SidecarModelRuntime } from './model.js';
+import type { SidecarInferenceProvider } from './inference-provider.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MAX_COMPACT_SOURCES = 200;
@@ -162,7 +162,7 @@ export interface MemoryObjectServiceOptions {
     userId?: string | null;
   };
   policy?: SidecarPolicy | null;
-  modelRuntime?: SidecarModelRuntime | null;
+  inference?: SidecarInferenceProvider | null;
   now?: () => number;
 }
 
@@ -539,7 +539,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
   readonly identity: MemoryObjectServiceOptions['identity'];
 
   private readonly client: CapabilityClient | null;
-  private readonly models: SidecarModelRuntime | null;
+  private readonly models: SidecarInferenceProvider | null;
   private readonly now: () => number;
   private readonly serial = new KeyedSerial();
   private policy: SidecarPolicy;
@@ -551,7 +551,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
     this.config = options.config;
     this.local = options.local;
     this.client = options.client;
-    this.models = options.modelRuntime ?? null;
+    this.models = options.inference ?? null;
     this.identity = options.identity;
     this.policy = options.policy ?? { schema: 1, agents: {} };
     this.now = options.now ?? Date.now;

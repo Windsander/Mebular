@@ -479,7 +479,7 @@ async function createService(options: {
   return { home, store, model, engine, engineInstaller, service, config };
 }
 
-async function waitFor<T>(fn: () => T | Promise<T>, timeoutMs = 1000): Promise<T> {
+async function waitFor<T>(fn: () => T | Promise<T>, timeoutMs = 5_000): Promise<T> {
   const started = Date.now();
   for (;;) {
     const value = await fn();
@@ -543,13 +543,14 @@ describe('sidecar model install manager', () => {
       return current?.state === 'completed' ? current : null;
     });
     expect(done).toMatchObject({ progress: 1, downloadedBytes: 100, totalBytes: 100, error: null });
+    // Windows CI 上 fsync + rename 可能明显慢于内存状态更新；这里等的是落盘结果。
     const persisted = await waitFor(async () => {
       const parsed = JSON.parse(await readFile(join(home, 'inference', 'install.json'), 'utf8')) as { job: ModelInstallJob };
       return parsed.job.state === 'completed' ? parsed : null;
-    });
+    }, 15_000);
     expect(persisted!.job.state).toBe('completed');
     expect(JSON.stringify(persisted)).not.toContain(SECRET_PATH);
-  });
+  }, 30_000);
 
   it('取消会 abort 下载并清理 partial', async () => {
     const home = await tempDir();

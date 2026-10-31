@@ -367,6 +367,10 @@ function spawnServe(home, port) {
       MEBULAR_CLOUD_ROOT: home,
       FAKE_SIDECAR_TRACES_FILE: join(home, 'ui-memory-runtime-traces.json'),
       FAKE_SIDECAR_TRACE_DETAIL_FILE: join(home, 'ui-memory-runtime-trace-detail.json'),
+      // C8f：安装任务在 3.5s 内走完下载/校验/引擎准备；30B 固定失败用于错误行。
+      FAKE_SIDECAR_INSTALL_AUTOCOMPLETE_MS: '3500',
+      FAKE_SIDECAR_INSTALL_FAIL_PACKS: 'qwen3-30b-a3b-instruct-q4_k_m',
+      FAKE_SIDECAR_ADMIN_OUT: join(home, 'ui-model-admin.jsonl'),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -862,7 +866,10 @@ async function main() {
       await waitFor(`(() => {
         const section = document.querySelector('#settings-panel-advanced [data-settings-section=model-source]');
         const s = section?.querySelector('[data-rt-model-source]');
+        const note = section?.querySelector('[data-rt-model-source-note]');
         return Boolean(s) && s.disabled === true && /轻量 MCP/.test(section.textContent)
+          && getComputedStyle(note).display !== 'none'
+          && !section.querySelector('[data-rt-model-list]')
           && !/endpoint|keyRef|token|Raw/i.test(section.textContent);
       })()`, 30000));
     await evalJs('document.querySelector("#settings-close").click()');
@@ -901,6 +908,237 @@ async function main() {
           && !/endpoint|keyRef|api key|token|Raw|模型路径|capture|host/i.test(section.textContent);
       })()`, 30000));
     await capture('c6-settings-advanced.jpg');
+    // C8f · 本地模型：列表 / 下载进度 / 取消 / 失败 / 自动启用 / 停用 / 删除
+    const modelAdminPath = join(home, 'ui-model-admin.jsonl');
+    const modelPosts = () => {
+      if (!existsSync(modelAdminPath)) return [];
+      return readFileSync(modelAdminPath, 'utf-8').trim().split('\n').filter(Boolean)
+        .map((line) => JSON.parse(line))
+        .filter((entry) => entry.method === 'POST');
+    };
+    const postsBeforeLocal = modelPosts().length;
+    const PACK_8B = 'qwen3-8b-instruct-q4_k_m';
+    const PACK_4B = 'qwen3-4b-instruct-q4_k_m';
+    const PACK_14B = 'qwen3-14b-instruct-q4_k_m';
+    const PACK_30B = 'qwen3-30b-a3b-instruct-q4_k_m';
+    await evalJs(`(() => {
+      const s = document.querySelector('#rt-model-source');
+      s.value = 'local';
+      s.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    check('C8f local 选中：同一模型来源设置项内出现 4 个模型（名称/tier/量化/大小/状态/推荐/硬件）',
+      await waitFor(`(() => {
+        const section = document.querySelector('#settings-panel-advanced [data-settings-section=model-source]');
+        const list = section?.querySelector('[data-rt-model-list]');
+        const cards = list ? [...list.querySelectorAll('[data-rt-model-card]')] : [];
+        const c8 = list?.querySelector('[data-rt-model-card="${PACK_8B}"]');
+        const c4 = list?.querySelector('[data-rt-model-card="${PACK_4B}"]');
+        return cards.length === 4
+          && /本地模型/.test(list.textContent)
+          && /可用磁盘/.test(list.textContent) && /最低内存/.test(list.textContent)
+          && /Qwen3 8B/.test(c8?.textContent ?? '') && /默认/.test(c8?.textContent ?? '')
+          && /Q4_K_M/.test(c8?.textContent ?? '') && /推荐/.test(c8?.textContent ?? '')
+          && /未安装/.test(c8?.textContent ?? '') && Boolean(c8?.querySelector('[data-rt-model-action=download]'))
+          && /Qwen3 4B/.test(c4?.textContent ?? '') && /已安装/.test(c4?.textContent ?? '')
+          && Boolean(c4?.querySelector('[data-rt-model-action=enable]'))
+          && getComputedStyle(section.querySelector('[data-rt-model-source-note]')).display !== 'none'
+          && !/endpoint|keyRef|token|模型路径|capture/i.test(list.textContent);
+      })()`, 30000));
+    check('C8f local 选中不立刻写 model-source（避免 pack_required）；先选/装模型',
+      await evalJs(`(async () => {
+        const res = await fetch('/admin/api/memory-runtime/model-source').then((r) => r.json()).catch(() => null);
+        return res?.source === 'heuristic'
+          && /选择|下载|启用/.test(document.querySelector('[data-rt-model-source-note]')?.textContent ?? '');
+      })()`) && modelPosts().length === postsBeforeLocal);
+    await capture('c8f-models-local.jpg');
+    await evalJs(`document.querySelector('#settings-panel-advanced [data-settings-section=model-source]')?.scrollIntoView({ block: 'start' })`);
+    await setViewport({ width: 760, height: 900, deviceScaleFactor: 1, mobile: false });
+    check('C8f 模型列表 760px：单列卡片、无横向滚动',
+      await evalJs(`(() => {
+        const box = document.querySelector('#settings .modal-box');
+        const cards = [...document.querySelectorAll('#settings-panel-advanced [data-rt-model-card]')];
+        const columns = new Set(cards.map((card) => Math.round(card.getBoundingClientRect().left)));
+        return cards.length === 4 && columns.size === 1
+          && box.scrollWidth <= box.clientWidth + 1
+          && document.documentElement.scrollWidth <= window.innerWidth + 1;
+      })()`));
+    await captureNow('c8f-models-local-760.jpg');
+    await setViewport({ width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    check('C8f 模型列表 390px：无横向滚动，动作按钮不挤压',
+      await evalJs(`(() => {
+        const box = document.querySelector('#settings .modal-box');
+        const actions = [...document.querySelectorAll('#settings-panel-advanced [data-rt-model-action]')];
+        return box.scrollWidth <= box.clientWidth + 1
+          && document.documentElement.scrollWidth <= window.innerWidth + 1
+          && actions.every((button) => button.getBoundingClientRect().width > 0);
+      })()`));
+    await captureNow('c8f-models-local-390.jpg');
+    await clearViewport();
+
+    await evalJs(`document.querySelector('[data-rt-model-card="${PACK_8B}"] [data-rt-model-action=download]').click()`);
+    check('C8f 下载：进度文本 + aria-live + 进度条 + 取消按钮（不只靠颜色）',
+      await waitFor(`(() => {
+        const card = document.querySelector('[data-rt-model-card="${PACK_8B}"]');
+        const progress = card?.querySelector('[data-rt-model-progress]');
+        return Boolean(progress)
+          && /%/.test(progress.textContent) && /B/.test(progress.textContent)
+          && Boolean(progress.querySelector('[aria-live=polite]'))
+          && Boolean(progress.querySelector('[role=progressbar]'))
+          && /下载中|校验中|安装中/.test(card.textContent)
+          && Boolean(card.querySelector('[data-rt-model-action=cancel]'));
+      })()`, 15000));
+    await evalJs(`(() => {
+      const section = document.querySelector('#settings-panel-advanced [data-settings-section=model-source]');
+      const scroller = document.querySelector('#settings .settings-scroll');
+      const fold = document.querySelector('#diag-fold');
+      if (fold) fold.open = true;
+      scroller.scrollTop = Math.max(0, section.offsetTop - 12);
+      window.__c8fPollState = { scrollTop: scroller.scrollTop };
+    })()`);
+    await sleep(2300);
+    check('C8f 轮询重渲染保留滚动 / 来源选中 / 折叠展开',
+      await evalJs(`(() => {
+        const scroller = document.querySelector('#settings .settings-scroll');
+        const section = document.querySelector('#settings-panel-advanced [data-settings-section=model-source]');
+        return Math.abs(scroller.scrollTop - window.__c8fPollState.scrollTop) <= 2
+          && document.querySelector('#rt-model-source')?.value === 'local'
+          && document.querySelector('#diag-fold')?.open === true
+          && Boolean(section.querySelector('[data-rt-model-list]'));
+      })()`));
+    await evalJs(`(() => { const fold = document.querySelector('#diag-fold'); if (fold) fold.open = false; })()`);
+    await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+    check('C8f reduced-motion：进度条有静态分支（无宽度过渡）',
+      await evalJs(`(() => {
+        const bar = document.querySelector('[data-rt-model-progress] .runtime-progress > span');
+        return Boolean(bar) && getComputedStyle(bar).transitionDuration === '0s';
+      })()`));
+    await send('Emulation.setEmulatedMedia', { features: [] });
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await evalJs(`document.querySelector('#settings-panel-advanced [data-settings-section=model-source]')?.scrollIntoView({ block: 'start' })`);
+    await captureNow('c8f-models-progress.jpg');
+    await clearViewport();
+    check('C8f 完成后自动启用：当前使用 + 停用；不重启 sidecar',
+      await waitFor(`(() => {
+        const card = document.querySelector('[data-rt-model-card="${PACK_8B}"]');
+        return Boolean(card) && /当前使用/.test(card.textContent) && /已启用/.test(card.textContent)
+          && Boolean(card.querySelector('[data-rt-model-action=disable]'))
+          && !card.querySelector('[data-rt-model-action=remove]');
+      })()`, 30000));
+    check('C8f 自动启用已写回 model-source=local',
+      await waitFor(`(async () => {
+        const res = await fetch('/admin/api/memory-runtime/model-source').then((r) => r.json()).catch(() => null);
+        return res?.source === 'local' && res?.model?.active === 'local';
+      })()`, 20000));
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await evalJs(`document.querySelector('#settings-panel-advanced [data-settings-section=model-source]')?.scrollIntoView({ block: 'start' })`);
+    await captureNow('c8f-models-active.jpg');
+    await clearViewport();
+
+    await evalJs(`document.querySelector('[data-rt-model-card="${PACK_8B}"] [data-rt-model-action=disable]').click()`);
+    check('C8f 停用：回到 heuristic，本地列表收起（不直接重启 sidecar）',
+      await waitFor(`(async () => {
+        const res = await fetch('/admin/api/memory-runtime/model-source').then((r) => r.json()).catch(() => null);
+        const section = document.querySelector('#settings-panel-advanced [data-settings-section=model-source]');
+        return res?.source === 'heuristic'
+          && document.querySelector('#rt-model-source')?.value === 'heuristic'
+          && !section?.querySelector('[data-rt-model-list]');
+      })()`, 20000));
+
+    await evalJs(`(() => {
+      const s = document.querySelector('#rt-model-source');
+      s.value = 'local';
+      s.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    await waitFor('Boolean(document.querySelector("[data-rt-model-list]"))', 20000);
+    const deleteDialog = await evalJs(`(() => {
+      document.querySelector('[data-rt-model-card="${PACK_8B}"] [data-rt-model-action=remove]').click();
+      const modal = document.querySelector('#modal');
+      return { open: modal?.hidden === false, text: modal?.textContent ?? '' };
+    })()`);
+    check('C8f 删除：二次确认写清只删模型文件、不影响已保存的记忆',
+      deleteDialog.open && /模型文件/.test(deleteDialog.text) && /不影响已保存的记忆/.test(deleteDialog.text),
+      deleteDialog.text.slice(0, 80));
+    await evalJs('document.querySelector("#modal-cancel").click()');
+    check('C8f 删除取消：行保留',
+      await waitFor(`Boolean(document.querySelector('[data-rt-model-card="${PACK_8B}"] [data-rt-model-action=remove]'))`));
+    await evalJs(`document.querySelector('[data-rt-model-card="${PACK_8B}"] [data-rt-model-action=remove]').click()`);
+    await waitFor('document.querySelector("#modal")?.hidden === false');
+    await evalJs('document.querySelector("#modal-confirm").click()');
+    check('C8f 删除确认：模型文件删除后回到未安装（可重新下载）',
+      await waitFor(`(() => {
+        const card = document.querySelector('[data-rt-model-card="${PACK_8B}"]');
+        return Boolean(card) && !card.querySelector('[data-rt-model-action=remove]')
+          && Boolean(card.querySelector('[data-rt-model-action=download]'));
+      })()`, 20000));
+    // 删除 4B，制造「local 且无任何已安装包」场景。
+    await evalJs(`document.querySelector('[data-rt-model-card="${PACK_4B}"] [data-rt-model-action=remove]').click()`);
+    await waitFor('document.querySelector("#modal")?.hidden === false');
+    await evalJs('document.querySelector("#modal-confirm").click()');
+    await waitFor(`Boolean(document.querySelector('[data-rt-model-card="${PACK_4B}"] [data-rt-model-action=download]'))`, 20000);
+
+    await evalJs(`(() => {
+      const s = document.querySelector('#rt-model-source');
+      s.value = 'heuristic';
+      s.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    await waitFor(`(async () => {
+      const res = await fetch('/admin/api/memory-runtime/model-source').then((r) => r.json()).catch(() => null);
+      return res?.source === 'heuristic';
+    })()`, 20000);
+    const postsBeforeEmptyLocal = modelPosts().length;
+    await evalJs(`(() => {
+      const s = document.querySelector('#rt-model-source');
+      s.value = 'local';
+      s.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    check('C8f local 且无已安装包：提示先安装，绝不 POST model-source',
+      await waitFor(`(() => {
+        const section = document.querySelector('#settings-panel-advanced [data-settings-section=model-source]');
+        return /先下载并启用一个模型/.test(section?.textContent ?? '')
+          && !section?.querySelector('[data-rt-model-active]');
+      })()`, 20000));
+    await sleep(400);
+    check('C8f local 无已安装包不写 model-source（无 pack_required）',
+      modelPosts().length === postsBeforeEmptyLocal);
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await evalJs(`document.querySelector('#settings-panel-advanced [data-settings-section=model-source]')?.scrollIntoView({ block: 'start' })`);
+    await captureNow('c8f-models-empty.jpg');
+    await clearViewport();
+
+    await evalJs(`document.querySelector('[data-rt-model-card="${PACK_14B}"] [data-rt-model-action=download]').click()`);
+    await waitFor(`Boolean(document.querySelector('[data-rt-model-card="${PACK_14B}"] [data-rt-model-progress]'))`, 15000);
+    await evalJs(`document.querySelector('[data-rt-model-card="${PACK_14B}"] [data-rt-model-action=cancel]').click()`);
+    check('C8f 取消：行内显示已取消，保留模型列表且不自动启用',
+      await waitFor(`(() => {
+        const card = document.querySelector('[data-rt-model-card="${PACK_14B}"]');
+        const section = document.querySelector('#settings-panel-advanced [data-settings-section=model-source]');
+        return /已取消/.test(card?.textContent ?? '')
+          && /安装已取消/.test(card?.textContent ?? '')
+          && section.querySelectorAll('[data-rt-model-card]').length === 4
+          && !section.querySelector('[data-rt-model-active]');
+      })()`, 20000));
+
+    await evalJs(`document.querySelector('[data-rt-model-card="${PACK_30B}"] [data-rt-model-action=download]').click()`);
+    check('C8f 失败：toast/行内错误 + 保留其他模型（30B 引擎失败）',
+      await waitFor(`(() => {
+        const card = document.querySelector('[data-rt-model-card="${PACK_30B}"]');
+        const section = document.querySelector('#settings-panel-advanced [data-settings-section=model-source]');
+        return /失败/.test(card?.textContent ?? '')
+          && /推理引擎准备失败/.test(card?.textContent ?? '')
+          && section.querySelectorAll('[data-rt-model-card]').length === 4
+          && Boolean(document.querySelector('[data-rt-model-card="${PACK_14B}"]'));
+      })()`, 25000));
+    const localFlowPosts = modelPosts().map((entry) => entry.path);
+    check('C8f 数据流：download→install、自动启用→activate、取消→cancel、删除→remove；local 选择本身不写来源',
+      localFlowPosts.some((path) => path.endsWith(`/models/${PACK_8B}/install`))
+        && localFlowPosts.some((path) => path.endsWith(`/models/${PACK_8B}/activate`))
+        && localFlowPosts.some((path) => path.endsWith(`/models/${PACK_14B}/install`))
+        && localFlowPosts.some((path) => path.endsWith('/installs/job_fake_0001/cancel'))
+        && localFlowPosts.some((path) => path.endsWith(`/models/${PACK_8B}/remove`))
+        && localFlowPosts.some((path) => path.endsWith(`/models/${PACK_4B}/remove`))
+        && !/token|tokenFile|host-token|keyRef|baseUrl|installedPath|modelPath/.test(JSON.stringify(modelPosts())),
+      `posts=${localFlowPosts.length}`);
+
     await evalJs(`(() => {
       const s = document.querySelector('#rt-model-source');
       s.value = 'auto';

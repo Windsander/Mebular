@@ -89,23 +89,88 @@ function recordAdmin(req, body) {
   }
 }
 
+const GIB = 1024 ** 3;
 const MODEL_PACKS = [
-  { packId: 'qwen3-8b-instruct-q4_k_m', modelId: 'qwen3-8b-instruct', tier: 'default', displayName: 'Qwen3 8B' },
-  { packId: 'qwen3-4b-instruct-q4_k_m', modelId: 'qwen3-4b-instruct', tier: 'light', displayName: 'Qwen3 4B' },
-  { packId: 'qwen3-14b-instruct-q4_k_m', modelId: 'qwen3-14b-instruct', tier: 'quality', displayName: 'Qwen3 14B' },
-  { packId: 'qwen3-30b-a3b-instruct-q4_k_m', modelId: 'qwen3-30b-a3b-instruct', tier: 'high', displayName: 'Qwen3 30B-A3B' },
+  { packId: 'qwen3-8b-instruct-q4_k_m', modelId: 'qwen3-8b-instruct', tier: 'default', displayName: 'Qwen3 8B', sizeBytes: 5_027_783_488, minMemoryBytes: 16 * GIB, minDiskBytes: 7 * GIB },
+  { packId: 'qwen3-4b-instruct-q4_k_m', modelId: 'qwen3-4b-instruct', tier: 'light', displayName: 'Qwen3 4B', sizeBytes: 2_497_280_256, minMemoryBytes: 8 * GIB, minDiskBytes: 4 * GIB },
+  { packId: 'qwen3-14b-instruct-q4_k_m', modelId: 'qwen3-14b-instruct', tier: 'quality', displayName: 'Qwen3 14B', sizeBytes: 9_001_752_960, minMemoryBytes: 24 * GIB, minDiskBytes: 12 * GIB },
+  { packId: 'qwen3-30b-a3b-instruct-q4_k_m', modelId: 'qwen3-30b-a3b-instruct', tier: 'high', displayName: 'Qwen3 30B-A3B', sizeBytes: 18_556_685_824, minMemoryBytes: 48 * GIB, minDiskBytes: 24 * GIB },
 ];
 const ACTIVE_PACK = 'qwen3-4b-instruct-q4_k_m';
 let inferenceSource = env.FAKE_SIDECAR_MODEL_SOURCE ?? 'heuristic';
 let engineState = 'stopped';
 let currentInstall = null;
+let currentInstallStartedAt = 0;
+const installedPacks = new Set([ACTIVE_PACK]);
+let activePackId = ACTIVE_PACK;
+const installAutocompleteMs = Math.max(0, Number(env.FAKE_SIDECAR_INSTALL_AUTOCOMPLETE_MS ?? 0));
+const installFailPacks = new Set(String(env.FAKE_SIDECAR_INSTALL_FAIL_PACKS ?? '')
+  .split(',')
+  .map((value) => value.trim())
+  .filter(Boolean));
+
+function packInstalled(packId) {
+  return installedPacks.has(packId);
+}
+
+function progressInstall() {
+  if (!currentInstall) return currentInstall;
+  if (!['downloading', 'verifying', 'installing'].includes(currentInstall.state)) return currentInstall;
+  const elapsed = Math.max(0, Date.now() - currentInstallStartedAt);
+  const failAfter = installAutocompleteMs > 0 ? Math.min(900, installAutocompleteMs) : 900;
+  if (installFailPacks.has(currentInstall.packId) && elapsed >= failAfter) {
+    currentInstall = {
+      ...currentInstall,
+      state: 'failed',
+      phase: 'engine',
+      progress: 0.6,
+      downloadedBytes: currentInstall.totalBytes,
+      updatedAt: Date.now(),
+      error: { code: 'engine_install_failed', message: '推理引擎准备失败', retryable: true },
+    };
+    return currentInstall;
+  }
+  if (installAutocompleteMs > 0 && elapsed >= installAutocompleteMs) {
+    installedPacks.add(currentInstall.packId);
+    currentInstall = {
+      ...currentInstall,
+      state: 'completed',
+      phase: 'engine',
+      progress: 1,
+      downloadedBytes: currentInstall.totalBytes,
+      updatedAt: Date.now(),
+      completedAt: Date.now(),
+      warnings: ['model_installed', 'engine_ready'],
+    };
+    return currentInstall;
+  }
+  if (installAutocompleteMs > 0) {
+    const ratio = Math.min(0.98, elapsed / installAutocompleteMs);
+    const progress = Math.max(currentInstall.progress, ratio);
+    const phase = ratio < 0.85 ? 'model' : 'engine';
+    const state = ratio < 0.55 ? 'downloading' : ratio < 0.85 ? 'verifying' : 'installing';
+    currentInstall = {
+      ...currentInstall,
+      state,
+      phase,
+      progress,
+      downloadedBytes: Math.round(currentInstall.totalBytes * progress),
+      speedBytesPerSecond: Math.max(1, Math.round(currentInstall.totalBytes / (installAutocompleteMs / 1000))),
+      etaMs: Math.max(0, installAutocompleteMs - elapsed),
+      updatedAt: Date.now(),
+    };
+  }
+  return currentInstall;
+}
 
 function engineView() {
   return {
     state: engineState,
     health: engineState === 'running' ? 'ok' : 'unknown',
-    packId: engineState === 'running' ? ACTIVE_PACK : null,
-    modelId: engineState === 'running' ? 'qwen3-4b-instruct' : null,
+    packId: engineState === 'running' ? activePackId : null,
+    modelId: engineState === 'running'
+      ? MODEL_PACKS.find((pack) => pack.packId === activePackId)?.modelId ?? null
+      : null,
     crashCount: 0,
     restartCount: 0,
     lastError: null,
@@ -121,24 +186,27 @@ function engineView() {
 function activeView() {
   return {
     source: inferenceSource,
-    packId: inferenceSource === 'local' ? ACTIVE_PACK : null,
-    modelId: inferenceSource === 'local' ? 'qwen3-4b-instruct' : null,
+    packId: inferenceSource === 'local' ? activePackId : null,
+    modelId: inferenceSource === 'local'
+      ? MODEL_PACKS.find((pack) => pack.packId === activePackId)?.modelId ?? null
+      : null,
     engine: engineView(),
   };
 }
 
-function installJob(state = 'downloading') {
+function installJob(state = 'downloading', packId = ACTIVE_PACK) {
+  const pack = MODEL_PACKS.find((entry) => entry.packId === packId);
   return {
     schema: 1,
     jobId: 'job_fake_0001',
-    packId: ACTIVE_PACK,
-    modelId: 'qwen3-4b-instruct',
+    packId,
+    modelId: pack?.modelId ?? 'qwen3-4b-instruct',
     state,
     phase: 'model',
     progress: state === 'completed' ? 1 : 0.25,
-    downloadedBytes: 25,
-    totalBytes: 100,
-    speedBytesPerSecond: 10,
+    totalBytes: pack?.sizeBytes ?? 100,
+    downloadedBytes: Math.round((pack?.sizeBytes ?? 100) * (state === 'completed' ? 1 : 0.25)),
+    speedBytesPerSecond: 10_485_760,
     etaMs: 7500,
     startedAt: Date.now(),
     updatedAt: Date.now(),
@@ -149,6 +217,7 @@ function installJob(state = 'downloading') {
 }
 
 function catalogView() {
+  progressInstall();
   return {
     hardware: {
       platform: 'darwin',
@@ -178,23 +247,23 @@ function catalogView() {
       description: '',
       quantization: 'Q4_K_M',
       contextLength: 32768,
-      estimatedDownloadBytes: 100,
+      estimatedDownloadBytes: pack.sizeBytes,
       requirements: {
         platforms: ['darwin', 'linux', 'win32'],
         architectures: null,
-        minMemoryBytes: 1,
-        recommendedMemoryBytes: 2,
-        minDiskBytes: 1,
+        minMemoryBytes: pack.minMemoryBytes,
+        recommendedMemoryBytes: pack.minMemoryBytes * 1.5,
+        minDiskBytes: pack.minDiskBytes,
         gpu: 'optional',
       },
-      state: pack.packId === ACTIVE_PACK ? 'installed' : 'not_installed',
-      installed: pack.packId === ACTIVE_PACK,
-      installedBytes: pack.packId === ACTIVE_PACK ? 100 : 0,
-      expectedBytes: 100,
+      state: packInstalled(pack.packId) ? 'installed' : 'not_installed',
+      installed: packInstalled(pack.packId),
+      installedBytes: packInstalled(pack.packId) ? pack.sizeBytes : 0,
+      expectedBytes: pack.sizeBytes,
       verifiedAt: null,
       manifest: { available: true, error: null },
       supported: true,
-      active: inferenceSource === 'local' && pack.packId === ACTIVE_PACK,
+      active: inferenceSource === 'local' && pack.packId === activePackId,
       install: currentInstall,
       warnings: [],
     })),
@@ -225,12 +294,13 @@ function catalogView() {
 }
 
 function statusView() {
+  progressInstall();
   return {
     active: activeView(),
     engine: engineView(),
     install: currentInstall,
     recommended: catalogView().recommended,
-    installedPackIds: [ACTIVE_PACK],
+    installedPackIds: [...installedPacks],
     warnings: [],
   };
 }
@@ -447,20 +517,21 @@ if (mode === 'hang') {
         }
         if (action === 'status') {
           recordAdmin(req);
+          progressInstall();
           const pack = MODEL_PACKS.find((entry) => entry.packId === packId);
           sendEnvelope(res, 200, {
             packId,
             modelId: pack.modelId,
             displayName: pack.displayName,
-            state: packId === ACTIVE_PACK ? 'installed' : 'not_installed',
-            installed: packId === ACTIVE_PACK,
-            installedBytes: packId === ACTIVE_PACK ? 100 : 0,
-            expectedBytes: 100,
+            state: packInstalled(packId) ? 'installed' : 'not_installed',
+            installed: packInstalled(packId),
+            installedBytes: packInstalled(packId) ? pack.sizeBytes : 0,
+            expectedBytes: pack.sizeBytes,
             verified: null,
             verifiedAt: null,
             manifest: { available: true, error: null },
             supported: true,
-            active: inferenceSource === 'local' && packId === ACTIVE_PACK,
+            active: inferenceSource === 'local' && packId === activePackId,
             install: currentInstall,
             engine: engineView(),
             warnings: [],
@@ -470,18 +541,24 @@ if (mode === 'hang') {
         const body = await readBody(req);
         recordAdmin(req, body);
         if (action === 'install') {
-          currentInstall = installJob();
+          currentInstall = installJob('downloading', packId);
+          currentInstallStartedAt = Date.now();
           sendEnvelope(res, 202, currentInstall);
           return;
         }
         if (action === 'activate') {
+          if (!packInstalled(packId)) {
+            sendError(res, 409, 'not_installed', '模型包未安装');
+            return;
+          }
           inferenceSource = 'local';
+          activePackId = packId;
           engineState = 'running';
           sendEnvelope(res, 200, {
             activated: true,
             active: 'local',
             packId,
-            modelId: 'qwen3-4b-instruct',
+            modelId: MODEL_PACKS.find((entry) => entry.packId === packId)?.modelId ?? null,
             reason: null,
             warnings: [],
             engine: engineView(),
@@ -491,6 +568,7 @@ if (mode === 'hang') {
         }
         if (action === 'deactivate') {
           inferenceSource = 'heuristic';
+          if (activePackId === packId) activePackId = ACTIVE_PACK;
           engineState = 'stopped';
           sendEnvelope(res, 200, {
             activated: false,
@@ -529,10 +607,17 @@ if (mode === 'hang') {
           return;
         }
         if (action === 'remove') {
+          const wasActive = inferenceSource === 'local' && packId === activePackId;
+          installedPacks.delete(packId);
+          if (wasActive) {
+            inferenceSource = 'heuristic';
+            activePackId = ACTIVE_PACK;
+            engineState = 'stopped';
+          }
           sendEnvelope(res, 200, {
             packId,
             removed: true,
-            wasActive: inferenceSource === 'local' && packId === ACTIVE_PACK,
+            wasActive,
             warnings: [],
           });
           return;
@@ -545,11 +630,12 @@ if (mode === 'hang') {
         const jobId = decodeURIComponent(parts[1] ?? '');
         if (parts[2] === 'cancel') {
           recordAdmin(req);
-          currentInstall = installJob('cancelled');
+          currentInstall = installJob('cancelled', currentInstall?.packId ?? ACTIVE_PACK);
           sendEnvelope(res, 200, currentInstall);
           return;
         }
         if (currentInstall && currentInstall.jobId === jobId) {
+          progressInstall();
           sendEnvelope(res, 200, currentInstall);
           return;
         }

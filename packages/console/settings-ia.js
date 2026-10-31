@@ -275,6 +275,75 @@ export function runtimeModelSourceReady(meta) {
   return meta?.enabled === true && meta?.available === true;
 }
 
+/** 安装任务的活动状态：只有这些状态需要轮询 / 显示进度 / 提供取消。 */
+export const RUNTIME_MODEL_JOB_ACTIVE_STATES = Object.freeze(['downloading', 'verifying', 'installing']);
+export const RUNTIME_MODEL_JOB_TERMINAL_STATES = Object.freeze(['completed', 'failed', 'cancelled', 'interrupted']);
+
+export function runtimeModelJobActive(job) {
+  return RUNTIME_MODEL_JOB_ACTIVE_STATES.includes(job?.state);
+}
+
+export function runtimeModelJobTerminal(job) {
+  return RUNTIME_MODEL_JOB_TERMINAL_STATES.includes(job?.state);
+}
+
+/**
+ * 单个模型包在 Console 的展示状态：
+ * 下载/校验/安装中优先使用当前 job；否则按 active → installed → unsupported → 未安装。
+ */
+export function runtimeModelStatusOf(pack, job = null) {
+  if (job && job.packId === pack?.packId) {
+    if (runtimeModelJobActive(job)) return job.state;
+    if (['failed', 'cancelled', 'interrupted'].includes(job.state)) return job.state;
+  }
+  if (pack?.active === true) return 'enabled';
+  if (pack?.installed === true) return 'installed';
+  if (pack?.supported === false) return 'unsupported';
+  return 'not_installed';
+}
+
+/**
+ * 模型包唯一主动作：安装中取消；启用中停用；已安装启用；未安装下载；硬件/清单不满足则不提供下载。
+ * 删除是「已安装未启用」的次级动作，由界面另行追加。
+ */
+export function runtimeModelActionOf(pack, job = null) {
+  if (job && job.packId === pack?.packId && runtimeModelJobActive(job)) return 'cancel';
+  if (pack?.active === true) return 'disable';
+  if (pack?.installed === true) return 'enable';
+  if (pack?.supported === false
+    || pack?.manifest?.available === false
+    || pack?.manifestAvailable === false) return 'unsupported';
+  return 'download';
+}
+
+/**
+ * 字节数的用户可读格式（十进制单位，与模型目录文案一致）。
+ * 只用于展示，不参与安装/校验判断。
+ */
+export function formatBytes(value, { locale = 'zh-CN' } = {}) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes < 0) return '—';
+  if (bytes === 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let amount = bytes;
+  let index = 0;
+  while (amount >= 1000 && index < units.length - 1) {
+    amount /= 1000;
+    index += 1;
+  }
+  const digits = index === 0 ? 0 : amount >= 100 ? 0 : amount >= 10 ? 1 : 2;
+  let formatted;
+  try {
+    formatted = new Intl.NumberFormat(locale, {
+      maximumFractionDigits: digits,
+      minimumFractionDigits: 0,
+    }).format(amount);
+  } catch {
+    formatted = amount.toFixed(digits).replace(/\.0+$/, '');
+  }
+  return `${formatted} ${units[index]}`;
+}
+
 /** sidecar 生命周期状态 → Console 文案 key（未知状态按 stopped 展示，不暴露原始码）。 */
 export const RUNTIME_SIDECAR_STATES = Object.freeze([
   'disabled', 'not_installed', 'stopped', 'starting', 'ready', 'degraded', 'stopping', 'failed',

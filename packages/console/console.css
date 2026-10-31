@@ -573,7 +573,8 @@ body.modal-open { overflow: hidden; }
 /* 字段帮助默认收起；聚焦/警告时再出现，空值提示由 placeholder 承担。 */
 .cfg-row .cfg-help { display: none; }
 .cfg-row:focus-within .cfg-help,
-.cfg-row .cfg-help.cfg-warn { display: block; }
+.cfg-row .cfg-help.cfg-warn,
+.cfg-row .cfg-help.is-visible { display: block; }
 
 /* ---------- 向导 ---------- */
 .modal-box-wide { width: min(640px, 94vw); }
@@ -1644,6 +1645,46 @@ body.modal-open { overflow: hidden; }
 .runtime-mode-actions .btn { display: grid; gap: 3px; text-align: left; justify-items: start; padding: 9px 11px; }
 .runtime-model-desc { font-size: 11px; line-height: 1.55; color: var(--crt-muted, rgba(140, 255, 200, 0.55)); }
 .runtime-mode-settings-hint { margin-top: 8px; }
+
+/* C8f · 本地模型列表（同一「模型来源」设置项内的读数面） */
+.runtime-model-list { display: grid; gap: 8px; margin-top: 10px; min-width: 0; }
+.runtime-model-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.runtime-model-head h4 { margin: 0; font-size: 12px; letter-spacing: 1px; color: rgba(150, 255, 205, 0.72); }
+.runtime-model-intro,
+.runtime-model-hardware,
+.runtime-model-active { margin: 0; font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.runtime-model-hardware { color: var(--crt-muted); }
+.runtime-model-active { color: #9dffcf; }
+.runtime-model-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 8px; min-width: 0; }
+.runtime-model-card { padding: 9px 10px; display: grid; gap: 6px; align-content: start; min-width: 0; }
+.runtime-model-card-head { display: flex; align-items: flex-start; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.runtime-model-name { margin: 0; font-size: 12.5px; line-height: 1.45; color: #c8ffe3; overflow-wrap: anywhere; }
+.runtime-model-tags { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; min-width: 0; }
+.runtime-model-meta,
+.runtime-model-state,
+.runtime-model-reason,
+.runtime-model-error,
+.runtime-model-progress-text { margin: 0; font-size: 11px; line-height: 1.55; overflow-wrap: anywhere; }
+.runtime-model-meta { color: var(--crt-muted); }
+.runtime-model-state { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.runtime-model-reason { color: #ffd27a; }
+.runtime-model-error { color: #ffb9b9; }
+.runtime-model-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 2px; }
+.runtime-model-progress { display: grid; gap: 4px; margin-top: 2px; }
+.runtime-model-progress-head { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; color: var(--crt-dim); }
+.runtime-model-progress .runtime-progress { margin-top: 0; }
+.runtime-model-progress .runtime-progress > span { transition: width 0.3s ease; }
+.runtime-model-empty { margin: 0; font-size: 11.5px; line-height: 1.6; color: var(--crt-muted); overflow-wrap: anywhere; }
+@media (max-width: 900px) {
+  .runtime-model-grid { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 760px) {
+  .runtime-model-card { padding: 8px 9px; }
+  .runtime-model-actions .btn { flex: 0 0 auto; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .runtime-model-progress .runtime-progress > span { transition: none; }
+}
 @media (max-width: 1100px) {
   .runtime-layout { grid-template-columns: minmax(0, 1fr); }
 }

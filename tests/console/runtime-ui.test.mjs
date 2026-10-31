@@ -16,11 +16,16 @@ import {
   RUNTIME_SIDECAR_STATES,
   filterRuntimeTimeline,
   isInternalRuntimeMemory,
+  formatBytes,
   memoryRuntimeEnabledOf,
   memoryRuntimeModeOf,
+  runtimeModelActionOf,
+  runtimeModelJobActive,
+  runtimeModelJobTerminal,
   runtimeModelSourceAvailable,
   runtimeModelSourceOf,
   runtimeModelSourceReady,
+  runtimeModelStatusOf,
   runtimeShowsModelSettings,
   runtimeSidecarStateKey,
   runtimeTimelineKind,
@@ -49,6 +54,11 @@ const functionSource = (name, nextName) => {
 
 const statusFactsSource = functionSource('runtimeStatusFactsHtml', 'runtimeModeSettingsHtml');
 const modelSourceSectionSource = functionSource('runtimeModelSourceSectionHtml', 'renderRuntimeSettings');
+const modelUiStart = consoleJs.indexOf('const RUNTIME_MODEL_POLL_MS');
+const modelUiEnd = consoleJs.indexOf('function renderRuntimeSettings(', modelUiStart);
+const modelUiSource = modelUiStart >= 0 && modelUiEnd > modelUiStart
+  ? consoleJs.slice(modelUiStart, modelUiEnd)
+  : '';
 
 describe('0.3 设置 IA：只有两个产品增量', () => {
   it('tab 顺序稳定：常用/安全/AI 助手/记忆运行时/MCP 接入/高级', () => {
@@ -160,7 +170,12 @@ describe('0.3 静态 DOM / 数据面契约', () => {
     expect(consoleJs).toContain("api('/admin/api/memory-runtime/traces?limit=20')");
     expect(consoleJs).toContain("api('/admin/api/memory-runtime/feedback'");
     expect(consoleJs).toContain('api(`/admin/api/memory-runtime/traces/${encodeURIComponent(id)}`)');
-    expect(consoleJs).not.toContain("api('/admin/api/models')");
+    expect(consoleJs).toContain("api('/admin/api/models')");
+    expect(consoleJs).toContain("api('/admin/api/models/status')");
+    expect(consoleJs).toContain("api('/admin/api/models/download'");
+    expect(consoleJs).toContain("api('/admin/api/models/select'");
+    expect(consoleJs).toContain("api('/admin/api/models/cancel'");
+    expect(consoleJs).toContain("api('/admin/api/models/remove'");
     expect(consoleJs).not.toContain('/runtime/v1');
     expect(consoleJs).not.toMatch(/runtimePack|data-rt-pack|settings\.runtime\.local/);
     expect(consoleJs).toContain('saveRuntimePatch({ memoryRuntime: { enabled } }');
@@ -192,6 +207,7 @@ describe('0.3 静态 DOM / 数据面契约', () => {
     expect(modelSourceSectionSource).toContain('data-rt-model-source');
     expect(modelSourceSectionSource).toContain('IA_RUNTIME_MODEL_SOURCES');
     expect(modelSourceSectionSource).toContain('runtimeModelSourceReady(meta)');
+    expect(modelSourceSectionSource).toContain('data-rt-model-list');
   });
 
   it('轨迹详情展示 why / citations / confidence / domain / owner / provenance；反馈走 admin proxy', () => {
@@ -217,5 +233,118 @@ describe('0.3 静态 DOM / 数据面契约', () => {
     expect(zh['settings.runtime.mode.title']).toBe('记忆模式');
     expect(zh['settings.runtime.modelSource.title']).toBe('模型来源');
     expect(en['settings.runtime.modelSource.title']).toBe('Model source');
+  });
+});
+
+describe('C8f · 本地模型列表与自动部署', () => {
+  const installed = { packId: 'qwen3-4b-instruct-q4_k_m', installed: true, active: false, supported: true };
+  const active = { ...installed, active: true };
+  const fresh = { packId: 'qwen3-8b-instruct-q4_k_m', installed: false, active: false, supported: true };
+  const unsupported = { packId: 'qwen3-30b-a3b-instruct-q4_k_m', installed: false, active: false, supported: false, warnings: ['memory_insufficient'] };
+  const downloading = { packId: fresh.packId, state: 'downloading', phase: 'model', progress: 0.25 };
+
+  it('包状态与唯一主动作：取消 / 停用 / 启用 / 下载 / 不支持', () => {
+    expect(runtimeModelJobActive(downloading)).toBe(true);
+    expect(runtimeModelJobActive({ state: 'completed' })).toBe(false);
+    expect(runtimeModelJobTerminal({ state: 'failed' })).toBe(true);
+    expect(runtimeModelJobTerminal({ state: 'installing' })).toBe(false);
+    expect(runtimeModelStatusOf(fresh, downloading)).toBe('downloading');
+    expect(runtimeModelStatusOf(fresh, { packId: fresh.packId, state: 'failed' })).toBe('failed');
+    expect(runtimeModelStatusOf(fresh, { packId: fresh.packId, state: 'cancelled' })).toBe('cancelled');
+    expect(runtimeModelStatusOf(installed, downloading)).toBe('installed');
+    expect(runtimeModelStatusOf(active, downloading)).toBe('enabled');
+    expect(runtimeModelStatusOf(unsupported)).toBe('unsupported');
+    expect(runtimeModelActionOf(fresh, downloading)).toBe('cancel');
+    expect(runtimeModelActionOf(fresh)).toBe('download');
+    expect(runtimeModelActionOf(installed)).toBe('enable');
+    expect(runtimeModelActionOf(active)).toBe('disable');
+    expect(runtimeModelActionOf(unsupported)).toBe('unsupported');
+  });
+
+  it('大小格式化复用统一实现（十进制单位，空值不崩溃）', () => {
+    expect(formatBytes(0)).toBe('0 B');
+    expect(formatBytes(100)).toBe('100 B');
+    expect(formatBytes(5_027_783_488)).toBe('5.03 GB');
+    expect(formatBytes(Number.NaN)).toBe('—');
+  });
+
+  it('local 选中时在同一个模型来源设置项下渲染模型列表', () => {
+    expect(modelSourceSectionSource).toContain('showModels');
+    expect(modelSourceSectionSource).toContain("source === 'local'");
+    expect(modelSourceSectionSource).toContain('runtimeModelListBodyHtml');
+    expect(modelUiSource).toContain('data-rt-model-card');
+    expect(modelUiSource).toContain('runtimeModelName');
+    expect(modelUiSource).toContain('runtimeModelRequirementText');
+    expect(modelUiSource).toContain('runtimeModelReasonText');
+    expect(modelUiSource).toContain('settings.runtime.models.recommended');
+    for (const key of ['tier', 'quantization', 'supported']) expect(modelUiSource).toContain(key);
+  });
+
+  it('未安装 → 下载 → 进度 → 完成后自动启用；轮询 2s 只在前台高级页进行', () => {
+    expect(consoleJs).toContain("api('/admin/api/models/download'");
+    expect(consoleJs).toContain('RUNTIME_MODEL_POLL_MS = 2000');
+    expect(consoleJs).toContain("api('/admin/api/models/status')");
+    expect(consoleJs).toContain('startRuntimeModelPolling');
+    expect(consoleJs).toContain('runtimeModelJobActive');
+    expect(consoleJs).toContain('state.runtime.pendingActivatePack = packId');
+    expect(consoleJs).toContain('activateRuntimeModel(packId, { afterInstall: true })');
+    expect(consoleJs).toContain('state.settingsTab !== \'advanced\'');
+    expect(consoleJs).toContain('document.hidden');
+    expect(modelUiSource).toContain('role="progressbar"');
+    expect(modelUiSource).toContain('aria-live="polite"');
+    expect(modelUiSource).toContain('downloadedBytes');
+    expect(modelUiSource).toContain('speedBytesPerSecond');
+    expect(modelUiSource).toContain('etaMs');
+  });
+
+  it('取消 / 失败保留旧列表与旧数据，只给行内错误和 toast', () => {
+    expect(consoleJs).toContain("api('/admin/api/models/cancel'");
+    expect(consoleJs).toContain('state.runtime.modelError');
+    expect(consoleJs).toContain("t('settings.runtime.models.installFailed'");
+    const reload = (() => {
+      const start = consoleJs.indexOf('async function reloadRuntimeModels');
+      const end = consoleJs.indexOf('async function pollRuntimeModelJob', start);
+      return start >= 0 && end > start ? consoleJs.slice(start, end) : '';
+    })();
+    expect(reload.length).toBeGreaterThan(0);
+    expect(reload).not.toContain('state.runtime.models = null');
+    expect(reload).toContain('state.runtime.errors');
+  });
+
+  it('已启用 → 停用走 model-source heuristic，不直接重启 sidecar', () => {
+    const disable = functionSource('disableRuntimeModel', 'removeRuntimeModel');
+    expect(disable).toContain("setRuntimeModelSource('heuristic')");
+    expect(consoleJs).toContain("api('/admin/api/memory-runtime/model-source'");
+    expect(consoleJs).not.toContain('restartMemoryRuntime');
+  });
+
+  it('删除是已安装未启用的次级动作，二次确认写清只删模型文件、不影响记忆', () => {
+    const remove = functionSource('removeRuntimeModel', 'changeRuntimeModelSource');
+    expect(remove).toContain('confirmModal');
+    expect(remove).toContain("api('/admin/api/models/remove'");
+    expect(zh['settings.runtime.models.removeBody']).toContain('模型文件');
+    expect(zh['settings.runtime.models.removeBody']).toContain('不影响已保存的记忆');
+    expect(en['settings.runtime.models.removeBody']).toContain('Saved memories are not affected');
+    expect(modelUiSource).toContain("pack?.installed === true && pack?.active !== true");
+  });
+
+  it('轻量模式隐藏整个模型区；仅沉浸式且就绪时加载', () => {
+    expect(modelSourceSectionSource).toContain('enabled && ready && source === \'local\'');
+    expect(modelUiSource).toContain('memoryRuntimeModeOf(state.runtime.status, currentConfigFile())');
+    expect(modelUiSource).toContain("t('settings.runtime.modelSource.light')");
+    expect(runtimeShowsModelSettings(null, null)).toBe(false);
+  });
+
+  it('模型区文案与 DOM 不暴露 token / 路径 / endpoint / keyRef', () => {
+    expect(modelUiSource.length).toBeGreaterThan(0);
+    expect(modelUiSource).not.toMatch(/endpoint|keyRef|baseUrl|modelPath|installedPath|hostToken|host-token|api[ _-]?key|tokenFile/i);
+    const keys = Object.keys(zh).filter((key) => key.startsWith('settings.runtime.models.'));
+    expect(keys.length).toBeGreaterThan(40);
+    for (const key of keys) {
+      expect(typeof en[key]).toBe('string');
+      expect(en[key]).not.toMatch(/[\u3400-\u9fff]/);
+      expect(zh[key]).not.toMatch(/endpoint|keyRef|baseUrl|tokenFile|host-token|modelPath/i);
+      expect(en[key]).not.toMatch(/endpoint|keyRef|baseUrl|tokenFile|host-token|modelPath/i);
+    }
   });
 });

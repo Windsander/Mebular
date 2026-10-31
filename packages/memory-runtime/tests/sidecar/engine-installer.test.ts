@@ -4,7 +4,7 @@
 import { afterEach, describe, expect, it } from '@jest/globals';
 import { createHash } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdtemp, readFile, readdir, readlink, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -363,6 +363,33 @@ describe('EngineInstaller assets', () => {
     expect(await readdir(engineDir)).toEqual([]);
   });
 
+  it('瞬时下载失败会重试，成功后正常安装', async () => {
+    const dir = await tempDir();
+    const archive = tarWithBinary();
+    const asset = fakeAsset(archive, 'tar.gz');
+    let calls = 0;
+    const body = fetchBody(archive);
+    const installer = new EngineInstaller({
+      dataDir: dir,
+      platform: 'darwin',
+      arch: 'arm64',
+      now: () => NOW,
+      nonce: () => 'retry',
+      resolveAsset: () => ({ ok: true, asset }),
+      maxDownloadAttempts: 3,
+      retryDelayMs: 0,
+      fetch: async (url) => {
+        calls += 1;
+        if (calls === 1) throw new Error('temporary network failure');
+        return body(url);
+      },
+    });
+    const status = await installer.ensureInstalled();
+    expect(calls).toBe(2);
+    expect(status.installed).toBe(true);
+    expect(installer.binaryPath()).toBeTruthy();
+  });
+
   it('取消会 abort 下载并清理 partial，不留下半安装状态', async () => {
     const dir = await tempDir();
     const archive = tarWithBinary();
@@ -426,12 +453,40 @@ describe('safe engine archive extraction', () => {
     expect((await stat(join(target, `${ROOT}llama-server.exe`))).isFile()).toBe(true);
   });
 
-  it('拒绝 ../、绝对路径、符号链接与硬链接', async () => {
+  it('允许官方归档中的相对 symlink（同根内、指向普通文件）', async () => {
+    const dir = await tempDir();
+    const archive = gzipSync(tarArchive([
+      { name: ROOT, type: 'directory' },
+      { name: BINARY, data: Buffer.from('#!/bin/sh\nexit 0\n') },
+      { name: `${ROOT}libllama.0.8.0.dylib`, data: Buffer.from('library') },
+      { name: `${ROOT}libllama.0.dylib`, type: 'symlink', linkName: 'libllama.0.8.0.dylib' },
+      { name: `${ROOT}libllama.dylib`, type: 'symlink', linkName: 'libllama.0.dylib' },
+    ]));
+    const archivePath = join(dir, 'symlink-ok.tar.gz');
+    const target = join(dir, 'out-symlink-ok');
+    await writeFile(archivePath, archive);
+    await extractEngineArchive({
+      archivePath,
+      asset: fakeAsset(archive, 'tar.gz'),
+      targetDir: target,
+    });
+    const link = join(target, `${ROOT}libllama.dylib`);
+    expect((await lstat(link)).isSymbolicLink()).toBe(true);
+    expect(await readlink(link)).toBe('libllama.0.dylib');
+    expect((await stat(join(target, BINARY))).isFile()).toBe(true);
+  });
+
+  it('拒绝 ../、绝对路径、逃逸符号链接与硬链接', async () => {
     const dir = await tempDir();
     const cases = [
       [{ name: `${ROOT}../../evil`, data: Buffer.from('x') }],
       [{ name: '/tmp/evil', data: Buffer.from('x') }],
       [{ name: `${ROOT}llama-server`, type: 'symlink' as const, linkName: '../../evil' }],
+      [{ name: `${ROOT}llama-server`, type: 'symlink' as const, linkName: 'missing.dylib' }],
+      [
+        { name: `${ROOT}a`, type: 'symlink' as const, linkName: 'b' },
+        { name: `${ROOT}b`, type: 'symlink' as const, linkName: 'a' },
+      ],
       [{ name: `${ROOT}llama-server`, type: 'hardlink' as const, linkName: `${ROOT}other` }],
     ];
     for (const [index, entries] of cases.entries()) {

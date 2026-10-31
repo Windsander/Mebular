@@ -1163,7 +1163,8 @@ class ManagedInferenceProvider implements SidecarInferenceProvider {
           },
         ],
         temperature: 0,
-        maxTokens: 160,
+        // Qwen3 thinking 可能耗尽小预算；给结构化 query plan 留足空间。
+        maxTokens: 512,
         responseSchema: QUERY_PLAN_SCHEMA,
       },
       { keywords: [] },
@@ -1286,7 +1287,16 @@ class ManagedInferenceProvider implements SidecarInferenceProvider {
       now: this.now,
       sleep: this.sleep,
     });
-    const outcome = await gateway.completeJson<T>(request, () => fallback);
+    // Qwen3 thinking 会占用结构化 JSON 的小预算；本地 memory 抽取/摘要/query plan
+    // 不需要思维链，显式关闭。远程 API 不发送该字段，避免不兼容。
+    const localRequest: ChatJsonRequest = {
+      ...request,
+      extraBody: {
+        ...(request.extraBody ?? {}),
+        chat_template_kwargs: { enable_thinking: false },
+      },
+    };
+    const outcome = await gateway.completeJson<T>(localRequest, () => fallback);
     return {
       outcome,
       model: connection.modelId ?? local.modelId,

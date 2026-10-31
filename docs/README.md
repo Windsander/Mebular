@@ -61,6 +61,7 @@ main [`README.md`](../README.md); this index only describes document structure.
 - [Memory Runtime 0.3.0 contract](design/0.3.0-memory-runtime-contract-v2.md) — frozen sidecar and capability contract (Chinese)
 - [Memory Runtime sidecar lifecycle](design/0.3.0-memory-runtime-sidecar.md) — process, discovery, tokens, local data and failure behaviour (Chinese)
 - [0.3.0 acceptance report](quality/0.3.0-memory-runtime-acceptance.md) — recall quality, security and performance evidence
+- [0.3.0 real model smoke](quality/0.3.0-model-smoke.md) — Qwen3-4B + llama.cpp verification; records the engine symlink and Qwen3 thinking blockers
 - [DSH plugin v1](design/dsh-plugin-v1.md) — historical v0.1 design; current guide is [DSH integration](integrations/DSH.md)
 - [Configuration journey v1](design/config-journey-v1.md) — Historical record of the v1 setup flow
 - [HTML prototype](design/prototype/README.md) — Historical record of the early prototype

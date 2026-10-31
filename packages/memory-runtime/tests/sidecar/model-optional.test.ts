@@ -65,11 +65,19 @@ function modelFetch(options: {
   keywords?: string[];
   summary?: string;
   fail?: number;
+  onRequest?: (body: {
+    messages?: Array<{ content?: string }>;
+    chat_template_kwargs?: Record<string, unknown>;
+    max_tokens?: number;
+  }) => void;
 }): ChatFetch {
   return async (_url, init) => {
     const body = JSON.parse(init.body) as {
       messages?: Array<{ content?: string }>;
+      chat_template_kwargs?: Record<string, unknown>;
+      max_tokens?: number;
     };
+    options.onRequest?.(body);
     const system = body.messages?.[0]?.content ?? '';
     if (options.fail) return completion('upstream-body-should-not-leak', options.fail);
     if (system.includes('memory search query')) {
@@ -189,6 +197,22 @@ describe('optional model integration', () => {
     expect(result.data.traceId).toBeTruthy();
     const trace = await service.getTrace(result.data.traceId!);
     expect(trace?.model).toMatchObject({ query: 'local' });
+  });
+
+  it('本地 query plan 关闭 thinking 并给足结构化预算', async () => {
+    const bodies: Array<{
+      messages?: Array<{ content?: string }>;
+      chat_template_kwargs?: Record<string, unknown>;
+      max_tokens?: number;
+    }> = [];
+    const { model } = await setup({
+      fetch: modelFetch({ keywords: ['sidecar'], onRequest: (body) => bodies.push(body) }),
+    });
+    const result = await model.planQuery({ source: 'local', query: '项目端口', allowRemote: true });
+    expect(result.ok).toBe(true);
+    const request = bodies.find((body) => JSON.stringify(body.messages).includes('memory search query'));
+    expect(request?.chat_template_kwargs).toEqual({ enable_thinking: false });
+    expect(request?.max_tokens).toBeGreaterThanOrEqual(512);
   });
 
   it('recall query plan 失败：保留原 query，degraded 可见但不阻塞召回', async () => {

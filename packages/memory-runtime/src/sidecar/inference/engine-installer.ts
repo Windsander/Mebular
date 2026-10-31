@@ -118,6 +118,10 @@ export interface EngineInstallerOptions {
   nonce?: () => string;
   extractor?: EngineArchiveExtractor;
   maxUncompressedBytes?: number;
+  /** 引擎归档下载失败的重试次数（含首次）；默认 2。 */
+  maxDownloadAttempts?: number;
+  /** 重试间隔；默认 500ms。 */
+  retryDelayMs?: number;
   /**
    * 测试/嵌入注入点；默认只解析官方清单。即使注入，也仍然强制资产 URL
    * 由 `llamaCppReleaseAssetUrl()` 生成，不能指向任意主机。
@@ -144,7 +148,10 @@ interface TarEntry {
   path: string;
   type: 'file' | 'directory' | 'symlink' | 'hardlink' | 'other';
   data?: Buffer;
+  /** 归档中的原始链接目标；symlink 使用。 */
   linkPath?: string;
+  /** 校验后的链接目标（相对解压根目录的 POSIX 路径）。 */
+  linkTarget?: string;
 }
 
 interface ZipEntry {
@@ -152,6 +159,7 @@ interface ZipEntry {
   type: 'file' | 'directory' | 'symlink' | 'other';
   data?: Buffer;
   linkPath?: string;
+  linkTarget?: string;
 }
 
 const DEFAULT_MAX_UNCOMPRESSED_BYTES = 512 * 1024 * 1024;
@@ -191,6 +199,29 @@ function normalizeRelativePath(value: string): string | null {
 function underArchiveRoot(path: string, archiveRoot: string): boolean {
   const root = archiveRoot.endsWith('/') ? archiveRoot.slice(0, -1) : archiveRoot;
   return path === root || path.startsWith(`${root}/`);
+}
+
+/**
+ * 校验 symlink 目标：
+ * - 只允许相对目标；
+ * - 目标按链接所在目录解析后必须仍在 archiveRoot 内；
+ * - 拒绝绝对路径、反斜杠、NUL 与 `..` 逃逸。
+ * 返回相对解压根目录的 POSIX 路径。
+ */
+function resolveSymlinkTarget(
+  linkEntryPath: string,
+  linkPath: string,
+  archiveRoot: string,
+): string | null {
+  if (typeof linkPath !== 'string' || linkPath.length === 0 || linkPath.length > 1024) return null;
+  if (linkPath.includes('\0') || linkPath.includes('\\')) return null;
+  if (linkPath.startsWith('/') || /^[A-Za-z]:/.test(linkPath)) return null;
+  const linkDir = linkEntryPath.includes('/')
+    ? linkEntryPath.slice(0, linkEntryPath.lastIndexOf('/'))
+    : '';
+  const normalized = normalizeRelativePath(linkDir ? `${linkDir}/${linkPath}` : linkPath);
+  if (!normalized || !underArchiveRoot(normalized, archiveRoot)) return null;
+  return normalized;
 }
 
 function safeJoin(base: string, relative: string): string {
@@ -433,19 +464,56 @@ function validateArchiveEntries(
     if (!path || !underArchiveRoot(path, asset.archiveRoot)) {
       throw new EngineInstallerError('engine_extract_failed', 'unsafe archive entry path');
     }
-    if (entry.type === 'symlink' || entry.type === 'hardlink') {
-      throw new EngineInstallerError('engine_extract_failed', 'archive links are not allowed');
+    if (entry.type === 'hardlink') {
+      throw new EngineInstallerError('engine_extract_failed', 'archive hardlinks are not allowed');
     }
-    if (entry.type === 'other') {
+    if (entry.type === 'symlink') {
+      const linkTarget = resolveSymlinkTarget(path, entry.linkPath ?? '', asset.archiveRoot);
+      if (!linkTarget || linkTarget === path) {
+        throw new EngineInstallerError('engine_extract_failed', 'unsafe archive symlink target');
+      }
+      entry.linkTarget = linkTarget;
+    } else if (entry.type === 'other') {
       throw new EngineInstallerError('engine_extract_failed', 'unsupported archive entry type');
-    }
-    if (entry.linkPath) {
-      throw new EngineInstallerError('engine_extract_failed', 'archive links are not allowed');
+    } else if (entry.linkPath) {
+      throw new EngineInstallerError('engine_extract_failed', 'unexpected archive link target');
     }
     if (map.has(path)) {
       throw new EngineInstallerError('engine_extract_failed', 'duplicate archive entry');
     }
     map.set(path, entry);
+  }
+  // 允许官方归档中的相对 symlink 链（例如 libllama.dylib -> libllama.0.dylib
+  // -> libllama.0.8.0.dylib），但最终必须落在同归档内的普通文件上，且不能成环。
+  for (const entry of map.values()) {
+    if (entry.type !== 'symlink') continue;
+    const seen = new Set<string>([entry.path]);
+    let current = entry;
+    let finalTarget: string | null = null;
+    for (;;) {
+      const targetPath = current.linkTarget;
+      if (!targetPath) {
+        throw new EngineInstallerError('engine_extract_failed', 'archive symlink target is missing');
+      }
+      if (seen.has(targetPath)) {
+        throw new EngineInstallerError('engine_extract_failed', 'archive symlink cycle');
+      }
+      seen.add(targetPath);
+      const target = map.get(targetPath);
+      if (!target) {
+        throw new EngineInstallerError('engine_extract_failed', 'archive symlink target is missing');
+      }
+      if (target.type === 'file') {
+        finalTarget = targetPath;
+        break;
+      }
+      if (target.type !== 'symlink') {
+        throw new EngineInstallerError('engine_extract_failed', 'archive symlink must target a regular file');
+      }
+      current = target;
+    }
+    // 保留原始 linkPath 用于创建 symlink；linkTarget 指向链末普通文件，供复制降级使用。
+    entry.linkTarget = finalTarget;
   }
   const binary = map.get(binaryPath);
   if (!binary || binary.type !== 'file') {
@@ -462,17 +530,7 @@ async function writeArchiveEntries(
 ): Promise<void> {
   let index = 0;
   const total = Math.max(1, entries.size);
-  for (const [path, entry] of entries) {
-    throwIfAborted(signal);
-    const target = safeJoin(targetDir, path);
-    if (entry.type === 'directory') {
-      await fs.mkdir(target, { recursive: true, mode: 0o700 });
-    } else if (entry.type === 'file') {
-      await fs.mkdir(dirname(target), { recursive: true, mode: 0o700 });
-      await fs.writeFile(target, entry.data!, { mode: 0o600, flag: 'wx' });
-    } else {
-      throw new EngineInstallerError('engine_extract_failed', 'unsupported archive entry type');
-    }
+  const report = async (): Promise<void> => {
     index += 1;
     if (onProgress) {
       try {
@@ -482,6 +540,41 @@ async function writeArchiveEntries(
       }
     }
     if (index % 64 === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+  };
+
+  // 第一遍只写目录/普通文件，保证第二遍 symlink 的目标已经存在（Windows 复制降级需要）。
+  for (const [path, entry] of entries) {
+    throwIfAborted(signal);
+    if (entry.type === 'symlink') continue;
+    const target = safeJoin(targetDir, path);
+    if (entry.type === 'directory') {
+      await fs.mkdir(target, { recursive: true, mode: 0o700 });
+    } else if (entry.type === 'file') {
+      await fs.mkdir(dirname(target), { recursive: true, mode: 0o700 });
+      await fs.writeFile(target, entry.data!, { mode: 0o600, flag: 'wx' });
+    } else {
+      throw new EngineInstallerError('engine_extract_failed', 'unsupported archive entry type');
+    }
+    await report();
+  }
+
+  // 第二遍创建 symlink；受限文件系统/Windows 不支持时复制已校验的目标文件。
+  for (const [path, entry] of entries) {
+    throwIfAborted(signal);
+    if (entry.type !== 'symlink') continue;
+    const target = safeJoin(targetDir, path);
+    await fs.mkdir(dirname(target), { recursive: true, mode: 0o700 });
+    try {
+      await fs.symlink(entry.linkPath!, target, 'file');
+    } catch {
+      if (!entry.linkTarget) {
+        throw new EngineInstallerError('engine_extract_failed', 'archive symlink target is missing');
+      }
+      await fs.copyFile(safeJoin(targetDir, entry.linkTarget), target).catch(() => {
+        throw new EngineInstallerError('engine_extract_failed', 'cannot materialize archive symlink');
+      });
+    }
+    await report();
   }
 }
 
@@ -590,6 +683,8 @@ export class EngineInstaller implements EngineInstallerLike {
   private readonly nonce: () => string;
   private readonly extractor: EngineArchiveExtractor;
   private readonly maxUncompressedBytes: number;
+  private readonly maxDownloadAttempts: number;
+  private readonly retryDelayMs: number;
 
   private statusValue: EngineInstallerStatus;
   private stored: StoredEngineState | null = null;
@@ -608,6 +703,8 @@ export class EngineInstaller implements EngineInstallerLike {
     this.fetchImpl = options.fetch ?? defaultFetch();
     this.extractor = options.extractor ?? extractEngineArchive;
     this.maxUncompressedBytes = Math.max(1, options.maxUncompressedBytes ?? DEFAULT_MAX_UNCOMPRESSED_BYTES);
+    this.maxDownloadAttempts = Math.max(1, options.maxDownloadAttempts ?? 2);
+    this.retryDelayMs = Math.max(0, options.retryDelayMs ?? 500);
     const resolve = options.resolveAsset ?? resolveEngineAsset;
     this.resolution = resolve({ platform: options.platform, arch: options.arch });
     if (this.resolution.ok) {
@@ -935,6 +1032,31 @@ export class EngineInstaller implements EngineInstallerLike {
   }
 
   private async download(asset: EngineAsset, targetPath: string, options: EngineInstallOptions): Promise<void> {
+    let lastError: unknown = null;
+    for (let attempt = 1; attempt <= this.maxDownloadAttempts; attempt += 1) {
+      throwIfAborted(options.signal);
+      try {
+        await this.downloadOnce(asset, targetPath, options);
+        return;
+      } catch (error) {
+        lastError = error;
+        if (isAborted(options.signal) || !(error instanceof EngineInstallerError) || !error.retryable) {
+          throw error;
+        }
+        if (error.code === 'engine_checksum_mismatch' || error.code === 'engine_size_mismatch') {
+          throw error;
+        }
+        if (attempt < this.maxDownloadAttempts) {
+          await new Promise<void>((resolve) => setTimeout(resolve, this.retryDelayMs));
+        }
+      }
+    }
+    throw lastError instanceof EngineInstallerError
+      ? lastError
+      : new EngineInstallerError('engine_download_failed', messageOf(lastError), true);
+  }
+
+  private async downloadOnce(asset: EngineAsset, targetPath: string, options: EngineInstallOptions): Promise<void> {
     throwIfAborted(options.signal);
     let response: FetchResponseLike;
     try {

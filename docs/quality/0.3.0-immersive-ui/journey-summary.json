@@ -1,36 +1,36 @@
 {
-  "startedAt": "2026-10-30T18:09:50.694Z",
-  "finishedAt": "2026-10-30T18:10:38.767Z",
+  "startedAt": "2026-10-31T04:45:43.550Z",
+  "finishedAt": "2026-10-31T04:46:19.839Z",
   "passed": 84,
   "failed": 0,
   "defects": [],
   "devices": {
     "a": {
-      "deviceId": "device-a-1793383790694-c22462",
+      "deviceId": "device-a-1793421943550-c19e67",
       "home": "<temp>/device-a"
     },
     "b": {
-      "deviceId": "device-b-1793383790694-c22462",
+      "deviceId": "device-b-1793421943550-c19e67",
       "home": "<temp>/device-b"
     }
   },
   "dsh": {
     "thread": "dsh_memory-e2e-session",
-    "detailId": "01M6702NJY6J41PWB58RG887Q9",
+    "detailId": "01M684EZNRAPCTR1FE7PKX2K6D",
     "domain": "user"
   },
   "opencode": {
     "old": {
-      "recordId": "01M67039B03E9EK17VY6CM85AM",
-      "detailId": "01M67039B2Y77E4WAJ0JGK5Y63"
+      "recordId": "01M684F8XB56ET5XEZJ3JSVKWH",
+      "detailId": "01M684F8XD95FWC08VQP7S77H0"
     },
     "new": {
-      "recordId": "01M6703AAPN05G4HV985ES95HF",
-      "detailId": "01M6703AAY9XG78C1HX6WYMBPW"
+      "recordId": "01M684F9P938VSGJ7H13P9PNQV",
+      "detailId": "01M684F9PN92REAHS2M7ZBJK51"
     },
     "supersede": {
-      "validTo": 1793383835990,
-      "supersededBy": "01M6703AAPN05G4HV985ES95HF"
+      "validTo": 1793421977289,
+      "supersededBy": "01M684F9P938VSGJ7H13P9PNQV"
     }
   },
   "sync": {

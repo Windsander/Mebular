@@ -1,41 +1,41 @@
 {
   "old": {
-    "recordId": "01M67039B03E9EK17VY6CM85AM",
-    "detailId": "01M67039B2Y77E4WAJ0JGK5Y63",
+    "recordId": "01M684F8XB56ET5XEZJ3JSVKWH",
+    "detailId": "01M684F8XD95FWC08VQP7S77H0",
     "request": "…. Defaults to markdown.\"},\"timeout\":{\"type\":\"number\",\"exclusiveMinimum\":0,\"maximum\":120,\"description\":\"Optional timeout in seconds (maximum: 120)\"}},\"required\":[\"url\"],\"additionalProperties\":false},\"strict\":false}},{\"type\":\"function\",\"function\":{\"name\":\"websearch\",\"description\":\"Search the web using the user's selected search integration. Use this for current information beyond knowledge cutoff.\\n\\nThe current year is 2026. Use this year when searching for recent information or current events.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Websearch query\"}},\"required\":[\"query\"],\"additionalProperties\":false},\"strict\":false}},{\"type\":\"function\",\"function\":{\"name\":\"write\",\"description\":\"Writes a file to the local filesystem, overwriting if one exists.\\n\\nMissing parent directories are created automatically.\\n\\nUse this tool to create new files or overwrite existing files. For partial changes, use the edit tool instead.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Path to the file to write to\"},\"content\":{\"type\":\"string\",\"description\":\"Content to write to the file\"}},\"required\":[\"path\",\"content\"],\"additionalProperties\":false},\"strict\":false}},{\"type\":\"function\",\"function\":{\"name\":\"execute\",\"description\":\"Run JavaScript in a confined Code Mode runtime to script tool calls and HTTP requests and compose their results.\\n`fetch` is available for HTTP requests. Imports, direct filesystem access, and timers are unavailable; all other external access goes through `tools`.\\nWithin `{ code }`, the only callable tools are those explicitly listed in the Code Mode catalog instructions or returned by the `search` function. Inside `{ code }`, ignore tools shown outside the Code Mode catalog. They are not available in the Code Mode runtime.\\nCall tools through `tools` using only exact paths and signatures from the catalog. Do not infer or normalize tool names; preserve bracket notation such as `tools.<namespace>[\\\"tool-name\\\"](input)`.\\nPrefer an explicit `return`; if omitted, the final top-level expression becomes the result.\\nAwait every call whose completion matters; pending calls are interrupted when execution ends. Run independent calls concurrently with `Promise.allSettled`.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"code\":{\"type\":\"string\"}},\"required\":[\"code\"],\"additionalProperties\":false},\"strict\":false}}],\"stream\":true,\"stream_options\":{\"include_usage\":true},\"max_completion_tokens\":4000}"
   },
   "new": {
-    "recordId": "01M6703AAPN05G4HV985ES95HF",
-    "detailId": "01M6703AAY9XG78C1HX6WYMBPW",
+    "recordId": "01M684F9P938VSGJ7H13P9PNQV",
+    "detailId": "01M684F9PN92REAHS2M7ZBJK51",
     "request": "…. Defaults to markdown.\"},\"timeout\":{\"type\":\"number\",\"exclusiveMinimum\":0,\"maximum\":120,\"description\":\"Optional timeout in seconds (maximum: 120)\"}},\"required\":[\"url\"],\"additionalProperties\":false},\"strict\":false}},{\"type\":\"function\",\"function\":{\"name\":\"websearch\",\"description\":\"Search the web using the user's selected search integration. Use this for current information beyond knowledge cutoff.\\n\\nThe current year is 2026. Use this year when searching for recent information or current events.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Websearch query\"}},\"required\":[\"query\"],\"additionalProperties\":false},\"strict\":false}},{\"type\":\"function\",\"function\":{\"name\":\"write\",\"description\":\"Writes a file to the local filesystem, overwriting if one exists.\\n\\nMissing parent directories are created automatically.\\n\\nUse this tool to create new files or overwrite existing files. For partial changes, use the edit tool instead.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Path to the file to write to\"},\"content\":{\"type\":\"string\",\"description\":\"Content to write to the file\"}},\"required\":[\"path\",\"content\"],\"additionalProperties\":false},\"strict\":false}},{\"type\":\"function\",\"function\":{\"name\":\"execute\",\"description\":\"Run JavaScript in a confined Code Mode runtime to script tool calls and HTTP requests and compose their results.\\n`fetch` is available for HTTP requests. Imports, direct filesystem access, and timers are unavailable; all other external access goes through `tools`.\\nWithin `{ code }`, the only callable tools are those explicitly listed in the Code Mode catalog instructions or returned by the `search` function. Inside `{ code }`, ignore tools shown outside the Code Mode catalog. They are not available in the Code Mode runtime.\\nCall tools through `tools` using only exact paths and signatures from the catalog. Do not infer or normalize tool names; preserve bracket notation such as `tools.<namespace>[\\\"tool-name\\\"](input)`.\\nPrefer an explicit `return`; if omitted, the final top-level expression becomes the result.\\nAwait every call whose completion matters; pending calls are interrupted when execution ends. Run independent calls concurrently with `Promise.allSettled`.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"code\":{\"type\":\"string\"}},\"required\":[\"code\"],\"additionalProperties\":false},\"strict\":false}}],\"stream\":true,\"stream_options\":{\"include_usage\":true},\"max_completion_tokens\":4000}"
   },
   "supersede": {
     "currentQuery": [],
     "history": [
       {
-        "id": "01M67039B03E9EK17VY6CM85AM",
-        "content": "项目端口是多少 port1793383790694c22462 port 7332",
-        "validTo": 1793383835990,
-        "supersededBy": "01M6703AAPN05G4HV985ES95HF"
+        "id": "01M684F8XB56ET5XEZJ3JSVKWH",
+        "content": "项目端口是多少 port1793421943550c19e67 port 7332",
+        "validTo": 1793421977289,
+        "supersededBy": "01M684F9P938VSGJ7H13P9PNQV"
       }
     ],
     "oldDetail": {
-      "id": "01M67039B2Y77E4WAJ0JGK5Y63",
+      "id": "01M684F8XD95FWC08VQP7S77H0",
       "type": "detail_record",
       "kind": "detail_record",
       "detailKind": "raw_chunk",
       "domain": "agent:opencode",
       "ownerType": "agent",
       "ownerId": "opencode",
-      "text": "项目端口是多少 port1793383790694c22462 7332",
+      "text": "项目端口是多少 port1793421943550c19e67 7332",
       "truncated": false,
       "redacted": false,
-      "expiresAt": 1795975834978,
+      "expiresAt": 1796013976493,
       "availability": [
         "available"
       ],
       "recordIds": [
-        "01M67039B03E9EK17VY6CM85AM"
+        "01M684F8XB56ET5XEZJ3JSVKWH"
       ],
       "provenance": {
         "source": "runtime",
@@ -44,15 +44,15 @@
         "extractor": "host",
         "model": null,
         "version": "0.3.0",
-        "deviceId": "device-b-1793383790694-c22462",
-        "hostId": "h_c33b3fec91ac34f5",
+        "deviceId": "device-b-1793421943550-c19e67",
+        "hostId": "h_61ac5354b791ae24",
         "threadId": "th_host_e2e_seed",
         "agentId": "opencode",
         "agentName": null,
         "messageIds": [],
         "rawChunkIds": [],
         "confirmation": "none",
-        "at": 1793383834978
+        "at": 1793421976493
       },
       "mime": "text/plain",
       "role": "user",
@@ -61,30 +61,30 @@
       "turn": null,
       "threadId": "th_host_e2e_seed",
       "retentionClass": "conversation",
-      "contentHash": "sha256:edef8fa562821b9510c04f412c71c754d03ae7193ae9f9164d607c59ab0391b5",
+      "contentHash": "sha256:2c0df56127eb9ff72d2db4a9c97173d83e2a688f52f8f1bdf8eb010e5c068035",
       "redaction": {
         "applied": false,
         "rules": []
       },
       "deletedAt": null,
       "deletedReason": null,
-      "createdAt": 1793383834978,
-      "updatedAt": 1793383834978
+      "createdAt": 1793421976493,
+      "updatedAt": 1793421976493
     },
     "newCurrent": [
       {
-        "id": "01M6703AAPN05G4HV985ES95HF",
-        "content": "项目端口是多少 port1793383790694c22462 port 7331"
+        "id": "01M684F9P938VSGJ7H13P9PNQV",
+        "content": "项目端口是多少 port1793421943550c19e67 port 7331"
       }
     ]
   },
   "deleted": {
     "result": {
       "deleted": [
-        "01M67039B03E9EK17VY6CM85AM"
+        "01M684F8XB56ET5XEZJ3JSVKWH"
       ],
       "detailsDeleted": [
-        "01M67039B2Y77E4WAJ0JGK5Y63"
+        "01M684F8XD95FWC08VQP7S77H0"
       ],
       "notFound": [],
       "forbidden": [],

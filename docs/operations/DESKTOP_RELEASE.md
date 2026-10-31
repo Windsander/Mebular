@@ -15,7 +15,8 @@
 - 全部为 **unsigned** 发布；不做代码签名、公证或自动更新。
 - 每个安装包都自带 Electron 和一份完整的 Mebular runtime，**不需要本机 Node.js**，也不依赖
   仓库源码目录。
-- GitHub Release 同时提供 `SHA256SUMS.txt`，覆盖上面 4 个安装包。
+- GitHub Release 同时提供 `SHA256SUMS.txt`，覆盖上面 4 个安装包和 Hermes 插件
+  `mebular-hermes-plugins-<version>.tar.gz`（见 [`RELEASE.md`](RELEASE.md)）。
 - 签名、公证、Windows Authenticode 与自动更新留到后续版本（见第 6 节）。
 
 ## 1. runtime 架构
@@ -166,14 +167,15 @@ electron-builder 的 `artifactName` 固定为：
 | Linux AppImage | `Mebular-${version}-${arch}.${ext}` + x64 | `Mebular-0.3.0-x86_64.AppImage` |
 | Linux deb | 同上；deb 的 arch 宏为 `amd64` | `Mebular-0.3.0-amd64.deb` |
 
-`SHA256SUMS.txt` 由 release job 在 Linux 上生成，只包含安装包，按文件名 `LC_ALL=C sort`
-排序，例如：
+`SHA256SUMS.txt` 由 release job 在 Linux 上生成，覆盖 4 个安装包和 Hermes 插件 tarball，
+按文件名 `LC_ALL=C sort` 排序，例如：
 
 ```text
 <hash>  Mebular-0.3.0-amd64.deb
 <hash>  Mebular-0.3.0-universal.dmg
 <hash>  Mebular-0.3.0-x86_64.AppImage
 <hash>  Mebular-Setup-0.3.0.exe
+<hash>  mebular-hermes-plugins-0.3.0.tar.gz
 ```
 
 dry-run 不会生成这个文件；它只在正式 `release` job 创建 GitHub Release 时产生。
@@ -226,7 +228,7 @@ AppImage 需要 FUSE；没有 FUSE 时可使用 `--appimage-extract-and-run`。d
 
 | 项目 | `workflow_dispatch` dry-run | push `release/v*` 正式发布 |
 | --- | --- | --- |
-| verify（8 tarballs） | ✅ | ✅ |
+| verify（8 npm tarballs + Hermes tarball） | ✅ | ✅ |
 | preflight（npm whoami） | ❌ | ✅ |
 | desktop matrix（三平台） | ✅ | ✅ |
 | npm publish（7 + 1） | ❌ | ✅ |
@@ -237,15 +239,17 @@ AppImage 需要 FUSE；没有 FUSE 时可使用 `--appimage-extract-and-run`。d
 
 dry-run 的 artifacts：
 
-- `release-tarballs`：8 个 `.tgz`，保留 7 天；
+- `release-tarballs`：8 个 npm `.tgz`，保留 7 天；
+- `hermes-plugins`：`mebular-hermes-plugins-<version>.tar.gz`，保留 7 天；
 - `desktop-macos`：DMG；
 - `desktop-windows`：NSIS `.exe`；
 - `desktop-linux`：AppImage + deb。
 
 正式流水线中，`publish` / `publish-dsh` 依赖三个 desktop job 全部成功，因此**安装包没全绿
 就不会发 npm**。`visibility` job 再确认八包均可 `npm view` 且 `dist-tags.latest` 指向本次
-版本；只有它通过后，`release` job 才下载三平台 artifacts，校验每种扩展名恰好 1 个，生成
-`SHA256SUMS.txt`，创建/更新 GitHub Release 并 `--clobber` 上传。
+版本；只有它通过后，`release` job 才下载三平台 artifacts 与 `hermes-plugins`，校验每种
+扩展名恰好 1 个、Hermes tarball 恰好 1 个，生成 `SHA256SUMS.txt`，创建/更新 GitHub Release
+并 `--clobber` 上传。资产校验允许额外 Hermes tarball，不要求总数固定为 4。
 
 本地或 CI 都可以对解包目录跑 packaged runtime smoke：
 

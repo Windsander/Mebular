@@ -130,6 +130,17 @@ function buildFixture() {
 
   write(
     root,
+    'integrations/hermes/mebular-memory/plugin.yaml',
+    'name: mebular\nversion: 0.1.1\n',
+  );
+  write(
+    root,
+    'integrations/hermes/mebular-companion/plugin.yaml',
+    'name: mebular-companion\nversion: 0.1.1\nkind: standalone\n',
+  );
+
+  write(
+    root,
     'CHANGELOG.md',
     '# Changelog\n\n## [v0.1.1] - 2026-10-25\n\n- fixture\n',
   );
@@ -174,6 +185,12 @@ describe('bump-version：八包 + MCP/OpenCode 版本源', () => {
     );
     expect(readFileSync(join(root, 'packages/opencode-plugin/index.js'), 'utf8')).toContain(
       "PACKAGE_VERSION = '0.2.0'",
+    );
+    expect(readFileSync(join(root, 'integrations/hermes/mebular-memory/plugin.yaml'), 'utf8')).toContain(
+      'version: 0.2.0',
+    );
+    expect(readFileSync(join(root, 'integrations/hermes/mebular-companion/plugin.yaml'), 'utf8')).toContain(
+      'version: 0.2.0',
     );
 
     const fleet = JSON.parse(readFileSync(join(root, 'packages/fleet/package.json'), 'utf8'));
@@ -232,6 +249,23 @@ describe('verify-release-version：通过/失败定位', () => {
     const result = verifyReleaseVersion({ root, version: '0.2.0', tag: 'v0.2.0' });
     expect(result.ok).toBe(false);
     expect(result.checks.find((check) => check.label.includes('opencode-plugin/index.js PACKAGE_VERSION'))?.ok).toBe(false);
+  });
+
+  it('Hermes plugin.yaml 版本落后时报错', () => {
+    const root = buildFixture();
+    bumpVersion({ root, version: '0.2.0', tag: 'v0.2.0', date: '2026-10-26' });
+    write(
+      root,
+      'integrations/hermes/mebular-companion/plugin.yaml',
+      'name: mebular-companion\nversion: 0.1.1\nkind: standalone\n',
+    );
+    const result = verifyReleaseVersion({ root, version: '0.2.0', tag: 'v0.2.0' });
+    expect(result.ok).toBe(false);
+    expect(
+      result.checks.find(
+        (check) => check.label === 'integrations/hermes/mebular-companion/plugin.yaml version',
+      )?.ok,
+    ).toBe(false);
   });
 
   it('memory-runtime 若依赖 core 但 tarball 无法安装时报错', () => {

@@ -9,7 +9,9 @@
   `fleet` / `memory-runtime` / `opencode-plugin` 七个 lockstep 包，加独立 npm job 的
   `dsh-plugin`；
 - macOS Universal DMG、Windows NSIS x64、Linux AppImage + deb x64（unsigned）；
-- `SHA256SUMS.txt`（仅 GitHub Release 资产生成）。
+- `mebular-hermes-plugins-<version>.tar.gz`：Hermes MemoryProvider + 可选 companion 的
+  一键安装包，只随 GitHub Release 发布，不进 npm，也不要求 PyPI；
+- `SHA256SUMS.txt`（仅 GitHub Release 资产生成，覆盖 4 个安装包与 Hermes 插件 tarball）。
 
 从 v0.2.0 起，`@mebular/dsh-plugin` 仍由独立 npm job 发布，但版本号随统一 release train
 bump，八个 npm 包同版本，并由发布 gate 校验；不存在只发布 DSH 插件的批次。
@@ -76,7 +78,8 @@ v0.3.0 也新增独立的 `@mebular/opencode-plugin`（OpenCode V2 / OpenChamber
 | `Mebular-Setup-<version>.exe` | `desktop-windows` | Windows NSIS x64，unsigned |
 | `Mebular-<version>-x86_64.AppImage` | `desktop-linux` | Linux x64，unsigned |
 | `Mebular-<version>-amd64.deb` | `desktop-linux` | Debian/Ubuntu x64，unsigned |
-| `SHA256SUMS.txt` | `release` job | 只覆盖 4 个安装包，按文件名排序 |
+| `mebular-hermes-plugins-<version>.tar.gz` | verify 的 `hermes-plugins` | Hermes provider + companion 一键安装包；只进 GitHub Release |
+| `SHA256SUMS.txt` | `release` job | 覆盖 4 个安装包 + Hermes 插件 tarball，按文件名排序 |
 
 ## 1. 一次性前置清单
 
@@ -133,7 +136,7 @@ v0.3.0 也新增独立的 `@mebular/opencode-plugin`（OpenCode V2 / OpenChamber
 `minimum` + `latest` 两个矩阵 job，并附带独立 `dsh-memory-runtime` job）：
 
 ```text
-verify（SSOT / build / lint / test / 8 tarballs）
+verify（SSOT / build / lint / test / 8 npm tarballs + Hermes 插件 tarball）
   ├─ dsh-e2e（reusable dsh-e2e.yml：真实 DSH 最低版 + latest + memory-runtime）
   ├─ preflight（push only：npm whoami）
   ├─ desktop-macos  ─┐
@@ -150,17 +153,19 @@ verify（SSOT / build / lint / test / 8 tarballs）
      visibility（npm view 八包 + dist-tags.latest；失败不创建 Release）
         │
         ▼
-     release（4 个安装包 + SHA256SUMS.txt）
+     release（4 个安装包 + Hermes 插件 tarball + SHA256SUMS.txt）
 ```
 
 关键点：
 
-1. **verify** 是唯一一次 pack：8 个 tarball 上传为 artifact `release-tarballs`，后续 npm
-   publish 与三平台 runtime 都消费这同一批文件，保证「测什么发什么」。pack smoke 由
-   `verify:mcp:publish`（6 个运行时包）与 `verify:opencode:publish`（OpenCode 插件）覆盖。
+1. **verify** 是唯一一次 pack：8 个 npm tarball 上传为 artifact `release-tarballs`，后续
+   npm publish 与三平台 runtime 都消费这同一批文件；Hermes 插件 tarball 单独上传为
+   `hermes-plugins`，release job 直接复用它，保证「测什么发什么」。pack smoke 由
+   `verify:mcp:publish`（6 个运行时包）、`verify:opencode:publish`（OpenCode 插件）与
+   `verify:hermes:package`（Hermes 安装 + Python 入口 + 备份）覆盖。
 2. **verify 版本 SSOT** 调用 `node scripts/verify-release-version.mjs`，校验 8 个 manifest、
    根 lock、桌面三处、MCP 版本源、sidecar `SIDECAR_RUNTIME_VERSION`、OpenCode 插件
-   `PACKAGE_VERSION` 与 CHANGELOG；dry-run 与正式发布走同一段代码。
+   `PACKAGE_VERSION`、两个 Hermes `plugin.yaml` 与 CHANGELOG；dry-run 与正式发布走同一段代码。
 3. **preflight** 只在 push 时运行，用 `npm whoami` 验证 token 能认证；失败则后续 job 不启动。
 4. **desktop matrix** 在 macOS / Windows / Linux runner 上各自下载 `release-tarballs`，
    执行 `prepare-runtime` → `smoke:runtime` → `dist:*` → packaged runtime smoke，并上传
@@ -176,9 +181,11 @@ verify（SSOT / build / lint / test / 8 tarballs）
 8. **visibility** 依赖 `publish` + `publish-dsh`，用
    `scripts/verify-release-visibility.mjs` 有界轮询八个包的 `npm view <pkg>@<version> version`
    与 `dist-tags.latest`。只有八包可见且 latest 指向本次版本，`release` 才会启动。
-9. **release** 依赖全部 job（含 `dsh-e2e`），下载三个 `desktop-*` artifact，校验恰好 1 个
-   `.dmg` / `.exe` / `.AppImage` / `.deb`，生成 `SHA256SUMS.txt`，从 CHANGELOG 抽取 notes，
-   创建 Release 并 `gh release upload --clobber`。
+9. **release** 依赖全部 job（含 `dsh-e2e`），下载三个 `desktop-*` artifact 与
+   `hermes-plugins`，校验恰好 1 个 `.dmg` / `.exe` / `.AppImage` / `.deb` 和 1 个
+   `mebular-hermes-plugins-<version>.tar.gz`，生成覆盖这些文件的 `SHA256SUMS.txt`，从
+   CHANGELOG 抽取 notes，创建 Release 并 `gh release upload --clobber`。资产校验不假设
+   “只有 4 个安装包”，允许额外的 Hermes tarball（以及未来新增的 Release 资产）。
 
 > 串行保证：`concurrency.group = publish-${{ github.ref }}`，`cancel-in-progress: false`；
 > 同一 release 分支重复 push 不会并行发布。dry-run（`workflow_dispatch`）运行
@@ -200,7 +207,8 @@ origin/main
 
 1. 从最新 `origin/main` 创建 `release-prep/vX.Y.Z`，提交版本与 CHANGELOG。
 2. 在 `release-prep/vX.Y.Z` 上跑 `gh workflow run publish.yml --ref release-prep/vX.Y.Z`，
-   确认三平台安装包与 8 个 tarball 全绿。**不要**用 push `release/v*` 代替 dry-run。
+   确认三平台安装包、8 个 npm tarball 与 Hermes 插件 tarball 全绿。**不要**用 push
+   `release/v*` 代替 dry-run。
 3. dry-run 通过后，从 prep 分支创建 `release/vX.Y.Z` 并 push；这会触发正式发布。
 4. 发布成功后，用 PR 把 `release/vX.Y.Z` 回合并到 `main`（历史 v0.1.1 的 PR #251 即此步骤）。
 5. 回合并后删除 `release/vX.Y.Z` 与 `release-prep/vX.Y.Z`；远端已合并分支用第 8.1 节的
@@ -245,6 +253,7 @@ npm run test:coverage          # core/fleet/service + memory-runtime 非 sidecar
 npm run test:coverage:sidecar  # sidecar 独立覆盖率门槛（不能靠排除保持全局绿）
 npm run verify:mcp:publish     # 6 个运行时 lockstep 包 npm pack + tarball 冒烟
 npm run verify:opencode:publish # @mebular/opencode-plugin npm pack + tarball 安装/入口冒烟
+npm run verify:hermes:package  # Hermes tarball 打包 + 临时 HERMES_HOME 安装 / Python 入口 / 备份
 npm run verify:dsh-plugin      # 插件契约 + tarball
 npm run verify:dsh:e2e:min     # 真实 DSH 最低支持版本 E2E
 npm run verify:dsh:e2e:latest  # 真实 DSH npm latest（网络允许时）
@@ -339,8 +348,9 @@ gh workflow run publish.yml --ref release-prep/v0.3.0
 gh run list --workflow=publish.yml --limit 5
 gh run watch <run-id>
 
-# 下载 tarball 与三平台产物
+# 下载 npm tarball、Hermes 插件包与三平台产物
 gh run download <run-id> -n release-tarballs -D release-pack
+gh run download <run-id> -n hermes-plugins -D release-assets
 gh run download <run-id> -n desktop-macos -D release-assets
 gh run download <run-id> -n desktop-windows -D release-assets
 gh run download <run-id> -n desktop-linux -D release-assets
@@ -411,9 +421,11 @@ mebular-memory-runtime version
 - [ ] 八个包的 `version` 与 `dist-tags.latest` 都等于本次发布版本（或直接看 visibility job）；
 - [ ] `mebular-memory-runtime version` 的 `runtimeVersion`、`apiVersion`、
       `capabilityApiVersion` 与本次版本/能力契约一致；
-- [ ] GitHub Release 资产 = 4 个安装包（`.dmg` / `.exe` / `.AppImage` / `.deb`）+
-      `SHA256SUMS.txt`，release notes 来自 CHANGELOG 的 `## [vX.Y.Z]` 章节；
-- [ ] 下载资产后按第 6 节校验 checksum；`SHA256SUMS.txt` 恰好 4 行；
+- [ ] GitHub Release 资产至少包含 4 个安装包（`.dmg` / `.exe` / `.AppImage` / `.deb`）、
+      `mebular-hermes-plugins-<version>.tar.gz` 与 `SHA256SUMS.txt`；允许额外的 Release
+      资产，不把总数写死为 4。release notes 来自 CHANGELOG 的 `## [vX.Y.Z]` 章节；
+- [ ] 下载资产后按第 6 节校验 checksum；`SHA256SUMS.txt` 覆盖 4 个安装包与 Hermes
+      插件 tarball（至少 5 行）；
 - [ ] `release/vX.Y.Z` 已通过 PR 回合并 `main`，随后删除 release / prep 分支。
 
 > 不要用 `npm install -g @mebular/mcp@0.3.0` 冒充双 bin 安装：`@mebular/mcp` 只提供
@@ -463,12 +475,34 @@ Get-Content SHA256SUMS.txt | ForEach-Object {
 
 验收标准：
 
-- `SHA256SUMS.txt` 恰好覆盖 4 行：1 个 `.dmg`、1 个 `.exe`、1 个 `.AppImage`、1 个 `.deb`；
+- `SHA256SUMS.txt` 覆盖 1 个 `.dmg`、1 个 `.exe`、1 个 `.AppImage`、1 个 `.deb` 和 1 个
+  `mebular-hermes-plugins-<version>.tar.gz`（至少 5 行）；允许未来新增 Release 资产，
+  不要求总数固定为 4；
 - 文件名与第 0.1 节一致；没有额外平台包或调试产物；
 - macOS 打开 DMG 后能启动；Windows NSIS 能安装并启动；Linux AppImage 可执行，deb 可安装；
 - 首次启动能进入锁定控制台，`/healthz` 正常；
 - 全部为 **unsigned** 发布：macOS Gatekeeper 与 Windows SmartScreen 会拦截，按 Release
   notes 的绕过步骤操作。签名、公证与自动更新不在 v0.3.0 范围。
+
+Hermes 插件 tarball 的离线验收（用临时 `HERMES_HOME`，不碰真实 `~/.hermes`）：
+
+```bash
+VERSION="$(node -p "require('./package.json').version")"
+TARBALL="release-assets/mebular-hermes-plugins-${VERSION}.tar.gz"
+tar -tzf "$TARBALL"
+TMP_HOME="$(mktemp -d)"
+mkdir -p "$TMP_HOME/bundle"
+tar -xzf "$TARBALL" -C "$TMP_HOME/bundle"
+HERMES_HOME="$TMP_HOME/hermes" "$TMP_HOME/bundle/install.sh"
+test -f "$TMP_HOME/hermes/plugins/mebular/plugin.yaml"
+test -f "$TMP_HOME/hermes/plugins/mebular-companion/plugin.yaml"
+python3 -m py_compile "$TMP_HOME/hermes/plugins/mebular/__init__.py"
+rm -rf "$TMP_HOME"
+```
+
+预期：安装脚本打印 `hermes config set memory.provider mebular`；目录名是
+`plugins/mebular`（不是 `mebular-memory`）；重复安装会生成 `.bak-<timestamp>`；脚本不启动
+Hermes，也不修改 `MEMORY.md` / `USER.md`。完整的自动校验是 `npm run verify:hermes:package`。
 
 安装包内的 runtime 结构、本地打包与签名后续见
 [`DESKTOP_RELEASE.md`](DESKTOP_RELEASE.md)。
@@ -525,7 +559,10 @@ Get-Content SHA256SUMS.txt | ForEach-Object {
 | desktop 报 tarball 版本不一致 | verify 的 tarball 与根版本不匹配；确认下载的是同一 run 的 `release-tarballs`。 |
 | desktop 报缺少 `@mebular/core/packages/...` | 根包 `files` 未包含运行时目录；修 `package.json` 后重跑 verify。 |
 | packaged smoke 找不到 `Resources` | electron-builder 产物路径变化；按日志检查 `dist/` 实际目录。 |
-| Release 资产数不是 1 | 某个 desktop job 上传了额外文件或缺失；检查 artifact 内容后重跑。 |
+| Release 资产数不是 1 | 某个 desktop job 上传了额外文件或缺失；检查 artifact 内容后重跑。Hermes 插件 tarball 是独立允许的额外资产，不要按“只有 4 个”判断。 |
+| verify:hermes:package 报 tarball 版本不一致 | 根 `package.json` 与 `integrations/hermes/*/plugin.yaml` 不同；先跑 `npm run verify:release-version` 定位。 |
+| Hermes 报找不到 provider | 目录必须是 `$HERMES_HOME/plugins/mebular`；`memory.provider` 必须同为 `mebular`，不能是 `mebular-memory`。 |
+| install.sh 报缺少源目录 | 必须在解压后的 tarball 根目录运行；不要只复制 `install.sh`。 |
 | checksum 校验失败 | 下载不完整或资产被覆盖；重新下载，必要时重跑 release job。 |
 | 安装 tarball 报找不到 `@mebular/*` | 检查 `scripts/publish-manifest.mjs` 是否在 prepack 生效、发布顺序是否完整。 |
 | DSH 里看不到 `mcp__mebular__*` 工具 | App/daemon 未运行或端口不一致。先 `curl http://127.0.0.1:7331/healthz`，再核对 host 解析结果。 |
@@ -654,6 +691,7 @@ git push -u origin release/v0.1.0
 | `npm audit --omit=dev` | ✅ | 0 vulnerabilities |
 | `npm run check:docs` | ✅ | 7/7 |
 | `npm run verify:mcp:publish` | ⏳ | 发布分支上由 Publish verify 重跑 |
+| `npm run verify:hermes:package` | ✅ | 离线构建 / 安装 / py_compile / 入口 / 备份 / 失败原子性 |
 | `npm run verify:dsh-plugin` | ✅ | 136 checks：bundle / patch / runtime bridge / client contract / tarball |
 | DSH 真实 E2E（min） | ✅ | `@deepseek-ai/dsh@0.2.1-rc.2`：6 场景 121/121（2026-10-26 本地复跑） |
 | DSH 真实 E2E（latest） | ✅ | npm `latest`（当时同为 `0.2.1-rc.2`）：6 场景 121/121 |

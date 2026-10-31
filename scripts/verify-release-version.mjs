@@ -166,6 +166,23 @@ export function verifyReleaseVersion({ root = SCRIPT_ROOT, version, tag = `v${ve
     add('packages/memory-runtime/src/sidecar/config.ts SIDECAR_RUNTIME_VERSION', value === version, `${value} != ${version}`);
   });
 
+  // ---- Hermes 插件目录清单（Release tarball，不进 npm） ----
+  safe('Hermes plugin.yaml', () => {
+    for (const rel of [
+      'integrations/hermes/mebular-memory/plugin.yaml',
+      'integrations/hermes/mebular-companion/plugin.yaml',
+    ]) {
+      const file = join(root, rel);
+      if (!existsSync(file)) {
+        add(rel, false, '不存在');
+        continue;
+      }
+      const source = readText(file);
+      const value = /^version:\s*["']?([^"'\s#]+)["']?\s*(?:#.*)?$/m.exec(source)?.[1];
+      add(`${rel} version`, value === version, `${value} != ${version}`);
+    }
+  });
+
   safe('packages/opencode-plugin/index.js PACKAGE_VERSION', () => {
     const file = join(root, 'packages/opencode-plugin/index.js');
     if (!existsSync(file)) {

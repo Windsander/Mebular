@@ -93,15 +93,33 @@ when the MCP setting `memoryRuntime.enabled=true` (or when you start it manually
    While it is ready, `<home>/memory-runtime.json` exists and contains the sidecar URL
    plus `tokenFile` (normally `<home>/memory-runtime/host-token`).
 
-3. Install the provider as `plugins/mebular`, because Hermes uses the directory name as
-   the value of `memory.provider`:
+3. Install the provider from the release bundle (available **after** the 0.3.0
+   release; use the source command below before the release). The provider must be
+   installed as `plugins/mebular`, because Hermes uses the directory name as the value
+   of `memory.provider`:
+
+   ```bash
+   gh release download v0.3.0 -p 'mebular-hermes-plugins-*.tar.gz'
+   mkdir -p mebular-hermes-plugins
+   tar -xzf mebular-hermes-plugins-0.3.0.tar.gz -C mebular-hermes-plugins
+   cd mebular-hermes-plugins
+
+   HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}" ./install.sh
+   hermes config set memory.provider mebular
+   ```
+
+   The installer places the provider at `plugins/mebular` and the companion at
+   `plugins/mebular-companion`. Existing directories are backed up as
+   `.bak-<timestamp>`; a failed install exits non-zero and restores them. The directory
+   name must be `mebular`, **not** `mebular-memory`.
+
+   From a source checkout before the release:
 
    ```bash
    HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
-
    mkdir -p "$HERMES_HOME/plugins"
-   rm -rf "$HERMES_HOME/plugins/mebular"
    cp -R integrations/hermes/mebular-memory "$HERMES_HOME/plugins/mebular"
+   cp -R integrations/hermes/mebular-companion "$HERMES_HOME/plugins/mebular-companion"
    hermes config set memory.provider mebular
    ```
 
@@ -117,11 +135,12 @@ group/world-readable token files on POSIX. `MEBULAR_MEMORY_RUNTIME_TOKEN` is onl
 test/troubleshooting override. It is **not** the MCP capability token, and the provider
 never reads MCP tokens, `tokens.json` or Hermes model credentials.
 
-Optional companion (host-model candidates):
+Installing or enabling the provider does not import, mirror or dual-write Hermes'
+built-in `MEMORY.md` / `USER.md`; those files keep working and remain owned by Hermes.
+
+Optional companion (host-model candidates, installed by the same `install.sh`):
 
 ```bash
-rm -rf "$HERMES_HOME/plugins/mebular-companion"
-cp -R integrations/hermes/mebular-companion "$HERMES_HOME/plugins/mebular-companion"
 hermes plugins enable mebular-companion
 export MEBULAR_COMPANION_ENABLED=1
 ```

@@ -127,13 +127,15 @@ Electron。
   `npm run build` → `npm ci --prefix apps/desktop` → pack 5 个 tarball →
   `prepare-runtime` → `smoke:runtime` → `dist:dir` → packaged runtime smoke →
   `npm run smoke`（无 GUI；`ELECTRON_SKIP_BINARY_DOWNLOAD=1` 时自动 SKIP 二进制冒烟）。
-- **Publish（`.github/workflows/publish.yml`）**：`verify` 只 pack 一次 8 个 tarball，三个
-  desktop job 分别用同一批 tarball 构建安装包（其中 6 个运行时包进入桌面 runtime）：
+- **Publish（`.github/workflows/publish.yml`）**：`verify` 只 pack 一次 8 个 npm tarball，
+  并额外生成 Hermes 插件 tarball；三个 desktop job 分别用同一批 npm tarball 构建安装包
+  （其中 6 个运行时包进入桌面 runtime）：
   - `desktop-macos`（macos-latest）：Universal DMG + packaged smoke；
   - `desktop-windows`（windows-latest）：NSIS x64 + `win-unpacked` resources smoke；
   - `desktop-linux`（ubuntu-latest）：AppImage + deb x64 + `linux-unpacked` resources smoke。
-  三个 job 全部成功后才允许 `publish` 发 npm；`release` job 再上传安装包与
-  `SHA256SUMS.txt`。手动 `workflow_dispatch` 是 dry-run：只构建并上传 artifacts，不发布。
+  三个 job 全部成功后才允许 `publish` 发 npm；`release` job 再上传安装包、Hermes 插件
+  tarball 与 `SHA256SUMS.txt`。手动 `workflow_dispatch` 是 dry-run：只构建并上传 artifacts，
+  不发布。
 
 版本 SSOT：`apps/desktop/package.json`、`package-lock.json` 根 version 与
 `src/main/daemon.mjs` 的 `APP_VERSION` 必须与八个 npm 包（含 `opencode-plugin` 与

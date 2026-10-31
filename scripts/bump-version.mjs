@@ -209,6 +209,31 @@ export function bumpVersion({
     log(`  PACKAGE_VERSION -> ${version}  packages/opencode-plugin/index.js`);
   }
 
+  // ---- Hermes 插件目录清单（Release tarball，不进 npm） ----
+  for (const rel of [
+    'integrations/hermes/mebular-memory/plugin.yaml',
+    'integrations/hermes/mebular-companion/plugin.yaml',
+  ]) {
+    const file = join(root, rel);
+    if (!existsSync(file)) {
+      throw new Error(`${rel} 不存在；Hermes Release tarball 版本必须同步`);
+    }
+    const before = readFileSync(file, 'utf8');
+    const after = replaceOnce(
+      before,
+      /^(version:\s*)["']?[^"'\s#]+["']?(\s*(?:#.*)?)$/m,
+      `$1${version}$2`,
+      rel,
+    );
+    if (after === before) {
+      log(`  Hermes plugin.yaml 已是 ${version}，跳过`);
+    } else {
+      writeFileSync(file, after, 'utf8');
+      changes.push(`${rel} version -> ${version}`);
+      log(`  version -> ${version}  ${rel}`);
+    }
+  }
+
   // ---- CHANGELOG 章节占位 ----
   const clFile = join(root, 'CHANGELOG.md');
   const HEADER =
@@ -299,7 +324,7 @@ async function main(argv) {
       log: (line) => console.log(line),
     });
     console.log(
-      `✓ 已同步为 ${result.tag}（${RELEASE_PACKAGES.length} 个 npm 包 + 根 lock + 桌面 App + MCP/OpenCode 版本源 + CHANGELOG）`,
+      `✓ 已同步为 ${result.tag}（${RELEASE_PACKAGES.length} 个 npm 包 + 根 lock + 桌面 App + MCP/OpenCode 版本源 + Hermes plugin.yaml + CHANGELOG）`,
     );
     return 0;
   } catch (error) {

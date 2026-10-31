@@ -1,7 +1,7 @@
 name: Publish
 
 # 发布顺序（push 到 release/v*）：
-#   verify（版本 SSOT + lint/test + 8 个发布 tarball）
+#   verify（版本 SSOT + lint/test + 8 个 npm tarball + Hermes 插件 tarball）
 #     → dsh-e2e（复用 dsh-e2e.yml：真实 DSH 最低版 + latest；失败即阻断发布）
 #     → preflight（npm token 可用性；失败则后续全部不启动）
 #     → desktop-macos / desktop-windows / desktop-linux
@@ -9,7 +9,7 @@ name: Publish
 #     → publish（直接发布 verify 产出的 7 个 lockstep tarball）
 #     → publish-dsh（dsh-plugin tarball）
 #     → visibility（八个包均可 npm view + latest 指向本次版本才继续）
-#     → release（三平台安装包 + SHA256SUMS.txt，幂等上传）
+#     → release（三平台安装包 + Hermes 插件 tarball + SHA256SUMS.txt，幂等上传）
 #
 # workflow_dispatch 是 packaging dry-run：跑 verify + dsh-e2e + desktop matrix 并上传 artifacts，
 # publish / publish-dsh / visibility / release 全部跳过；TAG 从根 package.json 版本生成。
@@ -32,7 +32,7 @@ concurrency:
 
 jobs:
   verify:
-    name: verify (SSOT / lint / test / 8 tarballs)
+    name: verify (SSOT / lint / test / 8 npm tarballs + Hermes)
     runs-on: ubuntu-latest
     timeout-minutes: 40
     outputs:
@@ -86,12 +86,12 @@ jobs:
         shell: bash
         run: |
           if [ "$MODE" = "dry-run" ]; then
-            echo "::notice title=Packaging dry-run::$TAG · 只构建三平台安装包并上传 artifacts；不发布 npm、不创建 GitHub Release。"
+            echo "::notice title=Packaging dry-run::$TAG · 只构建三平台安装包、npm tarball 与 Hermes 插件 tarball 并上传 artifacts；不发布 npm、不创建 GitHub Release。"
           else
-            echo "::notice title=Release::$TAG · 安装包全部通过后发布 npm，八个包（7 lockstep + dsh-plugin）可见后上传 GitHub Release 资产。"
+            echo "::notice title=Release::$TAG · 安装包全部通过后发布 npm，八个包（7 lockstep + dsh-plugin）可见后上传 GitHub Release 资产（含 Hermes 插件 tarball）。"
           fi
 
-      - name: Verify version SSOT (branch / 8 manifests / locks / MCP / OpenCode / CHANGELOG)
+      - name: Verify version SSOT (branch / 8 manifests / locks / MCP / OpenCode / Hermes / CHANGELOG)
         shell: bash
         run: node scripts/verify-release-version.mjs --version "$VERSION" --tag "$TAG"
 
@@ -175,6 +175,21 @@ jobs:
         with:
           name: release-tarballs
           path: release-pack/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+      # Hermes 插件只做 GitHub Release tarball，不进 npm、不要求 PyPI。
+      - name: Pack Hermes plugin bundle
+        run: npm run package:hermes
+
+      - name: Verify Hermes plugin package (install / Python entry / backup)
+        run: npm run verify:hermes:package
+
+      - name: Upload Hermes plugin bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: hermes-plugins
+          path: dist/hermes/mebular-hermes-plugins-*.tar.gz
           if-no-files-found: error
           retention-days: 7
 
@@ -568,7 +583,7 @@ jobs:
             --interval-seconds 10
 
   release:
-    name: GitHub Release installers + checksums (push only)
+    name: GitHub Release installers + Hermes plugins + checksums (push only)
     needs: [verify, publish, publish-dsh, visibility, desktop-macos, desktop-windows, desktop-linux, dsh-e2e]
     if: >-
       github.event_name == 'push'
@@ -593,7 +608,13 @@ jobs:
           path: release-assets
           merge-multiple: true
 
-      - name: Verify asset set (1 dmg / 1 exe / 1 AppImage / 1 deb)
+      - name: Download Hermes plugin bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: hermes-plugins
+          path: release-assets
+
+      - name: Verify asset set (1 dmg / 1 exe / 1 AppImage / 1 deb / 1 Hermes tarball)
         shell: bash
         run: |
           set -euo pipefail
@@ -605,16 +626,29 @@ jobs:
               exit 1
             fi
           done
+          HERMES_TARBALL="mebular-hermes-plugins-${TAG#v}.tar.gz"
+          if [ ! -f "release-assets/$HERMES_TARBALL" ]; then
+            echo "::error::缺少 Hermes 插件 tarball：$HERMES_TARBALL"
+            ls -l release-assets
+            exit 1
+          fi
+          HERMES_COUNT="$(find release-assets -maxdepth 1 -type f -name 'mebular-hermes-plugins-*.tar.gz' | wc -l | tr -d ' ')"
+          if [ "$HERMES_COUNT" -ne 1 ]; then
+            echo "::error::期望 1 个 Hermes 插件 tarball，实际 ${HERMES_COUNT} 个"
+            ls -l release-assets
+            exit 1
+          fi
           ls -lh release-assets
 
-      - name: Generate SHA256SUMS.txt (installers only, stable order)
+      - name: Generate SHA256SUMS.txt (installers + Hermes plugins, stable order)
         shell: bash
         run: |
           set -euo pipefail
           (
             cd release-assets
             find . -maxdepth 1 -type f \
-              \( -name '*.dmg' -o -name '*.exe' -o -name '*.AppImage' -o -name '*.deb' \) \
+              \( -name '*.dmg' -o -name '*.exe' -o -name '*.AppImage' -o -name '*.deb' \
+                 -o -name 'mebular-hermes-plugins-*.tar.gz' \) \
               -printf '%f\n' | LC_ALL=C sort | xargs sha256sum
           ) > SHA256SUMS.txt
           cat SHA256SUMS.txt
@@ -655,7 +689,7 @@ jobs:
               --target "$GITHUB_SHA"
           fi
 
-      - name: Upload installers + checksums (idempotent, --clobber)
+      - name: Upload installers + Hermes plugins + checksums (idempotent, --clobber)
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -666,6 +700,7 @@ jobs:
             release-assets/*.exe \
             release-assets/*.AppImage \
             release-assets/*.deb \
+            release-assets/mebular-hermes-plugins-*.tar.gz \
             SHA256SUMS.txt \
             --clobber
           echo "Release $TAG 资产："

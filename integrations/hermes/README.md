@@ -1,11 +1,12 @@
 # Hermes integration（Mebular 0.3）
 
-本目录只包含 Python 侧集成，不依赖 Mebular TypeScript 源码，也不修改 Hermes 核心：
+本目录包含 Python 侧集成与 Release 安装脚本，不依赖 Mebular TypeScript 源码，也不修改 Hermes 核心：
 
-| 目录 | 类型 | 作用 |
+| 目录/文件 | 类型 | 作用 |
 |---|---|---|
 | [`mebular-memory/`](./mebular-memory/) | `MemoryProvider`（外部 memory provider，单选） | 自动 recall + 每轮 ingest + 压缩/会话边界归档 |
 | [`mebular-companion/`](./mebular-companion/) | 普通插件，`kind: standalone` | 可选：用宿主模型 `ctx.llm` 抽取 `CandidateRecord` |
+| [`install.sh`](./install.sh) | Release 安装脚本 | 装成 `plugins/mebular` + `plugins/mebular-companion`，备份旧目录 |
 
 ## Hermes 调查结论
 
@@ -22,23 +23,56 @@
 9. **`ctx.llm` 是插件能力，不是 MemoryProvider 能力**：`ctx.llm.complete` / `complete_structured` 使用宿主凭据与 trust gate；插件拿不到 token。companion 因此独立、可选，核心 provider 不 import 它。
 10. **工具面**：memory provider 可以提供工具，但 Mebular 0.3 决定不新增 `runtime_*` MCP 工具，29 个 MCP 工具保持不变。本 provider `get_tool_schemas()` 返回空，MCP 继续承担显式治理。
 
-## 快速安装
+## 一键安装（Release 资产）
+
+> 0.3.0 尚未发布；下面的 GitHub Release 资产在**发布后**提供。发布前或从源码开发时，使用文末的“源码安装”。
+
+发布后，GitHub Release 会提供 `mebular-hermes-plugins-<version>.tar.gz`，与 npm 包使用同一版本号。不需要 PyPI，也不需要手工查找 `$HERMES_HOME`：
+
+```bash
+# 1) 下载并解压（示例版本 0.3.0）
+gh release download v0.3.0 -p 'mebular-hermes-plugins-*.tar.gz'
+mkdir -p mebular-hermes-plugins
+tar -xzf mebular-hermes-plugins-0.3.0.tar.gz -C mebular-hermes-plugins
+cd mebular-hermes-plugins
+
+# 2) 安装到 $HERMES_HOME/plugins（默认 ~/.hermes/plugins）
+HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}" ./install.sh
+
+# 3) 激活 memory provider
+hermes config set memory.provider mebular
+hermes memory status
+```
+
+`install.sh` 的行为：
+
+- 把 `mebular/` 安装为 `$HERMES_HOME/plugins/mebular`，把 `mebular-companion/` 安装为 `$HERMES_HOME/plugins/mebular-companion`；
+- 已有目录先备份为 `.bak-<timestamp>`，不会静默覆盖；
+- 先暂存并校验两个插件，再一次性替换；失败时非零退出并恢复旧目录，不留下部分安装；
+- 只打印下一步 `hermes config set memory.provider mebular`，不自行修改 Hermes 配置、不启动/重启 Hermes。
+
+> **目录名必须是 `mebular`，不是 `mebular-memory`。** Hermes 按 `$HERMES_HOME/plugins/<name>/` 发现 provider，`<name>` 就是 `memory.provider` 的值；仓库源码目录名只是开发时的名字。
+>
+> 安装或启用 provider **不会导入、镜像或双写** Hermes 内置的 `MEMORY.md` / `USER.md`；内置记忆继续由 Hermes 自己维护。
+
+可选 companion 已由同一个 `install.sh` 安装，但默认关闭，且不占 provider 名额：
+
+```bash
+hermes plugins enable mebular-companion
+export MEBULAR_COMPANION_ENABLED=1
+```
+
+### 源码安装（发布前 / 开发）
 
 ```bash
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
-
-# memory provider
 mkdir -p "$HERMES_HOME/plugins"
-rm -rf "$HERMES_HOME/plugins/mebular"
+
+# memory provider 必须安装为 plugins/mebular
 cp -R integrations/hermes/mebular-memory "$HERMES_HOME/plugins/mebular"
-hermes config set memory.provider mebular
-
-# 可选 companion（不占 provider 名额）
-rm -rf "$HERMES_HOME/plugins/mebular-companion"
 cp -R integrations/hermes/mebular-companion "$HERMES_HOME/plugins/mebular-companion"
-hermes plugins enable mebular-companion
-export MEBULAR_COMPANION_ENABLED=1
 
+hermes config set memory.provider mebular
 hermes memory status
 ```
 

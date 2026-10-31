@@ -146,6 +146,27 @@ describe('LlamaCppInferenceEngine', () => {
     expect(adapter.getView()).toMatchObject({ state: 'stopped', packId: null });
   });
 
+  it('requireBinaryPath 时没有 EngineInstaller 路径就拒绝 spawn', async () => {
+    let created = 0;
+    const adapter = new LlamaCppInferenceEngine({
+      requireBinaryPath: true,
+      engineFactory: (options) => {
+        created += 1;
+        return fakeEngine(options);
+      },
+    });
+    await expect(adapter.start({
+      packId: 'pack',
+      modelPath: SECRET_PATH,
+      modelId: 'model',
+    })).rejects.toMatchObject({
+      code: 'engine_not_installed',
+      status: 503,
+    });
+    expect(created).toBe(0);
+    expect(adapter.getView()).toMatchObject({ state: 'stopped' });
+  });
+
   it('启动过程中 stop 不会等待自身而死锁', async () => {
     let release!: (value: EngineConnection) => void;
     const adapter = new LlamaCppInferenceEngine({

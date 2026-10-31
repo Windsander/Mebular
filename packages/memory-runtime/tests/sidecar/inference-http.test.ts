@@ -35,6 +35,7 @@ function job(state: ModelInstallJob['state'] = 'downloading'): ModelInstallJob {
     packId: PACK_ID,
     modelId: MODEL_ID,
     state,
+    phase: state === 'completed' ? 'engine' : 'model',
     progress: state === 'completed' ? 1 : 0.5,
     downloadedBytes: 50,
     totalBytes: 100,
@@ -57,6 +58,12 @@ function engine(): InferenceEngineView {
     crashCount: 0,
     restartCount: 0,
     lastError: null,
+    installed: true,
+    release: 'b12017',
+    platform: 'darwin',
+    arch: 'arm64',
+    binaryReady: true,
+    reason: null,
   };
 }
 
@@ -95,6 +102,20 @@ function catalog(): ModelCatalogView {
     active: { source: 'heuristic', packId: null, modelId: null, engine: engine() },
     providers: [],
     install: null,
+    engine: {
+      state: 'installed',
+      installed: true,
+      release: 'b12017',
+      platform: 'darwin',
+      arch: 'arm64',
+      asset: 'llama-b12017-bin-macos-arm64.tar.gz',
+      binaryReady: true,
+      reason: null,
+      progress: 1,
+      installedAt: 1000,
+      verifiedAt: 1000,
+      supported: true,
+    },
     warnings: [],
   };
 }
@@ -284,6 +305,14 @@ describe('sidecar model runtime HTTP', () => {
     expect(models.status).toBe(200);
     expect(modelsBody.ok).toBe(true);
     expect(modelsBody.data.packs[0].packId).toBe(PACK_ID);
+    expect(modelsBody.data.engine).toMatchObject({
+      installed: true,
+      release: 'b12017',
+      platform: 'darwin',
+      arch: 'arm64',
+      binaryReady: true,
+      reason: null,
+    });
     expect(JSON.stringify(modelsBody)).not.toContain('host-token');
 
     const version = await fetch(`${server.url}/version`, { headers: auth() });
@@ -299,7 +328,8 @@ describe('sidecar model runtime HTTP', () => {
     const statusBody = await status.json() as any;
     expect(statusBody.data.inference).toMatchObject({
       installedPackIds: [PACK_ID],
-      install: { jobId: 'job_http' },
+      install: { jobId: 'job_http', phase: 'model' },
+      engine: { installed: true, binaryReady: true, release: 'b12017' },
     });
   });
 

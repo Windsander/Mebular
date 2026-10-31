@@ -25,6 +25,12 @@ import { findModelPack } from '../../src/inference/catalog.js';
 import { CURATED_MODEL_PACKS } from '../../src/inference/catalog.js';
 import type { EngineStatus, HardwareProfile, ModelManifest, ModelStatus } from '../../src/inference/types.js';
 import type { InferenceEngine, InferenceProcessStartRequest } from '../../src/sidecar/inference/engine.js';
+import {
+  EngineInstallerError,
+  type EngineInstallOptions,
+  type EngineInstallerLike,
+  type EngineInstallerStatus,
+} from '../../src/sidecar/inference/engine-installer.js';
 import { ModelInstaller, type ModelStoreLike } from '../../src/sidecar/inference/model-installer.js';
 import { InferenceService, type InstalledModelResolver } from '../../src/sidecar/inference/service.js';
 import { CuratedModelManifestResolver, FileModelManifestResolver } from '../../src/sidecar/inference/manifest.js';
@@ -316,6 +322,70 @@ class FakeEngineAdapter implements InferenceEngine {
   }
 }
 
+class FakeEngineInstaller implements EngineInstallerLike {
+  installed: boolean;
+  stayUninstalled = false;
+  fail: Error | null = null;
+  hold: Promise<void> | null = null;
+  ensureCalls = 0;
+  initCalls = 0;
+  removeCalls = 0;
+  disposeCalls = 0;
+
+  constructor(options: { installed?: boolean } = {}) {
+    this.installed = options.installed ?? true;
+  }
+
+  async init(): Promise<void> {
+    this.initCalls += 1;
+  }
+
+  status(): EngineInstallerStatus {
+    return {
+      state: this.installed ? 'installed' : 'not_installed',
+      installed: this.installed,
+      release: 'b12017',
+      platform: 'darwin',
+      arch: 'arm64',
+      asset: 'llama-b12017-bin-macos-arm64.tar.gz',
+      binaryReady: this.installed,
+      reason: this.installed ? null : 'engine_not_installed',
+      progress: this.installed ? 1 : 0,
+      installedAt: this.installed ? NOW : null,
+      verifiedAt: this.installed ? NOW : null,
+      supported: true,
+    };
+  }
+
+  async ensureInstalled(options: EngineInstallOptions = {}): Promise<EngineInstallerStatus> {
+    this.ensureCalls += 1;
+    if (this.fail) throw this.fail;
+    options.onProgress?.({
+      phase: 'downloading',
+      progress: 0.5,
+      downloadedBytes: 50,
+      totalBytes: 100,
+    });
+    if (this.hold) await this.hold;
+    if (!this.stayUninstalled) this.installed = true;
+    return this.status();
+  }
+
+  binaryPath(): string | null {
+    return this.installed ? join(SECRET_PATH, 'engine', 'llama-server') : null;
+  }
+
+  async remove(): Promise<{ removed: boolean }> {
+    this.removeCalls += 1;
+    this.installed = false;
+    return { removed: true };
+  }
+
+  async dispose(): Promise<void> {
+    this.disposeCalls += 1;
+  }
+}
+
 function hardware(overrides: Partial<HardwareProfile> = {}): HardwareProfile {
   return {
     platform: 'darwin',
@@ -336,6 +406,7 @@ interface ServiceHarness {
   store: FakeStore;
   model: FakeInferenceProvider;
   engine: FakeEngineAdapter;
+  engineInstaller: FakeEngineInstaller;
   service: InferenceService;
   config: SidecarConfig;
 }
@@ -346,6 +417,7 @@ async function createService(options: {
   store?: FakeStore;
   model?: FakeInferenceProvider;
   engine?: FakeEngineAdapter;
+  engineInstaller?: FakeEngineInstaller;
   hardware?: HardwareProfile | null;
   resolveManifest?: (packId: string) => Promise<ModelManifest>;
   resolveInstalledModel?: InstalledModelResolver;
@@ -370,6 +442,7 @@ async function createService(options: {
   }
   const model = options.model ?? new FakeInferenceProvider(config.model);
   const engine = options.engine ?? new FakeEngineAdapter();
+  const engineInstaller = options.engineInstaller ?? new FakeEngineInstaller();
   const service = new InferenceService({
     paths: {
       dataDir: home,
@@ -380,6 +453,7 @@ async function createService(options: {
     inference: model,
     store,
     engineAdapter: engine,
+    engineInstaller,
     ...(options.useCuratedManifest
       ? {}
       : {
@@ -402,7 +476,7 @@ async function createService(options: {
     ...(options.createJobId ? { createJobId: options.createJobId } : {}),
   });
   await service.init();
-  return { home, store, model, engine, service, config };
+  return { home, store, model, engine, engineInstaller, service, config };
 }
 
 async function waitFor<T>(fn: () => T | Promise<T>, timeoutMs = 1000): Promise<T> {
@@ -581,6 +655,105 @@ describe('sidecar model install manager', () => {
     await expect(manager.install(PACK_ID)).rejects.toMatchObject({ code: 'disk_insufficient' });
     expect(store.downloadCalls).toHaveLength(0);
   });
+
+  it('安装任务按 model → engine 阶段推进，引擎已安装时完成', async () => {
+    const home = await tempDir();
+    const store = new FakeStore();
+    store.downloadImpl = async (options) => {
+      options.onStatus?.(downloadStatus('downloading', 40));
+      options.onStatus?.(downloadStatus('installing', 100));
+      store.statuses.set(PACK_ID, {
+        packId: PACK_ID,
+        modelId: MODEL_ID,
+        state: 'installed',
+        installedBytes: 100,
+        expectedBytes: 100,
+      });
+      return installResult();
+    };
+    const engineInstaller = new FakeEngineInstaller({ installed: false });
+    let release!: () => void;
+    engineInstaller.hold = new Promise<void>((resolve) => { release = resolve; });
+    const manager = new ModelInstaller({
+      dataDir: home,
+      store,
+      resolvePack: () => findModelPack(PACK_ID),
+      resolveManifest: async () => manifest(),
+      engineInstaller,
+      now: () => NOW,
+      createJobId: () => 'job_phase',
+    });
+    await manager.init();
+    await manager.install(PACK_ID);
+    const enginePhase = await waitFor(() => {
+      const job = manager.get('job_phase');
+      return job?.phase === 'engine'
+        && (job.state === 'downloading' || job.state === 'verifying' || job.state === 'installing')
+        ? job
+        : null;
+    });
+    expect(enginePhase!.phase).toBe('engine');
+    expect(store.downloadCalls).toHaveLength(1);
+    release();
+    const done = await waitFor(() => {
+      const job = manager.get('job_phase');
+      return job?.state === 'completed' ? job : null;
+    });
+    expect(done).toMatchObject({ phase: 'engine', progress: 1, error: null });
+    expect(done!.warnings).toEqual(expect.arrayContaining(['model_installed', 'engine_ready']));
+    expect(engineInstaller.ensureCalls).toBe(1);
+  });
+
+  it('引擎安装失败时模型仍在、job 结构化失败；重试跳过已安装模型', async () => {
+    const home = await tempDir();
+    const store = new FakeStore();
+    store.downloadImpl = async (options) => {
+      options.onStatus?.(downloadStatus('downloading', 100));
+      store.statuses.set(PACK_ID, {
+        packId: PACK_ID,
+        modelId: MODEL_ID,
+        state: 'installed',
+        installedBytes: 100,
+        expectedBytes: 100,
+      });
+      return installResult();
+    };
+    const engineInstaller = new FakeEngineInstaller({ installed: false });
+    engineInstaller.fail = new EngineInstallerError('engine_checksum_mismatch', 'checksum mismatch', true);
+    const manager = new ModelInstaller({
+      dataDir: home,
+      store,
+      resolvePack: () => findModelPack(PACK_ID),
+      resolveManifest: async () => manifest(),
+      engineInstaller,
+      now: () => NOW,
+      createJobId: () => 'job_engine_failed',
+    });
+    await manager.init();
+    await manager.install(PACK_ID);
+    const failed = await waitFor(() => {
+      const job = manager.get('job_engine_failed');
+      return job?.state === 'failed' ? job : null;
+    });
+    expect(failed).toMatchObject({
+      phase: 'engine',
+      error: { code: 'engine_checksum_mismatch', retryable: true },
+    });
+    expect(failed!.warnings).toEqual(expect.arrayContaining(['model_installed', 'engine_install_failed']));
+    expect((await store.getModelStatus(PACK_ID)).state).toBe('installed');
+
+    engineInstaller.fail = null;
+    const retry = await manager.install(PACK_ID);
+    expect(retry).toMatchObject({ phase: 'engine', state: 'installing' });
+    expect(store.downloadCalls).toHaveLength(1);
+    const completed = await waitFor(() => {
+      const job = manager.get('job_engine_failed');
+      return job?.state === 'completed' ? job : null;
+    });
+    expect(completed).toMatchObject({ phase: 'engine', progress: 1, error: null });
+    expect(engineInstaller.ensureCalls).toBe(2);
+    expect(store.downloadCalls).toHaveLength(1);
+  });
 });
 
 describe('sidecar model runtime service', () => {
@@ -596,6 +769,8 @@ describe('sidecar model runtime service', () => {
     });
     expect(harness.engine.startCalls).toBe(1);
     expect(harness.engine.running).toBe(true);
+    expect(harness.engine.current?.binaryPath).toContain('llama-server');
+    expect(harness.engineInstaller.ensureCalls).toBe(1);
     expect(harness.store.verifyCalls).toBe(1);
     expect(harness.model.reconfigures.at(-1)).toMatchObject({
       source: 'local',
@@ -623,6 +798,41 @@ describe('sidecar model runtime service', () => {
     expect(result.warnings).toEqual(expect.arrayContaining(['engine_unavailable', 'engine:startup_timeout']));
     expect(harness.engine.running).toBe(false);
     expect(harness.model.reconfigures.at(-1)?.source).toBe('heuristic');
+  });
+
+  it('引擎不可用/安装失败时 activate 回退 heuristic，start 返回结构化错误', async () => {
+    const missing = new FakeEngineInstaller({ installed: false });
+    missing.stayUninstalled = true;
+    const notInstalled = await createService({ engineInstaller: missing });
+    const activateMissing = await notInstalled.service.activate(PACK_ID);
+    expect(activateMissing).toMatchObject({
+      activated: false,
+      active: 'heuristic',
+      reason: 'engine_not_installed',
+    });
+    expect(notInstalled.engine.startCalls).toBe(0);
+    await expect(notInstalled.service.startEngine(PACK_ID)).rejects.toMatchObject({
+      code: 'engine_not_installed',
+      status: 503,
+    });
+
+    const failing = new FakeEngineInstaller({ installed: false });
+    failing.fail = new EngineInstallerError('engine_checksum_mismatch', 'checksum', true);
+    const installFailed = await createService({ engineInstaller: failing });
+    const activateFailed = await installFailed.service.activate(PACK_ID);
+    expect(activateFailed).toMatchObject({
+      activated: false,
+      active: 'heuristic',
+      reason: 'engine_checksum_mismatch',
+    });
+    expect(activateFailed.warnings).toEqual(expect.arrayContaining([
+      'engine_checksum_mismatch',
+      'engine:engine_checksum_mismatch',
+    ]));
+    await expect(installFailed.service.startEngine(PACK_ID)).rejects.toMatchObject({
+      code: 'engine_checksum_mismatch',
+      status: 503,
+    });
   });
 
   it('deactivate 回到 heuristic、停止引擎且保留模型文件', async () => {

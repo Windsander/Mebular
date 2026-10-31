@@ -25,6 +25,35 @@ export type ModelInstallState =
   | 'cancelled'
   | 'interrupted';
 
+/** 安装任务的当前阶段：先模型包，再引擎资产。 */
+export type ModelInstallPhase = 'model' | 'engine';
+
+export type EngineAssetInstallState =
+  | 'not_installed'
+  | 'downloading'
+  | 'verifying'
+  | 'extracting'
+  | 'installing'
+  | 'installed'
+  | 'failed'
+  | 'cancelled';
+
+/** 引擎资产安装状态（公开视图）；不含绝对路径、URL 或 token。 */
+export interface EngineAssetInstallView {
+  state: EngineAssetInstallState;
+  installed: boolean;
+  release: string | null;
+  platform: string;
+  arch: string;
+  asset: string | null;
+  binaryReady: boolean;
+  reason: string | null;
+  progress: number;
+  installedAt: number | null;
+  verifiedAt: number | null;
+  supported: boolean;
+}
+
 export interface ModelInstallError {
   /** 稳定错误码；例如 manifest_missing / disk_insufficient / checksum_mismatch。 */
   code: string;
@@ -39,7 +68,9 @@ export interface ModelInstallJob {
   packId: string;
   modelId: string;
   state: ModelInstallState;
-  /** 0–1；下载阶段按总字节计算，校验/安装阶段视为 1。 */
+  /** 当前阶段：模型包下载/校验/安装，或引擎资产准备。 */
+  phase: ModelInstallPhase;
+  /** 0–1；按当前 phase 计算（模型阶段按总字节，引擎阶段按引擎安装进度）。 */
   progress: number;
   downloadedBytes: number;
   totalBytes: number;
@@ -65,6 +96,18 @@ export interface InferenceEngineView {
   restartCount: number;
   /** 只给稳定 code 与脱敏短句。 */
   lastError: { code: string; message: string } | null;
+  /**
+   * 引擎资产（llama.cpp 二进制）安装状态。sidecar service 注入；
+   * engine adapter 自身不感知安装目录。
+   */
+  asset?: EngineAssetInstallView;
+  /** 引擎资产状态的关键字段平铺，便于 /status.inference.engine 直接读取。 */
+  installed?: boolean;
+  release?: string | null;
+  platform?: string;
+  arch?: string;
+  binaryReady?: boolean;
+  reason?: string | null;
 }
 
 export interface ModelActiveView {
@@ -147,6 +190,8 @@ export interface ModelCatalogView {
   active: ModelActiveView;
   providers: ModelProvider[];
   install: ModelInstallJob | null;
+  /** 引擎资产安装状态；与模型安装/激活分开，不包含路径。 */
+  engine: EngineAssetInstallView;
   warnings: string[];
 }
 
@@ -250,6 +295,16 @@ export type InferenceErrorCode =
   | 'engine_unavailable'
   | 'engine_not_running'
   | 'engine_pack_mismatch'
+  | 'engine_not_installed'
+  | 'engine_asset_unsupported'
+  | 'engine_download_failed'
+  | 'engine_http_error'
+  | 'engine_size_mismatch'
+  | 'engine_checksum_mismatch'
+  | 'engine_extract_failed'
+  | 'engine_binary_missing'
+  | 'engine_install_failed'
+  | 'engine_storage_unavailable'
   | 'storage_unavailable'
   | 'not_active'
   | 'cancelled';

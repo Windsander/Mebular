@@ -24,15 +24,27 @@ export interface EngineAcquireRequest {
   modelId?: string;
 }
 
-/** LlamaServerEngine 的最小子集；测试可注入 fake。 */
-export interface LlamaProcessLike {
+/**
+ * 本地 native engine 的受管子进程（managed-child）。
+ *
+ * 这是 sidecar 私有的进程抽象，不是 service：
+ * - 只有 `LlamaCppInferenceEngine`/`InferenceService` 能启动/停止；
+ * - 没有公开 API、独立 token、独立安装或独立配置；
+ * - 不承载记忆、不写图、不参与同步。
+ *
+ * `LlamaServerEngine` 是该接口当前唯一的 llama.cpp 实现；测试可注入 fake。
+ */
+export interface InferenceProcess {
   acquire(): Promise<EngineConnection>;
   getStatus(): EngineStatus;
   stop?(): Promise<void>;
   resetCircuit?(): void;
 }
 
-export type InferenceProcessFactory = (options: LlamaServerEngineOptions) => LlamaProcessLike;
+/** @deprecated 使用 `InferenceProcess`；保留别名兼容 C8a/C8b 调用方。 */
+export type LlamaProcessLike = InferenceProcess;
+
+export type InferenceProcessFactory = (options: LlamaServerEngineOptions) => InferenceProcess;
 
 /** service 依赖的引擎 adapter 面；测试可注入 fake。 */
 export interface InferenceEngine {
@@ -54,6 +66,10 @@ export interface InferenceEngineOptions {
   startupTimeoutMs?: number;
   idleTimeoutMs?: number;
   binaryPath?: string | null;
+  /** 动态解析 EngineInstaller 的二进制路径（sidecar 懒启动时使用）。 */
+  binaryPathProvider?: () => string | null;
+  /** 生产装配为 true：没有 EngineInstaller 校验过的路径时拒绝 spawn。 */
+  requireBinaryPath?: boolean;
 }
 
 function engineErrorMessage(code: string): string {
@@ -64,7 +80,7 @@ function engineErrorMessage(code: string): string {
   return '模型引擎不可用';
 }
 
-function defaultEngineFactory(options: LlamaServerEngineOptions): LlamaProcessLike {
+function defaultEngineFactory(options: LlamaServerEngineOptions): InferenceProcess {
   return new LlamaServerEngine(options);
 }
 
@@ -76,7 +92,9 @@ export class LlamaCppInferenceEngine implements InferenceEngine {
   private readonly defaultStartupTimeoutMs: number;
   private readonly defaultIdleTimeoutMs: number;
   private readonly binaryPath: string | null;
-  private current: { request: InferenceProcessStartRequest; engine: LlamaProcessLike | null } | null = null;
+  private readonly binaryPathProvider: (() => string | null) | null;
+  private readonly requireBinaryPath: boolean;
+  private current: { request: InferenceProcessStartRequest; engine: InferenceProcess | null } | null = null;
   private starting: Promise<void> | null = null;
 
   constructor(options: InferenceEngineOptions = {}) {
@@ -87,6 +105,8 @@ export class LlamaCppInferenceEngine implements InferenceEngine {
     this.defaultStartupTimeoutMs = Math.max(1, options.startupTimeoutMs ?? 30_000);
     this.defaultIdleTimeoutMs = Math.max(1, options.idleTimeoutMs ?? 5 * 60_000);
     this.binaryPath = options.binaryPath ?? null;
+    this.binaryPathProvider = options.binaryPathProvider ?? null;
+    this.requireBinaryPath = options.requireBinaryPath ?? false;
   }
 
   /** 记录引擎目标但不启动；用于 sidecar 重启后按配置懒启动。 */
@@ -228,12 +248,22 @@ export class LlamaCppInferenceEngine implements InferenceEngine {
   }
 
   private async createEngine(request: InferenceProcessStartRequest): Promise<void> {
+    const binaryPath = request.binaryPath
+      ?? this.binaryPathProvider?.()
+      ?? this.binaryPath
+      ?? undefined;
+    if (!binaryPath && this.requireBinaryPath) {
+      throw new InferenceError('engine_not_installed', 'llama.cpp 引擎尚未安装或未通过校验', {
+        status: 503,
+        retryable: true,
+      });
+    }
     const engine = this.engineFactory({
       modelPath: request.modelPath,
       modelId: request.modelId,
       ...(request.contextSize !== undefined ? { contextSize: request.contextSize } : {}),
       ...(request.threads !== undefined ? { threads: request.threads } : {}),
-      binaryPath: request.binaryPath ?? this.binaryPath ?? undefined,
+      binaryPath,
       startupTimeoutMs: this.defaultStartupTimeoutMs,
       idleTimeoutMs: this.defaultIdleTimeoutMs,
       autoIdleCheck: true,

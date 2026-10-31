@@ -18,6 +18,11 @@ import {
 } from '../../inference/store.js';
 import { modelManifestTotalBytes, type ModelManifest, type ModelPack, type ModelStatus } from '../../inference/types.js';
 import { readJsonFile, writeJsonAtomic } from '../atomic-json.js';
+import type {
+  EngineInstallOptions,
+  EngineInstallProgress,
+  EngineInstallerStatus,
+} from './engine-installer.js';
 import {
   MODEL_INSTALL_SCHEMA,
   InferenceError,
@@ -45,12 +50,20 @@ export type InstallPreflight = (
   manifest: ModelManifest,
 ) => Promise<InstallPreflightResult | void>;
 
+/** ModelInstaller 只需要引擎安装器的这两个方法；测试可注入 fake。 */
+export interface ModelEngineInstallerLike {
+  status(): EngineInstallerStatus;
+  ensureInstalled(options?: EngineInstallOptions): Promise<EngineInstallerStatus>;
+}
+
 export interface ModelInstallerOptions {
   dataDir: string;
   store: ModelStoreLike;
   resolvePack(packId: string): ModelPack | null;
   resolveManifest(packId: string): Promise<ModelManifest>;
   preflight?: InstallPreflight;
+  /** 模型安装完成后自动准备 llama.cpp 引擎；缺省表示不管理引擎。 */
+  engineInstaller?: ModelEngineInstallerLike;
   now?: () => number;
   createJobId?: () => string;
   /** 进度持久化节流；默认 500ms。 */
@@ -95,6 +108,17 @@ const ERROR_MESSAGES: Record<string, string> = {
   cancelled: '模型安装已取消',
   storage_unavailable: '模型存储不可用',
   install_internal_error: '模型安装内部错误',
+  engine_asset_unsupported: '当前平台没有可用的 llama.cpp 引擎资产',
+  engine_download_failed: '引擎下载失败',
+  engine_http_error: '引擎下载请求失败',
+  engine_size_mismatch: '引擎归档大小不一致',
+  engine_checksum_mismatch: '引擎归档校验失败',
+  engine_extract_failed: '引擎归档解压失败',
+  engine_binary_missing: '引擎归档缺少 llama-server',
+  engine_install_failed: '引擎安装失败',
+  engine_storage_unavailable: '引擎存储不可用',
+  engine_not_installed: '引擎尚未安装',
+  engine_install_in_progress: '引擎安装正在进行',
 };
 
 function cloneJob(job: ModelInstallJob): ModelInstallJob {
@@ -130,6 +154,7 @@ function parseStoredJob(value: unknown): ModelInstallJob | null {
     packId: value.packId,
     modelId: value.modelId,
     state: value.state,
+    phase: value.phase === 'engine' ? 'engine' : 'model',
     progress: numberOr(value.progress, 0),
     downloadedBytes: numberOr(value.downloadedBytes, 0),
     totalBytes: numberOr(value.totalBytes, 0),
@@ -179,7 +204,11 @@ function installErrorFrom(error: unknown, cancelled: boolean): ModelInstallError
     code,
     message: ERROR_MESSAGES[code] ?? ERROR_MESSAGES.install_internal_error!,
     retryable: code === 'http_error' || code === 'download_failed' || code === 'checksum_mismatch'
-      || code === 'size_mismatch',
+      || code === 'size_mismatch'
+      || code === 'engine_download_failed' || code === 'engine_http_error'
+      || code === 'engine_size_mismatch' || code === 'engine_checksum_mismatch'
+      || code === 'engine_extract_failed' || code === 'engine_install_failed'
+      || code === 'engine_storage_unavailable',
   };
 }
 
@@ -195,6 +224,7 @@ export class ModelInstaller {
   private readonly resolvePack: ModelInstallerOptions['resolvePack'];
   private readonly resolveManifest: ModelInstallerOptions['resolveManifest'];
   private readonly preflight: InstallPreflight;
+  private readonly engineInstaller: ModelEngineInstallerLike | null;
   private readonly now: () => number;
   private readonly createJobId: () => string;
   private readonly persistIntervalMs: number;
@@ -214,6 +244,7 @@ export class ModelInstaller {
     this.resolvePack = options.resolvePack;
     this.resolveManifest = options.resolveManifest;
     this.preflight = options.preflight ?? (async () => undefined);
+    this.engineInstaller = options.engineInstaller ?? null;
     this.now = options.now ?? Date.now;
     this.createJobId = options.createJobId ?? (() => `job_${randomUUID()}`);
     this.persistIntervalMs = Math.max(0, options.persistIntervalMs ?? 500);
@@ -275,7 +306,13 @@ export class ModelInstaller {
       const warnings = Array.isArray(preflight?.warnings) ? [...preflight.warnings] : [];
 
       const installed = await this.store.getModelStatus(packId);
-      if (installed.state === 'installed' && options.force !== true) {
+      const engineReady = this.engineInstaller?.status().installed === true;
+      // 模型已安装但引擎未就绪：重试只补引擎，不重新下载数 GB 的模型。
+      const engineOnly = installed.state === 'installed'
+        && options.force !== true
+        && this.engineInstaller !== null
+        && !engineReady;
+      if (installed.state === 'installed' && options.force !== true && !engineOnly) {
         throw new InferenceError('already_installed', '模型包已安装', {
           status: 409,
           details: { packId },
@@ -292,10 +329,11 @@ export class ModelInstaller {
         jobId: this.createJobId(),
         packId,
         modelId: manifest.modelId,
-        state: 'downloading',
+        state: engineOnly ? 'installing' : 'downloading',
+        phase: engineOnly ? 'engine' : 'model',
         progress: 0,
-        downloadedBytes: 0,
-        totalBytes,
+        downloadedBytes: engineOnly ? (installed.installedBytes ?? totalBytes) : 0,
+        totalBytes: engineOnly ? (installed.expectedBytes ?? totalBytes) : totalBytes,
         speedBytesPerSecond: 0,
         etaMs: null,
         startedAt: now,
@@ -308,10 +346,10 @@ export class ModelInstaller {
       const controller = new AbortController();
       this.controller = controller;
       await this.persist(true);
-      if (this.cancelReason !== null || this.job.state !== 'downloading') {
+      if (this.cancelReason !== null) {
         return cloneJob(job);
       }
-      this.task = this.run(job, manifest, controller, options.force === true);
+      this.task = this.run(job, manifest, controller, options.force === true, engineOnly);
       // run 永不 reject；这里不 await，安装通过 GET /installs/:jobId 观察。
       void this.task;
       return cloneJob(job);
@@ -333,9 +371,11 @@ export class ModelInstaller {
     await this.store.clearPartial(this.job.packId).catch(() => undefined);
     if (this.job && this.job.jobId === jobId) {
       const installed = await this.store.getModelStatus(this.job.packId).catch(() => null);
+      const engineReady = this.engineInstaller?.status().installed === true;
+      const phase = this.job.phase;
       this.controller = null;
       this.task = null;
-      if (installed?.state === 'installed') {
+      if (installed?.state === 'installed' && (phase !== 'engine' || engineReady)) {
         // 取消与原子提交赛跑：文件已经落盘，不能谎报 cancelled。
         this.job.state = 'completed';
         this.job.progress = 1;
@@ -348,6 +388,9 @@ export class ModelInstaller {
         this.job.error = null;
         if (!this.job.warnings.includes('install_completed_before_cancel')) {
           this.job.warnings = [...this.job.warnings, 'install_completed_before_cancel'];
+        }
+        if (phase === 'engine' && !this.job.warnings.includes('engine_install_completed_before_cancel')) {
+          this.job.warnings = [...this.job.warnings, 'engine_install_completed_before_cancel'];
         }
         await this.persist(true);
         return cloneJob(this.job);
@@ -395,27 +438,48 @@ export class ModelInstaller {
     manifest: ModelManifest,
     controller: AbortController,
     force: boolean,
+    engineOnly: boolean,
   ): Promise<void> {
     try {
-      const result = await this.store.download(manifest, {
-        ...(force ? { force: true } : {}),
-        signal: controller.signal,
-        onStatus: (status) => this.applyStatus(job, status),
-      });
-      if (this.cancelReason === 'cancel' || controller.signal.aborted) {
-        // cancel() 会写最终 cancelled；这里避免与它竞争。
-        return;
+      if (!engineOnly) {
+        const result = await this.store.download(manifest, {
+          ...(force ? { force: true } : {}),
+          signal: controller.signal,
+          onStatus: (status) => this.applyStatus(job, status),
+        });
+        if (this.cancelReason === 'cancel' || controller.signal.aborted) {
+          // cancel() 会写最终 cancelled；这里避免与它竞争。
+          return;
+        }
+        job.downloadedBytes = result.installedBytes;
+        job.totalBytes = result.installedBytes;
+        job.warnings = [...job.warnings, ...(job.warnings.includes('model_installed') ? [] : ['model_installed'])];
+      }
+      if (this.engineInstaller) {
+        job.phase = 'engine';
+        job.state = 'installing';
+        job.progress = 0;
+        job.speedBytesPerSecond = 0;
+        job.etaMs = null;
+        job.updatedAt = this.now();
+        await this.persist(true);
+        // 已安装且校验通过时直接跳过引擎下载；activate/start 还会再次确保。
+        if (this.engineInstaller.status().installed !== true) {
+          await this.engineInstaller.ensureInstalled({
+            signal: controller.signal,
+            onProgress: (progress) => this.applyEngineProgress(job, progress),
+          });
+        }
+        if (this.cancelReason === 'cancel' || controller.signal.aborted) return;
+        job.warnings = [...job.warnings, ...(job.warnings.includes('engine_ready') ? [] : ['engine_ready'])];
       }
       job.state = 'completed';
       job.progress = 1;
-      job.downloadedBytes = result.installedBytes;
-      job.totalBytes = result.installedBytes;
       job.speedBytesPerSecond = 0;
       job.etaMs = 0;
       job.completedAt = this.now();
       job.updatedAt = this.now();
       job.error = null;
-      job.warnings = [...job.warnings, ...(job.warnings.includes('model_installed') ? [] : ['model_installed'])];
     } catch (error) {
       if (this.cancelReason === 'cancel') {
         // cancel() 负责最终状态、partial 清理与持久化。
@@ -431,6 +495,12 @@ export class ModelInstaller {
       } else {
         job.state = 'failed';
         job.error = installErrorFrom(error, false);
+        if (job.phase === 'engine' && !job.warnings.includes('model_installed')) {
+          job.warnings = [...job.warnings, 'model_installed'];
+        }
+        if (job.phase === 'engine' && !job.warnings.includes('engine_install_failed')) {
+          job.warnings = [...job.warnings, 'engine_install_failed'];
+        }
       }
       job.speedBytesPerSecond = 0;
       job.etaMs = null;
@@ -442,6 +512,17 @@ export class ModelInstaller {
         await this.persist(true);
       }
     }
+  }
+
+  private applyEngineProgress(job: ModelInstallJob, progress: EngineInstallProgress): void {
+    if (this.job?.jobId !== job.jobId) return;
+    job.phase = 'engine';
+    job.state = progress.phase === 'downloading'
+      ? 'downloading'
+      : progress.phase === 'verifying' ? 'verifying' : 'installing';
+    job.progress = Math.min(1, Math.max(0, progress.progress));
+    job.updatedAt = this.now();
+    void this.persist(false);
   }
 
   private applyStatus(job: ModelInstallJob, status: ModelDownloadStatus): void {

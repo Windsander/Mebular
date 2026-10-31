@@ -20,8 +20,14 @@ import { ModelInstaller, type ModelStoreLike } from './model-installer.js';
 import { CuratedModelManifestResolver, FileModelManifestResolver, type ModelManifestResolver } from './manifest.js';
 import type { InferenceEngine } from './engine.js';
 import {
+  EngineInstaller,
+  EngineInstallerError,
+  type EngineInstallerLike as ManagedEngineInstaller,
+} from './engine-installer.js';
+import {
   InferenceError,
   hardwareView,
+  type EngineAssetInstallView,
   type ModelActivationView,
   type ModelActiveView,
   type ModelCatalogEntryView,
@@ -55,6 +61,8 @@ export interface InferenceServiceOptions {
   inference: SidecarInferenceProvider;
   store: ModelStoreLike;
   engineAdapter: InferenceEngine;
+  /** llama.cpp 引擎资产安装器；生产装配必须注入（默认按 dataDir 创建）。 */
+  engineInstaller?: ManagedEngineInstaller;
   manifestResolver?: ModelManifestResolver;
   manifestDir?: string;
   installManager?: ModelInstaller;
@@ -196,6 +204,7 @@ export class InferenceService implements InferenceApi {
   private readonly store: ModelStoreLike;
   private readonly manifestResolver: ModelManifestResolver;
   private readonly engineAdapter: InferenceEngine;
+  private readonly engineInstaller: ManagedEngineInstaller;
   private readonly resolveInstalledModel: InstalledModelResolver;
   private readonly detectHardwareImpl: (options: { diskPath: string }) => Promise<HardwareProfile>;
   private readonly now: () => number;
@@ -222,6 +231,12 @@ export class InferenceService implements InferenceApi {
     this.now = options.now ?? Date.now;
     this.platform = options.platform ?? process.platform;
     this.arch = options.arch ?? process.arch;
+    this.engineInstaller = options.engineInstaller ?? new EngineInstaller({
+      dataDir: options.paths.dataDir,
+      platform: this.platform,
+      arch: this.arch,
+      now: this.now,
+    });
     this.hardwareTtlMs = Math.max(1_000, options.hardwareTtlMs ?? 60_000);
     this.hardware = options.hardware ?? null;
     this.hardwareAt = this.hardware ? this.now() : 0;
@@ -239,6 +254,7 @@ export class InferenceService implements InferenceApi {
       resolvePack: (packId) => this.findPack(packId),
       resolveManifest: (packId) => this.manifestResolver.resolve(packId),
       preflight: (pack, manifest) => this.preflight(pack, manifest),
+      engineInstaller: this.engineInstaller,
       now: this.now,
       ...(options.createJobId ? { createJobId: options.createJobId } : {}),
     });
@@ -250,6 +266,11 @@ export class InferenceService implements InferenceApi {
       await this.installManager.init();
     } catch {
       this.warnings.push('install_state_unreadable');
+    }
+    try {
+      await this.engineInstaller.init();
+    } catch {
+      this.warnings.push('engine_state_unreadable');
     }
 
     const configured = this.config.model;
@@ -263,6 +284,7 @@ export class InferenceService implements InferenceApi {
           const status = await this.store.getModelStatus(packId);
           if (status.state === 'installed') {
             const installed = await this.resolveInstalledModel(packId, status);
+            const binaryPath = this.engineInstaller.binaryPath();
             await this.engineAdapter.prepare({
               packId,
               modelPath: installed.modelPath,
@@ -271,6 +293,7 @@ export class InferenceService implements InferenceApi {
               ...(installed.manifest.runtime.threads !== undefined
                 ? { threads: installed.manifest.runtime.threads }
                 : {}),
+              ...(binaryPath ? { binaryPath } : {}),
             });
             this.activePackId = packId;
           } else {
@@ -351,6 +374,7 @@ export class InferenceService implements InferenceApi {
       active: this.activeView(),
       providers: this.providers(activeSource(this.config, this.activePackId)),
       install,
+      engine: this.engineInstallView(),
       warnings: unique(warnings),
     };
   }
@@ -467,6 +491,18 @@ export class InferenceService implements InferenceApi {
         });
       }
 
+      const engine = await this.prepareEngine();
+      if (!engine.ok) {
+        await this.engineAdapter.stop().catch(() => undefined);
+        const warnings = await this.applyHeuristic(pack.packId);
+        return this.activationView(false, 'heuristic', pack.packId, engine.code, [
+          engine.code,
+          `engine:${engine.code}`,
+          ...engine.warnings,
+          ...warnings,
+        ]);
+      }
+
       try {
         await this.engineAdapter.start({
           packId: pack.packId,
@@ -476,6 +512,7 @@ export class InferenceService implements InferenceApi {
           ...(installed.manifest.runtime.threads !== undefined
             ? { threads: installed.manifest.runtime.threads }
             : {}),
+          binaryPath: engine.binaryPath,
         });
       } catch (error) {
         await this.engineAdapter.stop().catch(() => undefined);
@@ -538,6 +575,14 @@ export class InferenceService implements InferenceApi {
         );
       }
       const installed = await this.resolveInstalledModel(pack.packId, status);
+      const engine = await this.prepareEngine();
+      if (!engine.ok) {
+        throw new InferenceError(engine.code as InferenceError['code'], engine.message, {
+          status: 503,
+          retryable: engine.retryable,
+          details: { packId: pack.packId, engineCode: engine.code },
+        });
+      }
       await this.engineAdapter.start({
         packId: pack.packId,
         modelPath: installed.modelPath,
@@ -546,13 +591,14 @@ export class InferenceService implements InferenceApi {
         ...(installed.manifest.runtime.threads !== undefined
           ? { threads: installed.manifest.runtime.threads }
           : {}),
+        binaryPath: engine.binaryPath,
       });
       return {
         packId: pack.packId,
         started: true,
         stopped: false,
         reason: null,
-        warnings: [...(support?.warnings ?? [])],
+        warnings: [...(support?.warnings ?? []), ...engine.warnings],
         engine: this.engineView(),
       };
     });
@@ -649,6 +695,7 @@ export class InferenceService implements InferenceApi {
     if (this.disposed) return;
     this.disposed = true;
     await this.installManager.dispose().catch(() => undefined);
+    await this.engineInstaller.dispose().catch(() => undefined);
     await this.engineAdapter.dispose().catch(() => undefined);
   }
 
@@ -676,7 +723,58 @@ export class InferenceService implements InferenceApi {
   }
 
   private engineView(): InferenceEngineView {
-    return this.engineAdapter.getView();
+    const process = this.engineAdapter.getView();
+    const asset = this.engineInstallView();
+    return {
+      ...process,
+      asset,
+      installed: asset.installed,
+      release: asset.release,
+      platform: asset.platform,
+      arch: asset.arch,
+      binaryReady: asset.binaryReady,
+      reason: asset.reason,
+    };
+  }
+
+  private engineInstallView(): EngineAssetInstallView {
+    return { ...this.engineInstaller.status() };
+  }
+
+  /**
+   * 激活/启动前的引擎准备：只使用 EngineInstaller 校验过的二进制。
+   * 失败返回稳定 code，由 activate 回退 heuristic、start 返回结构化错误。
+   */
+  private async prepareEngine(): Promise<
+    | { ok: true; binaryPath: string; warnings: string[] }
+    | { ok: false; code: string; message: string; retryable: boolean; warnings: string[] }
+  > {
+    try {
+      const status = await this.engineInstaller.ensureInstalled();
+      const binaryPath = this.engineInstaller.binaryPath();
+      if (!status.installed || !status.binaryReady || !binaryPath) {
+        return {
+          ok: false,
+          code: 'engine_not_installed',
+          message: 'llama.cpp 引擎尚未安装或未通过校验',
+          retryable: true,
+          warnings: status.reason ? [status.reason] : [],
+        };
+      }
+      return { ok: true, binaryPath, warnings: [] };
+    } catch (error) {
+      const code = error instanceof EngineInstallerError
+        ? error.code
+        : (error as { code?: unknown })?.code;
+      const stable = typeof code === 'string' && code.length > 0 ? code : 'engine_install_failed';
+      return {
+        ok: false,
+        code: stable,
+        message: engineFailureMessage(stable),
+        retryable: error instanceof EngineInstallerError ? error.retryable : true,
+        warnings: [],
+      };
+    }
   }
 
   private providers(active: ModelActiveView['source']): ModelProvider[] {
@@ -924,4 +1022,15 @@ export class InferenceService implements InferenceApi {
 
 function unique(values: string[]): string[] {
   return [...new Set(values.filter((value) => value.length > 0))];
+}
+
+function engineFailureMessage(code: string): string {
+  if (code === 'engine_asset_unsupported') return '当前平台没有可用的 llama.cpp 引擎资产';
+  if (code === 'engine_not_installed') return 'llama.cpp 引擎尚未安装或未通过校验';
+  if (code === 'engine_checksum_mismatch') return 'llama.cpp 引擎下载校验失败';
+  if (code === 'engine_size_mismatch') return 'llama.cpp 引擎下载大小不一致';
+  if (code === 'engine_extract_failed') return 'llama.cpp 引擎归档解压失败';
+  if (code === 'engine_binary_missing') return 'llama.cpp 引擎归档缺少 llama-server';
+  if (code === 'cancelled') return 'llama.cpp 引擎安装已取消';
+  return 'llama.cpp 引擎安装失败';
 }

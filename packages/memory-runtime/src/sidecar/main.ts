@@ -55,6 +55,7 @@ import {
 } from './inference-provider.js';
 import { ModelStore } from '../inference/store.js';
 import {
+  EngineInstaller,
   LlamaCppInferenceEngine,
   InferenceService,
 } from './inference/index.js';
@@ -473,7 +474,18 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
 
   const identity = mergeIdentity(paths.home, options.identity, capabilityIdentity);
 
-  const engineAdapter = new LlamaCppInferenceEngine({ env, now });
+  const engineInstaller = new EngineInstaller({
+    dataDir: paths.dataDir,
+    platform: process.platform,
+    arch: process.arch,
+    now,
+  });
+  const engineAdapter = new LlamaCppInferenceEngine({
+    env,
+    now,
+    binaryPathProvider: () => engineInstaller.binaryPath(),
+    requireBinaryPath: true,
+  });
   const inferenceHolder: { current: InferenceService | null } = { current: null };
   const model = createSidecarInferenceProvider(config.model, {
     homeDir: paths.home,
@@ -496,6 +508,7 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
     inference: model,
     store: new ModelStore({ rootDir: paths.modelsDir, now }),
     engineAdapter,
+    engineInstaller,
     now,
     platform: process.platform,
     arch: process.arch,

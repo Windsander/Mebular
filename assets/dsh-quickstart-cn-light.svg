@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="320" viewBox="0 0 1080 320" role="img" aria-label="三步接入：安装 DSH 插件，重启 DSH；已有 App/CLI 自动连接，没有 runtime 时面板显式安装共享 runtime。">
+  <title>快速开始</title>
+  <desc>三步接入：安装 DSH 插件，重启 DSH；已有 App/CLI 自动连接，没有 runtime 时面板显式安装共享 runtime。</desc>
+  <defs>
+    <style>
+      .theme-light { display: none; }
+      @media (prefers-color-scheme: light) {
+        .theme-dark { display: none; }
+        .theme-light { display: block; }
+      }
+    </style>
+  </defs>
+  <g class="theme-dark">
+    <rect width="1080" height="320" fill="#03050a"/>
+    <defs><radialGradient id="glow-theme-dark" cx="50%" cy="36%" r="72%">
+      <stop offset="0%" stop-color="#0d2140" stop-opacity="0.85"/>
+      <stop offset="100%" stop-color="#03050a" stop-opacity="0"/>
+    </radialGradient></defs>
+    <ellipse cx="540" cy="166" rx="620" ry="176" fill="url(#glow-theme-dark)"/>
+    <text x="40" y="44" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="21" fill="#e2ecff" font-weight="700" text-anchor="start" letter-spacing="1.2">快速开始</text>
+    <text x="40" y="72" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="13" fill="#8aa8c8" font-weight="400" text-anchor="start">安装插件 → 连接共享 runtime → 重启 DSH</text>
+    <marker id="arrow-dark" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a8acf"/></marker>
+    <rect x="40" y="100" width="300" height="160" rx="16" fill="#081322" stroke="#1a3a60" stroke-width="1.2"/>
+    <rect x="60" y="120" width="46" height="34" rx="8" fill="#0d1e35" stroke="#4a8acf" stroke-width="1.2"/><text x="70" y="143" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="15" font-weight="700" fill="#8ac8ff">&gt;</text><line x1="85" y1="141" x2="96" y2="141" stroke="#8ac8ff" stroke-width="1.6"/>
+    <circle cx="312" cy="128" r="12" fill="#8ac8ff" opacity="0.16"/>
+    <text x="312" y="133" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="11" fill="#8ac8ff" font-weight="700" text-anchor="middle">1</text>
+    <text x="122" y="142" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="16" fill="#e2ecff" font-weight="700" text-anchor="start">安装插件</text>
+    <text x="60" y="188" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="11.5" fill="#8ac8ff" font-weight="400" text-anchor="start">dsh plugin --profile web add</text>
+    <text x="60" y="210" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#8aa8c8" font-weight="400" text-anchor="start">@mebular/dsh-plugin@0.2.4</text>
+    <rect x="390" y="100" width="300" height="160" rx="16" fill="#081322" stroke="#1a3a60" stroke-width="1.2"/>
+    <path d="M433,123 L452,133 L452,150 L433,160 L414,150 L414,133 Z" fill="#0d1e35" stroke="#4a8acf" stroke-width="1.2"/><path d="M414,133 L433,143 L452,133" fill="none" stroke="#8ac8ff" stroke-width="1.2" opacity="0.8"/><line x1="433" y1="143" x2="433" y2="158" stroke="#8ac8ff" stroke-width="1.2" opacity="0.5"/>
+    <circle cx="662" cy="128" r="12" fill="#8ac8ff" opacity="0.16"/>
+    <text x="662" y="133" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="11" fill="#8ac8ff" font-weight="700" text-anchor="middle">2</text>
+    <text x="472" y="142" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="16" fill="#e2ecff" font-weight="700" text-anchor="start">重启 DSH</text>
+    <text x="410" y="188" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="11.5" fill="#8ac8ff" font-weight="400" text-anchor="start">open Mebular panel</text>
+    <text x="410" y="210" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#8aa8c8" font-weight="400" text-anchor="start">自动解析 shared runtime</text>
+    <rect x="740" y="100" width="300" height="160" rx="16" fill="#081322" stroke="#1a3a60" stroke-width="1.2"/>
+    <path d="M783,125 A14,14 0 1 1 771,132" fill="none" stroke="#8ac8ff" stroke-width="1.8"/><path d="M771,132 L771,125 L778,125" fill="none" stroke="#8ac8ff" stroke-width="1.8"/><circle cx="783" cy="139" r="3" fill="#8ac8ff"/>
+    <circle cx="1012" cy="128" r="12" fill="#8ac8ff" opacity="0.16"/>
+    <text x="1012" y="133" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="11" fill="#8ac8ff" font-weight="700" text-anchor="middle">3</text>
+    <text x="822" y="142" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="16" fill="#e2ecff" font-weight="700" text-anchor="start">App 或面板</text>
+    <text x="760" y="188" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="11.5" fill="#8ac8ff" font-weight="400" text-anchor="start">App/CLI → attach</text>
+    <text x="760" y="210" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#8aa8c8" font-weight="400" text-anchor="start">无 runtime → 面板安装</text>
+    <line x1="345" y1="180" x2="380" y2="180" stroke="#4a8acf" stroke-width="1.4" stroke-dasharray="4 4" opacity="0.7" marker-end="url(#arrow-dark)"/>
+    <line x1="695" y1="180" x2="730" y2="180" stroke="#4a8acf" stroke-width="1.4" stroke-dasharray="4 4" opacity="0.7" marker-end="url(#arrow-dark)"/>
+    <text x="540" y="288" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#8aa8c8" font-weight="400" text-anchor="middle">不会静默下载；用户确认后才安装</text>
+  </g>
+  <g class="theme-light">
+    <rect width="1080" height="320" fill="#ffffff"/>
+    <defs><radialGradient id="glow-theme-light" cx="50%" cy="36%" r="72%">
+      <stop offset="0%" stop-color="#dceaff" stop-opacity="0.7"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient></defs>
+    <ellipse cx="540" cy="166" rx="620" ry="176" fill="url(#glow-theme-light)"/>
+    <text x="40" y="44" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="21" fill="#0b1a33" font-weight="700" text-anchor="start" letter-spacing="1.2">快速开始</text>
+    <text x="40" y="72" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="13" fill="#5a7290" font-weight="400" text-anchor="start">安装插件 → 连接共享 runtime → 重启 DSH</text>
+    <marker id="arrow-light" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#7fa6d9"/></marker>
+    <rect x="40" y="100" width="300" height="160" rx="16" fill="#f7faff" stroke="#c9d8ee" stroke-width="1.2"/>
+    <rect x="60" y="120" width="46" height="34" rx="8" fill="#ffffff" stroke="#7fa6d9" stroke-width="1.2"/><text x="70" y="143" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="15" font-weight="700" fill="#2f6fce">&gt;</text><line x1="85" y1="141" x2="96" y2="141" stroke="#2f6fce" stroke-width="1.6"/>
+    <circle cx="312" cy="128" r="12" fill="#2f6fce" opacity="0.16"/>
+    <text x="312" y="133" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="11" fill="#2f6fce" font-weight="700" text-anchor="middle">1</text>
+    <text x="122" y="142" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="16" fill="#0b1a33" font-weight="700" text-anchor="start">安装插件</text>
+    <text x="60" y="188" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="11.5" fill="#2f6fce" font-weight="400" text-anchor="start">dsh plugin --profile web add</text>
+    <text x="60" y="210" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#5a7290" font-weight="400" text-anchor="start">@mebular/dsh-plugin@0.2.4</text>
+    <rect x="390" y="100" width="300" height="160" rx="16" fill="#f7faff" stroke="#c9d8ee" stroke-width="1.2"/>
+    <path d="M433,123 L452,133 L452,150 L433,160 L414,150 L414,133 Z" fill="#ffffff" stroke="#7fa6d9" stroke-width="1.2"/><path d="M414,133 L433,143 L452,133" fill="none" stroke="#2f6fce" stroke-width="1.2" opacity="0.8"/><line x1="433" y1="143" x2="433" y2="158" stroke="#2f6fce" stroke-width="1.2" opacity="0.5"/>
+    <circle cx="662" cy="128" r="12" fill="#2f6fce" opacity="0.16"/>
+    <text x="662" y="133" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="11" fill="#2f6fce" font-weight="700" text-anchor="middle">2</text>
+    <text x="472" y="142" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="16" fill="#0b1a33" font-weight="700" text-anchor="start">重启 DSH</text>
+    <text x="410" y="188" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="11.5" fill="#2f6fce" font-weight="400" text-anchor="start">open Mebular panel</text>
+    <text x="410" y="210" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#5a7290" font-weight="400" text-anchor="start">自动解析 shared runtime</text>
+    <rect x="740" y="100" width="300" height="160" rx="16" fill="#f7faff" stroke="#c9d8ee" stroke-width="1.2"/>
+    <path d="M783,125 A14,14 0 1 1 771,132" fill="none" stroke="#2f6fce" stroke-width="1.8"/><path d="M771,132 L771,125 L778,125" fill="none" stroke="#2f6fce" stroke-width="1.8"/><circle cx="783" cy="139" r="3" fill="#2f6fce"/>
+    <circle cx="1012" cy="128" r="12" fill="#2f6fce" opacity="0.16"/>
+    <text x="1012" y="133" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="11" fill="#2f6fce" font-weight="700" text-anchor="middle">3</text>
+    <text x="822" y="142" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="16" fill="#0b1a33" font-weight="700" text-anchor="start">App 或面板</text>
+    <text x="760" y="188" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="11.5" fill="#2f6fce" font-weight="400" text-anchor="start">App/CLI → attach</text>
+    <text x="760" y="210" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#5a7290" font-weight="400" text-anchor="start">无 runtime → 面板安装</text>
+    <line x1="345" y1="180" x2="380" y2="180" stroke="#7fa6d9" stroke-width="1.4" stroke-dasharray="4 4" opacity="0.7" marker-end="url(#arrow-light)"/>
+    <line x1="695" y1="180" x2="730" y2="180" stroke="#7fa6d9" stroke-width="1.4" stroke-dasharray="4 4" opacity="0.7" marker-end="url(#arrow-light)"/>
+    <text x="540" y="288" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#5a7290" font-weight="400" text-anchor="middle">不会静默下载；用户确认后才安装</text>
+  </g>
+<style>.theme-dark{display:none !important}.theme-light{display:block !important}</style>
+</svg>

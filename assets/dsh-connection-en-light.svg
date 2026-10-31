@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="300" viewBox="0 0 1080 300" role="img" aria-label="DSH integration: shared runtime resolve reaches the same Mebular daemon, Console and MCP">
+  <title>DSH plugin integration</title>
+  <desc>DSH uses shared runtime resolve to reach the same Mebular daemon; panel and MCP share one dynamic URL.</desc>
+  <defs>
+    <defs>
+    <radialGradient id="glow-dark" cx="50%" cy="38%" r="72%">
+      <stop offset="0%" stop-color="#0d2140" stop-opacity="0.7"/>
+      <stop offset="100%" stop-color="#03050a" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+    <defs>
+    <radialGradient id="glow-light" cx="50%" cy="38%" r="72%">
+      <stop offset="0%" stop-color="#dceaff" stop-opacity="0.7"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+    <style>
+      .theme-light { display: none; }
+      @media (prefers-color-scheme: light) {
+        .theme-dark { display: none; }
+        .theme-light { display: block; }
+      }
+    </style>
+  </defs>
+  <g class="theme-dark">
+
+
+  <rect width="1080" height="300" fill="#03050a"/>
+  <ellipse cx="540" cy="120" rx="594" ry="156" fill="url(#glow-dark)"/>
+  <text x="40" y="44" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="21" fill="#e2ecff" font-weight="700"><tspan letter-spacing="1.2">DSH PLUGIN</tspan></text>
+  <text x="40" y="72" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="13" fill="#8aa8c8" font-weight="400">One shared runtime. One Console. Two shells.</text>
+
+  <rect x="36" y="92" width="300" height="160" rx="16" fill="#081322" stroke="#1a3a60" stroke-width="1.2"/>
+  <text x="58" y="118" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="11" fill="#8ac8ff" font-weight="700">MEBULAR RUNTIME</text>
+  <text x="58" y="150" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="20" fill="#e2ecff" font-weight="700">same graph</text>
+  <text x="58" y="180" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="12" fill="#8aa8c8" font-weight="400">Console at /console</text>
+  <text x="58" y="200" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="12" fill="#8aa8c8" font-weight="400">MCP at /mcp</text>
+  <text x="58" y="232" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="12" fill="#8ac8ff" font-weight="500">127.0.0.1:7331</text>
+
+  <rect x="744" y="92" width="300" height="160" rx="16" fill="#081322" stroke="#1a3a60" stroke-width="1.2"/>
+  <text x="766" y="118" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="11" fill="#8ac8ff" font-weight="700">DSH WEB</text>
+  <text x="766" y="150" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="20" fill="#e2ecff" font-weight="700">Mebular panel</text>
+  <text x="766" y="180" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="12" fill="#8aa8c8" font-weight="400">sidebar iframe</text>
+  <text x="766" y="200" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="12" fill="#8aa8c8" font-weight="400">official MCP client</text>
+  <text x="766" y="220" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="12" fill="#8aa8c8" font-weight="400">same memory + tasks</text>
+
+  <line x1="700" y1="142" x2="384" y2="142" stroke="#4a8acf" stroke-width="1.3" stroke-dasharray="4 5"/>
+  <path d="M384,142 l10,-4 v8 z" fill="#4a8acf"/>
+  <circle cx="700" cy="142" r="2.5" fill="#8ac8ff"/>
+  <line x1="700" y1="202" x2="384" y2="202" stroke="#4a8acf" stroke-width="1.3" stroke-dasharray="4 5"/>
+  <path d="M384,202 l10,-4 v8 z" fill="#4a8acf"/>
+  <circle cx="700" cy="202" r="2.5" fill="#8ac8ff"/>
+  <text x="540" y="128" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="11" fill="#8ac8ff" font-weight="500" text-anchor="middle">iframe · ?embed=dsh</text>
+  <text x="540" y="188" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="11" fill="#8ac8ff" font-weight="500" text-anchor="middle">official MCP client · /mcp</text>
+  <text x="540" y="170" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="10" fill="#8aa8c8" font-weight="400" text-anchor="middle">same daemon</text>
+
+  <text x="540" y="282" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="11" fill="#8aa8c8" font-weight="400" text-anchor="middle">Shared resolve: App / CLI / shared current → dynamic URL</text>
+  <text x="540" y="296" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#8aa8c8" font-weight="400" text-anchor="middle">The App stays the control plane; DSH is the agent shell.</text>
+
+  </g>
+  <g class="theme-light">
+
+
+  <rect width="1080" height="300" fill="#ffffff"/>
+  <ellipse cx="540" cy="120" rx="594" ry="156" fill="url(#glow-light)"/>
+  <text x="40" y="44" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="21" fill="#0b1a33" font-weight="700"><tspan letter-spacing="1.2">DSH PLUGIN</tspan></text>
+  <text x="40" y="72" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="13" fill="#5a7290" font-weight="400">One shared runtime. One Console. Two shells.</text>
+
+  <rect x="36" y="92" width="300" height="160" rx="16" fill="#f7faff" stroke="#c9d8ee" stroke-width="1.2"/>
+  <text x="58" y="118" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="11" fill="#2f6fce" font-weight="700">MEBULAR RUNTIME</text>
+  <text x="58" y="150" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="20" fill="#0b1a33" font-weight="700">same graph</text>
+  <text x="58" y="180" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="12" fill="#5a7290" font-weight="400">Console at /console</text>
+  <text x="58" y="200" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="12" fill="#5a7290" font-weight="400">MCP at /mcp</text>
+  <text x="58" y="232" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="12" fill="#2f6fce" font-weight="500">127.0.0.1:7331</text>
+
+  <rect x="744" y="92" width="300" height="160" rx="16" fill="#f7faff" stroke="#c9d8ee" stroke-width="1.2"/>
+  <text x="766" y="118" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="11" fill="#2f6fce" font-weight="700">DSH WEB</text>
+  <text x="766" y="150" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="20" fill="#0b1a33" font-weight="700">Mebular panel</text>
+  <text x="766" y="180" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="12" fill="#5a7290" font-weight="400">sidebar iframe</text>
+  <text x="766" y="200" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="12" fill="#5a7290" font-weight="400">official MCP client</text>
+  <text x="766" y="220" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="12" fill="#5a7290" font-weight="400">same memory + tasks</text>
+
+  <line x1="700" y1="142" x2="384" y2="142" stroke="#7fa6d9" stroke-width="1.3" stroke-dasharray="4 5"/>
+  <path d="M384,142 l10,-4 v8 z" fill="#7fa6d9"/>
+  <circle cx="700" cy="142" r="2.5" fill="#2f6fce"/>
+  <line x1="700" y1="202" x2="384" y2="202" stroke="#7fa6d9" stroke-width="1.3" stroke-dasharray="4 5"/>
+  <path d="M384,202 l10,-4 v8 z" fill="#7fa6d9"/>
+  <circle cx="700" cy="202" r="2.5" fill="#2f6fce"/>
+  <text x="540" y="128" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="11" fill="#2f6fce" font-weight="500" text-anchor="middle">iframe · ?embed=dsh</text>
+  <text x="540" y="188" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="11" fill="#2f6fce" font-weight="500" text-anchor="middle">official MCP client · /mcp</text>
+  <text x="540" y="170" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="10" fill="#5a7290" font-weight="400" text-anchor="middle">same daemon</text>
+
+  <text x="540" y="282" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="11" fill="#5a7290" font-weight="400" text-anchor="middle">Shared resolve: App / CLI / shared current → dynamic URL</text>
+  <text x="540" y="296" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#5a7290" font-weight="400" text-anchor="middle">The App stays the control plane; DSH is the agent shell.</text>
+
+  </g>
+<style>.theme-dark{display:none !important}.theme-light{display:block !important}</style>
+</svg>

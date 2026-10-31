@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="140" viewBox="0 0 1080 140" role="img" aria-label="Status dot: green up, amber starting/installing/updating, red down, gray waiting for the first check.">
+  <title>STATUS DOT</title>
+  <desc>Status dot: green up, amber starting/installing/updating, red down, gray waiting for the first check.</desc>
+  <defs>
+    <style>
+      .theme-light { display: none; }
+      @media (prefers-color-scheme: light) {
+        .theme-dark { display: none; }
+        .theme-light { display: block; }
+      }
+    </style>
+  </defs>
+  <g class="theme-dark">
+    <rect width="1080" height="140" fill="#03050a"/>
+    <defs><radialGradient id="glow-theme-dark" cx="50%" cy="36%" r="72%">
+      <stop offset="0%" stop-color="#0d2140" stop-opacity="0.85"/>
+      <stop offset="100%" stop-color="#03050a" stop-opacity="0"/>
+    </radialGradient></defs>
+    <ellipse cx="540" cy="73" rx="620" ry="77" fill="url(#glow-theme-dark)"/>
+    <text x="40" y="44" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="21" fill="#e2ecff" font-weight="700" text-anchor="start" letter-spacing="1.2">STATUS DOT</text>
+    <text x="40" y="72" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="13" fill="#8aa8c8" font-weight="400" text-anchor="start">sidebar icon; visible with the panel closed</text>
+    <circle cx="60" cy="98" r="15" fill="#3fb950" opacity="0.16"/>
+    <circle cx="60" cy="98" r="7" fill="#3fb950"/>
+    <text x="82" y="103" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="13" fill="#e2ecff" font-weight="400" text-anchor="start">up</text>
+    <circle cx="300" cy="98" r="15" fill="#d29922" opacity="0.16"/>
+    <circle cx="300" cy="98" r="7" fill="#d29922"/>
+    <text x="322" y="103" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="13" fill="#e2ecff" font-weight="400" text-anchor="start">starting / install / update</text>
+    <circle cx="540" cy="98" r="15" fill="#f85149" opacity="0.16"/>
+    <circle cx="540" cy="98" r="7" fill="#f85149"/>
+    <text x="562" y="103" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="13" fill="#e2ecff" font-weight="400" text-anchor="start">down</text>
+    <circle cx="780" cy="98" r="15" fill="#8b949e" opacity="0.16"/>
+    <circle cx="780" cy="98" r="7" fill="#8b949e"/>
+    <text x="802" y="103" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="13" fill="#e2ecff" font-weight="400" text-anchor="start">first check</text>
+  </g>
+  <g class="theme-light">
+    <rect width="1080" height="140" fill="#ffffff"/>
+    <defs><radialGradient id="glow-theme-light" cx="50%" cy="36%" r="72%">
+      <stop offset="0%" stop-color="#dceaff" stop-opacity="0.7"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient></defs>
+    <ellipse cx="540" cy="73" rx="620" ry="77" fill="url(#glow-theme-light)"/>
+    <text x="40" y="44" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="21" fill="#0b1a33" font-weight="700" text-anchor="start" letter-spacing="1.2">STATUS DOT</text>
+    <text x="40" y="72" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="13" fill="#5a7290" font-weight="400" text-anchor="start">sidebar icon; visible with the panel closed</text>
+    <circle cx="60" cy="98" r="15" fill="#1a7f37" opacity="0.16"/>
+    <circle cx="60" cy="98" r="7" fill="#1a7f37"/>
+    <text x="82" y="103" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="13" fill="#0b1a33" font-weight="400" text-anchor="start">up</text>
+    <circle cx="300" cy="98" r="15" fill="#9a6700" opacity="0.16"/>
+    <circle cx="300" cy="98" r="7" fill="#9a6700"/>
+    <text x="322" y="103" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="13" fill="#0b1a33" font-weight="400" text-anchor="start">starting / install / update</text>
+    <circle cx="540" cy="98" r="15" fill="#cf222e" opacity="0.16"/>
+    <circle cx="540" cy="98" r="7" fill="#cf222e"/>
+    <text x="562" y="103" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="13" fill="#0b1a33" font-weight="400" text-anchor="start">down</text>
+    <circle cx="780" cy="98" r="15" fill="#6e7781" opacity="0.16"/>
+    <circle cx="780" cy="98" r="7" fill="#6e7781"/>
+    <text x="802" y="103" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="13" fill="#0b1a33" font-weight="400" text-anchor="start">first check</text>
+  </g>
+<style>.theme-dark{display:none !important}.theme-light{display:block !important}</style>
+</svg>

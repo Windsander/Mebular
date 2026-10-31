@@ -33,6 +33,22 @@ function fakeReact() {
   };
 }
 
+describe('DSH README theme-aware diagrams', () => {
+  const readmeCn = readFileSync(join(here, '..', '..', 'packages', 'dsh-plugin', 'README.md'), 'utf-8');
+  const readmeEn = readFileSync(join(here, '..', '..', 'packages', 'dsh-plugin', 'README_EN.md'), 'utf-8');
+  const bases = ['dsh-memory-mesh', 'dsh-capabilities', 'dsh-quickstart', 'dsh-connection', 'dsh-status'];
+  it('uses <picture> light/dark assets instead of inline SVG media queries', () => {
+    for (const [text, suffix] of [[readmeCn, 'cn'], [readmeEn, 'en']]) {
+      for (const base of bases) {
+        expect(text).toContain(`${base}-${suffix}-dark.svg`);
+        expect(text).toContain(`${base}-${suffix}-light.svg`);
+        expect(text).not.toMatch(new RegExp(`!\\[[^\\]]*\\]\\([^)]*${base}-${suffix}\\.svg`));
+      }
+      expect(text).toContain(`memory-runtime-${suffix}-light.svg`);
+    }
+  });
+});
+
 describe('P2 @mebular/dsh-plugin client：静态契约', () => {
   it('使用 window.__ModuleLoader__.load 手写包装，id 为包名', () => {
     expect(source).toContain('window.__ModuleLoader__.load({');

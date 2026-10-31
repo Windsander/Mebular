@@ -1,6 +1,11 @@
 <div align="center">
 
-![Mebular — distributed memory network](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-hero.svg)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-hero-light.svg">
+    <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-hero-dark.svg" alt="Mebular — distributed memory network">
+  </picture>
+</p>
 
 **One memory. Every assistant. Every device.**
 
@@ -40,7 +45,12 @@ The Plugin defaults to `attach`; it never starts or downloads Mebular silently.
 
 <div align="center">
 
-![Memory Runtime: lightweight MCP and immersive access share one graph.](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/memory-runtime-en.svg)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/memory-runtime-en-light.svg">
+    <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/memory-runtime-en.svg" alt="Memory Runtime: lightweight MCP and immersive access share one graph.">
+  </picture>
+</p>
 
 *0.3 · Default off. Lightweight MCP and immersive share one graph.*
 
@@ -65,9 +75,19 @@ DSH durable logs may retain source-tagged snapshots (platform limit), never rend
 
 <div align="center">
 
-![One memory graph: two machines, each running a Mebular node. Machine A connects DSH, Hermes and Codex; machine B connects Pi, OpenCode and Cursor. Both nodes sync the same graph directly.](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-memory-mesh-en.svg)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-memory-mesh-en-light.svg">
+    <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-memory-mesh-en-dark.svg" alt="One memory graph: two machines, each running a Mebular node. Machine A connects DSH, Hermes and Codex; machine B connects Pi, OpenCode and Cursor. Both nodes sync the same graph directly.">
+  </picture>
+</p>
 
-![What you get in DSH: a shared Console, official MCP tools, a status dot, the attach / managed / auto lifecycle and on-demand install/update; panel: false keeps MCP only.](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-capabilities-en.svg)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-capabilities-en-light.svg">
+    <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-capabilities-en-dark.svg" alt="What you get in DSH: a shared Console, official MCP tools, a status dot, the attach / managed / auto lifecycle and on-demand install/update; panel: false keeps MCP only.">
+  </picture>
+</p>
 
 </div>
 
@@ -75,11 +95,26 @@ DSH durable logs may retain source-tagged snapshots (platform limit), never rend
 
 <div align="center">
 
-![Three steps: install the plugin, restart DSH; an existing App/CLI attaches, and the panel explicitly installs the shared runtime when none exists.](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-quickstart-en.svg)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-quickstart-en-light.svg">
+    <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-quickstart-en-dark.svg" alt="Three steps: install the plugin, restart DSH; an existing App/CLI attaches, and the panel explicitly installs the shared runtime when none exists.">
+  </picture>
+</p>
 
-![DSH integration: DSH Web loads /console/?embed=dsh in an iframe, and the official MCP client reaches the same daemon at /mcp; shared runtime resolve selects the App/CLI/shared provider and dynamic URL.](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-connection-en.svg)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-connection-en-light.svg">
+    <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-connection-en-dark.svg" alt="DSH integration: DSH Web loads /console/?embed=dsh in an iframe, and the official MCP client reaches the same daemon at /mcp; shared runtime resolve selects the App/CLI/shared provider and dynamic URL.">
+  </picture>
+</p>
 
-![Status dot: green up, amber starting/installing/updating, red down, gray waiting for the first check.](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-status-en.svg)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-status-en-light.svg">
+    <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-status-en-dark.svg" alt="Status dot: green up, amber starting/installing/updating, red down, gray waiting for the first check.">
+  </picture>
+</p>
 
 </div>
 

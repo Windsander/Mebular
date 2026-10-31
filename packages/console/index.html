@@ -1,16 +1,17 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" style="background:#05070f;color-scheme:dark">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="color-scheme" content="dark" />
+  <meta name="theme-color" content="#05070f" />
   <!-- 走查修复 B：壳安全区首帧就位（同步、先于样式与首帧；CSP 禁内联故独立文件） -->
   <script src="./shell-boot.js"></script>
   <title>Mebular</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22><text y=%2213%22 font-size=%2214%22>✦</text></svg>" />
   <link rel="stylesheet" href="./console.css" />
 </head>
-<body>
+<body style="background:#05070f">
   <!-- i18n 首帧门（无语言文本）：shell-boot.js 在解析期给 <html> 加 console-booting，
        CSS 隐藏 #app，只画品牌占位；console.js 在 consoleReady 处移除该类。 -->
   <div id="boot-screen" aria-hidden="true">

@@ -60,6 +60,14 @@ const modelUiSource = modelUiStart >= 0 && modelUiEnd > modelUiStart
   ? consoleJs.slice(modelUiStart, modelUiEnd)
   : '';
 
+describe('Console 首帧暗色（DSH 暗色刷新不白闪）', () => {
+  it('html/body 在样式表之前就有暗色背景与 color-scheme', () => {
+    expect(indexHtml).toMatch(/<html[^>]*style="[^"]*background:#05070f[^"]*color-scheme:dark/);
+    expect(indexHtml).toMatch(/<body[^>]*style="[^"]*background:#05070f/);
+    expect(indexHtml).toContain('<meta name="theme-color" content="#05070f" />');
+  });
+});
+
 describe('0.3 设置 IA：只有两个产品增量', () => {
   it('tab 顺序稳定：常用/安全/AI 助手/记忆运行时/MCP 接入/高级', () => {
     expect(IA_TABS.map((tab) => tab.id)).toEqual(['common', 'security', 'assistants', 'runtime', 'mcp', 'advanced']);

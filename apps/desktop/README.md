@@ -32,19 +32,19 @@ npm run dev -- --home ~/.mebular --port 7331   # 透传参数（可选）
 npm run smoke                     # 无 GUI 有界冒烟（CI 用）
 ```
 
-## 安装包（v0.2.4，unsigned）
+## 安装包（v0.3.0，unsigned）
 
-安装包里的 Mebular 运行时**不来自仓库源码目录**，而是先用 `npm pack` 产出五个发布
+安装包里的 Mebular 运行时**不来自仓库源码目录**，而是先用 `npm pack` 产出六个发布
 tarball，再由 `prepare-runtime` 一次性 `npm install --omit=dev --ignore-scripts` 到
 `apps/desktop/runtime`，最后经 `extraResources` 复制成 `<resources>/node_modules`。
 安装包自带 Electron，用户机器不需要安装 Node.js。
 
 ```bash
-# 仓库根：build + 五个 lockstep tarball（core/fleet/service/mcp/skill）
+# 仓库根：build + 六个 lockstep tarball（core/fleet/service/mcp/memory-runtime/skill）
 npm run build
 rm -rf release-pack && mkdir -p release-pack
 npm pack --pack-destination release-pack
-for p in packages/fleet packages/service packages/mcp packages/skill; do
+for p in packages/fleet packages/service packages/mcp packages/memory-runtime packages/skill; do
   (cd "$p" && npm pack --pack-destination ../../release-pack)
 done
 
@@ -54,10 +54,22 @@ npm --prefix apps/desktop run smoke:runtime     # 从 runtime 起 serve，校验
 npm --prefix apps/desktop run dist:dir          # runtime → prepare-build → electron-builder --dir
 
 # 三平台 target（本机只构建当前平台；正式三平台由 CI matrix 构建）
-npm --prefix apps/desktop run dist:mac          # DMG（universal）
-npm --prefix apps/desktop run dist:win          # NSIS（x64）
-npm --prefix apps/desktop run dist:linux        # AppImage + deb（x64）
+CSC_IDENTITY_AUTO_DISCOVERY=false npm --prefix apps/desktop run dist:mac   # DMG（universal）
+CSC_IDENTITY_AUTO_DISCOVERY=false npm --prefix apps/desktop run dist:win   # NSIS（x64）
+CSC_IDENTITY_AUTO_DISCOVERY=false npm --prefix apps/desktop run dist:linux # AppImage + deb（x64）
 ```
+
+`CSC_IDENTITY_AUTO_DISCOVERY=false` 是 macOS/Linux shell 写法；Windows PowerShell 用
+`$env:CSC_IDENTITY_AUTO_DISCOVERY='false'`。
+
+> npm 11.19+ 默认阻止依赖安装脚本，`npm ci --prefix apps/desktop` 可能不会下载 Electron
+> 二进制。若 `apps/desktop/node_modules/electron/dist` 不存在，先执行
+> `node apps/desktop/node_modules/electron/install.js` 再构建。
+
+本机 macOS arm64 的 unsigned dry-run 实测（2026-10-31）：`dist:dir` 与 `dist:mac` 均成功，
+universal DMG 为 225.0 MiB，`hdiutil verify` 通过；`signed=false notarized=false`。
+详细记录、sha256 和边界见
+[`docs/operations/DESKTOP_RELEASE.md`](../../docs/operations/DESKTOP_RELEASE.md#26-unsigned-本地-dry-runmacos-arm64-实测2026-10-31)。
 
 发布资产名：
 
@@ -70,12 +82,23 @@ npm --prefix apps/desktop run dist:linux        # AppImage + deb（x64）
 打包后的冒烟可直接指向 `<resources>`：
 
 ```bash
+node apps/desktop/scripts/smoke-runtime.mjs --runtime apps/desktop/dist/mac-universal/Mebular.app/Contents/Resources
 node apps/desktop/scripts/smoke-runtime.mjs --runtime apps/desktop/dist/mac-arm64/Mebular.app/Contents/Resources
 node apps/desktop/scripts/smoke-runtime.mjs --runtime apps/desktop/dist/win-unpacked/resources
 node apps/desktop/scripts/smoke-runtime.mjs --runtime apps/desktop/dist/linux-unpacked/resources
 ```
 
-> v0.2.4 产物**未签名、未公证**：macOS Gatekeeper 要求右键 → 打开（或系统设置 → 隐私与
+资产校验（本地 dry-run 与 CI release 共用）：
+
+```bash
+npm run verify:desktop:assets -- --dir apps/desktop/dist
+npm run verify:desktop:assets -- \
+  --dir release-assets \
+  --expect dmg,exe,AppImage,deb \
+  --require-hermes
+```
+
+> v0.3.0 产物**未签名、未公证**：macOS Gatekeeper 要求右键 → 打开（或系统设置 → 隐私与
 > 安全性 → 仍要打开），Windows SmartScreen 要求「更多信息 → 仍要运行」。发布前先用
 > Release 的 `SHA256SUMS.txt` 校验。签名、公证与自动更新留到后续版本；完整说明见
 > [`docs/operations/DESKTOP_RELEASE.md`](../../docs/operations/DESKTOP_RELEASE.md)。
@@ -124,7 +147,7 @@ IPC **白名单**（`daemon:status|start|stop|restart`、`console:open`、`logs:
 Electron。
 
 - **CI（`.github/workflows/ci.yml` 的 `desktop` job，ubuntu-latest）**：`npm ci` → 根
-  `npm run build` → `npm ci --prefix apps/desktop` → pack 5 个 tarball →
+  `npm run build` → `npm ci --prefix apps/desktop` → pack 6 个 runtime tarball →
   `prepare-runtime` → `smoke:runtime` → `dist:dir` → packaged runtime smoke →
   `npm run smoke`（无 GUI；`ELECTRON_SKIP_BINARY_DOWNLOAD=1` 时自动 SKIP 二进制冒烟）。
 - **Publish（`.github/workflows/publish.yml`）**：`verify` 只 pack 一次 8 个 npm tarball，
@@ -133,9 +156,10 @@ Electron。
   - `desktop-macos`（macos-latest）：Universal DMG + packaged smoke；
   - `desktop-windows`（windows-latest）：NSIS x64 + `win-unpacked` resources smoke；
   - `desktop-linux`（ubuntu-latest）：AppImage + deb x64 + `linux-unpacked` resources smoke。
-  三个 job 全部成功后才允许 `publish` 发 npm；`release` job 再上传安装包、Hermes 插件
-  tarball 与 `SHA256SUMS.txt`。手动 `workflow_dispatch` 是 dry-run：只构建并上传 artifacts，
-  不发布。
+  三个 job 全部成功后才允许 `publish` 发 npm；`release` job 用
+  `scripts/verify-desktop-assets.mjs` 校验资产、生成 `SHA256SUMS.txt`，再上传安装包、
+  Hermes 插件 tarball 与 checksum。手动 `workflow_dispatch` 是 dry-run：只构建并上传
+  artifacts，不发布。
 
 版本 SSOT：`apps/desktop/package.json`、`package-lock.json` 根 version 与
 `src/main/daemon.mjs` 的 `APP_VERSION` 必须与八个 npm 包（含 `opencode-plugin` 与

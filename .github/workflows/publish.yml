@@ -614,44 +614,15 @@ jobs:
           name: hermes-plugins
           path: release-assets
 
-      - name: Verify asset set (1 dmg / 1 exe / 1 AppImage / 1 deb / 1 Hermes tarball)
+      - name: Verify asset set + generate SHA256SUMS.txt (installers + Hermes plugins)
         shell: bash
         run: |
           set -euo pipefail
-          for ext in dmg exe AppImage deb; do
-            count="$(find release-assets -maxdepth 1 -type f -name "*.${ext}" | wc -l | tr -d ' ')"
-            if [ "$count" -ne 1 ]; then
-              echo "::error::期望 1 个 *.${ext}，实际 ${count} 个"
-              ls -l release-assets
-              exit 1
-            fi
-          done
-          HERMES_TARBALL="mebular-hermes-plugins-${TAG#v}.tar.gz"
-          if [ ! -f "release-assets/$HERMES_TARBALL" ]; then
-            echo "::error::缺少 Hermes 插件 tarball：$HERMES_TARBALL"
-            ls -l release-assets
-            exit 1
-          fi
-          HERMES_COUNT="$(find release-assets -maxdepth 1 -type f -name 'mebular-hermes-plugins-*.tar.gz' | wc -l | tr -d ' ')"
-          if [ "$HERMES_COUNT" -ne 1 ]; then
-            echo "::error::期望 1 个 Hermes 插件 tarball，实际 ${HERMES_COUNT} 个"
-            ls -l release-assets
-            exit 1
-          fi
           ls -lh release-assets
-
-      - name: Generate SHA256SUMS.txt (installers + Hermes plugins, stable order)
-        shell: bash
-        run: |
-          set -euo pipefail
-          (
-            cd release-assets
-            find . -maxdepth 1 -type f \
-              \( -name '*.dmg' -o -name '*.exe' -o -name '*.AppImage' -o -name '*.deb' \
-                 -o -name 'mebular-hermes-plugins-*.tar.gz' \) \
-              -printf '%f\n' | LC_ALL=C sort | xargs sha256sum
-          ) > SHA256SUMS.txt
-          cat SHA256SUMS.txt
+          node scripts/verify-desktop-assets.mjs \
+            --dir release-assets \
+            --expect dmg,exe,AppImage,deb \
+            --require-hermes
 
       - name: Extract release notes from CHANGELOG
         shell: bash
@@ -701,7 +672,7 @@ jobs:
             release-assets/*.AppImage \
             release-assets/*.deb \
             release-assets/mebular-hermes-plugins-*.tar.gz \
-            SHA256SUMS.txt \
+            release-assets/SHA256SUMS.txt \
             --clobber
           echo "Release $TAG 资产："
           gh release view "$TAG" --json assets --jq '.assets[] | "\(.name)  \(.size) bytes"'

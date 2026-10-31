@@ -1974,6 +1974,9 @@ let lastSettingsSignature = null;
 // 覆盖渲染依赖：activeTab（即 settingsTab）、settings、rawConfig、writes、healthz、本机 deviceId、
 // AI 助手专区依赖（clients / service / 行内动作消息与展开态）。
 function settingsSignature(activeTab) {
+  // Runtime 状态只影响「记忆运行时 / 高级」面板；MCP/常用/安全 tab 不应因
+  // 模型状态/轨迹轮询而重建 DOM（否则原生 select 弹层会被销毁）。
+  const runtimeRelevant = activeTab === 'runtime' || activeTab === 'advanced';
   return JSON.stringify([
     activeTab,
     getLocale(),
@@ -1988,7 +1991,7 @@ function settingsSignature(activeTab) {
     state.cloudsError ?? null,
     state.cloudRename?.id ?? null,
     state.cloudRenameError ?? '',
-    state.runtime ? [
+    runtimeRelevant && state.runtime ? [
       state.runtime.status?.enabled ?? null,
       state.runtime.status?.state ?? null,
       state.runtime.status?.available ?? null,

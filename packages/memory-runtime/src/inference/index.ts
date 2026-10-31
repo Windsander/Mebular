@@ -5,6 +5,7 @@
 
 export * from './types.js';
 export * from './catalog.js';
+export * from './engine-assets.js';
 export * from './detect.js';
 export * from './store.js';
 export * from './engine.js';

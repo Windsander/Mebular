@@ -13,9 +13,9 @@ import {
 } from '../../src/sidecar/config.js';
 import { SidecarLocalLayer } from '../../src/sidecar/local-layer.js';
 import {
-  createSidecarModelRuntime,
-  type SidecarModelRuntime,
-} from '../../src/sidecar/model.js';
+  createSidecarInferenceProvider,
+  type SidecarInferenceProvider,
+} from '../../src/sidecar/inference-provider.js';
 import { SidecarServer } from '../../src/sidecar/server.js';
 import { SettlementRuntime } from '../../src/sidecar/settlement.js';
 import type { ChatFetch, ChatFetchResponse } from '../../src/inference/gateway.js';
@@ -28,7 +28,7 @@ interface Harness {
   home: string;
   fake: FakeCapabilityServer;
   runtime: SettlementRuntime;
-  model: SidecarModelRuntime;
+  model: SidecarInferenceProvider;
   server: SidecarServer;
 }
 
@@ -76,7 +76,7 @@ async function setup(): Promise<Harness> {
     },
   }).model;
   const fetchImpl: ChatFetch = async () => jsonResponse(JSON.stringify({ candidates: [] }));
-  const model = createSidecarModelRuntime(config.model, {
+  const model = createSidecarInferenceProvider(config.model, {
     homeDir: home,
     env: { TEST_STATUS_KEY: SECRET },
     fetch: fetchImpl,
@@ -89,7 +89,7 @@ async function setup(): Promise<Harness> {
     client,
     identity,
     autoStartReplayer: false,
-    modelRuntime: model,
+    inference: model,
     now: () => NOW,
   });
   await runtime.init();
@@ -110,6 +110,9 @@ async function setup(): Promise<Harness> {
       warnings: [],
     }),
     getModelStatus: () => model.status(),
+    inference: {
+      capabilities: () => ({ install: true, activate: true, catalog: true, engine: true }),
+    } as unknown as import('../../src/sidecar/inference/types.js').InferenceApi,
     ingest: runtime,
     namespaces: runtime,
     recall: runtime,
@@ -158,7 +161,13 @@ describe('sidecar model status/version', () => {
       degraded: false,
       credential: { configured: true, source: 'env' },
     });
-    expect(body.data.capabilities.models).toEqual(expect.arrayContaining(['heuristic', 'host', 'api']));
+    expect(body.data.capabilities.models).toMatchObject({
+      install: true,
+      activate: true,
+      catalog: true,
+    });
+    expect(body.data.capabilities.inference).toMatchObject({ engine: true });
+    expect(body.data.capabilities.inference.sources).toEqual(expect.arrayContaining(['heuristic', 'host', 'api']));
     expect(JSON.stringify(body)).not.toContain(SECRET);
   });
 });

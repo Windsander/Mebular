@@ -9,7 +9,7 @@ import {
 } from '../../packages/mcp/src/inference-admin.mjs';
 import {
   PACK_4B,
-  PACK_9B,
+  PACK_8B,
   cleanupDirs,
   makeManifest,
   putManifest,
@@ -55,8 +55,11 @@ describe('InferenceManager · download/import/remove', () => {
       fetch: async () => response(200, content),
     });
 
-    await expect(manager.download({ pack: PACK_9B, wait: true }))
-      .rejects.toMatchObject({ code: 'manifest_missing' });
+    // 内置 manifest 让所有精选项都可安装；未知 pack 仍在下载前拒绝。
+    await expect(manager.download({ pack: 'qwen3.5-9b-instruct-q4_k_m', wait: true }))
+      .rejects.toMatchObject({ code: 'unknown_pack' });
+    const listedBefore = await manager.list();
+    expect(listedBefore.packs.find((pack) => pack.packId === PACK_8B)?.manifestAvailable).toBe(true);
 
     const downloaded = await manager.download({
       pack: PACK_4B,
@@ -151,14 +154,14 @@ describe('InferenceManager · download/import/remove', () => {
     tempDirs.push(home, source);
     await writeImportPack(source, makeManifest());
     const manager = createInferenceManager({ home });
-    await expect(manager.importPack({ path: source, pack: 'qwen3.5-32b-instruct-q4_k_m' }))
+    await expect(manager.importPack({ path: source, pack: 'qwen3-32b-instruct-q4_k_m' }))
       .rejects.toMatchObject({ code: 'manifest_mismatch' });
 
     const unsupported = await tempDir('mebular-inference-import-32b-');
     tempDirs.push(unsupported);
     await writeImportPack(unsupported, makeManifest({
-      packId: 'qwen3.5-32b-instruct-q4_k_m',
-      modelId: 'qwen3.5-32b-instruct',
+      packId: 'qwen3-32b-instruct-q4_k_m',
+      modelId: 'qwen3-32b-instruct',
     }));
     await expect(manager.importPack({ path: unsupported }))
       .rejects.toMatchObject({ code: 'unknown_pack' });

@@ -16,10 +16,10 @@ import { defaultSidecarPolicy } from '../../src/sidecar/domains.js';
 import { MemoryObjectService } from '../../src/sidecar/internal-objects.js';
 import { SidecarLocalLayer } from '../../src/sidecar/local-layer.js';
 import {
-  createSidecarModelRuntime,
-  type SidecarModelEngine,
-  type SidecarModelRuntime,
-} from '../../src/sidecar/model.js';
+  createSidecarInferenceProvider,
+  type InferenceEngineFacade,
+  type SidecarInferenceProvider,
+} from '../../src/sidecar/inference-provider.js';
 import { RecallService } from '../../src/sidecar/recall.js';
 import type { ChatFetch, ChatFetchResponse } from '../../src/inference/gateway.js';
 import {
@@ -35,12 +35,12 @@ interface Harness {
   local: SidecarLocalLayer;
   fake: FakeCapabilityServer;
   client: CapabilityClient;
-  model: SidecarModelRuntime;
+  model: SidecarInferenceProvider;
   config: SidecarConfig;
 }
 
 const harnesses: Harness[] = [];
-const runtimes: SidecarModelRuntime[] = [];
+const runtimes: SidecarInferenceProvider[] = [];
 
 afterEach(async () => {
   for (const harness of harnesses.splice(0)) {
@@ -92,7 +92,7 @@ function modelSettings(path: string) {
   }).model;
 }
 
-function fakeEngine(): () => SidecarModelEngine {
+function fakeEngine(): () => InferenceEngineFacade {
   return () => ({
     async acquire() {
       return {
@@ -119,7 +119,7 @@ async function setup(options: { fetch: ChatFetch; mutateConfig?: (config: Sideca
   const config = defaultSidecarConfig();
   config.model = modelSettings(modelPath);
   options.mutateConfig?.(config);
-  const model = createSidecarModelRuntime(config.model, {
+  const model = createSidecarInferenceProvider(config.model, {
     homeDir: home,
     modelsDir: join(home, 'memory-runtime', 'models'),
     fetch: options.fetch,
@@ -169,7 +169,7 @@ describe('optional model integration', () => {
       client,
       identity: { cloudId: 'cl_test', profileId: 'default', hostId: 'h_test', deviceId: 'device-local' },
       policy: defaultSidecarPolicy(),
-      modelRuntime: model,
+      inference: model,
       now: () => NOW,
     });
 
@@ -203,7 +203,7 @@ describe('optional model integration', () => {
       client,
       identity: { cloudId: 'cl_test', profileId: 'default', hostId: 'h_test', deviceId: 'device-local' },
       policy: defaultSidecarPolicy(),
-      modelRuntime: model,
+      inference: model,
       now: () => NOW,
     });
 
@@ -241,7 +241,7 @@ describe('optional model integration', () => {
       client,
       identity: { cloudId: 'cl_test', profileId: 'default', hostId: 'h_test' },
       policy: defaultSidecarPolicy(),
-      modelRuntime: model,
+      inference: model,
       now: () => NOW,
     });
 
@@ -274,7 +274,7 @@ describe('optional model integration', () => {
       client,
       identity: { cloudId: 'cl_test', profileId: 'default', hostId: 'h_test' },
       policy: defaultSidecarPolicy(),
-      modelRuntime: model,
+      inference: model,
       now: () => NOW,
     });
 

@@ -6,6 +6,9 @@ import { join } from 'node:path';
 import { startHttpServer, hashToken } from '../../packages/mcp/src/serve.mjs';
 import {
   PACK_4B,
+  PACK_8B,
+  PACK_14B,
+  PACK_30B,
   cleanupDirs,
   makeManifest,
   tempDir,
@@ -90,24 +93,21 @@ async function post(base, path, body, auth) {
 }
 
 describe('GET /admin/api/models', () => {
-  it('返回三项精选目录与设备状态；status 含硬件推荐', async () => {
+  it('返回四项精选目录与设备状态；status 含硬件推荐', async () => {
     const { base } = await setup();
     const list = await fetch(`${base}/admin/api/models`);
     expect(list.status).toBe(200);
     const body = await list.json();
-    expect(body.packs.map((pack) => pack.packId)).toEqual([
-      'qwen3.5-9b-instruct-q4_k_m',
-      'qwen3.5-27b-instruct-q4_k_m',
-      'qwen3.5-4b-instruct-q4_k_m',
-    ]);
+    expect(body.packs.map((pack) => pack.packId)).toEqual([PACK_8B, PACK_30B, PACK_14B, PACK_4B]);
     expect(body.packs.every((pack) => pack.state === 'not_installed')).toBe(true);
+    expect(body.packs.every((pack) => pack.manifestAvailable === true)).toBe(true);
 
     const status = await fetch(`${base}/admin/api/models/status`);
     const statusBody = await status.json();
     expect(statusBody).toMatchObject({
       ok: true,
       runtime: { source: 'heuristic', pack: null },
-      recommendation: { kind: 'local', packId: 'qwen3.5-9b-instruct-q4_k_m' },
+      recommendation: { kind: 'local', packId: PACK_8B },
     });
     expect(statusBody.engine.state).toBe('stopped');
     expect(JSON.stringify(statusBody)).not.toMatch(/apiKey|sk-/i);
@@ -147,7 +147,7 @@ process.on('SIGINT', stop);
 describe('写端点门禁：CSRF / Origin / scope', () => {
   it('无 CSRF 403；跨站点 Origin 403；同源 + CSRF 才进入业务错误', async () => {
     const { base } = await setup();
-    const noCsrf = await post(base, '/admin/api/models/select', { pack: 'qwen3.5-4b-instruct-q4_k_m' });
+    const noCsrf = await post(base, '/admin/api/models/select', { pack: PACK_4B });
     expect(noCsrf.status).toBe(403);
 
     const auth = await csrf(base);
@@ -159,13 +159,13 @@ describe('写端点门禁：CSRF / Origin / scope', () => {
         'x-mebular-csrf': auth.token,
         cookie: auth.cookie,
       },
-      body: JSON.stringify({ pack: 'qwen3.5-4b-instruct-q4_k_m' }),
+      body: JSON.stringify({ pack: PACK_4B }),
     });
     expect(cross.status).toBe(403);
     expect((await cross.json()).message).toContain('Origin');
 
     const allowed = await post(base, '/admin/api/models/select', {
-      pack: 'qwen3.5-4b-instruct-q4_k_m',
+      pack: PACK_4B,
     }, auth);
     expect(allowed.status).toBe(409);
     expect(await allowed.json()).toMatchObject({
@@ -224,7 +224,7 @@ describe('写端点门禁：CSRF / Origin / scope', () => {
     const write = await post(
       base,
       '/admin/api/models/select',
-      { pack: 'qwen3.5-4b-instruct-q4_k_m' },
+      { pack: PACK_4B },
       { token: 'x', cookie: 'mebular_csrf=x', bearer: token },
     );
     expect(write.status).toBe(403);

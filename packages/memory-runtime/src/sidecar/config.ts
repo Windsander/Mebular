@@ -71,7 +71,7 @@ export interface SidecarDetailSettings {
   quotaBytesCloud: number;
 }
 
-export interface SidecarModelSettings {
+export interface InferenceSettings {
   source: 'heuristic' | 'local' | 'host' | 'api' | 'auto';
   local: {
     pack: string | null;
@@ -128,7 +128,7 @@ export interface SidecarConfig {
   trace: 'off' | 'local';
   retention: SidecarRetentionSettings;
   detail: SidecarDetailSettings;
-  model: SidecarModelSettings;
+  model: InferenceSettings;
   limits: SidecarLimitSettings;
   recall: SidecarRecallSettings;
   context: SidecarContextSettings;

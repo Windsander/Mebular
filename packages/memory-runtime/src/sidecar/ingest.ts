@@ -42,10 +42,10 @@ import { SidecarSettlementError } from './errors.js';
 import { heuristicCandidates } from './heuristic.js';
 import { LocalLayerError, type OutboxItem, type SidecarLocalLayer } from './local-layer.js';
 import type {
-  SidecarModelExtractionResult,
-  SidecarModelExtractionSourceSelection,
-  SidecarModelRuntime,
-} from './model.js';
+  InferenceExtractionResult,
+  InferenceSourceSelection,
+  SidecarInferenceProvider,
+} from './inference-provider.js';
 import { redactText } from './text.js';
 import type { RawChunk } from '../runtime/types.js';
 
@@ -194,7 +194,7 @@ export interface IngestServiceOptions {
     userId?: string | null;
   };
   policy?: SidecarPolicy | null;
-  modelRuntime?: SidecarModelRuntime | null;
+  inference?: SidecarInferenceProvider | null;
   now?: () => number;
   idempotencyTtlMs?: number;
   extractionTtlMs?: number;
@@ -414,7 +414,7 @@ export class IngestService {
   readonly identity: IngestServiceOptions['identity'];
 
   private readonly client: CapabilityClient | null;
-  private readonly models: SidecarModelRuntime | null;
+  private readonly models: SidecarInferenceProvider | null;
   private policy: SidecarPolicy | null;
   private readonly now: () => number;
   private readonly idempotencyTtlMs: number;
@@ -432,7 +432,7 @@ export class IngestService {
     this.config = options.config;
     this.local = options.local;
     this.client = options.client;
-    this.models = options.modelRuntime ?? null;
+    this.models = options.inference ?? null;
     this.identity = options.identity;
     this.policy = options.policy ?? null;
     this.now = options.now ?? Date.now;
@@ -645,7 +645,7 @@ export class IngestService {
       degraded = selection.degraded;
 
       if (selection.source === 'local' || selection.source === 'api') {
-        let outcome: SidecarModelExtractionResult;
+        let outcome: InferenceExtractionResult;
         try {
           outcome = this.models
             ? await this.models.extractCandidates({
@@ -1141,7 +1141,7 @@ export class IngestService {
   private async selectExtractionSource(
     extractor: IngestExtractor,
     allowRemote: boolean,
-  ): Promise<SidecarModelExtractionSourceSelection> {
+  ): Promise<InferenceSourceSelection> {
     if (!this.models) {
       if (extractor === 'local' || extractor === 'api') {
         return {

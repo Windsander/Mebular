@@ -371,6 +371,7 @@ export async function detectHardware(options: DetectHardwareOptions = {}): Promi
 }
 
 const TIER_RANK: Record<ModelPack['tier'], number> = {
+  high: 4,
   quality: 3,
   default: 2,
   light: 1,
@@ -400,7 +401,7 @@ function gpuAllows(pack: ModelPack, profile: HardwareProfile): boolean {
 }
 
 /**
- * 推荐 27B/9B/4B 或 heuristic。
+ * 推荐 30B-A3B/14B/8B/4B 或 heuristic。
  * - 先按 minMemory/minDisk/platform 过滤；
  * - 优先选择达到 recommendedMemory 的最高质量包；
  * - 没有达到建议内存的包时，仍选择可运行的最高质量包；
@@ -467,14 +468,18 @@ export function recommendModel(
   eligible.sort((left, right) => TIER_RANK[right.pack.tier] - TIER_RANK[left.pack.tier]);
   const highest = eligible[0]!;
   let preferred = highest;
-  if (!highest.meetsRecommendedMemory) {
-    // 不因为低一档“达到建议内存”就跳过仍可运行的更高档：
-    // 例如 16 GiB 上 9B 未达 24 GiB 建议值，但 4B 达到建议值；仍应默认 9B。
-    // 只有更高档是 quality、而 default 档达到建议内存时才降档（如 40 GiB 的 27B → 9B）。
-    const recommendedDefault = eligible
+  if (
+    !highest.meetsRecommendedMemory
+    && (highest.pack.tier === 'high' || highest.pack.tier === 'quality')
+  ) {
+    // 高档可运行但未达建议内存时，退到“达到建议内存”的最高档：
+    // 例如 48 GiB 上 30B-A3B 低于 64 GiB 建议值，应选达到 32 GiB 建议值的 14B，
+    // 而不是直接跳到 8B；若最高档只是 default（如 16 GiB 的 8B），仍保留 8B，
+    // 不因为 4B 达到建议值而降档。
+    const recommended = eligible
       .slice(1)
-      .find((entry) => entry.pack.tier === 'default' && entry.meetsRecommendedMemory);
-    if (recommendedDefault && highest.pack.tier === 'quality') preferred = recommendedDefault;
+      .find((entry) => entry.meetsRecommendedMemory);
+    if (recommended) preferred = recommended;
   }
   const alternatives = eligible
     .filter((entry) => entry.pack.packId !== preferred.pack.packId)

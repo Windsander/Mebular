@@ -28,7 +28,7 @@ import {
 } from './ingest.js';
 import { MemoryObjectService } from './internal-objects.js';
 import type { SidecarLocalLayer } from './local-layer.js';
-import type { SidecarModelRuntime } from './model.js';
+import type { SidecarInferenceProvider } from './inference-provider.js';
 import { OutboxReplayer } from './outbox-replayer.js';
 import {
   RecallService,
@@ -51,7 +51,7 @@ export interface SettlementRuntimeOptions {
   client: CapabilityClient | null;
   identity: SettlementIdentity;
   policy?: SidecarPolicy | null;
-  modelRuntime?: SidecarModelRuntime | null;
+  inference?: SidecarInferenceProvider | null;
   policyPath?: string;
   now?: () => number;
   replayerIntervalMs?: number;
@@ -145,7 +145,7 @@ export class SettlementRuntime {
   readonly objects: MemoryObjectService;
 
   private readonly client: CapabilityClient | null;
-  private readonly modelRuntime: SidecarModelRuntime | null;
+  private readonly inference: SidecarInferenceProvider | null;
   private policy: SidecarPolicy;
   private readonly policyPath?: string;
 
@@ -154,7 +154,7 @@ export class SettlementRuntime {
     this.local = options.local;
     this.identity = options.identity;
     this.client = options.client;
-    this.modelRuntime = options.modelRuntime ?? null;
+    this.inference = options.inference ?? null;
     this.policy = options.policy ?? { schema: 1, agents: {} };
     this.policyPath = options.policyPath;
     const ingestOptions: IngestServiceOptions = {
@@ -168,7 +168,7 @@ export class SettlementRuntime {
         ...(options.identity.userId !== undefined ? { userId: options.identity.userId } : {}),
       },
       policy: this.policy,
-      ...(this.modelRuntime ? { modelRuntime: this.modelRuntime } : {}),
+      ...(this.inference ? { inference: this.inference } : {}),
       ...(options.now ? { now: options.now } : {}),
     };
     this.ingest = new IngestService(ingestOptions);
@@ -183,7 +183,7 @@ export class SettlementRuntime {
         ...(options.identity.userId !== undefined ? { userId: options.identity.userId } : {}),
       },
       policy: this.policy,
-      ...(this.modelRuntime ? { modelRuntime: this.modelRuntime } : {}),
+      ...(this.inference ? { inference: this.inference } : {}),
       ...(options.now ? { now: options.now } : {}),
     });
     this.recall = new RecallService({
@@ -199,7 +199,7 @@ export class SettlementRuntime {
       policy: this.policy,
       getPolicy: () => this.policy,
       checkpointSource: this.objects,
-      ...(this.modelRuntime ? { modelRuntime: this.modelRuntime } : {}),
+      ...(this.inference ? { inference: this.inference } : {}),
       ...(options.now ? { now: options.now } : {}),
     });
     this.replayer = new OutboxReplayer({
@@ -244,7 +244,7 @@ export class SettlementRuntime {
     return this.ingest.isDegraded
       || this.recall.isDegraded
       || this.objects.isDegraded
-      || this.modelRuntime?.currentStatus().degraded === true;
+      || this.inference?.currentStatus().degraded === true;
   }
 
   get stats(): IngestStatsSnapshot {

@@ -15,8 +15,9 @@ import {
 import { createInferenceManager } from '../../packages/mcp/src/inference-admin.mjs';
 import {
   PACK_4B,
-  PACK_27B,
-  PACK_9B,
+  PACK_8B,
+  PACK_14B,
+  PACK_30B,
   cleanupDirs,
   fileMode,
   makeManifest,
@@ -77,17 +78,24 @@ describe('设备级 model store 初始化', () => {
 });
 
 describe('catalog 与选择关系', () => {
-  it('精选目录固定 9B/27B/4B，不含 32B；manifest 只接受三项', async () => {
+  it('精选目录固定 8B/30B-A3B/14B/4B，不含 32B；内置完整 manifest', async () => {
     const home = await homeDir();
     const catalog = await loadModelCatalog(home);
-    expect(catalog.packs.map((pack) => pack.packId)).toEqual([PACK_9B, PACK_27B, PACK_4B]);
-    expect(JSON.stringify(catalog.packs)).not.toMatch(/32b/i);
+    expect(catalog.packs.map((pack) => pack.packId)).toEqual([PACK_8B, PACK_30B, PACK_14B, PACK_4B]);
+    expect(JSON.stringify(catalog.packs)).not.toMatch(/32b|qwen3\.5/i);
     for (const pack of catalog.packs) {
-      expect(pack.source.repository.repo).toMatch(/^Qwen\/Qwen3\.5-(4B|9B|27B)-GGUF$/);
-      expect(pack.manifest).toBeUndefined();
+      expect(pack.source.repository.repo).toMatch(/^Qwen\/Qwen3-(4B|8B|14B|30B-A3B)-GGUF$/);
+      expect(pack.manifest?.files).toHaveLength(1);
+      expect(pack.manifest?.files[0]?.url).toMatch(/^https:\/\/huggingface\.co\/Qwen\/Qwen3-/);
     }
-    await expect(resolveManifestForPack({ home, packId: PACK_9B, catalog }))
-      .rejects.toMatchObject({ code: 'manifest_missing' });
+    await expect(resolveManifestForPack({ home, packId: PACK_8B, catalog }))
+      .resolves.toMatchObject({
+        manifest: {
+          packId: PACK_8B,
+          modelId: 'qwen3-8b-instruct',
+          license: { id: 'apache-2.0' },
+        },
+      });
   });
 
   it('config 显式 pack 优先于 inference.selectedPack；否则使用设备选择', async () => {
@@ -107,9 +115,9 @@ describe('catalog 与选择关系', () => {
     });
     expect(resolveModelSettings({
       ...base,
-      config: { runtime: { model: { source: 'local', local: { pack: PACK_9B, path: '/custom' } } } },
+      config: { runtime: { model: { source: 'local', local: { pack: PACK_8B, path: '/custom' } } } },
     })).toMatchObject({
-      pack: PACK_9B,
+      pack: PACK_8B,
       path: '/custom',
       selectionSource: 'config',
     });

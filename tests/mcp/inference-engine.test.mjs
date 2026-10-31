@@ -33,11 +33,11 @@ async function setup({ failStart = false } = {}) {
       calls.start += 1;
       if (failStart) throw Object.assign(new Error('boom'), { code: 'startup_timeout' });
       state = 'running';
-      return { baseUrl: 'http://127.0.0.1:12345/v1', apiKey: SECRET, modelId: 'qwen3.5-4b-instruct', port: 12345 };
+      return { baseUrl: 'http://127.0.0.1:12345/v1', apiKey: SECRET, modelId: 'qwen3-4b-instruct', port: 12345 };
     },
     async acquire() {
       calls.acquire += 1;
-      return { baseUrl: 'http://127.0.0.1:12345/v1', apiKey: SECRET, modelId: 'qwen3.5-4b-instruct', port: 12345 };
+      return { baseUrl: 'http://127.0.0.1:12345/v1', apiKey: SECRET, modelId: 'qwen3-4b-instruct', port: 12345 };
     },
     getStatus() {
       return {
@@ -127,7 +127,7 @@ describe('InferenceEngineManager', () => {
     const manager = createInferenceManager({ home });
     await expect(manager.start({})).rejects.toMatchObject({ code: 'no_model_selected' });
     await expect(manager.start({ pack: PACK_4B })).rejects.toMatchObject({ code: 'not_installed' });
-    await expect(manager.test({ pack: 'qwen3.5-32b-nope' })).rejects.toMatchObject({ code: 'not_installed' });
+    await expect(manager.test({ pack: 'qwen3-32b-nope' })).rejects.toMatchObject({ code: 'not_installed' });
     await manager.dispose();
   });
 });

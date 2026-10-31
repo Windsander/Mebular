@@ -92,7 +92,7 @@ describe('mebular models CLI', () => {
     const list = await runCli(home, ['list']);
     expect(list.code).toBe(0);
     expect(list.json).toMatchObject({ ok: true, command: 'models.list' });
-    expect(list.json.packs).toHaveLength(3);
+    expect(list.json.packs).toHaveLength(4);
 
     const status = await runCli(home, ['status'], {
       MEBULAR_MODEL_HARDWARE_JSON: JSON.stringify({

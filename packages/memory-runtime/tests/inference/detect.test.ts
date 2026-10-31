@@ -121,7 +121,7 @@ describe('detectHardware', () => {
 });
 
 describe('recommendModel', () => {
-  it('16 GiB 推荐默认 9B', () => {
+  it('16 GiB 推荐默认 8B', () => {
     const result = recommendModel(makeHardware({ totalMemoryBytes: 16 * GIB }));
     expect(result).toMatchObject({
       kind: 'local',
@@ -131,32 +131,38 @@ describe('recommendModel', () => {
     expect(result.warnings.some((warning) => warning.includes('recommended'))).toBe(true);
   });
 
-  it('32 GiB 仍推荐 9B（27B 需要 40 GiB 才能启动）', () => {
+  it('32 GiB 推荐 14B 高质量', () => {
     const result = recommendModel(makeHardware({ totalMemoryBytes: 32 * GIB }));
-    expect(result.packId).toBe(DEFAULT_MODEL_PACK_ID);
+    expect(result).toMatchObject({
+      kind: 'local',
+      packId: 'qwen3-14b-instruct-q4_k_m',
+      tier: 'quality',
+    });
+    expect(result.alternatives).toContain(DEFAULT_MODEL_PACK_ID);
   });
 
-  it('40 GiB 上 27B 可启动但未达 64 GiB 建议值，降回 9B', () => {
-    const result = recommendModel(makeHardware({ totalMemoryBytes: 40 * GIB }));
-    expect(result.packId).toBe(DEFAULT_MODEL_PACK_ID);
-    expect(result.alternatives).toContain('qwen3.5-27b-instruct-q4_k_m');
-    expect(result.warnings.some((warning) => warning.includes('27b'))).toBe(true);
+  it('48 GiB 上 30B-A3B 可启动但未达 64 GiB 建议值，退到 14B', () => {
+    const result = recommendModel(makeHardware({ totalMemoryBytes: 48 * GIB }));
+    expect(result.packId).toBe('qwen3-14b-instruct-q4_k_m');
+    expect(result.alternatives).toContain('qwen3-30b-a3b-instruct-q4_k_m');
+    expect(result.warnings.some((warning) => warning.includes('30b'))).toBe(true);
   });
 
-  it('64 GiB 推荐 27B 高质量', () => {
+  it('64 GiB 推荐 30B-A3B 高端 MoE', () => {
     const result = recommendModel(makeHardware({ totalMemoryBytes: 64 * GIB }));
     expect(result).toMatchObject({
       kind: 'local',
-      packId: 'qwen3.5-27b-instruct-q4_k_m',
-      tier: 'quality',
+      packId: 'qwen3-30b-a3b-instruct-q4_k_m',
+      tier: 'high',
     });
+    expect(result.alternatives).toContain('qwen3-14b-instruct-q4_k_m');
     expect(result.alternatives).toContain(DEFAULT_MODEL_PACK_ID);
   });
 
   it('8 GiB 推荐 4B 轻量', () => {
     const result = recommendModel(makeHardware({ totalMemoryBytes: 8 * GIB }));
     expect(result).toMatchObject({
-      packId: 'qwen3.5-4b-instruct-q4_k_m',
+      packId: 'qwen3-4b-instruct-q4_k_m',
       tier: 'light',
     });
   });
@@ -175,6 +181,6 @@ describe('recommendModel', () => {
   it('目录顺序不影响推荐质量排序', () => {
     const reversed = [...CURATED_MODEL_PACKS].reverse();
     const result = recommendModel(makeHardware({ totalMemoryBytes: 64 * GIB }), reversed);
-    expect(result.packId).toBe('qwen3.5-27b-instruct-q4_k_m');
+    expect(result.packId).toBe('qwen3-30b-a3b-instruct-q4_k_m');
   });
 });

@@ -35,6 +35,11 @@ import type {
 import type { SidecarObjectsApi } from './internal-objects.js';
 import { SidecarSettlementError } from './errors.js';
 import type { NamespacesView } from './settlement.js';
+import {
+  InferenceError,
+  type InferenceApi,
+  type InferenceStatusView,
+} from './inference/types.js';
 
 const REQUEST_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
@@ -187,6 +192,8 @@ export interface SidecarStatusSnapshot {
   warnings: string[];
   /** 最近的沉降错误；不包含正文/token。 */
   lastError: SidecarStatusError | null;
+  /** 模型安装/引擎/推荐状态；不包含 token/path。 */
+  inference?: InferenceStatusView;
 }
 
 export interface SidecarStatus extends SidecarStatusSnapshot {
@@ -263,6 +270,8 @@ export interface SidecarServerOptions {
   namespaces?: SidecarNamespacesApi;
   recall?: SidecarRecallApi;
   objects?: SidecarObjectsApi;
+  /** inference host API；缺省时 /models 返回 501。 */
+  inference?: InferenceApi;
   /** 动态降级标记（沉降/outbox）；与显式 degraded 取或。 */
   getDegraded?: () => boolean;
   state?: SidecarState;
@@ -416,6 +425,7 @@ export class SidecarServer {
   private readonly namespaces?: SidecarNamespacesApi;
   private readonly recall?: SidecarRecallApi;
   private readonly objects?: SidecarObjectsApi;
+  private readonly inference?: InferenceApi;
   private readonly getDegraded?: () => boolean;
   private readonly now: () => number;
   private server: Server | null = null;
@@ -437,6 +447,7 @@ export class SidecarServer {
     this.namespaces = options.namespaces;
     this.recall = options.recall;
     this.objects = options.objects;
+    this.inference = options.inference;
     this.getDegraded = options.getDegraded;
     this.state = options.state ?? 'starting';
     this.degraded = options.degraded === true;
@@ -818,6 +829,12 @@ export class SidecarServer {
           return;
         }
         const model = await this.modelPayload();
+        const modelCapabilities = this.inference?.capabilities() ?? {
+          install: false,
+          activate: false,
+          catalog: false,
+          engine: false,
+        };
         this.send(res, 200, this.envelope(requestId, {
           runtimeVersion: this.runtimeVersion,
           apiVersion: this.apiVersion,
@@ -840,7 +857,15 @@ export class SidecarServer {
             checkpoint: Boolean(this.objects),
             compact: Boolean(this.objects),
             self: Boolean(this.objects),
-            models: model.sources ?? ['heuristic', 'host'],
+            models: {
+              install: modelCapabilities.install,
+              activate: modelCapabilities.activate,
+              catalog: modelCapabilities.catalog,
+            },
+            inference: {
+              engine: modelCapabilities.engine,
+              sources: model.sources ?? ['heuristic', 'host'],
+            },
           },
           details: {
             stagingHours: this.config.detail.stagingHours,
@@ -866,6 +891,168 @@ export class SidecarServer {
           Array.isArray(status.warnings) ? status.warnings : [],
           status.degraded,
         ));
+        return;
+      }
+
+      if (relative === 'models') {
+        if (!isGet) {
+          req.resume();
+          this.sendError(res, 405, requestId, 'method_not_allowed', 'models 仅接受 GET');
+          return;
+        }
+        if (!this.inference) {
+          req.resume();
+          this.sendError(res, 501, requestId, 'not_implemented', 'inference 尚未启用');
+          return;
+        }
+        const catalog = await this.inference.listModels();
+        this.send(res, 200, this.envelope(
+          requestId,
+          catalog,
+          catalog.warnings,
+          catalog.active.engine.state === 'crashed' || catalog.active.engine.state === 'circuit_open',
+        ));
+        return;
+      }
+
+      if (relative.startsWith('models/')) {
+        if (!this.inference) {
+          req.resume();
+          this.sendError(res, 501, requestId, 'not_implemented', 'inference 尚未启用');
+          return;
+        }
+        const parts = relative.split('/');
+        if (parts.length < 2 || parts.length > 3) {
+          req.resume();
+          this.sendError(res, 404, requestId, 'not_found', '未知模型路径');
+          return;
+        }
+        let packId: string;
+        try {
+          packId = decodeURIComponent(parts[1] ?? '');
+        } catch {
+          req.resume();
+          this.sendError(res, 400, requestId, 'invalid_request', '模型包 id 非法');
+          return;
+        }
+        if (packId.length === 0 || packId.includes('/')) {
+          req.resume();
+          this.sendError(res, 404, requestId, 'not_found', '未知模型包');
+          return;
+        }
+        const action = parts[2] ?? 'status';
+        if (action !== 'status' && this.state === 'stopping') {
+          req.resume();
+          this.sendError(res, 503, requestId, 'stopping', 'sidecar 正在停止', undefined, true);
+          return;
+        }
+        if (action === 'status' || action === 'get') {
+          if (!isGet) {
+            req.resume();
+            this.sendError(res, 405, requestId, 'method_not_allowed', '模型状态仅接受 GET');
+            return;
+          }
+          const view = await this.inference.getModelStatus(packId);
+          if (!view) {
+            this.sendError(res, 404, requestId, 'unknown_pack', '未知模型包');
+            return;
+          }
+          this.send(res, 200, this.envelope(requestId, view, view.warnings, false));
+          return;
+        }
+        if (!isPost) {
+          req.resume();
+          this.sendError(res, 405, requestId, 'method_not_allowed', '模型操作仅接受 POST');
+          return;
+        }
+        req.resume();
+        if (action === 'install') {
+          const force = url.searchParams.get('force') === 'true' || url.searchParams.get('force') === '1';
+          const job = await this.inference.install(packId, { force });
+          this.send(res, 202, this.envelope(requestId, job, job.warnings, false));
+          return;
+        }
+        if (action === 'activate') {
+          const result = await this.inference.activate(packId);
+          this.send(res, 200, this.envelope(requestId, result, result.warnings, !result.activated));
+          return;
+        }
+        if (action === 'deactivate') {
+          const result = await this.inference.deactivate(packId);
+          this.send(res, 200, this.envelope(requestId, result, result.warnings, false));
+          return;
+        }
+        if (action === 'start') {
+          const result = await this.inference.startEngine(packId);
+          this.send(res, 200, this.envelope(requestId, result, result.warnings, false));
+          return;
+        }
+        if (action === 'stop') {
+          const result = await this.inference.stopEngine(packId);
+          this.send(res, 200, this.envelope(requestId, result, result.warnings, false));
+          return;
+        }
+        if (action === 'remove') {
+          const result = await this.inference.removeModel(packId);
+          this.send(res, 200, this.envelope(requestId, result, result.warnings, false));
+          return;
+        }
+        this.sendError(res, 404, requestId, 'not_found', '未知模型操作');
+        return;
+      }
+
+      if (relative.startsWith('installs/')) {
+        if (!this.inference) {
+          req.resume();
+          this.sendError(res, 501, requestId, 'not_implemented', 'inference 尚未启用');
+          return;
+        }
+        const parts = relative.split('/');
+        if (parts.length < 2 || parts.length > 3) {
+          req.resume();
+          this.sendError(res, 404, requestId, 'not_found', '未知安装任务路径');
+          return;
+        }
+        let jobId: string;
+        try {
+          jobId = decodeURIComponent(parts[1] ?? '');
+        } catch {
+          req.resume();
+          this.sendError(res, 400, requestId, 'invalid_request', '安装任务 id 非法');
+          return;
+        }
+        if (jobId.length === 0 || jobId.includes('/')) {
+          req.resume();
+          this.sendError(res, 404, requestId, 'install_not_found', '安装任务不存在');
+          return;
+        }
+        if (parts.length === 2) {
+          if (!isGet) {
+            req.resume();
+            this.sendError(res, 405, requestId, 'method_not_allowed', '安装任务仅接受 GET');
+            return;
+          }
+          const job = await this.inference.getInstall(jobId);
+          if (!job) {
+            this.sendError(res, 404, requestId, 'install_not_found', '安装任务不存在或已被替换');
+            return;
+          }
+          this.send(res, 200, this.envelope(requestId, job, job.warnings, false));
+          return;
+        }
+        if (parts[2] !== 'cancel') {
+          req.resume();
+          this.sendError(res, 404, requestId, 'not_found', '未知安装任务操作');
+          return;
+        }
+        if (!isPost) {
+          req.resume();
+          this.sendError(res, 405, requestId, 'method_not_allowed', '取消安装仅接受 POST');
+          return;
+        }
+        req.resume();
+        const job = await this.inference.cancelInstall(jobId);
+        this.send(res, 200, this.envelope(requestId, job, job.warnings, false));
         return;
       }
 
@@ -1267,6 +1454,22 @@ export class SidecarServer {
             error.code,
             error.message,
             error.details,
+            error.retryable,
+          );
+        } else if (!res.writableEnded) {
+          res.destroy();
+        }
+        return;
+      }
+      if (error instanceof InferenceError) {
+        if (!res.headersSent) {
+          this.sendError(
+            res,
+            error.status,
+            requestId,
+            error.code,
+            error.message,
+            error.options.details,
             error.retryable,
           );
         } else if (!res.writableEnded) {

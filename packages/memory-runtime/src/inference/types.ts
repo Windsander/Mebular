@@ -13,7 +13,7 @@ export const MODEL_MANIFEST_SCHEMA = 1 as const;
 export const MODEL_FORMATS = ['gguf', 'safetensors', 'mlx', 'onnx'] as const;
 export type ModelFormat = (typeof MODEL_FORMATS)[number];
 
-export const MODEL_TIERS = ['light', 'default', 'quality', 'custom'] as const;
+export const MODEL_TIERS = ['light', 'default', 'quality', 'high', 'custom'] as const;
 export type ModelTier = (typeof MODEL_TIERS)[number];
 
 export const MODEL_SOURCE_KINDS = ['catalog', 'repo', 'local', 'import', 'custom'] as const;
@@ -104,7 +104,7 @@ export interface ModelContext {
   defaultMaxOutputTokens?: number;
 }
 
-export interface ModelRuntime {
+export interface ModelExecutionSpec {
   engine: 'llama-server';
   minVersion?: string;
   /** 默认推理线程数；缺省由引擎决定。 */
@@ -125,15 +125,15 @@ export interface ModelManifest {
   license: ModelLicense;
   requirements: ModelRequirements;
   context: ModelContext;
-  runtime: ModelRuntime;
+  runtime: ModelExecutionSpec;
   source: ModelSource;
   /** 包版本（可选）；与 modelId 分离，便于同一模型多版本共存。 */
   version?: string;
 }
 
 /**
- * 精选目录条目。默认只包含仓库坐标和硬件要求；完整 manifest（含 sha256）
- * 由调用方注入，避免把未经核对的 URL/哈希写死在源码里。
+ * 精选目录条目。默认附带内置完整 manifest（含文件 sha256 与由仓库坐标推导
+ * 的下载 URL）；调用方仍可用显式 manifest 覆盖，但不得夹带目录外模型。
  */
 export interface ModelPack {
   packId: string;
@@ -148,7 +148,7 @@ export interface ModelPack {
   requirements: ModelRequirements;
   source: ModelSource;
   default?: boolean;
-  /** 注入/解析后的完整 manifest；默认 catalog 为 undefined。 */
+  /** 内置或注入/解析后的完整 manifest；`includeManifests:false` 时为空。 */
   manifest?: ModelManifest;
 }
 

@@ -124,8 +124,8 @@ sidecar 不会在背后替你选模型。四个来源：
 
 ```bash
 mebular models list
-mebular models install --pack qwen3.5-9b-instruct-q4_k_m
-mebular models select qwen3.5-9b-instruct-q4_k_m
+mebular models install --pack qwen3-8b-instruct-q4_k_m
+mebular models select qwen3-8b-instruct-q4_k_m
 ```
 
 模型包在使用前会按 manifest 和 SHA-256 校验，绝不会静默下载或更新。sidecar 仍需要

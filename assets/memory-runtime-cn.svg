@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="430" viewBox="0 0 1080 430" role="img" aria-label="记忆运行时：轻量 MCP 与沉浸式两种接入，共用同一张图">
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="38%" r="72%">
+      <stop offset="0%" stop-color="#0d2140" stop-opacity="0.85"/>
+      <stop offset="100%" stop-color="#03050a" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1080" height="430" fill="#03050a"/>
+  <ellipse cx="540" cy="172" rx="594" ry="223.6" fill="url(#glow)"/>
+<text x="40" y="44" font-family="'SF Pro Display','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="21" fill="#e2ecff" font-weight="700" letter-spacing="1.2">记忆运行时</text>
+<text x="40" y="72" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="13" fill="#8aa8c8">两种接入，同一张图。</text>
+<rect x="40" y="104" width="460" height="210" rx="16" fill="#081322" stroke="#1a3a60" stroke-width="1.2"/>
+<text x="64" y="134" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="16" fill="#8aa8c8" font-weight="700">轻量 MCP</text>
+<circle cx="68" cy="172" r="3" fill="#8aa8c8"/>
+<text x="82" y="176" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="12.5" fill="#e2ecff">Agent 直接调用记忆工具。</text>
+<circle cx="68" cy="214" r="3" fill="#8aa8c8"/>
+<text x="82" y="218" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="12.5" fill="#e2ecff">不启动 sidecar，只用工具。</text>
+<circle cx="68" cy="256" r="3" fill="#8aa8c8"/>
+<text x="82" y="260" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="12.5" fill="#e2ecff">适合只用 MCP 的宿主。</text>
+<rect x="580" y="104" width="460" height="210" rx="16" fill="#081322" stroke="#1a3a60" stroke-width="1.2"/>
+<text x="604" y="134" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="16" fill="#8ac8ff" font-weight="700">沉浸式</text>
+<circle cx="608" cy="172" r="3" fill="#8ac8ff"/>
+<text x="622" y="176" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="12.5" fill="#e2ecff">Sidecar 自动召回、抽取、压缩。</text>
+<circle cx="608" cy="214" r="3" fill="#8ac8ff"/>
+<text x="622" y="218" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="12.5" fill="#e2ecff">本地 Qwen 可选，失败回退规则。</text>
+<circle cx="608" cy="256" r="3" fill="#8ac8ff"/>
+<text x="622" y="260" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="12.5" fill="#e2ecff">工具默认隐藏，仍是同一张图。</text>
+<rect x="80" y="344" width="280" height="36" rx="18" fill="#0d1e35" stroke="#264c79" stroke-width="1.2"/>
+<text x="220" y="367" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="12" fill="#8ac8ff" text-anchor="middle">默认关闭</text>
+<rect x="400" y="344" width="280" height="36" rx="18" fill="#0d1e35" stroke="#264c79" stroke-width="1.2"/>
+<text x="540" y="367" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="12" fill="#8aa8c8" text-anchor="middle">同一张图</text>
+<rect x="720" y="344" width="280" height="36" rx="18" fill="#0d1e35" stroke="#264c79" stroke-width="1.2"/>
+<text x="860" y="367" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="12" fill="#8aa8c8" text-anchor="middle">本地模型可选</text>
+<text x="540" y="408" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#8aa8c8" text-anchor="middle">0.3 在 MCP 之上增加运行时，不是第二套记忆库。</text>
+</svg>

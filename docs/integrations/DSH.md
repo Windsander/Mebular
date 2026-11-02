@@ -176,7 +176,7 @@ adapter follows the resulting sidecar discovery automatically.
    download the sidecar automatically; install `@mebular/memory-runtime` or use the
    desktop bundle.
 
-2. Verify the sidecar before enabling the DSH group:
+2. Verify the sidecar before relying on the DSH bridge:
 
    ```bash
    mebular memory-runtime status --json
@@ -222,12 +222,18 @@ adapter follows the resulting sidecar discovery automatically.
   token never appears in logs, URLs, errors or `getState()`.
 - **Recall:** only on `agent/pre-step` with `step===1` and `decision.kind==='enter'`, for
   a new human turn. Calls `POST /memory-runtime/v1/context` (falls back to `/recall` only
-  on an explicit 404/405 from an older sidecar). A hit appends **one request-scoped
-  context message** with `role:'user'` and `source.kind='mebular-memory'`; DSH renders it
-  as context injection, not a user bubble. It never uses `source.kind='user'`, never
-  fabricates a new human turn, never writes session history, and is de-duplicated per
-  `(agentId, surface, query, turn)` for 30 minutes. No hit, timeout or failure leaves the
-  decision unchanged.
+  on an explicit 404/405 from an older sidecar). A hit keeps **one current source-tagged
+  context message** with `role:'user'` and `source.kind='mebular-memory'`; it is not a user
+  bubble or user-visible history. It never uses `source.kind='user'` or fabricates a new
+  human turn, and is de-duplicated per `(agentId, surface, query, turn)` for 30 minutes.
+  On each human turn the adapter removes earlier `mebular-memory` messages from the propose
+  batch and replaces the previous memory node on the session surface with the current hit.
+  No hit, timeout or failure replaces it with an empty system node that DSH does not project
+  into model messages, leaving the decision otherwise unchanged. Ordinary
+  user/assistant/tool messages are untouched. **Platform limit:** DSH 0.2.1-rc.2 has no
+  non-persistent model-context channel, so durable `session.v4.jsonl` retains a
+  source-tagged snapshot. That is host behaviour, not an ordinary user message, and does
+  not mean an old block remains in the next model request.
 - **Ingest:** listens to live own `session/event` entries and batches user/assistant/tool
   events to `POST /memory-runtime/v1/ingest`; inherited fork/resume prefixes and the
   adapter's own injection are skipped. The queue is bounded (256), batches are 16 events
@@ -257,8 +263,13 @@ adapter follows the resulting sidecar discovery automatically.
 
 ### Real boundaries
 
-- The recall block is a source-tagged context message, not a fake user turn. If a future
-  DSH preview changes this channel, the adapter is expected to disable injection with
+- The recall block is a source-tagged context message, not a fake user turn or user-visible
+  history. DSH's durable session log retains a source-tagged snapshot because the platform
+  has no non-persistent model channel. Each turn filters/replaces it so a miss carries no
+  old block into the next model request. This host-owned snapshot is outside Mebular's
+  graph: Mebular deletion, retention expiry and tombstone sync do not erase it; manage it
+  through DSH's own session retention/deletion controls. If a future DSH preview changes
+  this channel, the adapter is expected to disable injection with
   `injection_channel_unsupported` rather than fall back to `source.kind='user'`.
 - DSH exposes no compaction summary guarantee beyond the events it emits; the adapter
   never invents one. An interrupted compaction is not a committed checkpoint.
@@ -290,6 +301,13 @@ and model fallback rules.
   ingest/recall/checkpoint without host configuration; 29 MCP tools and settled memories
   remain. `<home>/memory-runtime/` may be kept or deleted; deleting it does not delete
   settled memories.
+- **Version and downgrade boundary.** Run the same Mebular version on every device; there is
+  no mixed-version window. Explicitly run `mebular memory-runtime stop` before changing
+  package versions. Unsettled staging/outbox entries are device-local, are not migrated or
+  guaranteed to settle, and are discarded with the local directory. Already-settled or
+  synced details remain subject to normal graph retention/deletion. These data-retention
+  notes are not acceptance of a complete 0.3-to-0.2 rollback; see the
+  [Memory Runtime guide](../guides/MEMORY_RUNTIME.md#upgrading-from-02-and-the-old-prototype).
 
 ## Lightweight MCP is unchanged
 
@@ -298,6 +316,9 @@ same 29 `mcp__mebular__*` tools, the same attach/managed lifecycle, panel and Co
 There is no `mebular-memory-runtime` process, no new `<home>/memory-runtime/` directory
 or files, no `memory-runtime.json`, no host token and no port 7341 listener. If the
 directory exists from an earlier immersive session, lightweight mode does not modify it.
+To follow live mode changes, the installed plugin may still register Memory Runtime
+discovery/feature listeners and a discovery polling timer; lightweight means no sidecar
+process or sidecar HTTP request, not zero listeners/timers across the DSH plugin.
 
 ## Status and panel
 

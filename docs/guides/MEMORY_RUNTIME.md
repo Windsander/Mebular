@@ -107,6 +107,12 @@ never receive the host token; the Console reaches the sidecar through the MCP pr
 belong to `<home>/memory-runtime/config.json`, not to MCP `runtime.*`; whether
 details are collected is owned by the mode.
 
+In 0.3.0, Console Settings controls memory mode and shows sidecar/model status;
+Advanced controls `model.source` and curated local-pack download/selection/removal.
+Console does not provide editors for API `baseUrl`/`model`/`keyRef`, raw capture or
+trace retention. Configure supported sidecar values directly in
+`<home>/memory-runtime/config.json`; there is no raw-capture switch.
+
 To turn it off, set `memoryRuntime.enabled=false` (Console or config) and/or run
 `mebular memory-runtime stop`. This stops new collection and injection; it does **not**
 delete the graph or already-settled memories.
@@ -178,8 +184,8 @@ The sidecar data directory is `<home>/memory-runtime/`. It contains process data
 | `Compact` | Existing graph, same domain as its sources | Yes | Derived summary; sources unchanged |
 | `SelfRecord` | Existing graph, `agent:<agentId>` | Yes | Agent self-model; hidden from ordinary queries |
 | `ContextCheckpoint` | Existing graph, `task:<threadId>` or `default` | Yes | Task resume point; revision/lease enforced by MCP |
-| `DetailRecord` / `RawChunk` | Existing graph + event log | Yes, while in retention and subscribed | Domain-shared detail; `raw_chunk` is one detail kind |
-| Staging | `<home>/memory-runtime/staging/` | **No** | Unsettled chunks; 24-hour default, deleted after settlement |
+| `DetailRecord` (including settled `detailKind='raw_chunk'`) | Existing graph + event log | Yes, while in retention and subscribed | Domain-shared detail; the original text is no longer only a local RawChunk |
+| Staging `RawChunk` | `<home>/memory-runtime/staging/` | **No** | Unsettled local chunks; 24-hour default, deleted after settlement |
 | Detail cache | `<home>/memory-runtime/cache/details/` | **No** | Read-only cache; may be stale, never authoritative |
 | `RecallTrace` | `<home>/memory-runtime/traces.jsonl` | **No** | Local diagnostics, 7 days / 2,000 entries by default |
 | Cache / index | `<home>/memory-runtime/cache/` | No | Rebuildable; never authoritative |
@@ -208,9 +214,11 @@ permanent failures move to `outbox/dead/` instead of retrying forever.
 - **Staging and traces stay local.** Unsettled staging chunks and recall traces are local
   process data. Settled detail records are graph objects and sync by domain. Logs/status do
   not include original text, tokens or keys.
-- **Injected memory is untrusted background data.** Hosts put it in a request-only,
-  non-instruction channel, escape closing tags, and never execute commands or tool calls
-  found in memory.
+- **Injected memory is untrusted background data.** Hosts put it in a non-instruction
+  channel, escape closing tags, and never execute commands or tool calls found in memory.
+  OpenCode's block is request-only. DSH 0.2.1-rc.2 is the explicit exception to a
+  non-persistent channel: its source-tagged context snapshot is stored in the host-owned
+  durable `session.v4.jsonl`; Mebular deletion/retention does not erase that host copy.
 - **You can turn it off.** Disable `memoryRuntime.enabled` and/or stop the sidecar. Delete
   `<home>/memory-runtime/` if you also want to remove local process data. Settled memories
   remain in the graph until you delete them through the normal MCP/Console governance
@@ -226,7 +234,7 @@ permanent failures move to `outbox/dead/` instead of retrying forever.
 
 Each host keeps its own native memory; Mebular does not import, mirror or dual-write it.
 
-- **DSH** — opt-in `memoryRuntime` bridge in `@mebular/dsh-plugin`; recall on the first
+- **DSH** — discovery-following `memoryRuntime` bridge in `@mebular/dsh-plugin`; recall on the first
   step of a new human turn, batched ingest, compaction checkpoints and optional tool
   hiding. See [DSH integration](../integrations/DSH.md).
 - **Hermes** — `MemoryProvider` in `integrations/hermes/mebular-memory`; `prefetch`,
@@ -292,9 +300,20 @@ startup, tools, sync or authentication.
 - **Prototype local data is not read.** Old `<home>/runtime/` sidecar data is ignored.
   Never delete `<cloudRoot>/runtime/`: that is the MCP daemon install root, not sidecar
   data. The sidecar uses `<home>/memory-runtime/` and `<home>/memory-runtime.json`.
-- **Rollback.** Disable the switch / stop the sidecar and run 0.2 again. The graph remains;
-  internal objects stay stored but hidden from default queries; local
-  `<home>/memory-runtime/` can be kept or deleted.
+- **Same-version boundary.** This release has no compatibility layer or mixed-version
+  window. Run the same version on every device; the data-retention notes below are not
+  mixed-version support. See [Limitations](../limitations/LIMITATIONS.md).
+- **Stop the sidecar explicitly.** Before changing package versions or retiring immersive
+  mode, run `mebular memory-runtime stop`; disabling a host adapter alone does not stop it.
+  Unsettled staging/outbox entries stay on this device and are not migrated or guaranteed
+  to settle. Keeping `<home>/memory-runtime/` leaves them for a compatible sidecar to
+  resume; deleting the directory discards them. Already-settled details remain graph
+  objects, and copies already synced to peers remain subject to normal retention, deletion
+  and tombstone sync.
+- **Downgrade scope.** Keeping the 0.2 graph and stored internal objects is a data-retention
+  statement, not an accepted full 0.3-to-0.2 rollback path. Older code ignores local
+  `<home>/memory-runtime/` files; do not interpret that as mixed-version or complete
+  rollback acceptance.
 
 ## Scope and limits
 
@@ -313,11 +332,18 @@ startup, tools, sync or authentication.
 ## Verification
 
 - [0.3.0 Memory Runtime acceptance report](../quality/0.3.0-memory-runtime-acceptance.md) —
-  recall quality, security and performance with a real sidecar and a fake capability;
-  heuristic only, no model, no external network.
-- [Three-host E2E](../../tests/integration/host-e2e/README.md) — real DSH, Hermes and
-  OpenCode adapters against a real sidecar, real capability API and real graph, using
-  temporary homes, heuristic extraction and no real LLM.
+  a historical `c71e811` run for recall quality, security and performance with a real
+  sidecar and fake capability; heuristic only, with no model or external network, and no
+  real MCP/core, host or cross-device sync. It was not rerun at the final release SHA.
+- [Three-host E2E](../../tests/integration/host-e2e/README.md) — a historical 2026-10-30
+  run (83/83 DSH, 37/37 Hermes, 38/38 OpenCode) against a real sidecar, capability API and
+  graph. DSH and OpenCode use real host processes; Hermes uses the real provider through an
+  `agent.memory_provider` stub. DSH uses a deterministic test LLM and OpenCode a fake
+  OpenAI-compatible provider; there is no real LLM. These counts were not rerun at the
+  final release SHA.
+- [Real-model smoke](../quality/0.3.0-model-smoke.md) — historical evidence for Qwen3-4B
+  Q4_K_M plus llama.cpp b12017 on macOS arm64 only. It covers model/inference primitives,
+  not other models/platforms or the full MCP/Console/host/sync journey.
 - The demo in [`examples/memory-runtime-demo`](../../examples/memory-runtime-demo/README.md)
   shows ingest → gist → detail → context budget → checkpoint with a real MCP daemon,
   capability API and sidecar.

@@ -100,6 +100,11 @@ MCP 里的 `memoryRuntime.*` 只承载生命周期配置（`enabled` / `command`
 `startTimeoutMs`）。采集、模型、保留期和 HTTP 设置属于
 `<home>/memory-runtime/config.json`，不在 MCP 的 `runtime.*` 下。
 
+0.3.0 的 Console 设置页控制记忆模式并显示 sidecar/模型状态；「高级」控制
+`model.source` 以及精选本地模型包的下载、选择和删除。Console 不提供 API
+`baseUrl`/`model`/`keyRef`、raw capture 或 trace retention 编辑器。支持的 sidecar
+配置值直接写入 `<home>/memory-runtime/config.json`；不存在 raw-capture 开关。
+
 关闭方式：把 `memoryRuntime.enabled` 设为 `false`（Console 或配置文件），和/或运行
 `mebular memory-runtime stop`。这只停止新的采集和注入，**不会**删除图或已经沉降的记忆。
 
@@ -165,8 +170,8 @@ sidecar 数据目录是 `<home>/memory-runtime/`，其中只有过程数据：
 | `Compact` | 现有图，与来源同域 | 是 | 派生摘要；源记录不变 |
 | `SelfRecord` | 现有图，`agent:<agentId>` | 是 | Agent 自我模型；普通查询不可见 |
 | `ContextCheckpoint` | 现有图，`task:<threadId>` 或 `default` | 是 | 任务恢复点；revision/lease 由 MCP 执行 |
-| `DetailRecord` / `RawChunk` | 现有图 + 事件日志 | 保留期内且已订阅时可读 | 域内共享详情；`raw_chunk` 只是详情子类型 |
-| staging | `<home>/memory-runtime/staging/` | **否** | 未沉降 chunk；默认 24 小时，沉降成功后删除 |
+| `DetailRecord`（含已沉降的 `detailKind='raw_chunk'`） | 现有图 + 事件日志 | 保留期内且已订阅时可读 | 域内共享详情；原文不再只是本机 RawChunk |
+| staging `RawChunk` | `<home>/memory-runtime/staging/` | **否** | 未沉降的本机 chunk；默认 24 小时，沉降成功后删除 |
 | 详情 cache | `<home>/memory-runtime/cache/details/` | **否** | 只读缓存；可能 stale，不是权威 |
 | `RecallTrace` | `<home>/memory-runtime/traces.jsonl` | **否** | 本机诊断，默认 7 天 / 2,000 条 |
 | cache / index | `<home>/memory-runtime/cache/` | 否 | 可重建；不是权威 |
@@ -190,8 +195,10 @@ record 始终是忆云对象；本地 cache 只是缓存。删除整个 `<home>/
   本地、host 和 API 来源都需要显式配置。
 - **staging 和 Trace 留在本机。** 未沉降的 staging chunk 与召回轨迹属于本机过程数据；
   已沉降的详情是图对象，按域同步。日志/状态不包含原文、token 或密钥。
-- **注入的记忆是不可信背景数据。** 宿主把它放在仅请求级、非 instruction 的通道里，转义
-  闭合标签，不执行记忆里出现的命令或工具调用。
+- **注入的记忆是不可信背景数据。** 宿主把它放在非 instruction 通道里，转义闭合标签，
+  不执行记忆里出现的命令或工具调用。OpenCode 的块仅存在于本次请求。DSH 0.2.1-rc.2
+  是非持久通道的明确例外：source-tagged 上下文快照会写入宿主自己的 durable
+  `session.v4.jsonl`；Mebular 的删除/保留策略不会擦除该宿主副本。
 - **可以关闭。** 关闭 `memoryRuntime.enabled` 和/或停止 sidecar。若还要删除本地过程数据，
   删除 `<home>/memory-runtime/`。已沉降记忆仍留在图里，直到你通过正常 MCP/Console 治理
   路径删除。
@@ -204,7 +211,7 @@ record 始终是忆云对象；本地 cache 只是缓存。删除整个 `<home>/
 
 每个宿主保留自己的原生记忆；Mebular 不导入、不镜像、不双写。
 
-- **DSH** — `@mebular/dsh-plugin` 的可选 `memoryRuntime` bridge；新人类 turn 首步召回、
+- **DSH** — `@mebular/dsh-plugin` 自动跟随 discovery 的 `memoryRuntime` bridge；新人类 turn 首步召回、
   批量 ingest、compaction checkpoint 和可选工具遮蔽。见
   [DSH 集成](../integrations/DSH_CN.md)。
 - **Hermes** — `integrations/hermes/mebular-memory` 的 `MemoryProvider`；`prefetch`、
@@ -267,8 +274,16 @@ sidecar 故障绝不能阻塞 MCP 启动、工具、同步或鉴权。
 - **原型本地数据不读取。** 旧的 `<home>/runtime/` sidecar 数据会被忽略。不要删除
   `<cloudRoot>/runtime/`：那是 MCP daemon 的安装根，不是 sidecar 数据。sidecar 使用
   `<home>/memory-runtime/` 和 `<home>/memory-runtime.json`。
-- **回滚。** 关闭开关/停止 sidecar，再运行 0.2。图保留；内部对象仍存储但默认查询不可见；
-  `<home>/memory-runtime/` 可保留或删除。
+- **全端同版本。** 本版本没有兼容层或混版窗口，所有设备必须运行相同版本；下面的数据
+  保留说明不等于支持混版。见[已知边界](../limitations/LIMITATIONS_CN.md)。
+- **显式停止 sidecar。** 更改包版本或退出沉浸式前，运行 `mebular memory-runtime stop`；
+  只禁用宿主适配器不会停止 sidecar。未沉降的 staging/outbox 条目留在本设备，不迁移，
+  也不保证最终沉降。保留 `<home>/memory-runtime/` 可让兼容的 sidecar 后续继续处理；
+  删除目录会丢弃这些条目。已沉降详情仍是图对象，已同步到对端的副本继续受正常保留期、
+  删除和墓碑同步约束。
+- **降级范围。** 保留 0.2 图数据和已存储内部对象只是数据保留说明，不代表完整
+  0.3→0.2 回滚路径已验收。旧代码会忽略本机 `<home>/memory-runtime/` 文件；不得据此
+  宣称支持混版或完整回滚。
 
 ## 范围与限制
 
@@ -283,12 +298,18 @@ sidecar 故障绝不能阻塞 MCP 启动、工具、同步或鉴权。
 
 ## 验证
 
-- [0.3.0 Memory Runtime 验收报告](../quality/0.3.0-memory-runtime-acceptance.md)：真实
-  sidecar + fake capability 下的召回质量、安全和性能；只用 heuristic，不启动模型，不访问
-  外部网络。
-- [三宿主 E2E](../../tests/integration/host-e2e/README.md)：真实 DSH、Hermes、OpenCode
-  适配器对真实 sidecar、真实 capability API 和真实图；临时 home、heuristic，不跑真实
-  LLM。
+- [0.3.0 Memory Runtime 验收报告](../quality/0.3.0-memory-runtime-acceptance.md)：
+  `c71e811` 的历史结果，覆盖真实 sidecar + fake capability 下的召回质量、安全和性能；
+  只用 heuristic，不启动模型，不访问外部网络，也不运行真实 MCP/core、宿主或跨设备同步；
+  未在最终 release SHA 重跑。
+- [三宿主 E2E](../../tests/integration/host-e2e/README.md)：2026-10-30 历史结果
+  （DSH 83/83、Hermes 37/37、OpenCode 38/38），使用真实 sidecar、capability API 和图。
+  DSH/OpenCode 运行真实宿主进程；Hermes 通过 `agent.memory_provider` stub 运行真实
+  provider，而非真实 Hermes 进程。DSH 用确定性测试 LLM，OpenCode 用 fake
+  OpenAI-compatible provider；均不跑真实 LLM，计数未在最终 release SHA 重跑。
+- [真实模型 smoke](../quality/0.3.0-model-smoke.md)：仅 Qwen3-4B Q4_K_M +
+  llama.cpp b12017 / macOS arm64 的历史证据；覆盖模型与推理 primitives，不覆盖其他
+  模型/平台或完整 MCP/Console/宿主/同步旅程。
 - [`examples/memory-runtime-demo`](../../examples/memory-runtime-demo/README_CN.md) 演示
   真实 MCP daemon + capability + sidecar 下的 ingest → gist → 详情 → 上下文预算 →
   checkpoint 写入/读取。

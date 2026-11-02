@@ -277,10 +277,18 @@ never blocks Hermes compression.
 - The provider still accepts `namespace` in its config file and
   `MEBULAR_RUNTIME_NAMESPACE` as read-only compatibility aliases, but new configuration
   should use `domain` / `MEBULAR_MEMORY_DOMAIN`. Requests always send `domain`.
-- To turn the sidecar off, set `memoryRuntime.enabled=false` (or
+- To turn the sidecar off, set `memoryRuntime.enabled=false` (or explicitly run
   `mebular memory-runtime stop`). The sidecar stops; 29 MCP tools and settled memories
   remain. Keep or delete `<home>/memory-runtime/`; deleting it does not delete memories
-  already settled through MCP.
+  already settled through MCP. Disabling/removing only the Hermes provider does not stop
+  the sidecar.
+- **Version and downgrade boundary.** Run the same Mebular version on every device; there is
+  no mixed-version window. Explicitly stop the sidecar before changing package versions.
+  Unsettled staging/outbox entries are device-local, are not migrated or guaranteed to
+  settle, and are discarded with the local directory. Already-settled or synced details
+  remain subject to normal graph retention/deletion. These data-retention notes are not
+  acceptance of a complete 0.3-to-0.2 rollback; see the
+  [Memory Runtime guide](../guides/MEMORY_RUNTIME.md#upgrading-from-02-and-the-old-prototype).
 
 ## Uninstall
 

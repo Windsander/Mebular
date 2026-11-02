@@ -234,9 +234,11 @@ sidecar discovery，不需要逐宿主开启。
 
 - 召回块是 source-tagged 上下文消息，不是伪造的用户 turn，也不是用户可见历史。DSH
   durable session log 会留下 source-tagged 快照（平台没有非持久模型通道）；每轮由适配器
-  过滤/替换，无命中不进入下一轮模型请求。如果未来 DSH preview 提供非持久通道，适配器应
-  优先迁移；如果通道语义再次变化导致无法保证上述边界，应带 `injection_channel_unsupported`
-  禁用注入，而不是回退到 `source.kind='user'`。
+  过滤/替换，无命中不进入下一轮模型请求。该快照属于宿主，不在 Mebular 图内：Mebular
+  删除、保留期到期和墓碑同步都不会擦除它；需通过 DSH 自己的会话保留/删除机制管理。
+  如果未来 DSH preview 提供非持久通道，适配器应优先迁移；如果通道语义再次变化导致无法
+  保证上述边界，应带 `injection_channel_unsupported` 禁用注入，而不是回退到
+  `source.kind='user'`。
 - DSH 只保证它实际发出的 compaction 事件；适配器不编造 summary。被中断的压缩不是已提交
   的 checkpoint。
 - DSH 不暴露自己的 LLM 凭据，本适配器也不读取它们。
@@ -264,6 +266,11 @@ sidecar discovery，不需要逐宿主开启。
   ingest/recall/checkpoint，不需要改宿主配置。sidecar 停止，
   29 个 MCP 工具和已沉降记忆保留。`<home>/memory-runtime/` 可保留或删除；删除它不会
   删除已沉降记忆。
+- **版本与降级边界。** 所有设备必须运行相同的 Mebular 版本，没有混版窗口。更改包版本前
+  显式运行 `mebular memory-runtime stop`。未沉降 staging/outbox 条目只在本机，不迁移、
+  不保证最终沉降，并随本机目录删除而丢弃；已沉降或已同步详情仍受正常图保留/删除策略
+  约束。这些数据保留说明不代表完整 0.3→0.2 回滚已验收；见
+  [Memory Runtime 指南](../guides/MEMORY_RUNTIME_CN.md#从-02-和旧原型升级)。
 
 ## 轻量 MCP 保持不变
 
@@ -271,7 +278,9 @@ sidecar discovery，不需要逐宿主开启。
 `mcp__mebular__*` 工具，同样的 attach/managed 生命周期、面板和 Console。没有
 `mebular-memory-runtime` 进程，不新建 `<home>/memory-runtime/` 目录或文件，不生成
 `memory-runtime.json`、host token，不监听 7341 端口。如果目录是之前沉浸式留下的，轻量
-模式也不会修改它。
+模式也不会修改它。为跟随运行中的模式切换，已安装插件仍可能注册 Memory Runtime
+discovery/feature listener 和 discovery 轮询 timer；“轻量”指没有 sidecar 进程或 sidecar
+HTTP 请求，不是整个 DSH 插件完全不注册 listener/timer。
 
 ## 状态与面板
 

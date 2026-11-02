@@ -34,18 +34,42 @@ function fakeReact() {
 }
 
 describe('DSH README theme-aware diagrams', () => {
-  const readmeCn = readFileSync(join(here, '..', '..', 'packages', 'dsh-plugin', 'README.md'), 'utf-8');
-  const readmeEn = readFileSync(join(here, '..', '..', 'packages', 'dsh-plugin', 'README_EN.md'), 'utf-8');
-  const bases = ['dsh-memory-mesh', 'dsh-capabilities', 'dsh-quickstart', 'dsh-connection', 'dsh-status'];
-  it('uses <picture> light/dark assets instead of inline SVG media queries', () => {
-    for (const [text, suffix] of [[readmeCn, 'cn'], [readmeEn, 'en']]) {
+  const repoRoot = join(here, '..', '..');
+  const readmes = [
+    { text: readFileSync(join(repoRoot, 'packages', 'dsh-plugin', 'README.md'), 'utf-8'), suffix: 'cn' },
+    { text: readFileSync(join(repoRoot, 'packages', 'dsh-plugin', 'README_EN.md'), 'utf-8'), suffix: 'en' },
+  ];
+  const bases = [
+    'one-graph',
+    'memory-runtime',
+    'dsh-memory-mesh',
+    'dsh-capabilities',
+    'dsh-quickstart',
+    'dsh-connection',
+    'dsh-status',
+  ];
+  it('uses one self-adaptive SVG per language instead of <picture> light/dark pairs', () => {
+    for (const { text, suffix } of readmes) {
+      expect(text).not.toContain('<picture');
+      expect(text).not.toMatch(/<img\b/);
+      expect(text).toContain('assets/dsh-plugin-hero.svg');
       for (const base of bases) {
-        expect(text).toContain(`${base}-${suffix}-dark.svg`);
-        expect(text).toContain(`${base}-${suffix}-light.svg`);
-        expect(text).not.toMatch(new RegExp(`!\\[[^\\]]*\\]\\([^)]*${base}-${suffix}\\.svg`));
+        const asset = `${base}-${suffix}.svg`;
+        expect(text).toContain(`assets/${asset}`);
+        expect(text).not.toContain(`${base}-${suffix}-dark.svg`);
+        expect(text).not.toContain(`${base}-${suffix}-light.svg`);
+        const svg = readFileSync(join(repoRoot, 'assets', asset), 'utf-8');
+        expect(svg).toContain('class="theme-dark"');
+        expect(svg).toContain('class="theme-light"');
+        expect(svg).toContain('prefers-color-scheme');
+        expect(svg).not.toContain('!important');
       }
-      expect(text).toContain(`memory-runtime-${suffix}-light.svg`);
     }
+    const hero = readFileSync(join(repoRoot, 'assets', 'dsh-plugin-hero.svg'), 'utf-8');
+    expect(hero).toContain('class="theme-dark"');
+    expect(hero).toContain('class="theme-light"');
+    expect(hero).toContain('prefers-color-scheme');
+    expect(hero).not.toContain('!important');
   });
 });
 

@@ -463,6 +463,15 @@ check('client has no JSX build dependency', !clientSource.includes('react/jsx-ru
 const readmePath = join(pkgDir, 'README.md');
 check('README.md exists', existsSync(readmePath));
 const readme = existsSync(readmePath) ? readFileSync(readmePath, 'utf8') : '';
+const dshGuideCnPath = join(repoRoot, 'docs', 'integrations', 'DSH_CN.md');
+const dshGuideEnPath = join(repoRoot, 'docs', 'integrations', 'DSH.md');
+check(
+  'DSH integration guide exists (CN/EN)',
+  existsSync(dshGuideCnPath) && existsSync(dshGuideEnPath),
+);
+const dshGuideCn = existsSync(dshGuideCnPath) ? readFileSync(dshGuideCnPath, 'utf8') : '';
+const dshGuideEn = existsSync(dshGuideEnPath) ? readFileSync(dshGuideEnPath, 'utf8') : '';
+const memoryRuntimeDocs = [readme, dshGuideCn, dshGuideEn].join('\n');
 check(
   'README documents local install from ./packages/dsh-plugin',
   readme.includes('dsh plugin --profile web add ./packages/dsh-plugin'),
@@ -483,12 +492,13 @@ check('README documents the shared Console', /共享.*Console|Console.*同一/.t
 check('README documents app independence', /App.*(继续|独立)|Mebular daemon.*(继续|独立)/.test(readme));
 check('README documents default port 7331', readme.includes('7331'));
 check('README documents runtime discovery', readme.includes('runtime.json'));
-check('README documents the sidecar base path', readme.includes('/memory-runtime/v1'));
+check('README links to the DSH integration guide', readme.includes('docs/integrations/DSH_CN.md'));
+check('README or DSH guide documents the sidecar base path', memoryRuntimeDocs.includes('/memory-runtime/v1'));
 check('README documents memory-runtime.json discovery', readme.includes('memory-runtime.json'));
 check('README documents MEBULAR_MEMORY_RUNTIME_URL', readme.includes('MEBULAR_MEMORY_RUNTIME_URL'));
-check('README documents MEBULAR_MEMORY_RUNTIME_TOKEN', readme.includes('MEBULAR_MEMORY_RUNTIME_TOKEN'));
-check('README documents the host token file', readme.includes('tokenFile'));
-check('README documents the source-tagged context injection', readme.includes("source.kind='mebular-memory'"));
+check('README or DSH guide documents MEBULAR_MEMORY_RUNTIME_TOKEN', memoryRuntimeDocs.includes('MEBULAR_MEMORY_RUNTIME_TOKEN'));
+check('README or DSH guide documents the host token file', memoryRuntimeDocs.includes('tokenFile'));
+check('README or DSH guide documents the source-tagged context injection', memoryRuntimeDocs.includes("source.kind='mebular-memory'"));
 check('README does not use the legacy /runtime/v1 path', !readme.includes('/runtime/v1'));
 check('README documents MEBULAR_HTTP_PORT', readme.includes('MEBULAR_HTTP_PORT'));
 check('README documents attach and managed', /attach/.test(readme) && /managed/.test(readme));

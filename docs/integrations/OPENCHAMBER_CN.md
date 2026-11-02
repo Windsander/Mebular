@@ -172,14 +172,13 @@ Token 是 sidecar 的 **host token**，不是 MCP capability token。POSIX 下 t
 
 | 键 | 默认 | 含义 |
 |---|---|---|
-| `enabled` | `true` | 显式关闭插件 |
+| ~~`enabled`~~ / ~~`capture`~~ | — | 旧字段；忽略并 warning，不控制行为 |
 | `runtimeUrl` | — | sidecar 根地址或 `/memory-runtime/v1` base；缺省走环境/配置/发现 |
 | `token` | — | Host bearer token；只用于 `Authorization` |
 | `tokenFile` | — | 显式 host token 文件；缺省用发现 `tokenFile` 或 `<home>/memory-runtime/host-token` |
 | `agentId` | `opencode` | 逻辑 Agent ID |
 | `namespace` / `namespaces` | — | 旧召回域别名；`namespace` 仅只读兼容 |
 | `domains` | — | v2 记忆域（如 `user` / `agent:opencode`）；缺省由 sidecar 决定 |
-| ~~`capture`~~ | — | 0.3.0 已删除；旧值忽略，采集由 sidecar 模式负责 |
 | `recall` / `ingest` / `checkpoints` | `true` | 是否启用各路径 |
 | `modelSource` | `heuristic` | `heuristic`，或 `host`/`current` 使用 `ctx.session.generate` |
 | `hideMemoryTools` | `true` | 对普通 Agent 删除 `mebular_*` 工具 |
@@ -235,9 +234,15 @@ OpenCode 不会把模型凭据交给插件，插件也不会索取。选择 `hos
   可用。
 - 原型写到 `<home>/runtime/` 的本地数据不会被读取或迁移。不要删除
   `<cloudRoot>/runtime/`；那是 MCP daemon 的安装根，不是 sidecar 数据。
-- 要关闭 sidecar，设置 `memoryRuntime.enabled=false`，或从 OpenCode 的 `plugins` 数组移除
-  插件条目。sidecar 停止，29 个 MCP 工具和已沉降记忆保留。`<home>/memory-runtime/`
-  可保留或删除；删除它不会删除已沉降记忆。
+- 要关闭 sidecar，设置 `memoryRuntime.enabled=false`，或显式运行
+  `mebular memory-runtime stop`。移除 OpenCode 插件只会禁用该宿主适配器，不会停止
+  sidecar。29 个 MCP 工具和已沉降记忆保留。`<home>/memory-runtime/` 可保留或删除；
+  删除它不会删除已沉降记忆。
+- **版本与降级边界。** 所有设备必须运行相同的 Mebular 版本，没有混版窗口。更改包版本前
+  显式停止 sidecar。未沉降 staging/outbox 条目只在本机，不迁移、不保证最终沉降，并随
+  本机目录删除而丢弃；已沉降或已同步详情仍受正常图保留/删除策略约束。这些数据保留说明
+  不代表完整 0.3→0.2 回滚已验收；见
+  [Memory Runtime 指南](../guides/MEMORY_RUNTIME_CN.md#从-02-和旧原型升级)。
 
 ## 卸载
 

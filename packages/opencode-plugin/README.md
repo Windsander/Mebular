@@ -168,5 +168,7 @@ node --experimental-vm-modules node_modules/jest/bin/jest.js tests/opencode-plug
 测试使用 fake `ctx` / `fetch` / `session`，覆盖加载、版本检查、sidecar
 发现/token 文件权限、认证/API 版本失败禁用、无命中、超时、去重、工具遮蔽、
 原生 memory 不受影响、request-only 注入、`session.generate` 失败回退、
-compaction checkpoint 与 ingest 幂等。真实 OpenCode E2E 使用 fake
-`/memory-runtime/v1` sidecar，不依赖真实 MCP 图数据。
+compaction checkpoint 与 ingest 幂等。[真实 OpenCode E2E](../../tests/integration/host-e2e/README.md)
+启动真实 OpenCode、sidecar、capability 与 GraphStore，但模型侧使用 fake
+OpenAI-compatible provider，不跑真实 LLM。`--controller-fallback` 不启动真实
+OpenCode，只验证 plugin controller + 真实 sidecar，并会明确打印该边界。

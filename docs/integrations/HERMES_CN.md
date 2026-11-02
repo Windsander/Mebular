@@ -253,9 +253,15 @@ pending，在 provider 存活期间重试；它不会被报告为已提交，也
   `<cloudRoot>/runtime/` 混淆；只有前者是可丢弃的原型数据。
 - Provider 仍接受配置文件里的 `namespace` 和 `MEBULAR_RUNTIME_NAMESPACE` 作为只读兼容
   别名，但新配置应使用 `domain` / `MEBULAR_MEMORY_DOMAIN`；请求只发送 `domain`。
-- 要关闭 sidecar，设置 `memoryRuntime.enabled=false`（或 `mebular memory-runtime stop`）。
-  sidecar 停止，29 个 MCP 工具和已沉降记忆保留。`<home>/memory-runtime/` 可保留或删除；
-  删除它不会删除已通过 MCP 沉降的记忆。
+- 要关闭 sidecar，设置 `memoryRuntime.enabled=false`（或显式运行
+  `mebular memory-runtime stop`）。sidecar 停止，29 个 MCP 工具和已沉降记忆保留。
+  `<home>/memory-runtime/` 可保留或删除；删除它不会删除已通过 MCP 沉降的记忆。只禁用或
+  移除 Hermes provider 不会停止 sidecar。
+- **版本与降级边界。** 所有设备必须运行相同的 Mebular 版本，没有混版窗口。更改包版本前
+  显式停止 sidecar。未沉降 staging/outbox 条目只在本机，不迁移、不保证最终沉降，并随
+  本机目录删除而丢弃；已沉降或已同步详情仍受正常图保留/删除策略约束。这些数据保留说明
+  不代表完整 0.3→0.2 回滚已验收；见
+  [Memory Runtime 指南](../guides/MEMORY_RUNTIME_CN.md#从-02-和旧原型升级)。
 
 ## 卸载
 

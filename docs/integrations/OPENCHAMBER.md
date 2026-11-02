@@ -188,14 +188,13 @@ Common options:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `enabled` | `true` | Explicitly disable the plugin |
+| ~~`enabled`~~ / ~~`capture`~~ | — | Legacy fields; ignored with a warning and do not control behaviour |
 | `runtimeUrl` | — | Sidecar origin or `/memory-runtime/v1` base; otherwise env/config/discovery |
 | `token` | — | Host bearer token; only used in the `Authorization` header |
 | `tokenFile` | — | Explicit host token file; otherwise discovery `tokenFile` or `<home>/memory-runtime/host-token` |
 | `agentId` | `opencode` | Logical agent ID |
 | `namespace` / `namespaces` | — | Legacy recall-domain aliases; `namespace` is read-only compatibility |
 | `domains` | — | v2 memory domains such as `user` / `agent:opencode`; omitted lets the sidecar choose |
-| ~~`capture`~~ | — | Removed in 0.3.0: legacy value is ignored; the sidecar mode owns collection |
 | `recall` / `ingest` / `checkpoints` | `true` | Enable each path |
 | `modelSource` | `heuristic` | `heuristic`, or `host`/`current` for `ctx.session.generate` |
 | `hideMemoryTools` | `true` | Remove `mebular_*` tools from ordinary agents |
@@ -257,10 +256,18 @@ after a turn. This has three consequences:
   `/runtime/v1` is rejected/disabled; MCP keeps working.
 - Prototype data under `<home>/runtime/` is not read or migrated. Do not delete
   `<cloudRoot>/runtime/`; that is the MCP daemon install root, not sidecar data.
-- To turn the sidecar off, set `memoryRuntime.enabled=false` or remove the plugin entry
-  from OpenCode's `plugins` array. The sidecar stops; 29 MCP tools and settled memories
-  remain. `<home>/memory-runtime/` may be kept or deleted; deleting it does not delete
-  settled memories.
+- To turn the sidecar off, set `memoryRuntime.enabled=false` or explicitly run
+  `mebular memory-runtime stop`. Removing the OpenCode plugin only disables that host
+  adapter; it does not stop the sidecar. The 29 MCP tools and settled memories remain.
+  `<home>/memory-runtime/` may be kept or deleted; deleting it does not delete settled
+  memories.
+- **Version and downgrade boundary.** Run the same Mebular version on every device; there is
+  no mixed-version window. Explicitly stop the sidecar before changing package versions.
+  Unsettled staging/outbox entries are device-local, are not migrated or guaranteed to
+  settle, and are discarded with the local directory. Already-settled or synced details
+  remain subject to normal graph retention/deletion. These data-retention notes are not
+  acceptance of a complete 0.3-to-0.2 rollback; see the
+  [Memory Runtime guide](../guides/MEMORY_RUNTIME.md#upgrading-from-02-and-the-old-prototype).
 
 ## Uninstall
 

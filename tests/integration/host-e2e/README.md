@@ -1,9 +1,11 @@
 # 三宿主 Host E2E
 
-三个 suite 都跑同一条真实链路：
+三个 suite 都跑同一条 Memory Runtime 链路，但“真实宿主”范围不同：DSH/OpenCode 启动真实
+宿主进程；Hermes 用仓库的 `agent.memory_provider` stub 驱动真实 provider，不启动真实
+Hermes 进程：
 
 ```text
-宿主进程 + 真实宿主适配器
+真实宿主进程或 Hermes MemoryProvider stub + 真实宿主适配器
   -> /memory-runtime/v1
   -> 真实 Memory Runtime sidecar
   -> /internal/memory/v1（真实 MCP capability token）
@@ -43,7 +45,8 @@ node tests/integration/host-e2e/immersive-journey.mjs
 
 证据默认写入 `docs/quality/0.3.0-immersive-ui/`（`MEBULAR_EVIDENCE_DIR` 可覆盖），包括 DSH `dsh-*.png/html/txt`、`dsh-llm-requests.json`、`dsh-session-history.txt`、Hermes/OpenCode 结果与 Console 截图。
 
-本次结果（2026-10-31，macOS arm64，Node 26.7.0，DSH 0.2.1-rc.2，OpenCode 2.2.0）：
+历史结果（2026-10-31，macOS arm64，Node 26.7.0，DSH 0.2.1-rc.2，OpenCode 2.2.0；
+未在最终 v0.3.0 release SHA 重跑）：
 
 ```text
 沉浸式旅程：84 passed, 0 failed, 0 defects（exit 0）
@@ -77,7 +80,7 @@ node tests/integration/host-e2e/dsh-real-runtime.mjs --scenario fail-open
 4. **OpenCode 注入块是 request-only。** 断言真实 outgoing model request 含记忆块，但 fake provider 不验证模型是否遵守“不可信背景”声明。
 5. **不跑真实模型。** DSH/Hermes 不启动 LLM；OpenCode 只使用 fake OpenAI-compatible provider。所有抽取均为 `heuristic`。
 
-## 结果（本机 2026-10-30）
+## 历史结果（本机 2026-10-30；非最终 release SHA 重跑）
 
 ```text
 DSH host E2E：83 passed, 0 failed（auto-discovery / no-discovery / fail-open）
@@ -85,6 +88,10 @@ Hermes host E2E：37 passed, 0 failed
 OpenCode host E2E：38 passed, 0 failed, 0 skipped
 verify-host-e2e：三个宿主全部 exit 0
 ```
+
+这些计数与 `docs/quality/0.3.0-immersive-journey.md` 的 C6d 回归一致；早期发布草稿中的
+113/113 DSH、35/35 Hermes 不是这次记录的结果。当前源码的 fresh 结果必须重新运行上面的
+命令取得，不能把本历史计数当作新的最终 SHA 验收。
 
 运行环境：macOS arm64、Node 26.7.0、Python 3.13.9、OpenCode 2.2.0、DSH 0.2.1-rc.2（npm cache）、无本地模型。
 

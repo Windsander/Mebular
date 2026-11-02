@@ -1,17 +1,12 @@
 <div align="center">
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-hero-light.svg">
-    <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-hero-dark.svg" alt="Mebular — distributed memory network">
-  </picture>
-</p>
+![Mebular — distributed memory network](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-hero.svg)
 
 **One memory. Every assistant. Every device.**
 
 A distributed memory network for your AI assistants. Memory and tasks stay on your devices; devices sync directly.
 
-[![CI](https://github.com/Windsander/Mebular/actions/workflows/ci.yml/badge.svg?style=flat-square)](https://github.com/Windsander/Mebular/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](https://github.com/Windsander/Mebular/blob/main/LICENSE) [![Node.js >=22.19](https://img.shields.io/badge/Node-%E2%89%A522.19-339933?logo=node.js&logoColor=white&style=flat-square)](https://github.com/Windsander/Mebular/blob/main/docs/getting-started/QUICKSTART.md) [![MCP server](https://img.shields.io/badge/MCP-server-5A67D8?logo=modelcontextprotocol&logoColor=white&style=flat-square)](https://github.com/Windsander/Mebular/blob/main/docs/getting-started/QUICKSTART.md) [![DSH plugin](https://img.shields.io/badge/DSH-plugin-4D6BFE?logo=deepseek&logoColor=white&style=flat-square)](https://awesome-dsh-plugin.com/p/Windsander/Mebular--packages-dsh-plugin/)
+[![CI](https://github.com/Windsander/Mebular/actions/workflows/ci.yml/badge.svg?style=flat-square)](https://github.com/Windsander/Mebular/actions/workflows/ci.yml) [![License: MIT](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/badges/license-mit.svg)](https://github.com/Windsander/Mebular/blob/main/LICENSE) [![Node.js >=22.19](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/badges/node.svg)](https://github.com/Windsander/Mebular/blob/main/docs/getting-started/QUICKSTART.md) [![MCP server](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/badges/mcp-server.svg)](https://github.com/Windsander/Mebular/blob/main/docs/getting-started/QUICKSTART.md) [![DSH plugin](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/badges/dsh-plugin.svg)](https://awesome-dsh-plugin.com/p/Windsander/Mebular--packages-dsh-plugin/)
 
 [Start in 5 minutes](https://github.com/Windsander/Mebular/blob/main/docs/getting-started/QUICKSTART.md) · [How it works](https://github.com/Windsander/Mebular/blob/main/docs/architecture/ARCHITECT.md) · [Website](https://mebular.cyberfederal.io) · [中文](https://github.com/Windsander/Mebular/blob/main/packages/dsh-plugin/README.md)
 
@@ -32,62 +27,31 @@ The Plugin defaults to `attach`; it never starts or downloads Mebular silently.
 
 </div>
 
-<table width="100%">
-  <tr>
-    <td width="25%"><img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-en-normal.jpg" alt="The complete dark DeepSeek Harness view: Mebular sidebar entry, panel header and embedded star map" width="100%"><br><sub>Full DSH panel · entry and star map</sub></td>
-    <td width="25%"><img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-en-collapsed.jpg" alt="Mebular Console full width after collapsing the dark DeepSeek Harness sidebar" width="100%"><br><sub>Collapsed sidebar · full Console</sub></td>
-    <td width="25%"><img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-en-memories.jpg" alt="The Mebular shared-memory view inside dark DeepSeek Harness" width="100%"><br><sub>Shared memory view</sub></td>
-    <td width="25%"><img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-en-settings.jpg" alt="The Mebular settings view inside dark DeepSeek Harness (demo data)" width="100%"><br><sub>Settings and keep-running</sub></td>
-  </tr>
-</table>
+| Full DSH panel · entry and star map | Collapsed sidebar · full Console | Shared memory view | Settings and keep-running |
+| --- | --- | --- | --- |
+| [![The complete dark DeepSeek Harness view: Mebular sidebar entry, panel header and embedded star map](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-thumbs/dsh-plugin-demo-en-normal.jpg)](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-en-normal.jpg) | [![Mebular Console full width after collapsing the dark DeepSeek Harness sidebar](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-thumbs/dsh-plugin-demo-en-collapsed.jpg)](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-en-collapsed.jpg) | [![The Mebular shared-memory view inside dark DeepSeek Harness](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-thumbs/dsh-plugin-demo-en-memories.jpg)](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-en-memories.jpg) | [![The Mebular settings view inside dark DeepSeek Harness (demo data)](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-thumbs/dsh-plugin-demo-en-settings.jpg)](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-en-settings.jpg) |
 
-## Memory Runtime
+## Runtime modes
 
 <div align="center">
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/memory-runtime-en-light.svg">
-    <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/memory-runtime-en.svg" alt="Memory Runtime: lightweight MCP and immersive access share one graph.">
-  </picture>
-</p>
+![Why Mebular: one shared graph instead of a silo; local-first, direct sync, auditable, MCP](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/one-graph-en.svg?v=2)
 
-*0.3 · Default off. Lightweight MCP and immersive share one graph.*
+![Memory Runtime: lightweight MCP and immersive access share one graph.](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/memory-runtime-en.svg?v=2)
 
-[Memory Runtime guide](https://github.com/Windsander/Mebular/blob/main/docs/guides/MEMORY_RUNTIME.md) · [DSH integration](https://github.com/Windsander/Mebular/blob/main/docs/integrations/DSH.md)
+*0.3 adds an optional runtime above MCP. Default off; local Qwen optional.*
+
+[Runtime guide](https://github.com/Windsander/Mebular/blob/main/docs/guides/MEMORY_RUNTIME.md) · [DSH integration](https://github.com/Windsander/Mebular/blob/main/docs/integrations/DSH.md)
 
 </div>
-
-<details>
-<summary>Discovery &amp; auth</summary>
-
-| Item | Rule |
-| --- | --- |
-| Sidecar base | `memoryRuntime.url` > env > `memory-runtime.json`; endpoint `/memory-runtime/v1` |
-| Token | `MEBULAR_MEMORY_RUNTIME_TOKEN` > `tokenFile` > discovery; POSIX `0600` |
-| Injection | `role='user'` + `source.kind='mebular-memory'`; one per human turn; silence on no hits |
-| Mode | No per-host capture switch; lightweight = zero sidecar requests; immersive = auto |
-
-DSH durable logs may retain source-tagged snapshots (platform limit), never rendered as user bubbles.
-</details>
 
 ## DSH integration
 
 <div align="center">
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-memory-mesh-en-light.svg">
-    <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-memory-mesh-en-dark.svg" alt="One memory graph: two machines, each running a Mebular node. Machine A connects DSH, Hermes and Codex; machine B connects Pi, OpenCode and Cursor. Both nodes sync the same graph directly.">
-  </picture>
-</p>
+![One memory graph: two machines, each running a Mebular node. Machine A connects DSH, Hermes and Codex; machine B connects Pi, OpenCode and Cursor. Both nodes sync the same graph directly.](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-memory-mesh-en.svg)
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-capabilities-en-light.svg">
-    <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-capabilities-en-dark.svg" alt="What you get in DSH: a shared Console, official MCP tools, a status dot, the attach / managed / auto lifecycle and on-demand install/update; panel: false keeps MCP only.">
-  </picture>
-</p>
+![What you get in DSH: a shared Console, official MCP tools, a status dot, the attach / managed / auto lifecycle and on-demand install/update; panel: false keeps MCP only.](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-capabilities-en.svg)
 
 </div>
 
@@ -95,33 +59,17 @@ DSH durable logs may retain source-tagged snapshots (platform limit), never rend
 
 <div align="center">
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-quickstart-en-light.svg">
-    <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-quickstart-en-dark.svg" alt="Three steps: install the plugin, restart DSH; an existing App/CLI attaches, and the panel explicitly installs the shared runtime when none exists.">
-  </picture>
-</p>
+![Three steps: install the plugin, restart DSH; an existing App/CLI attaches, and the panel explicitly installs the shared runtime when none exists.](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-quickstart-en.svg)
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-connection-en-light.svg">
-    <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-connection-en-dark.svg" alt="DSH integration: DSH Web loads /console/?embed=dsh in an iframe, and the official MCP client reaches the same daemon at /mcp; shared runtime resolve selects the App/CLI/shared provider and dynamic URL.">
-  </picture>
-</p>
+![DSH integration: DSH Web loads /console/?embed=dsh in an iframe, and the official MCP client reaches the same daemon at /mcp; shared runtime resolve selects the App/CLI/shared provider and dynamic URL.](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-connection-en.svg)
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-status-en-light.svg">
-    <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-status-en-dark.svg" alt="Status dot: green up, amber starting/installing/updating, red down, gray waiting for the first check.">
-  </picture>
-</p>
+![Status dot: green up, amber starting/installing/updating, red down, gray waiting for the first check.](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-status-en.svg)
 
 </div>
 
 An existing Mebular app or CLI attaches automatically; when no runtime exists, open the Mebular panel and install the shared runtime when prompted. Only the CLI-only path needs `mebular serve`.
 
-<details>
-<summary>Commands: install / development install / uninstall</summary>
+### Commands
 
 ```bash
 # Install the plugin (it never starts or downloads Mebular silently)
@@ -134,8 +82,6 @@ dsh plugin --profile web add ./packages/dsh-plugin
 # Uninstall
 dsh plugin --profile web remove @mebular/dsh-plugin
 ```
-
-</details>
 
 ## MCP tools
 
@@ -154,13 +100,12 @@ DSH reaches the same daemon at `/mcp` through the official MCP client; tools app
 
 | Start | Learn | Run | Trust |
 | --- | --- | --- | --- |
-| <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/getting-started/QUICKSTART.md">Quickstart</a></strong> <br><sub>Install &amp; pair</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/architecture/ARCHITECT.md">Architecture</a></strong> <br><sub>Nodes &amp; sync</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/console/README.md">Console</a></strong> <br><sub>Local GUI</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/limitations/LIMITATIONS.md">Limitations</a></strong> <br><sub>Sensitive data</sub> |
-| <strong><a href="https://github.com/Windsander/Mebular/blob/main/packages/skill/SETUP.md">Agent skills</a></strong> <br><sub>Setup playbooks</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/packages/fleet/RUNBOOK.md">Fleet ops</a></strong> <br><sub>Multi-machine</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/operations/SHARED_RUNTIME.md">Shared runtime</a></strong> <br><sub>Install/upgrade/rollback</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/SEALING.md">Sealing docs</a></strong> <br><sub>Protocol rules</sub> |
-| <strong><a href="https://github.com/Windsander/Mebular/blob/main/CHANGELOG.md">Changelog</a></strong> <br><sub>Release notes</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/CONTRIBUTING.md">Contributing</a></strong> <br><sub>Quality gates</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/SECURITY.md">Security</a></strong> <br><sub>Report a vuln</sub> | <strong><a href="https://mebular.cyberfederal.io">Website</a></strong> <br><sub>Product site</sub> |
-| <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/integrations/DSH.md">DSH integration</a></strong> <br><sub>Full reference</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/operations/DSH_E2E.md">DSH E2E</a></strong> <br><sub>CI gates</sub> | <strong><a href="https://www.npmjs.com/package/@mebular/dsh-plugin">npm</a></strong> <br><sub>Package page</sub> | <strong><a href="https://awesome-dsh-plugin.com/p/Windsander/Mebular--packages-dsh-plugin/">awesome-dsh-plugin</a></strong> <br><sub>Plugin list</sub> |
+| **[Quickstart](https://github.com/Windsander/Mebular/blob/main/docs/getting-started/QUICKSTART.md)** <br><sub>Install &amp; pair</sub> | **[Architecture](https://github.com/Windsander/Mebular/blob/main/docs/architecture/ARCHITECT.md)** <br><sub>Nodes &amp; sync</sub> | **[Console](https://github.com/Windsander/Mebular/blob/main/docs/console/README.md)** <br><sub>Local GUI</sub> | **[Limitations](https://github.com/Windsander/Mebular/blob/main/docs/limitations/LIMITATIONS.md)** <br><sub>Sensitive data</sub> |
+| **[Agent skills](https://github.com/Windsander/Mebular/blob/main/packages/skill/SETUP.md)** <br><sub>Setup playbooks</sub> | **[Fleet ops](https://github.com/Windsander/Mebular/blob/main/packages/fleet/RUNBOOK.md)** <br><sub>Multi-machine</sub> | **[Shared runtime](https://github.com/Windsander/Mebular/blob/main/docs/operations/SHARED_RUNTIME.md)** <br><sub>Install/upgrade/rollback</sub> | **[Sealing docs](https://github.com/Windsander/Mebular/blob/main/SEALING.md)** <br><sub>Protocol rules</sub> |
+| **[Changelog](https://github.com/Windsander/Mebular/blob/main/CHANGELOG.md)** <br><sub>Release notes</sub> | **[Contributing](https://github.com/Windsander/Mebular/blob/main/CONTRIBUTING.md)** <br><sub>Quality gates</sub> | **[Security](https://github.com/Windsander/Mebular/blob/main/SECURITY.md)** <br><sub>Report a vuln</sub> | **[Website](https://mebular.cyberfederal.io)** <br><sub>Product site</sub> |
+| **[DSH integration](https://github.com/Windsander/Mebular/blob/main/docs/integrations/DSH.md)** <br><sub>Full reference</sub> | **[DSH E2E](https://github.com/Windsander/Mebular/blob/main/docs/operations/DSH_E2E.md)** <br><sub>CI gates</sub> | **[npm](https://www.npmjs.com/package/@mebular/dsh-plugin)** <br><sub>Package page</sub> | **[awesome-dsh-plugin](https://awesome-dsh-plugin.com/p/Windsander/Mebular--packages-dsh-plugin/)** <br><sub>Plugin list</sub> |
 
-<details>
-<summary>Discovery &amp; compatibility</summary>
+### Discovery &amp; compatibility
 
 | Case | Resolution |
 | --- | --- |
@@ -169,8 +114,6 @@ DSH reaches the same daemon at `/mcp` through the official MCP client; tools app
 | Memory Runtime sidecar | `memoryRuntime.url > MEBULAR_MEMORY_RUNTIME_URL > <home>/memory-runtime.json` (never guesses a port) |
 | `MEBULAR_HOME` | Locates daemon and sidecar discovery files |
 | Mebular app | Independent; connects to the same daemon |
-
-</details>
 
 <div align="center">
 

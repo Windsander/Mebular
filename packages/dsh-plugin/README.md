@@ -1,17 +1,12 @@
 <div align="center">
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-hero-light.svg">
-    <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-hero-dark.svg" alt="Mebular — 分布式记忆网络">
-  </picture>
-</p>
+![Mebular — 分布式记忆网络](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-hero.svg)
 
 **一份记忆，每个助手，每台设备。**
 
 面向 AI 助手的分布式记忆网络。记忆和任务留在你的设备上，设备之间直接同步。
 
-[![CI](https://github.com/Windsander/Mebular/actions/workflows/ci.yml/badge.svg?style=flat-square)](https://github.com/Windsander/Mebular/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](https://github.com/Windsander/Mebular/blob/main/LICENSE) [![Node.js >=22.19](https://img.shields.io/badge/Node-%E2%89%A522.19-339933?logo=node.js&logoColor=white&style=flat-square)](https://github.com/Windsander/Mebular/blob/main/docs/getting-started/QUICKSTART_CN.md) [![MCP server](https://img.shields.io/badge/MCP-server-5A67D8?logo=modelcontextprotocol&logoColor=white&style=flat-square)](https://github.com/Windsander/Mebular/blob/main/docs/getting-started/QUICKSTART_CN.md) [![DSH plugin](https://img.shields.io/badge/DSH-plugin-4D6BFE?logo=deepseek&logoColor=white&style=flat-square)](https://awesome-dsh-plugin.com/zh/p/Windsander/Mebular--packages-dsh-plugin/)
+[![CI](https://github.com/Windsander/Mebular/actions/workflows/ci.yml/badge.svg?style=flat-square)](https://github.com/Windsander/Mebular/actions/workflows/ci.yml) [![License: MIT](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/badges/license-mit.svg)](https://github.com/Windsander/Mebular/blob/main/LICENSE) [![Node.js >=22.19](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/badges/node.svg)](https://github.com/Windsander/Mebular/blob/main/docs/getting-started/QUICKSTART_CN.md) [![MCP server](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/badges/mcp-server.svg)](https://github.com/Windsander/Mebular/blob/main/docs/getting-started/QUICKSTART_CN.md) [![DSH plugin](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/badges/dsh-plugin.svg)](https://awesome-dsh-plugin.com/zh/p/Windsander/Mebular--packages-dsh-plugin/)
 
 [5 分钟开始](https://github.com/Windsander/Mebular/blob/main/docs/getting-started/QUICKSTART_CN.md) · [了解架构](https://github.com/Windsander/Mebular/blob/main/docs/architecture/ARCHITECT.md) · [官网](https://mebular.cyberfederal.io) · [English](https://github.com/Windsander/Mebular/blob/main/packages/dsh-plugin/README_EN.md)
 
@@ -32,62 +27,31 @@ App 与 DSH Plugin 是同一套本机 runtime 的两个入口。插件默认 `at
 
 </div>
 
-<table width="100%">
-  <tr>
-    <td width="25%"><img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-cn-normal.jpg" alt="完整深色 DeepSeek Harness 界面：侧栏 Mebular 入口、面板 header 与内嵌星图" width="100%"><br><sub>完整 DSH 面板 · 入口与星图</sub></td>
-    <td width="25%"><img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-cn-collapsed.jpg" alt="深色 DeepSeek Harness 侧栏折叠后，Mebular Console 全宽显示" width="100%"><br><sub>折叠侧栏 · Console 全宽</sub></td>
-    <td width="25%"><img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-cn-memories.jpg" alt="深色 DeepSeek Harness 中的 Mebular 共享记忆视图" width="100%"><br><sub>共享记忆视图</sub></td>
-    <td width="25%"><img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-cn-settings.jpg" alt="深色 DeepSeek Harness 中的 Mebular 设置视图（演示数据）" width="100%"><br><sub>设置与常驻配置</sub></td>
-  </tr>
-</table>
+| 完整 DSH 面板 · 入口与星图 | 折叠侧栏 · Console 全宽 | 共享记忆视图 | 设置与常驻配置 |
+| --- | --- | --- | --- |
+| [![完整深色 DeepSeek Harness 界面：侧栏 Mebular 入口、面板 header 与内嵌星图](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-thumbs/dsh-plugin-demo-cn-normal.jpg)](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-cn-normal.jpg) | [![深色 DeepSeek Harness 侧栏折叠后，Mebular Console 全宽显示](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-thumbs/dsh-plugin-demo-cn-collapsed.jpg)](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-cn-collapsed.jpg) | [![深色 DeepSeek Harness 中的 Mebular 共享记忆视图](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-thumbs/dsh-plugin-demo-cn-memories.jpg)](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-cn-memories.jpg) | [![深色 DeepSeek Harness 中的 Mebular 设置视图（演示数据）](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-thumbs/dsh-plugin-demo-cn-settings.jpg)](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-cn-settings.jpg) |
 
-## Memory Runtime
+## 运行方式
 
 <div align="center">
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/memory-runtime-cn-light.svg">
-    <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/memory-runtime-cn.svg" alt="记忆运行时：轻量 MCP 与沉浸式两种接入，共用同一张图。">
-  </picture>
-</p>
+![为什么是 Mebular：一张共享的图，不是孤岛；本地优先、点对点、可审计、MCP](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/one-graph-cn.svg?v=2)
 
-*0.3 · 默认关闭；轻量 MCP 与沉浸式共用同一张图。*
+![记忆运行时：轻量 MCP 与沉浸式两种接入，共用同一张图。](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/memory-runtime-cn.svg?v=2)
 
-[Memory Runtime 指南](https://github.com/Windsander/Mebular/blob/main/docs/guides/MEMORY_RUNTIME_CN.md) · [DSH 集成说明](https://github.com/Windsander/Mebular/blob/main/docs/integrations/DSH_CN.md)
+*0.3 在 MCP 之上增加可选运行时。默认关闭；本地 Qwen 可选。*
+
+[运行方式指南](https://github.com/Windsander/Mebular/blob/main/docs/guides/MEMORY_RUNTIME_CN.md) · [DSH 集成](https://github.com/Windsander/Mebular/blob/main/docs/integrations/DSH_CN.md)
 
 </div>
-
-<details>
-<summary>发现与认证</summary>
-
-| 事项 | 规则 |
-| --- | --- |
-| sidecar base | `memoryRuntime.url` > env > `memory-runtime.json`；端点 `/memory-runtime/v1` |
-| token | `MEBULAR_MEMORY_RUNTIME_TOKEN` > `tokenFile` > discovery；POSIX `0600` |
-| 注入 | `role='user'` + `source.kind='mebular-memory'`；每个 human turn 只一条；无命中沉默 |
-| 模式 | 没有逐宿主 capture 开关；轻量 = 零 sidecar 请求；沉浸式 = 自动 |
-
-DSH durable log 可能留下 source-tagged 快照（平台限制），但不会渲染为用户气泡。
-</details>
 
 ## DSH 接入
 
 <div align="center">
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-memory-mesh-cn-light.svg">
-    <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-memory-mesh-cn-dark.svg" alt="一张记忆图：两台机器，每台一个 Mebular 节点；机器 A 连接 DSH、Hermes、Codex，机器 B 连接 Pi、OpenCode、Cursor；两个节点直接同步同一张图。">
-  </picture>
-</p>
+![一张记忆图：两台机器，每台一个 Mebular 节点；机器 A 连接 DSH、Hermes、Codex，机器 B 连接 Pi、OpenCode、Cursor；两个节点直接同步同一张图。](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-memory-mesh-cn.svg)
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-capabilities-cn-light.svg">
-    <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-capabilities-cn-dark.svg" alt="DSH 里得到什么：侧边栏共享 Console、官方 MCP 工具、状态点、attach / managed / auto 生命周期与按需安装更新；panel: false 只保留 MCP。">
-  </picture>
-</p>
+![DSH 里得到什么：侧边栏共享 Console、官方 MCP 工具、状态点、attach / managed / auto 生命周期与按需安装更新；panel: false 只保留 MCP。](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-capabilities-cn.svg)
 
 </div>
 
@@ -95,33 +59,17 @@ DSH durable log 可能留下 source-tagged 快照（平台限制），但不会�
 
 <div align="center">
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-quickstart-cn-light.svg">
-    <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-quickstart-cn-dark.svg" alt="三步接入：安装插件、重启 DSH；已有 App/CLI 自动连接，没有 runtime 时面板显式安装共享 runtime。">
-  </picture>
-</p>
+![三步接入：安装插件、重启 DSH；已有 App/CLI 自动连接，没有 runtime 时面板显式安装共享 runtime。](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-quickstart-cn.svg)
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-connection-cn-light.svg">
-    <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-connection-cn-dark.svg" alt="DSH 接入：DSH Web 通过 iframe 加载 /console/?embed=dsh，官方 MCP client 连接同一个 daemon 的 /mcp；通过共享 runtime resolve 解析 App/CLI/shared provider 与动态 URL。">
-  </picture>
-</p>
+![DSH 接入：DSH Web 通过 iframe 加载 /console/?embed=dsh，官方 MCP client 连接同一个 daemon 的 /mcp；通过共享 runtime resolve 解析 App/CLI/shared provider 与动态 URL。](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-connection-cn.svg)
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-status-cn-light.svg">
-    <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-status-cn-dark.svg" alt="状态点：绿色已连接，琥珀色启动/安装/更新中，红色未运行，灰色等待首次检查。">
-  </picture>
-</p>
+![状态点：绿色已连接，琥珀色启动/安装/更新中，红色未运行，灰色等待首次检查。](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-status-cn.svg)
 
 </div>
 
 已有 Mebular App 或 CLI 时，插件会自动连接；没有 runtime 时，打开 Mebular 面板按提示安装共享 runtime。只有 CLI 方式需要手动 `mebular serve`。
 
-<details>
-<summary>命令行：安装 / 开发安装 / 卸载</summary>
+### 命令行
 
 ```bash
 # 安装插件（不会静默启动或下载 Mebular）
@@ -134,8 +82,6 @@ dsh plugin --profile web add ./packages/dsh-plugin
 # 卸载
 dsh plugin --profile web remove @mebular/dsh-plugin
 ```
-
-</details>
 
 ## MCP 工具
 
@@ -154,13 +100,12 @@ DSH 通过官方 MCP client 连接同一个 daemon 的 `/mcp`；工具在 DSH �
 
 | 开始 | 理解 | 运维 | 信任 |
 | --- | --- | --- | --- |
-| <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/getting-started/QUICKSTART_CN.md">快速上手</a></strong> <br><sub>安装与配对</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/architecture/ARCHITECT.md">架构</a></strong> <br><sub>节点与同步</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/console/README.md">控制台</a></strong> <br><sub>本地界面</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/limitations/LIMITATIONS_CN.md">限制</a></strong> <br><sub>敏感数据</sub> |
-| <strong><a href="https://github.com/Windsander/Mebular/blob/main/packages/skill/SETUP.md">Agent</a></strong> <br><sub>部署规约</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/packages/fleet/RUNBOOK.md">Fleet</a></strong> <br><sub>多机操作</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/operations/SHARED_RUNTIME.md">共享 runtime</a></strong> <br><sub>安装、升级与回滚</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/SEALING_CN.md">封板契约</a></strong> <br><sub>协议红线</sub> |
-| <strong><a href="https://github.com/Windsander/Mebular/blob/main/CHANGELOG.md">变更日志</a></strong> <br><sub>发布说明</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/CONTRIBUTING.md">参与贡献</a></strong> <br><sub>质量门禁</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/SECURITY.md">安全</a></strong> <br><sub>报告漏洞</sub> | <strong><a href="https://mebular.cyberfederal.io">官网</a></strong> <br><sub>产品站点</sub> |
-| <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/integrations/DSH_CN.md">DSH 集成说明</a></strong> <br><sub>完整配置</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/operations/DSH_E2E.md">DSH E2E</a></strong> <br><sub>CI 门禁</sub> | <strong><a href="https://www.npmjs.com/package/@mebular/dsh-plugin">npm</a></strong> <br><sub>包页面</sub> | <strong><a href="https://awesome-dsh-plugin.com/zh/p/Windsander/Mebular--packages-dsh-plugin/">awesome-dsh-plugin</a></strong> <br><sub>插件列表</sub> |
+| **[快速上手](https://github.com/Windsander/Mebular/blob/main/docs/getting-started/QUICKSTART_CN.md)** <br><sub>安装与配对</sub> | **[架构](https://github.com/Windsander/Mebular/blob/main/docs/architecture/ARCHITECT.md)** <br><sub>节点与同步</sub> | **[控制台](https://github.com/Windsander/Mebular/blob/main/docs/console/README.md)** <br><sub>本地界面</sub> | **[限制](https://github.com/Windsander/Mebular/blob/main/docs/limitations/LIMITATIONS_CN.md)** <br><sub>敏感数据</sub> |
+| **[Agent](https://github.com/Windsander/Mebular/blob/main/packages/skill/SETUP.md)** <br><sub>部署规约</sub> | **[Fleet](https://github.com/Windsander/Mebular/blob/main/packages/fleet/RUNBOOK.md)** <br><sub>多机操作</sub> | **[共享 runtime](https://github.com/Windsander/Mebular/blob/main/docs/operations/SHARED_RUNTIME.md)** <br><sub>安装、升级与回滚</sub> | **[封板契约](https://github.com/Windsander/Mebular/blob/main/SEALING_CN.md)** <br><sub>协议红线</sub> |
+| **[变更日志](https://github.com/Windsander/Mebular/blob/main/CHANGELOG.md)** <br><sub>发布说明</sub> | **[参与贡献](https://github.com/Windsander/Mebular/blob/main/CONTRIBUTING.md)** <br><sub>质量门禁</sub> | **[安全](https://github.com/Windsander/Mebular/blob/main/SECURITY.md)** <br><sub>报告漏洞</sub> | **[官网](https://mebular.cyberfederal.io)** <br><sub>产品站点</sub> |
+| **[DSH 集成说明](https://github.com/Windsander/Mebular/blob/main/docs/integrations/DSH_CN.md)** <br><sub>完整配置</sub> | **[DSH E2E](https://github.com/Windsander/Mebular/blob/main/docs/operations/DSH_E2E.md)** <br><sub>CI 门禁</sub> | **[npm](https://www.npmjs.com/package/@mebular/dsh-plugin)** <br><sub>包页面</sub> | **[awesome-dsh-plugin](https://awesome-dsh-plugin.com/zh/p/Windsander/Mebular--packages-dsh-plugin/)** <br><sub>插件列表</sub> |
 
-<details>
-<summary>兼容发现</summary>
+### 兼容发现
 
 | 场景 | 解析方式 |
 | --- | --- |
@@ -169,8 +114,6 @@ DSH 通过官方 MCP client 连接同一个 daemon 的 `/mcp`；工具在 DSH �
 | Memory Runtime sidecar | `memoryRuntime.url > MEBULAR_MEMORY_RUNTIME_URL > <home>/memory-runtime.json`（不猜端口） |
 | `MEBULAR_HOME` | 定位 daemon 与 sidecar discovery |
 | Mebular App | 独立运行；连接同一个 daemon |
-
-</details>
 
 <div align="center">
 

@@ -6,7 +6,7 @@
 # 说明: 这是 monorepo 子包条目，url 指向 packages/dsh-plugin；name 使用
 # owner/repo#subname。
 #
-# 2026-11-03 文案校准（对齐 0.3 运行方式与工具面）：上游 PR 已提交：
+# 2026-11-03 文案校准（对齐 0.3 工具面与主项目口径）：上游 PR 已提交：
 # https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/11519
 # 合并后把本文件同步为目标仓库状态并记录合并时间。
 #
@@ -18,5 +18,5 @@ name: Windsander/Mebular#packages/dsh-plugin
 category: memory
 icon: https://raw.githubusercontent.com/Windsander/Mebular/main/packages/dsh-plugin/assets/icon-180.png
 description:
-  en: "Bring Mebular to DSH: local-first cross-device memory and task collaboration. One graph shared with your other AI assistants, synced peer-to-peer, with signed, auditable writes; Mebular's Console sits in the DSH sidebar. The Mebular App bundles the runtime, so the plugin attaches directly; with the plugin alone, click Install in the panel and it automatically downloads, verifies, initializes and starts one — no silent install."
-  zh: '为 DSH 接入 Mebular：本地优先的跨设备记忆与任务协作。一张与其它 AI 助手共用、点对点同步的图，写入即签名、可审计；Mebular Console 直接嵌入 DSH 侧边栏。Mebular App 自带 runtime，插件直接连接；只装插件时，可在面板内点击安装，自动完成下载、校验、初始化与启动，不会静默安装。'
+  en: "🌌 Mebular · shared memory and task collaboration for agents. Through a DSH-native plugin, it provides complete cross-device, cross-agent memory sharing and task-graph capabilities — so physical devices are no longer the boundary of your agents. Secure, controllable, and decentralized!"
+  zh: '🌌 Mebular 忆云 · 智能体共享记忆与任务协作。通过 DSH 原生插件接入，提供完整的跨设备、跨 Agent 记忆共享与任务图功能，让物理设备不再是你智能体的边界，安全、可控、去中心化！'

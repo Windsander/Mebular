@@ -1,7 +1,7 @@
 {
   "name": "@mebular/dsh-plugin",
   "version": "0.3.0",
-  "description": "Mebular memory, task graph, and shared Console for DeepSeek Harness",
+  "description": "Mebular memory, task graph, and shared Console for DeepSeek Harness. | Mebular 为 DeepSeek Harness 提供记忆、任务图与共享 Console。",
   "license": "MIT",
   "author": {
     "name": "Sobert Li (Windsander)",

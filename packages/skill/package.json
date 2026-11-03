@@ -1,7 +1,7 @@
 {
   "name": "@mebular/skill",
   "version": "0.3.0",
-  "description": "Mebular 行为层：可移植的 SKILL.md + MEMORY_POLICY.md 与各 MCP client 接入片段",
+  "description": "Mebular behavior layer: portable SKILL.md + MEMORY_POLICY.md and MCP client integration snippets. | Mebular 行为层：可移植的 SKILL.md + MEMORY_POLICY.md 与各 MCP client 接入片段。",
   "license": "MIT",
   "author": {
     "name": "Sobert Li (Windsander)",

@@ -4,9 +4,13 @@
 # 合并时间: 2026-10-24
 # 目标文件: data/plugins/Windsander__Mebular--packages-dsh-plugin.yml
 # 说明: 这是 monorepo 子包条目，url 指向 packages/dsh-plugin；name 使用
-# owner/repo#subname。以下字段与目标仓库当前条目保持一致。
+# owner/repo#subname。
 #
-# 安装: dsh plugin --profile web add @mebular/dsh-plugin@0.2.4
+# 2026-11-03 文案校准（对齐 0.3 运行方式与工具面）：上游 PR 已提交：
+# https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/11519
+# 合并后把本文件同步为目标仓库状态并记录合并时间。
+#
+# 安装: dsh plugin --profile web add @mebular/dsh-plugin@0.3.0
 # 兼容: DSH >=0.2.1-rc.2 <0.3.0, Node.js >=22.19
 
 url: https://github.com/Windsander/Mebular/tree/main/packages/dsh-plugin
@@ -14,5 +18,5 @@ name: Windsander/Mebular#packages/dsh-plugin
 category: memory
 icon: https://raw.githubusercontent.com/Windsander/Mebular/main/packages/dsh-plugin/assets/icon-180.png
 description:
-  en: 'Decentralized, offline-first graph memory and task graph for DSH, with signed facts, multi-device sync, and the shared Mebular Console embedded in a sidebar panel. Requires a running Mebular daemon (the Mebular desktop app, or mebular serve from @mebular/core); this plugin only attaches its memory tools and Console panel to it.'
-  zh: '去中心化、离线优先的 DSH 图式记忆与任务图：签名事实、多设备同步，并在侧边栏复用 Mebular 共享控制台。需本机已运行 Mebular 守护进程（Mebular 桌面 App，或 @mebular/core 的 mebular serve）；本插件只把它的记忆工具与控制台面板接入 DSH。'
+  en: "Bring Mebular to DSH: local-first cross-device memory and task collaboration. One graph shared with your other AI assistants, synced peer-to-peer, with signed, auditable writes; Mebular's Console sits in the DSH sidebar. The Mebular App bundles the runtime, so the plugin attaches directly; with the plugin alone, click Install in the panel and it automatically downloads, verifies, initializes and starts one — no silent install."
+  zh: '为 DSH 接入 Mebular：本地优先的跨设备记忆与任务协作。一张与其它 AI 助手共用、点对点同步的图，写入即签名、可审计；Mebular Console 直接嵌入 DSH 侧边栏。Mebular App 自带 runtime，插件直接连接；只装插件时，可在面板内点击安装，自动完成下载、校验、初始化与启动，不会静默安装。'

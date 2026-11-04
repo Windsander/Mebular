@@ -1,6 +1,46 @@
 {
   "v": 1,
-  "note": "Fleet 黑盒编排 plan 节点夹具 v1。task_plan 是 internal 记忆节点，不进入 MCP 公共方法、人类 UI 或 fleet SSE。本文件先冻结形状；P2 的 validator/materializer 与测试必须匹配。taskId 规则：${planId}#${version}#${stepId}（planId/stepId 不得含 #）。",
+  "note": "Fleet 黑盒编排 plan 节点夹具 v1。task_plan 是 internal 记忆节点，不进入人类 UI 或 fleet SSE；唯一创建路径是 task_submit 的 optional plan 字段（完整 plan 定义），Fleet 校验后创建 plan 节点与 root task。taskId 规则：step=${planId}#${version}#${stepId}，root=${planId}#${version}#root；planId/stepId 不得含 #，stepId 不得为 root。",
+  "submission": {
+    "tool": "task_submit",
+    "arguments": {
+      "intent": "提交一个完整 plan",
+      "to": { "device": "device-A", "agent": "__plan__" },
+      "plan": {
+        "v": 1,
+        "kind": "task_plan",
+        "planId": "plan-submit-001",
+        "version": 1,
+        "owner": { "device": "device-A", "agent": "planner" },
+        "goal": "最小可提交 plan：work → pre-MR gate → MR",
+        "createdAt": 1700000006000,
+        "budget": { "maxSteps": 3, "maxAttemptsPerStep": 1 },
+        "policy": {
+          "allowedDevices": ["device-B"],
+          "allowedAgents": ["worker"],
+          "requireCapabilities": ["fleet.task"],
+          "maxParallel": 1,
+          "allowSubcontract": false
+        },
+        "steps": [
+          { "stepId": "work", "kind": "task", "intent": "执行唯一工作 step", "dependsOn": [], "acceptance": { "kind": "non-empty-result" } },
+          { "stepId": "pre-mr", "kind": "reduce", "intent": "pre-MR gate", "dependsOn": ["work"], "join": { "mode": "all" }, "acceptance": { "kind": "non-empty-result" } },
+          { "stepId": "mr", "kind": "mr", "intent": "提交唯一 MR", "dependsOn": ["pre-mr"], "acceptance": { "kind": "mr-once" } }
+        ]
+      }
+    },
+    "expect": {
+      "ok": true,
+      "planId": "plan-submit-001",
+      "version": 1,
+      "rootTaskId": "plan-submit-001#1#root",
+      "taskId": "plan-submit-001#1#root"
+    }
+  },
+  "idempotency": {
+    "repeatSame": "同 planId + version + 规范化内容 → 返回已有 plan/rootTaskId，不重复写 plan 或 root task",
+    "conflict": "同 planId + version 但规范化内容不同 → PLAN_CONFLICT；不创建任何对象"
+  },
   "plan": {
     "v": 1,
     "kind": "task_plan",
@@ -229,6 +269,26 @@
           { "stepId": "a", "kind": "task", "intent": "a", "dependsOn": ["missing"], "acceptance": { "kind": "non-empty-result" } },
           { "stepId": "pre-mr", "kind": "reduce", "intent": "pre-MR gate", "dependsOn": ["a"], "join": { "mode": "all" }, "acceptance": { "kind": "non-empty-result" } },
           { "stepId": "mr", "kind": "mr", "intent": "mr", "dependsOn": ["pre-mr"], "acceptance": { "kind": "mr-once" } }
+        ]
+      }
+    },
+    "mrGateAny": {
+      "expectedError": "PLAN_MR",
+      "plan": {
+        "v": 1,
+        "kind": "task_plan",
+        "planId": "plan-bad-mr-gate",
+        "version": 1,
+        "owner": { "device": "device-A", "agent": "planner" },
+        "goal": "负例：MR 直接 gate 使用 any 必须被拒绝",
+        "createdAt": 1700000007000,
+        "budget": { "maxSteps": 4, "maxAttemptsPerStep": 1 },
+        "policy": { "allowedDevices": ["device-B"], "allowedAgents": ["worker"], "requireCapabilities": [], "maxParallel": 1, "allowSubcontract": false },
+        "steps": [
+          { "stepId": "a", "kind": "task", "intent": "a", "dependsOn": [], "acceptance": { "kind": "non-empty-result" } },
+          { "stepId": "b", "kind": "task", "intent": "b", "dependsOn": [], "acceptance": { "kind": "non-empty-result" } },
+          { "stepId": "gate-any", "kind": "join", "intent": "非法 MR gate", "dependsOn": ["a", "b"], "join": { "mode": "any" }, "acceptance": { "kind": "non-empty-result" } },
+          { "stepId": "mr", "kind": "mr", "intent": "mr", "dependsOn": ["gate-any"], "acceptance": { "kind": "mr-once" } }
         ]
       }
     }

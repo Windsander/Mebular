@@ -1466,6 +1466,9 @@ export function createController(dependencies = {}) {
   const recalls = new Map();
   const pendingCheckpoints = new Map();
   const checkpointRevisions = new Map();
+  const knownRecordIds = new Map();
+  const knownDetailIds = new Map();
+  const compactionChunkRefs = new Map();
   const inflight = new Set();
   let lifecycleAbort = typeof AbortController === 'function' ? new AbortController() : null;
   let authRecoveryTimer = null;
@@ -1504,6 +1507,7 @@ export function createController(dependencies = {}) {
       expired: 0,
       interrupted: 0,
       rejected: 0,
+      droppedRefs: 0,
       retryAfterTruncated: 0,
     },
     model: { calls: 0, succeeded: 0, failed: 0, fallbacks: 0, skipped: 0 },
@@ -2590,6 +2594,34 @@ export function createController(dependencies = {}) {
     }));
   }
 
+  function rememberIngestGraphIds(session, data) {
+    if (!session || !isObject(data)) return;
+    const records = Array.isArray(data.records) ? data.records : [];
+    const recordIds = records.map((record) => asText(record?.id)).filter(Boolean);
+    const detailIds = [
+      ...(Array.isArray(data.detail?.ids) ? data.detail.ids : []),
+      ...records.flatMap((record) => (Array.isArray(record?.detailIds) ? record.detailIds : [])),
+    ].map(asText).filter(Boolean);
+    const rememberSet = (map, ids) => {
+      if (ids.length === 0) return;
+      let set = map.get(session);
+      if (!set) {
+        set = new Set();
+        map.set(session, set);
+      }
+      for (const id of ids) set.add(id);
+      while (set.size > 512) set.delete(set.values().next().value);
+      while (map.size > 128) map.delete(map.keys().next().value);
+    };
+    rememberSet(knownRecordIds, recordIds);
+    rememberSet(knownDetailIds, detailIds);
+  }
+
+  function knownGraphIdsFor(map, session, ids) {
+    const set = map.get(session) ?? new Set();
+    return ids.filter((id) => set.has(id));
+  }
+
   async function sendIngest(chunks, options = {}) {
     const session = safeThreadId(options.sessionID);
     const lifecycleSignal = lifecycleAbort?.signal;
@@ -2669,6 +2701,7 @@ export function createController(dependencies = {}) {
           stats.ingest.empty += 1;
         }
         if (result.data?.duplicate === true) stats.ingest.duplicates += 1;
+        rememberIngestGraphIds(session, result.data);
         return result;
       }
       if (result.status === 401) {
@@ -2818,9 +2851,32 @@ export function createController(dependencies = {}) {
     return entry.legacyIds.includes(compactionId) || entry.legacyIds.includes(sourceEventId);
   }
 
+  function isLegacyTransportCheckpoint(checkpoint) {
+    if (!isObject(checkpoint)) return false;
+    const state = isObject(checkpoint.state) ? checkpoint.state : {};
+    const compactionId = asText(state.compactionId) || asText(checkpoint.compactionId);
+    const sourceEventId = asText(state.sourceEventId) || asText(checkpoint.sourceEventId);
+    if (compactionId.length > 0) return !compactionId.startsWith('cmp_');
+    return /^evt[_:.-]/i.test(sourceEventId);
+  }
+
   function normalizedCheckpointState(checkpoint) {
     const state = isObject(checkpoint?.state) ? checkpoint.state : {};
     const cloned = JSON.parse(JSON.stringify(state));
+    const normalizeRefItems = (items) => (Array.isArray(items)
+      ? items.map((item) => (isObject(item)
+        ? { ...item, recordIds: Array.isArray(item.recordIds) ? item.recordIds : [] }
+        : item))
+      : items);
+    cloned.decisions = normalizeRefItems(cloned.decisions);
+    if (isObject(cloned.progress)) {
+      cloned.progress = {
+        ...cloned.progress,
+        done: normalizeRefItems(cloned.progress.done),
+        doing: normalizeRefItems(cloned.progress.doing),
+        blocked: normalizeRefItems(cloned.progress.blocked),
+      };
+    }
     delete cloned.at;
     delete cloned.sourceEventId;
     delete cloned.compactionId;
@@ -3271,15 +3327,23 @@ export function createController(dependencies = {}) {
     const endSeq = asText(data?.endSeq) || asText(data?.seq) || 'end';
     const domain = checkpointDomain(session);
     const fleetTaskId = asText(data?.fleetTaskId) || asText(data?.taskId);
-    const recordIds = uniqueStrings([
-      ...(Array.isArray(options.recordIds) ? options.recordIds : []),
-      ...(Array.isArray(data?.recordIds) ? data.recordIds : []),
-    ], 200);
-    const detailIds = uniqueStrings([
-      ...(Array.isArray(options.detailIds) ? options.detailIds : []),
+    const trustedRecordIds = uniqueStrings(Array.isArray(options.recordIds) ? options.recordIds : [], 200);
+    const trustedDetailIds = uniqueStrings(Array.isArray(options.detailIds) ? options.detailIds : [], 200);
+    const hostRecordIds = uniqueStrings(Array.isArray(data?.recordIds) ? data.recordIds : [], 200);
+    const hostDetailIds = uniqueStrings([
       ...(Array.isArray(data?.detailIds) ? data.detailIds : []),
       ...(Array.isArray(data?.detail?.ids) ? data.detail.ids : []),
     ], 200);
+    const acceptedHostRecordIds = knownGraphIdsFor(knownRecordIds, session, hostRecordIds);
+    const acceptedHostDetailIds = knownGraphIdsFor(knownDetailIds, session, hostDetailIds);
+    const droppedRefs = (hostRecordIds.length - acceptedHostRecordIds.length)
+      + (hostDetailIds.length - acceptedHostDetailIds.length);
+    if (droppedRefs > 0) {
+      stats.checkpoints.droppedRefs += droppedRefs;
+      noteFailure('checkpoint_refs_dropped');
+    }
+    const recordIds = uniqueStrings([...trustedRecordIds, ...acceptedHostRecordIds], 200);
+    const detailIds = uniqueStrings([...trustedDetailIds, ...acceptedHostDetailIds], 200);
     const checkpointOptions = {
       threadId: session,
       domain,
@@ -3386,13 +3450,18 @@ export function createController(dependencies = {}) {
       return false;
     }
     entry.revisionSource = resolvedRevision.source;
-    if (resolvedRevision.checkpoint
+    const evidenceMatchesExisting = resolvedRevision.checkpoint
+      ? checkpointEvidence(resolvedRevision.checkpoint) === entryEvidence(entry)
+      : false;
+    const sameLogicalCheckpoint = resolvedRevision.checkpoint
       && resolvedRevision.checkpoint.pending !== true
-      && checkpointMatches(entry, resolvedRevision.checkpoint)) {
-      if (checkpointEvidence(resolvedRevision.checkpoint) === entryEvidence(entry)) {
+      && (checkpointMatches(entry, resolvedRevision.checkpoint)
+        || (isLegacyTransportCheckpoint(resolvedRevision.checkpoint) && evidenceMatchesExisting));
+    if (sameLogicalCheckpoint) {
+      if (evidenceMatchesExisting) {
         // A restart/fresh-envelope replay may have a different expectedRevision
-        // or sourceEventId but the same logical compactionId and evidence.
-        // Treat the existing committed object as the idempotent result.
+        // or sourceEventId but the same logical evidence. Treat the existing
+        // committed object as the idempotent result.
         finishCheckpoint(entry, 'committed', {
           revision: resolvedRevision.checkpoint.revision,
           duplicate: true,
@@ -3470,6 +3539,10 @@ export function createController(dependencies = {}) {
       ?? finiteTimestamp(event?.time?.start)
       ?? finiteTimestamp(event?.time?.end);
     const summary = asText(data.text) || asText(data.summary);
+    const logicalCompactionId = compactionLogicalId({
+      ...data,
+      ...(eventAt !== null ? { at: eventAt } : {}),
+    }, sessionID);
     let recordIds = [];
     let detailIds = [];
     if (ingestAllowed && summary.length > 0) {
@@ -3479,7 +3552,7 @@ export function createController(dependencies = {}) {
         config.maxChunkBytes,
       );
       const chunk = {
-        key: `${sessionID}:system:compaction:${hashText(redacted.text)}`,
+        key: `${sessionID}:system:compaction:${logicalCompactionId}:${eventAt ?? 0}:${hashText(redacted.text)}`,
         role: 'system',
         text: chunkText,
         at: now(),
@@ -3487,8 +3560,13 @@ export function createController(dependencies = {}) {
         contentHash: hashText(chunkText),
         redaction: { applied: redacted.applied, rules: redacted.rules },
       };
-      if (!seenChunks.has(chunk.key)) {
-        remember(seenChunks, chunk.key);
+      if (seenChunks.has(chunk.key)) {
+        const cachedRefs = compactionChunkRefs.get(chunk.key);
+        if (cachedRefs) {
+          recordIds = [...cachedRefs.recordIds];
+          detailIds = [...cachedRefs.detailIds];
+        }
+      } else {
         const ingested = await sendIngest([chunk], { sessionID, extractor: 'heuristic' });
         const extractionStatus = asText(ingested?.data?.extraction?.status);
         const detail = isObject(ingested?.data?.detail) ? ingested.data.detail : {};
@@ -3501,7 +3579,8 @@ export function createController(dependencies = {}) {
           && extractionStatus !== 'pending'
           && Array.isArray(ingested.data?.records)
           && ingested.data.records.length > 0;
-        if (settled && Array.isArray(ingested.data?.records)) {
+        if (settled) {
+          remember(seenChunks, chunk.key);
           recordIds = uniqueStrings(ingested.data.records.map((record) => record?.id), 200);
           detailIds = uniqueStrings([
             ...ingested.data.records.flatMap((record) => (
@@ -3509,12 +3588,18 @@ export function createController(dependencies = {}) {
             )),
             ...(Array.isArray(ingested.data.detail?.ids) ? ingested.data.detail.ids : []),
           ], 200);
+          compactionChunkRefs.set(chunk.key, { recordIds: [...recordIds], detailIds: [...detailIds] });
+          while (compactionChunkRefs.size > config.dedupeCacheSize) {
+            const oldest = compactionChunkRefs.keys().next().value;
+            if (oldest === undefined) break;
+            compactionChunkRefs.delete(oldest);
+          }
         }
       }
     }
     await putCheckpoint(sessionID, {
       ...data,
-      compactionId: compactionLogicalId(data, sessionID),
+      compactionId: logicalCompactionId,
       ...(eventAt !== null ? { at: eventAt } : {}),
     }, eventID, { recordIds, detailIds });
   }

@@ -428,6 +428,49 @@ async function main() {
         secondRequestId: secondIngestBody?.body?.requestId,
       }));
 
+    // H1: real structured compaction replay must not bump revision after the
+    // capability normalizes decisions/progress recordIds.
+    const structuredThread = 'ses_real_structured';
+    const structuredSummary = [
+      '## Objective',
+      'Ship structured checkpoint evidence.',
+      '## Requirements',
+      '- Keep schema 2',
+      '## Decisions',
+      '- Reuse checkpoint — no new endpoint',
+      '## Work State',
+      '- Done: evidence wiring',
+      '- Doing: structured replay',
+      '- Blocked: none',
+      '## Next Move',
+      '- Verify replay',
+    ].join('\n');
+    const structuredEvent = {
+      id: 'evt_real_structured',
+      type: 'session.compaction.ended',
+      data: {
+        sessionID: structuredThread,
+        compactionId: 'cmp_real_structured',
+        at: 1700000000000,
+        reason: 'auto',
+        text: structuredSummary,
+      },
+    };
+    await controller.handleEvent(structuredEvent);
+    await controller.handleEvent(structuredEvent);
+    const structuredCheckpoint = await runtime.sidecarCheckpoint(structuredThread, 'opencode');
+    check('真实结构化 compaction 同一事件重放 revision 不变',
+      structuredCheckpoint?.revision === 1
+      && structuredCheckpoint?.state?.contentMode === 'structured'
+      && controller.getStatus().counts.checkpoints.updates === 0
+      && controller.getStatus().counts.checkpoints.duplicates >= 1,
+      JSON.stringify({
+        revision: structuredCheckpoint?.revision,
+        contentMode: structuredCheckpoint?.state?.contentMode,
+        updates: controller.getStatus().counts.checkpoints.updates,
+        duplicates: controller.getStatus().counts.checkpoints.duplicates,
+      }));
+
     // M3: real sidecar ingest with a permanent detail-write failure must be
     // reported as partial, never committed.
     const partialThread = 'ses_real_partial';
@@ -537,20 +580,22 @@ async function main() {
       const checkpoint = await runtime.sidecarCheckpoint(evidenceThread, 'opencode');
       return checkpoint?.revision === 2 ? checkpoint : null;
     });
-    check('首次无 refs、重放有 summary/refs 时显式更新 revision',
+    check('首次无 refs、重放有 summary 时显式更新；未验证外部 refs 被丢弃',
       evidenceInitial?.revision === 1
       && evidenceUpdated?.revision === 2
       && evidenceUpdated?.summary === '以后默认用 evidence-update 主题'
       && Array.isArray(evidenceUpdated?.recordIds)
-      && evidenceUpdated.recordIds.includes(evidenceRefs.recordId)
+      && evidenceUpdated.recordIds.length === 0
       && Array.isArray(evidenceUpdated?.detailIds)
-      && evidenceUpdated.detailIds.includes(evidenceRefs.detailId)
-      && controller.getStatus().counts.checkpoints.updates >= 1,
+      && evidenceUpdated.detailIds.length === 0
+      && controller.getStatus().counts.checkpoints.updates >= 1
+      && controller.getStatus().counts.checkpoints.droppedRefs >= 2,
       JSON.stringify({
         initial: evidenceInitial?.revision,
         updated: evidenceUpdated?.revision,
         summary: evidenceUpdated?.summary,
         records: evidenceUpdated?.recordIds,
+        droppedRefs: controller.getStatus().counts.checkpoints.droppedRefs,
         updates: controller.getStatus().counts.checkpoints.updates,
       }));
 
@@ -736,6 +781,16 @@ async function main() {
         discoveryB: discoveryB.url,
       }));
 
+    const sidecarFinal = await requestSidecar(discovery, '/status');
+    const sidecarCounts = sidecarFinal.data?.counts ?? {};
+    check('sidecar objectWritesFailed 等于注入故障数且 deadLetter=0',
+      sidecarCounts.objectWritesFailed === 1
+      && sidecarCounts.deadLetter === 0,
+      JSON.stringify({
+        objectWritesFailed: sidecarCounts.objectWritesFailed,
+        deadLetter: sidecarCounts.deadLetter,
+      }));
+
     check('checkpoint 写失败计数为 0', controller.getStatus().counts.checkpoints.failed === 0,
       JSON.stringify(controller.getStatus().counts.checkpoints));
   } finally {
@@ -753,7 +808,7 @@ async function main() {
       suite: 'opencode-checkpoint-recovery',
       passed,
       failed,
-      results,
+      checks: results.length,
     }, null, 2), 'utf8').catch(() => undefined);
   }
   console.log(`\n${failed === 0 ? '✓' : '✗'} OpenCode checkpoint recovery（真实 sidecar/capability，fake host）：${passed} passed, ${failed} failed`);

@@ -20,6 +20,7 @@ import plugin, {
   getStatus,
   normalizeRuntimeUrl,
   parseCandidateOutput,
+  parseCompactionCheckpoint,
   resolvePluginConfig,
   summaryOnlyCheckpointState,
   supportsOpencodeVersion,
@@ -1935,6 +1936,77 @@ describe('event collection hardening', () => {
     expect(status.checkpoints.last).toMatchObject({ state: 'committed', revision: 1, duplicate: true });
   });
 
+  it('dedupes a structured compaction after capability adds empty recordIds to decisions/progress', async () => {
+    const summary = [
+      '## Objective',
+      'Ship stable evidence comparison.',
+      '## Requirements',
+      '- Keep schema 2',
+      '## Decisions',
+      '- Reuse checkpoint — no new endpoint',
+      '## Work State',
+      '- Done: evidence wiring',
+      '- Doing: tests',
+      '- Blocked: none',
+      '## Next Move',
+      '- Verify replay',
+    ].join('\n');
+    const parsed = parseCompactionCheckpoint(summary, {
+      threadId: 'ses_structured_evidence',
+      domain: 'task:ses_structured_evidence',
+    });
+    const normalized = JSON.parse(JSON.stringify(parsed));
+    for (const bucket of [normalized.progress.done, normalized.progress.doing, normalized.progress.blocked]) {
+      for (const item of bucket) item.recordIds = [];
+    }
+    for (const item of normalized.decisions) item.recordIds = [];
+    let puts = 0;
+    const fetchImpl = createFetch({
+      '/checkpoints/ses_structured_evidence': (call) => {
+        if (call.method === 'GET') {
+          return jsonResponse({
+            ok: true,
+            data: {
+              checkpoint: {
+                domain: 'task:ses_structured_evidence',
+                revision: 1,
+                pending: false,
+                summary,
+                recordIds: [],
+                detailIds: [],
+                state: {
+                  ...normalized,
+                  kind: 'compaction',
+                  reason: 'auto',
+                  compactionId: 'cmp_structured_evidence',
+                  sourceEventId: 'evt_structured_evidence',
+                  at: 1700000000000,
+                },
+              },
+              source: 'cloud',
+            },
+          });
+        }
+        puts += 1;
+        return jsonResponse({ ok: true, data: { checkpoint: { revision: 2, pending: false } } });
+      },
+    });
+    const { controller } = controllerWith({ fetchImpl });
+    await controller.handleEvent({
+      id: 'evt_structured_evidence',
+      type: 'session.compaction.ended',
+      data: {
+        sessionID: 'ses_structured_evidence',
+        compactionId: 'cmp_structured_evidence',
+        at: 1700000000000,
+        reason: 'auto',
+        text: summary,
+      },
+    });
+    expect(puts).toBe(0);
+    expect(controller.getStatus().counts.checkpoints.duplicates).toBe(1);
+  });
+
   it('recreates after checkpoint deletion using the authoritative GET revision', async () => {
     let currentRevision = 0;
     let gets = 0;
@@ -2168,6 +2240,132 @@ describe('event collection hardening', () => {
     expect(status.checkpoints.last).toMatchObject({ state: 'committed', revision: 2 });
   });
 
+  it('keeps per-compaction refs when two compactions share the same summary', async () => {
+    let ingestCalls = 0;
+    let stored = null;
+    const puts = [];
+    const fetchImpl = createFetch({
+      '/ingest': () => {
+        ingestCalls += 1;
+        return jsonResponse({
+          ok: true,
+          data: {
+            accepted: { chunks: 1, records: 1 },
+            records: [{ id: `rec_same_summary_${ingestCalls}` }],
+            detail: { ids: [], written: 0, duplicates: 0, queued: 0, failed: 0 },
+            queued: false,
+            extraction: { id: `ex_same_${ingestCalls}`, status: 'completed', extractor: 'heuristic', records: [], warnings: [] },
+          },
+        });
+      },
+      '/checkpoints/ses_same_summary': (call) => {
+        if (call.method === 'GET') {
+          return jsonResponse({ ok: true, data: { checkpoint: stored, source: 'cloud' } });
+        }
+        puts.push(call.body);
+        stored = {
+          domain: 'task:ses_same_summary',
+          revision: (stored?.revision ?? 0) + 1,
+          pending: false,
+          summary: call.body.summary,
+          recordIds: call.body.recordIds,
+          detailIds: call.body.detailIds,
+          state: call.body.state,
+        };
+        return jsonResponse({ ok: true, data: { checkpoint: stored, source: 'cloud' } });
+      },
+    });
+    const { controller } = controllerWith({ fetchImpl });
+    for (const compactionId of ['cmp_same_summary_a', 'cmp_same_summary_b']) {
+      await controller.handleEvent({
+        id: `evt_${compactionId}`,
+        type: 'session.compaction.ended',
+        data: {
+          sessionID: 'ses_same_summary',
+          compactionId,
+          at: 1700000000000,
+          reason: 'auto',
+          text: 'identical compaction summary',
+        },
+      });
+    }
+    expect(ingestCalls).toBe(2);
+    expect(puts.map((body) => body.recordIds)).toEqual([
+      ['rec_same_summary_1'],
+      ['rec_same_summary_2'],
+    ]);
+    expect(puts[1].expectedRevision).toBe(1);
+  });
+
+  it('drops unverified host checkpoint refs instead of writing dangling ids', async () => {
+    const puts = [];
+    const fetchImpl = createFetch({
+      '/checkpoints/ses_dangling': (call) => {
+        if (call.method === 'GET') {
+          return jsonResponse({ ok: true, data: { checkpoint: null, source: 'cloud' } });
+        }
+        puts.push(call.body);
+        return jsonResponse({
+          ok: true,
+          data: {
+            checkpoint: {
+              domain: 'task:ses_dangling',
+              revision: 1,
+              pending: false,
+              summary: call.body.summary,
+              recordIds: call.body.recordIds,
+              detailIds: call.body.detailIds,
+              state: call.body.state,
+            },
+            source: 'cloud',
+          },
+        });
+      },
+    });
+    const { controller } = controllerWith({ fetchImpl });
+    await controller.handleEvent({
+      id: 'evt_dangling',
+      type: 'session.compaction.ended',
+      data: {
+        sessionID: 'ses_dangling',
+        compactionId: 'cmp_dangling',
+        reason: 'auto',
+        recordIds: ['missing_record'],
+        detailIds: ['missing_detail'],
+      },
+    });
+    expect(puts).toHaveLength(1);
+    expect(puts[0].recordIds).toEqual([]);
+    expect(puts[0].detailIds).toEqual([]);
+    expect(controller.getStatus().counts.checkpoints.droppedRefs).toBe(2);
+  });
+
+  it('keeps no-id compactions separate when only the envelope time differs', async () => {
+    const fetchImpl = createFetch();
+    const { controller } = controllerWith({ fetchImpl });
+    const data = {
+      sessionID: 'ses_envelope_time',
+      reason: 'auto',
+      text: 'same envelope-time tuple',
+      messageCount: 2,
+    };
+    await controller.handleEvent({
+      id: 'env_time_1',
+      at: 1700000000000,
+      type: 'session.compaction.ended',
+      data,
+    });
+    await controller.handleEvent({
+      id: 'env_time_2',
+      at: 1700000000001,
+      type: 'session.compaction.ended',
+      data,
+    });
+    const puts = fetchImpl.callsFor('/checkpoints/ses_envelope_time').filter((call) => call.method === 'PUT');
+    expect(puts).toHaveLength(2);
+    expect(new Set(puts.map((call) => call.body.state.compactionId)).size).toBe(2);
+  });
+
   it('keeps no-id compactions separate when stable event time differs', async () => {
     const fetchImpl = createFetch();
     const { controller } = controllerWith({ fetchImpl });
@@ -2228,7 +2426,7 @@ describe('event collection hardening', () => {
     });
     const { controller } = controllerWith({ fetchImpl });
     await controller.handleEvent({
-      id: 'evt_legacy_event',
+      id: 'evt_fresh_legacy_envelope',
       type: 'session.compaction.ended',
       data: {
         sessionID: 'ses_legacy_event',
@@ -2820,6 +3018,16 @@ describe('event subscription reconnect and hot disable', () => {
   it('dedupes a replayed compaction event into one checkpoint write', async () => {
     let stored = null;
     const fetchImpl = createFetch({
+      '/ingest': () => jsonResponse({
+        ok: true,
+        data: {
+          accepted: { chunks: 1, records: 1 },
+          records: [{ id: 'rec_compact_replay' }],
+          detail: { ids: [], written: 0, duplicates: 0, queued: 0, failed: 0 },
+          queued: false,
+          extraction: { id: 'ex_compact_replay', status: 'completed', extractor: 'heuristic', records: [], warnings: [] },
+        },
+      }),
       '/checkpoints/ses_compact_replay': (call) => {
         if (call.method === 'GET') {
           return jsonResponse({ ok: true, data: { checkpoint: stored, source: 'cloud' } });

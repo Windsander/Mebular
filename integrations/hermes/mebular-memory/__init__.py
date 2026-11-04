@@ -123,11 +123,14 @@ _DUPLICATE_SYNC_WINDOW = 5.0
 _SPOOL_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
 _SPOOL_MAX_BYTES = 16 * 1024 * 1024
 _SPOOL_DEAD_LIMIT = 500
+_DEAD_PENDING_LIMIT = 100
+_DEAD_PENDING_MAX_BYTES = 8 * 1024 * 1024
 _MAX_RETRY_DELAY = 30.0
 _MAX_RETRY_AFTER = 300.0
 _MODE_PROBE_SECONDS = 30.0
 _DEAD_WRITE_MAX_ATTEMPTS = 5
 _WORKER_STALE_SECONDS = 60.0
+_WORKER_START_TIMEOUT = 10.0
 
 # These failures can be repaired by an operator (token rotation or mode
 # re-enable).  They stay queued, but the worker still applies the configured
@@ -207,7 +210,7 @@ _ASSIGNMENT_KEYS = (
     r"private[_-]?key|set[_-]?cookie|cookie|proxy[_-]?authorization|authorization|"
     r"token|secret|password|passwd|pwd"
 )
-_ASSIGNMENT_KEY_PATTERN = rf"(?:[A-Za-z0-9]+[_-])*(?:{_ASSIGNMENT_KEYS})"
+_ASSIGNMENT_KEY_PATTERN = rf"(?:[A-Za-z0-9]+[_-])*(?:my)?(?:{_ASSIGNMENT_KEYS})"
 _QUOTED_ASSIGNMENT_RE = re.compile(
     rf"\b(?P<key>{_ASSIGNMENT_KEY_PATTERN})\b"
     r"(?P<sep>\s*[:=]\s*)(?P<quote>[\"'])(?P<value>[^\"']{1,512})(?P=quote)",
@@ -268,7 +271,9 @@ _COMMON_SECRET_WORDS = frozenset(
 
 
 def _normalise_key(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+    text = str(value or "").strip()
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", text)
+    return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
 
 
 def _is_high_risk_key(key: str) -> bool:
@@ -1738,12 +1743,16 @@ class _Spool:
         self._items: List[Dict[str, Any]] = []
         self._dead: List[Dict[str, Any]] = []
         self._dead_pending: List[Dict[str, Any]] = []
+        self._orphan_dead_pending: List[Dict[str, Any]] = []
         self._dead_write_failures = 0
         self._dead_write_abandoned = 0
+        self._dead_write_abandoned_cleaned = 0
+        self._dead_pending_dropped = 0
         self._live_quota_evicted = 0
         self._worker_owner: Any = None
         self._worker_heartbeat = time.monotonic()
         self._worker_starting = False
+        self._worker_starting_at = 0.0
         self._metrics: Dict[str, int] = {}
         self._last_ingest_shared: Optional[Dict[str, Any]] = None
         self.writer_pid = os.getpid()
@@ -1888,12 +1897,15 @@ class _Spool:
                 "attempts": 0,
                 "at": now,
             })
-            # A restart gets one immediate retry even when the previous
-            # process exhausted its dead-write budget.
-            item["deadPending"]["attempts"] = 0
-            item["deadPending"]["at"] = 0
-            item["deadPending"].pop("abandoned", None)
+            if item["deadPending"].get("abandoned") is not True:
+                # A restart gets one immediate retry for non-abandoned work.
+                item["deadPending"]["attempts"] = 0
+                item["deadPending"]["at"] = 0
             self._dead_pending.append(item)
+        before = len(self._dead_pending)
+        self._dead_pending = self._trim_dead_pending_locked(self._dead_pending, now=now)
+        if len(self._dead_pending) != before:
+            changed = True
         return changed
 
     def _load(self) -> None:
@@ -1942,6 +1954,31 @@ class _Spool:
             live_bytes=self._bytes_locked() + self._bytes_locked(self._dead_pending),
         )
         if len(self._dead) != dead_before_trim:
+            changed = True
+        # Crash-safe idempotence: a move that wrote the target before removing
+        # the source must not replay the same logical item twice.
+        dead_ids = {str(item.get("id") or "") for item in self._dead}
+        all_pending_ids = {
+            str(item.get("id") or "") for item in self._dead_pending
+        }
+        deduped_pending: List[Dict[str, Any]] = []
+        pending_ids: set[str] = set()
+        for item in self._dead_pending:
+            item_id = str(item.get("id") or "")
+            if not item_id or item_id in dead_ids or item_id in pending_ids:
+                changed = True
+                continue
+            pending_ids.add(item_id)
+            deduped_pending.append(item)
+        if len(deduped_pending) != len(self._dead_pending):
+            self._dead_pending = deduped_pending
+            changed = True
+        terminal_ids = dead_ids | all_pending_ids
+        before_live = len(self._items)
+        self._items = [
+            item for item in self._items if str(item.get("id") or "") not in terminal_ids
+        ]
+        if len(self._items) != before_live:
             changed = True
         if self._enforce_live_budget_locked(now):
             changed = True
@@ -2042,6 +2079,36 @@ class _Spool:
             values.pop(0)
         return values
 
+    def _trim_dead_pending_locked(
+        self,
+        records: List[Dict[str, Any]],
+        *,
+        now: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        current = int(now if now is not None else _now_ms())
+        values: List[Dict[str, Any]] = []
+        for item in records:
+            pending = item.get("deadPending") if isinstance(item.get("deadPending"), dict) else {}
+            if pending.get("abandoned") is True:
+                abandoned_at = int(pending.get("at") or 0)
+                if abandoned_at + _SPOOL_RETENTION_MS <= current:
+                    self._dead_write_abandoned_cleaned += 1
+                    continue
+            values.append(item)
+        if len(values) > _DEAD_PENDING_LIMIT:
+            dropped = len(values) - _DEAD_PENDING_LIMIT
+            values = values[-_DEAD_PENDING_LIMIT:]
+            self._dead_pending_dropped += dropped
+        live_bytes = (
+            self._bytes_locked()
+            + self._bytes_locked(self._dead)
+        )
+        budget = min(_DEAD_PENDING_MAX_BYTES, max(0, self._max_bytes - live_bytes))
+        while values and self._bytes_locked(values) > budget:
+            values.pop(0)
+            self._dead_pending_dropped += 1
+        return values
+
     def _prune_dead_locked(self, now: int) -> None:
         live_bytes = self._bytes_locked() + self._bytes_locked(self._dead_pending)
         self._dead = self._dead_records_bounded_locked(
@@ -2090,10 +2157,13 @@ class _Spool:
                 str(item.get("id") or ""), "live_quota_evicted"
             )
             if attempts and self._items and self._items[0] is item:
-                # Neither dead nor dead-pending could be persisted; stop rather
-                # than silently dropping pending work.
-                logger.warning("Mebular live spool over budget but cannot persist eviction")
-                break
+                # Neither file could be persisted; move it to the in-memory
+                # orphan queue so later live items are not blocked.
+                if not self.orphan_dead_pending_live(
+                    str(item.get("id") or ""), "live_quota_evicted"
+                ):
+                    logger.warning("Mebular live spool over budget but cannot persist eviction")
+                    break
             if attempts:
                 self._live_quota_evicted += 1
                 changed = True
@@ -2105,6 +2175,16 @@ class _Spool:
 
     def _expire_locked(self, now: int) -> bool:
         changed = False
+        pending_before = len(self._dead_pending)
+        self._dead_pending = self._trim_dead_pending_locked(
+            self._dead_pending, now=now
+        )
+        if len(self._dead_pending) != pending_before:
+            try:
+                self._persist_dead_pending_locked()
+            except _SpoolUnavailable:
+                pass
+            changed = True
         dead_before = len(self._dead)
         self._prune_dead_locked(now)
         if len(self._dead) != dead_before:
@@ -2175,6 +2255,29 @@ class _Spool:
                 except _SpoolUnavailable:
                     raise
                 self._dead = dead_candidate
+            total_after = live_after + self._bytes_locked(dead_candidate) + self._bytes_locked(self._dead_pending)
+            if total_after > self._max_bytes:
+                pending_budget = max(
+                    0,
+                    self._max_bytes - live_after - self._bytes_locked(dead_candidate),
+                )
+                trimmed = list(self._dead_pending)
+                while trimmed and self._bytes_locked(trimmed) > pending_budget:
+                    trimmed.pop(0)
+                    self._dead_pending_dropped += 1
+                if trimmed != self._dead_pending:
+                    try:
+                        self._write_atomic(self._dead_pending_path, trimmed)
+                    except _SpoolUnavailable:
+                        raise
+                    self._dead_pending = trimmed
+                if (
+                    live_after
+                    + self._bytes_locked(dead_candidate)
+                    + self._bytes_locked(self._dead_pending)
+                    > self._max_bytes
+                ):
+                    raise _SpoolFull("total_bytes")
             self._items.append(record)
             try:
                 self._persist_locked()
@@ -2255,9 +2358,12 @@ class _Spool:
             current = self._worker_owner
             if current is owner:
                 return True
+            starting_expired = False
             if current is not None and self._worker_starting:
-                return False
-            if current is not None:
+                if time.monotonic() - self._worker_starting_at < _WORKER_START_TIMEOUT:
+                    return False
+                starting_expired = True
+            if current is not None and not starting_expired:
                 try:
                     if not getattr(current, "_shutdown", False):
                         worker = getattr(current, "_worker", None)
@@ -2273,6 +2379,7 @@ class _Spool:
                     pass
             self._worker_owner = owner
             self._worker_starting = True
+            self._worker_starting_at = time.monotonic()
             self._worker_heartbeat = time.monotonic()
             return True
 
@@ -2280,6 +2387,7 @@ class _Spool:
         with self._lock:
             if self._worker_owner is owner:
                 self._worker_starting = False
+                self._worker_starting_at = 0.0
                 self._worker_heartbeat = time.monotonic()
 
     def note_worker_progress(self, owner: Any) -> None:
@@ -2292,6 +2400,7 @@ class _Spool:
             if self._worker_owner is owner:
                 self._worker_owner = None
                 self._worker_starting = False
+                self._worker_starting_at = 0.0
 
     def worker_owner(self) -> Any:
         with self._lock:
@@ -2334,7 +2443,13 @@ class _Spool:
                     "attempts": attempts,
                     "at": now,
                 }
-                candidate = [*self._dead_pending, pending_item]
+                candidate = self._trim_dead_pending_locked(
+                    [*self._dead_pending, pending_item]
+                )
+                if not any(entry.get("id") == pending_item.get("id") for entry in candidate):
+                    item["deadPending"] = dict(pending_item["deadPending"])
+                    self.orphan_dead_pending_live(item_id, reason)
+                    return attempts
                 try:
                     self._write_atomic(self._dead_pending_path, candidate)
                 except _SpoolUnavailable as error:
@@ -2364,8 +2479,13 @@ class _Spool:
                 record = copy.deepcopy(item)
                 record["deadAt"] = now
                 record["reason"] = str(reason or "dead_write_failed")[:120]
+                pending_after = [
+                    entry for entry in self._dead_pending if entry.get("id") != item_id
+                ]
                 candidate = self._dead_records_bounded_locked(
-                    [*self._dead, record], now=now, live_bytes=self._bytes_locked()
+                    [*self._dead, record],
+                    now=now,
+                    live_bytes=self._bytes_locked() + self._bytes_locked(pending_after),
                 )
                 if not any(entry.get("id") == record.get("id") for entry in candidate):
                     return False
@@ -2401,6 +2521,116 @@ class _Spool:
             except _SpoolUnavailable:
                 pass
             return attempts
+
+    def orphan_dead_pending_live(self, item_id: str, reason: str) -> int:
+        """Move an unpublishable dead-pending live item into memory only."""
+        with self._lock:
+            for index, item in enumerate(self._items):
+                if item.get("id") != item_id:
+                    continue
+                record = copy.deepcopy(item)
+                pending = record.get("deadPending")
+                attempts = int(pending.get("attempts") or 0) if isinstance(pending, dict) else 0
+                record["deadPending"] = {
+                    "reason": str(reason or "dead_write_failed")[:120],
+                    "attempts": attempts + 1,
+                    "at": _now_ms(),
+                    "orphaned": True,
+                }
+                self._items.pop(index)
+                self._orphan_dead_pending.append(record)
+                try:
+                    self._persist_locked()
+                except _SpoolUnavailable:
+                    pass
+                return attempts + 1
+            return 0
+
+    def orphan_dead_pending_items(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            return copy.deepcopy(self._orphan_dead_pending)
+
+    def orphan_dead_pending_count(self) -> int:
+        with self._lock:
+            return len(self._orphan_dead_pending)
+
+    def try_orphan_dead(self, item_id: str, reason: str) -> bool:
+        with self._lock:
+            for index, item in enumerate(self._orphan_dead_pending):
+                if item.get("id") != item_id:
+                    continue
+                now = _now_ms()
+                record = copy.deepcopy(item)
+                record["deadAt"] = now
+                record["reason"] = str(reason or "dead_write_failed")[:120]
+                candidate = self._dead_records_bounded_locked(
+                    [*self._dead, record],
+                    now=now,
+                    live_bytes=self._bytes_locked()
+                    + self._bytes_locked(self._dead_pending)
+                    + self._bytes_locked([record]),
+                )
+                if not any(entry.get("id") == record.get("id") for entry in candidate):
+                    return False
+                try:
+                    self._write_atomic(self._dead_path, candidate)
+                except _SpoolUnavailable:
+                    self._dead_write_failures += 1
+                    return False
+                self._dead = candidate
+                self._orphan_dead_pending.pop(index)
+                return True
+            return False
+
+    def try_orphan_pending(self, item_id: str, reason: str) -> bool:
+        with self._lock:
+            for index, item in enumerate(self._orphan_dead_pending):
+                if item.get("id") != item_id:
+                    continue
+                record = copy.deepcopy(item)
+                record["deadPending"] = dict(record.get("deadPending") or {})
+                record["deadPending"]["reason"] = str(reason or "dead_write_failed")[:120]
+                record["deadPending"]["at"] = _now_ms()
+                candidate = self._trim_dead_pending_locked(
+                    [*self._dead_pending, record]
+                )
+                if not any(entry.get("id") == record.get("id") for entry in candidate):
+                    return False
+                try:
+                    self._write_atomic(self._dead_pending_path, candidate)
+                except _SpoolUnavailable:
+                    return False
+                self._dead_pending = candidate
+                self._orphan_dead_pending.pop(index)
+                return True
+            return False
+
+    def fail_orphan(self, item_id: str, reason: str) -> int:
+        with self._lock:
+            attempts = 0
+            for item in self._orphan_dead_pending:
+                if item.get("id") != item_id:
+                    continue
+                pending = item.setdefault("deadPending", {})
+                attempts = int(pending.get("attempts") or 0) + 1
+                pending["attempts"] = attempts
+                pending["reason"] = str(reason or "dead_write_failed")[:120]
+                pending["at"] = _now_ms()
+                break
+            return attempts
+
+    def abandon_orphan(self, item_id: str, reason: str) -> bool:
+        with self._lock:
+            for item in self._orphan_dead_pending:
+                if item.get("id") != item_id:
+                    continue
+                pending = item.setdefault("deadPending", {})
+                pending["abandoned"] = True
+                pending["reason"] = str(reason or "deadWriteAbandoned")[:120]
+                pending["at"] = _now_ms()
+                self._dead_write_abandoned += 1
+                return True
+            return False
 
     def dead_pending_count(self) -> int:
         with self._lock:
@@ -2458,6 +2688,7 @@ class _Spool:
                 self._bytes_locked()
                 + self._bytes_locked(self._dead)
                 + self._bytes_locked(self._dead_pending)
+                + self._bytes_locked(self._orphan_dead_pending)
             )
 
     def dead_write_failures(self) -> int:
@@ -2467,6 +2698,14 @@ class _Spool:
     def dead_write_abandoned(self) -> int:
         with self._lock:
             return self._dead_write_abandoned
+
+    def dead_write_abandoned_cleaned(self) -> int:
+        with self._lock:
+            return self._dead_write_abandoned_cleaned
+
+    def dead_pending_dropped(self) -> int:
+        with self._lock:
+            return self._dead_pending_dropped
 
     def live_quota_evicted(self) -> int:
         with self._lock:
@@ -2567,7 +2806,6 @@ class MebularMemoryProvider(MemoryProvider):
         self._mode_blocked_reason = ""
         self._mode_blocked_at_ms = 0
         self._mode_next_probe_at = 0.0
-        self._mode_new_work_probe_at = 0.0
         self._mode_probe_attempts = 0
         self._mode_probe_result = ""
 
@@ -2687,7 +2925,6 @@ class MebularMemoryProvider(MemoryProvider):
             self._mode_blocked_reason = ""
             self._mode_blocked_at_ms = 0
             self._mode_next_probe_at = 0.0
-            self._mode_new_work_probe_at = 0.0
             self._mode_probe_attempts = 0
             self._mode_probe_result = ""
             self._checkpoint_failures = 0
@@ -3010,20 +3247,11 @@ class MebularMemoryProvider(MemoryProvider):
         self._mode_blocked_reason = ""
         self._mode_blocked_at_ms = 0
         self._mode_next_probe_at = 0.0
-        self._mode_new_work_probe_at = 0.0
         self._mode_probe_attempts = 0
         self._mode_probe_result = ""
 
     def _mode_probe_due(self) -> bool:
         return bool(self._mode_blocked_reason) and time.monotonic() >= self._mode_next_probe_at
-
-    def _allow_new_work_probe(self) -> bool:
-        spool = self._spool
-        if not self._mode_blocked_reason or spool is None:
-            return False
-        if spool.depth() != 0 or spool.dead_pending_count():
-            return False
-        return time.monotonic() >= self._mode_new_work_probe_at
 
     def _mode_allows_work(self) -> bool:
         if self._mode and self._mode.lower() not in _DISCOVERY_ACTIVE_MODES:
@@ -3245,14 +3473,9 @@ class MebularMemoryProvider(MemoryProvider):
         messages: Optional[List[Dict[str, Any]]] = None,
         turn_author: Optional[Dict[str, Any]] = None,
     ) -> None:
-        if not self._ready() or not self._writes_enabled:
-            return
-        probe_new = False
-        if not self._mode_allows_work():
-            probe_new = self._allow_new_work_probe()
-            if not probe_new:
-                return
-        if not self._capability_enabled("ingest"):
+        if (not self._ready() or not self._writes_enabled
+                or not self._mode_allows_work()
+                or not self._capability_enabled("ingest")):
             return
         try:
             self._sync_turn_impl(
@@ -3261,7 +3484,6 @@ class MebularMemoryProvider(MemoryProvider):
                 session_id=session_id,
                 messages=messages,
                 turn_author=turn_author,
-                allow_mode_probe=probe_new,
             )
         except Exception as error:
             # Hermes must never see a memory-provider exception on a turn.
@@ -3275,7 +3497,6 @@ class MebularMemoryProvider(MemoryProvider):
         session_id: str = "",
         messages: Optional[List[Dict[str, Any]]] = None,
         turn_author: Optional[Dict[str, Any]] = None,
-        allow_mode_probe: bool = False,
     ) -> None:
         sid = str(session_id or self._session_id)
         selected = _turn_messages(messages, user_content or "", assistant_content or "")
@@ -3307,7 +3528,7 @@ class MebularMemoryProvider(MemoryProvider):
                 sequence = self._turn_seq.get(sid, 0) + 1
                 self._turn_seq[sid] = sequence
         if payload is not None:
-            self._enqueue(payload, allow_mode_probe=allow_mode_probe)
+            self._enqueue(payload)
             return
         request_id = self._request_id("turn", sid, sequence, signature)
         chunks = _chunks_from_messages(selected, request_id=request_id, now=now)
@@ -3319,7 +3540,7 @@ class MebularMemoryProvider(MemoryProvider):
         )
         with self._lock:
             self._last_sync_payload = payload
-        self._enqueue(payload, allow_mode_probe=allow_mode_probe)
+        self._enqueue(payload)
 
     def on_pre_compress(self, messages: List[Dict[str, Any]], **kwargs: Any) -> str:
         """Best-effort archive + state-only checkpoint before compression.
@@ -3741,19 +3962,10 @@ class MebularMemoryProvider(MemoryProvider):
             return candidate
         return "th_" + _sha256_text(candidate or "hermes-session")[:32]
 
-    def _enqueue(
-        self, payload: Dict[str, Any], *, allow_mode_probe: bool = False
-    ) -> None:
+    def _enqueue(self, payload: Dict[str, Any]) -> None:
         spool = self._spool
-        if spool is None:
+        if spool is None or not self._mode_allows_work():
             return
-        if not allow_mode_probe and not self._mode_allows_work():
-            return
-        if allow_mode_probe:
-            self._mode_probe_attempts += 1
-            self._mode_next_probe_at = time.monotonic()
-            self._mode_new_work_probe_at = time.monotonic() + _MODE_PROBE_SECONDS
-            self._record_warning("mode_probe_queued")
         try:
             spool.append("ingest", payload)
         except _SpoolExpired:
@@ -3818,7 +4030,7 @@ class MebularMemoryProvider(MemoryProvider):
                 self._worker.start()
                 if spool is not None:
                     spool.confirm_worker(self)
-            except Exception:
+            except BaseException:
                 if spool is not None:
                     spool.release_worker(self)
                 raise
@@ -3879,6 +4091,34 @@ class MebularMemoryProvider(MemoryProvider):
         attempts = spool.fail_dead_pending(item_id, reason)
         if expired and attempts >= _DEAD_WRITE_MAX_ATTEMPTS:
             spool.abandon_dead_pending(item_id, "deadWriteAbandoned")
+            self._record_warning("deadWriteAbandoned")
+        return True
+
+    def _retry_one_orphan(self, spool: _Spool) -> bool:
+        orphans = spool.orphan_dead_pending_items()
+        if not orphans:
+            return False
+        item = orphans[0]
+        item_id = str(item.get("id") or "")
+        pending = item.get("deadPending") if isinstance(item.get("deadPending"), dict) else {}
+        if pending.get("abandoned") is True:
+            return False
+        now = _now_ms()
+        expired = int(item.get("expiresAt") or 0) <= now
+        reason = "retention_expired" if expired else str(
+            pending.get("reason") or "dead_write_failed"
+        )
+        attempts = int(pending.get("attempts") or 0)
+        last_at = int(pending.get("at") or 0)
+        if attempts >= _DEAD_WRITE_MAX_ATTEMPTS and now - last_at < _MAX_RETRY_AFTER * 1000:
+            return False
+        if spool.try_orphan_dead(item_id, reason):
+            return True
+        if spool.try_orphan_pending(item_id, reason):
+            return True
+        attempts = spool.fail_orphan(item_id, reason)
+        if expired and attempts >= _DEAD_WRITE_MAX_ATTEMPTS:
+            spool.abandon_orphan(item_id, "deadWriteAbandoned")
             self._record_warning("deadWriteAbandoned")
         return True
 
@@ -4024,6 +4264,8 @@ class MebularMemoryProvider(MemoryProvider):
                 spool.expire()
                 if self._retry_one_dead_pending(spool):
                     continue
+                if self._retry_one_orphan(spool):
+                    continue
                 self._wake.wait(timeout=0.5)
                 self._wake.clear()
                 continue
@@ -4032,10 +4274,9 @@ class MebularMemoryProvider(MemoryProvider):
             if isinstance(dead_pending, dict):
                 attempts = int(dead_pending.get("attempts") or 0)
                 if attempts >= _DEAD_WRITE_MAX_ATTEMPTS:
-                    spool.mark_dead_pending(
+                    spool.orphan_dead_pending_live(
                         item_id, str(dead_pending.get("reason") or "dead_write_failed")
                     )
-                    self._wait_retry(1.0)
                     continue
                 reason = str(dead_pending.get("reason") or "dead_write_failed")
                 if spool.dead(item_id, reason):
@@ -4416,6 +4657,7 @@ class MebularMemoryProvider(MemoryProvider):
                 "spoolPending": self.pending(),
                 "spoolDead": self._spool.dead_count() if self._spool else 0,
                 "spoolDeadPending": self._spool.dead_pending_count() if self._spool else 0,
+                "spoolOrphanDeadPending": self._spool.orphan_dead_pending_count() if self._spool else 0,
                 "spoolRejected": self._spool_rejected,
                 "spoolWriteFailures": self._spool_write_failures,
                 "spoolBytes": self._spool.bytes() if self._spool else 0,
@@ -4441,7 +4683,11 @@ class MebularMemoryProvider(MemoryProvider):
                 "writeFailures": self._spool_write_failures,
                 "deadWriteFailures": self._spool.dead_write_failures() if self._spool else 0,
                 "deadPending": self._spool.dead_pending_count() if self._spool else 0,
+                "deadPendingLimit": _DEAD_PENDING_LIMIT,
+                "deadPendingDropped": self._spool.dead_pending_dropped() if self._spool else 0,
                 "deadWriteAbandoned": self._spool.dead_write_abandoned() if self._spool else 0,
+                "deadWriteAbandonedCleaned": self._spool.dead_write_abandoned_cleaned() if self._spool else 0,
+                "orphanDeadPending": self._spool.orphan_dead_pending_count() if self._spool else 0,
                 "liveQuotaEvicted": self._spool.live_quota_evicted() if self._spool else 0,
                 "writerPid": self._spool.writer_pid if self._spool else os.getpid(),
                 "writerScope": "process",
@@ -4462,14 +4708,10 @@ class MebularMemoryProvider(MemoryProvider):
                 "nextProbeInMs": max(
                     0, int((self._mode_next_probe_at - time.monotonic()) * 1000)
                 ) if self._mode_next_probe_at else 0,
-                "nextNewWorkProbeInMs": max(
-                    0, int((self._mode_new_work_probe_at - time.monotonic()) * 1000)
-                ) if self._mode_new_work_probe_at else 0,
                 "lastProbeResult": self._mode_probe_result,
                 "recovery": [
                     "fresh_active_discovery",
                     "same_pending_operation_success",
-                    "bounded_new_work_probe",
                 ],
             }
         if not self._writes_enabled:

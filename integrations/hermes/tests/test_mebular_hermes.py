@@ -1529,6 +1529,112 @@ class SpoolContractTests(BaseCase):
             provider._spool.dead_pending_items()[0]["deadPending"]["abandoned"]
         )
 
+    def test_dead_pending_count_and_byte_limits(self) -> None:
+        spool = memory_plugin._Spool(self.spool_path, 200, max_bytes=16 * 1024 * 1024)
+        for index in range(120):
+            item_id = spool.append("ingest", {
+                "requestId": f"pending-limit-{index}",
+                "chunks": [{"role": "user", "text": "x"}],
+            })
+            spool.mark_dead_pending(item_id, "test")
+        self.assertLessEqual(
+            spool.dead_pending_count(), memory_plugin._DEAD_PENDING_LIMIT
+        )
+        self.assertGreater(spool.dead_pending_dropped(), 0)
+        self.assertLessEqual(spool.total_bytes(), spool._max_bytes)
+
+    def test_abandoned_dead_pending_survives_restart_and_expires(self) -> None:
+        spool = memory_plugin._Spool(self.spool_path, 100)
+        item_id = spool.append("ingest", {
+            "requestId": "abandoned-restart",
+            "chunks": [{"role": "user", "text": "abandoned"}],
+        })
+        spool.mark_dead_pending(item_id, "test")
+        spool.abandon_dead_pending(item_id, "deadWriteAbandoned")
+        reopened = memory_plugin._Spool(self.spool_path, 100)
+        self.assertEqual(reopened.dead_pending_count(), 1)
+        self.assertTrue(
+            reopened.dead_pending_items()[0]["deadPending"]["abandoned"]
+        )
+        with reopened._lock:
+            reopened._dead_pending[0]["deadPending"]["at"] = (
+                int(time.time() * 1000) - 31 * 24 * 60 * 60 * 1000
+            )
+            reopened._persist_dead_pending_locked()
+        cleaned = memory_plugin._Spool(self.spool_path, 100)
+        self.assertEqual(cleaned.dead_pending_count(), 0)
+        self.assertGreaterEqual(cleaned.dead_write_abandoned_cleaned(), 1)
+
+    def test_load_dedupes_live_pending_and_dead_by_id(self) -> None:
+        now = int(time.time() * 1000)
+        directory = self.hermes_home / "mebular-memory"
+        directory.mkdir(parents=True)
+        record = {
+            "id": "duplicate-move",
+            "kind": "ingest",
+            "payload": {"requestId": "duplicate-move", "chunks": []},
+            "attempts": 0,
+            "createdAt": now,
+            "expiresAt": now + 60_000,
+            "deadPending": {"reason": "x", "attempts": 1, "at": now},
+        }
+        self.spool_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+        (directory / "dead-pending.jsonl").write_text(
+            json.dumps(record) + "\n", encoding="utf-8"
+        )
+        dead = dict(record)
+        dead["deadAt"] = now
+        dead["reason"] = "test"
+        (directory / "dead.jsonl").write_text(
+            json.dumps(dead) + "\n", encoding="utf-8"
+        )
+        spool = memory_plugin._Spool(self.spool_path, 100)
+        self.assertEqual(spool.depth(), 0)
+        self.assertEqual(spool.dead_pending_count(), 0)
+        self.assertEqual(spool.dead_count(), 1)
+
+    def test_double_file_failure_orphans_head_and_processes_next(self) -> None:
+        server = self.fake_server()
+        provider = self.make_provider(server)
+        provider._spool.append("ingest", {
+            "requestId": "orphan-head",
+            "chunks": [{"role": "user", "text": "head"}],
+        })
+        with provider._spool._lock:
+            provider._spool._items[0]["deadPending"] = {
+                "reason": "dead_write_failed", "attempts": 5,
+                "at": int(time.time() * 1000),
+            }
+        provider._spool.append("ingest", {
+            "requestId": "behind-orphan",
+            "chunks": [{"role": "user", "text": "behind"}],
+        })
+
+        def fail_both(path: Path, records: List[Dict[str, Any]]) -> None:
+            if path.name in {"dead.jsonl", "dead-pending.jsonl"}:
+                raise memory_plugin._SpoolUnavailable("both read-only")
+            return original(path, records)
+
+        original = provider._spool._write_atomic
+        with mock.patch.object(provider._spool, "_write_atomic", side_effect=fail_both):
+            provider._wake.set()
+            self.assertTrue(self.wait_until(
+                lambda: provider.pending() == 0, timeout=3.0
+            ))
+        self.assertEqual(len(server.ingests), 1)
+        self.assertIn("behind", server.ingests[0]["chunks"][0]["text"])
+        self.assertEqual(provider._spool.orphan_dead_pending_count(), 1)
+
+    def test_start_timeout_allows_takeover(self) -> None:
+        server = self.fake_server()
+        first = self.make_provider(server)
+        second = self.make_provider(server)
+        spool = first._spool
+        spool._worker_owner = first
+        spool._worker_starting = True
+        spool._worker_starting_at = time.monotonic() - 11.0
+        self.assertTrue(spool.claim_worker(second))
+
     def test_corrupt_dead_pending_at_is_field_tolerant(self) -> None:
         self.spool_path.parent.mkdir(parents=True, exist_ok=True)
         now = int(time.time() * 1000)
@@ -1622,6 +1728,7 @@ class SpoolContractTests(BaseCase):
         # A starting owner must not be raced by a second provider.
         spool._worker_owner = first
         spool._worker_starting = True
+        spool._worker_starting_at = time.monotonic()
         self.assertFalse(spool.claim_worker(second))
         spool._worker_starting = False
         # A live but stale/blocked owner can be safely replaced.
@@ -1702,6 +1809,9 @@ class SpoolContractTests(BaseCase):
             "GITHUB_TOKEN=plain\n"
             "MY_API_KEY=plain\n"
             "apiToken=abc-def-ghij\n"
+            "secretKey=abc\n"
+            "privateKey=abc\n"
+            "mySecretKey=abc\n"
             "AWS_SECRET_ACCESS_KEY=AbCdEfGhIjKlMnOpQrStUvWxYz012345\n"
             "AWS_SESSION_TOKEN=shortlowercase\n"
             "https://alice:s3cr3t-pass@example.com/path\n"
@@ -1724,6 +1834,9 @@ class SpoolContractTests(BaseCase):
             "GITHUB_TOKEN=plain",
             "MY_API_KEY=plain",
             "abc-def-ghij",
+            "secretKey=abc",
+            "privateKey=abc",
+            "mySecretKey=abc",
             "AbCdEfGhIjKlMnOpQrStUvWxYz012345",
             "shortlowercase",
             "alice:s3cr3t-pass",
@@ -2012,17 +2125,17 @@ class SpoolContractTests(BaseCase):
         self.assertNotIn("modeBlocked", provider.get_status_config())
         self.assertEqual(provider.pending(), 0)
 
-    def test_mode_block_with_empty_spool_uses_one_new_work_probe(self) -> None:
+    def test_mode_block_with_empty_spool_rejects_new_work(self) -> None:
         server = self.fake_server()
         provider = self.make_provider(server, sync_max_attempts=3)
         provider._note_mode_blocked("mode_mismatch")
-        provider._mode_new_work_probe_at = 0.0
         self.assertEqual(provider.pending(), 0)
-        provider.sync_turn("probe new work", "ok", session_id="s1")
-        self.assertTrue(provider.flush(timeout=3.0))
-        self.assertNotIn("modeBlocked", provider.get_status_config())
+        provider.sync_turn("new work must not queue", "ok", session_id="s1")
+        time.sleep(0.3)
+        self.assertIn("modeBlocked", provider.get_status_config())
         self.assertEqual(provider.pending(), 0)
-        self.assertTrue(server.ingests)
+        self.assertEqual(server.ingests, [])
+        self.assertEqual(server.paths(), [])
 
     def test_queued_checkpoint_revision_conflict_never_rebases(self) -> None:
         server = self.fake_server()

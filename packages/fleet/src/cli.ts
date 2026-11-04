@@ -24,6 +24,7 @@ import { CapabilityCardPublisher } from './runtime/card-publisher.js';
 import { FileTaskEventStore } from './store/file-store.js';
 import { MebularTaskEventStore } from './store/mebular-store.js';
 import { DaemonTaskEventStore } from './store/daemon-store.js';
+import { DaemonAgentBackend } from './store/daemon-agent-backend.js';
 import type { TaskEventStore } from './store/file-store.js';
 import { NullTransport } from './transport/null.js';
 import { SpoolTransport } from './transport/spool.js';
@@ -496,6 +497,31 @@ async function openTaskStore(config: FleetConfig, args: Args): Promise<{ store: 
   return { store: new MebularTaskEventStore(mebular), mebular };
 }
 
+/** CR-002：embedded 用本地 Mebular，daemon 用 `/app/capability-cards` + `/app/nodes`。 */
+function createCardPublisher(
+  config: FleetConfig,
+  mebular: Mebular | null,
+  registry?: ReturnType<typeof buildRegistry>,
+): CapabilityCardPublisher | null {
+  const log = (message: string): void => console.error(message);
+  if (mebular !== null) {
+    return new CapabilityCardPublisher({ mebular, config, ...(registry !== undefined ? { registry } : {}), log });
+  }
+  if (config.daemon?.endpoint !== undefined) {
+    return new CapabilityCardPublisher({
+      backend: new DaemonAgentBackend({
+        endpoint: config.daemon.endpoint,
+        ...(config.daemon.token !== undefined ? { token: config.daemon.token } : {}),
+        ...(config.daemon.tokenFile !== undefined ? { tokenFile: config.daemon.tokenFile } : {}),
+      }),
+      config,
+      ...(registry !== undefined ? { registry } : {}),
+      log,
+    });
+  }
+  return null;
+}
+
 /**
  * `fleet node`（任务板/发起端）。
  * `--run-forever`：常驻（服务模式），直到收到 SIGINT/SIGTERM；写 `service.heartbeat`（role=node）。
@@ -531,11 +557,9 @@ async function runFleetNode(args: Args): Promise<number> {
     console.log(JSON.stringify({ role: 'node', event: 'join-service', endpoint: `http://${bind}:${joinService.port}`, port: joinService.port }));
   }
   const node = new FleetNode({ device: config.device, store, transport: new NullTransport(), quota: new LocalQuota({ limitPerDevice: config.quotaLimitPerDevice ?? 1_000_000 }) });
-  const cardPublisher = mebular !== null
-    ? new CapabilityCardPublisher({ mebular, config, log: (message) => console.error(message) })
-    : null;
+  const cardPublisher = createCardPublisher(config, mebular);
   if (cardPublisher !== null) await cardPublisher.publish();
-  else console.error('[fleet:caps] skipped: daemon store mode has no local Mebular identity handle');
+  else console.error('[fleet:caps] skipped: no embedded Mebular and no daemon endpoint');
   const submit = num(args.submit, 0);
   let code = 0;
   if (submit > 0) {
@@ -628,12 +652,10 @@ async function runFleetWorker(args: Args): Promise<number> {
   }
   const log = await ExecutionLog.open(str(args['exec-log'], join(dir, 'exec.jsonl')));
   const registry = buildRegistry(config.agents);
-  const cardPublisher = mebular !== null
-    ? new CapabilityCardPublisher({ mebular, config, registry, log: (message) => console.error(message) })
-    : null;
+  const cardPublisher = createCardPublisher(config, mebular, registry);
   registry.onChange(() => cardPublisher?.onRegistryChange());
   if (cardPublisher !== null) await cardPublisher.publish();
-  else console.error('[fleet:caps] skipped: daemon store mode has no local Mebular identity handle');
+  else console.error('[fleet:caps] skipped: no embedded Mebular and no daemon endpoint');
   const worker = new FleetWorker({ device: config.device, agent: str(args.agent, 'worker'), store, transport: new NullTransport(), registry, log });
   await worker.reconcile();
   const deadline = Date.now() + num(args['timeout-ms'], 60_000);

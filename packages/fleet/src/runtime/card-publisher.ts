@@ -7,10 +7,22 @@ import { stat } from 'node:fs/promises';
 import type { Mebular } from '@mebular/core';
 import { fleetConfigPath, loadFleetConfig, type FleetConfig } from '../config.js';
 import type { ExecutorRegistry } from './agent.js';
-import { publishFleetCards, type FleetCardsPublishResult } from '../cards.js';
+import {
+  AGENT_NAMESPACE,
+  embeddedAgentDirectoryBackend,
+} from '../agentdir.js';
+import {
+  embeddedCapabilityCardBackend,
+  publishFleetCardsWithBackend,
+  type FleetAgentBackend,
+  type FleetCardsPublishResult,
+} from '../cards.js';
 
 export interface CapabilityCardPublisherOptions {
-  mebular: Pick<Mebular, 'graph' | 'identity'>;
+  /** daemon 模式：由 HTTP backend 负责签名/写节点。 */
+  backend?: FleetAgentBackend;
+  /** embedded 模式：本地 Mebular 签名/写节点。 */
+  mebular?: Pick<Mebular, 'graph' | 'identity'>;
   config: FleetConfig;
   registry?: ExecutorRegistry;
   /** 卡片 namespace（默认 `agents`；配置变更重载时仍使用该值）。 */
@@ -31,6 +43,7 @@ export interface CapabilityCardPublisherStatus {
 
 export class CapabilityCardPublisher {
   private config: FleetConfig;
+  private readonly backend: FleetAgentBackend;
   private readonly configPath: string;
   private readonly checkIntervalMs: number;
   private readonly log: (message: string) => void;
@@ -43,6 +56,17 @@ export class CapabilityCardPublisher {
 
   constructor(private readonly options: CapabilityCardPublisherOptions) {
     this.config = options.config;
+    const namespace = options.namespace ?? AGENT_NAMESPACE;
+    if (options.backend !== undefined) {
+      this.backend = options.backend;
+    } else if (options.mebular !== undefined) {
+      this.backend = {
+        ...embeddedCapabilityCardBackend(options.mebular, namespace),
+        ...embeddedAgentDirectoryBackend(options.mebular as Mebular, namespace),
+      };
+    } else {
+      throw new Error('CapabilityCardPublisher 需要 backend（daemon）或 mebular（embedded）');
+    }
     this.configPath = options.configPath ?? fleetConfigPath(options.config.dir);
     this.checkIntervalMs = options.checkIntervalMs ?? 1_000;
     this.log = options.log ?? ((message) => console.error(message));
@@ -63,11 +87,10 @@ export class CapabilityCardPublisher {
     if (this.inFlight !== null) return this.inFlight;
     this.inFlight = (async () => {
       try {
-        const result = await publishFleetCards({
-          mebular: this.options.mebular,
+        const result = await publishFleetCardsWithBackend({
+          backend: this.backend,
           config: this.config,
           ...(this.options.registry !== undefined ? { registry: this.options.registry } : {}),
-          ...(this.options.namespace !== undefined ? { namespace: this.options.namespace } : {}),
           now: this.now(),
         });
         if (result.errors.length > 0) {

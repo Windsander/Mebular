@@ -458,4 +458,23 @@ describe('P1 能力卡读取工具', () => {
     expect(latestCapabilityCards(cards)[0]!.version).toBe(4);
     expect(activeCapabilityCards(latestCapabilityCards(cards))).toEqual([]);
   });
+
+  it('同版本竞态：平局按稳定序列化裁决，输入顺序不影响结果', () => {
+    const base = compileCapabilityCards({ config: fleetConfig('device-A', [{ name: 'worker', kind: 'echo' }]), now: 1 })[0]!;
+    const a: AgentCapabilityCard = {
+      ...base,
+      version: 5,
+      capabilities: ['fleet.task', 'a'],
+      signature: { alg: 'Ed25519', keyId: 'device-A', sig: 'a' },
+    };
+    const b: AgentCapabilityCard = {
+      ...base,
+      version: 5,
+      capabilities: ['fleet.task', 'b'],
+      signature: { alg: 'Ed25519', keyId: 'device-A', sig: 'b' },
+    };
+    const first = latestCapabilityCards([a, b])[0]!;
+    const second = latestCapabilityCards([b, a])[0]!;
+    expect(JSON.stringify(first)).toBe(JSON.stringify(second));
+  });
 });

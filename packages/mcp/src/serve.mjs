@@ -682,6 +682,16 @@ export function loadFleetSecurity() {
   return fleetSecurityPromise;
 }
 
+let fleetCardsPromise = null;
+
+/** CR-002：延迟加载 fleet 能力卡 canonical/schema/签名逻辑（唯一实现仍在 fleet）。 */
+export function loadFleetCards() {
+  if (fleetCardsPromise === null) {
+    fleetCardsPromise = import('../../fleet/dist/index.js').catch(() => null);
+  }
+  return fleetCardsPromise;
+}
+
 /**
  * 写端点门禁：medium 要动态码；high 要会签批准/恢复码；low 放行。
  * 导出供 S2-3 单测直接断言（HTTP 层同样走这里）。
@@ -897,6 +907,8 @@ export async function startHttpServer({
   let service = initialService;
   let config = initialConfig ?? {};
   let runtime = initialRuntime;
+  // CR-002：守护内串行化能力卡签名/写入，避免同版本并发请求产生重复节点。
+  let cardWriteQueue = Promise.resolve();
 
   // 0.3 详情保留维护：service 就绪后启动（启动一次 + 每 24h），热切换复用同一 timer。
   // 失败只记录状态/日志，不阻断 MCP；关闭时显式清理，避免测试/宿主进程残留 timer。
@@ -4150,13 +4162,28 @@ export async function startHttpServer({
           }
           const type = typeof payload.type === 'string' && payload.type.length > 0 ? payload.type : null;
           if (!type) return sendJson(res, 400, { ok: false, error: 'type 必填' });
+          if (payload.metadata !== undefined
+            && (typeof payload.metadata !== 'object' || payload.metadata === null || Array.isArray(payload.metadata))) {
+            return sendJson(res, 400, { ok: false, error: 'metadata 必须为对象' });
+          }
           const node = await app.graph.createNode(
             type,
             typeof payload.content === 'object' && payload.content !== null ? payload.content : {},
             Array.isArray(payload.edges) ? payload.edges : [],
-            payload.namespace ? { namespace: payload.namespace } : {},
+            {
+              ...(payload.namespace ? { namespace: payload.namespace } : {}),
+              ...(payload.metadata !== undefined ? { metadata: payload.metadata } : {}),
+            },
           );
-          return sendJson(res, 200, { ok: true, node: { id: node.id, type: node.type, namespace: node.namespace ?? 'default' } });
+          return sendJson(res, 200, {
+            ok: true,
+            node: {
+              id: node.id,
+              type: node.type,
+              namespace: node.namespace ?? 'default',
+              ...(node.metadata !== undefined ? { metadata: node.metadata } : {}),
+            },
+          });
         }
         // [raw-graph-debug] 原始图调试/接入端点（调试例外）：不做内部对象、归档或
         // 墓碑过滤，仅供 daemon/fleet 原始图读写与排障。普通记忆列表与域统计必须走
@@ -4174,8 +4201,92 @@ export async function startHttpServer({
           return sendJson(res, 200, {
             ok: true,
             count: trimmed.length,
-            nodes: trimmed.map((n) => ({ id: n.id, type: n.type, namespace: n.namespace ?? 'default', content: n.content })),
+            nodes: trimmed.map((n) => ({
+              id: n.id,
+              type: n.type,
+              namespace: n.namespace ?? 'default',
+              content: n.content,
+              ...(n.metadata !== undefined ? { metadata: n.metadata } : {}),
+            })),
           });
+        }
+        // CR-002：daemon 身份签名能力卡（draft 无 signature），写 agents 域 internal 节点。
+        if (path === '/app/capability-cards' && req.method === 'POST') {
+          if (!app) return sendJson(res, 503, { ok: false, error: 'capability_cards_unavailable', message: '图存储尚未初始化' });
+          let payload;
+          try {
+            payload = JSON.parse(body.toString('utf-8') || '{}');
+          } catch {
+            return sendJson(res, 400, { ok: false, error: 'invalid json' });
+          }
+          const lib = await loadFleetCards();
+          if (!lib || typeof lib.signAgentCapabilityCard !== 'function'
+            || typeof lib.validateCapabilityCardDraft !== 'function'
+            || typeof lib.appendCapabilityCard !== 'function') {
+            return sendJson(res, 503, { ok: false, error: 'capability_cards_unavailable', message: '能力卡模块不可用' });
+          }
+          const namespace = typeof payload.namespace === 'string' && payload.namespace.length > 0
+            ? payload.namespace
+            : 'agents';
+          if (namespace !== 'agents') {
+            return sendJson(res, 400, { ok: false, error: 'namespace_invalid', message: '能力卡只能写入 agents 域' });
+          }
+          const draft = payload.card;
+          const validation = lib.validateCapabilityCardDraft(draft);
+          if (!validation.ok) {
+            return sendJson(res, 422, { ok: false, error: 'card_invalid', errors: validation.errors });
+          }
+          if (!deviceId) {
+            return sendJson(res, 409, { ok: false, error: 'identity_unavailable', message: '本机设备身份不可用' });
+          }
+          if (draft.device !== deviceId) {
+            return sendJson(res, 403, { ok: false, error: 'device_mismatch', message: '能力卡 device 必须是本机守护设备' });
+          }
+          const serialize = (fn) => {
+            const run = cardWriteQueue.then(fn, fn);
+            cardWriteQueue = run.catch(() => undefined);
+            return run;
+          };
+          try {
+            const result = await serialize(async () => {
+              const latest = lib.latestCapabilityCards(await lib.listCapabilityCards(app, 'agents'))
+                .find((card) => card.device === draft.device && card.agent === draft.agent) ?? null;
+              if (latest !== null) {
+                const sameContent = lib.capabilityCardFingerprint(latest) === lib.capabilityCardFingerprint(draft);
+                if (latest.version === draft.version) {
+                  return sameContent
+                    ? { status: 200, body: { ok: true, card: latest, nodeId: null, replayed: true } }
+                    : { status: 409, body: { ok: false, error: 'card_version_conflict', message: '同版本能力卡内容冲突' } };
+                }
+                if (latest.version > draft.version) {
+                  return { status: 409, body: { ok: false, error: 'card_stale', message: '能力卡版本落后于已发布版本' } };
+                }
+                if (draft.version !== latest.version + 1) {
+                  return { status: 409, body: { ok: false, error: 'card_version_gap', message: '能力卡版本必须紧邻上一版本' } };
+                }
+              } else if (draft.version !== 1) {
+                return { status: 409, body: { ok: false, error: 'card_version_gap', message: '首版能力卡 version 必须为 1' } };
+              }
+              let signed;
+              try {
+                signed = await lib.signAgentCapabilityCard(app, draft);
+              } catch (error) {
+                if (error?.code === 'CARD_SIGNER_UNAVAILABLE') {
+                  return { status: 409, body: { ok: false, error: 'identity_unavailable', message: '本机设备身份不可用，无法签名能力卡' } };
+                }
+                throw error;
+              }
+              const signedCheck = lib.validateAgentCapabilityCard(signed);
+              if (!signedCheck.ok) {
+                return { status: 500, body: { ok: false, error: 'card_invalid', errors: signedCheck.errors } };
+              }
+              const nodeId = await lib.appendCapabilityCard(app, signed, 'agents');
+              return { status: 200, body: { ok: true, card: signed, nodeId, replayed: false } };
+            });
+            return sendJson(res, result.status, result.body);
+          } catch (error) {
+            return sendJson(res, 500, { ok: false, error: 'capability_card_write_failed', message: String(error?.message ?? error) });
+          }
         }
         // W2 A4：join 邀请（守护用自身身份生成令牌）
         if (path === '/app/join/invite' && req.method === 'POST') {

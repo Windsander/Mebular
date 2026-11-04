@@ -30,6 +30,7 @@ export * from './store/file-store.js';
 export * from './store/mebular-store.js';
 export * from './store/message-store.js';
 export * from './store/daemon-store.js';
+export * from './store/daemon-agent-backend.js';
 export * from './runtime/planner.js';
 export * from './runtime/fairness.js';
 export * from './runtime/executor.js';

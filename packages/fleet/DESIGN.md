@@ -39,6 +39,7 @@
 
 - **目录**（普通记忆域，默认 `agents`）：每设备一条**签名**记录 `{device, agents:[{name,kind,capabilities?,concurrency,capacity?}], updatedAt, version}`；`task_targets = 订阅任务域的对端 ∩ 其目录 (device,agent)`；`capacity/load` 为**建议性**，不参与授权/一致性。
 - **能力卡（P1）**（同 `agents` 域，internal 记忆节点）：`metadata.internal=true` + `internalObject.kind="agent_capability_card"`；由 config 的 optional `capabilities`、ExecutorRegistry、运行环境编译，设备签名、版本单调、agent 移除发 tombstone。卡片只含标签/限制/工具名，不含 command/env/凭据/原始对话。默认记忆列表、域计数、搜索、图遍历与 fleet SSE 都不返回能力卡；`task_targets` 只额外返回 `cards` 摘要，旧 `targets` 字段与顺序不变。
+- **CR-002（P1，已批准）daemon 发布**：生产 `store:"daemon"` 下 fleet 无本地 Mebular 句柄。最小内部 app 扩展：`POST /app/nodes` 接受 optional `metadata`，`GET /app/nodes` 返回 optional `metadata`；新增内部 `POST /app/capability-cards`（draft 无 signature），由守护身份 `app.identity.getDeviceKey(deviceId)` 签名并写 `agents` 域 internal 节点，身份不可用返回 409，不伪造。签名/canonical/schema 仍只复用 fleet `cards.ts`；fleet 侧用 `DaemonAgentBackend` 走这两个既有 app 面。embedded 路径仍用本地 Mebular。公开 MCP 方法、人类 UI、`TaskEvent` 线格式均不变。
 - **工具面（MCP 与 CLI 能力完全一致）**：任务工具经**统一 MCP 入口**暴露（`mebular mcp` / HTTP `/mcp`，与记忆面同一入口；
   `fleet mcp` 已删除）+ 等价子命令 `fleet task_*` / `mebular task_*`；对照见下表。
 

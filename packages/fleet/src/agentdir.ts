@@ -195,14 +195,31 @@ export interface AgentDirectoryPublishResult {
   entry: AgentDirectoryEntry;
 }
 
-/** 发布日期目录：同设备版本单调；内容未变时返回现有版本（不写新节点）。 */
-export async function publishAgentDirectory(
+/** Agent 目录后端：embedded 用 Mebular，daemon 用本机 app HTTP。 */
+export interface AgentDirectoryBackend {
+  listDirectories(): Promise<AgentDirectoryEntry[]>;
+  appendDirectory(entry: AgentDirectoryEntry): Promise<boolean>;
+}
+
+/** embedded 后端：本地 Mebular 的 `agents` 域消息节点。 */
+export function embeddedAgentDirectoryBackend(
   mebular: Mebular,
+  namespace = AGENT_NAMESPACE,
+): AgentDirectoryBackend {
+  const store = agentDirectoryStore(mebular, namespace);
+  return {
+    listDirectories: () => store.all(),
+    appendDirectory: (entry) => store.append(entry),
+  };
+}
+
+/** 发布 Agent 目录（后端无关）：同设备版本单调；内容未变时返回现有版本。 */
+export async function publishAgentDirectoryWithBackend(
+  backend: AgentDirectoryBackend,
   config: Pick<FleetConfig, 'device' | 'agents'>,
-  options: { namespace?: string; now?: number } = {},
+  options: { now?: number } = {},
 ): Promise<AgentDirectoryPublishResult> {
-  const store = agentDirectoryStore(mebular, options.namespace ?? AGENT_NAMESPACE);
-  const entries = await store.all();
+  const entries = await backend.listDirectories();
   const latest = latestDirectories(entries).find((entry) => entry.device === config.device) ?? null;
   const candidate = compileAgentDirectory(config, {
     ...(latest !== null ? { version: latest.version } : {}),
@@ -215,6 +232,19 @@ export async function publishAgentDirectory(
     ...candidate,
     version: latest === null ? 1 : latest.version + 1,
   };
-  await store.append(entry);
+  await backend.appendDirectory(entry);
   return { published: true, version: entry.version, entry };
+}
+
+/** 发布日期目录：同设备版本单调；内容未变时返回现有版本（不写新节点）。 */
+export async function publishAgentDirectory(
+  mebular: Mebular,
+  config: Pick<FleetConfig, 'device' | 'agents'>,
+  options: { namespace?: string; now?: number } = {},
+): Promise<AgentDirectoryPublishResult> {
+  return publishAgentDirectoryWithBackend(
+    embeddedAgentDirectoryBackend(mebular, options.namespace ?? AGENT_NAMESPACE),
+    config,
+    { ...(options.now !== undefined ? { now: options.now } : {}) },
+  );
 }

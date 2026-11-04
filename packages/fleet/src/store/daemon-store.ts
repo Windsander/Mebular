@@ -33,7 +33,13 @@ interface DaemonReply {
   node?: { id: string; type: string; namespace: string };
 }
 
-function readToken(options: DaemonStoreOptions): string | undefined {
+export interface DaemonTokenOptions {
+  token?: string;
+  tokenFile?: string;
+}
+
+/** 读取 daemon bearer token（内联优先；tokenFile 支持 `{token}` 或纯文本）。 */
+export function readDaemonToken(options: DaemonTokenOptions): string | undefined {
   if (options.token !== undefined && options.token.length > 0) return options.token;
   if (options.tokenFile !== undefined) {
     try {
@@ -51,7 +57,8 @@ function readToken(options: DaemonStoreOptions): string | undefined {
   return undefined;
 }
 
-function requestJson<T>(url: string, method: string, token: string | undefined, body: unknown, timeoutMs: number): Promise<{ status: number; json: T }> {
+/** 本机 app 接口 JSON 请求（token/超时/错误语义与任务 store 一致）。 */
+export function requestDaemonJson<T>(url: string, method: string, token: string | undefined, body: unknown, timeoutMs: number): Promise<{ status: number; json: T }> {
   return new Promise((resolve, reject) => {
     const payload = body === undefined ? undefined : JSON.stringify(body);
     const u = new URL(url);
@@ -98,13 +105,13 @@ export class DaemonTaskEventStore implements TaskEventStore {
     this.endpoint = options.endpoint.replace(/\/+$/, '');
     this.namespace = options.namespace ?? 'tasks';
     this.type = options.type ?? 'task_event';
-    this.token = readToken(options);
+    this.token = readDaemonToken(options);
     this.timeoutMs = options.timeoutMs ?? 15_000;
   }
 
   private async list(): Promise<DaemonReply> {
     const url = `${this.endpoint}/app/nodes?namespace=${encodeURIComponent(this.namespace)}&type=${encodeURIComponent(this.type)}`;
-    const { status, json } = await requestJson<DaemonReply>(url, 'GET', this.token, undefined, this.timeoutMs);
+    const { status, json } = await requestDaemonJson<DaemonReply>(url, 'GET', this.token, undefined, this.timeoutMs);
     if (status !== 200 || json.ok !== true) throw new Error(`守护 listNodes 失败（HTTP ${status}）：${json.error ?? '未知'}`);
     return json;
   }
@@ -123,7 +130,7 @@ export class DaemonTaskEventStore implements TaskEventStore {
   async append(event: TaskEvent): Promise<boolean> {
     const existing = await this.all();
     if (existing.some((e) => e.eventId === event.eventId)) return false;
-    const { status, json } = await requestJson<DaemonReply>(
+    const { status, json } = await requestDaemonJson<DaemonReply>(
       `${this.endpoint}/app/nodes`,
       'POST',
       this.token,

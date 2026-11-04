@@ -2206,7 +2206,8 @@ function domainStatsFromNodes(nodes: Node[], options: { includeReserved: boolean
       if (kind === null || !FLEET_INTERNAL_COUNT_KINDS.has(kind)) entry.count += 1;
     } else if (MEMORY_NODE_TYPES.has(node.type)) {
       entry.memoryRecords += 1;
-    }    entry.lastUpdatedAt = Math.max(
+    }
+    entry.lastUpdatedAt = Math.max(
       entry.lastUpdatedAt,
       typeof node.updatedAt === 'number' ? node.updatedAt : 0,
     );

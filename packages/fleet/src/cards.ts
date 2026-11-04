@@ -11,7 +11,9 @@ import { createHash } from 'node:crypto';
 import type { Mebular } from '@mebular/core';
 import {
   AGENT_NAMESPACE,
-  publishAgentDirectory,
+  embeddedAgentDirectoryBackend,
+  publishAgentDirectoryWithBackend,
+  type AgentDirectoryBackend,
   type AgentDirectoryPublishResult,
 } from './agentdir.js';
 import type { FleetAgentConfig, FleetConfig } from './config.js';
@@ -127,6 +129,15 @@ export interface CapabilityCardValidation {
   ok: boolean;
   errors: string[];
 }
+
+/** 能力卡后端：embedded（本地 Mebular 签名/写）与 daemon（守护 HTTP 签名/写）共用发布逻辑。 */
+export interface CapabilityCardBackend {
+  listCards(): Promise<AgentCapabilityCard[]>;
+  signAndAppendCard(draft: CapabilityCardDraft): Promise<AgentCapabilityCard>;
+}
+
+/** 发布能力卡 + Agent 目录所需的完整后端。 */
+export interface FleetAgentBackend extends CapabilityCardBackend, AgentDirectoryBackend {}
 
 export interface CapabilityCardCompileInput {
   config: Pick<FleetConfig, 'device' | 'namespace' | 'agents'>;
@@ -357,6 +368,15 @@ function scanSensitiveKeys(value: unknown, path: string, errors: string[]): void
 
 /** 严格形状校验（含隐私键扫描；不校验签名有效性）。 */
 export function validateAgentCapabilityCard(input: unknown): CapabilityCardValidation {
+  return validateCardFields(input, true);
+}
+
+/** 签名前 draft 校验：与完整卡同一套字段规则，但要求 `signature` 不存在。 */
+export function validateCapabilityCardDraft(input: unknown): CapabilityCardValidation {
+  return validateCardFields(input, false);
+}
+
+function validateCardFields(input: unknown, requireSignature: boolean): CapabilityCardValidation {
   const errors: string[] = [];
   if (!isRecord(input)) return { ok: false, errors: ['能力卡必须是对象'] };
   const card = input;
@@ -386,6 +406,8 @@ export function validateAgentCapabilityCard(input: unknown): CapabilityCardValid
     if (!Array.isArray(card.permissions.taskNamespaces)
       || card.permissions.taskNamespaces.some((value) => !nonEmptyString(value))) {
       errors.push('permissions.taskNamespaces 必须为字符串数组');
+    } else if (card.permissions.taskNamespaces.some((value) => value.startsWith('__'))) {
+      errors.push('permissions.taskNamespaces 不得使用保留 namespace');
     }
     if ('allowSubcontract' in card.permissions) errors.push('permissions 不得定义 allowSubcontract（plan-level 字段）');
   }
@@ -406,12 +428,16 @@ export function validateAgentCapabilityCard(input: unknown): CapabilityCardValid
       errors.push('provenance.publishedAt 必须为有限数字');
     }
   }
-  if (!isRecord(card.signature)) {
-    errors.push('signature 必须为对象');
-  } else {
-    if (card.signature.alg !== 'Ed25519') errors.push('signature.alg 必须为 Ed25519');
-    if (!nonEmptyString(card.signature.keyId)) errors.push('signature.keyId 必须为非空字符串');
-    if (!nonEmptyString(card.signature.sig)) errors.push('signature.sig 必须为非空字符串');
+  if (requireSignature) {
+    if (!isRecord(card.signature)) {
+      errors.push('signature 必须为对象');
+    } else {
+      if (card.signature.alg !== 'Ed25519') errors.push('signature.alg 必须为 Ed25519');
+      if (!nonEmptyString(card.signature.keyId)) errors.push('signature.keyId 必须为非空字符串');
+      if (!nonEmptyString(card.signature.sig)) errors.push('signature.sig 必须为非空字符串');
+    }
+  } else if ('signature' in card) {
+    errors.push('draft 不得包含 signature');
   }
   if (card.tombstone !== undefined && typeof card.tombstone !== 'boolean') errors.push('tombstone 若存在须为布尔');
   scanSensitiveKeys(card, 'card', errors);
@@ -466,10 +492,10 @@ export async function appendCapabilityCard(
   mebular: Pick<Mebular, 'graph'>,
   card: AgentCapabilityCard,
   namespace = AGENT_NAMESPACE,
-): Promise<void> {
+): Promise<string> {
   const validation = validateAgentCapabilityCard(card);
   if (!validation.ok) throw new Error(`能力卡非法：${validation.errors.join('; ')}`);
-  await mebular.graph.createNode(CAPABILITY_CARD_NODE_TYPE, card as unknown as Record<string, unknown>, [], {
+  const node = await mebular.graph.createNode(CAPABILITY_CARD_NODE_TYPE, card as unknown as Record<string, unknown>, [], {
     namespace,
     metadata: {
       internal: true,
@@ -479,20 +505,34 @@ export async function appendCapabilityCard(
       },
     },
   });
+  return node.id;
 }
 
-/** 发布能力卡：版本单调、同内容 no-op、agent 移除发 tombstone。 */
-export async function publishCapabilityCards(options: {
-  mebular: Pick<Mebular, 'graph' | 'identity'>;
+/** embedded 后端：本地 Mebular 签名并写 internal 节点。 */
+export function embeddedCapabilityCardBackend(
+  mebular: Pick<Mebular, 'graph' | 'identity'>,
+  namespace = AGENT_NAMESPACE,
+): CapabilityCardBackend {
+  return {
+    listCards: () => listCapabilityCards(mebular, namespace),
+    signAndAppendCard: async (draft) => {
+      const signed = await signAgentCapabilityCard(mebular, draft);
+      await appendCapabilityCard(mebular, signed, namespace);
+      return signed;
+    },
+  };
+}
+
+/** 发布能力卡（后端无关）：版本单调、同内容 no-op、agent 移除发 tombstone。 */
+export async function publishCapabilityCardsWithBackend(options: {
+  backend: CapabilityCardBackend;
   config: Pick<FleetConfig, 'device' | 'namespace' | 'agents'>;
   registry?: { names(): string[] };
-  namespace?: string;
   runtime?: CapabilityCardRuntime;
   now?: number;
 }): Promise<CapabilityCardPublishResult> {
-  const namespace = options.namespace ?? AGENT_NAMESPACE;
   const now = options.now ?? Date.now();
-  const existing = latestCapabilityCards(await listCapabilityCards(options.mebular, namespace));
+  const existing = latestCapabilityCards(await options.backend.listCards());
   const desired = compileCapabilityCards({
     config: options.config,
     ...(options.registry !== undefined ? { registry: options.registry } : {}),
@@ -519,8 +559,7 @@ export async function publishCapabilityCards(options: {
       continue;
     }
     try {
-      const signed = await signAgentCapabilityCard(options.mebular, candidate);
-      await appendCapabilityCard(options.mebular, signed, namespace);
+      const signed = await options.backend.signAndAppendCard(candidate);
       published.push(signed);
     } catch (error) {
       errors.push(`${draft.device}/${draft.agent}: ${(error as Error).message}`);
@@ -528,6 +567,7 @@ export async function publishCapabilityCards(options: {
   }
 
   for (const latest of existing) {
+    if (latest.device !== options.config.device) continue; // 只为本机移除的 agent 发 tombstone
     if (desiredAgents.has(latest.agent) || latest.tombstone === true) continue;
     const { signature: _signature, ...rest } = latest;
     const candidate: CapabilityCardDraft = {
@@ -547,8 +587,7 @@ export async function publishCapabilityCards(options: {
       tombstone: true,
     };
     try {
-      const signed = await signAgentCapabilityCard(options.mebular, candidate);
-      await appendCapabilityCard(options.mebular, signed, namespace);
+      const signed = await options.backend.signAndAppendCard(candidate);
       published.push(signed);
       tombstoned += 1;
     } catch (error) {
@@ -565,7 +604,47 @@ export async function publishCapabilityCards(options: {
   };
 }
 
-/** 发布能力卡 + 每设备 Agent 目录；单次失败只进入 errors，不阻塞调用方主循环。 */
+/** embedded 便利入口：本地 Mebular 签名/写节点。 */
+export async function publishCapabilityCards(options: {
+  mebular: Pick<Mebular, 'graph' | 'identity'>;
+  config: Pick<FleetConfig, 'device' | 'namespace' | 'agents'>;
+  registry?: { names(): string[] };
+  namespace?: string;
+  runtime?: CapabilityCardRuntime;
+  now?: number;
+}): Promise<CapabilityCardPublishResult> {
+  return publishCapabilityCardsWithBackend({
+    backend: embeddedCapabilityCardBackend(options.mebular, options.namespace ?? AGENT_NAMESPACE),
+    config: options.config,
+    ...(options.registry !== undefined ? { registry: options.registry } : {}),
+    ...(options.runtime !== undefined ? { runtime: options.runtime } : {}),
+    ...(options.now !== undefined ? { now: options.now } : {}),
+  });
+}
+
+/** 发布能力卡 + 每设备 Agent 目录（后端无关）；单次失败只进入 errors。 */
+export async function publishFleetCardsWithBackend(options: {
+  backend: FleetAgentBackend;
+  config: Pick<FleetConfig, 'device' | 'namespace' | 'agents'>;
+  registry?: { names(): string[] };
+  runtime?: CapabilityCardRuntime;
+  now?: number;
+}): Promise<FleetCardsPublishResult> {
+  const errors: string[] = [];
+  let directory: AgentDirectoryPublishResult | null = null;
+  try {
+    directory = await publishAgentDirectoryWithBackend(options.backend, options.config, {
+      ...(options.now !== undefined ? { now: options.now } : {}),
+    });
+  } catch (error) {
+    errors.push(`directory: ${(error as Error).message}`);
+  }
+  const cards = await publishCapabilityCardsWithBackend(options);
+  errors.push(...cards.errors);
+  return { cards, directory, errors };
+}
+
+/** embedded 便利入口：发布能力卡 + 目录。 */
 export async function publishFleetCards(options: {
   mebular: Pick<Mebular, 'graph' | 'identity'>;
   config: Pick<FleetConfig, 'device' | 'namespace' | 'agents'>;
@@ -574,19 +653,18 @@ export async function publishFleetCards(options: {
   runtime?: CapabilityCardRuntime;
   now?: number;
 }): Promise<FleetCardsPublishResult> {
-  const errors: string[] = [];
-  let directory: AgentDirectoryPublishResult | null = null;
-  try {
-    directory = await publishAgentDirectory(options.mebular as Mebular, options.config, {
-      ...(options.namespace !== undefined ? { namespace: options.namespace } : {}),
-      ...(options.now !== undefined ? { now: options.now } : {}),
-    });
-  } catch (error) {
-    errors.push(`directory: ${(error as Error).message}`);
-  }
-  const cards = await publishCapabilityCards(options);
-  errors.push(...cards.errors);
-  return { cards, directory, errors };
+  const namespace = options.namespace ?? AGENT_NAMESPACE;
+  const backend: FleetAgentBackend = {
+    ...embeddedCapabilityCardBackend(options.mebular, namespace),
+    ...embeddedAgentDirectoryBackend(options.mebular as Mebular, namespace),
+  };
+  return publishFleetCardsWithBackend({
+    backend,
+    config: options.config,
+    ...(options.registry !== undefined ? { registry: options.registry } : {}),
+    ...(options.runtime !== undefined ? { runtime: options.runtime } : {}),
+    ...(options.now !== undefined ? { now: options.now } : {}),
+  });
 }
 
 /** `task_targets.cards` 摘要：只含标签/版本/在线/在途，不含卡片原文或角色卡。 */

@@ -78,6 +78,10 @@ describe('P1 fleet config：capabilities optional + __plan__ 保留名', () => {
     expect(validateFleetConfig(legacy)).toEqual([]);
     const withOptional = fleetConfig('device-A', [{ name: 'worker', kind: 'echo', capabilities: ['code.write', 'review'] }]);
     expect(validateFleetConfig(withOptional)).toEqual([]);
+    // P7/B1：defaultAgent 是 optional；旧 config 不填仍有效。
+    expect(validateFleetConfig({ ...withOptional, defaultAgent: 'worker' })).toEqual([]);
+    expect(validateFleetConfig({ ...withOptional, defaultAgent: '' }).join('; ')).toContain('defaultAgent');
+    expect(validateFleetConfig({ ...withOptional, defaultAgent: PLAN_SENTINEL }).join('; ')).toContain('defaultAgent');
   });
 
   it('capabilities 形状非法被拒', () => {
@@ -112,6 +116,15 @@ describe('P1 能力卡 schema / 生成 / 隐私', () => {
     expect(validateAgentCapabilityCard(withEnv).ok).toBe(false);
     expect(validateAgentCapabilityCard({ ...capability, agent: PLAN_SENTINEL }).ok).toBe(false);
     expect(validateAgentCapabilityCard({ ...capability, device: PLAN_SENTINEL }).ok).toBe(false);
+    // P7：runtime / provenance.source 不是自由文本。
+    expect(validateAgentCapabilityCard({
+      ...capability,
+      runtime: { ...(capability.runtime as object), os: '/bin/sh -c secret' },
+    }).ok).toBe(false);
+    expect(validateAgentCapabilityCard({
+      ...capability,
+      provenance: { ...(capability.provenance as object), source: 'RAW DIALOGUE SOURCE' },
+    }).ok).toBe(false);
   });
 
   it('从 config + registry + 运行环境编译：字段齐全、无 command/env、tools 对齐 16 方法', () => {

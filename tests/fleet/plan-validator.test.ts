@@ -187,7 +187,7 @@ describe('P2 plan schema/validator', () => {
     const ok = validatePlan(child, {
       parentPlan: parent,
       caller: B,
-      parentStepBudget: { maxDepth: 3, maxChildren: 3, maxTasks: 3 },
+      parentStepBudget: { maxDepth: 3, maxChildren: 3, maxTasks: 4 },
       parentTaskState: parentTaskState(),
     });
     expect(ok.ok).toBe(true);
@@ -225,7 +225,7 @@ describe('P2 plan schema/validator', () => {
     const sameDeviceWrongAgent = validatePlan(childPlan(parent, { owner: { device: 'device-B', agent: 'other' } }), {
       parentPlan: parent,
       caller: B,
-      parentStepBudget: { maxDepth: 3, maxChildren: 3, maxTasks: 3 },
+      parentStepBudget: { maxDepth: 3, maxChildren: 3, maxTasks: 4 },
     });
     expect(sameDeviceWrongAgent).toMatchObject({ ok: false, code: 'PLAN_POLICY' });
 
@@ -244,9 +244,22 @@ describe('P2 plan schema/validator', () => {
     });
     expect(tooSmall).toMatchObject({ ok: false, code: 'PLAN_BUDGET' });
 
+    // P7：budget 比较使用 remainingBudget(effectiveBudget(parentTask))；maxTasks 先扣父 task 自身。
+    const boundaryChild = childPlan(parent);
+    const required = boundaryChild.budget.maxSteps + 1;
+    const boundaryBase = { parentPlan: parent, caller: B, parentTaskState: parentTaskState() };
+    expect(validatePlan(boundaryChild, {
+      ...boundaryBase,
+      parentStepBudget: { maxDepth: 3, maxChildren: required, maxTasks: required + 1 },
+    }).ok).toBe(true);
+    expect(validatePlan(boundaryChild, {
+      ...boundaryBase,
+      parentStepBudget: { maxDepth: 3, maxChildren: required, maxTasks: required },
+    })).toMatchObject({ ok: false, code: 'PLAN_BUDGET' });
+
     // 子 plan 省略 policy 字段时按父 plan 继承后落库；replay 仍需幂等。
     const minimal = childPlan(parent, { policy: {} });
-    const budget = { maxDepth: 3, maxChildren: 3, maxTasks: 3 };
+    const budget = { maxDepth: 3, maxChildren: 3, maxTasks: 4 };
     const first = validatePlan(minimal, { parentPlan: parent, caller: B, parentStepBudget: budget, parentTaskState: parentTaskState() });
     expect(first.ok).toBe(true);
     if (first.ok) {
@@ -268,7 +281,7 @@ describe('P2 plan schema/validator', () => {
 
   it('B8：sub-plan 绑定父 step 的执行者/活动状态/kind', () => {
     const parent = parentPlan();
-    const budget = { maxDepth: 3, maxChildren: 3, maxTasks: 3 };
+    const budget = { maxDepth: 3, maxChildren: 3, maxTasks: 4 };
     const base = {
       parentPlan: parent,
       caller: B,

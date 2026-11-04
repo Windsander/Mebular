@@ -4360,11 +4360,15 @@ export async function startHttpServer({
         // CR-002：daemon 身份签名能力卡（draft 无 signature），写 agents 域 internal 节点。
         if (path === '/app/capability-cards' && req.method === 'POST') {
           if (!app) return sendJson(res, 503, { ok: false, error: 'capability_cards_unavailable', message: '图存储尚未初始化' });
+          if (!writesEnabled) return sendJson(res, 403, { ok: false, error: 'read_only', message: '写能力已关闭' });
           let payload;
           try {
             payload = JSON.parse(body.toString('utf-8') || '{}');
           } catch {
             return sendJson(res, 400, { ok: false, error: 'invalid json' });
+          }
+          if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+            return sendJson(res, 400, { ok: false, error: 'card body 必须为对象' });
           }
           const lib = await loadFleetCards();
           if (!lib || typeof lib.signAgentCapabilityCard !== 'function'

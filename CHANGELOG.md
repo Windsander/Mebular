@@ -38,9 +38,18 @@ stay inside Fleet; the human Console and the 16 task methods keep their existing
 - **MR/cancel semantics hardened** — pending MR cancel is covered, terminal MRs are never withdrawn, and concurrent materializers converge on one logical MR via deterministic event IDs.
 - **No new human UI or MCP methods** — navigation/pages/settings are unchanged; plan/card/role stay out of memory lists, domain counts, search and the star-map fleet SSE.
 
+### Fixed
+
+- **Default MCP plan owner** — `task_submit.plan` now uses a plan-specific agent (`ctx.agent` / `config.defaultAgent` / first configured agent) for the default `board` placeholder owner, so the owner and MR executor are actually runnable; an empty agent configuration fails closed with `PLAN_POLICY` + `PLAN_OWNER_UNEXECUTABLE`. Ordinary task defaults remain `board`.
+- **CR-003 internal endpoint whitelist** — the approved internal app endpoints (`/app/nodes`, `/app/capability-cards`, `/app/plans`, `/app/role-cards`, `/app/peers`) are documented as the only allowed internal HTTP surface; no public MCP/UI/TaskEvent changes. Capability-card writes now honor `writesEnabled` and reject non-object bodies; card runtime/provenance source are restricted to safe tokens.
+
 ### Verification
 
 - **P6 evidence** — [0.3.0 Fleet orchestration P6 E2E and regression evidence](docs/quality/0.3.0-fleet-orchestration-e2e.md) records the 21/21 `verify:fleet:p6` run, full Jest results, Console UI smoke, daemon verified-card path and explicit known limits.
+
+### Notes
+
+- **P6 real-network scope** — the five-node P6 E2E uses in-process `InMemoryHub` loopback plus a deterministic event bridge to isolate orchestration from anti-entropy scheduling. Real libp2p multi-node sync remains covered by `verify:fleet:tasks` (two nodes), the sync suites, `routing-e2e` and `verify:daemon:cluster`; this release does not claim five-node real-WAN performance.
 
 ## [v0.3.0] - 2026-10-30
 

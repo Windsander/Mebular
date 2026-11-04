@@ -316,7 +316,7 @@ describe('P2 daemon /app/plans', () => {
       trace: { chain: [] },
       to: { device: 'device-A', agent: 'planner' },
       intent: 'parent-work',
-      budget: { maxDepth: 3, maxChildren: 2, maxTasks: 2 },
+      budget: { maxDepth: 3, maxChildren: 2, maxTasks: 3 },
     })).toBe(true);
 
     const rootlessChild = childPlan(parent.planId, {

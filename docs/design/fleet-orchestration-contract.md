@@ -1,6 +1,6 @@
 # Mebular Fleet 黑盒任务编排 · 边界与契约 v1
 
-**状态**：v1.0 / P0 冻结稿，2026-11-04
+**状态**：v1.1 / P0 冻结稿 + CR-003（内部 app 端点白名单），2026-11-05
 **阶段**：P0（只冻结边界与契约；不写生产代码）
 **上位计划**：《Mebular Fleet · 黑盒任务编排（本期）》（Chief 持有；未经 CR 不修改 step、scope、Gate）
 **协议夹具**：[`plan.example.json`](../../packages/fleet/protocol/plan.example.json)、[`card.example.json`](../../packages/fleet/protocol/card.example.json)
@@ -295,7 +295,7 @@ metadata.internalObject.kind =
 - 域计数不得把 internal 对象计入普通记忆数量；不得新增“internal 计数”UI。
 - 状态视图不落盘；不产生 internal 节点。
 - plan/card 不进 fleet SSE。
-- 不新增公开/内部 HTTP 端点；P1–P7 只能复用既有读写路径。
+- 除 **CR-003** 批准的内部 app 端点（见 §11.3.1）外，不新增公开/内部 HTTP 端点；其余 P1–P7 只能复用既有读写路径。
 
 ### 4.3 事件流与星图
 
@@ -794,7 +794,7 @@ child.allowSubcontract    ≤ parent.allowSubcontract（布尔：父 false 时�
 child.budget.maxSteps     ≤ parent.budget.maxSteps（每 plan 上限，不是“剩余 step”）
 ```
 
-- 子 plan 的实际任务数至少 = `child.maxSteps + 1`（child root + step tasks）；父 step task 剩余 `maxTasks >= child.maxSteps + 1`，且 `maxChildren >= child.maxSteps + 1`。
+- 子 plan 的实际任务数至少 = `child.maxSteps + 1`（child root + step tasks）；父 step task 剩余 `maxTasks >= child.maxSteps + 1`，且 `maxChildren >= child.maxSteps + 1`（剩余 = `remainingBudget(effectiveBudget(parentTask))`，先扣父 task 自身）。
 - 子 plan 的 root/step task 仍计入**父 step task 的既有 `TaskBudget`**（`maxTasks`/`maxDepth`/`maxChildren`）；普通 task-tree 后代也会消耗这些额度。校验只保证**最小可容纳**，运行时继续由 core `treeViolations` 约束；不新增预算字段。
 - 父 **plan policy** `allowSubcontract=false` → 子 plan 提交被 `PLAN_POLICY` 拒绝，不创建任何对象；`allowSubcontract=false` 不映射 task `dispatch`，不阻止普通 task-tree 子任务。
 - 子 plan 使用新 `planId` + `parent:{planId,version,stepId}`；step schema 不新增 `allowSubcontract`；子 plan 不提交 MR；子 plan 的 root/step task 由父 step task 派生，父 step 通过 task 派生树等待子任务，不在 plan 里引用子 plan step。
@@ -1043,7 +1043,7 @@ E-<gate>-<n>
 
 | 对象 | 版本 | 规则 |
 |---|---|---|
-| 本契约 | `v1.0` | P0 冻结；修改走 CR + 新 minor；不改变 scope |
+| 本契约 | `v1.1` | P0 冻结 + CR-003；修改走 CR + 新 minor；不改变 scope |
 | plan 记录 | `v=1` | 记录 schema 版本；不兼容变更走 CR |
 | plan 版本 | `version` | 同一 planId 单调；不可变；旧版本保留 |
 | 能力卡 | `v=1`，`version` | 按 `(device, agent, kind)` 单调；签名；tombstone |
@@ -1071,11 +1071,32 @@ E-<gate>-<n>
 - Reviewer 签字：
 ```
 
+### 11.3.1 CR-003 内部 app 端点白名单（已批准，纳入本期）
+
+**提出**：P6/P7 硬化评审；**决策**：纳入本期；**批准**：Chief + Reviewer。
+
+**问题**：P0 §4.2 原文禁止新增“公开/内部 HTTP 端点”，但 P1/P2/P5/P6 的实现需要守护内部 app 面来服务无本地 Mebular 句柄的 fleet 客户端。
+
+**批准范围**：只允许以下内部端点，且全部满足 loopback + bearer/scope、internal metadata、无公共 MCP 方法、无人类 UI、无 TaskEvent 线格式变化：
+
+| 端点 | 方法/scope | 约束 |
+|---|---|---|
+| `/app/nodes` | GET/POST；`memory.read`/`memory.write` | raw debug 面；POST 接受 optional `metadata`；拒绝 `agent_capability_card` / `agent_role_card` / `task_plan` 的通用写入；GET 不返回 role card 原文 |
+| `/app/capability-cards` | POST；`memory.write` | 只接受对象 body；守护身份签名；只写 `agents` 域 internal 能力卡；`writesEnabled=false` 返回 403 |
+| `/app/plans` | POST/GET；`memory.write`/`memory.read` | 只接受完整 `task_plan`；internal metadata；只写任务板 namespace；完整 validator/幂等 |
+| `/app/role-cards` | POST/GET；`memory.write`/`memory.read` | 只接受对象 body；只写 `agents` 域 internal 角色卡；写/读路径都重建安全 `summary` |
+| `/app/peers` | GET；`memory.read` | 只返回 sync 握手登记的**在线** peer `{device, publicKeyHex}`；不回退 `config.peers` 地址簿；供 daemon 验证远端能力卡签名 |
+
+**明确不允许**：新增公共 MCP 方法、人类 UI、`plan_*`/`agent_card_*`、TaskEvent 类型/字段、任意通用 RPC/远程执行；上述白名单之外的新端点一律视为红牌并停止开 CR。
+
+**兼容**：旧守护没有 `/app/peers` 时 daemon 远端卡片保持 fail-closed；旧 worker/peer/config 不受影响。
+
 ### 11.4 CR 审批
 
 - Chief + 独立 Reviewer 双方批准；Implementer 不能批准自己的 CR。
 - 若 CR 改变契约：更新本文档、fixtures、验收矩阵；必要时更新 plan 版本；重跑受影响 Gate。
 - 若 CR 触碰红牌（新 MCP 方法/新 UI/原始对话/开放抢单/跨 plan 依赖/重复 MR）：默认拒绝；只有 Chief 明确重开 scope 才能继续，且必须重跑 G0。
+- **CR-003** 已按上述流程批准：只允许 §11.3.1 的内部 app 端点白名单；除此之外仍按“不新增公开/内部 HTTP 端点”执行。
 - 执行会话不得自行修改 OpenChamber plan；plan 由 Chief 持有。
 
 ### 11.5 additive 兼容规则

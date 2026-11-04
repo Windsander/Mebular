@@ -326,10 +326,10 @@
       ]
     },
     "parentStepTaskBudget": {
-      "note": "runtime TaskBudget，非 plan 字段；边界值 = child.maxSteps + 1（child root + step tasks），本夹具刚好通过",
+      "note": "runtime TaskBudget，非 plan 字段；边界值 = child.maxSteps + 2（父 task 自身 + child root + step tasks），本夹具刚好通过",
       "maxDepth": 3,
       "maxChildren": 5,
-      "maxTasks": 5
+      "maxTasks": 6
     },
     "submission": {
       "caller": { "device": "device-B", "agent": "worker" },
@@ -490,7 +490,7 @@
     "subPlanBudget": {
       "expectedError": "PLAN_BUDGET",
       "parentStepTaskBudget": {
-        "note": "child.maxSteps=4 需要 maxTasks/maxChildren >= 5；此处 4 不足",
+        "note": "child.maxSteps=4 需要剩余 maxTasks >= 5（父 task 自身先扣 1，故声明 maxTasks >= 6）；此处 4 不足",
         "maxDepth": 3,
         "maxChildren": 4,
         "maxTasks": 4

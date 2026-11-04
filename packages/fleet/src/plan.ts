@@ -8,6 +8,7 @@
 
 import { PLAN_SENTINEL, type FleetEndpoint, type TaskBudget } from './protocol/envelope.js';
 import type { TaskState } from './model.js';
+import { remainingBudget } from './collab/tree.js';
 
 export const TASK_PLAN_KIND = 'task_plan' as const;
 export const TASK_PLAN_NODE_TYPE = 'task_plan' as const;
@@ -570,11 +571,14 @@ function validateParent(plan: TaskPlan, context: PlanValidationContext): PlanVal
     return failure('PLAN_STATE_INVALID', '父 step task 不存在或尚未物化');
   }
   const required = plan.budget.maxSteps + 1;
-  if (context.parentStepBudget.maxTasks < required) {
-    return failure('PLAN_BUDGET', `父 step task 剩余 maxTasks 不足（${context.parentStepBudget.maxTasks} < ${required}）`);
+  // effectiveBudget(parentTask) 描述父 task 自身可用的预算；子 plan 是它的下一层，
+  // 必须先扣掉父 task 自身（remainingBudget），再比较 child root + maxSteps。
+  const parentRemaining = remainingBudget(context.parentStepBudget);
+  if (parentRemaining.maxTasks < required) {
+    return failure('PLAN_BUDGET', `父 step task 剩余 maxTasks 不足（${parentRemaining.maxTasks} < ${required}）`);
   }
-  if (context.parentStepBudget.maxChildren < required) {
-    return failure('PLAN_BUDGET', `父 step task 剩余 maxChildren 不足（${context.parentStepBudget.maxChildren} < ${required}）`);
+  if (parentRemaining.maxChildren < required) {
+    return failure('PLAN_BUDGET', `父 step task 剩余 maxChildren 不足（${parentRemaining.maxChildren} < ${required}）`);
   }
   return null;
 }

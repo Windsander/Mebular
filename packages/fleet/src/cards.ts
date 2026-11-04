@@ -178,6 +178,10 @@ function nonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0;
 }
 
+/** P7 硬化：能力卡的 runtime/provenance.source 不是自由文本，只接受安全 token。 */
+const CARD_RUNTIME_TOKEN_RE = /^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,127}$/;
+const CARD_SOURCE_TOKEN_RE = /^[a-z][a-z0-9+._-]{0,127}$/;
+
 /** 确定性 JSON：对象键递归排序、忽略 undefined。 */
 export function canonicalCardJson(value: unknown): string {
   if (value === undefined) return 'null';
@@ -426,14 +430,21 @@ function validateCardFields(input: unknown, requireSignature: boolean): Capabili
     errors.push('runtime 必须为对象');
   } else {
     for (const key of ['os', 'arch', 'runtime', 'runtimeVersion']) {
-      if (!nonEmptyString(card.runtime[key])) errors.push(`runtime.${key} 必须为非空字符串`);
+      const value = card.runtime[key];
+      if (!nonEmptyString(value) || !CARD_RUNTIME_TOKEN_RE.test(value)) {
+        errors.push(`runtime.${key} 必须为安全 token（无空白/路径/引号/原文）`);
+      }
     }
   }
   if (!isRecord(card.provenance)) {
     errors.push('provenance 必须为对象');
   } else {
     for (const key of ['source', 'configHash', 'registryHash']) {
-      if (!nonEmptyString(card.provenance[key])) errors.push(`provenance.${key} 必须为非空字符串`);
+      const value = card.provenance[key];
+      if (!nonEmptyString(value)) errors.push(`provenance.${key} 必须为非空字符串`);
+      else if (key === 'source' && !CARD_SOURCE_TOKEN_RE.test(value)) {
+        errors.push('provenance.source 必须为安全 token（无空白/路径/引号/原文）');
+      }
     }
     if (typeof card.provenance.publishedAt !== 'number' || !Number.isFinite(card.provenance.publishedAt)) {
       errors.push('provenance.publishedAt 必须为有限数字');

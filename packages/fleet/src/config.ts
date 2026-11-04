@@ -138,6 +138,8 @@ export interface FleetConfig {
   peers: FleetPeerConfig[];
   /** 本机 agent 注册表（按 to.agent 名路由） */
   agents: FleetAgentConfig[];
+  /** 可选默认 Agent；缺省时 plan 提交使用 agents[0]（普通 task 的默认 agent 仍是 board）。 */
+  defaultAgent?: string;
   quotaLimitPerDevice?: number;
   /**
    * join 服务（T2）：`fleet node` 启动最小 HTTP 端点 `POST /mebular/join` 以签发委派证书。
@@ -169,6 +171,10 @@ export function validateFleetConfig(input: unknown): string[] {
     if (typeof c[key] !== 'string' || (c[key] as string).length === 0) errors.push(`${key} 必须为非空字符串`);
   }
   if (c.device === PLAN_SENTINEL) errors.push(`device 不得使用保留名 ${PLAN_SENTINEL}`);
+  if (c.defaultAgent !== undefined) {
+    if (typeof c.defaultAgent !== 'string' || c.defaultAgent.length === 0) errors.push('defaultAgent 必须为非空字符串');
+    else if (c.defaultAgent === PLAN_SENTINEL) errors.push(`defaultAgent 不得使用保留名 ${PLAN_SENTINEL}`);
+  }
   if (!Array.isArray(c.peers)) errors.push('peers 必须为数组');
   else {
     for (const peer of c.peers as Array<Record<string, unknown>>) {
@@ -371,6 +377,7 @@ export function daemonConfigToFleet(dir: string, cfg: Record<string, unknown>): 
     peers,
     // 守护侧只作任务板（board），不注册执行型 agent；占位满足校验（kind 属合法枚举）
     agents: [{ name: 'board', kind: 'echo' }],
+    ...(typeof cfg.defaultAgent === 'string' && cfg.defaultAgent.length > 0 ? { defaultAgent: cfg.defaultAgent } : {}),
     ...(typeof cfg.quotaLimitPerDevice === 'number' ? { quotaLimitPerDevice: cfg.quotaLimitPerDevice } : {}),
   };
 }

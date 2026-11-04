@@ -79,7 +79,10 @@ interface Session {
   planStore: TaskPlanWriteStore;
   node: FleetNode;
   device: string;
+  /** 普通 task 工具的旧默认 agent（保持 board 不变）。 */
   agent: string;
+  /** plan 专用 agent：ctx.agent / defaultAgent / agents[0] / board。 */
+  planAgent: string;
   namespace: string;
   /** 本地配置（peers/namespace/daemon）；route 解释与 CLI materializer 共用。 */
   config: Awaited<ReturnType<typeof loadToolConfig>>;
@@ -91,6 +94,8 @@ async function openSession(ctx: ToolContext): Promise<Session> {
   const config = await loadToolConfig(ctx.dir);
   const namespace = ctx.namespace ?? config.namespace;
   const agent = ctx.agent ?? 'board';
+  // B1：普通 task 的 board 默认保持不变；plan 的 owner/MR 执行者必须落到本机可执行 Agent。
+  const planAgent = ctx.agent ?? config.defaultAgent ?? config.agents[0]?.name ?? 'board';
   const live = ctx.mebular;
   const useDaemon = live === undefined && config.store === 'daemon';
   let mebular: Mebular | null = live ?? null;
@@ -136,6 +141,7 @@ async function openSession(ctx: ToolContext): Promise<Session> {
     node,
     device,
     agent,
+    planAgent,
     namespace,
     config,
     close: async () => {
@@ -332,6 +338,38 @@ function dispatchInput(input: Record<string, unknown>): TaskDispatch | undefined
   return d;
 }
 
+type PlanOwnerNormalization =
+  | { ok: true; plan: unknown }
+  | { ok: false; error: 'PLAN_POLICY'; reason: 'PLAN_OWNER_UNEXECUTABLE'; errors: string[]; created: [] };
+
+/**
+ * B1：MCP 默认 `board` 是“占位 owner”，不是可执行 Agent。plan 提交时把 owner.agent=board
+ * 归一化为本机 planAgent；非 board 的显式 owner 不改写，仍由 submitTaskPlan 校验 equals planAgent。
+ * 配置没有任何可用 Agent 时 fail closed，绝不创建 plan/root。
+ */
+function normalizePlanOwnerForSession(input: unknown, session: Session): PlanOwnerNormalization {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return { ok: true, plan: input };
+  const plan = input as Record<string, unknown>;
+  const owner = plan.owner;
+  if (typeof owner !== 'object' || owner === null || Array.isArray(owner)) return { ok: true, plan: input };
+  const ownerAgent = (owner as Record<string, unknown>).agent;
+  if (ownerAgent !== 'board') return { ok: true, plan: input };
+  if (session.planAgent === 'board') {
+    if (session.config.agents.some((agent) => agent.name === 'board')) return { ok: true, plan: input };
+    return {
+      ok: false,
+      error: 'PLAN_POLICY',
+      reason: 'PLAN_OWNER_UNEXECUTABLE',
+      errors: ['PLAN_OWNER_UNEXECUTABLE: plan.owner.agent=board，但当前配置没有可执行 Agent；请配置 agents/defaultAgent 或显式 ctx.agent'],
+      created: [],
+    };
+  }
+  return {
+    ok: true,
+    plan: { ...plan, owner: { ...(owner as Record<string, unknown>), agent: session.planAgent } },
+  };
+}
+
 /** 工具描述首行 = 首要路由信号「何时用」；原始语义/约束保留在第二行。 */
 const when = (whenToUse: string, description: string): string => `何时用：${whenToUse}\n${description}`;
 
@@ -360,11 +398,13 @@ export const TASK_TOOLS: TaskTool[] = [
       const session = await openSession(ctx);
       try {
         if (input.plan !== undefined) {
+          const normalized = normalizePlanOwnerForSession(input.plan, session);
+          if (!normalized.ok) return normalized;
           return await submitTaskPlan({
-            plan: input.plan,
+            plan: normalized.plan,
             intent: requiredString(input, 'intent'),
             to: input.to,
-            caller: { device: session.device, agent: session.agent },
+            caller: { device: session.device, agent: session.planAgent },
             plans: planStoreOf(session),
             store: session.store,
           });

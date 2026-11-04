@@ -259,6 +259,43 @@ describe('CR-002 daemon 能力卡', () => {
     }
   });
 
+  it('P7：/app/capability-cards 对齐 plans/role：read-only 403 + payload 必须对象 400', async () => {
+    const badArray = await request('/app/capability-cards', { method: 'POST', body: [] });
+    expect(badArray.status).toBe(400);
+    expect(badArray.body.error).toBe('card body 必须为对象');
+    const badNull = await request('/app/capability-cards', { method: 'POST', body: null });
+    expect(badNull.status).toBe(400);
+    expect(badNull.body.error).toBe('card body 必须为对象');
+
+    const readonlyHome = await mkdtemp(join(tmpdir(), 'fleet-daemon-cards-readonly-'));
+    const readonlyServer = await startHttpServer({
+      home: readonlyHome,
+      app,
+      service,
+      config: { deviceId: 'device-A', sync: { namespaces: [] }, mcp: { http: { host: '127.0.0.1', port: 0, auth: 'none' } } },
+      buildServer: () => ({ connect: async () => undefined, close: async () => undefined }),
+      host: '127.0.0.1',
+      port: 0,
+      auth: 'none',
+      deviceId: 'device-A',
+      namespace: 'tasks',
+      writesEnabled: false,
+    });
+    try {
+      const readonlyBase = `http://127.0.0.1:${readonlyServer.port}`;
+      const res = await fetch(`${readonlyBase}/app/capability-cards`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ card: {} }),
+      });
+      expect(res.status).toBe(403);
+      expect((await res.json()).error).toBe('read_only');
+    } finally {
+      await readonlyServer.close().catch(() => undefined);
+      await rm(readonlyHome, { recursive: true, force: true });
+    }
+  });
+
   it('task_targets.cards 在 daemon 模式可用；旧 targets / 旧 task_submit 不变', async () => {
     const bHome = await mkdtemp(join(tmpdir(), 'fleet-daemon-cards-b-'));
     const masterB = await Mebular.generateUserMasterKey();

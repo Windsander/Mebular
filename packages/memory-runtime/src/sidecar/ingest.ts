@@ -46,6 +46,7 @@ import { heuristicCandidates } from './heuristic.js';
 import {
   LocalLayerError,
   type OutboxCommitted,
+  type OutboxFinalizeMarker,
   type OutboxItem,
   type OutboxReplayCompletion,
   type SidecarLocalLayer,
@@ -537,10 +538,10 @@ export class IngestService {
   private degraded = false;
   private lastError: IngestErrorView | null = null;
   private finalizeRetryTimer: ReturnType<typeof setTimeout> | null = null;
-  private finalizeRetryAttempts = 0;
   private finalizePending = 0;
   private finalizeExhausted = 0;
   private stopped = false;
+  private stopGeneration = 0;
 
   constructor(options: IngestServiceOptions) {
     this.config = options.config;
@@ -599,6 +600,7 @@ export class IngestService {
   /** 停止后台收口定时器；停止后不再调度或执行新的收口写入。 */
   stop(): void {
     this.stopped = true;
+    this.stopGeneration += 1;
     this.clearFinalizeRetryTimer();
   }
 
@@ -611,12 +613,16 @@ export class IngestService {
   /** 启动后调用：已有 outbox 视为仍需重放的降级状态。 */
   async init(): Promise<void> {
     this.stopped = false;
-    this.finalizeRetryAttempts = 0;
     await this.reconcileReplayFinalizations().catch(() => 0);
     const outbox = await this.local.outbox.stats();
     if (outbox.items > 0) {
       this.degraded = true;
-      this.lastError = nowView(this.now(), 'outbox_pending', '存在待重放的沉降请求');
+      const specificFinalizeError = this.lastError?.code === 'finalize_failed'
+        || this.lastError?.code === 'finalize_exhausted'
+        || this.lastError?.code === 'finalize_cleanup_failed';
+      if (!specificFinalizeError) {
+        this.lastError = nowView(this.now(), 'outbox_pending', '存在待重放的沉降请求');
+      }
     }
   }
 
@@ -1890,51 +1896,82 @@ export class IngestService {
     item: OutboxItem,
     outcome: OutboxReplayCompletion,
   ): Promise<void> {
-    if (this.stopped) return;
-    try {
-      await this.finalizeReplayedExtractionsUnlocked(item, outcome);
-      await this.local.outbox.markNeedsFinalize(item.id, false, {
+    const generation = this.stopGeneration;
+    if (this.stopped) {
+      const marker = await this.local.outbox.markNeedsFinalize(item.id, true, {
+        outcome,
         owner: item.replayLeaseOwner,
         item,
       }).catch(() => null);
-      this.finalizePending = Math.max(0, this.finalizePending - 1);
-      const remaining = await this.local.outbox.listNeedsFinalize().catch(() => null);
-      if (remaining) {
-        this.finalizePending = remaining.length;
-        this.finalizeExhausted = remaining.filter((entry) => entry.exhausted).length;
+      this.failed += 1;
+      this.degraded = true;
+      if (!this.lastError || isFinalizeError(this.lastError.code)) {
+        this.lastError = nowView(
+          this.now(),
+          marker?.exhausted ? 'finalize_exhausted' : 'finalize_failed',
+          '进程停止时保留待收口 marker',
+        );
       }
-      this.finalizeRetryAttempts = 0;
-      this.clearFinalizeRetryTimer();
-      if (this.lastError?.code === 'finalize_failed' || this.lastError?.code === 'finalize_exhausted') {
-        this.lastError = null;
+      await this.refreshFinalizeState();
+      return;
+    }
+    let cleanupFailed = false;
+    try {
+      await this.finalizeReplayedExtractionsUnlocked(item, outcome, generation);
+      const cleared = await this.local.outbox.clearFinalizeMarker(item.id, {
+        owner: item.replayLeaseOwner,
+      });
+      if (!cleared) {
+        cleanupFailed = true;
+        throw new Error('finalize_marker_cleanup_failed');
       }
-      if (this.finalizePending === 0) {
-        const outbox = await this.local.outbox.stats();
-        if (outbox.items === 0 && this.lastError === null) this.degraded = false;
-      }
+      await this.refreshFinalizeState();
     } catch {
       const marker = await this.local.outbox.markNeedsFinalize(item.id, true, {
         outcome,
         owner: item.replayLeaseOwner,
         item,
       }).catch(() => null);
-      this.finalizePending = Math.max(1, this.finalizePending);
-      this.finalizeExhausted = marker?.exhausted ? Math.max(1, this.finalizeExhausted) : this.finalizeExhausted;
       this.degraded = true;
       this.failed += 1;
       this.lastError = nowView(
         this.now(),
-        marker?.exhausted ? 'finalize_exhausted' : 'finalize_failed',
-        marker?.exhausted
-          ? 'extraction 收口多次失败，等待重启或维护扫描'
-          : 'extraction 收口失败，等待重试',
+        cleanupFailed
+          ? 'finalize_cleanup_failed'
+          : marker?.exhausted ? 'finalize_exhausted' : 'finalize_failed',
+        cleanupFailed
+          ? 'extraction 已收口但 marker 清理失败，保留重试'
+          : marker?.exhausted
+            ? 'extraction 收口多次失败，等待重启或维护扫描'
+            : 'extraction 收口失败，等待重试',
       );
-      if (marker?.exhausted) {
-        this.clearFinalizeRetryTimer();
-      } else {
-        this.scheduleFinalizeRetry();
-      }
+      await this.refreshFinalizeState();
     }
+  }
+
+  /** 每次失败/成功都重新扫描 marker，独立计算 pending/exhausted 与 timer。 */
+  private async refreshFinalizeState(): Promise<void> {
+    const pending = await this.local.outbox.listNeedsFinalize().catch(() => null);
+    if (!pending) return;
+    this.finalizePending = pending.length;
+    this.finalizeExhausted = pending.filter((entry) => entry.exhausted).length;
+    if (pending.length === 0) {
+      this.clearFinalizeRetryTimer();
+      if (this.lastError && isFinalizeError(this.lastError.code)) this.lastError = null;
+      const outbox = await this.local.outbox.stats().catch(() => null);
+      if (outbox?.items === 0 && this.lastError === null) this.degraded = false;
+      return;
+    }
+    this.degraded = true;
+    const exhausted = pending.every((entry) => entry.exhausted);
+    if (exhausted) {
+      this.clearFinalizeRetryTimer();
+      if (!this.lastError || this.lastError.code === 'finalize_failed') {
+        this.lastError = nowView(this.now(), 'finalize_exhausted', 'extraction 收口多次失败，等待维护扫描');
+      }
+      return;
+    }
+    this.scheduleFinalizeRetry(pending);
   }
 
   /** 重启/后台有界重试：读取持久化的 needsFinalize 项继续收口。 */
@@ -1944,11 +1981,7 @@ export class IngestService {
     this.finalizePending = pending.length;
     this.finalizeExhausted = pending.filter((entry) => entry.exhausted).length;
     if (pending.length === 0) {
-      this.clearFinalizeRetryTimer();
-      this.finalizeRetryAttempts = 0;
-      if (this.lastError?.code === 'finalize_failed' || this.lastError?.code === 'finalize_exhausted') {
-        this.lastError = null;
-      }
+      await this.refreshFinalizeState();
       return 0;
     }
     let finalized = 0;
@@ -1956,13 +1989,16 @@ export class IngestService {
       await this.finalizeReplayedOutbox(entry.item, entry.outcome);
       finalized += 1;
     }
+    await this.refreshFinalizeState();
     return finalized;
   }
 
-  private scheduleFinalizeRetry(): void {
-    if (this.stopped || this.finalizeRetryTimer || this.finalizeRetryAttempts >= 3) return;
-    this.finalizeRetryAttempts += 1;
-    const delay = Math.min(5_000, 100 * 2 ** (this.finalizeRetryAttempts - 1));
+  private scheduleFinalizeRetry(pending: readonly OutboxFinalizeMarker[]): void {
+    if (this.stopped || this.finalizeRetryTimer) return;
+    const retryable = pending.filter((entry) => !entry.exhausted);
+    if (retryable.length === 0) return;
+    const minAttempts = Math.min(...retryable.map((entry) => entry.attempts));
+    const delay = Math.min(5_000, 100 * 2 ** Math.max(0, Math.min(2, minAttempts - 1)));
     const timer = setTimeout(() => {
       this.finalizeRetryTimer = null;
       void this.reconcileReplayFinalizations().catch(() => undefined);
@@ -1980,6 +2016,7 @@ export class IngestService {
   private async finalizeReplayedExtractionsUnlocked(
     item: OutboxItem,
     outcome: OutboxReplayCompletion,
+    generation: number,
   ): Promise<void> {
     const extractionIds = item.meta?.extractionIds ?? [];
     if (extractionIds.length === 0) return;
@@ -2087,6 +2124,9 @@ export class IngestService {
           warning !== 'replay_dependency_pending' && warning !== 'replay_dead_dependency');
 
         const ttlMs = stored.expiresAt - this.now();
+        if (this.stopped || generation !== this.stopGeneration) {
+          throw new Error('finalize_interrupted_by_stop');
+        }
         if (ttlMs <= 0) {
           await this.local.cache.delete(key);
           continue;
@@ -2917,10 +2957,16 @@ export class IngestService {
   }
 }
 
+function isFinalizeError(code: string): boolean {
+  return code === 'finalize_failed'
+    || code === 'finalize_exhausted'
+    || code === 'finalize_cleanup_failed';
+}
+
 function hasPermanentDetailFailure(stored: StoredExtraction): boolean {
-  if (Array.isArray(stored.detailFailures)) {
-    return stored.detailFailures.some((failure) => failure.retryable === false);
-  }
+  const structuredPermanent = Array.isArray(stored.detailFailures)
+    && stored.detailFailures.some((failure) => failure.retryable === false);
+  if (structuredPermanent) return true;
   const temporaryCodes = new Set([
     'capability_unavailable',
     'timeout',
@@ -2928,10 +2974,6 @@ function hasPermanentDetailFailure(stored: StoredExtraction): boolean {
     'http_401',
     'http_408',
     'http_429',
-    'http_500',
-    'http_502',
-    'http_503',
-    'http_504',
     'capability_token_invalid',
     'detail_confirmation_failed',
     'detail_quota_exceeded',
@@ -2943,7 +2985,9 @@ function hasPermanentDetailFailure(stored: StoredExtraction): boolean {
     if (warning === 'detail_record_ids_exceeded') return true;
     const match = /^detail_write_failed:(.+)$/.exec(warning);
     if (!match) continue;
-    if (!temporaryCodes.has(match[1]!)) return true;
+    const code = match[1]!;
+    if (temporaryCodes.has(code) || /^http_5\d\d$/.test(code)) continue;
+    return true;
   }
   return false;
 }

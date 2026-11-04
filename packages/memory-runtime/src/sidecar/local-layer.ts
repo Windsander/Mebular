@@ -288,6 +288,26 @@ function mergeCommitted(
   };
 }
 
+function finalizeSnapshot(source: OutboxItem): OutboxItem {
+  return {
+    version: 1,
+    id: source.id,
+    requestId: source.requestId,
+    endpoint: source.endpoint,
+    method: source.method,
+    body: {},
+    createdAt: source.createdAt,
+    attempts: source.attempts,
+    lastAttemptAt: source.lastAttemptAt,
+    lastError: source.lastError,
+    ...(source.meta ? { meta: minimizeOutboxValue(source.meta) as OutboxItem['meta'] } : {}),
+    ...(source.committed
+      ? { committed: minimizeOutboxValue(source.committed) as OutboxItem['committed'] }
+      : {}),
+    ...(source.replayLeaseOwner ? { replayLeaseOwner: source.replayLeaseOwner } : {}),
+  };
+}
+
 function isOutboxItem(value: unknown): value is OutboxItem {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const item = value as Partial<OutboxItem>;
@@ -562,23 +582,7 @@ export class BoundedOutbox {
 
       const existing = await readJsonFile<StoredFinalizeMarker>(markerPath);
       const attempts = (typeof existing?.attempts === 'number' ? existing.attempts : 0) + 1;
-      const safeItem: OutboxItem = {
-        version: 1,
-        id: source.id,
-        requestId: source.requestId,
-        endpoint: source.endpoint,
-        method: source.method,
-        body: {},
-        createdAt: source.createdAt,
-        attempts: source.attempts,
-        lastAttemptAt: source.lastAttemptAt,
-        lastError: source.lastError,
-        ...(source.meta ? { meta: minimizeOutboxValue(source.meta) as OutboxItem['meta'] } : {}),
-        ...(source.committed
-          ? { committed: minimizeOutboxValue(source.committed) as OutboxItem['committed'] }
-          : {}),
-        ...(source.replayLeaseOwner ? { replayLeaseOwner: source.replayLeaseOwner } : {}),
-      };
+      const safeItem = finalizeSnapshot(source);
       const marker: StoredFinalizeMarker = {
         version: 1,
         id,
@@ -604,6 +608,52 @@ export class BoundedOutbox {
         exhausted: attempts >= 3,
       };
     });
+  }
+
+  /** 原子/可验证清除收口 marker；任一步失败返回 false，调用方必须保留失败状态。 */
+  async clearFinalizeMarker(
+    id: string,
+    { owner }: { owner?: string } = {},
+  ): Promise<boolean> {
+    return this.exclusive(async () => {
+      try {
+        await rm(this.finalizePathFor(id), { force: true });
+      } catch {
+        return false;
+      }
+      for (const path of [this.pathFor(id), this.deadPathFor(id)]) {
+        const current = await readJsonFile<OutboxItem>(path);
+        if (!isOutboxItem(current)) continue;
+        if (owner !== undefined && current.replayLeaseOwner !== undefined
+          && current.replayLeaseOwner !== owner) return false;
+        const meta = { ...(current.meta ?? {}) };
+        delete meta.needsFinalize;
+        delete meta.finalizeOutcome;
+        try {
+          await writeJsonAtomic(path, { ...current, meta });
+        } catch {
+          return false;
+        }
+      }
+      return true;
+    });
+  }
+
+  /** dead 转移前先落独立 marker；之后即使进程停止/退出也仍可被发现。 */
+  private async ensureFinalizeMarkerUnlocked(item: OutboxItem, outcome: OutboxReplayCompletion): Promise<void> {
+    if (!item.meta?.extractionIds || item.meta.extractionIds.length === 0) return;
+    const markerPath = this.finalizePathFor(item.id);
+    const existing = await readJsonFile<StoredFinalizeMarker>(markerPath);
+    if (existing) return;
+    const marker: StoredFinalizeMarker = {
+      version: 1,
+      id: item.id,
+      outcome,
+      attempts: 1,
+      at: this.now(),
+      item: finalizeSnapshot(item),
+    };
+    await writeJsonAtomic(markerPath, marker);
   }
 
   /** 重启/后台重试读取所有待收口项；独立 marker 优先于 active/dead 上的旧标记。 */
@@ -748,6 +798,7 @@ export class BoundedOutbox {
 
   private async deadLetterUnlocked(item: OutboxItem, errorCode: string): Promise<boolean> {
     const path = this.pathFor(item.id);
+    await this.ensureFinalizeMarkerUnlocked(item, 'dead');
     const dead: OutboxItem & { deadAt: number; error: string } = {
       ...item,
       body: minimizeOutboxValue(item.body),

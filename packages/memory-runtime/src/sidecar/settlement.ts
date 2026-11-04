@@ -258,9 +258,10 @@ export class SettlementRuntime {
   }
 
   async stop(): Promise<void> {
-    this.ingest.stop();
     this.local.stopMaintenance();
+    // 先让 replayer 在 finalize 仍可用时完成有界 flush，再关闭收口入口。
     await this.replayer.stop({ flushMs: 2000 });
+    this.ingest.stop();
   }
 
   get degraded(): boolean {

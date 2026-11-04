@@ -10,6 +10,7 @@ import { defaultSidecarPolicy } from '../../src/sidecar/domains.js';
 import { IngestService } from '../../src/sidecar/ingest.js';
 import { SidecarLocalLayer } from '../../src/sidecar/local-layer.js';
 import { OutboxReplayer } from '../../src/sidecar/outbox-replayer.js';
+import { SettlementRuntime } from '../../src/sidecar/settlement.js';
 import { sha256Hex } from '../../src/runtime/local-store.js';
 import { startFakeCapability, type FakeCapabilityServer } from './fake-capability.js';
 
@@ -2908,6 +2909,360 @@ describe('IngestService settlements', () => {
     await new Promise((resolve) => setTimeout(resolve, 150));
     expect(await local.outbox.listNeedsFinalize()).toHaveLength(1);
     expect((await service.getExtraction(extractionId))?.status).toBe('pending');
+  });
+
+  it('SettlementRuntime.stop 先 flush replayer，pending success 收口后重启仍 completed', async () => {
+    const { home, client, fake, local } = await setup();
+    const runtime = new SettlementRuntime({
+      config: defaultSidecarConfig(),
+      local,
+      client,
+      identity: { cloudId: 'cl_test', profileId: 'default', hostId: 'h_test' },
+      policy: defaultSidecarPolicy(),
+      autoStartReplayer: false,
+    });
+    await runtime.init();
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const queued = await runtime.handleIngest({
+      requestId: 'req_runtime_stop_flush',
+      agentId: 'opencode',
+      threadId: 'th_runtime_stop_flush',
+      extractor: 'host',
+      chunks: [],
+      candidates: [{ kind: 'observation', content: { content: 'runtime stop flush' } }],
+    });
+    const extractionId = queued.data.extraction.id;
+    fake.setFailure(null);
+
+    await runtime.stop();
+    expect((await runtime.ingest.getExtraction(extractionId))?.status).toBe('completed');
+    expect(await local.outbox.listNeedsFinalize()).toHaveLength(0);
+
+    const restartedLocal = new SidecarLocalLayer({ root: join(home, 'memory-runtime') });
+    await restartedLocal.init();
+    const restartedClient = new CapabilityClient({
+      baseUrl: fake.baseUrl,
+      token: 'cap-token',
+      retries: 0,
+      retryDelayMs: 0,
+    });
+    const restarted = new IngestService({
+      config: defaultSidecarConfig(),
+      local: restartedLocal,
+      client: restartedClient,
+      identity: { cloudId: 'cl_test', profileId: 'default', hostId: 'h_test' },
+      policy: defaultSidecarPolicy(),
+    });
+    await restarted.init();
+    expect((await restarted.getExtraction(extractionId))?.status).toBe('completed');
+  });
+
+  it('stop 发生在 finalize cache 写入前时保留 marker，重启可恢复', async () => {
+    const { home, service, fake, local } = await setup();
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const queued = await service.ingest({
+      requestId: 'req_stop_race_finalize',
+      agentId: 'opencode',
+      threadId: 'th_stop_race_finalize',
+      extractor: 'host',
+      chunks: [],
+      candidates: [{ kind: 'observation', content: { content: 'stop race finalize' } }],
+    });
+    const extractionId = queued.data.extraction.id;
+    const item = (await local.outbox.list())[0]!;
+    const originalGet = local.cache.get.bind(local.cache);
+    let markReading!: () => void;
+    const reading = new Promise<void>((resolve) => { markReading = resolve; });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    jest.spyOn(local.cache, 'get').mockImplementationOnce(async (...args: any[]) => {
+      markReading();
+      await gate;
+      return (originalGet as any)(...args);
+    });
+    const finalize = service.finalizeReplayedOutbox(item, 'dead');
+    await reading;
+    service.stop();
+    release();
+    await finalize;
+
+    expect(await local.outbox.listNeedsFinalize()).toHaveLength(1);
+    expect((await service.getExtraction(extractionId))?.status).toBe('pending');
+    jest.restoreAllMocks();
+
+    const restartedLocal = new SidecarLocalLayer({ root: join(home, 'memory-runtime') });
+    await restartedLocal.init();
+    const restartedClient = new CapabilityClient({
+      baseUrl: fake.baseUrl,
+      token: 'cap-token',
+      retries: 0,
+      retryDelayMs: 0,
+    });
+    const restarted = new IngestService({
+      config: defaultSidecarConfig(),
+      local: restartedLocal,
+      client: restartedClient,
+      identity: { cloudId: 'cl_test', profileId: 'default', hostId: 'h_test' },
+      policy: defaultSidecarPolicy(),
+    });
+    await restarted.init();
+    expect((await restarted.getExtraction(extractionId))?.status).toBe('failed');
+    expect(await restartedLocal.outbox.listNeedsFinalize()).toHaveLength(0);
+  });
+
+  it('stop 后 cleanup/dead 转移仍先持久 marker，重启可收口', async () => {
+    let clock = Date.UTC(2026, 0, 1);
+    const { home, service, fake, local } = await setup(defaultSidecarPolicy(), {
+      now: () => clock,
+      extractionTtlMs: 40 * 24 * 60 * 60 * 1000,
+    });
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const queued = await service.ingest({
+      requestId: 'req_stop_cleanup_marker',
+      agentId: 'opencode',
+      threadId: 'th_stop_cleanup_marker',
+      extractor: 'host',
+      chunks: [],
+      candidates: [{ kind: 'observation', content: { content: 'stop cleanup marker' } }],
+    });
+    const extractionId = queued.data.extraction.id;
+    service.stop();
+    clock += 31 * 24 * 60 * 60 * 1000;
+    await local.cleanup(clock);
+    expect(await local.outbox.deadCount()).toBe(1);
+    expect(await local.outbox.listNeedsFinalize()).toHaveLength(1);
+
+    const restartedLocal = new SidecarLocalLayer({
+      root: join(home, 'memory-runtime'),
+      now: () => clock,
+    });
+    await restartedLocal.init();
+    const restartedClient = new CapabilityClient({
+      baseUrl: fake.baseUrl,
+      token: 'cap-token',
+      retries: 0,
+      retryDelayMs: 0,
+    });
+    const restarted = new IngestService({
+      config: defaultSidecarConfig(),
+      local: restartedLocal,
+      client: restartedClient,
+      identity: { cloudId: 'cl_test', profileId: 'default', hostId: 'h_test' },
+      policy: defaultSidecarPolicy(),
+      now: () => clock,
+      extractionTtlMs: 40 * 24 * 60 * 60 * 1000,
+    });
+    await restarted.init();
+    expect((await restarted.getExtraction(extractionId))?.status).toBe('failed');
+  });
+
+  it('marker 清理失败时保留 marker/timer/error，修复后才清状态', async () => {
+    const { home, service, fake, local } = await setup();
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    await service.ingest({
+      requestId: 'req_marker_cleanup_failure',
+      agentId: 'opencode',
+      threadId: 'th_marker_cleanup_failure',
+      extractor: 'host',
+      chunks: [],
+      candidates: [{ kind: 'observation', content: { content: 'marker cleanup failure' } }],
+    });
+    const item = (await local.outbox.list())[0]!;
+    jest.spyOn(local.cache, 'set').mockRejectedValueOnce(new Error('EIO'));
+    await service.finalizeReplayedOutbox(item, 'dead');
+    jest.restoreAllMocks();
+    service.stop();
+
+    const restartedLocal = new SidecarLocalLayer({ root: join(home, 'memory-runtime') });
+    await restartedLocal.init();
+    const restartedClient = new CapabilityClient({
+      baseUrl: fake.baseUrl,
+      token: 'cap-token',
+      retries: 0,
+      retryDelayMs: 0,
+    });
+    const restarted = new IngestService({
+      config: defaultSidecarConfig(),
+      local: restartedLocal,
+      client: restartedClient,
+      identity: { cloudId: 'cl_test', profileId: 'default', hostId: 'h_test' },
+      policy: defaultSidecarPolicy(),
+    });
+    const clearSpy = jest.spyOn(restartedLocal.outbox, 'clearFinalizeMarker')
+      .mockResolvedValue(false);
+    await restarted.reconcileReplayFinalizations();
+    expect(restarted.lastErrorView?.code).toBe('finalize_cleanup_failed');
+    expect(restarted.reconciliationStatus()).toMatchObject({ pending: 1, timerActive: true });
+    expect(await restartedLocal.outbox.listNeedsFinalize()).toHaveLength(1);
+
+    clearSpy.mockRestore();
+    await restarted.reconcileReplayFinalizations();
+    expect(restarted.lastErrorView).toBeNull();
+    expect(restarted.reconciliationStatus()).toMatchObject({
+      pending: 0,
+      exhausted: 0,
+      timerActive: false,
+    });
+    expect(await restartedLocal.outbox.listNeedsFinalize()).toHaveLength(0);
+  });
+
+  it('legacy warning 兼容：http_5xx 视为暂时、validation 仍永久', async () => {
+    for (const warning of ['detail_write_failed:http_501', 'detail_write_failed:http_505', 'detail_write_failed:http_520']) {
+      const { service, fake, local } = await setup();
+      fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+      const queued = await service.ingest({
+        requestId: `req_legacy_${warning.split(':')[1]}`,
+        agentId: 'opencode',
+        threadId: `th_legacy_${warning.split(':')[1]}`,
+        extractor: 'host',
+        chunks: [],
+        candidates: [{ kind: 'observation', content: { content: `legacy ${warning}` } }],
+      });
+      const extractionId = queued.data.extraction.id;
+      const cacheKey = `extraction:v1:${extractionId}`;
+      const stored = await local.cache.get<any>(cacheKey);
+      delete stored.detailFailures;
+      stored.warnings = [...stored.warnings, warning];
+      await local.cache.set(cacheKey, stored, { ttlMs: 60_000 });
+      fake.setFailure(null);
+      const summary = await new OutboxReplayer({
+        outbox: local.outbox,
+        client: (service as any).client,
+        onSettled: (item, data) => service.applyReplayedOutbox(item, data),
+        onComplete: (item, outcome) => service.finalizeReplayedOutbox(item, outcome),
+      }).replayOnce();
+      expect(summary.remaining).toBe(0);
+      expect((await service.getExtraction(extractionId))?.status).toBe('completed');
+    }
+
+    const { service, fake, local } = await setup();
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const queued = await service.ingest({
+      requestId: 'req_legacy_validation',
+      agentId: 'opencode',
+      threadId: 'th_legacy_validation',
+      extractor: 'host',
+      chunks: [],
+      candidates: [{ kind: 'observation', content: { content: 'legacy validation' } }],
+    });
+    const extractionId = queued.data.extraction.id;
+    const cacheKey = `extraction:v1:${extractionId}`;
+    const stored = await local.cache.get<any>(cacheKey);
+    delete stored.detailFailures;
+    stored.warnings = [...stored.warnings, 'detail_write_failed:validation_failed'];
+    await local.cache.set(cacheKey, stored, { ttlMs: 60_000 });
+    fake.setFailure(null);
+    await new OutboxReplayer({
+      outbox: local.outbox,
+      client: (service as any).client,
+      onSettled: (item, data) => service.applyReplayedOutbox(item, data),
+      onComplete: (item, outcome) => service.finalizeReplayedOutbox(item, outcome),
+    }).replayOnce();
+    expect((await service.getExtraction(extractionId))?.status).toBe('failed');
+  });
+
+  it('多个 marker 独立预算：一个 exhausted 不压制另一个的重试 timer', async () => {
+    const { service, fake, local } = await setup();
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const first = await service.ingest({
+      requestId: 'req_multi_marker_first',
+      agentId: 'opencode',
+      threadId: 'th_multi_marker_first',
+      extractor: 'host',
+      chunks: [],
+      candidates: [{ kind: 'observation', content: { content: 'multi marker first' } }],
+    });
+    const second = await service.ingest({
+      requestId: 'req_multi_marker_second',
+      agentId: 'opencode',
+      threadId: 'th_multi_marker_second',
+      extractor: 'host',
+      chunks: [],
+      candidates: [{ kind: 'observation', content: { content: 'multi marker second' } }],
+    });
+    const items = await local.outbox.list();
+    const firstItem = items.find((item) => item.meta?.extractionIds?.includes(first.data.extraction.id))!;
+    const secondItem = items.find((item) => item.meta?.extractionIds?.includes(second.data.extraction.id))!;
+    const firstKey = `extraction:v1:${first.data.extraction.id}`;
+    const secondKey = `extraction:v1:${second.data.extraction.id}`;
+    const realSet = local.cache.set.bind(local.cache);
+    let failFirst = true;
+    let failSecondOnce = true;
+    jest.spyOn(local.cache, 'set').mockImplementation(async (...args: any[]) => {
+      const key = args[0];
+      if (key === firstKey && failFirst) throw new Error('EIO-first');
+      if (key === secondKey && failSecondOnce) {
+        failSecondOnce = false;
+        throw new Error('EIO-second');
+      }
+      return (realSet as any)(...args);
+    });
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await service.finalizeReplayedOutbox(firstItem, 'dead');
+    }
+    await service.finalizeReplayedOutbox(secondItem, 'dead');
+    expect(service.reconciliationStatus()).toMatchObject({
+      pending: 2,
+      exhausted: 1,
+      timerActive: true,
+    });
+
+    failFirst = false;
+    jest.restoreAllMocks();
+    await service.reconcileReplayFinalizations();
+    expect(service.reconciliationStatus()).toMatchObject({
+      pending: 0,
+      exhausted: 0,
+      timerActive: false,
+    });
+    expect(await local.outbox.listNeedsFinalize()).toHaveLength(0);
+  });
+
+  it('init 不覆盖 finalize_exhausted，恢复后清理 degraded 与 lastError', async () => {
+    const { home, service, fake, local } = await setup();
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const queued = await service.ingest({
+      requestId: 'req_init_priority_exhausted',
+      agentId: 'opencode',
+      threadId: 'th_init_priority_exhausted',
+      extractor: 'host',
+      chunks: [],
+      candidates: [{ kind: 'observation', content: { content: 'init priority exhausted' } }],
+    });
+    const extractionId = queued.data.extraction.id;
+    const item = (await local.outbox.list())[0]!;
+    await local.outbox.completeReplay(item.id, { outcome: 'dead', error: 'retention_expired' });
+    const deadItem = (await local.outbox.getDead(item.id))!;
+    jest.spyOn(local.cache, 'set').mockRejectedValue(new Error('EIO'));
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await service.finalizeReplayedOutbox(deadItem, 'dead');
+    }
+    expect(service.lastErrorView?.code).toBe('finalize_exhausted');
+    service.stop();
+
+    const restartedLocal = new SidecarLocalLayer({ root: join(home, 'memory-runtime') });
+    await restartedLocal.init();
+    const restartedClient = new CapabilityClient({
+      baseUrl: fake.baseUrl,
+      token: 'cap-token',
+      retries: 0,
+      retryDelayMs: 0,
+    });
+    const restarted = new IngestService({
+      config: defaultSidecarConfig(),
+      local: restartedLocal,
+      client: restartedClient,
+      identity: { cloudId: 'cl_test', profileId: 'default', hostId: 'h_test' },
+      policy: defaultSidecarPolicy(),
+    });
+    const failingSet = jest.spyOn(restartedLocal.cache, 'set').mockRejectedValue(new Error('EIO'));
+    await restarted.init();
+    expect(restarted.lastErrorView?.code).toBe('finalize_exhausted');
+    failingSet.mockRestore();
+    await restarted.reconcileReplayFinalizations();
+    expect((await restarted.getExtraction(extractionId))?.status).toBe('failed');
+    expect(restarted.lastErrorView).toBeNull();
+    expect(restarted.stats()).toMatchObject({ degraded: false, finalizePending: 0, finalizeExhausted: 0 });
   });
 
   it('Detail outbox 满时显式 503，不把失败吞成已完成', async () => {

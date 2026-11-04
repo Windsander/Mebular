@@ -692,6 +692,7 @@ describe('MemoryRuntimeSupervisor：生命周期', () => {
     expect(restarted.state).not.toBe('failed');
     expect(restarted.error?.code).not.toBe('sidecar_starting');
     expect(restarted).toMatchObject({ state: 'stopped', reason: 'disabled' });
+    expect(await supervisor.status()).toMatchObject({ state: 'stopped', reason: 'disabled' });
   }, 15000);
 
   it('starting/degraded 健康态不得被 acceptDormant 放行停止', async () => {
@@ -729,6 +730,58 @@ describe('MemoryRuntimeSupervisor：生命周期', () => {
     expect(stopped).toMatchObject({ state: 'degraded', error: { code: 'stop_incomplete' } });
     expect(pidAlive(unrelated.pid)).toBe(true);
   }, 10000);
+
+  it('discovery 刚删除且 sidecar 仍 immersive 时 stop(false) 必须 incomplete', async () => {
+    const home = await tempDir();
+    await writeCapabilityToken(home);
+    const external = spawn(process.execPath, [FAKE, 'serve'], {
+      env: { ...process.env, ...envFor(home, { FAKE_SIDECAR_HEARTBEAT_MS: '5000' }) },
+      stdio: 'ignore',
+    });
+    cleanups.push(async () => {
+      if (pidAlive(external.pid)) process.kill(external.pid, 'SIGTERM');
+    });
+    await waitFor(() => existsSync(join(home, 'memory-runtime.json')));
+    const discovery = JSON.parse(await readFile(join(home, 'memory-runtime.json'), 'utf-8'));
+    const supervisor = new MemoryRuntimeSupervisor({
+      home,
+      config: enabledConfig(),
+      env: envFor(home),
+      profileId: () => 'default',
+    });
+    expect(await supervisor.start()).toMatchObject({ state: 'ready', attached: true });
+    await rm(join(home, 'memory-runtime.json'), { force: true });
+    // sidecar heartbeat 5s：立即 stop 时它仍是 immersive/ready。
+    const stopped = await supervisor.stop({ includeAttached: false, timeoutMs: 300 });
+    expect(stopped).toMatchObject({ state: 'degraded', error: { code: 'disable_incomplete' } });
+    expect(pidAlive(discovery.pid)).toBe(true);
+  }, 15000);
+
+  it('discovery 刚删除且 sidecar 仍 immersive 时显式 stop(true) 仍可验证并停止', async () => {
+    const home = await tempDir();
+    await writeCapabilityToken(home);
+    const external = spawn(process.execPath, [FAKE, 'serve'], {
+      env: { ...process.env, ...envFor(home, { FAKE_SIDECAR_HEARTBEAT_MS: '5000' }) },
+      stdio: 'ignore',
+    });
+    cleanups.push(async () => {
+      if (pidAlive(external.pid)) process.kill(external.pid, 'SIGTERM');
+    });
+    await waitFor(() => existsSync(join(home, 'memory-runtime.json')));
+    const discovery = JSON.parse(await readFile(join(home, 'memory-runtime.json'), 'utf-8'));
+    const supervisor = new MemoryRuntimeSupervisor({
+      home,
+      config: enabledConfig(),
+      env: envFor(home),
+      profileId: () => 'default',
+    });
+    expect(await supervisor.start()).toMatchObject({ state: 'ready', attached: true });
+    await rm(join(home, 'memory-runtime.json'), { force: true });
+    const stopped = await supervisor.stop({ includeAttached: true, timeoutMs: 1000 });
+    expect(stopped).toMatchObject({ state: 'stopped', error: null });
+    expect(pidAlive(discovery.pid)).toBe(false);
+    expect(existsSync(join(home, 'memory-runtime', 'start.lock'))).toBe(false);
+  }, 15000);
 
   it('profile / home 不匹配：拒绝接管且不 spawn', async () => {
     const home = await tempDir();

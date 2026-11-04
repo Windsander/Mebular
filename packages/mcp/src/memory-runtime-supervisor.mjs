@@ -549,6 +549,7 @@ export class MemoryRuntimeSupervisor {
     this.childToken = null;
     this.childSecrets = [];
     this.managedInstance = null;
+    this.dormantLock = null;
     this.startPromise = null;
     this.restartTimer = null;
     this.cooldownTimer = null;
@@ -649,7 +650,7 @@ export class MemoryRuntimeSupervisor {
     return body.mode === discovery.mode || (allowDormant && body.mode === 'mcp');
   }
 
-  async #fetchHealth(discovery, { acceptDormant = false } = {}) {
+  async #fetchHealth(discovery, { acceptDormant = false, acceptNonReady = false } = {}) {
     if (!this.fetchImpl || typeof discovery?.healthUrl !== 'string') return { ok: false };
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), Math.max(1, this.healthTimeoutMs));
@@ -665,7 +666,7 @@ export class MemoryRuntimeSupervisor {
       const ready = body?.ready !== false;
       const dormant = acceptDormant && body?.mode === 'mcp' && body?.state === 'stopped';
       return {
-        ok: body?.ok !== false && (ready || dormant),
+        ok: body?.ok !== false && (ready || dormant || acceptNonReady),
         degraded: body?.degraded === true || body?.state === 'degraded',
         body,
       };
@@ -710,9 +711,9 @@ export class MemoryRuntimeSupervisor {
       capabilityApiVersion: CAPABILITY_API_VERSION,
       minMcpVersion: '0.3.0',
       maxMcpVersion: '0.3.x',
-      state: 'stopped',
-      mode: 'mcp',
-      degraded: true,
+      state: 'ready',
+      mode: 'immersive',
+      degraded: false,
       startedAt: lock.startedAt,
       updatedAt: this.now(),
       capabilities: {},
@@ -748,6 +749,32 @@ export class MemoryRuntimeSupervisor {
     await this.#readLockView();
     const discovery = await readDiscovery(this.paths.discoveryPath);
     if (!discovery) {
+      if (this.dormantLock) {
+        const lock = await readLock(this.paths.lockPath);
+        const credential = await this.#capabilityFingerprint();
+        if (!lock
+          || lock.pid !== this.dormantLock.pid
+          || lock.startedAt !== this.dormantLock.startedAt
+          || !pidAlive(lock.pid)
+          || credential !== this.dormantLock.credential) {
+          this.dormantLock = null;
+        } else {
+          this.#setState({
+            state: 'stopped',
+            available: false,
+            degraded: false,
+            managed: false,
+            attached: false,
+            pid: lock.pid,
+            url: null,
+            healthUrl: null,
+            reason: 'disabled',
+            error: null,
+            lock: this.lockView,
+          });
+          return false;
+        }
+      }
       if (this.child && this.child.exitCode === null) {
         const state = this.readySeen ? 'degraded' : 'starting';
         this.#setState({
@@ -1458,7 +1485,7 @@ export class MemoryRuntimeSupervisor {
    * 显式 stop 前的实例校验：与 attach 使用同一套 freshness/URL/home/profile/version、
    * health 身份和 token 鉴权的 /status 校验；任何一项无法确认都不得发送信号。
    */
-  async #verifyLiveInstance(discovery, { requireDiscovery = true } = {}) {
+  async #verifyLiveInstance(discovery, { requireDiscovery = true, allowNonReady = false } = {}) {
     if (!discovery || !Number.isInteger(discovery.pid) || !pidAlive(discovery.pid)) return false;
     if (this.#homeMismatch(discovery) || this.#profileMismatch(discovery) || this.#versionMismatch(discovery)) {
       return false;
@@ -1466,14 +1493,18 @@ export class MemoryRuntimeSupervisor {
     if (!validDiscoveryUrls(discovery)) return false;
     const age = this.now() - discovery.updatedAt;
     if (!Number.isFinite(age) || age < -1000 || age > MEMORY_RUNTIME_DISCOVERY_STALE_MS) return false;
-    const health = await this.#fetchHealth(discovery, { acceptDormant: true });
+    const health = await this.#fetchHealth(discovery, {
+      acceptDormant: true,
+      acceptNonReady: allowNonReady,
+    });
     if (!health.ok || !this.#healthIdentityMatches(discovery, health.body, { allowDormant: true })) {
       return false;
     }
     // 需要 host token 的 /status：确认 pid（以及新实例提供的 startedAt）仍属于同一实例。
     const observed = await this.#readSidecarMode(discovery);
     if (!observed) return false;
-    if (health.body?.ready === false
+    if (!allowNonReady
+      && health.body?.ready === false
       && !(observed.mode === 'mcp' && observed.state === 'stopped')) {
       return false;
     }
@@ -2120,6 +2151,11 @@ export class MemoryRuntimeSupervisor {
             error: null,
             lock: this.lockView,
           });
+          this.dormantLock = {
+            pid: lock.pid,
+            startedAt: lock.startedAt,
+            credential: await this.#capabilityFingerprint(),
+          };
           return this.snapshot();
         }
       }
@@ -2299,7 +2335,10 @@ export class MemoryRuntimeSupervisor {
             // 不重建 discovery，也不对不可验证的复用 PID 发信号。
             const candidate = this.#discoveryFromLock(lock);
             const verifiedFromLock = candidate
-              && await this.#verifyLiveInstance(candidate, { requireDiscovery: false });
+              && await this.#verifyLiveInstance(candidate, {
+                requireDiscovery: false,
+                allowNonReady: true,
+              });
             if (!verifiedFromLock) {
               clean = false;
             } else {
@@ -2371,6 +2410,34 @@ export class MemoryRuntimeSupervisor {
         ? capabilityAfter !== null
         : capabilityAfter === capabilityBefore;
       if (credentialUnchanged) clean = false;
+    } else {
+      // discovery 缺失时仍可能存活 manual/attached 实例：从 start.lock 验证 identity/token/status。
+      const lock = await this.#readLockView();
+      if (lock && lock.command === 'serve' && !pidAlive(lock.pid)) {
+        await unlink(this.paths.lockPath).catch(() => {
+          clean = false;
+        });
+      } else if (lock && lock.command === 'serve' && pidAlive(lock.pid)) {
+        const capabilityBefore = await this.#capabilityFingerprint();
+        const candidate = this.#discoveryFromLock(lock);
+        const verified = candidate
+          && await this.#verifyLiveInstance(candidate, { requireDiscovery: false });
+        if (!verified) {
+          clean = false;
+        } else {
+          const observed = await this.#readSidecarMode(candidate);
+          if (!(observed?.mode === 'mcp' && observed.state === 'stopped')) {
+            // 仍然 immersive/starting/degraded：没有确认 dormant，不能 clean。
+            clean = false;
+          } else {
+            const capabilityAfter = await this.#capabilityFingerprint();
+            const credentialUnchanged = capabilityBefore === null
+              ? capabilityAfter !== null
+              : capabilityAfter === capabilityBefore;
+            if (credentialUnchanged) clean = false;
+          }
+        }
+      }
     }
 
     if (clean) {

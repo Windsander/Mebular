@@ -203,6 +203,32 @@ describe('serve + Memory Runtime supervisor', () => {
     servers.splice(servers.indexOf(server), 1);
   }, 15000);
 
+  it('跨进程配置锁：外部持锁时 PATCH 返回 config_busy，不写配置', async () => {
+    const previousTimeout = process.env.MEBULAR_CONFIG_LOCK_TIMEOUT_MS;
+    process.env.MEBULAR_CONFIG_LOCK_TIMEOUT_MS = '100';
+    try {
+      const { home, base } = await start({ enabled: false });
+      const lockPath = join(home, 'config.json.write-lock');
+      await writeFile(lockPath, JSON.stringify({ pid: 999999, at: Date.now() }), 'utf-8');
+      const consoleResponse = await fetch(`${base}/console/`);
+      const csrf = consoleResponse.headers.get('x-mebular-csrf');
+      const cookie = consoleResponse.headers.get('set-cookie')?.split(';')[0];
+      const response = await fetch(`${base}/admin/api/config`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-mebular-csrf': csrf, cookie },
+        body: JSON.stringify({ patch: { 'memoryRuntime.enabled': true } }),
+      });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ ok: false, error: 'config_busy' });
+      const raw = await readFile(join(home, 'config.json'), 'utf-8').catch(() => null);
+      expect(raw).toBeNull();
+      await rm(lockPath, { force: true });
+    } finally {
+      if (previousTimeout === undefined) delete process.env.MEBULAR_CONFIG_LOCK_TIMEOUT_MS;
+      else process.env.MEBULAR_CONFIG_LOCK_TIMEOUT_MS = previousTimeout;
+    }
+  }, 15000);
+
   it('enabled：异步启动 sidecar，overview 只读展示且不泄漏 token；关闭时停止', async () => {
     const { home, server, base } = await start({ enabled: true });
     const ready = await waitFor(async () => {

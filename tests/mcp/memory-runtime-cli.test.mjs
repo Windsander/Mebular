@@ -233,17 +233,16 @@ describe('mebular memory-runtime CLI', () => {
     expect(pidAlive(second.pid)).toBe(false);
   }, 45000);
 
-  it('discovery 缺失的 dormant manual sidecar 仍可由 restart/stop 通过 start.lock 停止', async () => {
+  it('discovery 刚删除且 sidecar 仍 immersive 时 CLI restart/stop 仍可通过 start.lock 停止', async () => {
     const home = await tempDir();
     await writeConfig(home, { enabled: true, command: FAKE, startTimeoutMs: 3000 });
     await writeCapabilityToken(home);
-    const env = envFor(home);
+    const env = envFor(home, { FAKE_SIDECAR_HEARTBEAT_MS: '5000' });
     const started = runCli(env, 'start');
     expect(started.status).toBe(0);
     const first = parse(started);
     pids.push(first.pid);
     await rm(join(home, 'memory-runtime.json'), { force: true });
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
 
     const restarted = runCli(env, 'restart');
     expect(restarted.status).toBe(0);
@@ -255,7 +254,6 @@ describe('mebular memory-runtime CLI', () => {
     expect(secondDiscovery.pid).toBe(second.pid);
 
     await rm(join(home, 'memory-runtime.json'), { force: true });
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
     const stopped = runCli(env, 'stop');
     expect(stopped.status).toBe(0);
     expect(parse(stopped)).toMatchObject({ ok: true, action: 'stop', state: 'stopped' });

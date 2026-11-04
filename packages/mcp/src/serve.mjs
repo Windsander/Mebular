@@ -8,7 +8,7 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
-import { chmod, copyFile, mkdir, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, open, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import https from 'node:https';
 import { dirname, join, sep } from 'node:path';
@@ -1026,6 +1026,26 @@ export async function startHttpServer({
   let lifecycleClosing = false;
   let capabilityDrain = null;
   let configWriteQueue = Promise.resolve();
+  const acquireConfigFileLock = async (cfgFile) => {
+    const lockPath = `${cfgFile}.write-lock`;
+    const configured = Number(process.env.MEBULAR_CONFIG_LOCK_TIMEOUT_MS ?? '');
+    const timeoutMs = Number.isFinite(configured) && configured >= 0 ? configured : 5000;
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      try {
+        const handle = await open(lockPath, 'wx', 0o600);
+        await handle.writeFile(JSON.stringify({ pid: process.pid, at: Date.now() }), 'utf-8').catch(() => undefined);
+        return async () => {
+          await handle.close().catch(() => undefined);
+          await unlink(lockPath).catch(() => undefined);
+        };
+      } catch (error) {
+        if (error?.code !== 'EEXIST') throw error;
+        if (Date.now() >= deadline) return null;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    }
+  };
   const enqueueMemoryRuntimeLifecycle = (operation) => {
     if (lifecycleClosing) {
       const error = new Error('MCP 正在关闭：拒绝新的 Memory Runtime 生命周期操作');
@@ -3222,10 +3242,20 @@ export async function startHttpServer({
           message: 'MCP 正在关闭：不再接受配置写入或新的生命周期操作',
         });
       }
+      const cfgFile = configPath(home);
       const previousConfigWrite = configWriteQueue;
       let releaseConfigWrite;
       configWriteQueue = new Promise((resolveWrite) => { releaseConfigWrite = resolveWrite; });
       await previousConfigWrite;
+      const releaseConfigFileLock = await acquireConfigFileLock(cfgFile);
+      if (!releaseConfigFileLock) {
+        releaseConfigWrite();
+        return sendJson(res, 409, {
+          ok: false,
+          error: 'config_busy',
+          message: '配置正在被其他进程写入，请稍后重试',
+        });
+      }
       try {
       const input = parseJsonBody(body);
       if (!input || typeof input.patch !== 'object') {
@@ -3235,7 +3265,6 @@ export async function startHttpServer({
       if (errors.length > 0) {
         return sendJson(res, 400, { error: 'bad_request', errorKey: 'config_patch_invalid', message: errors.join('；'), details: errors });
       }
-      const cfgFile = configPath(home);
       let current = {};
       let originalRaw = null;
       try {
@@ -3442,6 +3471,7 @@ export async function startHttpServer({
         },
       });
       } finally {
+        await releaseConfigFileLock();
         releaseConfigWrite();
       }
     }

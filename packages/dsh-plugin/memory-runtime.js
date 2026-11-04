@@ -68,6 +68,7 @@ const DEFAULT_CONFIG = Object.freeze({
   checkpointMaxQueue: 32,
   checkpointRetries: 2,
   checkpointRetryBaseMs: 250,
+  checkpointReconcileMs: 5000,
   recallCooldownMs: 30_000,
   rateLimitBaseMs: 1000,
   retryAfterMaxMs: 60_000,
@@ -584,6 +585,7 @@ export function resolveMemoryRuntimeConfig(input = {}, options = {}) {
     checkpointMaxQueue: asInt(raw.checkpointMaxQueue, DEFAULT_CONFIG.checkpointMaxQueue, 1, 128),
     checkpointRetries: asInt(raw.checkpointRetries, DEFAULT_CONFIG.checkpointRetries, 0, 2),
     checkpointRetryBaseMs: asInt(raw.checkpointRetryBaseMs, DEFAULT_CONFIG.checkpointRetryBaseMs, 1, 10_000),
+    checkpointReconcileMs: asInt(raw.checkpointReconcileMs, DEFAULT_CONFIG.checkpointReconcileMs, 100, 60_000),
     recallCooldownMs: asInt(raw.recallCooldownMs, DEFAULT_CONFIG.recallCooldownMs, 0, 24 * 60 * 60_000),
     rateLimitBaseMs: asInt(raw.rateLimitBaseMs, DEFAULT_CONFIG.rateLimitBaseMs, 0, 60_000),
     retryAfterMaxMs: asInt(raw.retryAfterMaxMs, DEFAULT_CONFIG.retryAfterMaxMs, 0, 10 * 60_000),
@@ -1762,14 +1764,14 @@ export function createMemoryRuntimeAdapter(options = {}) {
         auth: { mode: 'none', tokenPresent: false, failures: 0, lastStatus: null, lastCode: null, lastAt: null },
         recall: { attempts: 0, hits: 0, empty: 0, failures: 0, skipped: 0, deduped: 0, cooling: 0, anchors: 0 },
         ingest: {
-          queued: 0, sent: 0, accepted: 0, committed: 0, pending: 0, extractionFailed: 0,
-          batches: 0, failed: 0, dropped: 0, duplicates: 0, skipped: 0,
+          queued: 0, sent: 0, accepted: 0, committed: 0, pending: 0, partial: 0,
+          extractionFailed: 0, batches: 0, failed: 0, dropped: 0, duplicates: 0, skipped: 0,
           retries: 0, exhausted: 0, interrupted: 0, lastError: null,
         },
         checkpoints: {
           queued: 0, attempts: 0, retries: 0, sent: 0, failed: 0, committed: 0, pending: 0,
           conflicts: 0, incomplete: 0, interrupted: 0, skipped: 0, reconciled: 0,
-          needsReconcile: 0, duplicates: 0,
+          needsReconcile: 0, needsReconcileGauge: 0, duplicates: 0,
         },
         tools: { trackedAgents: 0, restricted: 0, currentDenied: 0 },
         maintenance: { attempts: 0, sent: 0, failures: 0, skipped: 0, running: 0 },
@@ -1817,8 +1819,8 @@ export function createMemoryRuntimeAdapter(options = {}) {
     auth: { failures: 0, lastStatus: null, lastCode: null, lastAt: null },
     recall: { attempts: 0, hits: 0, empty: 0, failures: 0, skipped: 0, deduped: 0, cooling: 0 },
     ingest: {
-      queued: 0, sent: 0, accepted: 0, committed: 0, pending: 0, extractionFailed: 0,
-      batches: 0, failed: 0, dropped: 0, duplicates: 0, skipped: 0, inherited: 0,
+      queued: 0, sent: 0, accepted: 0, committed: 0, pending: 0, partial: 0,
+      extractionFailed: 0, batches: 0, failed: 0, dropped: 0, duplicates: 0, skipped: 0, inherited: 0,
       retries: 0, exhausted: 0, interrupted: 0, lastError: null,
     },
     checkpoints: {
@@ -1836,7 +1838,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
   const checkpointRevisions = new Map();
   const checkpointOperations = new Map();
   const pendingCheckpoints = new Map();
-  let activationGeneration = 0;
+  const featureGenerations = { recall: 0, ingest: 0, checkpoint: 0, maintenance: 0 };
   let recallCooldownUntil = 0;
   let rateLimitUntil = 0;
   let checkpointReconcileTimer = null;
@@ -1916,13 +1918,15 @@ export function createMemoryRuntimeAdapter(options = {}) {
 
   function stopRevokedWork(recallAllowed, ingestAllowed, checkpointAllowed) {
     if (recallAllowed && ingestAllowed && checkpointAllowed) return;
-    activationGeneration += 1;
     if (!recallAllowed) {
+      featureGenerations.recall += 1;
       anchors.clear();
       recallCooldownUntil = 0;
       abortActiveRequests('recall');
     }
     if (!ingestAllowed) {
+      featureGenerations.ingest += 1;
+      featureGenerations.maintenance += 1;
       ingestQueue?.clear();
       abortActiveRequests('ingest', 'maintenance');
       for (const scope of activeScopes) {
@@ -1934,6 +1938,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
       }
     }
     if (!checkpointAllowed) {
+      featureGenerations.checkpoint += 1;
       checkpointQueue?.clear();
       abortActiveRequests('checkpoint');
     }
@@ -2253,11 +2258,12 @@ export function createMemoryRuntimeAdapter(options = {}) {
     };
     if (parent?.aborted) onAbort();
     parent?.addEventListener?.('abort', onAbort, { once: true });
+    const requestFeature = requestOptions.feature ?? 'unknown';
     const requestGeneration = Number.isInteger(requestOptions.generation)
       ? requestOptions.generation
-      : activationGeneration;
+      : (featureGenerations[requestFeature] ?? 0);
     if (controller !== null) {
-      activeRequests.set(controller, { feature: requestOptions.feature ?? 'unknown' });
+      activeRequests.set(controller, { feature: requestFeature });
     }
     const run = (async () => {
       try {
@@ -2283,7 +2289,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
         } catch {
           document = null;
         }
-        if (requestGeneration !== activationGeneration) {
+        if (requestGeneration !== (featureGenerations[requestFeature] ?? 0)) {
           return { ok: false, code: 'revoked', retryable: false };
         }
         const status = Number.isInteger(response?.status) ? response.status : null;
@@ -2587,15 +2593,10 @@ export function createMemoryRuntimeAdapter(options = {}) {
       // A session that rejects surface ownership falls back below only when it
       // exposes no session history surface at all.
     }
-    if (stamped === null) return decision;
-    // If the session has a live surface but cannot be managed, a request-batch
-    // injection cannot be reliably removed on the next miss turn. Refuse the
-    // injection instead of letting a stale block leak into later turns.
-    if (typeof payload?.agent?.session?.snapshotEvents === 'function') return decision;
-    return {
-      ...decision,
-      messages: [...decision.messages, stamped],
-    };
+    // No removable session surface: refuse the injection. A request-batch
+    // memory block cannot be reliably removed on the next miss turn, so even a
+    // legacy session without `snapshotEvents` must not receive one.
+    return decision;
   }
 
   const ingestQueue = createIngestQueue({
@@ -2665,24 +2666,29 @@ export function createMemoryRuntimeAdapter(options = {}) {
           const extractionStatus = typeof data.extraction?.status === 'string'
             ? data.extraction.status
             : null;
+          const detailFailed = Number(data.detail?.failed) > 0;
+          const detailQueued = Number(data.detail?.queued) > 0;
           const sidecarPending = acceptedResult.status === 202
             || data.queued === true
             || extractionStatus === 'pending';
+          const partial = detailFailed || detailQueued || data.degraded === true;
           stats.ingest.accepted += group.length;
-          if (extractionStatus === 'failed') {
+          if (extractionStatus === 'failed' || detailFailed) {
             stats.ingest.failed += group.length;
-            stats.ingest.extractionFailed += group.length;
+            if (partial) stats.ingest.partial += group.length;
+            if (extractionStatus === 'failed') stats.ingest.extractionFailed += group.length;
             stats.ingest.lastError = {
-              code: 'extraction_failed',
+              code: extractionStatus === 'failed' ? 'extraction_failed' : 'detail_failed',
               status: acceptedResult.status ?? null,
               at: now(),
             };
             warnOnce(
-              'ingest:extraction_failed',
-              'memory runtime accepted an ingest batch but extraction failed; it is not committed',
+              `ingest:${stats.ingest.lastError.code}`,
+              'memory runtime accepted an ingest batch but extraction/detail failed; it is not committed',
             );
-          } else if (sidecarPending) {
+          } else if (sidecarPending || detailQueued || data.degraded === true) {
             stats.ingest.pending += group.length;
+            if (partial) stats.ingest.partial += group.length;
           } else {
             stats.ingest.sent += group.length;
             if (extractionStatus === 'completed') stats.ingest.committed += group.length;
@@ -2784,12 +2790,14 @@ export function createMemoryRuntimeAdapter(options = {}) {
     }
     const data = isObject(result.data) ? result.data : {};
     const checkpoint = isObject(data.checkpoint) ? data.checkpoint : null;
+    // `degraded` on a cloud checkpoint may simply mean schema 2 summary_only;
+    // that is still an authoritative graph revision. Only cache/stale views or
+    // a non-cloud source are rejected.
     const fresh = data.source === 'cloud'
-      && data.degraded !== true
       && (checkpoint === null || (
         checkpoint.source === 'cloud'
         && checkpoint.stale !== true
-        && checkpoint.degraded !== true
+        && checkpoint.pending !== true
       ));
     if (!fresh) {
       return { ok: false, reason: 'checkpoint_read_not_fresh', status: result.status };
@@ -2839,6 +2847,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
     state.error = null;
     state.revision = revision;
     state.lastCommittedRevision = revision;
+    pendingCheckpoints.delete(checkpointOperationKey(state));
     checkpointRevisions.set(checkpointRevisionKey(state.threadId, state.domain), revision);
     if (reconciled) stats.checkpoints.reconciled += 1;
     else stats.checkpoints.sent += 1;
@@ -2849,12 +2858,13 @@ export function createMemoryRuntimeAdapter(options = {}) {
     const operationKey = checkpointOperationKey(state);
     pendingCheckpoints.set(operationKey, {
       state,
+      kind: record.kind ?? 'queued',
       threadId: state.threadId,
       domain: state.domain,
       revisionKey: checkpointRevisionKey(state.threadId, state.domain),
-      requestId: record.requestId,
+      requestId: record.requestId ?? null,
       attempts: 0,
-      nextAt: now() + Math.min(config.checkpointRetryBaseMs * 4, 2000),
+      nextAt: now() + config.checkpointReconcileMs,
       lastError: null,
     });
     while (pendingCheckpoints.size > Math.max(8, config.checkpointMaxQueue)) {
@@ -2877,12 +2887,12 @@ export function createMemoryRuntimeAdapter(options = {}) {
     checkpointReconcileTimer = setTimeoutFn(() => {
       checkpointReconcileTimer = null;
       if (disposed || closing || pendingCheckpoints.size === 0) return;
-      void reconcilePendingCheckpoints({ force: true })
+      void reconcilePendingCheckpoints()
         .catch(() => {})
         .finally(() => {
           if (!disposed && !closing && pendingCheckpoints.size > 0) scheduleCheckpointReconcile();
         });
-    }, Math.max(250, Math.min(config.checkpointRetryBaseMs * 4, 5000)));
+    }, config.checkpointReconcileMs);
     checkpointReconcileTimer?.unref?.();
   }
 
@@ -2894,6 +2904,50 @@ export function createMemoryRuntimeAdapter(options = {}) {
       const current = await resolveCheckpointAuthority(record.threadId, record.domain, {
         signal: retryAbort?.signal,
       });
+      if (record.kind === 'preflight') {
+        if (current.ok) {
+          checkpointRevisions.set(record.revisionKey, current.revision);
+          if (current.exists && checkpointMatchesState(current.checkpoint, record.state)) {
+            markCheckpointCommitted(record.state, current.revision, { reconciled: true });
+            checkpointOperations.set(operationKey, {
+              requestId: record.requestId,
+              committedRevision: current.revision,
+            });
+            pendingCheckpoints.delete(operationKey);
+            continue;
+          }
+          pendingCheckpoints.delete(operationKey);
+          record.state.pending = false;
+          record.state.failed = false;
+          record.state.needsReconcile = false;
+          record.state.error = null;
+          if (!checkpointQueue.enqueue(record.state)) {
+            record.state.failed = true;
+            record.state.error = 'queue_rejected';
+            stats.checkpoints.failed += 1;
+          }
+          continue;
+        }
+        record.attempts += 1;
+        record.lastError = current.reason;
+        const retryable = isRetryableRuntimeFailure({
+          ok: false,
+          code: current.reason,
+          status: current.status,
+          retryAfterMs: current.retryAfterMs,
+        });
+        if (!retryable || record.attempts >= 4) {
+          record.state.pending = false;
+          record.state.needsReconcile = false;
+          record.state.failed = true;
+          record.state.error = `revision_unavailable:${record.lastError ?? 'unknown'}`;
+          stats.checkpoints.failed += 1;
+          pendingCheckpoints.delete(operationKey);
+          continue;
+        }
+        record.nextAt = now() + config.checkpointReconcileMs;
+        continue;
+      }
       if (current.ok && current.exists && checkpointMatchesState(current.checkpoint, record.state)) {
         markCheckpointCommitted(record.state, current.revision, { reconciled: true });
         checkpointOperations.set(operationKey, {
@@ -2909,7 +2963,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
           ? `checkpoint_other_revision:${current.checkpoint?.state?.compactionId ?? 'unknown'}:${current.checkpoint?.state?.endSeq ?? 'none'}`
           : 'checkpoint_not_visible')
         : current.reason;
-      if (record.attempts >= 3) {
+      if (record.attempts >= 6) {
         record.state.pending = true;
         record.state.needsReconcile = true;
         record.state.error = `reconcile_exhausted:${record.lastError ?? 'unknown'}`;
@@ -2917,7 +2971,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
         pendingCheckpoints.delete(operationKey);
         continue;
       }
-      record.nextAt = now() + Math.min(config.checkpointRetryBaseMs * (2 ** record.attempts), 15_000);
+      record.nextAt = now() + config.checkpointReconcileMs;
     }
   }
 
@@ -2970,7 +3024,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
       state.failed = false;
       state.needsReconcile = false;
       state.error = null;
-      const generation = activationGeneration;
+      const generation = featureGenerations.checkpoint;
       const summaryText = state.summary.text.trim();
       const domain = config.domain?.startsWith('task:') ? config.domain : `task:${state.threadId}`;
       state.domain = domain;
@@ -3070,13 +3124,30 @@ export function createMemoryRuntimeAdapter(options = {}) {
           generation,
         });
         if (!current.ok) {
+          const retryable = isRetryableRuntimeFailure({
+            ok: false,
+            code: current.reason,
+            status: current.status,
+            retryAfterMs: current.retryAfterMs,
+          });
           state.committed = false;
+          if (!retryable) {
+            state.pending = false;
+            state.failed = true;
+            state.needsReconcile = false;
+            state.error = `revision_unavailable:${current.reason}`;
+            stats.checkpoints.failed += 1;
+            return;
+          }
           state.pending = true;
           state.failed = false;
-          state.needsReconcile = true;
+          state.needsReconcile = false;
           state.error = `revision_unavailable:${current.reason}`;
           stats.checkpoints.pending += 1;
-          stats.checkpoints.needsReconcile += 1;
+          rememberPendingCheckpoint(state, {
+            kind: 'preflight',
+            requestId: priorOperation?.requestId ?? null,
+          });
           return;
         }
         expectedRevision = current.revision;
@@ -3105,7 +3176,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
       const path = `/checkpoints/${encodeURIComponent(state.threadId)}`;
       const baseRequestId = typeof priorOperation?.requestId === 'string' && priorOperation.requestId.length > 0
         ? priorOperation.requestId
-        : `dsh_${hashText(`${state.sessionId}\u0000${state.compactionId}\u0000${state.endSeq}`).slice(0, 40)}`;
+        : `dsh_${hashText(`${state.sessionId}\u0000${state.compactionId}\u0000${state.endSeq}\u0000${expectedRevision}`).slice(0, 40)}`;
       let requestId = baseRequestId;
       const useRequestId = (value) => {
         requestId = value.slice(0, 200);
@@ -3116,12 +3187,12 @@ export function createMemoryRuntimeAdapter(options = {}) {
       let retries = 0;
       let revisionRetried = false;
       for (;;) {
-        if (disposed || closing || !runtimeAllows('checkpoint') || generation !== activationGeneration) {
+        if (disposed || closing || !runtimeAllows('checkpoint') || generation !== featureGenerations.checkpoint) {
           result = { ok: false, code: 'interrupted', retryable: false };
           break;
         }
         await waitForRateLimit(retryAbort?.signal);
-        if (disposed || closing || !runtimeAllows('checkpoint') || generation !== activationGeneration) {
+        if (disposed || closing || !runtimeAllows('checkpoint') || generation !== featureGenerations.checkpoint) {
           result = { ok: false, code: 'interrupted', retryable: false };
           break;
         }
@@ -3134,7 +3205,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
           generation,
         });
         if (result.ok) break;
-        if (disposed || closing || !runtimeAllows('checkpoint') || generation !== activationGeneration) {
+        if (disposed || closing || !runtimeAllows('checkpoint') || generation !== featureGenerations.checkpoint) {
           result = { ok: false, code: 'interrupted', retryable: false };
           break;
         }
@@ -3189,7 +3260,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
           break;
         }
       }
-      if (disposed || closing || !runtimeAllows('checkpoint') || generation !== activationGeneration) {
+      if (disposed || closing || !runtimeAllows('checkpoint') || generation !== featureGenerations.checkpoint) {
         state.committed = false;
         state.pending = false;
         state.failed = false;
@@ -3232,6 +3303,15 @@ export function createMemoryRuntimeAdapter(options = {}) {
           signal: retryAbort?.signal,
           generation,
         });
+        if (disposed || closing || !runtimeAllows('checkpoint') || generation !== featureGenerations.checkpoint) {
+          state.committed = false;
+          state.pending = false;
+          state.failed = false;
+          state.skipped = true;
+          state.error = 'revoked';
+          stats.checkpoints.interrupted += 1;
+          return;
+        }
         if (current.ok
           && current.exists
           && checkpointMatchesState(current.checkpoint, state)) {
@@ -3907,21 +3987,15 @@ export function createMemoryRuntimeAdapter(options = {}) {
     const retryBudget = config.ingestRetries > 0
       ? config.ingestRetryBaseMs * ((2 ** config.ingestRetries) - 1)
       : 0;
-    const ingestBudget = Math.min(
-      60_000,
-      config.ingestTimeoutMs * (config.ingestRetries + 1)
-        + retryBudget
-        + config.retryAfterMaxMs * (config.ingestRetries + 1),
-    );
+    const ingestBudget = config.ingestTimeoutMs * (config.ingestRetries + 1)
+      + retryBudget
+      + config.retryAfterMaxMs * (config.ingestRetries + 1);
     await Promise.race([ingestQueue.flush(), delay(ingestBudget, setTimeoutFn)]);
     const checkpointRetryBudget = config.checkpointRetryBaseMs
       * ((2 ** (config.checkpointRetries + 1)) - 1);
-    const checkpointBudget = Math.min(
-      120_000,
-      config.checkpointTimeoutMs * (config.checkpointRetries + 2)
-        + checkpointRetryBudget
-        + config.retryAfterMaxMs * (config.checkpointRetries + 1),
-    );
+    const checkpointBudget = config.checkpointTimeoutMs * (config.checkpointRetries + 2)
+      + checkpointRetryBudget
+      + config.retryAfterMaxMs * (config.checkpointRetries + 1);
     await Promise.race([checkpointQueue.flush(), delay(checkpointBudget, setTimeoutFn)]);
     if (pendingCheckpoints.size > 0 && !disposed && !closing && runtimeAllows('checkpoint')) {
       await Promise.race([
@@ -4072,6 +4146,8 @@ export function createMemoryRuntimeAdapter(options = {}) {
         ...stats.checkpoints,
         queued: checkpointQueue.size(),
         reconciling: pendingCheckpoints.size,
+        needsReconcileGauge: [...compactions.values()]
+          .filter((entry) => entry.needsReconcile === true).length,
       },
       tools: {
         ...stats.tools,

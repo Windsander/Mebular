@@ -126,7 +126,9 @@ function parseArgs(argv) {
       throw new Error(`未知参数：${arg}`);
     }
   }
-  if (options.scenarios.length === 0) options.scenarios = ['auto-discovery', 'no-discovery', 'fail-open'];
+  if (options.scenarios.length === 0) {
+    options.scenarios = ['auto-discovery', 'no-discovery', 'fail-open', 'faults'];
+  }
   for (const name of options.scenarios) {
     if (!['auto-discovery', 'no-discovery', 'fail-open', 'faults'].includes(name)) {
       throw new Error(`未知场景 ${name}`);
@@ -152,7 +154,7 @@ function memoryPatch({ daemonUrl, mode }) {
     '      ingestRetries: 2',
     ...(mode === 'faults' ? [
       '      recall: false',
-      '      ingest: false',
+      '      ingest: true',
       '      checkpoints: true',
       '      hideMemoryTools: true',
       '      checkpointTimeoutMs: 1000',
@@ -472,12 +474,16 @@ async function runFaultScenario({ runtime, tap, discovery, phasePath, continueFi
   const rateLimited = await waitPhase(phasePath, 'rate-limited-done');
   const ratePuts = sidecarRequestsFromTap(tap).filter((request) => request.method === 'PUT'
     && request.body?.state?.compactionId === 'fault-429');
-  check('429 via proxy：真实 sidecar 前端收到 429 后重试并提交',
+  check('429 via synthetic tap（首个 PUT 未到真实 sidecar）：重试后提交',
     rateLimited?.state?.compaction?.committed === true
     && ratePuts.length === 2
     && ratePuts[0].status === 429
+    && ratePuts[0].synthetic429 === true
     && ratePuts[1].status === 200,
-    JSON.stringify({ state: rateLimited?.state?.compaction, statuses: ratePuts.map((request) => request.status) }));
+    JSON.stringify({
+      state: rateLimited?.state?.compaction,
+      statuses: ratePuts.map((request) => ({ status: request.status, synthetic: request.synthetic429 === true })),
+    }));
   await continueProbe(continueFile);
 
   const timedOut = await waitPhase(phasePath, 'timeout-done');
@@ -485,8 +491,12 @@ async function runFaultScenario({ runtime, tap, discovery, phasePath, continueFi
     && request.body?.state?.compactionId === 'fault-timeout');
   const timeoutGets = sidecarRequestsFromTap(tap).filter((request) => request.method === 'GET'
     && request.path.startsWith(`${SIDECAR_API}/checkpoints/${THREAD_ID}`));
-  check('timeout 对账：重试耗尽后权威 GET 将已提交 checkpoint 标为 committed',
+  const timeoutCheckpoint = await runtime.sidecarCheckpoint(THREAD_ID, 'dsh').catch(() => null);
+  check('timeout 对账：summary_only degraded 视图仍是权威 revision 并 committed',
     timedOut?.state?.compaction?.committed === true
+    && timeoutCheckpoint?.state?.compactionId === 'fault-timeout'
+    && timeoutCheckpoint?.contentMode === 'summary_only'
+    && timeoutCheckpoint?.degraded === true
     && timeoutPuts.length === 3
     && timeoutPuts.every((request) => request.status === 504 && request.upstreamStatus === 200)
     && timeoutGets.length >= 2,
@@ -527,7 +537,7 @@ async function runFaultScenario({ runtime, tap, discovery, phasePath, continueFi
   const reconciled = await waitPhase(phasePath, 'outbox-reconciled');
   const outboxPuts = sidecarRequestsFromTap(tap).filter((request) => request.method === 'PUT'
     && request.body?.state?.compactionId === 'fault-outbox');
-  check('202 → outbox replay → 权威 GET committed，且重复 compaction 不双写',
+  check('202 → outbox replay → 有界 timer 自动 GET committed（无重复 emit）',
     reconciled?.state?.compaction?.committed === true
     && Number.isInteger(reconciled?.state?.compaction?.revision)
     && outboxPuts.length === 1,
@@ -539,6 +549,19 @@ async function runFaultScenario({ runtime, tap, discovery, phasePath, continueFi
         expectedRevision: request.body?.expectedRevision,
         requestId: request.body?.requestId,
       })),
+    }));
+  await continueProbe(continueFile);
+  const duplicate = await waitPhase(phasePath, 'outbox-duplicate-done');
+  const duplicatePuts = sidecarRequestsFromTap(tap).filter((request) => request.method === 'PUT'
+    && request.body?.state?.compactionId === 'fault-outbox');
+  check('已对账的重复 compaction 不产生第二 PUT，也不重复计数 pending',
+    duplicate?.state?.compaction?.committed === true
+    && duplicatePuts.length === 1
+    && (duplicate?.state?.checkpoint?.pending ?? 0) <= 1,
+    JSON.stringify({
+      compaction: duplicate?.state?.compaction,
+      stats: duplicate?.state?.checkpoint,
+      puts: duplicatePuts.length,
     }));
 
   const current = await runtime.sidecarCheckpoint(THREAD_ID, 'dsh');
@@ -585,27 +608,57 @@ async function runFaultScenario({ runtime, tap, discovery, phasePath, continueFi
         requestId: request.body?.requestId,
       })),
     }));
+  proxy.setMode('fail_detail_writes');
+  await continueProbe(continueFile);
+
+  const detailPartial = await waitPhase(phasePath, 'detail-partial-done');
+  check('真实 detail partial：200 但 detail.failed>0 不计 committed',
+    detailPartial?.ingest?.accepted >= 1
+    && detailPartial?.ingest?.partial >= 1
+    && detailPartial?.ingest?.failed >= 1
+    && detailPartial?.ingest?.committed === 0
+    && detailPartial?.ingest?.sent === 0,
+    JSON.stringify(detailPartial?.ingest));
+  proxy.setMode('forward');
   await continueProbe(continueFile);
 
   const inFlight = await waitPhase(phasePath, 'disable-inflight');
   check('热禁用 in-flight checkpoint 尚未显示 committed',
     inFlight?.state?.compaction?.committed === false,
     JSON.stringify(inFlight?.state?.compaction));
+  const beforeDisableSideEffects = sidecarRequestsFromTap(tap).filter((request) => (
+    request.path.startsWith(`${SIDECAR_API}/context`) || request.path === `${SIDECAR_API}/ingest`
+  )).length;
   await setDiscoveryMode(runtime, 'mcp');
   await continueProbe(continueFile);
 
   const disabled = await waitPhase(phasePath, 'disabled-done');
-  const afterDisable = sidecarRequestsFromTap(tap).filter((request) => (
-    request.path.startsWith(`${SIDECAR_API}/context`)
-    || request.path === `${SIDECAR_API}/ingest`
-    || (request.method === 'PUT' && request.body?.state?.compactionId === 'fault-disable')
+  const disablePuts = sidecarRequestsFromTap(tap).filter((request) => (
+    request.method === 'PUT' && request.body?.state?.compactionId === 'fault-disable'
   ));
-  check('热禁用中止 in-flight checkpoint：晚到响应不标 committed，且无新写入',
+  const sidecarAfterDisable = await runtime.sidecarCheckpoint(THREAD_ID, 'dsh').catch(() => null);
+  const afterDisableRequests = sidecarRequestsFromTap(tap).filter((request) => (
+    request.path.startsWith(`${SIDECAR_API}/context`) || request.path === `${SIDECAR_API}/ingest`
+  ));
+  check('热禁用中止 in-flight checkpoint：PUT 被阻止且真实 sidecar 无该 checkpoint',
     disabled?.state?.compaction?.committed === false
     && disabled?.state?.compaction?.pending === false
-    && afterDisable.filter((request) => request.method === 'PUT').length === 1
+    && disablePuts.length === 1
+    && disablePuts[0].blockedBeforeSidecar === true
+    && disablePuts[0].upstreamStatus === undefined
+    && sidecarAfterDisable?.state?.compactionId !== 'fault-disable'
+    && afterDisableRequests.length === beforeDisableSideEffects
     && disabled?.state?.runtimeEnabled === false,
-    JSON.stringify({ compaction: disabled?.state?.compaction, requests: afterDisable.length }));
+    JSON.stringify({
+      compaction: disabled?.state?.compaction,
+      disablePuts: disablePuts.map((request) => ({
+        status: request.status,
+        blocked: request.blockedBeforeSidecar === true,
+        upstream: request.upstreamStatus,
+      })),
+      sidecarCompaction: sidecarAfterDisable?.state?.compactionId ?? null,
+      afterDisableRequests: afterDisableRequests.length,
+    }));
 }
 
 async function runScenario({ mode, root, dshBin, dshInstall, dshVersion, pluginTarball, probeTarball, options }) {
@@ -644,15 +697,25 @@ async function runScenario({ mode, root, dshBin, dshInstall, dshVersion, pluginT
     ? null
     : await createRuntimeTap(new URL(discovery.url).origin, {
       name: `dsh-sidecar-${mode}`,
-      beforeForward: faults === null ? null : (record) => {
+      beforeForward: faults === null ? null : async (record) => {
         if (faults.rateLimitOnce
           && record.method === 'PUT'
           && record.body?.state?.compactionId === 'fault-429') {
           faults.rateLimitOnce = false;
+          record.synthetic429 = true;
           return {
             status: 429,
             headers: { 'retry-after': '0.05' },
             body: { ok: false, error: { code: 'rate_limited', message: 'test-only 429', retryable: true } },
+          };
+        }
+        if (record.method === 'PUT'
+          && record.body?.state?.compactionId === 'fault-disable') {
+          record.blockedBeforeSidecar = true;
+          await new Promise((resolve) => setTimeout(resolve, 1200));
+          return {
+            status: 504,
+            body: { ok: false, error: { code: 'gateway_timeout', message: 'test-only blocked before sidecar' } },
           };
         }
         return null;
@@ -664,13 +727,6 @@ async function runScenario({ mode, root, dshBin, dshInstall, dshVersion, pluginT
             status: 504,
             delayMs: 1600,
             body: { ok: false, error: { code: 'gateway_timeout', message: 'test-only lost response' } },
-          };
-        }
-        if (record.method === 'PUT' && compactionId === 'fault-disable') {
-          return {
-            status: 504,
-            delayMs: 1200,
-            body: { ok: false, error: { code: 'gateway_timeout', message: 'test-only in-flight disable' } },
           };
         }
         return null;

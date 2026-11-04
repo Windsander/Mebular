@@ -76,7 +76,7 @@ async function main() {
       check('202 pending 断言判红',
         /✗ capability 故障时真实 sidecar 以 202 queued 回复，宿主保持 pending/.test(output)),
       check('前置 429 检查仍为绿（失败不是 DSH 未启动）',
-        /✓ 429 via proxy：真实 sidecar 前端收到 429 后重试并提交/.test(output)),
+        /✓ 429 via synthetic tap（首个 PUT 未到真实 sidecar）：重试后提交/.test(output)),
     ];
     if (checks.every(Boolean)) {
       exitCode = 0;

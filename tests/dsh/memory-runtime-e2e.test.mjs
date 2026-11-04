@@ -46,6 +46,46 @@ function makeAgent({ id = 'a1', session = makeSession(), tools = null } = {}) {
   };
 }
 
+function makeSurfaceSession({ id = 's1' } = {}) {
+  const events = [];
+  const nodes = [];
+  const append = (type, data, options = {}) => {
+    const seq = events.length;
+    events.push({ type, seq, time: seq, data: structuredClone(data) });
+    const op = options.surfaceOp;
+    if (op === 'append') nodes.push(seq);
+    else if (op?.op === 'replace') {
+      const start = nodes.indexOf(op.startSeq);
+      const end = nodes.indexOf(op.endSeq);
+      if (start < 0 || end < start) throw new Error('invalid surface replace');
+      nodes.splice(start, end - start + 1);
+      nodes.push(seq);
+    }
+    return events[seq];
+  };
+  return {
+    id,
+    inheritedEventCount: 0,
+    firstLiveSeq: 0,
+    seq: 10,
+    header: {},
+    surface: { nodes, contentGeneration: 0 },
+    ownEvents: () => events,
+    snapshotEvents: () => events,
+    isOwnSeq: () => true,
+    append,
+  };
+}
+
+function surfaceMemoryMessages(session) {
+  const current = new Set(session.surface.nodes);
+  return session.snapshotEvents()
+    .filter((event) => current.has(event.seq)
+      && event.type === 'user/message'
+      && event.data?.source?.kind === MEMORY_MESSAGE_SOURCE)
+    .map((event) => event.data);
+}
+
 function humanMessage(text, id = 'human-1') {
   return {
     id,
@@ -132,7 +172,7 @@ function runtimeRequests(runtime) {
 }
 
 describe('@mebular/dsh-plugin memory runtime E2E（真实 Cordis + fake Runtime）', () => {
-  it('pre-step 注入 recall，同 surface/query/turn 去重，新 turn 重新召回', async () => {
+  it('pre-step 注入 recall，同 surface 重复请求替换而非累积，新 turn 重新召回', async () => {
     const runtime = await fakeRuntime({
       records: [{ id: 'm1', type: 'fact', content: 'user prefers dark theme', why: 'keyword' }],
     });
@@ -143,7 +183,7 @@ describe('@mebular/dsh-plugin memory runtime E2E（真实 Cordis + fake Runtime�
       hideMemoryTools: false,
     });
 
-    const session = makeSession({ surface: { nodes: [1, 2], contentGeneration: 0 } });
+    const session = makeSurfaceSession();
     const agent = makeAgent({ session });
     const messages = [humanMessage('what theme should we use?')];
     const payload = {
@@ -157,20 +197,24 @@ describe('@mebular/dsh-plugin memory runtime E2E（真实 Cordis + fake Runtime�
 
     const first = await ctx.waterfall('agent/pre-step', payload, fallback);
     expect(first.kind).toBe('enter');
-    expect(first.messages).toHaveLength(2);
-    expect(first.messages[1].source.kind).toBe(MEMORY_MESSAGE_SOURCE);
-    expect(first.messages[1].content[0].text).toContain('user prefers dark theme');
+    expect(first.messages).toHaveLength(1);
+    expect(surfaceMemoryMessages(session)).toHaveLength(1);
+    expect(surfaceMemoryMessages(session)[0].content[0].text).toContain('user prefers dark theme');
     expect(runtime.state.contextCount).toBe(1);
 
     const second = await ctx.waterfall('agent/pre-step', payload, fallback);
     expect(second.messages).toBe(messages);
-    expect(runtime.state.contextCount).toBe(1);
+    // The live surface changed when the first injection was placed; a repeat
+    // request may recall again but must not accumulate a second memory node.
+    expect(surfaceMemoryMessages(session)).toHaveLength(1);
 
     const nextTurn = await ctx.waterfall('agent/pre-step', { ...payload, turn: 2 }, fallback);
-    expect(nextTurn.messages).toHaveLength(2);
-    expect(runtime.state.contextCount).toBe(2);
+    expect(nextTurn.messages).toHaveLength(1);
+    expect(surfaceMemoryMessages(session)).toHaveLength(1);
+    expect(runtime.state.contextCount).toBe(3);
 
     expect(runtimeRequests(runtime).map((request) => request.path)).toEqual([
+      '/memory-runtime/v1/context',
       '/memory-runtime/v1/context',
       '/memory-runtime/v1/context',
     ]);
@@ -449,7 +493,7 @@ describe('@mebular/dsh-plugin memory runtime E2E（真实 Cordis + fake Runtime�
       auth: 'auto',
     }, { userHome: home, env: {} });
 
-    const session = makeSession({ surface: { nodes: [1, 2], contentGeneration: 0 } });
+    const session = makeSurfaceSession();
     const agent = makeAgent({ session });
     const messages = [humanMessage('what theme should we use?')];
     const decision = await ctx.waterfall('agent/pre-step', {
@@ -460,8 +504,9 @@ describe('@mebular/dsh-plugin memory runtime E2E（真实 Cordis + fake Runtime�
       signal: new AbortController().signal,
     }, async () => ({ kind: 'enter', messages }));
 
-    expect(decision.messages).toHaveLength(2);
-    expect(decision.messages[1].source.kind).toBe(MEMORY_MESSAGE_SOURCE);
+    expect(decision.messages).toHaveLength(1);
+    expect(surfaceMemoryMessages(session)).toHaveLength(1);
+    expect(surfaceMemoryMessages(session)[0].source.kind).toBe(MEMORY_MESSAGE_SOURCE);
     const request = runtime.state.requests.find((entry) => entry.path === '/memory-runtime/v1/context');
     expect(request).toBeDefined();
     expect(request.auth).toBe('bearer');

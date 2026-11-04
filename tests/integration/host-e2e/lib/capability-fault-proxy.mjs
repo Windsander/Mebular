@@ -103,6 +103,22 @@ export async function createCapabilityFaultProxy(options = {}) {
       res.end(text);
       return;
     }
+    const detailWrite = path.endsWith('/detail') && body?.op === 'write';
+    if (state.mode === 'fail_detail_writes' && detailWrite) {
+      record.faulted = true;
+      record.status = 403;
+      const text = JSON.stringify({
+        ok: false,
+        error: {
+          code: 'forbidden_scope',
+          message: 'test-only detail policy rejection',
+          retryable: false,
+        },
+      });
+      res.writeHead(403, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(text) });
+      res.end(text);
+      return;
+    }
 
     try {
       await Promise.race([
@@ -121,6 +137,9 @@ export async function createCapabilityFaultProxy(options = {}) {
       record.status = response.status;
       res.writeHead(response.status, {
         'content-type': response.headers.get('content-type') ?? 'application/json',
+        ...(response.headers.get('retry-after') === null
+          ? {}
+          : { 'retry-after': response.headers.get('retry-after') }),
         'content-length': responseBuffer.length,
       });
       res.end(responseBuffer);
@@ -145,7 +164,9 @@ export async function createCapabilityFaultProxy(options = {}) {
     state,
     setTarget,
     setMode(mode) {
-      state.mode = mode === 'fail_checkpoint_writes' ? mode : 'forward';
+      state.mode = mode === 'fail_checkpoint_writes' || mode === 'fail_detail_writes'
+        ? mode
+        : 'forward';
     },
     close: () => new Promise((resolve) => server.close(() => resolve())),
   };

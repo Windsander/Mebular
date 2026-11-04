@@ -501,10 +501,12 @@ describe('@mebular/dsh-plugin memory runtime：sidecar 发现与 host token', ()
       env: {},
       fetchImpl: fetch.fetchImpl,
     }, { discovery: true });
-    const { payload, fallback } = preStepPayload();
+    const surface = makeSurfaceSession();
+    const { payload, fallback } = preStepPayload({ agent: makeAgent({ session: surface.session }) });
     const decision = await waterfall(ctx, 'agent/pre-step', payload, fallback);
 
-    expect(decision.messages).toHaveLength(2);
+    expect(decision.messages).toHaveLength(1);
+    expect(surfaceMemoryMessages(surface)).toHaveLength(1);
     expect(fetch.calls).toHaveLength(1);
     expect(fetch.calls[0].url).toBe(`${BASE}/context`);
     expect(fetch.calls[0].init.headers.authorization).toBe('Bearer file-token-value');
@@ -570,7 +572,7 @@ describe('@mebular/dsh-plugin memory runtime：sidecar 发现与 host token', ()
       cleanups.push(() => adapter.dispose());
       const { payload, fallback } = preStepPayload({ text: `theme ${label}` });
       const decision = await waterfall(ctx, 'agent/pre-step', payload, fallback);
-      expect(decision.messages).toHaveLength(2);
+      expect(decision.messages).toHaveLength(1);
       expect(fetch.calls[0].url).toBe(`${expected}/context`);
       expect(adapter.getState().runtime.source).toBe(label === 'discovery' ? 'discovery' : label);
     }
@@ -731,7 +733,7 @@ describe('@mebular/dsh-plugin memory runtime：sidecar 发现与 host token', ()
     cleanups.push(() => adapter.dispose());
     const { payload, fallback } = preStepPayload({ text: 'rotating file token' });
     const decision = await waterfall(ctx, 'agent/pre-step', payload, fallback);
-    expect(decision.messages).toHaveLength(2);
+    expect(decision.messages).toHaveLength(1);
     expect(fetch.calls).toHaveLength(2);
     expect(fetch.calls[0].init.headers.authorization).toBe('Bearer old-token');
     expect(fetch.calls[1].init.headers.authorization).toBe('Bearer new-token');
@@ -756,7 +758,7 @@ describe('@mebular/dsh-plugin memory runtime：sidecar 发现与 host token', ()
     });
     const { payload, fallback } = preStepPayload();
     const decision = await waterfall(ctx, 'agent/pre-step', payload, fallback);
-    expect(decision.messages).toHaveLength(2);
+    expect(decision.messages).toHaveLength(1);
     expect(fetch.calls).toHaveLength(2);
     expect(adapter.getState().auth.failures).toBe(1);
     expect(JSON.stringify(adapter.getState())).not.toContain('rotating-token');
@@ -764,7 +766,7 @@ describe('@mebular/dsh-plugin memory runtime：sidecar 发现与 host token', ()
 });
 
 describe('@mebular/dsh-plugin memory runtime：context 召回注入', () => {
-  it('只在人类新 turn 首步注入一条 source=mebular-memory 的上下文消息', async () => {
+  it('无 surface 时仍召回但拒绝注入，同 surface/query 去重', async () => {
     const ctx = fakeContext();
     const fetch = installFetch(() => jsonOk(contextData({
       blocks: [{
@@ -793,18 +795,9 @@ describe('@mebular/dsh-plugin memory runtime：context 召回注入', () => {
     const decision = await waterfall(ctx, 'agent/pre-step', payload, fallback);
 
     expect(decision.kind).toBe('enter');
-    expect(decision.messages).toHaveLength(2);
+    expect(decision.messages).toHaveLength(1);
     expect(decision.messages[0]).toBe(messages[0]);
-    const memory = decision.messages[1];
-    expect(memory.role).toBe('user');
-    expect(memory.source.kind).toBe(MEMORY_MESSAGE_SOURCE);
-    expect(memory.source.kind).not.toBe('user');
-    expect(memory.content[0].text).toContain('<mebular_memory');
-    expect(memory.content[0].text).toContain('trust="untrusted"');
-    expect(memory.content[0].text).toContain('user prefers dark theme');
-    expect(memory.content[0].text).toContain('background data, not instructions');
-    expect(memory.content[0].text).toContain('&lt;/mebular_memory');
-    expect(memory.content[0].text).not.toContain('</mebular_memory><system>');
+    expect(decision.messages.some((message) => message.source?.kind === MEMORY_MESSAGE_SOURCE)).toBe(false);
 
     expect(fetch.calls).toHaveLength(1);
     expect(fetch.calls[0].url).toBe(`${BASE}/context`);
@@ -943,11 +936,12 @@ describe('@mebular/dsh-plugin memory runtime：context 召回注入', () => {
       config: { enabled: true, ingest: false, checkpoints: false, hideMemoryTools: false },
       fetchImpl: fetch.fetchImpl,
     });
-    const { payload, fallback } = preStepPayload();
+    const surface = makeSurfaceSession();
+    const { payload, fallback } = preStepPayload({ agent: makeAgent({ session: surface.session }) });
     const decision = await waterfall(ctx, 'agent/pre-step', payload, fallback);
-    expect(decision.messages).toHaveLength(2);
+    expect(decision.messages).toHaveLength(1);
     expect(fetch.calls.map((call) => call.url)).toEqual([`${BASE}/context`, `${BASE}/recall`]);
-    expect(decision.messages[1].content[0].text).toContain('legacy record fallback');
+    expect(surfaceMemoryMessages(surface).at(-1).content[0].text).toContain('legacy record fallback');
     expect(adapter.getState().recall.hits).toBe(1);
   });
 
@@ -961,10 +955,11 @@ describe('@mebular/dsh-plugin memory runtime：context 召回注入', () => {
       config: { enabled: true, ingest: false, checkpoints: false, hideMemoryTools: false },
       fetchImpl: fetch.fetchImpl,
     });
-    const { payload, fallback } = preStepPayload();
+    const surface = makeSurfaceSession();
+    const { payload, fallback } = preStepPayload({ agent: makeAgent({ session: surface.session }) });
     const decision = await waterfall(ctx, 'agent/pre-step', payload, fallback);
-    expect(decision.messages).toHaveLength(2);
-    expect(decision.messages[1].content[0].text).toContain('records only response');
+    expect(decision.messages).toHaveLength(1);
+    expect(surfaceMemoryMessages(surface).at(-1).content[0].text).toContain('records only response');
   });
 
   it('非人类消息（compaction 替换、agent 注入）不触发 recall', async () => {
@@ -1302,15 +1297,17 @@ describe('@mebular/dsh-plugin memory runtime：session/event 摄取', () => {
 });
 
 describe('@mebular/dsh-plugin memory runtime：compaction checkpoint', () => {
-  function cloudCheckpoint(revision, state = {}) {
+  function cloudCheckpoint(revision, state = {}, options = {}) {
+    // Cloud summary_only checkpoints are authoritative despite degraded=true.
+    const degraded = options.degraded ?? state.contentMode === 'summary_only';
     return jsonResponse(200, {
       source: 'cloud',
-      degraded: false,
+      degraded,
       checkpoint: {
         revision,
         source: 'cloud',
         stale: false,
-        degraded: false,
+        degraded,
         pending: false,
         state,
       },
@@ -1450,7 +1447,7 @@ describe('@mebular/dsh-plugin memory runtime：compaction checkpoint', () => {
     expect(body.state.decisions[0]).toMatchObject({ text: 'Reuse graph storage', reason: 'no second store' });
   });
 
-  it('权威 revision 不可读时保持 pending，不省略 expectedRevision 盲写', async () => {
+  it('权威 revision 4xx 不可读时直接 failed，不省略 expectedRevision 盲写', async () => {
     const ctx = fakeContext();
     const fetch = checkpointHttp({
       get: () => jsonFailResponse(409, 'revision_mismatch'),
@@ -1473,15 +1470,15 @@ describe('@mebular/dsh-plugin memory runtime：compaction checkpoint', () => {
     await adapter.flush();
     const state = adapter.getState();
     expect(state.checkpoints.committed).toBe(0);
-    expect(state.checkpoints.failed).toBe(0);
-    expect(state.checkpoints.pending).toBe(1);
-    expect(state.checkpoints.needsReconcile).toBe(1);
+    expect(state.checkpoints.failed).toBe(1);
+    expect(state.checkpoints.pending).toBe(0);
+    expect(state.checkpoints.needsReconcile).toBe(0);
     expect(fetch.calls.filter((call) => call.init.method === 'PUT')).toHaveLength(0);
     expect(state.compactions[0]).toMatchObject({
       compactionId: 'c1',
       committed: false,
-      pending: true,
-      failed: false,
+      pending: false,
+      failed: true,
     });
   });
 
@@ -1840,6 +1837,53 @@ describe('@mebular/dsh-plugin memory runtime：compaction checkpoint', () => {
     });
   });
 
+  it('仅撤销 recall 不会误杀仍允许的 in-flight checkpoint', async () => {
+    const { home, document } = await makeHome({ mode: 'immersive' });
+    const ctx = fakeContext();
+    let releasePut;
+    let putStartedResolve;
+    const putStarted = new Promise((resolve) => { putStartedResolve = resolve; });
+    const fetch = installFetch((call) => {
+      if (call.init.method === 'GET') return cloudEmpty();
+      putStartedResolve();
+      return new Promise((resolve) => { releasePut = resolve; });
+    });
+    const session = makeSession();
+    const { adapter } = adapterFor({
+      ctx,
+      config: {
+        recall: true,
+        ingest: false,
+        checkpoints: true,
+        hideMemoryTools: true,
+        checkpointTimeoutMs: 500,
+      },
+      homeDir: home,
+      env: {},
+      fetchImpl: fetch.fetchImpl,
+    }, { discovery: true });
+    handlerFor(ctx, 'tools/change')();
+    await adapter.flush();
+    const listener = handlerFor(ctx, 'session/event');
+    for (const entry of compactionEvents()) listener(session, entry);
+    await putStarted;
+    await setDiscovery(home, document, {
+      capabilities: {
+        ...(document.capabilities ?? {}),
+        recall: false,
+        context: false,
+      },
+    });
+    handlerFor(ctx, 'tools/change')();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    releasePut(cloudCheckpoint(1, { compactionId: 'c1', endSeq: 13 }));
+    await adapter.flush();
+    const state = adapter.getState();
+    expect(state.checkpoints.committed).toBe(1);
+    expect(state.checkpoints.sent).toBe(1);
+    expect(state.compactions[0]).toMatchObject({ committed: true, skipped: false });
+  });
+
   it('热禁用会 abort in-flight checkpoint，晚到 200 不标 committed/sent', async () => {
     const { home, document } = await makeHome({ mode: 'immersive' });
     const ctx = fakeContext();
@@ -1881,6 +1925,72 @@ describe('@mebular/dsh-plugin memory runtime：compaction checkpoint', () => {
     expect(state.compactions[0]).toMatchObject({ committed: false, pending: false, skipped: true });
   });
 
+  it('权威 GET 5xx 后由有界 timer 重试并最终 PUT committed', async () => {
+    const ctx = fakeContext();
+    let gets = 0;
+    const fetch = checkpointHttp({
+      get: () => {
+        gets += 1;
+        if (gets === 1) return jsonFailResponse(503, 'runtime_not_ready');
+        return cloudCheckpoint(4, { compactionId: 'old', endSeq: 3 });
+      },
+      put: () => cloudCheckpoint(5, { compactionId: 'c1', endSeq: 13 }),
+    });
+    const session = makeSession();
+    const { adapter } = adapterFor({
+      ctx,
+      config: {
+        enabled: true,
+        recall: false,
+        ingest: false,
+        checkpoints: true,
+        hideMemoryTools: false,
+        checkpointTimeoutMs: 50,
+        checkpointRetries: 0,
+        checkpointReconcileMs: 20,
+      },
+      fetchImpl: fetch.fetchImpl,
+    });
+    const listener = handlerFor(ctx, 'session/event');
+    for (const entry of compactionEvents()) listener(session, entry);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    await adapter.flush();
+    const put = fetch.calls.find((call) => call.init.method === 'PUT');
+    expect(put.body.expectedRevision).toBe(4);
+    const state = adapter.getState();
+    expect(state.checkpoints.committed).toBe(1);
+    expect(state.checkpoints.failed).toBe(0);
+    expect(state.compactions[0]).toMatchObject({ committed: true, revision: 5 });
+  });
+
+  it('cloud summary_only（degraded:true）仍是权威 revision', async () => {
+    const ctx = fakeContext();
+    const fetch = checkpointHttp({
+      get: () => cloudCheckpoint(4, { contentMode: 'summary_only', compactionId: 'old' }),
+      put: () => cloudCheckpoint(5, { contentMode: 'summary_only', compactionId: 'c1', endSeq: 13 }),
+    });
+    const session = makeSession();
+    const { adapter } = adapterFor({
+      ctx,
+      config: {
+        enabled: true,
+        recall: false,
+        ingest: false,
+        checkpoints: true,
+        hideMemoryTools: false,
+        checkpointTimeoutMs: 100,
+      },
+      fetchImpl: fetch.fetchImpl,
+    });
+    const listener = handlerFor(ctx, 'session/event');
+    for (const entry of compactionEvents()) listener(session, entry);
+    await adapter.flush();
+    const put = fetch.calls.find((call) => call.init.method === 'PUT');
+    expect(put.body.expectedRevision).toBe(4);
+    expect(adapter.getState().checkpoints.committed).toBe(1);
+    expect(adapter.getState().compactions[0]).toMatchObject({ committed: true, revision: 5 });
+  });
+
   it('重启后首个 checkpoint 先 GET 权威 revision，绝不省略 expectedRevision', async () => {
     const ctx = fakeContext();
     const fetch = checkpointHttp({
@@ -1907,6 +2017,42 @@ describe('@mebular/dsh-plugin memory runtime：compaction checkpoint', () => {
     expect(put.body.expectedRevision).toBe(9);
     expect(adapter.getState().checkpoints.committed).toBe(1);
     expect(adapter.getState().compactions[0]).toMatchObject({ committed: true, revision: 10 });
+  });
+
+  it('同一 compaction 在不同 authoritative revision 下使用不同 requestId', async () => {
+    const run = async (get, put) => {
+      const ctx = fakeContext();
+      const fetch = checkpointHttp({ get, put });
+      const session = makeSession();
+      const { adapter } = adapterFor({
+        ctx,
+        config: {
+          enabled: true,
+          recall: false,
+          ingest: false,
+          checkpoints: true,
+          hideMemoryTools: false,
+          checkpointTimeoutMs: 100,
+        },
+        fetchImpl: fetch.fetchImpl,
+      });
+      const listener = handlerFor(ctx, 'session/event');
+      for (const entry of compactionEvents()) listener(session, entry);
+      await adapter.flush();
+      const putCall = fetch.calls.find((call) => call.init.method === 'PUT');
+      return { requestId: putCall.body.requestId, header: putCall.init.headers['idempotency-key'] };
+    };
+    const created = await run(
+      cloudEmpty,
+      () => cloudCheckpoint(1, { compactionId: 'c1', endSeq: 13 }),
+    );
+    const rebased = await run(
+      () => cloudCheckpoint(7, { compactionId: 'old', endSeq: 3 }),
+      () => cloudCheckpoint(8, { compactionId: 'c1', endSeq: 13 }),
+    );
+    expect(created.requestId).toBe(created.header);
+    expect(rebased.requestId).toBe(rebased.header);
+    expect(rebased.requestId).not.toBe(created.requestId);
   });
 
   it('删除后缓存 revision 冲突时 GET null 并以 expectedRevision:0 重建', async () => {
@@ -2051,6 +2197,7 @@ describe('@mebular/dsh-plugin memory runtime：compaction checkpoint', () => {
         hideMemoryTools: false,
         checkpointTimeoutMs: 100,
         checkpointRetryBaseMs: 1,
+        checkpointReconcileMs: 20,
       },
       fetchImpl: fetch.fetchImpl,
     });
@@ -2059,14 +2206,16 @@ describe('@mebular/dsh-plugin memory runtime：compaction checkpoint', () => {
     await adapter.flush();
     expect(adapter.getState().checkpoints.committed).toBe(0);
     expect(adapter.getState().compactions[0]).toMatchObject({ pending: true });
-    await adapter.flush();
+    await new Promise((resolve) => setTimeout(resolve, 300));
     const state = adapter.getState();
     expect(state.checkpoints.committed).toBe(1);
     expect(state.checkpoints.reconciled).toBe(1);
+    expect(state.checkpoints.needsReconcileGauge).toBe(0);
+    expect(state.checkpoints.reconciling).toBe(0);
     expect(state.compactions[0]).toMatchObject({ committed: true, pending: false, revision: 4 });
   });
 
-  it('409 后的 GET 拒绝 cache/stale/degraded revision，不盲写', async () => {
+  it('409 后的 GET 拒绝 cache/stale revision 并显式 failed，不盲写', async () => {
     const ctx = fakeContext();
     const fetch = checkpointHttp({
       get: () => jsonResponse(200, {
@@ -2100,9 +2249,10 @@ describe('@mebular/dsh-plugin memory runtime：compaction checkpoint', () => {
     await adapter.flush();
     expect(fetch.calls.filter((call) => call.init.method === 'PUT')).toHaveLength(0);
     expect(adapter.getState().checkpoints.committed).toBe(0);
-    expect(adapter.getState().checkpoints.pending).toBe(1);
-    expect(adapter.getState().checkpoints.needsReconcile).toBe(1);
-    expect(adapter.getState().compactions[0]).toMatchObject({ pending: true, failed: false });
+    expect(adapter.getState().checkpoints.failed).toBe(1);
+    expect(adapter.getState().checkpoints.pending).toBe(0);
+    expect(adapter.getState().checkpoints.needsReconcile).toBe(0);
+    expect(adapter.getState().compactions[0]).toMatchObject({ pending: false, failed: true });
   });
 
   it('重复 compaction 使用同一操作身份，不产生第二次图写入', async () => {
@@ -2132,6 +2282,8 @@ describe('@mebular/dsh-plugin memory runtime：compaction checkpoint', () => {
     const state = adapter.getState();
     expect(state.checkpoints.committed).toBe(1);
     expect(state.checkpoints.duplicates).toBe(1);
+    expect(state.checkpoints.reconciling).toBe(0);
+    expect(state.checkpoints.needsReconcileGauge).toBe(0);
     expect(state.compactions.every((entry) => entry.committed === true)).toBe(true);
   });
 
@@ -2783,9 +2935,17 @@ describe('@mebular/dsh-plugin memory runtime：ingest 有界重试', () => {
           extraction: { status: 'failed' },
         });
       }
+      if (call === 3) {
+        return jsonResponse(200, {
+          queued: false,
+          extraction: { status: 'completed' },
+        });
+      }
       return jsonResponse(200, {
         queued: false,
+        degraded: true,
         extraction: { status: 'completed' },
+        detail: { queued: 0, failed: 1 },
       });
     });
     const { adapter } = adapterFor({
@@ -2798,15 +2958,17 @@ describe('@mebular/dsh-plugin memory runtime：ingest 有界重试', () => {
     listener(session, event('user/message', 1, humanMessage('pending batch')));
     listener(session, event('user/message', 2, humanMessage('failed batch')));
     listener(session, event('user/message', 3, humanMessage('committed batch')));
+    listener(session, event('user/message', 4, humanMessage('detail partial batch')));
     await adapter.flush();
     const state = adapter.getState().ingest;
-    expect(state.accepted).toBe(3);
+    expect(state.accepted).toBe(4);
     expect(state.pending).toBe(1);
+    expect(state.partial).toBe(1);
     expect(state.extractionFailed).toBe(1);
-    expect(state.failed).toBe(1);
+    expect(state.failed).toBe(2);
     expect(state.sent).toBe(1);
     expect(state.committed).toBe(1);
-    expect(state.lastError?.code).toBe('extraction_failed');
+    expect(state.lastError?.code).toBe('detail_failed');
   });
 
   it('ingestRetries 被限制在契约范围内 0..2', () => {

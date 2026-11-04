@@ -111,6 +111,8 @@
     "verify:dsh:e2e:latest": "node scripts/verify-dsh-e2e.mjs --dsh-version latest",
     "verify:dsh:e2e:negative": "node tests/dsh/e2e/negative-control.mjs",
     "verify:dsh:memory-runtime": "node tests/dsh/e2e/memory-runtime-e2e.mjs",
+    "verify:dsh:checkpoint-faults": "node tests/integration/host-e2e/dsh-real-runtime.mjs --scenario faults",
+    "verify:dsh:checkpoint-negative": "node tests/dsh/e2e/checkpoint-negative-control.mjs",
     "verify:release-version": "node scripts/verify-release-version.mjs",
     "verify:desktop:assets": "node scripts/verify-desktop-assets.mjs",
     "verify:release-visibility": "node scripts/verify-release-visibility.mjs",

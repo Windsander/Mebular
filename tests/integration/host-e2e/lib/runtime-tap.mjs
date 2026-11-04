@@ -49,7 +49,7 @@ function forwardHeaders(headers) {
 
 function responseHeaders(headers) {
   const out = {};
-  for (const key of ['content-type', 'x-request-id', 'x-mebular-mode', 'x-mebular-degraded', 'www-authenticate']) {
+  for (const key of ['content-type', 'x-request-id', 'x-mebular-mode', 'x-mebular-degraded', 'www-authenticate', 'retry-after']) {
     const value = headers.get(key);
     if (value !== null) out[key] = value;
   }

@@ -1,0 +1,792 @@
+{
+  "schema": "mebular.scale-benchmark/1",
+  "label": "1k-smoke-repeat",
+  "runToken": "4aa5da9a",
+  "startedAt": "2026-11-04T12:40:20.211Z",
+  "finishedAt": "2026-11-04T12:42:20.897Z",
+  "status": "passed",
+  "command": "node tests/integration/scale-bench/run.mjs --records 1000 --details 1000 --batch-size 50 --queries 100 --label 1k-smoke-repeat --output /private/var/folders/86/gpjtr2p94dg7mz24pbkrj8pw0000gn/T/opencode/scale-1k-smoke-repeat-final.json",
+  "git": {
+    "sha": "6164da2c99a93c74a33ace2b18563b0b1ec9f6ac",
+    "shortSha": "6164da2c99a9",
+    "branch": "feat/0.3.2-evidence-bench",
+    "dirty": false,
+    "dirtyFileCount": 0
+  },
+  "environment": {
+    "platform": "darwin",
+    "release": "24.6.0",
+    "arch": "x64",
+    "node": "v26.8.1",
+    "v8": "14.6.202.34-node.28",
+    "cpuModel": "Intel(R) Core(TM) i7-8850H CPU @ 2.60GHz",
+    "cpuCount": 12,
+    "totalMemoryBytes": 34359738368,
+    "freeMemoryBytes": 2122522624,
+    "ci": false
+  },
+  "options": {
+    "records": 1000,
+    "details": 1000,
+    "batchSize": 50,
+    "queries": 100,
+    "limit": 20,
+    "keep": false
+  },
+  "realBoundary": {
+    "realComponents": [
+      "MCP capability HTTP server (packages/mcp/src/serve.mjs)",
+      "GraphStore + MemoryService + event log (Mebular app)",
+      "managed Memory Runtime sidecar process (mebular-memory-runtime)",
+      "sidecar -> capability HTTP path (/write, /detail, /query, /recall)",
+      "local filesystem in a temporary home"
+    ],
+    "fakeOrStub": [],
+    "notExercised": [
+      "real host process (DSH/Hermes/OpenCode/OpenChamber)",
+      "real model or model pack",
+      "P2P/remote sync peer",
+      "Console UI"
+    ]
+  },
+  "seed": {
+    "requestedRecords": 1000,
+    "requestedDetails": 1000,
+    "writtenRecords": 1000,
+    "writtenDetails": 1000,
+    "batches": 20,
+    "batchSize": 50,
+    "kindCounts": {
+      "conversation-user": 800,
+      "conversation-assistant": 100,
+      "tool_output": 60,
+      "document_slice": 40
+    },
+    "wallMs": 106957.853,
+    "throughput": {
+      "recordsPerSec": 9.35,
+      "detailsPerSec": 9.35,
+      "batchesPerSec": 0.19
+    },
+    "latency": {
+      "samples": 20,
+      "minMs": 3224.633,
+      "p50Ms": 4971.639,
+      "p95Ms": 7320.943,
+      "p99Ms": 8273.005,
+      "maxMs": 8273.005,
+      "meanMs": 5346.785
+    },
+    "perRecordLatencyMs": {
+      "samples": 20,
+      "minMs": 64.493,
+      "p50Ms": 99.433,
+      "p95Ms": 146.419,
+      "p99Ms": 165.46,
+      "maxMs": 165.46,
+      "meanMs": 106.936
+    },
+    "batchLatenciesMs": [
+      3224.633,
+      3319.278,
+      3454.683,
+      3688.691,
+      4159.176,
+      4104.441,
+      4321.873,
+      4739.944,
+      4779.69,
+      4971.639,
+      5551.528,
+      5330.38,
+      6163.278,
+      6302.725,
+      6124.496,
+      6731.158,
+      7320.943,
+      7168.712,
+      7205.422,
+      8273.005
+    ],
+    "errors": 0
+  },
+  "reads": {
+    "samples": 100,
+    "queryLimit": 20,
+    "sampling": "stratified by index % 100 detail-kind bucket; equal samples per bucket",
+    "hitRate": {
+      "capabilityQuery": 1,
+      "sidecarRecall": 1,
+      "sidecarContext": 1,
+      "detailExpand": 1
+    },
+    "detailCoverage": {
+      "samples": 100,
+      "expandAttempts": 90,
+      "missingDetail": 10,
+      "coverageRate": 0.9,
+      "hitRate": 1,
+      "byKind": [
+        {
+          "kind": "conversation-assistant",
+          "samples": 10,
+          "expandAttempts": 10,
+          "expandHits": 10,
+          "missingDetail": 0,
+          "coverage": 1,
+          "hitRate": 1
+        },
+        {
+          "kind": "conversation-user",
+          "samples": 80,
+          "expandAttempts": 80,
+          "expandHits": 80,
+          "missingDetail": 0,
+          "coverage": 1,
+          "hitRate": 1
+        },
+        {
+          "kind": "document_slice",
+          "samples": 4,
+          "expandAttempts": 0,
+          "expandHits": 0,
+          "missingDetail": 4,
+          "coverage": 0,
+          "hitRate": null
+        },
+        {
+          "kind": "tool_output",
+          "samples": 6,
+          "expandAttempts": 0,
+          "expandHits": 0,
+          "missingDetail": 6,
+          "coverage": 0,
+          "hitRate": null
+        }
+      ]
+    },
+    "degraded": {
+      "recalls": 0,
+      "contexts": 0
+    },
+    "failures": [],
+    "latency": {
+      "capabilityQuery": {
+        "samples": 100,
+        "minMs": 3.999,
+        "p50Ms": 5.683,
+        "p95Ms": 7.009,
+        "p99Ms": 10.985,
+        "maxMs": 14.578,
+        "meanMs": 5.842
+      },
+      "sidecarRecall": {
+        "samples": 100,
+        "minMs": 39.328,
+        "p50Ms": 50.122,
+        "p95Ms": 63.668,
+        "p99Ms": 70.505,
+        "maxMs": 96.13,
+        "meanMs": 51.03
+      },
+      "sidecarContext": {
+        "samples": 100,
+        "minMs": 42.546,
+        "p50Ms": 44.847,
+        "p95Ms": 66.101,
+        "p99Ms": 68.971,
+        "maxMs": 72.179,
+        "meanMs": 48.68
+      },
+      "detailExpand": {
+        "samples": 90,
+        "minMs": 5.173,
+        "p50Ms": 7.188,
+        "p95Ms": 8.416,
+        "p99Ms": 9.946,
+        "maxMs": 9.946,
+        "meanMs": 7.195
+      }
+    },
+    "recallInternalTiming": {
+      "expandMs": {
+        "samples": 100,
+        "minMs": 0,
+        "p50Ms": 2,
+        "p95Ms": 3,
+        "p99Ms": 3,
+        "maxMs": 5,
+        "meanMs": 2.1
+      },
+      "totalMs": {
+        "samples": 100,
+        "minMs": 13,
+        "p50Ms": 17,
+        "p95Ms": 21,
+        "p99Ms": 26,
+        "maxMs": 51,
+        "meanMs": 17.22
+      }
+    },
+    "detailExpandBySource": {
+      "capability": {
+        "samples": 90,
+        "minMs": 5.173,
+        "p50Ms": 7.188,
+        "p95Ms": 8.416,
+        "p99Ms": 9.946,
+        "maxMs": 9.946,
+        "meanMs": 7.195
+      }
+    }
+  },
+  "snapshots": {
+    "beforeSeed": {
+      "phase": "before-seed",
+      "at": "2026-11-04T12:40:21.019Z",
+      "host": {
+        "rssBytes": 112435200,
+        "heapTotalBytes": 40566784,
+        "heapUsedBytes": 24735208,
+        "externalBytes": 4665872,
+        "arrayBuffersBytes": 354330
+      },
+      "sidecar": {
+        "pid": 51026,
+        "rssBytes": 86351872,
+        "runtimeVersion": "0.3.0"
+      },
+      "disk": {
+        "logicalBytes": 2404,
+        "allocatedBytes": 28672,
+        "byPath": {
+          "device.jsonl": 0,
+          "memory-runtime": 440,
+          "memory-runtime/staging": 0,
+          "memory-runtime/traces.jsonl": 0,
+          "memory-runtime/cache": 0,
+          "memory-runtime/cache/details": 0,
+          "memory-runtime/outbox": 0,
+          "memory-runtime/outbox/dead": 0,
+          "memory-runtime/capability-idempotency.json": 0
+        }
+      },
+      "idempotencyLedgerEntries": 0,
+      "sidecarStatus": {
+        "state": "ready",
+        "degraded": false,
+        "counts": {
+          "stagingChunks": 0,
+          "localStagingChunks": 0,
+          "traces": 0,
+          "cachedRecords": 0,
+          "detailCacheEntries": 0,
+          "detailCacheBytes": 0,
+          "outbox": 0,
+          "deadLetter": 0,
+          "localTraces": 0,
+          "ingested": 0,
+          "settled": 0,
+          "recalls": 0,
+          "contexts": 0,
+          "feedback": 0,
+          "recallSilent": 0,
+          "compacts": 0,
+          "checkpoints": 0,
+          "selfRecords": 0,
+          "objectWritesQueued": 0,
+          "objectWritesFailed": 0
+        },
+        "details": {
+          "available": true,
+          "staging": {
+            "chunks": 0,
+            "hours": 24,
+            "maxBytes": 268435456
+          },
+          "cache": {
+            "entries": 0,
+            "bytes": 0,
+            "days": 30,
+            "maxBytes": 268435456
+          },
+          "outbox": {
+            "items": 0,
+            "bytes": 0
+          },
+          "quota": {
+            "bytesPerDomain": 268435456,
+            "bytesCloud": 1073741824,
+            "usedBytes": 0,
+            "bytes": 1073741824
+          },
+          "retentionDays": {
+            "conversation": 30,
+            "tool_output": 7,
+            "document_slice": 90
+          },
+          "maintenance": {
+            "running": true,
+            "intervalMs": 60000,
+            "lastAttemptAt": 1793796020825,
+            "lastSuccessAt": 1793796020825,
+            "lastError": null,
+            "lastResult": {
+              "stagingChunks": 0,
+              "traces": 0,
+              "cacheRemoved": 0,
+              "detailCacheRemoved": 0,
+              "outboxExpired": 0,
+              "deadRemoved": 0,
+              "bytes": 0,
+              "oldestAgeMs": null
+            }
+          }
+        },
+        "outbox": {
+          "items": 0,
+          "bytes": 0,
+          "oldestAt": null,
+          "deadItems": 0,
+          "deadBytes": 0,
+          "oldestAgeMs": null
+        },
+        "limits": {
+          "maxChunkBytes": 262144,
+          "maxContextTokens": 12000,
+          "maxRecall": 50
+        },
+        "warnings": []
+      },
+      "capabilityStatus": {
+        "counts": {
+          "nodes": 0,
+          "memoryRecords": 0,
+          "compacts": 0,
+          "checkpoints": 0,
+          "selfRecords": 0,
+          "details": 0,
+          "detailBytes": 0
+        },
+        "detailQuota": {
+          "domainBytes": 268435456,
+          "cloudBytes": 1073741824,
+          "threadBytes": 67108864
+        },
+        "detailRetentionDays": {
+          "conversation": 30,
+          "tool_output": 7,
+          "document_slice": 90,
+          "pinned": 0
+        },
+        "limits": {
+          "maxBodyBytes": 2097152,
+          "maxBatchItems": 100,
+          "maxLimit": 50,
+          "maxDetailTextBytes": 262144,
+          "maxDetailBatchItems": 100,
+          "maxDetailGetBytes": 65536,
+          "maxDetailListLimit": 50
+        }
+      }
+    },
+    "afterSeed": {
+      "phase": "after-seed",
+      "at": "2026-11-04T12:42:08.196Z",
+      "host": {
+        "rssBytes": 125374464,
+        "heapTotalBytes": 43913216,
+        "heapUsedBytes": 39351296,
+        "externalBytes": 5042286,
+        "arrayBuffersBytes": 745662
+      },
+      "sidecar": {
+        "pid": 51026,
+        "rssBytes": 164380672,
+        "runtimeVersion": "0.3.0"
+      },
+      "disk": {
+        "logicalBytes": 18968692,
+        "allocatedBytes": 22511616,
+        "byPath": {
+          "device.jsonl": 16190253,
+          "memory-runtime": 2776475,
+          "memory-runtime/staging": 0,
+          "memory-runtime/traces.jsonl": 0,
+          "memory-runtime/cache": 2176570,
+          "memory-runtime/cache/details": 1283730,
+          "memory-runtime/outbox": 0,
+          "memory-runtime/outbox/dead": 0,
+          "memory-runtime/capability-idempotency.json": 599465
+        }
+      },
+      "idempotencyLedgerEntries": 40,
+      "sidecarStatus": {
+        "state": "ready",
+        "degraded": false,
+        "counts": {
+          "stagingChunks": 0,
+          "localStagingChunks": 0,
+          "traces": 0,
+          "cachedRecords": 40,
+          "detailCacheEntries": 1000,
+          "detailCacheBytes": 1283730,
+          "outbox": 0,
+          "deadLetter": 0,
+          "localTraces": 0,
+          "ingested": 20,
+          "settled": 1000,
+          "recalls": 0,
+          "contexts": 0,
+          "feedback": 0,
+          "recallSilent": 0,
+          "compacts": 0,
+          "checkpoints": 0,
+          "selfRecords": 0,
+          "objectWritesQueued": 0,
+          "objectWritesFailed": 0
+        },
+        "details": {
+          "available": true,
+          "staging": {
+            "chunks": 0,
+            "hours": 24,
+            "maxBytes": 268435456
+          },
+          "cache": {
+            "entries": 1000,
+            "bytes": 1283730,
+            "days": 30,
+            "maxBytes": 268435456
+          },
+          "outbox": {
+            "items": 0,
+            "bytes": 0
+          },
+          "quota": {
+            "bytesPerDomain": 268435456,
+            "bytesCloud": 1073741824,
+            "usedBytes": 0,
+            "bytes": 1073741824
+          },
+          "retentionDays": {
+            "conversation": 30,
+            "tool_output": 7,
+            "document_slice": 90
+          },
+          "maintenance": {
+            "running": true,
+            "intervalMs": 60000,
+            "lastAttemptAt": 1793796080833,
+            "lastSuccessAt": 1793796080833,
+            "lastError": null,
+            "lastResult": {
+              "stagingChunks": 50,
+              "traces": 0,
+              "cacheRemoved": 0,
+              "detailCacheRemoved": 0,
+              "outboxExpired": 0,
+              "deadRemoved": 0,
+              "bytes": 1453690,
+              "oldestAgeMs": 58219
+            }
+          }
+        },
+        "outbox": {
+          "items": 0,
+          "bytes": 0,
+          "oldestAt": null,
+          "deadItems": 0,
+          "deadBytes": 0,
+          "oldestAgeMs": null
+        },
+        "limits": {
+          "maxChunkBytes": 262144,
+          "maxContextTokens": 12000,
+          "maxRecall": 50
+        },
+        "warnings": [
+          "hardware_not_detected"
+        ]
+      },
+      "capabilityStatus": {
+        "counts": {
+          "nodes": 2000,
+          "memoryRecords": 1000,
+          "compacts": 0,
+          "checkpoints": 0,
+          "selfRecords": 0,
+          "details": 1000,
+          "detailBytes": 243890
+        },
+        "detailQuota": {
+          "domainBytes": 268435456,
+          "cloudBytes": 1073741824,
+          "threadBytes": 67108864
+        },
+        "detailRetentionDays": {
+          "conversation": 30,
+          "tool_output": 7,
+          "document_slice": 90,
+          "pinned": 0
+        },
+        "limits": {
+          "maxBodyBytes": 2097152,
+          "maxBatchItems": 100,
+          "maxLimit": 50,
+          "maxDetailTextBytes": 262144,
+          "maxDetailBatchItems": 100,
+          "maxDetailGetBytes": 65536,
+          "maxDetailListLimit": 50
+        }
+      }
+    },
+    "afterReads": {
+      "phase": "after-reads",
+      "at": "2026-11-04T12:42:19.669Z",
+      "host": {
+        "rssBytes": 189054976,
+        "heapTotalBytes": 103354368,
+        "heapUsedBytes": 59097848,
+        "externalBytes": 5720067,
+        "arrayBuffersBytes": 1423396
+      },
+      "sidecar": {
+        "pid": 51026,
+        "rssBytes": 173568000,
+        "runtimeVersion": "0.3.0"
+      },
+      "disk": {
+        "logicalBytes": 19364903,
+        "allocatedBytes": 22908928,
+        "byPath": {
+          "device.jsonl": 16190253,
+          "memory-runtime": 3172686,
+          "memory-runtime/staging": 0,
+          "memory-runtime/traces.jsonl": 396211,
+          "memory-runtime/cache": 2176570,
+          "memory-runtime/cache/details": 1283730,
+          "memory-runtime/outbox": 0,
+          "memory-runtime/outbox/dead": 0,
+          "memory-runtime/capability-idempotency.json": 599465
+        }
+      },
+      "idempotencyLedgerEntries": 40,
+      "sidecarStatus": {
+        "state": "ready",
+        "degraded": false,
+        "counts": {
+          "stagingChunks": 0,
+          "localStagingChunks": 0,
+          "traces": 200,
+          "cachedRecords": 40,
+          "detailCacheEntries": 1000,
+          "detailCacheBytes": 1283730,
+          "outbox": 0,
+          "deadLetter": 0,
+          "localTraces": 200,
+          "ingested": 20,
+          "settled": 1000,
+          "recalls": 100,
+          "contexts": 100,
+          "feedback": 0,
+          "recallSilent": 0,
+          "compacts": 0,
+          "checkpoints": 0,
+          "selfRecords": 0,
+          "objectWritesQueued": 0,
+          "objectWritesFailed": 0
+        },
+        "details": {
+          "available": true,
+          "staging": {
+            "chunks": 0,
+            "hours": 24,
+            "maxBytes": 268435456
+          },
+          "cache": {
+            "entries": 1000,
+            "bytes": 1283730,
+            "days": 30,
+            "maxBytes": 268435456
+          },
+          "outbox": {
+            "items": 0,
+            "bytes": 0
+          },
+          "quota": {
+            "bytesPerDomain": 268435456,
+            "bytesCloud": 1073741824,
+            "usedBytes": 0,
+            "bytes": 1073741824
+          },
+          "retentionDays": {
+            "conversation": 30,
+            "tool_output": 7,
+            "document_slice": 90
+          },
+          "maintenance": {
+            "running": true,
+            "intervalMs": 60000,
+            "lastAttemptAt": 1793796080833,
+            "lastSuccessAt": 1793796080833,
+            "lastError": null,
+            "lastResult": {
+              "stagingChunks": 50,
+              "traces": 0,
+              "cacheRemoved": 0,
+              "detailCacheRemoved": 0,
+              "outboxExpired": 0,
+              "deadRemoved": 0,
+              "bytes": 1453690,
+              "oldestAgeMs": 58219
+            }
+          }
+        },
+        "outbox": {
+          "items": 0,
+          "bytes": 0,
+          "oldestAt": null,
+          "deadItems": 0,
+          "deadBytes": 0,
+          "oldestAgeMs": null
+        },
+        "limits": {
+          "maxChunkBytes": 262144,
+          "maxContextTokens": 12000,
+          "maxRecall": 50
+        },
+        "warnings": [
+          "hardware_not_detected"
+        ]
+      },
+      "capabilityStatus": {
+        "counts": {
+          "nodes": 2000,
+          "memoryRecords": 1000,
+          "compacts": 0,
+          "checkpoints": 0,
+          "selfRecords": 0,
+          "details": 1000,
+          "detailBytes": 243890
+        },
+        "detailQuota": {
+          "domainBytes": 268435456,
+          "cloudBytes": 1073741824,
+          "threadBytes": 67108864
+        },
+        "detailRetentionDays": {
+          "conversation": 30,
+          "tool_output": 7,
+          "document_slice": 90,
+          "pinned": 0
+        },
+        "limits": {
+          "maxBodyBytes": 2097152,
+          "maxBatchItems": 100,
+          "maxLimit": 50,
+          "maxDetailTextBytes": 262144,
+          "maxDetailBatchItems": 100,
+          "maxDetailGetBytes": 65536,
+          "maxDetailListLimit": 50
+        }
+      }
+    }
+  },
+  "cleanup": {
+    "cleaned": true,
+    "tempHomeRemoved": true,
+    "tempRoot": "<temp-home>",
+    "sidecarProcessStopped": true,
+    "sidecarProcessForcedStop": false
+  },
+  "error": null,
+  "components": {
+    "sidecar": {
+      "runtimeVersion": "0.3.0",
+      "apiVersion": 1,
+      "capabilityApiVersion": 1,
+      "state": "ready",
+      "mode": "immersive",
+      "capabilities": {
+        "ingest": true,
+        "recall": true,
+        "context": true,
+        "details": true,
+        "checkpoint": true,
+        "compact": true,
+        "self": true,
+        "models": [
+          "heuristic",
+          "host"
+        ]
+      }
+    },
+    "capability": {
+      "mcpVersion": "0.3.0",
+      "coreVersion": "0.3.0",
+      "capabilityApiVersion": 1,
+      "features": {
+        "domains": true,
+        "owner": true,
+        "provenance": true,
+        "batchWrite": true,
+        "idempotency": true,
+        "supersedes": true,
+        "temporalUpdates": [
+          "validTo"
+        ],
+        "internalObjects": [
+          "compact",
+          "self_record",
+          "context_checkpoint"
+        ],
+        "details": true,
+        "detailKinds": [
+          "raw_chunk",
+          "message",
+          "tool_output",
+          "document_slice"
+        ],
+        "detailRetentionClasses": [
+          "conversation",
+          "tool_output",
+          "document_slice",
+          "pinned"
+        ],
+        "detailDeleteReasons": [
+          "user_requested",
+          "record_deleted",
+          "retention_expired",
+          "quota_evicted",
+          "checkpoint_deleted"
+        ],
+        "sync": true,
+        "graph": true,
+        "readOnly": false,
+        "readEndpoints": [
+          "version",
+          "status",
+          "namespaces",
+          "query",
+          "search",
+          "history",
+          "profile",
+          "skills",
+          "graph",
+          "detail",
+          "sync"
+        ],
+        "writeEndpoints": [
+          "write",
+          "update",
+          "delete",
+          "archive",
+          "internal-object",
+          "detail",
+          "sync"
+        ]
+      }
+    }
+  }
+}

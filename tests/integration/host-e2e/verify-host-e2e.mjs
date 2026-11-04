@@ -18,6 +18,8 @@
 // Exit code is nonzero if any selected suite fails.
 
 import { spawn } from 'node:child_process';
+import { readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -26,12 +28,16 @@ const repoRoot = resolve(here, '..', '..', '..');
 const suites = {
   hermes: { label: 'Hermes', script: join(here, 'hermes-real-runtime.mjs') },
   opencode: { label: 'OpenCode / OpenChamber', script: join(here, 'opencode-real-runtime.mjs') },
+  'opencode-checkpoint': {
+    label: 'OpenCode checkpoint recovery（fake host / 真实 sidecar）',
+    script: join(here, 'opencode-checkpoint-recovery.mjs'),
+  },
   dsh: { label: 'DSH', script: join(here, 'dsh-real-runtime.mjs') },
 };
 
 function parseArgs(argv) {
   const options = {
-    hosts: ['hermes', 'opencode', 'dsh'],
+    hosts: ['hermes', 'opencode', 'opencode-checkpoint', 'dsh'],
     keep: false,
     dshVersion: null,
     controllerFallback: false,
@@ -71,18 +77,30 @@ function runSuite(name, options) {
     if (name === 'opencode' && options.controllerFallback) args.push('--controller-fallback');
     console.log(`\n${'='.repeat(72)}\n▶ ${suites[name].label}\n${'='.repeat(72)}`);
     const started = Date.now();
-    const child = spawn(process.execPath, args, { cwd: repoRoot, stdio: 'inherit' });
-    child.on('close', (code) => resolvePromise({
-      name,
-      code: code ?? 1,
-      tookMs: Date.now() - started,
-    }));
-    child.on('error', (error) => resolvePromise({
-      name,
-      code: 1,
-      tookMs: Date.now() - started,
-      error,
-    }));
+    const summaryPath = join(tmpdir(), `mebular-host-e2e-${name}-${process.pid}-${Date.now()}.json`);
+    const child = spawn(process.execPath, args, {
+      cwd: repoRoot,
+      stdio: 'inherit',
+      env: { ...process.env, HOST_E2E_SUMMARY_FILE: summaryPath },
+    });
+    const finish = async (code, error) => {
+      let summary = null;
+      try {
+        summary = JSON.parse(await readFile(summaryPath, 'utf8'));
+      } catch {
+        summary = null;
+      }
+      await rm(summaryPath, { force: true }).catch(() => undefined);
+      resolvePromise({
+        name,
+        code,
+        tookMs: Date.now() - started,
+        summary,
+        ...(error ? { error } : {}),
+      });
+    };
+    child.on('close', (code) => { void finish(code ?? 1, null); });
+    child.on('error', (error) => { void finish(1, error); });
   });
 }
 
@@ -103,8 +121,18 @@ async function main() {
   console.log(`\n${'='.repeat(72)}\n汇总\n${'='.repeat(72)}`);
   for (const result of results) {
     const detail = result.error ? ` (${result.error.message})` : ` (${formatDuration(result.tookMs)})`;
-    console.log(`  ${result.code === 0 ? '✓' : '✗'} ${suites[result.name].label}: exit ${result.code}${detail}`);
+    const structured = result.summary
+      ? ` {passed:${result.summary.passed},failed:${result.summary.failed}}`
+      : '';
+    console.log(`  ${result.code === 0 ? '✓' : '✗'} ${suites[result.name].label}: exit ${result.code}${detail}${structured}`);
   }
+  console.log(`HOST_E2E_SUMMARY ${JSON.stringify(results.map((result) => ({
+    name: result.name,
+    label: suites[result.name].label,
+    exitCode: result.code,
+    tookMs: result.tookMs,
+    summary: result.summary ?? null,
+  })))}`);
   const failed = results.filter((result) => result.code !== 0);
   console.log(failed.length === 0
     ? '\n✓ 所有选中的宿主 E2E 通过'

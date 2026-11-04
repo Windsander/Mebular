@@ -43,6 +43,9 @@ jobs:
       - name: DSH plugin contract (manifest / HTTP patch / no core imports)
         run: npm run verify:dsh-plugin
 
+      - name: OpenCode checkpoint recovery (real sidecar/capability, fake host)
+        run: npm run verify:opencode:checkpoint-recovery
+
       - name: Test with coverage gates
         run: npm run test:coverage
 

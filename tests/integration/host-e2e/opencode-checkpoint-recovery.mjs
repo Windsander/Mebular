@@ -24,9 +24,11 @@ import { requestSidecar, startRealRuntime } from './lib/real-runtime.mjs';
 
 let passed = 0;
 let failed = 0;
+const results = [];
 function check(name, ok, detail = '') {
   if (ok) passed += 1;
   else failed += 1;
+  results.push({ name, ok, detail });
   console.log(`  ${ok ? '✓' : '✗'} ${name}${detail ? `（${detail}）` : ''}`);
   return ok;
 }
@@ -160,6 +162,7 @@ async function main() {
   process.env.MEBULAR_CAPABILITY_URL = proxy.url;
 
   let runtime = null;
+  let runtimeB = null;
   let controller = null;
   try {
     runtime = await startRealRuntime({
@@ -174,14 +177,52 @@ async function main() {
     else process.env.MEBULAR_CAPABILITY_URL = previousCapabilityUrl;
 
     const putBodies = [];
+    const ingestBodies = [];
     let loseFirstCheckpointResponse = true;
+    let conflictThread = null;
+    let conflictInjected = false;
     const fetchImpl = async (url, init = {}) => {
-      const response = await fetch(url, init);
       const pathname = new URL(url).pathname;
       const method = init.method ?? 'GET';
+      const requestBody = typeof init.body === 'string' ? JSON.parse(init.body) : null;
+      const ingest = pathname.endsWith('/ingest');
+      if (ingest) ingestBodies.push({ body: requestBody, status: null });
+      if (method === 'PUT' && pathname.includes('/checkpoints/')
+        && conflictThread !== null && !conflictInjected && requestBody?.threadId === conflictThread) {
+        conflictInjected = true;
+        await requestSidecar(
+          discovery,
+          `/checkpoints/${encodeURIComponent(conflictThread)}?agentId=opencode`,
+          {
+            method: 'PUT',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              requestId: 'req_real_external_writer',
+              actor: { type: 'agent', agentId: 'opencode' },
+              agentId: 'opencode',
+              threadId: conflictThread,
+              domain: `task:${conflictThread}`,
+              summary: null,
+              state: summaryOnlyCheckpointState(null, {
+                threadId: conflictThread,
+                domain: `task:${conflictThread}`,
+              }),
+              recordIds: [],
+              detailIds: [],
+              expiresAt: 0,
+              expectedRevision: 0,
+            }),
+          },
+        );
+      }
+      const response = await fetch(url, init);
+      if (ingest) {
+        ingestBodies.at(-1).status = response.status;
+        const document = await response.clone().json().catch(() => null);
+        ingestBodies.at(-1).error = document?.error?.code ?? null;
+      }
       if (method === 'PUT' && pathname.includes('/checkpoints/')) {
-        const body = JSON.parse(init.body);
-        putBodies.push(body);
+        putBodies.push(requestBody);
         if (loseFirstCheckpointResponse) {
           loseFirstCheckpointResponse = false;
           // Drain the real response after the sidecar/capability commit. The
@@ -320,6 +361,21 @@ async function main() {
       () => controller.getStatus().counts.checkpoints.sent >= 3,
     )));
     const beforeRestart = await runtime.sidecarCheckpoint(restartThread, 'opencode');
+    const ingestRestartEvent = {
+      id: 'evt_ingest_restart',
+      type: 'session.compaction.ended',
+      data: {
+        sessionID: 'ses_real_ingest_restart',
+        compactionId: 'cmp_real_ingest_restart',
+        at: 1700000000000,
+        reason: 'auto',
+        text: '以后默认用 ingest-restart 主题',
+      },
+    };
+    await controller.handleEvent(ingestRestartEvent);
+    const firstIngestBody = ingestBodies
+      .filter((entry) => entry.body?.threadId === 'ses_real_ingest_restart')
+      .at(-1);
     await controller.dispose();
     controller = createController({
       ctx: makeFakeCtx(),
@@ -348,6 +404,28 @@ async function main() {
         before: beforeRestart?.revision,
         after: afterRestart?.revision,
         duplicates: controller.getStatus().counts.checkpoints.duplicates,
+      }));
+
+    // M4: same event after restart must produce the same ingest body/requestId
+    // (no wall-clock `at` in the idempotent body).
+    await controller.handleEvent(ingestRestartEvent);
+    await controller.whenIdle();
+    const secondIngestBody = ingestBodies
+      .filter((entry) => entry.body?.threadId === 'ses_real_ingest_restart')
+      .at(-1);
+    check('重启后同 requestId/ingest body 不产生 idempotency_conflict',
+      Boolean(firstIngestBody)
+      && Boolean(secondIngestBody)
+      && JSON.stringify(firstIngestBody.body) === JSON.stringify(secondIngestBody.body)
+      && firstIngestBody.status !== 409
+      && secondIngestBody.status !== 409,
+      JSON.stringify({
+        firstStatus: firstIngestBody?.status,
+        secondStatus: secondIngestBody?.status,
+        firstError: firstIngestBody?.error,
+        secondError: secondIngestBody?.error,
+        firstRequestId: firstIngestBody?.body?.requestId,
+        secondRequestId: secondIngestBody?.body?.requestId,
       }));
 
     // M3: real sidecar ingest with a permanent detail-write failure must be
@@ -422,6 +500,89 @@ async function main() {
       recreated?.revision === 1 && recreated?.state?.compactionId === 'cmp_real_rev_3',
       JSON.stringify({ revision: recreated?.revision, compactionId: recreated?.state?.compactionId }));
 
+    // M2: a same-logical-id replay with new summary/refs must update, not
+    // silently duplicate-skip.
+    const evidenceThread = 'ses_real_evidence';
+    await controller.handleEvent({
+      id: 'evt_real_evidence_1',
+      type: 'session.compaction.ended',
+      data: {
+        sessionID: evidenceThread,
+        compactionId: 'cmp_real_evidence',
+        at: 1700000000000,
+        reason: 'auto',
+      },
+    });
+    const evidenceInitial = await runtime.sidecarCheckpoint(evidenceThread, 'opencode');
+    const evidenceRefs = await runtime.seedMemoryWithDetail({
+      text: 'evidence update reference',
+      namespace: `task:${evidenceThread}`,
+      agentId: 'opencode',
+      threadId: evidenceThread,
+    });
+    await controller.handleEvent({
+      id: 'evt_real_evidence_2',
+      type: 'session.compaction.ended',
+      data: {
+        sessionID: evidenceThread,
+        compactionId: 'cmp_real_evidence',
+        at: 1700000000000,
+        reason: 'auto',
+        text: '以后默认用 evidence-update 主题',
+        recordIds: [evidenceRefs.recordId],
+        detailIds: [evidenceRefs.detailId],
+      },
+    });
+    const evidenceUpdated = await waitFor(async () => {
+      const checkpoint = await runtime.sidecarCheckpoint(evidenceThread, 'opencode');
+      return checkpoint?.revision === 2 ? checkpoint : null;
+    });
+    check('首次无 refs、重放有 summary/refs 时显式更新 revision',
+      evidenceInitial?.revision === 1
+      && evidenceUpdated?.revision === 2
+      && evidenceUpdated?.summary === '以后默认用 evidence-update 主题'
+      && Array.isArray(evidenceUpdated?.recordIds)
+      && evidenceUpdated.recordIds.includes(evidenceRefs.recordId)
+      && Array.isArray(evidenceUpdated?.detailIds)
+      && evidenceUpdated.detailIds.includes(evidenceRefs.detailId)
+      && controller.getStatus().counts.checkpoints.updates >= 1,
+      JSON.stringify({
+        initial: evidenceInitial?.revision,
+        updated: evidenceUpdated?.revision,
+        summary: evidenceUpdated?.summary,
+        records: evidenceUpdated?.recordIds,
+        updates: controller.getStatus().counts.checkpoints.updates,
+      }));
+
+    // M7: real revision conflict — another writer advances between the
+    // plugin's GET and PUT. The plugin must re-read once and retry.
+    const conflictThreadName = 'ses_real_conflict';
+    conflictThread = conflictThreadName;
+    const sentBeforeConflict = controller.getStatus().counts.checkpoints.sent;
+    await controller.handleEvent({
+      id: 'evt_real_conflict',
+      type: 'session.compaction.ended',
+      data: {
+        sessionID: conflictThreadName,
+        compactionId: 'cmp_real_conflict_plugin',
+        at: 1700000000000,
+        reason: 'auto',
+      },
+    });
+    check('真实 GET/PUT 之间被另一写者推进后一次重读重试成功', Boolean(await waitFor(
+      () => controller.getStatus().counts.checkpoints.sent === sentBeforeConflict + 1,
+    )) && controller.getStatus().counts.checkpoints.conflicts >= 1
+      && controller.getStatus().counts.checkpoints.failed === 0);
+    const conflictCheckpoint = await runtime.sidecarCheckpoint(conflictThreadName, 'opencode');
+    check('冲突恢复后 revision 前进到 2',
+      conflictCheckpoint?.revision === 2
+      && conflictCheckpoint?.state?.compactionId === 'cmp_real_conflict_plugin',
+      JSON.stringify({
+        revision: conflictCheckpoint?.revision,
+        compactionId: conflictCheckpoint?.state?.compactionId,
+      }));
+    conflictThread = null;
+
     // M2: capability down -> PUT 202/outbox -> capability up -> one revision.
     const outboxThread = 'ses_real_outbox';
     proxy.pause();
@@ -484,16 +645,117 @@ async function main() {
     check('真实图中只有一个 202 恢复后的 checkpoint 节点', checkpointNodes.length === 1,
       JSON.stringify({ nodes: checkpointNodes.length }));
 
+    // M7: real instance switch. Start a second real runtime with its own MCP
+    // capability, point the plugin's discovery at it, and verify the task
+    // checkpoint updates in the new instance's revision space.
+    const switchThread = 'ses_real_instance_switch';
+    await controller.handleEvent({
+      id: 'evt_instance_switch_a',
+      type: 'session.compaction.ended',
+      data: {
+        sessionID: switchThread,
+        compactionId: 'cmp_instance_switch_a',
+        at: 1700000000000,
+        reason: 'auto',
+      },
+    });
+    const instanceACheckpoint = await runtime.sidecarCheckpoint(switchThread, 'opencode');
+    const previousCapabilityForB = process.env.MEBULAR_CAPABILITY_URL;
+    delete process.env.MEBULAR_CAPABILITY_URL;
+    runtimeB = await startRealRuntime({
+      root: join(root, 'instance-b'),
+      memoryRuntime: { enabled: true },
+      manageMemoryRuntime: true,
+    });
+    if (previousCapabilityForB === undefined) delete process.env.MEBULAR_CAPABILITY_URL;
+    else process.env.MEBULAR_CAPABILITY_URL = previousCapabilityForB;
+    const discoveryB = await runtimeB.waitForSidecar();
+    const instanceBBody = {
+      requestId: 'req_instance_b_initial',
+      actor: { type: 'agent', agentId: 'opencode' },
+      agentId: 'opencode',
+      threadId: switchThread,
+      domain: `task:${switchThread}`,
+      summary: null,
+      state: summaryOnlyCheckpointState(null, {
+        threadId: switchThread,
+        domain: `task:${switchThread}`,
+      }),
+      recordIds: [],
+      detailIds: [],
+      expiresAt: 0,
+      expectedRevision: 0,
+    };
+    await requestSidecar(
+      discoveryB,
+      `/checkpoints/${encodeURIComponent(switchThread)}?agentId=opencode`,
+      {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(instanceBBody),
+      },
+    );
+    await writeFile(
+      join(mebularHome, 'memory-runtime.json'),
+      JSON.stringify(discoveryB),
+      { encoding: 'utf8', mode: 0o600 },
+    );
+    await sleep(5100);
+    await controller.handleContext({
+      sessionID: switchThread,
+      messages: [],
+      system: [],
+      tools: {},
+    });
+    await controller.handleEvent({
+      id: 'evt_instance_switch_b',
+      type: 'session.compaction.ended',
+      data: {
+        sessionID: switchThread,
+        compactionId: 'cmp_instance_switch_b',
+        at: 1700000000100,
+        reason: 'auto',
+      },
+    });
+    const instanceBCheckpoint = await runtimeB.sidecarCheckpoint(switchThread, 'opencode');
+    const instanceAAfterResponse = await requestSidecar(
+      discovery,
+      `/checkpoints/${encodeURIComponent(switchThread)}?agentId=opencode`,
+    );
+    const instanceAAfter = instanceAAfterResponse.data?.checkpoint;
+    check('真实实例切换后在新实例 revision 前进且旧实例不变',
+      instanceACheckpoint?.revision === 1
+      && instanceAAfter?.revision === 1
+      && instanceBCheckpoint?.revision === 2
+      && instanceBCheckpoint?.state?.compactionId === 'cmp_instance_switch_b',
+      JSON.stringify({
+        aBefore: instanceACheckpoint?.revision,
+        aAfter: instanceAAfter?.revision,
+        b: instanceBCheckpoint?.revision,
+        runtimeUrl: controller.getStatus().runtime.url,
+        discoveryB: discoveryB.url,
+      }));
+
     check('checkpoint 写失败计数为 0', controller.getStatus().counts.checkpoints.failed === 0,
       JSON.stringify(controller.getStatus().counts.checkpoints));
   } finally {
     if (previousCapabilityUrl === undefined) delete process.env.MEBULAR_CAPABILITY_URL;
     else process.env.MEBULAR_CAPABILITY_URL = previousCapabilityUrl;
     if (controller) await controller.dispose().catch(() => undefined);
+    if (runtimeB) await runtimeB.cleanup().catch(() => undefined);
     if (runtime) await runtime.cleanup().catch(() => undefined);
     await proxy.close().catch(() => undefined);
   }
 
+  const summaryPath = process.env.HOST_E2E_SUMMARY_FILE;
+  if (summaryPath) {
+    await writeFile(summaryPath, JSON.stringify({
+      suite: 'opencode-checkpoint-recovery',
+      passed,
+      failed,
+      results,
+    }, null, 2), 'utf8').catch(() => undefined);
+  }
   console.log(`\n${failed === 0 ? '✓' : '✗'} OpenCode checkpoint recovery（真实 sidecar/capability，fake host）：${passed} passed, ${failed} failed`);
   return failed === 0 ? 0 : 1;
 }

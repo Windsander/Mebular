@@ -21,6 +21,7 @@ import plugin, {
   normalizeRuntimeUrl,
   parseCandidateOutput,
   resolvePluginConfig,
+  summaryOnlyCheckpointState,
   supportsOpencodeVersion,
 } from '../../packages/opencode-plugin/index.js';
 
@@ -1611,7 +1612,7 @@ describe('event collection hardening', () => {
     const fetchImpl = createFetch({
       '/checkpoints/ses_conflict': (call) => {
         if (call.method === 'GET') {
-          return jsonResponse({ ok: true, data: { checkpoint: { revision: 4 } } });
+          return jsonResponse({ ok: true, data: { checkpoint: { domain: 'task:ses_conflict', revision: 4, pending: false, state: {} }, source: 'cloud' } });
         }
         puts += 1;
         if (puts === 1) {
@@ -1687,7 +1688,7 @@ describe('event collection hardening', () => {
             ok: true,
             data: {
               checkpoint: currentRevision > 0
-                ? { revision: currentRevision, pending: false, state: {} }
+                ? { domain: 'task:ses_rev', revision: currentRevision, pending: false, state: {} }
                 : null,
               source: 'cloud',
             },
@@ -1903,7 +1904,15 @@ describe('event collection hardening', () => {
                 domain: 'task:ses_restart',
                 revision: 1,
                 pending: false,
-                state: { compactionId: 'cmp_restart' },
+                state: {
+                  ...summaryOnlyCheckpointState(null, {
+                    threadId: 'ses_restart',
+                    domain: 'task:ses_restart',
+                  }),
+                  kind: 'compaction',
+                  compactionId: 'cmp_restart',
+                  reason: 'auto',
+                },
               },
               source: 'cloud',
             },
@@ -1938,7 +1947,7 @@ describe('event collection hardening', () => {
             ok: true,
             data: {
               checkpoint: currentRevision > 0
-                ? { revision: currentRevision, pending: false, state: {} }
+                ? { domain: 'task:ses_recreate', revision: currentRevision, pending: false, state: {} }
                 : null,
               source: 'cloud',
             },
@@ -1984,7 +1993,7 @@ describe('event collection hardening', () => {
     expect(controller.getStatus().checkpoints.last).toMatchObject({ state: 'committed', revision: 1 });
   });
 
-  it('drops the revision cache when discovery points at a different sidecar instance', async () => {
+  it('drops the revision cache when profile changes without a URL change', async () => {
     const home = await tempDir();
     await writeDiscovery(home);
     let clock = Date.now();
@@ -1993,15 +2002,14 @@ describe('event collection hardening', () => {
     const puts = [];
     const fetchImpl = createFetch({
       '/checkpoints/ses_instance': (call) => {
-        const port = new URL(call.url).port;
         if (call.method === 'GET') {
           getUrls.push(call.url);
-          if (failSecondInstanceGet && port === '7342') {
+          if (failSecondInstanceGet && getUrls.length >= 2) {
             return jsonResponse({ ok: false, error: { code: 'runtime_error' } }, { ok: false, status: 500 });
           }
           return jsonResponse({ ok: true, data: { checkpoint: null, source: 'cloud' } });
         }
-        puts.push({ port, body: call.body });
+        puts.push(call.body);
         return jsonResponse({
           ok: true,
           data: {
@@ -2030,20 +2038,207 @@ describe('event collection hardening', () => {
     });
     await writeDiscovery(home, {
       updatedAt: clock,
-      discovery: { url: 'http://127.0.0.1:7342/memory-runtime/v1' },
+      discovery: { profileId: 'profile-b' },
     });
     clock += 6000;
     failSecondInstanceGet = true;
-    await controller.handleContext(hookEvent(userMessages('switch instance')));
+    await controller.handleContext(hookEvent(userMessages('switch profile')));
     await controller.handleEvent({
       id: 'evt_instance_2',
       type: 'session.compaction.ended',
       data: { sessionID: 'ses_instance', compactionId: 'cmp_instance_2', reason: 'auto' },
     });
-    expect(getUrls.at(-1)).toContain('127.0.0.1:7342');
-    expect(puts.at(-1).port).toBe('7342');
-    expect(puts.at(-1).body.expectedRevision).toBe(0);
+    expect(getUrls.at(-1)).toContain('127.0.0.1:7341');
+    expect(puts.at(-1).expectedRevision).toBe(0);
     await controller.dispose();
+  });
+
+  it('treats a foreign or empty checkpoint domain as absent instead of failing forever', async () => {
+    const scenarios = [
+      { name: 'foreign', checkpoint: { domain: 'default', revision: 1, pending: false, state: {} } },
+      { name: 'empty', checkpoint: { revision: 1, pending: false, state: {} } },
+    ];
+    for (const [index, scenario] of scenarios.entries()) {
+      const puts = [];
+      const fetchImpl = createFetch({
+        [`/checkpoints/ses_legacy_domain_${index}`]: (call) => {
+          if (call.method === 'GET') {
+            return jsonResponse({ ok: true, data: { checkpoint: scenario.checkpoint, source: 'cloud' } });
+          }
+          puts.push(call.body);
+          return jsonResponse({
+            ok: true,
+            data: {
+              checkpoint: {
+                domain: `task:ses_legacy_domain_${index}`,
+                revision: 1,
+                pending: false,
+                state: { compactionId: call.body.state.compactionId },
+              },
+              source: 'cloud',
+            },
+          });
+        },
+      });
+      const { controller } = controllerWith({ fetchImpl });
+      await controller.handleEvent({
+        id: `evt_legacy_domain_${index}`,
+        type: 'session.compaction.ended',
+        data: {
+          sessionID: `ses_legacy_domain_${index}`,
+          compactionId: `cmp_legacy_domain_${index}`,
+          reason: 'auto',
+        },
+      });
+      expect(puts).toHaveLength(1);
+      expect(puts[0].expectedRevision).toBe(0);
+      expect(controller.getStatus().counts.checkpoints.sent).toBe(1);
+      expect(controller.getStatus().counts.checkpoints.failed).toBe(0);
+    }
+  });
+
+  it('updates a same-logical-id checkpoint when summary or evidence changed', async () => {
+    const puts = [];
+    const fetchImpl = createFetch({
+      '/ingest': () => jsonResponse({
+        ok: true,
+        data: {
+          accepted: { chunks: 1, records: 1 },
+          records: [{ id: 'rec_evidence', detailIds: ['det_evidence'] }],
+          detail: { ids: ['det_from_detail'], written: 1, duplicates: 0, queued: 0, failed: 0 },
+          queued: false,
+          extraction: { id: 'ex_evidence', status: 'completed', extractor: 'heuristic', records: [], warnings: [] },
+        },
+      }),
+      '/checkpoints/ses_evidence': (call) => {
+        if (call.method === 'GET') {
+          return jsonResponse({
+            ok: true,
+            data: {
+              checkpoint: {
+                domain: 'task:ses_evidence',
+                revision: 1,
+                pending: false,
+                summary: null,
+                recordIds: [],
+                detailIds: [],
+                state: { compactionId: 'cmp_evidence' },
+              },
+              source: 'cloud',
+            },
+          });
+        }
+        puts.push(call.body);
+        return jsonResponse({
+          ok: true,
+          data: {
+            checkpoint: {
+              domain: 'task:ses_evidence',
+              revision: 2,
+              pending: false,
+              summary: call.body.summary,
+              recordIds: call.body.recordIds,
+              detailIds: call.body.detailIds,
+              state: call.body.state,
+            },
+            source: 'cloud',
+          },
+        });
+      },
+    });
+    const { controller } = controllerWith({ fetchImpl });
+    await controller.handleEvent({
+      id: 'evt_evidence',
+      type: 'session.compaction.ended',
+      data: {
+        sessionID: 'ses_evidence',
+        compactionId: 'cmp_evidence',
+        reason: 'auto',
+        text: '新的 checkpoint 证据摘要',
+      },
+    });
+    expect(puts).toHaveLength(1);
+    expect(puts[0].expectedRevision).toBe(1);
+    expect(puts[0].summary).toBe('新的 checkpoint 证据摘要');
+    expect(puts[0].recordIds).toEqual(['rec_evidence']);
+    expect(puts[0].detailIds).toEqual(['det_evidence', 'det_from_detail']);
+    const status = controller.getStatus();
+    expect(status.counts.checkpoints.updates).toBe(1);
+    expect(status.counts.checkpoints.duplicates).toBe(0);
+    expect(status.checkpoints.last).toMatchObject({ state: 'committed', revision: 2 });
+  });
+
+  it('keeps no-id compactions separate when stable event time differs', async () => {
+    const fetchImpl = createFetch();
+    const { controller } = controllerWith({ fetchImpl });
+    const base = {
+      sessionID: 'ses_same_tuple',
+      reason: 'auto',
+      text: 'same tuple',
+      messageCount: 2,
+      lastMessageID: 'msg_same',
+      transcriptHash: 'hash_same',
+    };
+    await controller.handleEvent({
+      id: 'env_same_tuple_1',
+      type: 'session.compaction.ended',
+      data: { ...base, at: 1700000000000 },
+    });
+    await controller.handleEvent({
+      id: 'env_same_tuple_2',
+      type: 'session.compaction.ended',
+      data: { ...base, at: 1700000000001 },
+    });
+    const puts = fetchImpl.callsFor('/checkpoints/ses_same_tuple').filter((call) => call.method === 'PUT');
+    expect(puts).toHaveLength(2);
+    expect(new Set(puts.map((call) => call.body.state.compactionId)).size).toBe(2);
+  });
+
+  it('recognizes a legacy checkpoint whose compactionId was the transport event id', async () => {
+    const legacyState = {
+      ...summaryOnlyCheckpointState(null, { threadId: 'ses_legacy_event', domain: 'task:ses_legacy_event' }),
+      kind: 'compaction',
+      compactionId: 'evt_legacy_event',
+      sourceEventId: 'evt_legacy_event',
+      at: 1700000000000,
+      reason: 'auto',
+    };
+    const fetchImpl = createFetch({
+      '/checkpoints/ses_legacy_event': (call) => {
+        if (call.method === 'GET') {
+          return jsonResponse({
+            ok: true,
+            data: {
+              checkpoint: {
+                domain: 'task:ses_legacy_event',
+                revision: 1,
+                pending: false,
+                summary: null,
+                recordIds: [],
+                detailIds: [],
+                state: legacyState,
+                sourceEventId: 'evt_legacy_event',
+              },
+              source: 'cloud',
+            },
+          });
+        }
+        return jsonResponse({ ok: true, data: { checkpoint: { revision: 2, pending: false } } });
+      },
+    });
+    const { controller } = controllerWith({ fetchImpl });
+    await controller.handleEvent({
+      id: 'evt_legacy_event',
+      type: 'session.compaction.ended',
+      data: {
+        sessionID: 'ses_legacy_event',
+        reason: 'auto',
+        at: 1700000000000,
+      },
+    });
+    const puts = fetchImpl.callsFor('/checkpoints/ses_legacy_event').filter((call) => call.method === 'PUT');
+    expect(puts).toHaveLength(0);
+    expect(controller.getStatus().counts.checkpoints.duplicates).toBe(1);
   });
 
   it('keeps different compactions with identical summary/count separate', async () => {
@@ -2092,8 +2287,25 @@ describe('event collection hardening', () => {
     expect(new Set(puts.map((call) => call.body.state.compactionId)).size).toBe(2);
   });
 
-  it('dedupes a fresh-envelope replay by compactionId/seq instead of the envelope id', async () => {
-    const fetchImpl = createFetch();
+  it('dedupes a fresh-envelope replay at checkpoint level instead of the envelope id', async () => {
+    let stored = null;
+    const fetchImpl = createFetch({
+      '/checkpoints/ses_envelope': (call) => {
+        if (call.method === 'GET') {
+          return jsonResponse({ ok: true, data: { checkpoint: stored, source: 'cloud' } });
+        }
+        stored = {
+          domain: 'task:ses_envelope',
+          revision: (stored?.revision ?? 0) + 1,
+          pending: false,
+          summary: call.body.summary,
+          recordIds: call.body.recordIds,
+          detailIds: call.body.detailIds,
+          state: call.body.state,
+        };
+        return jsonResponse({ ok: true, data: { checkpoint: stored, source: 'cloud' } });
+      },
+    });
     const { controller } = controllerWith({ fetchImpl });
     const data = {
       sessionID: 'ses_envelope',
@@ -2111,7 +2323,7 @@ describe('event collection hardening', () => {
       data: { ...data, eventID: 'event_from_payload_2' },
     });
     expect(fetchImpl.callsFor('/checkpoints/ses_envelope').filter((call) => call.method === 'PUT')).toHaveLength(1);
-    expect(controller.getStatus().counts.events.duplicates).toBe(1);
+    expect(controller.getStatus().counts.checkpoints.duplicates).toBe(1);
   });
 
   it('does not count a 202 checkpoint as committed until an authoritative read confirms it', async () => {
@@ -2203,7 +2415,7 @@ describe('event collection hardening', () => {
       '/checkpoints/ses_conflict_forever': (call) => {
         if (call.method === 'GET') {
           gets += 1;
-          return jsonResponse({ ok: true, data: { checkpoint: { revision: 4 } } });
+          return jsonResponse({ ok: true, data: { checkpoint: { domain: 'task:ses_conflict', revision: 4, pending: false, state: {} }, source: 'cloud' } });
         }
         puts += 1;
         return jsonResponse({ ok: false, error: { code: 'revision_mismatch' } }, { ok: false, status: 409 });
@@ -2460,6 +2672,79 @@ describe('event collection hardening', () => {
     expect(controller.getStatus().counts.checkpoints.retryAfterTruncated).toBeGreaterThanOrEqual(1);
   });
 
+  it('does not policy-block writes after a read-only 403', async () => {
+    const fetchImpl = createFetch({
+      '/context': () => jsonResponse({ ok: false, error: { code: 'forbidden_scope' } }, { ok: false, status: 403 }),
+      '/ingest': () => jsonResponse({
+        ok: true,
+        data: {
+          accepted: { chunks: 1, records: 1 },
+          records: [{ id: 'rec_read_forbidden' }],
+          detail: { ids: [], written: 0, duplicates: 0, queued: 0, failed: 0 },
+          queued: false,
+          extraction: { id: 'ex_read_forbidden', status: 'completed', extractor: 'heuristic', records: [], warnings: [] },
+        },
+      }),
+    });
+    const { controller } = controllerWith({
+      fetchImpl,
+      ctx: { contextMessages: [{ id: 'u1', type: 'user', text: 'read forbidden' }] },
+    });
+    await controller.handleContext(hookEvent(userMessages('read forbidden')));
+    expect(controller.getStatus().writes.disabled).toBe(false);
+    expect(controller.getStatus().counts.writes.readForbidden).toBeGreaterThanOrEqual(1);
+    await controller.handleEvent({ type: 'session.execution.succeeded', data: { sessionID: 'ses_read_forbidden' } });
+    expect(controller.getStatus().features.ingest).toBe(true);
+    expect(controller.getStatus().counts.ingest.committed).toBe(1);
+  });
+
+  it('clears a write policy block on discovery re-enable', async () => {
+    const home = await tempDir();
+    await writeDiscovery(home);
+    let clock = Date.now();
+    let ingestCalls = 0;
+    const fetchImpl = createFetch({
+      '/ingest': () => {
+        ingestCalls += 1;
+        if (ingestCalls === 1) {
+          return jsonResponse({ ok: false, error: { code: 'forbidden_scope' } }, { ok: false, status: 403 });
+        }
+        return jsonResponse({
+          ok: true,
+          data: {
+            accepted: { chunks: 1, records: 1 },
+            records: [{ id: `rec_policy_${ingestCalls}` }],
+            detail: { ids: [], written: 0, duplicates: 0, queued: 0, failed: 0 },
+            queued: false,
+            extraction: { id: 'ex_policy', status: 'completed', extractor: 'heuristic', records: [], warnings: [] },
+          },
+        });
+      },
+    });
+    const { controller } = controllerWith({
+      fetchImpl,
+      homeDir: home,
+      useDiscovery: true,
+      now: () => clock,
+      ctx: { contextMessages: [{ id: 'u1', type: 'user', text: 'policy recovery' }] },
+    });
+    await controller.start();
+    await controller.handleEvent({ type: 'session.execution.succeeded', data: { sessionID: 'ses_policy_1' } });
+    expect(controller.getStatus().writes).toMatchObject({ disabled: true, policy: true });
+    await rm(join(home, 'memory-runtime.json'));
+    clock += 6000;
+    await controller.handleContext(hookEvent(userMessages('disable policy')));
+    expect(controller.getStatus().enabled).toBe(false);
+    await writeDiscovery(home, { updatedAt: clock });
+    clock += 6000;
+    await controller.handleContext(hookEvent(userMessages('re-enable policy')));
+    expect(controller.getStatus().enabled).toBe(true);
+    expect(controller.getStatus().writes.disabled).toBe(false);
+    await controller.handleEvent({ type: 'session.execution.succeeded', data: { sessionID: 'ses_policy_2' } });
+    expect(controller.getStatus().counts.ingest.committed).toBe(1);
+    await controller.dispose();
+  });
+
   it('does not retry a persistent checkpoint 401 as pending', async () => {
     const fetchImpl = createFetch({
       '/checkpoints/ses_checkpoint_401': () => jsonResponse(
@@ -2533,7 +2818,24 @@ describe('event subscription reconnect and hot disable', () => {
   });
 
   it('dedupes a replayed compaction event into one checkpoint write', async () => {
-    const fetchImpl = createFetch();
+    let stored = null;
+    const fetchImpl = createFetch({
+      '/checkpoints/ses_compact_replay': (call) => {
+        if (call.method === 'GET') {
+          return jsonResponse({ ok: true, data: { checkpoint: stored, source: 'cloud' } });
+        }
+        stored = {
+          domain: 'task:ses_compact_replay',
+          revision: (stored?.revision ?? 0) + 1,
+          pending: false,
+          summary: call.body.summary,
+          recordIds: call.body.recordIds,
+          detailIds: call.body.detailIds,
+          state: call.body.state,
+        };
+        return jsonResponse({ ok: true, data: { checkpoint: stored, source: 'cloud' } });
+      },
+    });
     const { controller } = controllerWith({ fetchImpl });
     const event = {
       id: 'evt_compact_replay',
@@ -2544,7 +2846,36 @@ describe('event subscription reconnect and hot disable', () => {
     await controller.handleEvent(event);
     expect(fetchImpl.callsFor('/ingest')).toHaveLength(1);
     expect(fetchImpl.callsFor('/checkpoints/ses_compact_replay').filter((call) => call.method === 'PUT')).toHaveLength(1);
-    expect(controller.getStatus().counts.events.duplicates).toBe(1);
+    expect(controller.getStatus().counts.checkpoints.duplicates).toBe(1);
+  });
+
+  it('bounds whenIdle/flush while a Retry-After wait is active', async () => {
+    let notifyStarted;
+    const started = new Promise((resolve) => { notifyStarted = resolve; });
+    const fetchImpl = async (url) => {
+      const path = new URL(url).pathname.replace(/^\/memory-runtime\/v1/, '');
+      if (path === '/ingest') {
+        notifyStarted();
+        return jsonResponse(
+          { ok: false, error: { code: 'rate_limited' } },
+          { ok: false, status: 429, headers: { 'retry-after': '300' } },
+        );
+      }
+      return jsonResponse({ ok: false, error: { code: 'not_found' } }, { ok: false, status: 404 });
+    };
+    const { controller } = controllerWith({
+      fetchImpl,
+      config: { maxRetryAfterMs: 300000, whenIdleWaitMs: 50 },
+      ctx: { contextMessages: [{ id: 'u1', type: 'user', text: 'idle retry wait' }] },
+    });
+    const task = controller.handleEvent({ type: 'session.execution.succeeded', data: { sessionID: 'ses_idle_wait' } });
+    await started;
+    const began = Date.now();
+    await controller.whenIdle();
+    expect(Date.now() - began).toBeLessThan(500);
+    expect(controller.getStatus().lifecycle.idleTimedOut).toBe(true);
+    await controller.dispose();
+    await task;
   });
 
   it('aborts a Retry-After wait on dispose and bounds shutdown', async () => {

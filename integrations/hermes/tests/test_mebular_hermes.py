@@ -1653,6 +1653,58 @@ class SpoolContractTests(BaseCase):
             "orphan-restart",
         )
 
+    def test_four_file_failure_keeps_quarantined_live_and_restarts(self) -> None:
+        server = self.fake_server()
+        provider = self.make_provider(server)
+        provider._spool.append("ingest", {
+            "requestId": "live-quarantine-head",
+            "chunks": [{"role": "user", "text": "head"}],
+        })
+        with provider._spool._lock:
+            provider._spool._items[0]["deadPending"] = {
+                "reason": "x", "attempts": 5, "at": int(time.time() * 1000)
+            }
+        provider._spool.append("ingest", {
+            "requestId": "behind-live-quarantine",
+            "chunks": [{"role": "user", "text": "behind"}],
+        })
+        original = provider._spool._write_atomic
+
+        def fail_spills(path: Path, records: List[Dict[str, Any]]) -> None:
+            if path.name in {
+                "dead.jsonl", "dead-pending.jsonl",
+                "orphan-dead-pending.jsonl", "quarantine.jsonl",
+            }:
+                raise memory_plugin._SpoolUnavailable("spills read-only")
+            return original(path, records)
+
+        with mock.patch.object(provider._spool, "_write_atomic", side_effect=fail_spills):
+            provider._wake.set()
+            self.assertTrue(self.wait_until(
+                lambda: provider._spool.quarantine_live_count() == 1,
+                timeout=3.0,
+            ))
+            self.assertTrue(self.wait_until(
+                lambda: len(server.ingests) == 1, timeout=3.0
+            ))
+            self.assertEqual(
+                server.ingests[0]["chunks"][0]["text"], "behind"
+            )
+        records = self.read_jsonl(self.spool_path)
+        self.assertEqual(len(records), 1)
+        self.assertTrue(records[0]["deadPending"]["quarantined"])
+        reopened = memory_plugin._Spool(self.spool_path, 100)
+        self.assertEqual(reopened.quarantine_live_count(), 1)
+        self.assertTrue(
+            reopened.quarantined_live_items()[0]["deadPending"]["quarantined"]
+        )
+        with reopened._lock:
+            reopened._items[0]["deadPending"]["attempts"] = 1
+        self.assertTrue(
+            provider._retry_one_live_quarantine(reopened)
+        )
+        self.assertEqual(reopened.quarantine_live_count(), 0)
+
     def test_orphan_write_failure_quarantines_and_restarts(self) -> None:
         spool = memory_plugin._Spool(self.spool_path, 100)
         item_id = spool.append("ingest", {

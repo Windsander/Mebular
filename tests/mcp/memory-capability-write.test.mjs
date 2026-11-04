@@ -2143,3 +2143,50 @@ describe('公共工具面与轻量模式边界', () => {
     expect(TOOL_NAMES).not.toContain('memory_runtime_write');
   });
 });
+
+describe('close 与已认证在途写', () => {
+  it('close 撤销后，已进入 handler 的写请求不得再提交图或返回成功', async () => {
+    const marker = unique('close-inflight');
+    const storage = app.storage;
+    const originalListNodes = storage.listNodes.bind(storage);
+    let release = () => {};
+    const gate = new Promise((resolve) => { release = resolve; });
+    let entered = false;
+    storage.listNodes = async (...args) => {
+      if (!entered) {
+        entered = true;
+        await gate;
+      }
+      return originalListNodes(...args);
+    };
+    try {
+      const pending = post(capability('/write'), writeBody([{
+        clientItemId: unique('cand_close'),
+        domain: 'agent:opencode',
+        kind: 'fact',
+        content: { subject: 'close', predicate: 'marker', object: marker, confidence: 0.9 },
+      }]), { token });
+      const deadline = Date.now() + 5000;
+      while (!entered && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(entered).toBe(true);
+      const closing = server.close();
+      expect(server.getState().closing).toBe(true);
+      const revokeDeadline = Date.now() + 5000;
+      while (Date.now() < revokeDeadline && (await readCapabilityToken({ home, env: {} })) !== null) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(await readCapabilityToken({ home, env: {} })).toBeNull();
+      release();
+      const response = await pending;
+      expect(response.status).toBe(409);
+      expect(response.body?.error?.code).toBe('mode_mismatch');
+      await closing;
+      const nodes = await originalListNodes();
+      expect(JSON.stringify(nodes)).not.toContain(marker);
+    } finally {
+      storage.listNodes = originalListNodes;
+    }
+  }, 15000);
+});

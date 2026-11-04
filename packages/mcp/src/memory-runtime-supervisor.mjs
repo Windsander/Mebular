@@ -13,7 +13,7 @@
 // 本模块不读取/返回 host token 或 capability token 明文。
 
 import { spawn as defaultSpawn } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, createHash } from 'node:crypto';
 import { statSync } from 'node:fs';
 import { readFile, stat, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -648,7 +648,7 @@ export class MemoryRuntimeSupervisor {
     return body.mode === discovery.mode || (allowDormant && body.mode === 'mcp');
   }
 
-  async #fetchHealth(discovery) {
+  async #fetchHealth(discovery, { acceptDormant = false } = {}) {
     if (!this.fetchImpl || typeof discovery?.healthUrl !== 'string') return { ok: false };
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), Math.max(1, this.healthTimeoutMs));
@@ -662,7 +662,7 @@ export class MemoryRuntimeSupervisor {
       if (!response || response.ok !== true) return { ok: false };
       const body = await response.json().catch(() => ({}));
       return {
-        ok: body?.ok !== false && body?.ready !== false,
+        ok: body?.ok !== false && (acceptDormant || body?.ready !== false),
         degraded: body?.degraded === true || body?.state === 'degraded',
         body,
       };
@@ -685,6 +685,17 @@ export class MemoryRuntimeSupervisor {
         stale: !pidAlive(lock.pid),
       };
     return lock;
+  }
+
+  /** 当前 capability 凭据指纹；null 表示没有可读的生产 token 文件。 */
+  async #capabilityFingerprint() {
+    try {
+      const tokenFile = join(this.paths.dataDir, MEMORY_RUNTIME_CAPABILITY_TOKEN_FILE);
+      const raw = await readFile(tokenFile, 'utf-8');
+      return createHash('sha256').update(raw).digest('hex');
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -1356,7 +1367,7 @@ export class MemoryRuntimeSupervisor {
       || !Number.isFinite(age) || age < -1000 || age > MEMORY_RUNTIME_DISCOVERY_STALE_MS) {
       return null;
     }
-    const health = await this.#fetchHealth(discovery);
+    const health = await this.#fetchHealth(discovery, { acceptDormant: true });
     if (!this.#healthIdentityMatches(discovery, health.body, { allowDormant: true })) return null;
     const credential = await this.#resolveHostToken(discovery);
     if (!credential || !this.fetchImpl) return null;
@@ -1419,7 +1430,7 @@ export class MemoryRuntimeSupervisor {
     if (!validDiscoveryUrls(discovery)) return false;
     const age = this.now() - discovery.updatedAt;
     if (!Number.isFinite(age) || age < -1000 || age > MEMORY_RUNTIME_DISCOVERY_STALE_MS) return false;
-    const health = await this.#fetchHealth(discovery);
+    const health = await this.#fetchHealth(discovery, { acceptDormant: true });
     if (!health.ok || !this.#healthIdentityMatches(discovery, health.body, { allowDormant: true })) {
       return false;
     }
@@ -2109,7 +2120,9 @@ export class MemoryRuntimeSupervisor {
     if (this.startPromise) await Promise.race([this.startPromise.catch(() => undefined), sleep(250)]);
     const discoveredAtStop = await readDiscovery(this.paths.discoveryPath);
     const child = this.child;
-    const attachedDiscovery = discoveredAtStop && discoveredAtStop.pid !== child?.pid
+    const attachedDiscovery = discoveredAtStop
+      && discoveredAtStop.pid !== child?.pid
+      && discoveredAtStop.pid !== this.managedInstance?.pid
       ? discoveredAtStop
       : null;
     if (child) {
@@ -2234,6 +2247,7 @@ export class MemoryRuntimeSupervisor {
     } else if (attachedDiscovery && !this.#homeMismatch(attachedDiscovery)
       && !this.#profileMismatch(attachedDiscovery)) {
       // D1：外部 PID 归操作者；仅撤销匹配 discovery，再验证旧凭据也无法工作。
+      const capabilityBefore = await this.#capabilityFingerprint();
       await this.#removeDiscoveryIfMatches(attachedDiscovery).catch(() => false);
       if (pidAlive(attachedDiscovery.pid)
         && !await this.#waitAttachedDormant(
@@ -2261,6 +2275,9 @@ export class MemoryRuntimeSupervisor {
         remaining = await readDiscovery(this.paths.discoveryPath);
       }
       if (needsDormant(remaining)) clean = false;
+      // 能力仍有效且凭据未撤销/未换代：不能把“可能被同一 token 唤醒”的实例报告为 clean stopped。
+      const capabilityAfter = await this.#capabilityFingerprint();
+      if (capabilityBefore !== null && capabilityAfter === capabilityBefore) clean = false;
     }
 
     if (clean) {

@@ -1345,6 +1345,7 @@ export class IngestService {
 
     const ids: string[] = [];
     for (const source of chunks) {
+      this.lifecycle?.assertAccepting('ingest.staging.chunk');
       const chunk: RawChunk = { ...source, threadId };
       if (chunk.messageId) {
         const previous = byMessage.get(`${chunk.messageId}\u0000${chunk.chunkIndex ?? -1}`);
@@ -1355,9 +1356,15 @@ export class IngestService {
       }
       try {
         const stored = await this.local.store.putStagingChunk(cloudId, chunk);
+        if (this.lifecycle && !this.lifecycle.acceptsWork()) {
+          // 写盘期间 drain 开始：撤销刚写入的 staging，再按生命周期错误中止。
+          await this.local.clearStaging([stored.chunk.id]).catch(() => 0);
+          this.lifecycle.assertAccepting('ingest.staging.chunk.settled');
+        }
         ids.push(stored.chunk.id);
         if (stored.duplicate) appendWarnings(warnings, ['duplicate_staging_chunk']);
       } catch (error) {
+        if (error instanceof SidecarSettlementError) throw error;
         if ((error as { code?: string })?.code === 'content_hash_mismatch') {
           throw new SidecarSettlementError('content_hash_mismatch', '相同内容哈希对应了不同文本', {
             status: 400,
@@ -1501,6 +1508,13 @@ export class IngestService {
             continue;
           }
           const code = typeof result.code === 'string' ? result.code : 'detail_write_failed';
+          if (code === 'capability_disabled' || code === 'mode_mismatch') {
+            throw new SidecarSettlementError(
+              'mode_mismatch',
+              'capability 已撤销：详情写入未提交',
+              { status: 409, retryable: false, details: { reason: code } },
+            );
+          }
           appendWarnings(outcome.warnings, [`detail_write_failed:${code}`]);
           const clientItemId = typeof result.clientItemId === 'string' ? result.clientItemId : null;
           const item = clientItemId ? batch.find((entry) => entry.clientItemId === clientItemId) : undefined;
@@ -1516,6 +1530,16 @@ export class IngestService {
       } catch (error) {
         const code = error instanceof CapabilityClientError ? error.code : 'internal';
         appendWarnings(outcome.warnings, [`detail_write_failed:${code}`]);
+        if ((error instanceof CapabilityClientError
+            && (error.code === 'capability_disabled' || error.code === 'mode_mismatch'))
+          || (this.lifecycle && !this.lifecycle.acceptsWork())) {
+          // 生命周期撤销不是详情部分失败：记录已提交也不能把禁用写成 200 partial。
+          throw new SidecarSettlementError(
+            'mode_mismatch',
+            'capability 已撤销：详情写入未提交',
+            { status: 409, retryable: false, details: { reason: code } },
+          );
+        }
         if (retryableCapabilityError(error) || code === 'detail_quota_exceeded') {
           await this.enqueueDetail(requestId, actor, batch, stagingChunkIds, outcome);
         } else {

@@ -9,6 +9,7 @@ import { CapabilityClient } from '../../src/sidecar/capability-client.js';
 import { defaultSidecarConfig } from '../../src/sidecar/config.js';
 import { defaultSidecarPolicy } from '../../src/sidecar/domains.js';
 import { SidecarLocalLayer } from '../../src/sidecar/local-layer.js';
+import { LifecycleGate } from '../../src/sidecar/lifecycle-gate.js';
 import { SidecarServer } from '../../src/sidecar/server.js';
 import { SettlementRuntime } from '../../src/sidecar/settlement.js';
 import {
@@ -89,7 +90,10 @@ function checkpointState(threadId: string, goal: string, extra: Record<string, u
   };
 }
 
-async function setup(records: FakeMemoryRecord[] = compactRecords()): Promise<Harness> {
+async function setup(
+  records: FakeMemoryRecord[] = compactRecords(),
+  options: { inference?: any; lifecycle?: any } = {},
+): Promise<Harness> {
   const home = await mkdtemp(join(tmpdir(), 'mebular-objects-http-'));
   const local = new SidecarLocalLayer({ root: join(home, 'memory-runtime'), now: () => NOW });
   await local.init();
@@ -106,6 +110,8 @@ async function setup(records: FakeMemoryRecord[] = compactRecords()): Promise<Ha
     identity,
     policy: defaultSidecarPolicy(),
     autoStartReplayer: false,
+    ...(options.inference ? { inference: options.inference } : {}),
+    ...(options.lifecycle ? { lifecycle: options.lifecycle } : {}),
     now: () => NOW,
   });
   await runtime.init();
@@ -654,5 +660,49 @@ describe('sidecar compact / self / checkpoint HTTP', () => {
     expect(namespaces.status).toBe(200);
     const agent = namespaces.body.data.domains.find((domain: any) => domain.domain === 'agent:opencode');
     expect(agent).toMatchObject({ readable: true, writable: true, crossAgent: false });
+  });
+
+  it('compact 模型摘要晚到：drain 后丢弃结果，不提交 compact/缓存', async () => {
+    const gate = new LifecycleGate();
+    let release = () => {};
+    const modelGate = new Promise<void>((resolve) => { release = resolve; });
+    let started = false;
+    const model = {
+      selectOptionalSource: async () => ({ source: 'heuristic', degraded: false, warnings: [] }),
+      summarize: async () => {
+        started = true;
+        await modelGate;
+        return {
+          ok: true,
+          summary: '真实摘要内容',
+          model: 'fake-summary',
+          degraded: false,
+          warnings: [],
+          latencyMs: 0,
+        };
+      },
+      clearFailure: () => undefined,
+      noteFailure: () => undefined,
+      noteHostCandidates: () => undefined,
+      currentStatus: () => ({ degraded: false, warnings: [] }),
+    };
+    const { server, fake } = await setup(compactRecords(), { inference: model, lifecycle: gate });
+    const pending = request(`${server.url}/compact`, 'POST', {
+      agentId: 'opencode',
+      domain: 'agent:opencode',
+      limit: 3,
+    });
+    const deadline = Date.now() + 5000;
+    while (!started && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(started).toBe(true);
+    gate.beginDrain('test');
+    gate.finishDrain();
+    release();
+    const response = await pending;
+    expect(response.status).toBe(409);
+    expect(response.body?.error?.code).toBe('mode_mismatch');
+    expect(fake.compacts).toHaveLength(0);
   });
 });

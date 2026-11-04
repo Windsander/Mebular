@@ -882,6 +882,8 @@ export async function startHttpServer({
   writesEnabled: initialWritesEnabled = false,
   // C：一键重启执行器（可注入；verify:config 用 MEBULAR_RESTART_DRY_RUN 或注入替身）
   restartRunner = null,
+  // 测试注入：配置写盘前钩子，用于验证 close 与配置写入的线性化。
+  beforeConfigWrite = null,
   // 引导态（空家目录）：只服务 /healthz + /console 引导页 + /app/provision/*；其余 409 provision_required
   provision: initialProvision = false,
   // P1：同一进程内热初始化。返回新的运行时上下文；成功后本 server 从 UNINITIALIZED → READY。
@@ -1021,6 +1023,7 @@ export async function startHttpServer({
     : null;
   let memoryRuntimeLifecycle = Promise.resolve();
   let lifecycleClosing = false;
+  let capabilityDrain = null;
   const enqueueMemoryRuntimeLifecycle = (operation) => {
     if (lifecycleClosing) {
       const error = new Error('MCP 正在关闭：拒绝新的 Memory Runtime 生命周期操作');
@@ -3227,8 +3230,10 @@ export async function startHttpServer({
       }
       const cfgFile = configPath(home);
       let current = {};
+      let originalRaw = null;
       try {
-        current = JSON.parse(await readFile(cfgFile, 'utf-8'));
+        originalRaw = await readFile(cfgFile, 'utf-8');
+        current = JSON.parse(originalRaw);
       } catch {
         current = {};
       }
@@ -3255,15 +3260,51 @@ export async function startHttpServer({
         });
       }
       const tmp = `${cfgFile}.tmp-${process.pid}`;
+      // 入口后 close 可能已开始：写盘前二次检查，避免“已写文件但返回 409”。
+      if (beforeConfigWrite) await beforeConfigWrite();
+      if (lifecycleClosing) {
+        return sendJson(res, 409, {
+          ok: false,
+          error: 'closing',
+          message: 'MCP 正在关闭：配置未写入',
+        });
+      }
       await writeFile(tmp, JSON.stringify(merged, null, 2), 'utf-8');
+      if (lifecycleClosing) {
+        await rm(tmp, { force: true }).catch(() => undefined);
+        return sendJson(res, 409, {
+          ok: false,
+          error: 'closing',
+          message: 'MCP 正在关闭：配置未写入',
+        });
+      }
       if (existsSync(cfgFile)) await copyFile(cfgFile, `${cfgFile}.bak`);
       await rename(tmp, cfgFile);
+      if (lifecycleClosing) {
+        // rename 与 close 竞态：恢复原文件，避免返回 409 却留下新配置。
+        if (originalRaw === null) await rm(cfgFile, { force: true }).catch(() => undefined);
+        else await writeFile(cfgFile, originalRaw, 'utf-8').catch(() => undefined);
+        return sendJson(res, 409, {
+          ok: false,
+          error: 'closing',
+          message: 'MCP 正在关闭：配置已回滚',
+        });
+      }
       const backup = existsSync(`${cfgFile}.bak`) ? `${cfgFile}.bak` : null;
       const base = { ok: true, applied: changedPaths, backup, path: cfgFile, config: merged };
 
       // memoryRuntime.enabled 是热开关：同步内存配置，立即生成/撤销 capability token，
       // 并启动/停止 sidecar（sidecar 失败不影响配置写入与 MCP 本身）。
       if (changedPaths.some((changed) => changed === 'memoryRuntime' || changed.startsWith('memoryRuntime.'))) {
+        if (lifecycleClosing) {
+          if (originalRaw === null) await rm(cfgFile, { force: true }).catch(() => undefined);
+          else await writeFile(cfgFile, originalRaw, 'utf-8').catch(() => undefined);
+          return sendJson(res, 409, {
+            ok: false,
+            error: 'closing',
+            message: 'MCP 正在关闭：配置已回滚',
+          });
+        }
         if (merged?.memoryRuntime === undefined) {
           const next = { ...(config ?? {}) };
           delete next.memoryRuntime;
@@ -3290,6 +3331,7 @@ export async function startHttpServer({
             } else {
               // 先撤销 capability，再无冲刷停止/解绑；即使 revoke 失败也继续隔离故障。
               await memoryCapability.revoke().catch(() => undefined);
+              await memoryCapability.drain({ timeoutMs: 2000 }).catch(() => false);
               await memoryRuntimeSupervisor?.stop({ includeAttached: false }).catch(() => undefined);
             }
           });
@@ -4478,6 +4520,12 @@ export async function startHttpServer({
       // attached/manual 同时由 dispose 撤销匹配 discovery，覆盖网络已断开的场景。
       await memoryRuntimeLifecycle.catch(() => undefined);
       await memoryCapability.revoke().catch(() => undefined);
+      capabilityDrain = {
+        clean: await memoryCapability.drain({ timeoutMs: 2000 }).catch(() => false),
+      };
+      if (!capabilityDrain.clean) {
+        console.error('MEMORY_CAPABILITY_DRAIN_INCOMPLETE');
+      }
       // 优雅停止的顺序很重要：MCP/SSE/keep-alive 连接不会自己断，
       // 先收 MCP sessions，再主动结束连接，最后才等 listener（带有限超时）。
       // 详情维护先停 timer；进行中的 prune 最多等一个 session 预算，不拖死关闭。
@@ -4542,6 +4590,7 @@ export async function startHttpServer({
       phase,
       hotInitialized,
       closing: lifecycleClosing,
+      capabilityDrain,
       app,
       service,
       config,

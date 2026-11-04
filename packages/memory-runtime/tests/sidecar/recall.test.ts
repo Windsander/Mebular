@@ -9,6 +9,7 @@ import { CapabilityClient } from '../../src/sidecar/capability-client.js';
 import { defaultSidecarConfig, type SidecarConfig } from '../../src/sidecar/config.js';
 import { defaultSidecarPolicy, type SidecarPolicy } from '../../src/sidecar/domains.js';
 import { SidecarLocalLayer } from '../../src/sidecar/local-layer.js';
+import { LifecycleGate } from '../../src/sidecar/lifecycle-gate.js';
 import { RecallService } from '../../src/sidecar/recall.js';
 import { startFakeCapability, type FakeCapabilityServer, type FakeCompact, type FakeMemoryRecord } from './fake-capability.js';
 
@@ -62,6 +63,8 @@ async function setup(options: {
   records?: FakeMemoryRecord[];
   compacts?: FakeCompact[];
   policy?: SidecarPolicy;
+  inference?: any;
+  lifecycle?: any;
   mutateConfig?: (config: SidecarConfig) => void;
 } = {}): Promise<Harness> {
   const home = await mkdtemp(join(tmpdir(), 'mebular-recall-'));
@@ -80,6 +83,8 @@ async function setup(options: {
     client,
     identity: { cloudId: 'cl_test', profileId: 'default', hostId: 'h_test', deviceId: 'device-local' },
     policy: options.policy ?? defaultSidecarPolicy(),
+    ...(options.inference ? { inference: options.inference } : {}),
+    ...(options.lifecycle ? { lifecycle: options.lifecycle } : {}),
     now: () => NOW,
   });
   const harness = { home, local, fake, service, config };
@@ -758,5 +763,52 @@ describe('RecallService', () => {
     expect(feedback.feedback).toMatchObject({ useful: true, reason: 'helpful' });
     expect((await local.store.getTrace(response.data.traceId!))?.feedback).toMatchObject({ useful: true });
     expect(await local.store.listTraces()).toHaveLength(1);
+  });
+
+  it('模型 plan 晚到且 drain 已开始：丢弃结果，不写 trace，返回 409', async () => {
+    const gate = new LifecycleGate();
+    let release = () => {};
+    const modelGate = new Promise<void>((resolve) => { release = resolve; });
+    let started = false;
+    const model = {
+      selectOptionalSource: async () => ({ source: 'heuristic', degraded: false, warnings: [] }),
+      planQuery: async () => {
+        started = true;
+        await modelGate;
+        return {
+          ok: true,
+          query: '用户偏好',
+          degraded: false,
+          warnings: [],
+          latencyMs: 0,
+          source: 'heuristic',
+          model: 'fake',
+        };
+      },
+      clearFailure: () => undefined,
+      noteFailure: () => undefined,
+      noteHostCandidates: () => undefined,
+    };
+    const { service, local } = await setup({
+      records: [preferenceRecord()],
+      inference: model,
+      lifecycle: gate,
+      mutateConfig: (config) => { config.recall.queryPlan = 'model'; },
+    });
+    const pending = service.handleRecall({
+      agentId: 'opencode',
+      threadId: 'th_recall',
+      query: '你记得我的喜好吗？',
+    });
+    const deadline = Date.now() + 5000;
+    while (!started && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(started).toBe(true);
+    gate.beginDrain('test');
+    gate.finishDrain();
+    release();
+    await expect(pending).rejects.toMatchObject({ status: 409, code: 'mode_mismatch' });
+    expect(await local.store.listTraces()).toHaveLength(0);
   });
 });

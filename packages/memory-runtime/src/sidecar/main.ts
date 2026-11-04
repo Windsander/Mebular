@@ -448,6 +448,9 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
   let dormantIncomplete = false;
   let requestDormant: ((reason: string) => Promise<boolean>) | null = null;
   const lifecycle = new LifecycleGate();
+  const credentialId = (token: string): string => createHash('sha256').update(token).digest('hex');
+  let capabilityCredentialId: string | null = null;
+  let dormantCredentialId: string | null = null;
 
   if (!options.skipHandshake) {
     let tokenRecord;
@@ -466,6 +469,7 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
     if (tokenRecord.expired) {
       throw new SidecarStartupError('capability_token_expired', 5, 'capability token 已过期');
     }
+    capabilityCredentialId = credentialId(tokenRecord.token);
     // 生产实例即使由 env 引导，只要存在 capability-token 文件，401 刷新就必须以文件为准。
     let capabilityTokenFilePresent = false;
     try {
@@ -497,7 +501,9 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
             // 从文件启动的生产实例：文件被撤销后不得回退到启动时的 stale env。
             allowEnvFallback: !capabilityTokenFilePresent,
           });
-          return refreshed && !refreshed.expired ? refreshed.token : null;
+          const token = refreshed && !refreshed.expired ? refreshed.token : null;
+          capabilityCredentialId = token ? credentialId(token) : null;
+          return token;
         },
         onCapabilityRevoked: (error) => {
           Object.assign(capability, { reachable: false, error: error.code });
@@ -639,6 +645,10 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
       lifecycle.assertAccepting('outbox.enqueue');
       return enqueueOutbox(input);
     };
+    // WP1 合并点（不修改 local-layer）：completeReplay / completeReplay('dead') 必须在改写
+    // outbox/dead 之前检查同一 lifecycle generation（gate.acceptsWork() + generation 未变）；
+    // drain 后晚到的 replay 只能保持 pending，不能 deadLetter、删除或改 attempts。集成测试见
+    // WP2 报告中的 completeReplay 负例清单。
     await settlement.init();
   } catch (error) {
     throw new SidecarStartupError(
@@ -815,6 +825,7 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
     dormantPromise = (async () => {
       lifecycleMode = 'mcp';
       dormantReason = reason;
+      dormantCredentialId = capabilityCredentialId;
       // 同步撤销准入；后续 ingest/staging/model/capability 写与 outbox 入队立即 409。
       lifecycle.beginDrain(reason);
       // mcp+degraded 是 draining/incomplete；只有全部收尾后才发布 mcp+stopped。
@@ -906,7 +917,13 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
     if (reachable) {
       if (lifecycleMode === 'mcp') {
         // 只有完整 drain 结束后才允许恢复；进行中的 drain 不能被旧的正向探测抢先撤销。
-        if (dormantPromise || lifecycle.currentPhase !== 'dormant') return;
+        // 恢复还要求新的 capability 凭据代际：同一条仍有效的 token 不能自行把实例唤醒。
+        if (dormantPromise
+          || lifecycle.currentPhase !== 'dormant'
+          || capabilityCredentialId === null
+          || capabilityCredentialId === dormantCredentialId) {
+          return;
+        }
         dormantReason = null;
         dormantIncomplete = false;
         const nextDegraded = settlement.degraded || modelStatus.degraded;

@@ -1812,6 +1812,7 @@ export class RecallService {
   }
 
   private async execute(request: NormalizedRequest, mode: 'recall' | 'context'): Promise<RecallResponse & { blocks?: ContextBlock[] }> {
+    this.lifecycle?.assertAccepting('recall.execute');
     const recallId = shortId('rr');
     const warnings: string[] = [];
     let degraded = false;
@@ -3145,6 +3146,8 @@ export class RecallService {
       this.markAnchor(run.request);
     }
 
+    // 模型/召回已完成的晚到结果：drain 后不得再写 trace 或返回可注入结果。
+    this.lifecycle?.assertAccepting('recall.commit');
     const trace = await this.writeTrace(run, mode, fragments, warnings, degraded, silenceReason, timing);
     if (trace.failed) {
       degraded = true;

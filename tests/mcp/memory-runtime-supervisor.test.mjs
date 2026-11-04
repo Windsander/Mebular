@@ -280,6 +280,8 @@ describe('MemoryRuntimeSupervisor：生命周期', () => {
     expect(status).toMatchObject({
       state: 'ready', managed: false, attached: true, pid: external.pid, runtimeVersion: '0.3.0',
     });
+    // MCP 热禁用先撤销 capability（删除生产 token 文件），再验证外部进程 dormant。
+    await rm(join(home, 'memory-runtime', 'capability-token'), { force: true });
     await supervisor.dispose();
     expect(pidAlive(external.pid)).toBe(true);
     expect(existsSync(join(home, 'memory-runtime.json'))).toBe(false);
@@ -460,6 +462,151 @@ describe('MemoryRuntimeSupervisor：生命周期', () => {
     expect(existsSync(join(home, 'memory-runtime.json'))).toBe(true);
     expect(existsSync(join(home, 'memory-runtime', 'start.lock'))).toBe(true);
   }, 10000);
+
+  it('显式 stop 可停止有效的 mcp+stopped 外部实例并清理 discovery/lock', async () => {
+    const home = await tempDir();
+    await writeCapabilityToken(home);
+    const external = spawn(process.execPath, [FAKE, 'serve'], {
+      env: { ...process.env, ...envFor(home) },
+      stdio: 'ignore',
+    });
+    cleanups.push(async () => {
+      if (pidAlive(external.pid)) process.kill(external.pid, 'SIGTERM');
+    });
+    await waitFor(() => existsSync(join(home, 'memory-runtime.json')));
+    const original = JSON.parse(await readFile(join(home, 'memory-runtime.json'), 'utf-8'));
+    const hostToken = JSON.parse(await readFile(original.tokenFile, 'utf-8')).token;
+    await rm(join(home, 'memory-runtime.json'), { force: true });
+    await waitFor(async () => {
+      try {
+        const response = await fetch(`${original.url}/status`, {
+          headers: { authorization: `Bearer ${hostToken}` },
+        });
+        return (await response.json()).data.mode === 'mcp';
+      } catch {
+        return false;
+      }
+    });
+    // 重建有效的 dormant discovery：health ready:false，但 identity/pid/startedAt/URL 仍可验证。
+    await writeDiscovery(home, {
+      port: original.port,
+      pid: original.pid,
+      startedAt: original.startedAt,
+      mode: 'mcp',
+      state: 'stopped',
+      updatedAt: Date.now(),
+    });
+    const supervisor = new MemoryRuntimeSupervisor({
+      home,
+      config: enabledConfig(),
+      env: envFor(home),
+      profileId: () => 'default',
+      fetchImpl: (url, init) => fetch(url, init),
+    });
+    cleanups.push(() => supervisor.dispose());
+    const stopped = await supervisor.stop({ includeAttached: true, timeoutMs: 1000 });
+    expect(stopped).toMatchObject({ state: 'stopped', error: null });
+    expect(pidAlive(original.pid)).toBe(false);
+    expect(existsSync(join(home, 'memory-runtime.json'))).toBe(false);
+    expect(existsSync(join(home, 'memory-runtime', 'start.lock'))).toBe(false);
+  }, 15000);
+
+  it('stop(includeAttached:false) 后能力仍有效也不自动 immersive；新 capability 代际才恢复', async () => {
+    const home = await tempDir();
+    await mkdir(join(home, 'memory-runtime'), { recursive: true, mode: 0o700 });
+    let capabilityToken = 'cap-generation-a';
+    const capabilityRequests = [];
+    const capability = createServer((req, res) => {
+      const authorization = req.headers.authorization ?? null;
+      capabilityRequests.push({ path: req.url, authorization });
+      res.setHeader('content-type', 'application/json');
+      if (authorization !== `Bearer ${capabilityToken}`) {
+        res.statusCode = 401;
+        res.end(JSON.stringify({ ok: false, error: { code: 'capability_token_invalid' } }));
+        return;
+      }
+      if (String(req.url).endsWith('/version')) {
+        res.end(JSON.stringify({
+          ok: true,
+          requestId: 'req_version',
+          data: {
+            capabilityApiVersion: 1,
+            schemaVersion: 1,
+            mcpVersion: '0.3.0',
+            features: {},
+            limits: {},
+          },
+          warnings: [],
+          degraded: false,
+        }));
+        return;
+      }
+      res.end(JSON.stringify({
+        ok: true,
+        requestId: 'req_status',
+        data: { initialized: true, identity: { profileId: 'default', cloudId: null } },
+        warnings: [],
+        degraded: false,
+      }));
+    });
+    await new Promise((resolvePromise) => capability.listen(0, '127.0.0.1', resolvePromise));
+    const capabilityPort = capability.address().port;
+    cleanups.push(() => new Promise((resolvePromise) => {
+      capability.close(() => resolvePromise());
+      capability.closeAllConnections?.();
+    }));
+    const tokenPath = join(home, 'memory-runtime', 'capability-token');
+    const writeToken = (value) => writeFile(tokenPath, JSON.stringify({
+      version: 1, token: value, issuedAt: Date.now(), expiresAt: 0, mcpPid: process.pid,
+    }), { mode: 0o600 });
+    await writeToken(capabilityToken);
+    const sidecar = spawn(
+      process.execPath,
+      [fileURLToPath(new URL('../../packages/memory-runtime/bin/mebular-memory-runtime.mjs', import.meta.url)), 'serve'],
+      {
+        env: {
+          ...process.env,
+          ...envFor(home, {
+            MEBULAR_CAPABILITY_URL: `http://127.0.0.1:${capabilityPort}/internal/memory/v1`,
+            MEBULAR_CAPABILITY_TOKEN: capabilityToken,
+          }),
+        },
+        stdio: 'ignore',
+      },
+    );
+    cleanups.push(async () => {
+      if (pidAlive(sidecar.pid)) process.kill(sidecar.pid, 'SIGTERM');
+    });
+    await waitFor(() => existsSync(join(home, 'memory-runtime.json')));
+    const discovery = JSON.parse(await readFile(join(home, 'memory-runtime.json'), 'utf-8'));
+    const supervisor = new MemoryRuntimeSupervisor({
+      home,
+      config: enabledConfig(),
+      env: envFor(home),
+      profileId: () => 'default',
+    });
+    expect(await supervisor.start()).toMatchObject({ state: 'ready', attached: true });
+    const stopped = await supervisor.stop({ includeAttached: false, timeoutMs: 1000 });
+    expect(stopped).toMatchObject({
+      state: 'degraded',
+      error: { code: 'disable_incomplete' },
+    });
+    expect(existsSync(join(home, 'memory-runtime.json'))).toBe(false);
+    // 旧 capability 仍有效：等待超过一个 heartbeat，不得出现僵尸 discovery 或自动 immersive。
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 6000));
+    expect(existsSync(join(home, 'memory-runtime.json'))).toBe(false);
+    const hostToken = JSON.parse(await readFile(discovery.tokenFile, 'utf-8')).token;
+    const dormant = await fetch(`${discovery.url}/status`, {
+      headers: { authorization: `Bearer ${hostToken}` },
+    });
+    expect((await dormant.json()).data).toMatchObject({ mode: 'mcp', state: 'stopped' });
+
+    capabilityToken = 'cap-generation-b';
+    await writeToken(capabilityToken);
+    await waitFor(() => existsSync(join(home, 'memory-runtime.json')), { timeoutMs: 10000 });
+    expect(JSON.parse(await readFile(join(home, 'memory-runtime.json'), 'utf-8')).mode).toBe('immersive');
+    expect(capabilityRequests.some((request) => request.authorization === `Bearer ${capabilityToken}`)).toBe(true);
+  }, 40000);
 
   it('profile / home 不匹配：拒绝接管且不 spawn', async () => {
     const home = await tempDir();

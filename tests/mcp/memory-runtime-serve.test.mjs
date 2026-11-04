@@ -60,7 +60,7 @@ const fakeService = {
   }),
 };
 
-async function start({ enabled }) {
+async function start({ enabled, beforeConfigWrite = null }) {
   const home = await tempDir();
   process.env.MEBULAR_CLOUD_ROOT = join(home, 'cloud');
   delete process.env.MEBULAR_CAPABILITY_TOKEN;
@@ -78,6 +78,7 @@ async function start({ enabled }) {
     auth: 'none',
     writesEnabled: true,
     manageMemoryRuntime: true,
+    ...(beforeConfigWrite ? { beforeConfigWrite } : {}),
   });
   servers.push(server);
   return { home, server, base: `http://127.0.0.1:${server.port}` };
@@ -131,6 +132,42 @@ describe('serve + Memory Runtime supervisor', () => {
     await closing;
     servers.splice(servers.indexOf(server), 1);
   }, 20000);
+
+  it('已通过入口的 config PATCH 在写盘前遇到 close 时返回 409 且不落盘', async () => {
+    let release = () => {};
+    let entered = false;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const { home, base, server } = await start({
+      enabled: false,
+      beforeConfigWrite: async () => {
+        if (entered) return;
+        entered = true;
+        await gate;
+      },
+    });
+    const consoleResponse = await fetch(`${base}/console/`);
+    const csrf = consoleResponse.headers.get('x-mebular-csrf');
+    const cookie = consoleResponse.headers.get('set-cookie')?.split(';')[0];
+    const patch = fetch(`${base}/admin/api/config`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-mebular-csrf': csrf, cookie },
+      body: JSON.stringify({ patch: { 'memoryRuntime.enabled': true } }),
+    });
+    await waitFor(() => entered, { timeoutMs: 5000 });
+    const closing = server.close();
+    expect(server.getState().closing).toBe(true);
+    release();
+    const response = await patch;
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ ok: false, error: 'closing' });
+    const raw = await readFile(join(home, 'config.json'), 'utf-8').catch(() => null);
+    if (raw !== null) {
+      const config = JSON.parse(raw);
+      expect(config.memoryRuntime?.enabled).not.toBe(true);
+    }
+    await closing;
+    servers.splice(servers.indexOf(server), 1);
+  }, 15000);
 
   it('enabled：异步启动 sidecar，overview 只读展示且不泄漏 token；关闭时停止', async () => {
     const { home, server, base } = await start({ enabled: true });

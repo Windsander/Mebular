@@ -111,6 +111,9 @@ async function controlledCapability(token: string) {
     writeGate: null as Promise<void> | null,
     writeStarted: 0,
     writeSuccessEvenWhenDisabled: false,
+    writeResults: null as Array<Record<string, unknown>> | null,
+    detailGate: null as Promise<void> | null,
+    detailStarted: 0,
     requests: [] as Array<{ path: string; authorization: string | null }>,
   };
   const server = createServer(async (req, res) => {
@@ -144,6 +147,14 @@ async function controlledCapability(token: string) {
       }));
       return;
     }
+    if (path.endsWith('/detail') && state.detailGate) {
+      state.detailStarted += 1;
+      await state.detailGate;
+      if (!state.enabled) {
+        fail(404, 'capability_disabled');
+        return;
+      }
+    }
     if (state.writeGate) {
       state.writeStarted += 1;
       await state.writeGate;
@@ -151,6 +162,22 @@ async function controlledCapability(token: string) {
         fail(404, 'capability_disabled');
         return;
       }
+    }
+    if (path.endsWith('/write') && state.writeResults) {
+      res.end(JSON.stringify({
+        ok: true,
+        requestId: 'req_fake',
+        data: {
+          results: state.writeResults,
+          created: state.writeResults.filter((result) => result.status === 'created').length,
+          duplicates: state.writeResults.filter((result) => result.status === 'duplicate').length,
+          failed: state.writeResults.filter((result) => result.status === 'failed').length,
+          partial: state.writeResults.some((result) => result.status === 'failed'),
+        },
+        warnings: [],
+        degraded: false,
+      }));
+      return;
     }
     res.end(JSON.stringify({ ok: true, requestId: 'req_fake', data: { created: 1 }, warnings: [], degraded: false }));
   });
@@ -452,6 +479,10 @@ describe('memory-runtime sidecar process', () => {
       expect((await response.json() as any).error.code).toBe('mode_mismatch');
     }
 
+    capability.state.token = 'heartbeat-token-b';
+    await writeFile(join(home, 'memory-runtime', 'capability-token'), JSON.stringify({
+      version: 1, token: 'heartbeat-token-b', issuedAt: Date.now(), expiresAt: 0, mcpPid: process.pid,
+    }), { mode: 0o600 });
     capability.state.enabled = true;
     await waitFor(async () => {
       const discovery = JSON.parse(await readFile(join(home, 'memory-runtime.json'), 'utf8'));
@@ -490,6 +521,158 @@ describe('memory-runtime sidecar process', () => {
     });
     await expect(stat(tokenPath)).rejects.toMatchObject({ code: 'ENOENT' });
   }, 12000);
+
+  it('能力仍有效时同一 token 不自动恢复；新 capability 代际才允许 resume', async () => {
+    const home = await temp();
+    const dataDir = join(home, 'memory-runtime');
+    await mkdir(dataDir, { recursive: true, mode: 0o700 });
+    const tokenPath = join(dataDir, 'capability-token');
+    await writeFile(tokenPath, JSON.stringify({
+      version: 1, token: 'resume-token-a', issuedAt: Date.now(), expiresAt: 0, mcpPid: process.pid,
+    }), { mode: 0o600 });
+    const capability = await controlledCapability('resume-token-a');
+    const handle = await startSidecar({
+      home,
+      port: 0,
+      heartbeatMs: 50,
+      hostToken: 'host-token',
+      env: {
+        MEBULAR_HOME: home,
+        MEBULAR_CAPABILITY_URL: capability.url,
+        MEBULAR_CAPABILITY_TOKEN: 'resume-token-a',
+      },
+    });
+    handles.push(handle);
+    capability.state.enabled = false;
+    await waitFor(async () => {
+      try {
+        const discovery = JSON.parse(await readFile(join(home, 'memory-runtime.json'), 'utf8'));
+        return discovery.mode === 'mcp' && discovery.state === 'stopped';
+      } catch {
+        return false;
+      }
+    }, 15000);
+    // 同一 token 仍然有效：旧实现会在下一个 heartbeat 自动恢复 immersive。
+    capability.state.enabled = true;
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    const dormant = await fetch(`${handle.url}/status`, { headers: bearer('host-token') });
+    expect((await dormant.json() as any).data.mode).toBe('mcp');
+    const stillDormant = JSON.parse(await readFile(join(home, 'memory-runtime.json'), 'utf8'));
+    expect(stillDormant.mode).toBe('mcp');
+
+    capability.state.token = 'resume-token-b';
+    await writeFile(tokenPath, JSON.stringify({
+      version: 1, token: 'resume-token-b', issuedAt: Date.now(), expiresAt: 0, mcpPid: process.pid,
+    }), { mode: 0o600 });
+    await waitFor(async () => {
+      try {
+        return JSON.parse(await readFile(join(home, 'memory-runtime.json'), 'utf8')).mode === 'immersive';
+      } catch {
+        return false;
+      }
+    }, 15000);
+    const resumed = await fetch(`${handle.url}/status`, { headers: bearer('host-token') });
+    expect((await resumed.json() as any).data.capability.reachable).toBe(true);
+  }, 30000);
+
+  it('多 chunk staging 在逐块写入边界响应 drain，不得继续增长或发布 clean stopped', async () => {
+    const home = await temp();
+    const capability = await controlledCapability('staging-token');
+    const handle = await startSidecar({
+      home,
+      port: 0,
+      heartbeatMs: 50,
+      hostToken: 'host-token',
+      env: {
+        MEBULAR_HOME: home,
+        MEBULAR_CAPABILITY_URL: capability.url,
+        MEBULAR_CAPABILITY_TOKEN: 'staging-token',
+      },
+    });
+    handles.push(handle);
+    const originalPut = handle.local.store.putStagingChunk.bind(handle.local.store);
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let calls = 0;
+    let secondStarted = false;
+    handle.local.store.putStagingChunk = async (...args: Parameters<typeof originalPut>) => {
+      calls += 1;
+      if (calls === 2) {
+        secondStarted = true;
+        await gate;
+      }
+      return originalPut(...args);
+    };
+    const pending = fetch(`${handle.url}/ingest`, {
+      method: 'POST',
+      headers: { ...bearer('host-token'), 'content-type': 'application/json' },
+      body: JSON.stringify({
+        agentId: 'opencode',
+        extractor: 'host',
+        chunks: [
+          { role: 'user', text: '第一个 chunk' },
+          { role: 'assistant', text: '第二个 chunk' },
+        ],
+      }),
+    });
+    await waitFor(async () => secondStarted);
+    const before = await handle.local.stats();
+    capability.state.enabled = false;
+    await waitFor(async () => {
+      const discovery = JSON.parse(await readFile(join(home, 'memory-runtime.json'), 'utf8'));
+      return discovery.mode === 'mcp';
+    });
+    release();
+    const response = await pending;
+    expect(response.status).toBe(409);
+    expect((await response.json() as any).error.code).toBe('mode_mismatch');
+    const after = await handle.local.stats();
+    expect(after.stagingChunks).toBe(before.stagingChunks);
+  }, 15000);
+
+  it('record 成功后 detail 阶段遇到 drain：返回 409 mode_mismatch，不得伪装 200 partial', async () => {
+    const home = await temp();
+    const capability = await controlledCapability('detail-drain-token');
+    capability.state.writeResults = [{
+      status: 'created',
+      id: 'mem_detail_1',
+      kind: 'observation',
+      domain: 'agent:opencode',
+    }];
+    let release = () => {};
+    capability.state.detailGate = new Promise<void>((resolve) => { release = resolve; });
+    const handle = await startSidecar({
+      home,
+      port: 0,
+      heartbeatMs: 50,
+      hostToken: 'host-token',
+      env: {
+        MEBULAR_HOME: home,
+        MEBULAR_CAPABILITY_URL: capability.url,
+        MEBULAR_CAPABILITY_TOKEN: 'detail-drain-token',
+      },
+    });
+    handles.push(handle);
+    const pending = fetch(`${handle.url}/ingest`, {
+      method: 'POST',
+      headers: { ...bearer('host-token'), 'content-type': 'application/json' },
+      body: JSON.stringify({
+        agentId: 'opencode',
+        chunks: [{ role: 'user', text: '项目使用 pnpm workspace' }],
+        candidates: [{ kind: 'observation', content: { content: '项目使用 pnpm workspace' } }],
+      }),
+    });
+    await waitFor(async () => capability.state.detailStarted === 1);
+    capability.state.enabled = false;
+    await waitFor(async () => {
+      const discovery = JSON.parse(await readFile(join(home, 'memory-runtime.json'), 'utf8'));
+      return discovery.mode === 'mcp';
+    });
+    release();
+    const response = await pending;
+    expect(response.status).toBe(409);
+    expect((await response.json() as any).error.code).toBe('mode_mismatch');
+  }, 15000);
 
   it('in-flight replay 撤销后不重写 retry 元数据，clean 前原始 outbox 字节不变', async () => {
     const home = await temp();

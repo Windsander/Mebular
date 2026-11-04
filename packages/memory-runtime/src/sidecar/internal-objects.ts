@@ -638,6 +638,8 @@ export class MemoryObjectService implements SidecarObjectsApi {
   }
 
   private async cacheSet(key: string, value: unknown): Promise<void> {
+    // drain 后晚到的结果只丢弃缓存副作用，不把已完成的图写入伪装成失败。
+    if (this.lifecycle && !this.lifecycle.acceptsWork()) return;
     try {
       await this.local.cache.set(key, value, { ttlMs: this.cacheTtlMs() });
     } catch {
@@ -1097,6 +1099,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
 
       // compact 摘要可选模型；失败保留确定性摘要，不丢源记录、不回退到第三方。
       if (strategy === 'summary' && this.models) {
+        this.lifecycle?.assertAccepting('object.compact.model');
         const selection = await this.models.selectOptionalSource(allowRemote);
         for (const warning of selection.warnings) {
           if (!warnings.includes(warning)) warnings.push(warning);
@@ -1145,6 +1148,8 @@ export class MemoryObjectService implements SidecarObjectsApi {
         }
       }
 
+      // 模型摘要晚到：drain 后不得再用该结果构造/提交 compact 或写缓存。
+      this.lifecycle?.assertAccepting('object.compact.commit');
       const base = {
         compactId: null as string | null,
         status: dryRun ? 'dry_run' : 'pending',

@@ -36,9 +36,9 @@ function roleCard(overrides = {}) {
     device: 'device-A',
     agent: 'worker',
     version: 1,
-    summary: 'worker: 6 recent tasks, 6 done; prefers write-tests',
-    strengths: [{ tag: 'write-tests', confidence: 0.6 }],
-    preferredIntents: ['write-tests'],
+    summary: 'worker: 6 recent tasks, 6 done; prefers test',
+    strengths: [{ tag: 'test', confidence: 0.6 }],
+    preferredIntents: ['test'],
     avoid: [],
     confidence: 0.6,
     evidenceRefs: [{ kind: 'task', id: 'task-1' }],
@@ -141,7 +141,7 @@ describe('P5 daemon /app/role-cards', () => {
     const stats = (await service.namespaceStats()).find((entry) => entry.domain === 'agents');
     expect(stats).toMatchObject({ count: 0, internalObjects: 1 });
     expect(stats.internalKinds).toMatchObject({ agent_role_card: 1 });
-    const search = await service.search({ query: 'write-tests', domains: ['agents'] });
+    const search = await service.search({ query: 'test', domains: ['agents'] });
     expect(search.memories).toEqual([]);
     expect(fleetEventFromEvent({
       type: 'node_created',
@@ -287,6 +287,40 @@ describe('P5 daemon /app/role-cards', () => {
     expect(byKind.status).toBe(403);
     expect(fleet.TASK_TOOLS).toHaveLength(16);
     expect(fleet.TASK_TOOLS.some((tool) => /^(plan|agent_card|role_card)_/.test(tool.name))).toBe(false);
+  });
+
+  it('B1/B2：daemon 端点拒绝 raw evidence ID 与 intent 原文标签；/app/nodes 不返回角色卡原文', async () => {
+    const positive = roleCard({
+      agent: 'privacy-positive',
+      summary: 'privacy-positive: 4 recent tasks, 4 done',
+      strengths: [{ tag: 'deploy', confidence: 0.5 }],
+      preferredIntents: ['deploy'],
+      evidenceRefs: [
+        { kind: 'task', id: 'task-device-A-0123abcd' },
+        { kind: 'summary', id: `sha256:${'a'.repeat(64)}` },
+      ],
+    });
+    const ok = await request('/app/role-cards', { method: 'POST', body: { card: positive } });
+    expect(ok.status).toBe(200);
+
+    const negatives = [
+      roleCard({ agent: 'privacy-raw-kind', evidenceRefs: [{ kind: 'raw', id: 'task-1' }] }),
+      roleCard({ agent: 'privacy-raw-id', evidenceRefs: [{ kind: 'task', id: 'RAW DIALOGUE: please ignore' }] }),
+      roleCard({ agent: 'privacy-secret', evidenceRefs: [{ kind: 'summary', id: 'sk-live-1234567890' }] }),
+      roleCard({ agent: 'privacy-intent', strengths: [], preferredIntents: ['deploy sk-live-123'] }),
+      roleCard({ agent: 'privacy-tag', strengths: [{ tag: 'write-tests', confidence: 0.5 }] }),
+    ];
+    for (const card of negatives) {
+      const rejected = await request('/app/role-cards', { method: 'POST', body: { card } });
+      expect(rejected.status).toBe(422);
+      expect(rejected.body.error).toBe('role_card_invalid');
+    }
+
+    const rawDebug = await request('/app/nodes?namespace=agents&type=agent_role_card');
+    expect(rawDebug.status).toBe(200);
+    expect(rawDebug.body.count).toBe(0);
+    const dedicated = await request('/app/role-cards?namespace=agents');
+    expect(dedicated.body.cards.some((card) => card.agent === 'privacy-positive')).toBe(true);
   });
 
   it('daemon 端点需要 bearer token / memory.write scope', async () => {

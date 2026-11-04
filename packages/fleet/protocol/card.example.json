@@ -51,14 +51,14 @@
     "device": "device-B",
     "agent": "worker",
     "version": 3,
-    "summary": "擅长 API 实现与结构化审查；长任务稳定性一般。",
+    "summary": "worker: 42 recent tasks, 38 done (90%), prefers code, review",
     "strengths": [
-      { "tag": "code.write", "confidence": 0.86 },
+      { "tag": "code", "confidence": 0.86 },
       { "tag": "review", "confidence": 0.72 }
     ],
-    "preferredIntents": ["implement", "review"],
+    "preferredIntents": ["code", "review"],
     "avoid": [
-      { "tag": "long-running", "confidence": 0.64 }
+      { "tag": "ops", "confidence": 0.64 }
     ],
     "confidence": 0.78,
     "evidenceRefs": [

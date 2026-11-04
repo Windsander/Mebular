@@ -26,7 +26,7 @@ import { MebularTaskEventStore } from './store/mebular-store.js';
 import { DaemonTaskEventStore } from './store/daemon-store.js';
 import { DaemonAgentBackend } from './store/daemon-agent-backend.js';
 import { DaemonRoleCardStore } from './store/role-card-store.js';
-import { MebularRoleCardStore, type RoleCardStore } from './role-cards.js';
+import { MebularRoleCardStore, graphRoleSummaryProvider, type RoleCardStore } from './role-cards.js';
 import { DaemonTaskPlanStore, MebularTaskPlanStore, type TaskPlanStore } from './store/plan-store.js';
 import { PlanMaterializer } from './runtime/materializer.js';
 import { RoleCardJob } from './runtime/role-card-job.js';
@@ -613,11 +613,17 @@ function createRoleCardJob(
   const roleStore = createRoleCardStore(config, mebular);
   if (roleStore === null) return null;
   const log = (message: string): void => console.error(message);
+  if (config.roleCards?.enabled === true) {
+    log('[fleet:roles] roleCards.enabled=true：需 P6 真实 shadow 报告与审核后才允许启用软排序');
+  }
   return new RoleCardJob({
     device: config.device,
     agents: config.agents.map((agent) => agent.name),
     events: store,
     store: roleStore,
+    ...(mebular !== null
+      ? { summaries: graphRoleSummaryProvider(mebular, { namespaces: [config.namespace, AGENT_NAMESPACE] }) }
+      : {}),
     ...(config.roleCards?.refreshEveryTasks !== undefined ? { refreshEveryTasks: config.roleCards.refreshEveryTasks } : {}),
     ...(config.roleCards?.minIntervalMs !== undefined ? { minIntervalMs: config.roleCards.minIntervalMs } : {}),
     ...(config.roleCards?.window !== undefined ? { window: config.roleCards.window } : {}),

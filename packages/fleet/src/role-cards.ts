@@ -25,6 +25,85 @@ export const ROLE_CARD_DEFAULT_WINDOW = 50;
 export const ROLE_CARD_DEFAULT_REFRESH_TASKS = 5;
 export const ROLE_CARD_DEFAULT_MIN_INTERVAL_MS = 60_000;
 
+/**
+ * B2：写入角色卡的安全标签白名单。生成器只从 intent 中匹配这些标签，
+ * 未知 intent/短 token/原始对话一律忽略；schema 也拒绝白名单外的标签。
+ */
+export const ROLE_CARD_SAFE_TAGS = [
+  'analysis',
+  'api',
+  'bugfix',
+  'code',
+  'data',
+  'deploy',
+  'design',
+  'docs',
+  'infra',
+  'ops',
+  'planning',
+  'refactor',
+  'research',
+  'review',
+  'security',
+  'test',
+  'ui',
+] as const;
+
+export type RoleCardSafeTag = (typeof ROLE_CARD_SAFE_TAGS)[number];
+
+const SAFE_TAG_SET = new Set<string>(ROLE_CARD_SAFE_TAGS);
+
+const TAG_ALIASES: Readonly<Record<string, RoleCardSafeTag>> = {
+  analytics: 'data',
+  api: 'api',
+  backend: 'api',
+  bug: 'bugfix',
+  bugs: 'bugfix',
+  ci: 'ops',
+  code: 'code',
+  coding: 'code',
+  data: 'data',
+  database: 'data',
+  deploy: 'deploy',
+  deployment: 'deploy',
+  design: 'design',
+  devops: 'ops',
+  docs: 'docs',
+  documentation: 'docs',
+  frontend: 'ui',
+  fix: 'bugfix',
+  implementation: 'code',
+  implement: 'code',
+  infra: 'infra',
+  infrastructure: 'infra',
+  ops: 'ops',
+  plan: 'planning',
+  planning: 'planning',
+  refactor: 'refactor',
+  research: 'research',
+  review: 'review',
+  reviewing: 'review',
+  security: 'security',
+  test: 'test',
+  tests: 'test',
+  testing: 'test',
+  ui: 'ui',
+};
+
+/**
+ * B1：evidenceRefs kind 白名单。`raw`/任意 kind 一律拒绝。
+ * `session_summary`/`compact` 保留给既有 memory runtime 内部对象 ID。
+ */
+export const ROLE_CARD_EVIDENCE_KINDS = ['task', 'summary', 'checkpoint', 'session_summary', 'compact'] as const;
+
+const EVIDENCE_KIND_SET = new Set<string>(ROLE_CARD_EVIDENCE_KINDS);
+const FLEET_TASK_ID_RE = /^task-[A-Za-z0-9][A-Za-z0-9._:@-]{0,191}$/;
+const PLAN_TASK_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}#[1-9][0-9]*#(?:root|[a-z][a-z0-9_-]{0,63})$/;
+const HASH_EVIDENCE_ID_RE = /^(?:sha256:[0-9a-f]{64}|sha1:[0-9a-f]{40}|blake3:[0-9a-f]{64})$/;
+const ULID_EVIDENCE_ID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
+const UUID_EVIDENCE_ID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
+const STABLE_SUMMARY_ID_RE = /^(?:summary|compact|checkpoint|session)[-_][A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$/;
+
 /** 敏感键：角色卡任何层级都不允许出现（与能力卡同一红线）。 */
 const SENSITIVE_KEYS = new Set([
   'command',
@@ -176,6 +255,44 @@ function unitNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1;
 }
 
+export function isRoleCardSafeTag(value: unknown): value is RoleCardSafeTag {
+  return typeof value === 'string' && SAFE_TAG_SET.has(value);
+}
+
+/**
+ * B2：从 intent 中匹配固定安全标签；不保留任何原始 intent 文本。
+ * 未知词/短 token/secret 一律忽略；多标签按出现顺序去重。
+ */
+export function safeIntentTags(value: unknown): RoleCardSafeTag[] {
+  if (typeof value !== 'string' || value.length === 0) return [];
+  const out: RoleCardSafeTag[] = [];
+  const seen = new Set<string>();
+  for (const token of value.toLowerCase().split(/[^a-z0-9]+/)) {
+    if (token.length === 0) continue;
+    const tag = TAG_ALIASES[token];
+    if (tag === undefined || seen.has(tag)) continue;
+    seen.add(tag);
+    out.push(tag);
+  }
+  return out;
+}
+
+/** B1：按 kind 校验 evidenceRef.id 是否为稳定 ID/哈希格式，拒绝任意文本/空白/secret。 */
+export function isRoleEvidenceRefId(kind: unknown, id: unknown): boolean {
+  if (typeof kind !== 'string' || !EVIDENCE_KIND_SET.has(kind)) return false;
+  if (typeof id !== 'string' || id.length === 0 || id.length > MAX_EVIDENCE_ID_LENGTH) return false;
+  if (kind === 'task') return FLEET_TASK_ID_RE.test(id) || PLAN_TASK_ID_RE.test(id);
+  return HASH_EVIDENCE_ID_RE.test(id)
+    || ULID_EVIDENCE_ID_RE.test(id)
+    || UUID_EVIDENCE_ID_RE.test(id)
+    || STABLE_SUMMARY_ID_RE.test(id);
+}
+
+export function isValidRoleEvidenceRef(value: unknown): value is RoleCardEvidenceRef {
+  if (!isRecord(value)) return false;
+  return isRoleEvidenceRefId(value.kind, value.id);
+}
+
 function round4(value: number): number {
   return Math.round(value * 10_000) / 10_000;
 }
@@ -222,7 +339,9 @@ function validateTraits(value: unknown, field: string, errors: string[]): void {
       return;
     }
     scanUnknownKeys(item, TRAIT_KEYS, `${field}[${index}]`, errors);
-    if (!boundedString(item.tag, MAX_TAG_LENGTH)) errors.push(`${field}[${index}].tag 必须为非空短字符串`);
+    if (!boundedString(item.tag, MAX_TAG_LENGTH) || !isRoleCardSafeTag(item.tag)) {
+      errors.push(`${field}[${index}].tag 必须为安全标签白名单之一（${ROLE_CARD_SAFE_TAGS.join(',')}）`);
+    }
     if (!unitNumber(item.confidence)) errors.push(`${field}[${index}].confidence 必须为 0..1`);
   });
 }
@@ -247,8 +366,8 @@ export function validateAgentRoleCard(input: unknown): RoleCardValidation {
   validateTraits(card.avoid, 'avoid', errors);
   if (!Array.isArray(card.preferredIntents)
     || card.preferredIntents.length > MAX_LIST_LENGTH
-    || card.preferredIntents.some((tag) => !boundedString(tag, MAX_TAG_LENGTH))) {
-    errors.push(`preferredIntents 必须为最多 ${MAX_LIST_LENGTH} 项的非空短字符串数组`);
+    || card.preferredIntents.some((tag) => !boundedString(tag, MAX_TAG_LENGTH) || !isRoleCardSafeTag(tag))) {
+    errors.push(`preferredIntents 必须为最多 ${MAX_LIST_LENGTH} 项的安全标签白名单数组`);
   }
   if (!unitNumber(card.confidence)) errors.push('confidence 必须为 0..1');
   if (!Array.isArray(card.evidenceRefs) || card.evidenceRefs.length > MAX_LIST_LENGTH) {
@@ -260,8 +379,12 @@ export function validateAgentRoleCard(input: unknown): RoleCardValidation {
         return;
       }
       scanUnknownKeys(item, EVIDENCE_KEYS, `evidenceRefs[${index}]`, errors);
-      if (!boundedString(item.kind, 64)) errors.push(`evidenceRefs[${index}].kind 必须为非空短字符串`);
-      if (!boundedString(item.id, MAX_EVIDENCE_ID_LENGTH)) errors.push(`evidenceRefs[${index}].id 必须为非空短字符串`);
+      if (!boundedString(item.kind, 64) || !EVIDENCE_KIND_SET.has(item.kind)) {
+        errors.push(`evidenceRefs[${index}].kind 必须为允许集合之一（${ROLE_CARD_EVIDENCE_KINDS.join(',')}）`);
+      }
+      if (!boundedString(item.id, MAX_EVIDENCE_ID_LENGTH) || !isRoleEvidenceRefId(item.kind, item.id)) {
+        errors.push(`evidenceRefs[${index}].id 必须为匹配 kind 的稳定 ID/哈希格式`);
+      }
     });
   }
   if (typeof card.shadow !== 'boolean') errors.push('shadow 必须为布尔');
@@ -361,12 +484,10 @@ export function roleCardSortEligible(
  * 只用于软排序，不参与授权/硬过滤。`why` 只输出分数，不输出摘要原文。
  */
 export function roleCardScore(card: AgentRoleCard, intent?: string): number {
-  const label = typeof intent === 'string' ? normalizeIntentLabel(intent) : undefined;
+  const tags = safeIntentTags(intent);
   let score = card.confidence;
-  if (label !== undefined) {
-    if (card.preferredIntents.includes(label)) score += 0.05;
-    if (card.avoid.some((entry) => entry.tag === label)) score -= 0.05;
-  }
+  if (tags.some((tag) => card.preferredIntents.includes(tag))) score += 0.05;
+  if (tags.some((tag) => card.avoid.some((entry) => entry.tag === tag))) score -= 0.05;
   return round4(clamp01(score));
 }
 
@@ -378,7 +499,8 @@ export interface RoleTaskSample {
   taskId: string;
   device: string;
   agent: string;
-  intent: string;
+  /** B2：只保留固定安全标签，不保留 intent 原文。 */
+  tags: RoleCardSafeTag[];
   success: boolean;
   /** 终态事件时间（本机展示/最近性窗口；不参与任务一致性判定）。 */
   at: number;
@@ -414,7 +536,7 @@ export function collectRoleTaskSamples(
       taskId,
       device: state.to.device,
       agent: state.to.agent,
-      intent: normalizeIntentLabel(state.intent),
+      tags: safeIntentTags(state.intent),
       success: state.status === 'done',
       at: Number.isFinite(terminalEvent.at) ? terminalEvent.at : 0,
       ...(state.status === 'done' && Number.isFinite(latency) && latency >= 0 ? { latencyMs: Math.trunc(latency) } : {}),
@@ -425,15 +547,6 @@ export function collectRoleTaskSamples(
     if (a.taskId !== b.taskId) return a.taskId < b.taskId ? -1 : 1;
     return a.device < b.device ? -1 : a.device > b.device ? 1 : a.agent < b.agent ? -1 : a.agent > b.agent ? 1 : 0;
   });
-}
-
-/** 意图标签：折叠空白、小写；过长/控制字符改用短哈希，避免把长原文写进卡片。 */
-export function normalizeIntentLabel(value: unknown): string {
-  if (typeof value !== 'string') return 'unlabeled';
-  const text = value.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
-  if (text.length === 0) return 'unlabeled';
-  if (text.length <= 48) return text;
-  return `intent:${createHash('sha256').update(text).digest('hex').slice(0, 16)}`;
 }
 
 /** 最近性权重：7 天内为 1，30 天后为 0，线性衰减。 */
@@ -508,7 +621,8 @@ export function graphRoleSummaryProvider(
   const namespaces = new Set(options.namespaces ?? ['tasks', AGENT_NAMESPACE]);
   const kinds = new Set(options.kinds ?? ['compact', 'context_checkpoint']);
   return {
-    async listSummaries(): Promise<readonly RoleSummary[]> {
+    async listSummaries(options): Promise<readonly RoleSummary[]> {
+      const requestedAgents = new Set(options.agents);
       const out: RoleSummary[] = [];
       for (const kind of kinds) {
         const nodes = await mebular.graph.listNodes({ type: kind });
@@ -522,13 +636,19 @@ export function graphRoleSummaryProvider(
           if (!isRecord(content)) continue;
           const agent = summaryAgentOf(content);
           const device = typeof content.device === 'string' && content.device.length > 0 ? content.device : undefined;
+          // 非阻塞 #3：严格按 device/agent 过滤，避免跨 Agent 归因；无 owner 的摘要不参与。
+          if (device !== undefined && device !== options.device) continue;
+          if (agent === undefined || !requestedAgents.has(agent)) continue;
+          const intents = Array.isArray(content.intents)
+            ? [...new Set(content.intents
+              .filter((value): value is string => typeof value === 'string')
+              .flatMap((value) => safeIntentTags(value)))].slice(0, 16)
+            : [];
           out.push({
             id: node.id,
             ...(device !== undefined ? { device } : {}),
-            ...(agent !== undefined ? { agent } : {}),
-            ...(Array.isArray(content.intents)
-              ? { intents: content.intents.filter((value): value is string => typeof value === 'string').slice(0, 16).map(normalizeIntentLabel) }
-              : {}),
+            agent,
+            ...(intents.length > 0 ? { intents } : {}),
             ...(typeof content.updatedAt === 'number' && Number.isFinite(content.updatedAt) ? { at: content.updatedAt } : {}),
           });
         }
@@ -570,7 +690,7 @@ interface AgentAggregate {
   samples: RoleTaskSample[];
   successes: number;
   failures: number;
-  byIntent: Map<string, { success: number; failure: number }>;
+  byTag: Map<string, { success: number; failure: number }>;
 }
 
 function aggregateForAgent(samples: readonly RoleTaskSample[]): AgentAggregate | null {
@@ -581,28 +701,27 @@ function aggregateForAgent(samples: readonly RoleTaskSample[]): AgentAggregate |
   if (recent.length === 0) return null;
   let successes = 0;
   let failures = 0;
-  const byIntent = new Map<string, { success: number; failure: number }>();
+  const byTag = new Map<string, { success: number; failure: number }>();
   for (const sample of recent) {
-    const current = byIntent.get(sample.intent) ?? { success: 0, failure: 0 };
-    if (sample.success) {
-      successes += 1;
-      current.success += 1;
-    } else {
-      failures += 1;
-      current.failure += 1;
+    if (sample.success) successes += 1;
+    else failures += 1;
+    for (const tag of sample.tags) {
+      const current = byTag.get(tag) ?? { success: 0, failure: 0 };
+      if (sample.success) current.success += 1;
+      else current.failure += 1;
+      byTag.set(tag, current);
     }
-    byIntent.set(sample.intent, current);
   }
-  return { samples: recent, successes, failures, byIntent };
+  return { samples: recent, successes, failures, byTag };
 }
 
-function rankIntents(
-  byIntent: ReadonlyMap<string, { success: number; failure: number }>,
+function rankTags(
+  byTag: ReadonlyMap<string, { success: number; failure: number }>,
   total: number,
   pick: 'success' | 'failure',
   limit = 5,
 ): RoleCardTrait[] {
-  return [...byIntent.entries()]
+  return [...byTag.entries()]
     .filter(([, counts]) => counts[pick] > 0)
     .sort((a, b) => {
       const diff = b[1][pick] - a[1][pick];
@@ -641,7 +760,7 @@ export function generateRoleCards(input: RoleCardGenerateInput): RoleCardDraft[]
     const total = aggregate.samples.length;
     const consistency = Math.max(
       0,
-      ...[...aggregate.byIntent.values()].map((counts) => (counts.success + counts.failure) / total),
+      ...[...aggregate.byTag.values()].map((counts) => (counts.success + counts.failure) / total),
     );
     const latestAt = Math.max(...aggregate.samples.map((sample) => sample.at));
     const confidence = computeRoleConfidence({
@@ -650,17 +769,20 @@ export function generateRoleCards(input: RoleCardGenerateInput): RoleCardDraft[]
       consistency,
       freshness: freshnessOf(latestAt, now),
     });
-    const strengths = rankIntents(aggregate.byIntent, total, 'success');
-    const avoid = rankIntents(aggregate.byIntent, total, 'failure');
+    const strengths = rankTags(aggregate.byTag, total, 'success');
+    const avoid = rankTags(aggregate.byTag, total, 'failure');
     const preferredIntents = strengths.map((entry) => entry.tag);
-    const agentSummaries = summaries.filter((summary) => summary.agent === undefined || summary.agent === agent);
-    const summaryIntents = [...new Set(agentSummaries.flatMap((summary) => summary.intents ?? []))]
-      .filter((tag) => tag.length > 0 && !preferredIntents.includes(tag))
+    // B2：摘要 provider 的 intents 也必须过同一安全白名单；无 owner 的摘要不参与。
+    const agentSummaries = summaries.filter((summary) => summary.agent === agent);
+    const summaryIntents = [...new Set(agentSummaries.flatMap((summary) =>
+      (summary.intents ?? []).flatMap((intent) => safeIntentTags(intent))))]
+      .filter((tag) => !preferredIntents.includes(tag))
       .slice(0, 5);
+    // B1：只写合法稳定 ID/哈希；provider 的任意 ID 在 schema 层同样会被拒绝。
     const evidenceRefs: RoleCardEvidenceRef[] = [
-      ...aggregate.samples.slice(0, 8).map((sample) => ({ kind: 'task', id: sample.taskId })),
-      ...agentSummaries.slice(0, 4).map((summary) => ({ kind: 'summary', id: summary.id })),
-    ];
+      ...aggregate.samples.slice(0, 8).map((sample) => ({ kind: 'task' as const, id: sample.taskId })),
+      ...agentSummaries.slice(0, 4).map((summary) => ({ kind: 'summary' as const, id: summary.id })),
+    ].filter((ref) => isValidRoleEvidenceRef(ref));
     const successRate = round4(aggregate.successes / Math.max(1, total));
     const preferred = [...preferredIntents, ...summaryIntents];
     const summary = preferred.length > 0

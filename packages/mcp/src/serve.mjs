@@ -4213,6 +4213,7 @@ export async function startHttpServer({
         // 墓碑过滤，仅供 daemon/fleet 原始图读写与排障。普通记忆列表与域统计必须走
         // MemoryService.listRecords()/namespaceStats()（Console 见 admin.mjs），
         // 不得把这里当作普通记忆读路径。
+        // P5：即使 raw debug 也不返回角色卡原文；角色卡只能走 /app/role-cards。
         if (path === '/app/nodes' && req.method === 'GET') {
           const filter = {};
           const ns = url.searchParams.get('namespace');
@@ -4221,7 +4222,9 @@ export async function startHttpServer({
           if (ns) filter.namespace = ns;
           if (type) filter.type = type;
           const nodes = await app.graph.listNodes(filter);
-          const trimmed = Number.isInteger(limit) && limit > 0 ? nodes.slice(0, limit) : nodes;
+          const visible = nodes.filter((n) => n.type !== 'agent_role_card'
+            && n.metadata?.internalObject?.kind !== 'agent_role_card');
+          const trimmed = Number.isInteger(limit) && limit > 0 ? visible.slice(0, limit) : visible;
           return sendJson(res, 200, {
             ok: true,
             count: trimmed.length,

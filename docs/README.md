@@ -59,6 +59,7 @@ main [`README.md`](../README.md); this index only describes document structure.
 
 - [Memory Runtime guide (0.3.0)](guides/MEMORY_RUNTIME.md) · [中文](guides/MEMORY_RUNTIME_CN.md) — user-facing guide to modes, models, host boundaries and privacy
 - [Memory Runtime 0.3.0 contract](design/0.3.0-memory-runtime-contract-v2.md) — frozen sidecar and capability contract (Chinese)
+- [Memory Runtime 0.3.2 stability contract](design/0.3.2-stability-contract.md) · [中文](design/0.3.2-stability-contract_CN.md) — WP0 data, failure, lifecycle and acceptance target
 - [Memory Runtime sidecar lifecycle](design/0.3.0-memory-runtime-sidecar.md) — process, discovery, tokens, local data and failure behaviour (Chinese)
 - [0.3.0 acceptance report](quality/0.3.0-memory-runtime-acceptance.md) — recall quality, security and performance evidence
 - [0.3.0 real model smoke](quality/0.3.0-model-smoke.md) — Qwen3-4B + llama.cpp verification; records the engine symlink and Qwen3 thinking blockers

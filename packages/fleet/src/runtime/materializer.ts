@@ -23,9 +23,11 @@ import {
   type TaskPlan,
 } from '../plan.js';
 import {
+  ROUTE_STATUS_TTL_MS,
   loadRouteContext,
   resolvePlanStepRoute,
   routeInputFromContext,
+  type AgentStatusView,
   type PlanRoutingProvider,
   type RouteContext,
   type RouteDecision,
@@ -367,63 +369,58 @@ export class PlanMaterializer {
           computedBy: this.endpoint.device,
         });
       }
+      // B1：同 tick 内每成功建一个 task，实时递增该目标的 inflight；
+      // 后续 step（含显式 to）看到的是同一目标的最新容量，不会把多个 task 塞给 capacity=1 的目标。
+      const liveStatus: AgentStatusView[] = routeContext === null
+        ? []
+        : routeContext.status.map((view) => ({ ...view }));
       const stateMap = new Map(states.map((state) => [state.taskId, state]));
       const trigger = derivedTrace(plan, stateMap);
       for (const entry of ready) {
         if (busy >= parallel) break;
         const step = entry.step;
-        let to = step.to;
-        let decision: RouteDecision | null = null;
-        if (step.route !== undefined || routeContext !== null) {
-          if (routeContext === null) {
-            result.blocked.push({
-              planId: plan.planId,
-              version: plan.version,
-              stepId: step.stepId,
-              code: 'NO_TARGET',
-              blockedBy: ['NO_TARGET'],
-              detail: 'routing-unavailable',
-            });
-            continue;
-          }
-          decision = resolvePlanStepRoute(plan, step, routeInputFromContext(routeContext));
-          if (decision.decision !== 'assigned' || decision.chosen === null) {
-            result.blocked.push({
-              planId: plan.planId,
-              version: plan.version,
-              stepId: step.stepId,
-              code: decision.why.code,
-              blockedBy: decision.blockedBy.length > 0 ? decision.blockedBy : ['NO_TARGET'],
-              ...(decision.why !== undefined ? { why: decision.why } : {}),
-              ...(decision.rejected.length > 0 ? { rejected: decision.rejected } : {}),
-            });
-            continue;
-          }
-          // 显式 to 绝不被改派：resolver 保证 chosen===to；这里再做运行时兜底。
-          if (step.to !== undefined
-            && (decision.chosen.device !== step.to.device || decision.chosen.agent !== step.to.agent)) {
-            result.blocked.push({
-              planId: plan.planId,
-              version: plan.version,
-              stepId: step.stepId,
-              code: 'NO_TARGET',
-              blockedBy: ['NO_TARGET'],
-              detail: 'explicit-target-mismatch',
-            });
-            continue;
-          }
-          to = decision.chosen;
-        }
-        if (to === undefined) {
+        if (routeContext === null) {
+          // P3：无 routing provider 一律 fail-closed；不走 P2 无硬过滤路径。
           result.blocked.push({
             planId: plan.planId,
             version: plan.version,
             stepId: step.stepId,
             code: 'NO_TARGET',
             blockedBy: ['NO_TARGET'],
+            detail: 'routing-unavailable',
           });
           continue;
         }
+        const decision = resolvePlanStepRoute(plan, step, routeInputFromContext({
+          ...routeContext,
+          status: liveStatus,
+        }));
+        if (decision.decision !== 'assigned' || decision.chosen === null) {
+          result.blocked.push({
+            planId: plan.planId,
+            version: plan.version,
+            stepId: step.stepId,
+            code: decision.why.code,
+            blockedBy: decision.blockedBy.length > 0 ? decision.blockedBy : ['NO_TARGET'],
+            why: decision.why,
+            ...(decision.rejected.length > 0 ? { rejected: decision.rejected } : {}),
+          });
+          continue;
+        }
+        // 显式 to 绝不被改派：resolver 保证 chosen===to；这里再做运行时兜底。
+        if (step.to !== undefined
+          && (decision.chosen.device !== step.to.device || decision.chosen.agent !== step.to.agent)) {
+          result.blocked.push({
+            planId: plan.planId,
+            version: plan.version,
+            stepId: step.stepId,
+            code: 'NO_TARGET',
+            blockedBy: ['NO_TARGET'],
+            detail: 'explicit-target-mismatch',
+          });
+          continue;
+        }
+        const to = decision.chosen;
         const taskId = planTaskId(plan.planId, plan.version, step.stepId);
         if (stateMap.has(taskId)) continue;
         if ((await this.store.byTask(taskId)).length > 0) continue;
@@ -445,15 +442,30 @@ export class PlanMaterializer {
           result.tasksCreated.push(taskId);
           stateMap.set(taskId, reduceTaskEvents([event])!);
           busy += 1;
-          if (decision !== null) {
-            result.assignments.push({
-              planId: plan.planId,
-              version: plan.version,
-              stepId: step.stepId,
-              taskId,
-              chosen: to,
-              why: decision.why,
-              rejected: decision.rejected,
+          result.assignments.push({
+            planId: plan.planId,
+            version: plan.version,
+            stepId: step.stepId,
+            taskId,
+            chosen: to,
+            why: decision.why,
+            rejected: decision.rejected,
+          });
+          const live = liveStatus.find((view) => view.device === to.device && view.agent === to.agent);
+          if (live !== undefined) {
+            live.inflight = Math.max(0, Math.trunc(live.inflight)) + 1;
+          } else {
+            liveStatus.push({
+              v: 1,
+              kind: 'agent_status_view',
+              device: to.device,
+              agent: to.agent,
+              online: true,
+              inflight: 1,
+              capacity: 1,
+              asOf: Date.now(),
+              ttlMs: ROUTE_STATUS_TTL_MS,
+              computedBy: this.endpoint.device,
             });
           }
         }

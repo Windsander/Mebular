@@ -387,7 +387,10 @@ describe('P3 route resolver', () => {
   it('daemon provider：无法验证远端卡时只信任本机，远端候选 fail-closed（P6 风险）', async () => {
     const store = { all: async () => [] } as unknown as TaskEventStore;
     const provider = daemonRoutingProvider({
-      backend: { listCards: async () => [card(A.device, A.agent, ['planner'])] },
+      backend: {
+        listCards: async () => [card(A.device, A.agent, ['planner'])],
+        getSubscriptions: async (device: string) => (device === B.device ? ['tasks'] : []),
+      },
       config: { device: A.device, namespace: 'tasks', peers: [{ device: B.device }] },
       store,
       online: () => true,
@@ -400,6 +403,76 @@ describe('P3 route resolver', () => {
     const explicit = resolveRoute({ ...input({ to: B }), ...{ cards: context.cards, authorization: context.authorization, status: context.status } });
     expect(explicit).toMatchObject({ decision: 'NO_TARGET', chosen: null, blockedBy: ['MISSING_CAPABILITY'] });
     expect(explicit.rejected).toEqual([{ device: B.device, agent: B.agent, code: 'MISSING_CAPABILITY', detail: 'card' }]);
+  });
+
+  it('provider online/capacity 抛错时 loadRouteContext 捕获并 fail-closed', async () => {
+    const provider: PlanRoutingProvider = {
+      cards: async () => [card(B.device, B.agent, ['api'], { limits: { maxConcurrency: 3 } })],
+      authorized: () => ({ devices: [B.device] }),
+      online: () => { throw new Error('online unavailable'); },
+      capacity: () => { throw new Error('capacity unavailable'); },
+      observations: () => [],
+    };
+    const context = await loadRouteContext(provider, { states: [], events: [], asOf: 1, computedBy: A.device });
+    expect(context.status).toEqual([expect.objectContaining({
+      device: B.device,
+      agent: B.agent,
+      online: false,
+      capacity: 3,
+    })]);
+    const decision = resolveRoute({ ...input(), ...{ cards: context.cards, authorization: context.authorization, status: context.status } });
+    expect(decision.decision).toBe('NO_TARGET');
+    expect(decision.rejected).toEqual([{ device: B.device, agent: B.agent, code: 'OFFLINE' }]);
+  });
+
+  it('daemon 授权：config.peers 不是授权；B 订阅 tasks 后才进入候选', async () => {
+    const store = { all: async () => [] } as unknown as TaskEventStore;
+    const subscribed = new Set<string>();
+    const queryFailures = new Set<string>();
+    const provider = daemonRoutingProvider({
+      backend: {
+        listCards: async () => [card(B.device, B.agent, ['api'])],
+        getSubscriptions: async (device: string) => {
+          if (queryFailures.has(device)) throw new Error('policy unavailable');
+          return subscribed.has(device) ? ['tasks'] : [];
+        },
+      },
+      config: { device: A.device, namespace: 'tasks', peers: [{ device: C.device }] },
+      store,
+      online: () => true,
+    });
+    const base = input({
+      policy: { allowedDevices: [B.device], allowedAgents: ['worker'] },
+      route: { require: ['api'], prefer: [], strategy: 'deterministic' },
+    });
+
+    // 地址簿里有 C，但 C 未订阅；B 有可验证卡但不在 peers 中。两者都不授权。
+    let context = await loadRouteContext(provider, { states: [], events: [], asOf: 1, computedBy: A.device });
+    expect(context.authorization.devices).toEqual([A.device]);
+    let decision = resolveRoute({ ...base, ...{ cards: context.cards, authorization: context.authorization, status: context.status } });
+    expect(decision).toMatchObject({ decision: 'NO_TARGET', chosen: null, blockedBy: ['NO_CANDIDATES'] });
+
+    // C 订阅 tasks 也不等于 B 被授权；B 仍不在地址簿。查询 C 失败 → 不授权。
+    subscribed.add(C.device);
+    queryFailures.add(C.device);
+    context = await loadRouteContext(provider, { states: [], events: [], asOf: 1, computedBy: A.device });
+    expect(context.authorization.devices).toEqual([A.device]);
+
+    // 把 B 加入 config.peers 且订阅 tasks 后，才可路由。
+    const providerWithB = daemonRoutingProvider({
+      backend: {
+        listCards: async () => [card(B.device, B.agent, ['api'])],
+        getSubscriptions: async (device: string) => (device === B.device ? ['tasks'] : []),
+      },
+      config: { device: A.device, namespace: 'tasks', peers: [{ device: B.device }] },
+      store,
+      online: () => true,
+    });
+    context = await loadRouteContext(providerWithB, { states: [], events: [], asOf: 1, computedBy: A.device });
+    expect(context.authorization.devices).toEqual([A.device, B.device]);
+    decision = resolveRoute({ ...base, ...{ cards: context.cards, authorization: context.authorization, status: context.status } });
+    expect(decision).toMatchObject({ decision: 'assigned', chosen: B });
+    expect(decision.why.code).toBe('ASSIGNED');
   });
 
   it('卡片版本/tombstone：只使用最新 active 版本', () => {

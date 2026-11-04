@@ -75,7 +75,10 @@ export function embeddedRoutingProvider(options: EmbeddedRoutingProviderOptions)
 }
 
 export interface DaemonRoutingProviderOptions {
-  backend: Pick<CapabilityCardBackend, 'listCards'>;
+  backend: Pick<CapabilityCardBackend, 'listCards'> & {
+    /** 只读订阅查询（`/app/policy/subscriptions?device=`）。 */
+    getSubscriptions(device: string): Promise<string[]>;
+  };
   config: Pick<FleetConfig, 'device' | 'namespace' | 'peers'>;
   store: TaskEventStore;
   /** daemon 模式下没有 sync peer 视图；调用方可注入本机已知在线集合。 */
@@ -86,15 +89,27 @@ export interface DaemonRoutingProviderOptions {
 /**
  * daemon provider：复用 P1 `DaemonAgentBackend` 的卡片读取/验证。
  * 没有远端公钥时 listCards 只返回本机卡；远端候选会因缺少可信能力卡被拒绝（fail-closed）。
- * 授权集合取 config peers（地址簿/信任链已由配置给出）；真正的不可绕过门槛仍是卡片验证。
+ * **授权**：本机 + 对每个 config peer 查询其是否订阅任务 namespace；查询失败/未订阅 →
+ * 该 peer 不进入授权集合（绝不回退 `config.peers` 地址簿）。真正的硬门槛仍是卡片验证。
  */
 export function daemonRoutingProvider(options: DaemonRoutingProviderOptions): PlanRoutingProvider {
   const { backend, config, store } = options;
-  const configured = new Set<string>([config.device, ...config.peers.map((peer) => peer.device)]);
   return {
     namespace: config.namespace,
     cards: async (): Promise<readonly AgentCapabilityCard[]> => backend.listCards(),
-    authorized: (): RouteAuthorization => ({ devices: [...configured].sort() }),
+    authorized: async (): Promise<RouteAuthorization> => {
+      const devices = new Set<string>([config.device]);
+      for (const peer of config.peers) {
+        if (peer.device === config.device) continue;
+        try {
+          const namespaces = await backend.getSubscriptions(peer.device);
+          if (namespaces.includes(config.namespace)) devices.add(peer.device);
+        } catch {
+          // 订阅未知/查询失败 → 不授权；不回退地址簿。
+        }
+      }
+      return { devices: [...devices].sort() };
+    },
     online: (device: string): boolean => device === config.device || (options.online?.(device) ?? false),
     observations: async (): Promise<readonly RouteObservation[]> =>
       observeRouteOutcomes(await store.all(), { window: options.window }),

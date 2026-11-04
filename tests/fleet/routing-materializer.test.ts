@@ -14,6 +14,7 @@ import {
   TASK_TOOLS,
   appendCapabilityCard,
   compileCapabilityCards,
+  daemonRoutingProvider,
   derivePlanProgress,
   loadToolConfig,
   offlineMebularOptions,
@@ -188,6 +189,107 @@ describe('P3 materializer route', () => {
     expect(progress.steps.find((step) => step.stepId === 'api')?.status).toBe('dispatched');
   });
 
+  it('B1 route：同 tick 两个 ready step、唯一候选容量 1 → 只建 1 个，另一个 AT_CAPACITY', async () => {
+    const p = plan({
+      planId: 'plan-route-materializer-capacity-route-001',
+      policy: { allowedDevices: [B.device], allowedAgents: ['worker'], requireCapabilities: ['fleet.task'], maxParallel: 2, allowSubcontract: false },
+    }, [
+      { stepId: 'a', kind: 'task', intent: 'a', dependsOn: [], route: { require: ['api'], prefer: [], strategy: 'deterministic' }, acceptance: { kind: 'non-empty-result' } },
+      { stepId: 'b', kind: 'task', intent: 'b', dependsOn: [], route: { require: ['api'], prefer: [], strategy: 'deterministic' }, acceptance: { kind: 'non-empty-result' } },
+      { stepId: 'gate', kind: 'reduce', intent: 'gate', dependsOn: ['a', 'b'], join: { mode: 'all' }, acceptance: { kind: 'non-empty-result' } },
+      { stepId: 'mr', kind: 'mr', intent: 'mr', dependsOn: ['gate'], acceptance: { kind: 'mr-once' } },
+    ]);
+    const plans = new MemoryPlans();
+    await plans.append(p);
+    const limited = card(B.device, B.agent, ['api']);
+    limited.limits = { maxConcurrency: 1 };
+    const materializer = new PlanMaterializer({
+      device: A.device,
+      agent: A.agent,
+      plans,
+      store,
+      routing: routing({ cards: async () => [limited], authorized: () => ({ devices: [B.device] }) }),
+    });
+    const tick = await materializer.tick();
+    expect(tick.tasksCreated).toEqual([planTaskId(p.planId, 1, 'a')]);
+    expect(tick.assignments).toEqual([expect.objectContaining({ stepId: 'a', chosen: B })]);
+    expect(tick.blocked).toEqual([expect.objectContaining({
+      stepId: 'b',
+      code: 'NO_TARGET',
+      blockedBy: ['AT_CAPACITY'],
+    })]);
+    expect(await store.byTask(planTaskId(p.planId, 1, 'b'))).toHaveLength(0);
+    expect(await store.byTask(planTaskId(p.planId, 1, 'gate'))).toHaveLength(0);
+    expect(await store.byTask(planTaskId(p.planId, 1, 'mr'))).toHaveLength(0);
+  });
+
+  it('B1 显式 to：同 tick 两个 ready step、容量 1 → 只建 1 个，另一个 AT_CAPACITY', async () => {
+    const p = plan({
+      planId: 'plan-route-materializer-capacity-explicit-001',
+      policy: { allowedDevices: [B.device], allowedAgents: ['worker'], requireCapabilities: ['fleet.task'], maxParallel: 2, allowSubcontract: false },
+    }, [
+      { stepId: 'a', kind: 'task', intent: 'a', dependsOn: [], to: B, acceptance: { kind: 'non-empty-result' } },
+      { stepId: 'b', kind: 'task', intent: 'b', dependsOn: [], to: B, acceptance: { kind: 'non-empty-result' } },
+      { stepId: 'gate', kind: 'reduce', intent: 'gate', dependsOn: ['a', 'b'], join: { mode: 'all' }, acceptance: { kind: 'non-empty-result' } },
+      { stepId: 'mr', kind: 'mr', intent: 'mr', dependsOn: ['gate'], acceptance: { kind: 'mr-once' } },
+    ]);
+    const plans = new MemoryPlans();
+    await plans.append(p);
+    const limited = card(B.device, B.agent, ['api']);
+    limited.limits = { maxConcurrency: 1 };
+    const materializer = new PlanMaterializer({
+      device: A.device,
+      agent: A.agent,
+      plans,
+      store,
+      routing: routing({ cards: async () => [limited], authorized: () => ({ devices: [B.device] }) }),
+    });
+    const tick = await materializer.tick();
+    expect(tick.tasksCreated).toEqual([planTaskId(p.planId, 1, 'a')]);
+    expect(tick.blocked).toEqual([expect.objectContaining({ stepId: 'b', blockedBy: ['AT_CAPACITY'] })]);
+    expect(await store.byTask(planTaskId(p.planId, 1, 'b'))).toHaveLength(0);
+  });
+
+  it('B2 daemon 授权：B 有可验证卡但未订阅 tasks → 不建 task；订阅后才路由', async () => {
+    const p = plan({
+      planId: 'plan-route-materializer-daemon-auth-001',
+      policy: { allowedDevices: [B.device], allowedAgents: ['worker'], requireCapabilities: ['fleet.task'], maxParallel: 1, allowSubcontract: false },
+    }, [
+      { stepId: 'api', kind: 'task', intent: 'api', dependsOn: [], route: { require: ['api'], prefer: [], strategy: 'deterministic' }, acceptance: { kind: 'non-empty-result' } },
+      { stepId: 'gate', kind: 'reduce', intent: 'gate', dependsOn: ['api'], join: { mode: 'all' }, acceptance: { kind: 'non-empty-result' } },
+      { stepId: 'mr', kind: 'mr', intent: 'mr', dependsOn: ['gate'], acceptance: { kind: 'mr-once' } },
+    ]);
+    const plans = new MemoryPlans();
+    await plans.append(p);
+    const subscribed = new Set<string>();
+    const routingProvider = daemonRoutingProvider({
+      backend: {
+        listCards: async () => [card(B.device, B.agent, ['api'])],
+        getSubscriptions: async (device: string) => (subscribed.has(device) ? ['tasks'] : []),
+      },
+      config: { device: A.device, namespace: 'tasks', peers: [{ device: B.device }] },
+      store,
+      online: () => true,
+    });
+    const materializer = new PlanMaterializer({ device: A.device, agent: A.agent, plans, store, routing: routingProvider });
+
+    const before = await materializer.tick();
+    expect(before.tasksCreated).toEqual([]);
+    expect(before.blocked).toEqual([expect.objectContaining({
+      planId: p.planId,
+      stepId: 'api',
+      code: 'NO_TARGET',
+      blockedBy: ['NO_CANDIDATES'],
+    })]);
+    expect(await store.byTask(planTaskId(p.planId, 1, 'api'))).toHaveLength(0);
+
+    subscribed.add(B.device);
+    const after = await materializer.tick();
+    expect(after.tasksCreated).toEqual([planTaskId(p.planId, 1, 'api')]);
+    expect(after.assignments).toEqual([expect.objectContaining({ stepId: 'api', chosen: B })]);
+    expect((await store.byTask(planTaskId(p.planId, 1, 'api')))[0]?.to).toEqual(B);
+  });
+
   it('显式 to 通过硬过滤 → 创建且 chosen 仍是该目标', async () => {
     const p = plan({
       planId: 'plan-route-materializer-explicit-ok-001',
@@ -316,15 +418,27 @@ describe('P3 materializer route', () => {
     expect(await store.byTask(planTaskId(p.planId, 1, 'api'))).toHaveLength(0);
   });
 
-  it('无 routing provider 时 route step 保持 P3 前行为：blocked，不伪造目标', async () => {
-    const p = plan({ planId: 'plan-route-materializer-legacy-001' });
+  it('无 routing provider：route 与显式 to 都 fail-closed，不建 task', async () => {
+    const routePlan = plan({ planId: 'plan-route-materializer-legacy-001' });
+    const explicitPlan = plan({
+      planId: 'plan-route-materializer-legacy-explicit-001',
+    }, [
+      { stepId: 'api', kind: 'task', intent: 'api', dependsOn: [], to: B, acceptance: { kind: 'non-empty-result' } },
+      { stepId: 'gate', kind: 'reduce', intent: 'gate', dependsOn: ['api'], join: { mode: 'all' }, acceptance: { kind: 'non-empty-result' } },
+      { stepId: 'mr', kind: 'mr', intent: 'mr', dependsOn: ['gate'], acceptance: { kind: 'mr-once' } },
+    ]);
     const plans = new MemoryPlans();
-    await plans.append(p);
+    await plans.append(routePlan);
+    await plans.append(explicitPlan);
     const materializer = new PlanMaterializer({ device: A.device, agent: A.agent, plans, store });
     const tick = await materializer.tick();
     expect(tick.tasksCreated).toEqual([]);
-    expect(tick.blocked).toEqual([expect.objectContaining({ stepId: 'api', detail: 'routing-unavailable' })]);
-    expect(await store.byTask(planTaskId(p.planId, 1, 'api'))).toHaveLength(0);
+    expect(tick.blocked).toEqual([
+      expect.objectContaining({ planId: routePlan.planId, stepId: 'api', detail: 'routing-unavailable' }),
+      expect.objectContaining({ planId: explicitPlan.planId, stepId: 'api', detail: 'routing-unavailable' }),
+    ]);
+    expect(await store.byTask(planTaskId(routePlan.planId, 1, 'api'))).toHaveLength(0);
+    expect(await store.byTask(planTaskId(explicitPlan.planId, 1, 'api'))).toHaveLength(0);
   });
 
   it('旧 task_submit 不变；MCP 16 方法不变；不创建 join/MR', async () => {

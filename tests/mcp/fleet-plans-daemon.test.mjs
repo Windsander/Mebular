@@ -427,7 +427,23 @@ describe('P2 daemon /app/plans', () => {
 
       const plans = new fleet.DaemonTaskPlanStore({ endpoint: base, namespace: 'tasks' });
       const tasks = new fleet.DaemonTaskEventStore({ endpoint: base, namespace: 'tasks' });
-      const materializer = new fleet.PlanMaterializer({ device: 'device-A', agent: 'planner', plans, store: tasks });
+      const routingCards = fleet.compileCapabilityCards({
+        config: { device: 'device-B', namespace: 'tasks', agents: [{ name: 'worker', kind: 'echo' }] },
+        now: 1,
+      }).map((card) => ({ ...card, limits: { ...card.limits, maxConcurrency: 8 } }));
+      const materializer = new fleet.PlanMaterializer({
+        device: 'device-A',
+        agent: 'planner',
+        plans,
+        store: tasks,
+        routing: {
+          cards: async () => routingCards,
+          authorized: () => ({ devices: ['device-B'] }),
+          online: () => true,
+          observations: () => [],
+          namespace: 'tasks',
+        },
+      });
       const tick = await materializer.tick();
       expect(tick.tasksCreated).toContain(`${p.planId}#1#work`);
 

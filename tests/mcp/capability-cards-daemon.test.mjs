@@ -84,6 +84,13 @@ afterAll(async () => {
 });
 
 describe('CR-002 daemon 能力卡', () => {
+  it('DaemonAgentBackend.getSubscriptions 走只读 /app/policy/subscriptions', async () => {
+    const backend = new fleet.DaemonAgentBackend({ endpoint: base });
+    await app.subscribeNamespace('tasks');
+    expect(await backend.getSubscriptions('device-A')).toContain('tasks');
+    expect(await backend.getSubscriptions('device-unknown')).toEqual([]);
+  });
+
   it('publish → read → 签名可验证 → internal metadata 正确；并发同版本只写一次', async () => {
     const backend = new fleet.DaemonAgentBackend({
       endpoint: base,

@@ -55,6 +55,14 @@ interface CardReply {
   replayed?: boolean;
 }
 
+interface SubscriptionsReply {
+  ok: boolean;
+  error?: string;
+  message?: string;
+  device?: string;
+  namespaces?: unknown;
+}
+
 export interface DaemonAgentBackendOptions {
   endpoint: string;
   token?: string;
@@ -115,6 +123,17 @@ export class DaemonAgentBackend implements CapabilityCardBackend, AgentDirectory
       cards.push(card);
     }
     return cards;
+  }
+
+  /** 只读订阅查询：`GET /app/policy/subscriptions?device=`；失败抛错，由路由层 fail-closed。 */
+  async getSubscriptions(device: string): Promise<string[]> {
+    const url = `${this.endpoint}/app/policy/subscriptions?device=${encodeURIComponent(device)}`;
+    const { status, json } = await requestDaemonJson<SubscriptionsReply>(url, 'GET', this.token, undefined, this.timeoutMs);
+    if (status !== 200 || json.ok !== true) {
+      throw daemonError(`守护 getSubscriptions 失败（HTTP ${status}）：${json.error ?? '未知'}`);
+    }
+    if (!Array.isArray(json.namespaces)) return [];
+    return json.namespaces.filter((value): value is string => typeof value === 'string' && value.length > 0);
   }
 
   async listDirectories(): Promise<AgentDirectoryEntry[]> {

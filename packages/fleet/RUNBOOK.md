@@ -31,7 +31,7 @@ fleet doctor      --dir ~/.mebular --json
 ## 2.1 Plan materializer（P2）
 
 - plan 节点提交后，由 **plan owner 设备**上的 `fleet node --run-forever` 或 `fleet worker --run-forever` 周期性推进（两者都会 tick materializer）；daemon 模式经内部 `/app/plans` 读取 plan。
-- materializer 只创建依赖已满足且显式 `to` 的 step task；join/reduce/MR 执行属后续阶段。
+- materializer 只创建依赖已满足、且 route/显式 `to` 通过硬过滤的 step task；join/reduce/MR 执行属后续阶段。
 - 进程重启后从 plan + task 事件恢复，不需要 cursor；确定性 taskId/eventId 保证不重复建 task。
 - 默认只推进 owner device 的 plan；未授权设备不应运行 coordinator。
 - **sub-plan Agent 绑定**：MCP 任务工具缺省 Agent 是 `board`；宿主应注入真实执行 Agent，且必须与父 step task 的 `to.agent` 一致，否则 B8 拒绝。
@@ -67,3 +67,14 @@ fleet doctor      --dir ~/.mebular --json
 ## 6. 明确删除
 
 `fleet grant` / `fleet revoke`（域授权）/ `fleet declare-issuer` / `fleet pending` / `fleet approve` 已删除；加入令牌不再有自动授权/TTL 字段；对端×按域白名单、引导签发者、自动签发配置键已删除。
+
+## 2.2 Route + policy（P3）
+
+- **目标来源**：P1 能力卡（已验签/active/非 tombstone）+ sync 在线 peer + 本机任务视图/观察；显式 `to` 也只考虑该目标。
+- **硬过滤**：L1 授权 → policy `allowedDevices/allowedAgents/requireCapabilities` → `route.require`/工具 → payload 可达 → 在线/容量。显式 `to` 不通过即 blocked，**不会改派**。
+- **同 tick 容量**：materializer 每成功 append 一个 task 就实时递增该 `(device, agent)` 的 inflight；后续 step（含显式 `to`）满载返回 `AT_CAPACITY`，不建 task。
+- **无 routing provider**：materializer fail-closed（blocked `routing-unavailable`），不走 P2 无硬过滤路径；生产 CLI embedded/daemon 都会注入 provider。
+- **daemon coordinator 限制**：daemon 没有本地 `Mebular`，远端能力卡通常无法取得已认证公钥验签 → 远端 route/显式 `to` **fail-closed**，不伪造通过；双守护 E2E 的远端公钥/卡片验证留 P6。
+- **daemon L1 授权**：`DaemonAgentBackend.getSubscriptions()` 走只读 `/app/policy/subscriptions?device=`；只有订阅任务 namespace 的 peer 才进入授权集合，查询失败不授权，**绝不**回退 `config.peers` 地址簿。
+- **可解释性**：`task_status.plan` 的 step 可额外返回 `why`/`blockedBy`；`why.policy="inherited"` 表示实际生效的 plan policy，不是新授权来源。`why` 只含标签/计数/原因码，不含原始对话、command/env/凭据。
+- **角色卡/join/MR**：P3 角色卡仍未接入（`roleCard="disabled"`）；不创建 join/reduce/MR，留 P4/P5。

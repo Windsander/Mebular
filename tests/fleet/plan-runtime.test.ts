@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Mebular } from '@mebular/core';
 import {
+  AGENT_TASK_TOOL_NAMES,
   EchoExecutor,
   ExecutionLog,
   FleetWorker,
@@ -24,7 +25,9 @@ import {
   reduceTaskEvents,
   submitTaskPlan,
   toolByName,
+  type AgentCapabilityCard,
   type PlanAppendResult,
+  type PlanRoutingProvider,
   type TaskEvent,
   type TaskPlan,
   type TaskPlanWriteStore,
@@ -87,6 +90,34 @@ function plan(overrides: Partial<TaskPlan> = {}): TaskPlan {
 
 function ctx(extra: Partial<ToolContext> = {}): ToolContext {
   return { dir, agent: 'planner', ...extra };
+}
+
+/** P3：P2 回归测试用最小 routing provider（卡片仅用于硬过滤，不验签）。 */
+function routeCard(target: { device: string; agent: string }, capabilities: string[] = ['fleet.task']): AgentCapabilityCard {
+  return {
+    v: 1,
+    kind: 'agent_capability_card',
+    device: target.device,
+    agent: target.agent,
+    version: 1,
+    capabilities,
+    tools: [...AGENT_TASK_TOOL_NAMES],
+    limits: { maxConcurrency: 4 },
+    permissions: { taskNamespaces: ['tasks'] },
+    runtime: { os: 'test', arch: 'test', runtime: 'node', runtimeVersion: '20' },
+    provenance: { source: 'test', configHash: 'cfg', registryHash: 'reg', publishedAt: 1 },
+    signature: { alg: 'Ed25519', keyId: target.device, sig: 'sig' },
+  };
+}
+
+function routingFor(targets: Array<{ device: string; agent: string }>): PlanRoutingProvider {
+  return {
+    cards: async () => targets.map((target) => routeCard(target)),
+    authorized: () => ({ devices: [...new Set(targets.map((target) => target.device))] }),
+    online: () => true,
+    observations: () => [],
+    namespace: 'tasks',
+  };
 }
 
 async function statesOf(store: MebularTaskEventStore): Promise<TaskState[]> {
@@ -192,7 +223,7 @@ describe('P2 task_submit.plan + materializer', () => {
     const live = await openApp();
     const store = new MebularTaskEventStore(live);
     const plans = new MebularTaskPlanStore(live);
-    const materializer = new PlanMaterializer({ device: 'device-A', agent: 'planner', plans, store });
+    const materializer = new PlanMaterializer({ device: 'device-A', agent: 'planner', plans, store, routing: routingFor([B]) });
     const log = await ExecutionLog.open(join(dir, 'exec.jsonl'));
     const worker = new FleetWorker({
       device: 'device-B',
@@ -299,6 +330,7 @@ describe('P2 task_submit.plan + materializer', () => {
       agent: 'planner',
       plans: new MebularTaskPlanStore(live2),
       store: store2,
+      routing: routingFor([B]),
     });
     const beforeRestart = (await store2.byTask(workId)).length;
     const afterRestart = await materializer2.tick();
@@ -325,6 +357,7 @@ describe('P2 task_submit.plan + materializer', () => {
       agent: 'planner',
       plans: new MebularTaskPlanStore(live),
       store,
+      routing: routingFor([B]),
     });
     const result = await materializer.tick();
     expect(result.tasksCreated).toEqual([]);
@@ -386,7 +419,7 @@ describe('P2 task_submit.plan + materializer', () => {
       async append() { throw new Error('read-only'); },
       async close() {},
     };
-    const materializer = new PlanMaterializer({ device: 'device-A', agent: 'planner', plans: readOnlyPlans, store });
+    const materializer = new PlanMaterializer({ device: 'device-A', agent: 'planner', plans: readOnlyPlans, store, routing: routingFor([B]) });
     const tick = await materializer.tick();
     expect(tick.invalid.some((entry) => entry.planId === child.planId && entry.code === 'PLAN_STATE_INVALID')).toBe(true);
     expect(await store.byTask(planRootTaskId(child.planId, 1))).toHaveLength(0);
@@ -412,7 +445,7 @@ describe('P2 task_submit.plan + materializer', () => {
     const live = await openApp();
     const store = new MebularTaskEventStore(live);
     const plans = new MebularTaskPlanStore(live);
-    const materializer = new PlanMaterializer({ device: 'device-A', agent: 'planner', plans, store });
+    const materializer = new PlanMaterializer({ device: 'device-A', agent: 'planner', plans, store, routing: routingFor([B]) });
     await materializer.tick();
     const delegateTaskId = planTaskId(parent.planId, 1, 'delegate');
     expect(reduceTaskEvents(await store.byTask(delegateTaskId))?.status).toBe('queued');
@@ -465,7 +498,7 @@ describe('P2 task_submit.plan + materializer', () => {
     const childRoot = reduceTaskEvents(await store.byTask(childRootId));
     expect(childRoot?.trace).toEqual({ causedBy: delegateTaskId, chain: [delegateTaskId] });
 
-    const childMaterializer = new PlanMaterializer({ device: 'device-B', agent: 'worker', plans: childPlanStore, store });
+    const childMaterializer = new PlanMaterializer({ device: 'device-B', agent: 'worker', plans: childPlanStore, store, routing: routingFor([B]) });
     const childTick = await childMaterializer.tick();
     expect(childTick.tasksCreated).toEqual([planTaskId(child.planId, 1, 'work')]);
     const childWork = reduceTaskEvents(await store.byTask(planTaskId(child.planId, 1, 'work')));
@@ -496,7 +529,7 @@ describe('P2 task_submit.plan + materializer', () => {
     const live = await openApp();
     const store = new MebularTaskEventStore(live);
     const plans = new MebularTaskPlanStore(live);
-    const materializer = new PlanMaterializer({ device: 'device-A', agent: 'planner', plans, store });
+    const materializer = new PlanMaterializer({ device: 'device-A', agent: 'planner', plans, store, routing: routingFor([A]) });
     await materializer.tick();
     const delegateTaskId = planTaskId(parent.planId, 1, 'delegate');
     expect(reduceTaskEvents(await store.byTask(delegateTaskId))?.to).toEqual(A);
@@ -613,7 +646,7 @@ describe('P2 task_submit.plan + materializer', () => {
     const live = await openApp();
     const store = new MebularTaskEventStore(live);
     const plans = new MebularTaskPlanStore(live);
-    const materializer = new PlanMaterializer({ device: 'device-A', agent: 'planner', plans, store });
+    const materializer = new PlanMaterializer({ device: 'device-A', agent: 'planner', plans, store, routing: routingFor([A]) });
 
     // done 父 task + rootless child plan node。
     const parentDone = makeParent('plan-parent-b10-done-001');
@@ -681,7 +714,7 @@ describe('P2 task_submit.plan + materializer', () => {
     const live = await openApp();
     const store = new MebularTaskEventStore(live);
     const plans = new MebularTaskPlanStore(live);
-    const materializer = new PlanMaterializer({ device: 'device-A', agent: 'planner', plans, store });
+    const materializer = new PlanMaterializer({ device: 'device-A', agent: 'planner', plans, store, routing: routingFor([B]) });
     await materializer.tick();
     const log = await ExecutionLog.open(join(dir, 'reuse-exec.jsonl'));
     const worker = new FleetWorker({
@@ -718,8 +751,8 @@ describe('P2 task_submit.plan + materializer', () => {
     const live = await openApp();
     const store = new MebularTaskEventStore(live);
     const plans = new MebularTaskPlanStore(live);
-    const one = new PlanMaterializer({ device: 'device-A', agent: 'planner', plans, store });
-    const two = new PlanMaterializer({ device: 'device-A', agent: 'planner', plans, store });
+    const one = new PlanMaterializer({ device: 'device-A', agent: 'planner', plans, store, routing: routingFor([B]) });
+    const two = new PlanMaterializer({ device: 'device-A', agent: 'planner', plans, store, routing: routingFor([B]) });
     const [a, b] = await Promise.all([one.tick(), two.tick()]);
     expect([...a.tasksCreated, ...b.tasksCreated]).toEqual([planTaskId(p.planId, 1, 'work')]);
     const workId = planTaskId(p.planId, 1, 'work');
@@ -739,6 +772,7 @@ describe('P2 task_submit.plan + materializer', () => {
       agent: 'planner',
       plans: new MebularTaskPlanStore(live),
       store,
+      routing: routingFor([B]),
     });
     const result = await materializer.tick();
     expect(result.rootsCreated).toBe(1);

@@ -94,12 +94,14 @@ export interface RouteRanking {
 }
 
 export interface RouteWhy {
+  /** `ASSIGNED`/`NO_TARGET`；显式 policy 越权按契约 §7.5 使用 `POLICY_DENIED`。 */
   code: RouteDecisionCode;
   hardFilters: string[];
   ranking: RouteRanking[];
   tieBreak: typeof ROUTE_TIE_BREAK;
   roleCard: typeof ROUTE_ROLE_CARD_DISABLED;
-  policy: 'inherited' | 'plan';
+  /** `inherited` = 本轮实际生效的 plan policy（root 或已衰减 sub-plan），不是额外授权源。 */
+  policy: 'inherited';
 }
 
 export interface RouteDecision {
@@ -647,15 +649,39 @@ export async function loadRouteContext(
     const key = keyOf(state.to.device, state.to.agent);
     inflight.set(key, (inflight.get(key) ?? 0) + 1);
   }
-  const status = buildAgentStatusViews({
-    cards,
-    online: (device) => provider.online?.(device) ?? false,
-    inflight: (device, agent) => inflight.get(keyOf(device, agent)) ?? 0,
-    observations,
-    ...(provider.capacity !== undefined ? { capacity: provider.capacity } : {}),
-    asOf: options.asOf,
-    computedBy: options.computedBy,
-  });
+  // 非阻塞硬化：provider 的 online/capacity 是外部回调；任何异常都按 fail-closed 处理，
+  // 不让单个坏回调打断整轮 materializer tick。
+  const safeOnline = (device: string): boolean => {
+    try {
+      return provider.online?.(device) ?? false;
+    } catch {
+      return false;
+    }
+  };
+  const capacityOverride = provider.capacity;
+  const safeCapacity = capacityOverride === undefined
+    ? undefined
+    : (device: string, agent: string): number | undefined => {
+      try {
+        return capacityOverride(device, agent);
+      } catch {
+        return undefined;
+      }
+    };
+  let status: AgentStatusView[] = [];
+  try {
+    status = buildAgentStatusViews({
+      cards,
+      online: safeOnline,
+      inflight: (device, agent) => inflight.get(keyOf(device, agent)) ?? 0,
+      observations,
+      ...(safeCapacity !== undefined ? { capacity: safeCapacity } : {}),
+      asOf: options.asOf,
+      computedBy: options.computedBy,
+    });
+  } catch {
+    status = [];
+  }
   return {
     cards,
     authorization,

@@ -85,10 +85,14 @@ async function createRecord(domain, marker) {
 }
 
 function detailItem(domain, recordIds, text, extra = {}) {
+  const detailKind = extra.detailKind ?? (extra.retentionClass === 'tool_output'
+    ? 'tool_output'
+    : extra.retentionClass === 'document_slice' ? 'document_slice' : 'raw_chunk');
+  const role = extra.role ?? (extra.retentionClass === 'tool_output' ? 'tool' : 'user');
   return {
     domain,
-    detailKind: 'raw_chunk',
-    role: 'user',
+    detailKind,
+    role,
     recordIds,
     text,
     provenance: { source: 'runtime', extractor: 'host', ...(extra.provenance ?? {}) },
@@ -624,7 +628,7 @@ describe('保留、过期与配额', () => {
     for (const [retentionClass, delta] of Object.entries(expected)) {
       const res = await writeDetail([detailItem('agent:opencode', [recordId], `${marker}-${retentionClass}`, {
         retentionClass,
-      })]);
+      })], { actor: retentionClass === 'pinned' ? user : agent });
       expect(res.status).toBe(200);
       const node = await detailNode(res.body.data.results[0].id);
       expect(node.content.retentionClass).toBe(retentionClass);
@@ -643,6 +647,40 @@ describe('保留、过期与配额', () => {
     expect(overCap.status).toBe(422);
     expect(overCap.body.error.code).toBe('validation_failed');
     expect(overCap.body.error.details.field).toBe('expiresAt');
+  });
+
+  it('role/detailKind 决定 retentionClass；agent 不能声明 pinned，user 显式治理可以', async () => {
+    const marker = unique('detail-retention-consistency');
+    const recordId = await createRecord('agent:opencode', marker);
+    const toolMismatch = await writeDetail([detailItem('agent:opencode', [recordId], `${marker}-tool`, {
+      detailKind: 'raw_chunk',
+      role: 'tool',
+      retentionClass: 'conversation',
+    })]);
+    expect(toolMismatch.status).toBe(422);
+    expect(toolMismatch.body.error.details.field).toBe('retentionClass');
+
+    const documentMismatch = await writeDetail([detailItem('agent:opencode', [recordId], `${marker}-doc`, {
+      detailKind: 'document_slice',
+      role: 'user',
+      retentionClass: 'conversation',
+    })]);
+    expect(documentMismatch.status).toBe(422);
+
+    const agentPinned = await writeDetail([detailItem('agent:opencode', [recordId], `${marker}-pin`, {
+      retentionClass: 'pinned',
+    })]);
+    expect(agentPinned.status).toBe(422);
+    expect(agentPinned.body.error.details.field).toBe('retentionClass');
+
+    const governed = await writeDetail([detailItem('agent:opencode', [recordId], `${marker}-pin`, {
+      retentionClass: 'pinned',
+    })], { actor: user });
+    expect(governed.status).toBe(200);
+    expect((await detailNode(governed.body.data.results[0].id)).content).toMatchObject({
+      retentionClass: 'pinned',
+      expiresAt: 0,
+    });
   });
 
   it('过期详情：get 410、list 默认排除；user includeExpired 可见，agent 不可治理读取', async () => {
@@ -748,16 +786,16 @@ describe('保留、过期与配额', () => {
     const recordId = await createRecord(domain, marker);
     const first = await writeDetail([detailItem(domain, [recordId], 'a'.repeat(30 * 1024), {
       retentionClass: 'pinned',
-    })]);
+    })], { actor: user });
     const second = await writeDetail([detailItem(domain, [recordId], 'b'.repeat(30 * 1024), {
       retentionClass: 'pinned',
-    })]);
+    })], { actor: user });
     expect(first.status).toBe(200);
     expect(second.status).toBe(200);
 
     const failed = await writeDetail([detailItem(domain, [recordId], 'c'.repeat(30 * 1024), {
       retentionClass: 'pinned',
-    })]);
+    })], { actor: user });
     expect(failed.status).toBe(413);
     expect(failed.body.error.code).toBe('detail_quota_exceeded');
     expect(failed.body.error.details).toMatchObject({
@@ -777,12 +815,12 @@ describe('保留、过期与配额', () => {
     const marker = unique('detail-quota-partial');
     const domain = 'quota_partial';
     const recordId = await createRecord(domain, marker);
-    await writeDetail([detailItem(domain, [recordId], 'a'.repeat(30 * 1024), { retentionClass: 'pinned' })]);
-    await writeDetail([detailItem(domain, [recordId], 'b'.repeat(30 * 1024), { retentionClass: 'pinned' })]);
+    await writeDetail([detailItem(domain, [recordId], 'a'.repeat(30 * 1024), { retentionClass: 'pinned' })], { actor: user });
+    await writeDetail([detailItem(domain, [recordId], 'b'.repeat(30 * 1024), { retentionClass: 'pinned' })], { actor: user });
     const res = await writeDetail([
       detailItem(domain, [recordId], 'c'.repeat(20 * 1024), { retentionClass: 'pinned' }),
       detailItem(domain, [recordId], 'd'.repeat(10 * 1024), { retentionClass: 'pinned' }),
-    ]);
+    ], { actor: user });
     expect(res.status).toBe(200);
     expect(res.body.data.partial).toBe(true);
     expect(res.body.data.failed).toBe(2);
@@ -796,14 +834,14 @@ describe('保留、过期与配额', () => {
     const recordId = await createRecord(domain, marker);
     const first = await writeDetail([detailItem(domain, [recordId], 'a'.repeat(30 * 1024), {
       retentionClass: 'pinned',
-    })]);
-    await writeDetail([detailItem(domain, [recordId], 'b'.repeat(30 * 1024), { retentionClass: 'pinned' })]);
+    })], { actor: user });
+    await writeDetail([detailItem(domain, [recordId], 'b'.repeat(30 * 1024), { retentionClass: 'pinned' })], { actor: user });
     const key = unique('detail-quota-retry-key');
     const bodyItems = [
       detailItem(domain, [recordId], 'c'.repeat(30 * 1024), { retentionClass: 'pinned' }),
       detailItem(domain, [recordId], 'd'.repeat(30 * 1024), { retentionClass: 'pinned' }),
     ];
-    const firstAttempt = await writeDetail(bodyItems, { headers: { 'idempotency-key': key } });
+    const firstAttempt = await writeDetail(bodyItems, { actor: user, headers: { 'idempotency-key': key } });
     expect(firstAttempt.status).toBe(200);
     expect(firstAttempt.body.data.partial).toBe(true);
     expect(firstAttempt.body.data.failed).toBe(2);
@@ -814,7 +852,7 @@ describe('保留、过期与配额', () => {
       op: 'delete',
       ids: [first.body.data.results[0].id],
     }, { token });
-    const retry = await writeDetail(bodyItems, { headers: { 'idempotency-key': key } });
+    const retry = await writeDetail(bodyItems, { actor: user, headers: { 'idempotency-key': key } });
     expect(retry.status).toBe(200);
     expect(retry.body.data.created).toBe(1);
     expect(retry.body.data.failed).toBe(1);

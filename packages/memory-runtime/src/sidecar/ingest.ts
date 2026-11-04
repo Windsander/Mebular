@@ -30,6 +30,8 @@ import {
 } from './domains.js';
 import {
   canonicalJson,
+  clientItemIdFor,
+  normalizeCandidate,
   routeCandidate,
   sha256Hex,
   toWriteItem,
@@ -47,7 +49,11 @@ import type {
   SidecarInferenceProvider,
 } from './inference-provider.js';
 import { redactText } from './text.js';
-import type { RawChunk } from '../runtime/types.js';
+import type {
+  DetailRetentionClass,
+  RawChunk,
+  RuntimeDetailKind,
+} from '../runtime/types.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
@@ -61,6 +67,13 @@ const RAW_CHUNK_ID_RE = /^rc_[A-Za-z0-9]{8,}$/;
 const ROLES = ['user', 'assistant', 'system', 'tool'] as const;
 const MIMES = ['text/plain', 'text/markdown', 'application/json'] as const;
 const EXTRACTORS = ['auto', 'heuristic', 'local', 'host', 'api'] as const;
+const DETAIL_KINDS = ['raw_chunk', 'message', 'tool_output', 'document_slice'] as const;
+const SENSITIVE_FIELD_RE = /^(?:authorization|api[-_]?key|access[-_]?token|refresh[-_]?token|token|secret|password|passwd|credential|private[-_]?key)$/i;
+const DETAIL_RETENTION_DAYS: Record<Exclude<DetailRetentionClass, 'pinned'>, number> = {
+  conversation: 30,
+  tool_output: 7,
+  document_slice: 90,
+};
 
 export type IngestExtractor = (typeof EXTRACTORS)[number];
 export type IngestExtractorKind = 'heuristic' | 'local' | 'api' | 'host';
@@ -68,6 +81,9 @@ export type IngestExtractorKind = 'heuristic' | 'local' | 'api' | 'host';
 export interface IngestChunkInput {
   id?: string;
   role?: (typeof ROLES)[number];
+  detailKind?: RuntimeDetailKind;
+  /** pinned 只能走 user/system 治理；普通 ingest 不允许借此延长保留。 */
+  retentionClass?: DetailRetentionClass;
   text: string;
   mime?: (typeof MIMES)[number];
   at?: number;
@@ -98,6 +114,8 @@ export interface IngestRequest {
 
 export interface IngestRecordView {
   id: string;
+  /** 内部证据映射键；不是 Detail ID，也不是前向图引用。 */
+  clientItemId?: string;
   type?: string;
   kind: string;
   domain: string;
@@ -248,6 +266,11 @@ interface DetailSettlementOutcome {
   queuedRequestIds: string[];
 }
 
+interface CandidateEvidence {
+  stagingChunkIds: string[];
+  messageIds: string[];
+}
+
 interface CandidateContext {
   agentId: string;
   agentName?: string;
@@ -257,6 +280,7 @@ interface CandidateContext {
   extractor: IngestExtractorKind;
   model: string | null;
   source: 'runtime' | 'host';
+  evidenceByClientItemId?: Map<string, CandidateEvidence>;
 }
 
 interface FactIdentity {
@@ -312,6 +336,47 @@ function mayAutoSupersede(record: Record<string, unknown>, agentId: string): boo
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+/** ingest 的统一最小化边界：候选、staging、模型输入与 outbox 共用相同脱敏规则。 */
+function minimizeValue(value: unknown, key?: string): unknown {
+  if (typeof value === 'string') {
+    if (key && SENSITIVE_FIELD_RE.test(key)) return '[redacted]';
+    return redactText(value).text;
+  }
+  if (value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map((entry) => minimizeValue(entry));
+  const out: Record<string, unknown> = {};
+  for (const [entryKey, entryValue] of Object.entries(value as Record<string, unknown>)) {
+    if (entryValue !== undefined) out[entryKey] = minimizeValue(entryValue, entryKey);
+  }
+  return out;
+}
+
+function safeErrorMessage(error: unknown): string {
+  return redactText(String((error as Error)?.message ?? error ?? 'sidecar 内部错误')).text.slice(0, 512);
+}
+
+function candidateEvidenceKey(candidate: {
+  kind: string;
+  content: Record<string, unknown>;
+  domainHint?: string | null;
+  validFrom?: number;
+  validTo?: number;
+}): string {
+  return [
+    candidate.kind,
+    candidate.domainHint ?? '',
+    canonicalJson(candidate.content),
+    candidate.validFrom ?? '',
+    candidate.validTo ?? '',
+  ].join('\u0000');
+}
+
+function stringEvidence(value: unknown, max = 100): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0))]
+    .slice(0, max);
 }
 
 function invalid(message: string, details?: unknown): never {
@@ -385,15 +450,15 @@ function appendWarnings(target: string[], values: readonly string[]): void {
 
 function errorView(error: unknown, at: number): IngestErrorView {
   if (error instanceof SidecarSettlementError) {
-    return nowView(at, error.code, error.message);
+    return nowView(at, error.code, safeErrorMessage(error));
   }
   if (error instanceof CapabilityClientError) {
-    return nowView(at, error.code, error.message);
+    return nowView(at, error.code, safeErrorMessage(error));
   }
   if (error instanceof LocalLayerError) {
-    return nowView(at, error.code, error.message);
+    return nowView(at, error.code, safeErrorMessage(error));
   }
-  return nowView(at, 'internal', (error as Error)?.message ?? 'sidecar 内部错误');
+  return nowView(at, 'internal', safeErrorMessage(error));
 }
 
 function retryableCapabilityError(error: unknown): boolean {
@@ -438,6 +503,7 @@ export class IngestService {
     this.now = options.now ?? Date.now;
     this.idempotencyTtlMs = options.idempotencyTtlMs ?? IDEMPOTENCY_TTL_MS;
     this.extractionTtlMs = options.extractionTtlMs ?? EXTRACTION_TTL_MS;
+    this.local.setStagingDependencyHandler((ids) => this.expireStagingDependencies(ids));
   }
 
   get isDegraded(): boolean {
@@ -559,7 +625,8 @@ export class IngestService {
     const chunks = this.buildChunks(input.chunks, { agentId });
     const threadId = explicitThreadId ?? this.deriveThreadId(agentId, chunks);
 
-    const rawCandidates = input.candidates;
+    const rawCandidates = minimizeValue(input.candidates);
+    const explicitEvidence = this.explicitEvidence(rawCandidates, chunks);
     const candidateCheck = validateCandidates(rawCandidates);
     warnings.push(...candidateCheck.warnings);
     if (Array.isArray(rawCandidates) && rawCandidates.length > 0 && candidateCheck.candidates.length === 0) {
@@ -632,6 +699,12 @@ export class IngestService {
     });
 
     let routed: RoutedCandidate[] = routedHost;
+    let evidenceByClientItemId = this.evidenceForRouted(
+      routedHost,
+      chunks,
+      explicitEvidence,
+      agentId,
+    );
     let resolvedExtractor: IngestExtractorKind = 'host';
     let model: string | null = routedHost.length > 0 ? 'host-provided' : null;
     let degraded = false;
@@ -684,7 +757,9 @@ export class IngestService {
         }
 
         if (outcome.ok) {
-          const checked = validateCandidates(outcome.candidates);
+          const modelCandidates = minimizeValue(outcome.candidates);
+          const modelEvidence = this.explicitEvidence(modelCandidates, chunks);
+          const checked = validateCandidates(modelCandidates);
           appendWarnings(warnings, checked.warnings);
           if (outcome.candidates.length > 0 && checked.candidates.length === 0) {
             // 模型输出不可信：全部非法时回退 heuristic，绝不把原始形状写图。
@@ -701,6 +776,7 @@ export class IngestService {
               requestDomain,
               policy: this.policy,
             }));
+            evidenceByClientItemId = this.evidenceForRouted(routed, chunks, modelEvidence, agentId);
             for (const candidate of routed) appendWarnings(warnings, candidate.warnings);
             resolvedExtractor = selection.source;
             model = outcome.model ?? null;
@@ -723,27 +799,47 @@ export class IngestService {
     }
 
     if (!modelSucceeded && routed.length === 0) {
-      const heuristic = heuristicCandidates(chunks.map((chunk) => ({
-        role: chunk.role,
-        text: chunk.text,
-        at: chunk.at,
-        threadId,
-      })));
-      appendWarnings(warnings, heuristic.warnings);
-      const heuristicInputs: CandidateInput[] = heuristic.candidates.map((candidate) => ({
-        kind: candidate.kind,
-        content: candidate.content,
-        domainHint: null,
-        tags: candidate.tags ?? [],
-        relatedTo: [],
-        confirmation: candidate.confirmation,
-      }));
+      const heuristicInputs: CandidateInput[] = [];
+      const heuristicEvidence = new Map<string, CandidateEvidence>();
+      const heuristicKeys = new Set<string>();
+      for (const chunk of chunks) {
+        const heuristic = heuristicCandidates([{
+          role: chunk.role,
+          text: chunk.text,
+          at: chunk.at,
+          threadId,
+        }]);
+        for (const candidate of heuristic.candidates) {
+          const input: CandidateInput = {
+            kind: candidate.kind,
+            content: candidate.content,
+            domainHint: null,
+            tags: candidate.tags ?? [],
+            relatedTo: [],
+            confirmation: candidate.confirmation,
+          };
+          const key = candidateEvidenceKey(input);
+          if (!heuristicKeys.has(key)) {
+            heuristicKeys.add(key);
+            heuristicInputs.push(input);
+          }
+          const previous = heuristicEvidence.get(key) ?? { stagingChunkIds: [], messageIds: [] };
+          previous.stagingChunkIds = [...new Set([...previous.stagingChunkIds, chunk.id])];
+          previous.messageIds = [...new Set([
+            ...previous.messageIds,
+            ...(chunk.messageId ? [chunk.messageId] : []),
+          ])];
+          heuristicEvidence.set(key, previous);
+        }
+      }
       routed = heuristicInputs.map((candidate) => routeCandidate(candidate, {
         agentId,
         threadId: explicitThreadId,
         requestDomain,
         policy: this.policy,
       }));
+      evidenceByClientItemId = this.evidenceForRouted(routed, chunks, heuristicEvidence, agentId);
+      if (routed.length === 0) appendWarnings(warnings, ['no_extractable_memory']);
       for (const candidate of routed) appendWarnings(warnings, candidate.warnings);
       resolvedExtractor = 'heuristic';
       model = null;
@@ -758,6 +854,7 @@ export class IngestService {
       extractor: resolvedExtractor,
       model,
       source: resolvedExtractor === 'host' ? 'host' : 'runtime',
+      evidenceByClientItemId,
     };
 
     const outcome = await this.settle(routed, context);
@@ -768,12 +865,15 @@ export class IngestService {
       chunks,
       records: outcome.records,
       threadId,
-      stagingChunkIds,
       context,
       warnings,
     });
     if (outcome.records.length > 0 && detailOutcome.queued === 0
       && detailOutcome.failed === 0 && stagingChunkIds.length > 0) {
+      await this.clearStaging(stagingChunkIds, warnings);
+    } else if (outcome.records.length === 0 && !outcome.queued
+      && detailOutcome.queued === 0 && stagingChunkIds.length > 0) {
+      // 抽取已结束且没有可关联记录： staging 不再保留无用途正文。
       await this.clearStaging(stagingChunkIds, warnings);
     }
 
@@ -845,15 +945,28 @@ export class IngestService {
       if (!extraction) {
         throw new SidecarSettlementError('not_found', '抽取任务不存在或已过期', { status: 404 });
       }
-      if (extraction.status === 'completed' && extraction.records.length > 0) {
+      if ((extraction.status === 'completed' && extraction.records.length > 0)
+        || extraction.status === 'failed') {
         return {
           extraction: this.extractionView(extraction),
           queued: false,
-          degraded: this.degraded,
+          degraded: this.degraded || extraction.status === 'failed',
           warnings: [...extraction.warnings],
         };
       }
-      const checked = validateCandidates(candidates);
+      const staged = await this.stagedChunksFor(extraction.stagingChunkIds);
+      if (staged.length !== new Set(extraction.stagingChunkIds).size) {
+        const failed = await this.failExtraction(extraction, 'retention_expired');
+        return {
+          extraction: this.extractionView(failed),
+          queued: false,
+          degraded: true,
+          warnings: [...failed.warnings],
+        };
+      }
+      const safeCandidates = minimizeValue(candidates);
+      const explicitEvidence = this.explicitEvidence(safeCandidates, staged);
+      const checked = validateCandidates(safeCandidates);
       if (checked.candidates.length === 0) {
         throw new SidecarSettlementError('validation_failed', '候选记录全部非法', {
           status: 422,
@@ -869,6 +982,12 @@ export class IngestService {
       }));
       for (const candidate of routed) warnings.push(...candidate.warnings);
       this.models?.noteHostCandidates();
+      const evidenceByClientItemId = this.evidenceForRouted(
+        routed,
+        staged,
+        explicitEvidence,
+        extraction.agentId,
+      );
 
       const outcome = await this.settle(routed, {
         agentId: extraction.agentId,
@@ -879,15 +998,14 @@ export class IngestService {
         extractor: 'host',
         model: 'host-provided',
         source: 'host',
+        evidenceByClientItemId,
       });
       warnings.push(...outcome.warnings);
 
-      const staged = await this.stagedChunksFor(extraction.stagingChunkIds);
       const detailOutcome = await this.settleDetails({
         chunks: staged,
         records: outcome.records,
         threadId: extraction.threadId ?? this.deriveThreadId(extraction.agentId, staged),
-        stagingChunkIds: extraction.stagingChunkIds,
         context: {
           agentId: extraction.agentId,
           ...(extraction.agentName ? { agentName: extraction.agentName } : {}),
@@ -897,11 +1015,15 @@ export class IngestService {
           extractor: 'host',
           model: 'host-provided',
           source: 'host',
+          evidenceByClientItemId,
         },
         warnings,
       });
       if (outcome.records.length > 0 && detailOutcome.queued === 0
         && detailOutcome.failed === 0 && extraction.stagingChunkIds.length > 0) {
+        await this.clearStaging(extraction.stagingChunkIds, warnings);
+      } else if (outcome.records.length === 0 && !outcome.queued
+        && detailOutcome.queued === 0 && extraction.stagingChunkIds.length > 0) {
         await this.clearStaging(extraction.stagingChunkIds, warnings);
       }
       const queued = outcome.queued || detailOutcome.queued > 0;
@@ -974,13 +1096,20 @@ export class IngestService {
     const payload: Record<string, unknown> = isObject(data) ? data : {};
     const results = Array.isArray(payload.results) ? payload.results : [];
     const records: IngestRecordView[] = [];
-    for (const result of results) {
+    for (const [resultIndex, result] of results.entries()) {
       if (!isObject(result)) continue;
       const status = typeof result.status === 'string' ? result.status : 'failed';
       if (status !== 'created' && status !== 'duplicate') continue;
       if (typeof result.id !== 'string' || typeof result.domain !== 'string') continue;
+      const bodyItems = isObject(item.body) && Array.isArray(item.body.items) ? item.body.items : [];
+      const bodyItem = bodyItems[resultIndex];
       records.push({
         id: result.id,
+        ...(typeof result.clientItemId === 'string'
+          ? { clientItemId: result.clientItemId }
+          : isObject(bodyItem) && typeof bodyItem.clientItemId === 'string'
+            ? { clientItemId: bodyItem.clientItemId }
+            : {}),
         kind: typeof result.kind === 'string' ? result.kind : 'observation',
         domain: result.domain,
         status,
@@ -989,7 +1118,10 @@ export class IngestService {
     if (records.length === 0) return;
     const stagingChunkIds = item.meta?.stagingChunkIds ?? [];
     const chunks = await this.stagedChunksFor(stagingChunkIds);
-    if (chunks.length === 0) return;
+    if (chunks.length !== new Set(stagingChunkIds).size) {
+      await this.local.outbox.deadLetter(item.id, 'retention_expired');
+      return;
+    }
     const body: Record<string, unknown> = isObject(item.body) ? item.body : {};
     const actor: Record<string, unknown> = isObject(body.actor) ? body.actor : {};
     const items = Array.isArray(body.items) ? body.items.filter(isObject) : [];
@@ -998,11 +1130,16 @@ export class IngestService {
     const agentId = typeof actor.agentId === 'string' ? actor.agentId : 'runtime';
     const threadId = typeof provenance.threadId === 'string' ? provenance.threadId : null;
     const warnings: string[] = [];
+    const evidenceByClientItemId = new Map<string, CandidateEvidence>(
+      Object.entries(item.meta?.evidence ?? {}).map(([key, value]) => [key, {
+        stagingChunkIds: [...value.stagingChunkIds],
+        messageIds: [...value.messageIds],
+      }]),
+    );
     const detailOutcome = await this.settleDetails({
       chunks,
       records,
       threadId: threadId ?? this.deriveThreadId(agentId, chunks),
-      stagingChunkIds,
       context: {
         agentId,
         ...(typeof actor.displayName === 'string' ? { agentName: actor.displayName } : {}),
@@ -1013,6 +1150,7 @@ export class IngestService {
           || provenance.extractor === 'api' ? provenance.extractor : 'heuristic',
         model: typeof provenance.model === 'string' ? provenance.model : null,
         source: provenance.source === 'host' ? 'host' : 'runtime',
+        evidenceByClientItemId,
       },
       warnings,
     });
@@ -1222,6 +1360,98 @@ export class IngestService {
       .filter((value): value is string => typeof value === 'string' && value.length > 0))].slice(0, 64);
   }
 
+  private explicitEvidence(rawCandidates: unknown, chunks: RawChunk[]): Map<string, CandidateEvidence> {
+    const result = new Map<string, CandidateEvidence>();
+    if (!Array.isArray(rawCandidates)) return result;
+    const chunkIds = new Set(chunks.map((chunk) => chunk.id));
+    const messageIds = new Set(this.messageIdsOf(chunks));
+    for (const raw of rawCandidates) {
+      if (!isObject(raw)) continue;
+      let normalized: ReturnType<typeof normalizeCandidate>;
+      try {
+        normalized = normalizeCandidate(raw);
+      } catch {
+        continue;
+      }
+      const provenance = isObject(raw.provenance) ? raw.provenance : {};
+      const evidence = isObject(raw.evidence) ? raw.evidence : {};
+      const hasExplicit = raw.sourceChunkIds !== undefined || raw.sourceMessageIds !== undefined
+        || raw.stagingChunkIds !== undefined || raw.messageIds !== undefined
+        || provenance.sourceChunkIds !== undefined || provenance.sourceMessageIds !== undefined
+        || provenance.stagingChunkIds !== undefined || provenance.messageIds !== undefined
+        || Object.keys(evidence).length > 0;
+      if (!hasExplicit) continue;
+      const requestedChunks = stringEvidence(
+        raw.sourceChunkIds ?? raw.stagingChunkIds ?? evidence.stagingChunkIds ?? evidence.chunkIds
+          ?? provenance.sourceChunkIds ?? provenance.stagingChunkIds,
+      ).filter((id) => chunkIds.has(id));
+      const requestedMessages = stringEvidence(
+        raw.sourceMessageIds ?? raw.messageIds ?? evidence.messageIds
+          ?? provenance.sourceMessageIds ?? provenance.messageIds,
+      ).filter((id) => messageIds.has(id));
+      const key = candidateEvidenceKey(normalized);
+      const previous = result.get(key) ?? { stagingChunkIds: [], messageIds: [] };
+      result.set(key, {
+        stagingChunkIds: [...new Set([...previous.stagingChunkIds, ...requestedChunks])],
+        messageIds: [...new Set([...previous.messageIds, ...requestedMessages])],
+      });
+    }
+    return result;
+  }
+
+  private inferredEvidence(candidate: RoutedCandidate, chunks: RawChunk[]): CandidateEvidence {
+    if (chunks.length === 1) {
+      const chunk = chunks[0]!;
+      return {
+        stagingChunkIds: [chunk.id],
+        messageIds: chunk.messageId ? [chunk.messageId] : [],
+      };
+    }
+    const content = candidate.content;
+    const primary = candidate.kind === 'fact'
+      ? content.object
+      : candidate.kind === 'preference'
+        ? content.value
+        : candidate.kind === 'observation' || candidate.kind === 'episode'
+          ? content.content
+          : candidate.kind === 'entity' || candidate.kind === 'skill'
+            ? content.name
+            : undefined;
+    if (typeof primary !== 'string' || primary.trim().length < 2) {
+      return { stagingChunkIds: [], messageIds: [] };
+    }
+    const needle = primary.trim();
+    const supporting = chunks.filter((chunk) => chunk.text.includes(needle));
+    return {
+      stagingChunkIds: supporting.map((chunk) => chunk.id),
+      messageIds: this.messageIdsOf(supporting),
+    };
+  }
+
+  private evidenceForRouted(
+    routed: RoutedCandidate[],
+    chunks: RawChunk[],
+    explicit: Map<string, CandidateEvidence>,
+    agentId: string,
+  ): Map<string, CandidateEvidence> {
+    const result = new Map<string, CandidateEvidence>();
+    for (const candidate of routed) {
+      const explicitMatch = explicit.get(candidateEvidenceKey(candidate));
+      const inferred = explicitMatch ?? this.inferredEvidence(candidate, chunks);
+      const existing = result.get(clientItemIdFor(candidate, agentId));
+      if (!existing) {
+        result.set(clientItemIdFor(candidate, agentId), {
+          stagingChunkIds: [...inferred.stagingChunkIds],
+          messageIds: [...inferred.messageIds],
+        });
+      } else {
+        existing.stagingChunkIds = [...new Set([...existing.stagingChunkIds, ...inferred.stagingChunkIds])];
+        existing.messageIds = [...new Set([...existing.messageIds, ...inferred.messageIds])];
+      }
+    }
+    return result;
+  }
+
   private buildChunks(raw: unknown, context: { agentId: string }): RawChunk[] {
     if (raw === undefined || raw === null) return [];
     if (!Array.isArray(raw)) invalid('chunks 必须是数组', { field: 'chunks' });
@@ -1237,27 +1467,54 @@ export class IngestService {
       if (typeof input.text !== 'string' || input.text.trim().length === 0) {
         invalid(`chunks[${index}].text 必须是非空字符串`, { field: `chunks[${index}].text` });
       }
-      const text = input.text;
-      if (Buffer.byteLength(text, 'utf8') > this.config.limits.maxChunkBytes) {
+      const originalText = input.text;
+      if (Buffer.byteLength(originalText, 'utf8') > this.config.limits.maxChunkBytes) {
         throw new SidecarSettlementError('payload_too_large', `chunks[${index}] 超过 maxChunkBytes`, {
           status: 413,
           details: { maxChunkBytes: this.config.limits.maxChunkBytes },
         });
       }
       const role = enumValue(input.role, ROLES, `chunks[${index}].role`, 'user');
+      const requestedKind = enumValue(
+        input.detailKind,
+        DETAIL_KINDS,
+        `chunks[${index}].detailKind`,
+        role === 'tool' ? 'tool_output' : 'raw_chunk',
+      );
+      if (role === 'tool' && requestedKind === 'document_slice') {
+        invalid(`chunks[${index}] 不能同时是 tool role 与 document_slice`, {
+          field: `chunks[${index}].detailKind`,
+        });
+      }
+      const detailKind: RuntimeDetailKind = role === 'tool' ? 'tool_output' : requestedKind;
+      const retentionClass: DetailRetentionClass = detailKind === 'tool_output'
+        ? 'tool_output'
+        : detailKind === 'document_slice' ? 'document_slice' : 'conversation';
+      if (input.retentionClass !== undefined && input.retentionClass !== retentionClass) {
+        invalid(`chunks[${index}].retentionClass 必须由 role/detailKind 决定，且普通 ingest 不允许 pinned`, {
+          field: `chunks[${index}].retentionClass`,
+        });
+      }
       const mime = enumValue(input.mime, MIMES, `chunks[${index}].mime`, 'text/plain');
       const at = optionalPositiveNumber(input.at, `chunks[${index}].at`) ?? this.now();
-      const actualHash = sha256Hex(text);
-      const contentHash = this.contentHashOf(input.contentHash, actualHash, index);
-      const redaction = isObject(input.redaction) && typeof input.redaction.applied === 'boolean'
+      // 调用方 hash 仍校验其输入文本；之后只保留/发送脱敏文本及其新 hash。
+      this.contentHashOf(input.contentHash, sha256Hex(originalText), index);
+      const redacted = redactText(originalText);
+      const text = redacted.text;
+      const contentHash = sha256Hex(text);
+      const priorRedaction = isObject(input.redaction) && typeof input.redaction.applied === 'boolean'
         ? {
           applied: input.redaction.applied,
           rules: Array.isArray(input.redaction.rules)
             ? input.redaction.rules.filter((rule): rule is string => typeof rule === 'string')
             : [],
         }
-        : { applied: false, rules: [] };
-      const messageId = optionalText(input.messageId, `chunks[${index}].messageId`, 200);
+        : { applied: false, rules: [] as string[] };
+      const rules = [...priorRedaction.rules];
+      if (redacted.redacted && !rules.includes('builtin_secret')) rules.push('builtin_secret');
+      const redaction = { applied: priorRedaction.applied || redacted.redacted, rules };
+      const rawMessageId = optionalText(input.messageId, `chunks[${index}].messageId`, 200);
+      const messageId = rawMessageId === undefined ? undefined : redactText(rawMessageId).text;
       const turn = optionalNonNegativeInt(input.turn, `chunks[${index}].turn`);
       const chunkIndex = optionalNonNegativeInt(input.chunkIndex, `chunks[${index}].chunkIndex`);
       const id = typeof input.id === 'string' && RAW_CHUNK_ID_RE.test(input.id)
@@ -1280,6 +1537,8 @@ export class IngestService {
         agentId: context.agentId,
         hostId: this.identity.hostId ?? 'h_local',
         role,
+        detailKind,
+        retentionClass,
         text,
         mime,
         at,
@@ -1343,7 +1602,7 @@ export class IngestService {
         }
       }
       try {
-        const stored = await this.local.store.putStagingChunk(cloudId, chunk);
+        const stored = await this.local.putStagingChunk(cloudId, chunk);
         ids.push(stored.chunk.id);
         if (stored.duplicate) appendWarnings(warnings, ['duplicate_staging_chunk']);
       } catch (error) {
@@ -1387,14 +1646,12 @@ export class IngestService {
     chunks,
     records,
     threadId,
-    stagingChunkIds,
     context,
     warnings,
   }: {
     chunks: RawChunk[];
     records: IngestRecordView[];
     threadId: string;
-    stagingChunkIds: string[];
     context: CandidateContext;
     warnings: string[];
   }): Promise<DetailSettlementOutcome> {
@@ -1402,24 +1659,57 @@ export class IngestService {
     if (chunks.length === 0 || linked.length === 0) {
       return { ids: [], written: 0, duplicates: 0, queued: 0, failed: 0, warnings: [], queuedRequestIds: [] };
     }
-    const byDomain = new Map<string, string[]>();
+    const byDomain = new Map<string, Map<string, { chunk: RawChunk; recordIds: string[] }>>();
+    let unresolved = false;
     for (const record of linked) {
       const domain = record.domain || context.agentId;
-      const list = byDomain.get(domain) ?? [];
-      if (!list.includes(record.id)) list.push(record.id);
-      byDomain.set(domain, list);
+      const evidence = record.clientItemId
+        ? context.evidenceByClientItemId?.get(record.clientItemId)
+        : undefined;
+      const fallback = !evidence && chunks.length === 1
+        ? {
+          stagingChunkIds: [chunks[0]!.id],
+          messageIds: chunks[0]!.messageId ? [chunks[0]!.messageId] : [],
+        }
+        : evidence;
+      const chunkIds = new Set(fallback?.stagingChunkIds ?? []);
+      const messageIds = new Set(fallback?.messageIds ?? []);
+      const supporting = chunks.filter((chunk) => chunkIds.has(chunk.id)
+        || (chunk.messageId !== undefined && messageIds.has(chunk.messageId)));
+      if (supporting.length === 0) {
+        unresolved = true;
+        continue;
+      }
+      const domainChunks = byDomain.get(domain) ?? new Map<string, { chunk: RawChunk; recordIds: string[] }>();
+      for (const chunk of supporting) {
+        const entry = domainChunks.get(chunk.id) ?? { chunk, recordIds: [] };
+        if (!entry.recordIds.includes(record.id)) entry.recordIds.push(record.id);
+        domainChunks.set(chunk.id, entry);
+      }
+      byDomain.set(domain, domainChunks);
     }
+    if (unresolved) appendWarnings(warnings, ['detail_evidence_unresolved']);
 
     const items: CapabilityDetailWriteItem[] = [];
-    for (const [domain, recordIds] of byDomain) {
-      for (const chunk of chunks) {
+    const detailChunkIds = new Map<string, string>();
+    for (const [domain, domainChunks] of byDomain) {
+      for (const { chunk, recordIds } of domainChunks.values()) {
         const redacted = redactText(chunk.text);
         const rules = [...chunk.redaction.rules];
         if (redacted.redacted && !rules.includes('builtin_secret')) rules.push('builtin_secret');
+        const detailKind = chunk.detailKind ?? (chunk.role === 'tool' ? 'tool_output' : 'raw_chunk');
+        const retentionClass = chunk.retentionClass ?? (detailKind === 'tool_output'
+          ? 'tool_output'
+          : detailKind === 'document_slice' ? 'document_slice' : 'conversation');
+        const expiresAt = retentionClass === 'pinned'
+          ? 0
+          : this.now() + DETAIL_RETENTION_DAYS[retentionClass] * DAY_MS;
+        const clientItemId = detailClientItemId(domain, chunk);
+        detailChunkIds.set(clientItemId, chunk.id);
         items.push({
-          clientItemId: detailClientItemId(domain, chunk),
+          clientItemId,
           domain,
-          detailKind: 'raw_chunk',
+          detailKind,
           ...(threadId ? { threadId } : {}),
           recordIds: recordIds.slice(0, 32),
           role: chunk.role,
@@ -1430,8 +1720,8 @@ export class IngestService {
           ...(typeof chunk.turn === 'number' ? { turn: chunk.turn } : {}),
           contentHash: `sha256:${sha256Hex(redacted.text)}`,
           redaction: { applied: chunk.redaction.applied || redacted.redacted, rules },
-          retentionClass: 'conversation',
-          expiresAt: 0,
+          retentionClass,
+          expiresAt,
           provenance: {
             source: context.source,
             extractor: context.extractor,
@@ -1439,7 +1729,7 @@ export class IngestService {
             agentId: context.agentId,
             ...(context.agentName ? { agentName: context.agentName } : {}),
             ...(threadId ? { threadId } : {}),
-            messageIds: this.messageIdsOf(chunks),
+            messageIds: chunk.messageId ? [chunk.messageId] : [],
             confirmation: domain === 'user' ? 'explicit' : 'none',
             ...(this.identity.hostId ? { hostId: this.identity.hostId } : {}),
             ...(this.identity.userId ? { userId: this.identity.userId } : {}),
@@ -1465,9 +1755,12 @@ export class IngestService {
 
     for (let offset = 0; offset < items.length; offset += MAX_DETAIL_ITEMS_PER_WRITE) {
       const batch = items.slice(offset, offset + MAX_DETAIL_ITEMS_PER_WRITE);
+      const batchStagingIds = [...new Set(batch
+        .map((item) => detailChunkIds.get(item.clientItemId))
+        .filter((id): id is string => typeof id === 'string'))];
       const requestId = this.detailRequestId(batch);
       if (!this.client) {
-        await this.enqueueDetail(requestId, actor, batch, stagingChunkIds, outcome);
+        await this.enqueueDetail(requestId, actor, batch, batchStagingIds, outcome);
         continue;
       }
       try {
@@ -1475,6 +1768,13 @@ export class IngestService {
           { requestId, actor, items: batch },
           { idempotencyKey: requestId },
         );
+        const capabilityWarnings = response.warnings as unknown as unknown[];
+        for (const warning of capabilityWarnings) {
+          if (!isObject(warning) || warning.code !== 'detail_quota_evicted' || !Array.isArray(warning.ids)) continue;
+          for (const id of warning.ids) {
+            if (typeof id === 'string') await this.local.invalidateCachedDetail(id).catch(() => false);
+          }
+        }
         const data: Record<string, unknown> = isObject(response.data) ? response.data : {};
         const results = Array.isArray(data.results) ? data.results : [];
         const failedItems: CapabilityDetailWriteItem[] = [];
@@ -1500,13 +1800,16 @@ export class IngestService {
           }
         }
         if (failedItems.length > 0) {
-          await this.enqueueDetail(requestId, actor, failedItems, stagingChunkIds, outcome);
+          const failedStagingIds = [...new Set(failedItems
+            .map((item) => detailChunkIds.get(item.clientItemId))
+            .filter((id): id is string => typeof id === 'string'))];
+          await this.enqueueDetail(requestId, actor, failedItems, failedStagingIds, outcome);
         }
       } catch (error) {
         const code = error instanceof CapabilityClientError ? error.code : 'internal';
         appendWarnings(outcome.warnings, [`detail_write_failed:${code}`]);
         if (retryableCapabilityError(error) || code === 'detail_quota_exceeded') {
-          await this.enqueueDetail(requestId, actor, batch, stagingChunkIds, outcome);
+          await this.enqueueDetail(requestId, actor, batch, batchStagingIds, outcome);
         } else {
           outcome.failed += batch.length;
         }
@@ -1520,6 +1823,12 @@ export class IngestService {
     const clientItemId = typeof result.clientItemId === 'string' ? result.clientItemId : null;
     const item = clientItemId ? batch.find((entry) => entry.clientItemId === clientItemId) : undefined;
     if (!item) return;
+    const retentionClass = item.retentionClass ?? 'conversation';
+    const expiresAt = retentionClass === 'pinned'
+      ? 0
+      : typeof item.expiresAt === 'number' && item.expiresAt > 0
+        ? item.expiresAt
+        : this.now() + DETAIL_RETENTION_DAYS[retentionClass] * DAY_MS;
     await this.local.putCachedDetail(id, {
       detail: {
         id,
@@ -1527,9 +1836,17 @@ export class IngestService {
         kind: 'detail_record',
         detailKind: item.detailKind,
         domain: item.domain,
+        role: item.role ?? null,
         text: item.text,
         recordIds: item.recordIds,
-        expiresAt: 0,
+        threadId: item.threadId ?? null,
+        messageId: item.messageId ?? null,
+        chunkIndex: item.chunkIndex ?? 0,
+        turn: item.turn ?? null,
+        retentionClass,
+        contentHash: item.contentHash ?? `sha256:${sha256Hex(item.text)}`,
+        redacted: item.redaction?.applied === true,
+        expiresAt,
         availability: ['available'],
         provenance: item.provenance ?? {},
       },
@@ -1545,6 +1862,10 @@ export class IngestService {
   ): Promise<void> {
     const body = { requestId, actor, op: 'write', items };
     const id = `ob_${sha256Hex(`${requestId}\u0000detail`).slice(0, 40)}`;
+    const detailDeadlines = items
+      .map((item) => item.expiresAt)
+      .filter((value): value is number => typeof value === 'number' && value > 0);
+    const operationExpiresAt = detailDeadlines.length > 0 ? Math.min(...detailDeadlines) : undefined;
     try {
       await this.local.outbox.enqueue({
         id,
@@ -1553,6 +1874,7 @@ export class IngestService {
         method: 'POST',
         body,
         createdAt: this.now(),
+        ...(operationExpiresAt !== undefined ? { expiresAt: operationExpiresAt } : {}),
         meta: {
           kind: 'detail',
           ...(items[0]?.domain ? { domain: items[0].domain } : {}),
@@ -1564,10 +1886,15 @@ export class IngestService {
       appendWarnings(outcome.warnings, ['detail_queued', 'queued_outbox']);
       this.noteQueued({ code: 'detail_queued', message: '详情写入失败，已进入 outbox' });
     } catch (error) {
-      const code = error instanceof LocalLayerError ? error.code : 'internal';
-      appendWarnings(outcome.warnings, [`detail_outbox_failed:${code}`]);
-      outcome.failed += items.length;
-      this.noteSettlementError(error);
+      if (error instanceof LocalLayerError) {
+        this.noteSettlementError(error);
+        throw new SidecarSettlementError(
+          error.code === 'outbox_full' ? 'outbox_full' : 'storage_full',
+          safeErrorMessage(error),
+          { status: 503, retryable: true },
+        );
+      }
+      throw error;
     }
   }
 
@@ -1621,7 +1948,7 @@ export class IngestService {
       const results = Array.isArray(data.results) ? data.results : [];
       const records: IngestRecordView[] = [];
       const failedRetryable: CapabilityWriteItem[] = [];
-      for (const result of results) {
+      for (const [resultIndex, result] of results.entries()) {
         if (!isObject(result)) continue;
         const status = typeof result.status === 'string' ? result.status : 'failed';
         const kind = typeof result.kind === 'string' ? result.kind : 'observation';
@@ -1629,6 +1956,11 @@ export class IngestService {
         if (status === 'created' || status === 'duplicate') {
           records.push({
             ...(typeof result.id === 'string' ? { id: result.id } : { id: '' }),
+            ...(typeof result.clientItemId === 'string'
+              ? { clientItemId: result.clientItemId }
+              : items[resultIndex]?.clientItemId
+                ? { clientItemId: items[resultIndex].clientItemId }
+                : {}),
             ...(typeof result.type === 'string' ? { type: result.type } : {}),
             kind,
             domain,
@@ -1706,6 +2038,12 @@ export class IngestService {
     context: CandidateContext,
   ): Promise<void> {
     const id = `ob_${sha256Hex(requestId).slice(0, 40)}`;
+    const evidence = context.evidenceByClientItemId
+      ? Object.fromEntries([...context.evidenceByClientItemId.entries()].map(([key, value]) => [key, {
+        stagingChunkIds: [...value.stagingChunkIds],
+        messageIds: [...value.messageIds],
+      }]))
+      : undefined;
     await this.local.outbox.enqueue({
       id,
       requestId,
@@ -1716,6 +2054,7 @@ export class IngestService {
       meta: {
         kind: 'record',
         stagingChunkIds: [...context.stagingChunkIds],
+        ...(evidence ? { evidence } : {}),
         ...(context.threadId ? { domain: context.threadId } : {}),
       },
     });
@@ -1773,6 +2112,42 @@ export class IngestService {
 
   private extractionCacheKey(id: string): string {
     return `extraction:v1:${id}`;
+  }
+
+  private async failExtraction(extraction: StoredExtraction, code: string): Promise<StoredExtraction> {
+    const warnings = [...extraction.warnings];
+    appendWarnings(warnings, [code]);
+    const failed: StoredExtraction = {
+      ...extraction,
+      status: 'failed',
+      records: extraction.records.map((record) => ({ ...record })),
+      detailIds: [...extraction.detailIds],
+      warnings,
+      degraded: true,
+    };
+    const ttlMs = extraction.expiresAt - this.now();
+    if (ttlMs <= 0) {
+      await this.local.cache.delete(this.extractionCacheKey(extraction.id));
+    } else {
+      await this.local.cache.set(this.extractionCacheKey(extraction.id), failed, { ttlMs });
+    }
+    this.noteFailed({ code, message: '抽取依赖的 staging 已过期' });
+    return failed;
+  }
+
+  /** TTL/配额物理删除 staging 前后调用：pending 抽取必须有显式终态。 */
+  async expireStagingDependencies(ids: readonly string[]): Promise<void> {
+    if (ids.length === 0) return;
+    const expired = new Set(ids);
+    // 可能正运行在 ingest 的写盘链内；不能再 self-chain 造成死锁。
+    // JsonCache 自身串行化写入，completeExtraction 也会再次核对 staging 完整性。
+    const entries = await this.local.cache.list<StoredExtraction>('extraction:v1:');
+    for (const entry of entries) {
+      const extraction = entry.value;
+      if (!extraction || extraction.status !== 'pending') continue;
+      if (!extraction.stagingChunkIds.some((id) => expired.has(id))) continue;
+      await this.failExtraction(extraction, 'retention_expired');
+    }
   }
 
   private async saveExtraction(input: {

@@ -43,7 +43,7 @@ export const RUNTIME_METADATA_KEY = 'runtime';
 export const RUNTIME_MODEL_SOURCES = ['heuristic', 'local', 'host', 'api', 'auto'] as const;
 export type RuntimeModelSource = (typeof RUNTIME_MODEL_SOURCES)[number];
 
-export const RUNTIME_DETAIL_KINDS = ['raw_chunk', 'raw_quote', 'message', 'document_slice'] as const;
+export const RUNTIME_DETAIL_KINDS = ['raw_chunk', 'message', 'tool_output', 'document_slice'] as const;
 export type RuntimeDetailKind = (typeof RUNTIME_DETAIL_KINDS)[number];
 
 export const RUNTIME_DETAIL_AVAILABILITY = [
@@ -132,6 +132,10 @@ export interface RawChunk {
   agentId: string;
   hostId: string;
   role: 'user' | 'assistant' | 'system' | 'tool';
+  /** 缺省为普通 raw_chunk；tool role 由 ingest 规范化为 tool_output。 */
+  detailKind?: RuntimeDetailKind;
+  /** staging 中保留分类，确保离线重放不会把 tool/document 当 conversation。 */
+  retentionClass?: DetailRetentionClass;
   text: string; // 单块上限 256 KiB；超过由调用方切块
   mime: 'text/plain' | 'text/markdown' | 'application/json';
   at: number; // Unix ms

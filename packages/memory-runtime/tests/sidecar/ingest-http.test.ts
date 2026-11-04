@@ -21,9 +21,12 @@ interface Harness {
 
 const harnesses: Harness[] = [];
 
-async function setup(): Promise<Harness> {
+async function setup(options: { maxOutboxItems?: number } = {}): Promise<Harness> {
   const home = await mkdtemp(join(tmpdir(), 'mebular-memory-runtime-http-'));
-  const local = new SidecarLocalLayer({ root: join(home, 'memory-runtime') });
+  const local = new SidecarLocalLayer({
+    root: join(home, 'memory-runtime'),
+    ...(options.maxOutboxItems !== undefined ? { maxOutboxItems: options.maxOutboxItems } : {}),
+  });
   await local.init();
   const fake = await startFakeCapability();
   const client = new CapabilityClient({ baseUrl: fake.baseUrl, token: 'cap-token', retries: 0, retryDelayMs: 0 });
@@ -222,6 +225,25 @@ describe('sidecar ingest HTTP', () => {
     expect(secondBody.data.duplicate).toBe(true);
     expect(secondBody.data.records[0].id).toBe(firstBody.data.records[0].id);
     expect(fake.writeRequests).toHaveLength(1);
+  });
+
+  it('Detail outbox 满通过 HTTP 返回 503 outbox_full', async () => {
+    const { server, runtime, fake } = await setup({ maxOutboxItems: 1 });
+    await runtime.local.outbox.enqueue({
+      id: 'ob_http_existing_capacity',
+      requestId: 'req_http_existing_capacity',
+      endpoint: '/write',
+      body: { items: [] },
+    });
+    fake.setDetailFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const response = await fetch(`${server.url}/ingest`, {
+      method: 'POST',
+      headers: { ...auth(), 'content-type': 'application/json' },
+      body: JSON.stringify(ingestBody('idem_http_detail_full')),
+    });
+    expect(response.status).toBe(503);
+    expect((await response.json() as any).error.code).toBe('outbox_full');
+    expect((await runtime.local.outbox.stats()).items).toBe(1);
   });
 
   it('错误方法与错误请求体返回稳定错误码', async () => {

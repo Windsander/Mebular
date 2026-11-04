@@ -317,7 +317,7 @@ export function detailDeletedReason(node: Node | null | undefined): string | nul
 
 export function isDetailExpired(node: Node | null | undefined, now = Date.now()): boolean {
   const expiresAt = detailExpiresAt(node);
-  return expiresAt > 0 && expiresAt < now;
+  return expiresAt > 0 && expiresAt <= now;
 }
 
 export function detailBytes(node: Node | null | undefined): number {

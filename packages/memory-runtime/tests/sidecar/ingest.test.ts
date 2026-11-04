@@ -1,7 +1,7 @@
 // sidecar 沉降：ingest 幂等、staging、detail 写入/去重/跨域、outbox、无候选。
 
-import { describe, it, expect, afterEach } from '@jest/globals';
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { describe, it, expect, afterEach, jest } from '@jest/globals';
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CapabilityClient } from '../../src/sidecar/capability-client.js';
@@ -22,9 +22,17 @@ interface Harness {
 
 const harnesses: Harness[] = [];
 
-async function setup(policy = defaultSidecarPolicy()): Promise<Harness> {
+async function setup(
+  policy = defaultSidecarPolicy(),
+  options: { maxOutboxItems?: number; stagingBytes?: number; now?: () => number } = {},
+): Promise<Harness> {
   const home = await mkdtemp(join(tmpdir(), 'mebular-memory-runtime-ingest-'));
-  const local = new SidecarLocalLayer({ root: join(home, 'memory-runtime') });
+  const local = new SidecarLocalLayer({
+    root: join(home, 'memory-runtime'),
+    ...(options.maxOutboxItems !== undefined ? { maxOutboxItems: options.maxOutboxItems } : {}),
+    ...(options.stagingBytes !== undefined ? { stagingBytes: options.stagingBytes } : {}),
+    ...(options.now ? { now: options.now } : {}),
+  });
   await local.init();
   const fake = await startFakeCapability();
   const client = new CapabilityClient({
@@ -39,6 +47,7 @@ async function setup(policy = defaultSidecarPolicy()): Promise<Harness> {
     client,
     identity: { cloudId: 'cl_test', profileId: 'default', hostId: 'h_test' },
     policy,
+    ...(options.now ? { now: options.now } : {}),
   });
   await service.init();
   const harness = { home, local, fake, client, service };
@@ -140,7 +149,7 @@ describe('IngestService settlements', () => {
     expect(await local.store.countStagingChunks()).toBe(0);
   });
 
-  it('没有可链接记录时不写详情，staging 保留到 TTL', async () => {
+  it('没有可链接记录时不写详情，抽取结束后删除无用 staging', async () => {
     const { service, local, fake } = await setup();
     const result = await service.ingest({
       requestId: 'req_no_record',
@@ -154,7 +163,7 @@ describe('IngestService settlements', () => {
     expect(fake.writeRequests).toHaveLength(0);
     expect(fake.detailRequests).toHaveLength(0);
     expect(result.data.stagingChunkIds).toHaveLength(1);
-    expect(await local.store.countStagingChunks()).toBe(1);
+    expect(await local.store.countStagingChunks()).toBe(0);
   });
 
   it('宿主候选：user / agent:self / default / task 域与 provenance，详情按域各写一份', async () => {
@@ -429,6 +438,7 @@ describe('IngestService settlements', () => {
     const outboxItem = (await local.outbox.list())[0]!;
     expect(outboxItem.endpoint).toBe('/detail');
     expect(outboxItem.meta?.kind).toBe('detail');
+    expect(outboxItem.expiresAt).toBe((outboxItem.body as any).items[0].expiresAt);
     expect(await local.store.countStagingChunks()).toBe(1);
 
     fake.setDetailFailure(null);
@@ -471,7 +481,7 @@ describe('IngestService settlements', () => {
     expect(await local.store.countStagingChunks()).toBe(0);
   });
 
-  it('不可重试的记录错误不进 outbox，记录 failed/lastError 并保留 staging 到 TTL', async () => {
+  it('不可重试的记录错误不进 outbox，记录 failed/lastError 且清理无用 staging', async () => {
     const { service, fake, local } = await setup();
     fake.setFailure({ status: 422, code: 'validation_failed', retryable: false });
 
@@ -482,7 +492,7 @@ describe('IngestService settlements', () => {
     expect(result.data.extraction.status).toBe('failed');
     expect(result.data.records).toEqual([]);
     expect(await local.outbox.stats()).toMatchObject({ items: 0 });
-    expect(await local.store.countStagingChunks()).toBe(1);
+    expect(await local.store.countStagingChunks()).toBe(0);
     expect(service.stats()).toMatchObject({
       failed: 1,
       degraded: true,
@@ -591,5 +601,223 @@ describe('IngestService settlements', () => {
     expect(fake.writeRequests).toHaveLength(3);
     const sameItems = fake.writeRequests[2]!.body.items as any[];
     expect(sameItems[0].supersedes).toBeUndefined();
+  });
+
+  it('多域候选只关联实际支撑 chunk/message，不复制无关证据', async () => {
+    const { service, fake } = await setup();
+    const result = await service.ingest({
+      requestId: 'req_scoped_evidence',
+      agentId: 'opencode',
+      threadId: 'th_scoped_evidence',
+      extractor: 'host',
+      chunks: [
+        { role: 'user', text: '我喜欢深色主题', messageId: 'm_theme', chunkIndex: 0 },
+        { role: 'assistant', text: '项目使用 pnpm workspace', messageId: 'm_pnpm', chunkIndex: 1 },
+      ],
+      candidates: [
+        {
+          kind: 'preference',
+          content: { entity: 'user', preferenceType: 'theme', value: 'dark' },
+          sourceMessageIds: ['m_theme'],
+        },
+        {
+          kind: 'observation',
+          content: { content: '项目使用 pnpm workspace' },
+          sourceMessageIds: ['m_pnpm'],
+        },
+      ],
+    });
+
+    expect(result.status).toBe(200);
+    expect(fake.details).toHaveLength(2);
+    const userDetail = fake.details.find((detail) => detail.domain === 'user');
+    const agentDetail = fake.details.find((detail) => detail.domain === 'agent:opencode');
+    expect(userDetail).toMatchObject({ text: '我喜欢深色主题', messageId: 'm_theme' });
+    expect(agentDetail).toMatchObject({ text: '项目使用 pnpm workspace', messageId: 'm_pnpm' });
+    expect(userDetail?.recordIds).toEqual([
+      result.data.records.find((record) => record.domain === 'user')?.id,
+    ]);
+    expect(agentDetail?.recordIds).toEqual([
+      result.data.records.find((record) => record.domain === 'agent:opencode')?.id,
+    ]);
+    expect(JSON.stringify(userDetail)).not.toContain('pnpm workspace');
+    expect(JSON.stringify(agentDetail)).not.toContain('深色主题');
+    expect(fake.writeRequests[0]!.body.items.every((item: any) => item.provenance.detailIds === undefined)).toBe(true);
+  });
+
+  it('无法证明多 chunk 证据时只写记录，不伪造 Detail 关联', async () => {
+    const { service, fake } = await setup();
+    const result = await service.ingest({
+      requestId: 'req_unresolved_evidence',
+      agentId: 'opencode',
+      threadId: 'th_unresolved_evidence',
+      extractor: 'host',
+      chunks: [
+        { role: 'user', text: '第一段无关内容', messageId: 'm_unrelated_1' },
+        { role: 'assistant', text: '第二段无关内容', messageId: 'm_unrelated_2' },
+      ],
+      candidates: [{
+        kind: 'observation',
+        content: { content: '没有直接文本支撑的模型推断' },
+      }],
+    });
+
+    expect(result.data.records).toHaveLength(1);
+    expect(result.data.detailIds).toEqual([]);
+    expect(result.data.warnings).toContain('detail_evidence_unresolved');
+    expect(fake.details).toEqual([]);
+  });
+
+  it('tool/document/conversation 的 detailKind 与 retentionClass 不混用，普通 ingest 不允许 pinned', async () => {
+    const { service, fake } = await setup();
+    await service.ingest({
+      requestId: 'req_detail_retention_kinds',
+      agentId: 'opencode',
+      threadId: 'th_detail_retention_kinds',
+      extractor: 'host',
+      chunks: [
+        { role: 'tool', text: 'command output', messageId: 'm_tool' },
+        { role: 'user', text: '文档切片正文', detailKind: 'document_slice', messageId: 'm_doc' },
+        { role: 'user', text: '普通对话正文', messageId: 'm_conversation' },
+      ],
+      candidates: [
+        { kind: 'observation', content: { content: 'command output' }, sourceMessageIds: ['m_tool'] },
+        { kind: 'observation', content: { content: '文档切片正文' }, sourceMessageIds: ['m_doc'] },
+        { kind: 'observation', content: { content: '普通对话正文' }, sourceMessageIds: ['m_conversation'] },
+      ],
+    });
+
+    const byMessage = new Map(fake.details.map((detail) => [detail.messageId, detail]));
+    expect(byMessage.get('m_tool')).toMatchObject({ detailKind: 'tool_output', retentionClass: 'tool_output' });
+    expect(byMessage.get('m_doc')).toMatchObject({ detailKind: 'document_slice', retentionClass: 'document_slice' });
+    expect(byMessage.get('m_conversation')).toMatchObject({ detailKind: 'raw_chunk', retentionClass: 'conversation' });
+    expect(byMessage.get('m_tool')!.expiresAt!).toBeGreaterThan(0);
+    expect(byMessage.get('m_tool')!.expiresAt!).toBeLessThan(byMessage.get('m_conversation')!.expiresAt!);
+    expect(byMessage.get('m_conversation')!.expiresAt!).toBeLessThan(byMessage.get('m_doc')!.expiresAt!);
+
+    await expect(service.ingest({
+      requestId: 'req_pinned_ingest_forbidden',
+      agentId: 'opencode',
+      chunks: [{ role: 'user', text: '普通输入不能 pin', retentionClass: 'pinned' }],
+      candidates: [{ kind: 'observation', content: { content: '普通输入不能 pin' } }],
+    })).rejects.toMatchObject({ code: 'invalid_request', status: 400 });
+  });
+
+  it('pending 抽取的 staging 过期时，空闲维护显式 failed 且物理删除证据', async () => {
+    let clock = Date.UTC(2026, 0, 1);
+    let callback: (() => void) | null = null;
+    const { service, local, home } = await setup(defaultSidecarPolicy(), { now: () => clock });
+    const pending = await service.ingest({
+      requestId: 'req_pending_staging_expiry',
+      agentId: 'opencode',
+      threadId: 'th_pending_staging_expiry',
+      extractor: 'host',
+      chunks: [{
+        role: 'user',
+        text: '等待宿主候选',
+        messageId: 'm_pending_staging_expiry',
+        expiresAt: clock + 1_000,
+      }],
+    });
+    expect(pending.data.extraction.status).toBe('pending');
+    local.startMaintenance({
+      intervalMs: 1_000,
+      setIntervalFn: ((fn: () => void) => {
+        callback = fn;
+        return { unref: jest.fn() };
+      }) as unknown as typeof setInterval,
+      clearIntervalFn: jest.fn() as unknown as typeof clearInterval,
+      beforeStagingCleanup: (ids) => service.expireStagingDependencies(ids),
+    });
+
+    clock += 1_001;
+    callback!();
+    await local.idleMaintenance();
+    const extraction = await service.getExtraction(pending.data.extraction.id);
+    expect(extraction).toMatchObject({ status: 'failed', degraded: true });
+    expect(extraction?.warnings).toContain('retention_expired');
+    expect(await local.store.countStagingChunks()).toBe(0);
+    expect(await readFile(join(home, 'memory-runtime', 'staging', 'chunks.jsonl'), 'utf8')).toBe('');
+    const completed = await service.completeExtraction(pending.data.extraction.id, [{
+      kind: 'observation',
+      content: { content: '迟到的候选不能伪造完整沉降' },
+    }]);
+    expect(completed.extraction.status).toBe('failed');
+    expect(completed.queued).toBe(false);
+    await expect(local.outbox.stats()).resolves.toMatchObject({ items: 0 });
+    local.stopMaintenance();
+  });
+
+  it('capability 配额淘汰后立即失效对应 Detail cache', async () => {
+    const { service, client, local } = await setup();
+    await local.putCachedDetail('detail-evicted-by-quota', {
+      detail: { text: 'old cached detail', expiresAt: 0, availability: ['available'] },
+    });
+    jest.spyOn(client, 'detailWrite').mockResolvedValue({
+      ok: true,
+      requestId: 'req_quota_cache_invalidation',
+      capabilityVersion: 1,
+      status: 200,
+      degraded: false,
+      warnings: [{ code: 'detail_quota_evicted', ids: ['detail-evicted-by-quota'] }] as unknown as string[],
+      data: {
+        results: [{
+          clientItemId: 'det_quota_cache_invalidation',
+          status: 'created',
+          id: 'detail-new-after-quota',
+          domain: 'user',
+          detailKind: 'raw_chunk',
+        }],
+        created: 1,
+        duplicates: 0,
+        failed: 0,
+        partial: false,
+      },
+    });
+
+    await service.ingest({ requestId: 'req_quota_cache_invalidation', ...preferenceRequest() });
+    expect(await local.getCachedDetail('detail-evicted-by-quota')).toBeNull();
+  });
+
+  it('staging 配额淘汰也立即使依赖抽取 failed', async () => {
+    const { service, local } = await setup(defaultSidecarPolicy(), { stagingBytes: 4 });
+    const pending = await service.ingest({
+      requestId: 'req_quota_pending_a',
+      agentId: 'opencode',
+      threadId: 'th_quota_pending_a',
+      extractor: 'host',
+      chunks: [{ role: 'user', text: '1111', messageId: 'm_quota_a' }],
+    });
+    expect(pending.data.extraction.status).toBe('pending');
+
+    await service.ingest({
+      requestId: 'req_quota_pending_b',
+      agentId: 'opencode',
+      threadId: 'th_quota_pending_b',
+      extractor: 'host',
+      chunks: [{ role: 'user', text: '2222', messageId: 'm_quota_b' }],
+    });
+    const extraction = await service.getExtraction(pending.data.extraction.id);
+    expect(extraction).toMatchObject({ status: 'failed', degraded: true });
+    expect(extraction?.warnings).toContain('retention_expired');
+    expect((await local.store.listStagingChunks()).map((chunk) => chunk.id)).not.toContain(
+      pending.data.stagingChunkIds[0],
+    );
+  });
+
+  it('Detail outbox 满时显式 503，不把失败吞成已完成', async () => {
+    const { service, fake, local } = await setup(defaultSidecarPolicy(), { maxOutboxItems: 1 });
+    await local.outbox.enqueue({
+      id: 'ob_existing_capacity',
+      requestId: 'req_existing_capacity',
+      endpoint: '/write',
+      body: { items: [] },
+    });
+    fake.setDetailFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+
+    await expect(service.ingest({ requestId: 'req_detail_full', ...preferenceRequest() }))
+      .rejects.toMatchObject({ code: 'outbox_full', status: 503 });
+    expect(fake.writeRequests).toHaveLength(1);
+    expect((await local.outbox.stats()).items).toBe(1);
   });
 });

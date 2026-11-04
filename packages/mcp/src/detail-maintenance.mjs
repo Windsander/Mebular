@@ -16,6 +16,14 @@ function errorCode(error) {
   return typeof error?.code === 'string' && error.code.length > 0 ? error.code : 'ERROR';
 }
 
+function safeErrorMessage(error) {
+  return String(error?.message ?? error ?? 'detail maintenance failed')
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/-]{8,}=*/gi, 'Bearer [redacted]')
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, '[redacted]')
+    .replace(/\b(api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|passwd|authorization)\b(\s*[:=]\s*)(["']?)[^\s"',;]{4,}\3/gi, '$1$2$3[redacted]$3')
+    .slice(0, 512);
+}
+
 /**
  * @param {{
  *   getService: () => ({ pruneExpiredDetails?: (options?: { now?: number }) => Promise<string[]> } | null),
@@ -77,6 +85,9 @@ export function createDetailMaintenance({
         lastResult = {
           reason,
           pruned: Array.isArray(pruned) ? pruned.length : 0,
+          // 现有 MemoryService 维护结果不含正文统计；明确未知，不伪造零值。
+          bytes: null,
+          oldestAgeMs: null,
           at,
         };
         lastError = null;
@@ -85,7 +96,7 @@ export function createDetailMaintenance({
         lastError = {
           reason,
           code: errorCode(error),
-          message: String(error?.message ?? error),
+          message: safeErrorMessage(error),
           at,
         };
         logger?.error?.(`DETAIL_MAINTENANCE_FAILED ${lastError.code} ${lastError.message}`);

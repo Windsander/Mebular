@@ -75,6 +75,10 @@ export interface RuntimeLocalCleanupResult {
 export interface RuntimeLocalStoreStats {
   stagingChunks: number;
   traces: number;
+  stagingBytes: number;
+  traceBytes: number;
+  stagingOldestAt: number | null;
+  traceOldestAt: number | null;
   stagingPath: string;
   tracesPath: string;
 }
@@ -150,14 +154,19 @@ export class RuntimeLocalStore {
     this.now = options.now ?? Date.now;
   }
 
-  /** 启动时调用：加载本地对象并执行一次过期清理。 */
-  async init(): Promise<void> {
+  /** 仅加载本地对象；调用方需要在清理前核对依赖时使用。 */
+  async load(): Promise<void> {
     await ensureDir(this.root);
     await this.exclusive(async () => {
       await this.ensureStagingLoaded();
       await this.ensureTracesLoaded();
-      await this.prune(this.now());
     });
+  }
+
+  /** 启动时调用：加载本地对象并执行一次过期清理。 */
+  async init(): Promise<void> {
+    await this.load();
+    await this.cleanup();
   }
 
   /** 显式清理（sidecar 启动时 + 每日一次）。 */
@@ -180,9 +189,20 @@ export class RuntimeLocalStore {
       await this.ensureStagingLoaded();
       await this.ensureTracesLoaded();
       const now = this.now();
+      const staging = this.staging.filter((entry) => this.stagingAlive(entry.chunk, now));
+      const traces = this.traces.filter((trace) => this.traceAlive(trace, now));
+      const oldest = <T>(values: T[], at: (value: T) => number): number | null =>
+        values.reduce<number | null>((min, value) => {
+          const current = at(value);
+          return min === null || current < min ? current : min;
+        }, null);
       return {
-        stagingChunks: this.staging.filter((entry) => this.stagingAlive(entry.chunk, now)).length,
-        traces: this.traces.filter((trace) => this.traceAlive(trace, now)).length,
+        stagingChunks: staging.length,
+        traces: traces.length,
+        stagingBytes: staging.reduce((sum, entry) => sum + Buffer.byteLength(JSON.stringify(entry), 'utf8'), 0),
+        traceBytes: traces.reduce((sum, trace) => sum + Buffer.byteLength(JSON.stringify(trace), 'utf8'), 0),
+        stagingOldestAt: oldest(staging, (entry) => entry.chunk.at),
+        traceOldestAt: oldest(traces, (trace) => trace.at),
         stagingPath: this.stagingPath,
         tracesPath: this.tracesPath,
       };

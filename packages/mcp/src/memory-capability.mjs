@@ -98,6 +98,7 @@ const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 const IDEMPOTENCY_MAX_ENTRIES = 5000;
 const IDEMPOTENCY_LEDGER_VERSION = 1;
 const IDEMPOTENCY_LEDGER_FILE = 'capability-idempotency.json';
+const IDEMPOTENCY_MAINTENANCE_INTERVAL_MS = 60_000;
 const MAX_SYNC_WAIT_MS = 30_000;
 
 const AGENT_ID_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
@@ -1823,6 +1824,9 @@ function versionPayload() {
  *   env?: NodeJS.ProcessEnv,
  *   now?: () => number,
  *   ttlMs?: number,
+ *   idempotencyMaintenanceIntervalMs?: number,
+ *   setIntervalFn?: typeof setInterval,
+ *   clearIntervalFn?: typeof clearInterval,
  * }} options
  */
 export function createMemoryCapabilityHandler({
@@ -1834,11 +1838,24 @@ export function createMemoryCapabilityHandler({
   env = process.env,
   now = () => Date.now(),
   ttlMs,
+  idempotencyMaintenanceIntervalMs = IDEMPOTENCY_MAINTENANCE_INTERVAL_MS,
+  setIntervalFn = setInterval,
+  clearIntervalFn = clearInterval,
 } = {}) {
   let tokenRecord = null;
   let tokenPromise = null;
   let tokenError = null;
   let disposed = false;
+  let idempotencyTimer = null;
+  let idempotencyMaintenanceRun = null;
+  let idempotencyMaintenanceStatus = {
+    running: false,
+    intervalMs: Math.max(10, Math.floor(idempotencyMaintenanceIntervalMs)),
+    lastAttemptAt: null,
+    lastSuccessAt: null,
+    lastError: null,
+    lastResult: null,
+  };
   const hostId = hostIdForHome(home);
 
   async function ensureToken() {
@@ -1874,6 +1891,7 @@ export function createMemoryCapabilityHandler({
   /** daemon 启动时调用（仅 enabled）：提前生成 token 文件，sidecar 才能发现。 */
   async function prepare() {
     if (!isMemoryRuntimeEnabled(getConfig())) return { enabled: false, tokenId: null };
+    startIdempotencyMaintenance();
     try {
       const record = await ensureToken();
       return { enabled: true, tokenId: record.tokenId };
@@ -1891,6 +1909,8 @@ export function createMemoryCapabilityHandler({
 
   async function dispose() {
     disposed = true;
+    stopIdempotencyMaintenance();
+    await idempotencyMaintenanceRun?.catch(() => undefined);
     await revoke();
   }
 
@@ -1910,6 +1930,173 @@ export function createMemoryCapabilityHandler({
       hostId,
     };
   }
+
+    // ---------- 写路径：幂等账本（24h，本地过渡数据，不进入图/同步） ----------
+
+    const ledgerDir = typeof home === 'string' && home.length > 0 ? join(home, 'memory-runtime') : null;
+    const ledgerFile = ledgerDir ? join(ledgerDir, IDEMPOTENCY_LEDGER_FILE) : null;
+    let ledger = null;
+    let ledgerLoading = null;
+    let ledgerLastPersisted = null;
+    let ledgerWriteTail = Promise.resolve();
+
+    function sanitizeLedgerValue(value, key = '') {
+      if (typeof value === 'string') {
+        if (/^(?:authorization|api[-_]?key|access[-_]?token|refresh[-_]?token|token|secret|password|passwd|credential|private[-_]?key)$/i.test(key)) {
+          return '[redacted]';
+        }
+        return value
+          .replace(/\bBearer\s+[A-Za-z0-9._~+/-]{8,}=*/gi, 'Bearer [redacted]')
+          .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, '[redacted]')
+          .replace(/\b(api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|passwd|authorization)\b(\s*[:=]\s*)(["']?)[^\s"',;]{4,}\3/gi, '$1$2$3[redacted]$3');
+      }
+      if (value === null || typeof value !== 'object') return value;
+      if (Array.isArray(value)) return value.map((entry) => sanitizeLedgerValue(entry));
+      const out = {};
+      for (const [entryKey, entryValue] of Object.entries(value)) {
+        if (entryValue !== undefined) out[entryKey] = sanitizeLedgerValue(entryValue, entryKey);
+      }
+      return out;
+    }
+
+    function sanitizeLedgerEntry(entry) {
+      return {
+        key: entry.key,
+        requestHash: entry.requestHash,
+        at: entry.at,
+        data: sanitizeLedgerValue(entry.data),
+        warnings: sanitizeLedgerValue(entry.warnings ?? []),
+        degraded: entry.degraded === true,
+      };
+    }
+
+    async function ledgerState() {
+      if (ledger) return ledger;
+      if (!ledgerFile) {
+        ledger = new Map();
+        return ledger;
+      }
+      if (!ledgerLoading) {
+        ledgerLoading = (async () => {
+          const state = new Map();
+          try {
+            const raw = JSON.parse(await readFile(ledgerFile, 'utf-8'));
+            if (raw?.version === IDEMPOTENCY_LEDGER_VERSION && Array.isArray(raw.entries)) {
+              ledgerLastPersisted = JSON.stringify({ version: raw.version, entries: raw.entries });
+              const cutoff = now() - IDEMPOTENCY_TTL_MS;
+              for (const entry of raw.entries) {
+                if (!isObject(entry) || typeof entry.key !== 'string' || !isObject(entry.data)) continue;
+                if (typeof entry.at !== 'number' || entry.at <= cutoff) continue;
+                state.set(entry.key, sanitizeLedgerEntry(entry));
+              }
+            }
+          } catch {
+            // 账本损坏/不存在：按空处理；clientItemId 与内容 hash 仍可防重。
+          }
+          ledger = state;
+          return state;
+        })().finally(() => {
+          ledgerLoading = null;
+        });
+      }
+      return ledgerLoading;
+    }
+
+    async function saveLedgerUnlocked(state) {
+      if (!ledgerFile || !ledgerDir) return 0;
+      const cutoff = now() - IDEMPOTENCY_TTL_MS;
+      for (const [key, entry] of state) {
+        if (typeof entry.at !== 'number' || entry.at <= cutoff) state.delete(key);
+      }
+      while (state.size > IDEMPOTENCY_MAX_ENTRIES) {
+        const oldest = state.keys().next().value;
+        if (oldest === undefined) break;
+        state.delete(oldest);
+      }
+      const payload = {
+        version: IDEMPOTENCY_LEDGER_VERSION,
+        entries: [...state.values()].map(sanitizeLedgerEntry),
+      };
+      // 空账本且从未存在文件时不创建目录/文件（env-only token 与轻量启动保持零副作用）。
+      if (state.size === 0 && ledgerLastPersisted === null) return 0;
+      const serialized = JSON.stringify(payload);
+      if (serialized === ledgerLastPersisted) return Buffer.byteLength(serialized, 'utf8');
+      await mkdir(ledgerDir, { recursive: true, mode: 0o700 });
+      await chmod(ledgerDir, 0o700);
+      const tmp = `${ledgerFile}.tmp-${process.pid}-${randomUUID()}`;
+      try {
+        await writeFile(tmp, serialized, { encoding: 'utf-8', mode: 0o600 });
+        await chmod(tmp, 0o600);
+        await rename(tmp, ledgerFile);
+        await chmod(ledgerFile, 0o600);
+        ledgerLastPersisted = serialized;
+        return Buffer.byteLength(serialized, 'utf8');
+      } catch (error) {
+        await rm(tmp, { force: true }).catch(() => undefined);
+        throw error;
+      }
+    }
+
+    function saveLedger(state) {
+      const run = ledgerWriteTail.then(
+        () => saveLedgerUnlocked(state),
+        () => saveLedgerUnlocked(state),
+      );
+      ledgerWriteTail = run.then(() => undefined, () => undefined);
+      return run;
+    }
+
+    function runIdempotencyMaintenance() {
+      if (idempotencyMaintenanceRun) return idempotencyMaintenanceRun;
+      const at = now();
+      idempotencyMaintenanceStatus.lastAttemptAt = at;
+      idempotencyMaintenanceRun = (async () => {
+        try {
+          const state = await ledgerState();
+          const before = state.size;
+          const bytes = await saveLedger(state);
+          const oldestAt = state.size > 0 ? Math.min(...[...state.values()].map((entry) => entry.at)) : null;
+          idempotencyMaintenanceStatus.lastSuccessAt = at;
+          idempotencyMaintenanceStatus.lastError = null;
+          idempotencyMaintenanceStatus.lastResult = {
+            removed: Math.max(0, before - state.size),
+            count: state.size,
+            bytes,
+            oldestAgeMs: oldestAt === null ? null : Math.max(0, at - oldestAt),
+            at,
+          };
+          return idempotencyMaintenanceStatus.lastResult;
+        } catch (error) {
+          const code = typeof error?.code === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(error.code)
+            ? error.code
+            : 'idempotency_maintenance_failed';
+          idempotencyMaintenanceStatus.lastError = { code, at };
+          return idempotencyMaintenanceStatus.lastError;
+        } finally {
+          idempotencyMaintenanceRun = null;
+        }
+      })();
+      return idempotencyMaintenanceRun;
+    }
+
+    function startIdempotencyMaintenance() {
+      if (idempotencyTimer || disposed) return;
+      idempotencyTimer = setIntervalFn(() => {
+        void runIdempotencyMaintenance();
+      }, idempotencyMaintenanceStatus.intervalMs);
+      idempotencyTimer?.unref?.();
+      idempotencyMaintenanceStatus.running = true;
+      void runIdempotencyMaintenance();
+    }
+
+    function stopIdempotencyMaintenance() {
+      if (idempotencyTimer) {
+        clearIntervalFn(idempotencyTimer);
+        idempotencyTimer = null;
+      }
+      idempotencyMaintenanceStatus.running = false;
+    }
+
 
   const handle = async function handleMemoryCapabilityRequest({ req, res, url, body }) {
     const path = url?.pathname ?? '';
@@ -2026,71 +2213,6 @@ export function createMemoryCapabilityHandler({
       return parsed;
     };
 
-    // ---------- 写路径：幂等账本（24h，本地过渡数据，不进入图/同步） ----------
-
-    const ledgerDir = typeof home === 'string' && home.length > 0 ? join(home, 'memory-runtime') : null;
-    const ledgerFile = ledgerDir ? join(ledgerDir, IDEMPOTENCY_LEDGER_FILE) : null;
-    let ledger = null;
-    let ledgerLoading = null;
-
-    async function ledgerState() {
-      if (ledger) return ledger;
-      if (!ledgerFile) {
-        ledger = new Map();
-        return ledger;
-      }
-      if (!ledgerLoading) {
-        ledgerLoading = (async () => {
-          const state = new Map();
-          try {
-            const raw = JSON.parse(await readFile(ledgerFile, 'utf-8'));
-            if (raw?.version === IDEMPOTENCY_LEDGER_VERSION && Array.isArray(raw.entries)) {
-              const cutoff = now() - IDEMPOTENCY_TTL_MS;
-              for (const entry of raw.entries) {
-                if (!isObject(entry) || typeof entry.key !== 'string' || !isObject(entry.data)) continue;
-                if (typeof entry.at !== 'number' || entry.at < cutoff) continue;
-                state.set(entry.key, entry);
-              }
-            }
-          } catch {
-            // 账本损坏/不存在：按空处理；clientItemId 与内容 hash 仍可防重。
-          }
-          ledger = state;
-          return state;
-        })().finally(() => {
-          ledgerLoading = null;
-        });
-      }
-      return ledgerLoading;
-    }
-
-    async function saveLedger(state) {
-      if (!ledgerFile || !ledgerDir) return;
-      const cutoff = now() - IDEMPOTENCY_TTL_MS;
-      const entries = [...state.values()].filter((entry) => entry.at >= cutoff);
-      while (entries.length > IDEMPOTENCY_MAX_ENTRIES) {
-        const oldest = entries.shift();
-        if (oldest) state.delete(oldest.key);
-      }
-      // 重新过滤：淘汰后 entries 与 state 保持一致。
-      const payload = {
-        version: IDEMPOTENCY_LEDGER_VERSION,
-        entries: entries.filter((entry) => state.has(entry.key)),
-      };
-      await mkdir(ledgerDir, { recursive: true, mode: 0o700 });
-      await chmod(ledgerDir, 0o700);
-      const tmp = `${ledgerFile}.tmp-${process.pid}-${randomUUID()}`;
-      try {
-        await writeFile(tmp, JSON.stringify(payload), { encoding: 'utf-8', mode: 0o600 });
-        await chmod(tmp, 0o600);
-        await rename(tmp, ledgerFile);
-        await chmod(ledgerFile, 0o600);
-      } catch (error) {
-        await rm(tmp, { force: true }).catch(() => undefined);
-        throw error;
-      }
-    }
-
     function idempotencyKeyOf(req, payload) {
       const header = req?.headers?.['idempotency-key'];
       if (hasValue(header) && header !== '') {
@@ -2114,7 +2236,11 @@ export function createMemoryCapabilityHandler({
       const state = await ledgerState();
       const composite = `${tokenId ?? 'none'}\u0000${route}\u0000${key}`;
       const requestHash = sha256Hex(canonicalJson(payload));
-      const existing = state.get(composite);
+      let existing = state.get(composite);
+      if (existing && (typeof existing.at !== 'number' || existing.at <= now() - IDEMPOTENCY_TTL_MS)) {
+        state.delete(composite);
+        existing = null;
+      }
       if (existing) {
         if (existing.requestHash !== requestHash) {
           throw new CapabilityError(409, 'idempotency_conflict', '同一幂等键对应了不同请求体', {
@@ -2144,10 +2270,10 @@ export function createMemoryCapabilityHandler({
       };
       // LRU：同键刷新到队尾。
       state.delete(composite);
-      state.set(composite, entry);
+      state.set(composite, sanitizeLedgerEntry(entry));
       const cutoff = now() - IDEMPOTENCY_TTL_MS;
       for (const [entryKey, value] of state) {
-        if (typeof value.at !== 'number' || value.at < cutoff) state.delete(entryKey);
+        if (typeof value.at !== 'number' || value.at <= cutoff) state.delete(entryKey);
       }
       while (state.size > IDEMPOTENCY_MAX_ENTRIES) {
         const oldest = state.keys().next().value;
@@ -3636,7 +3762,22 @@ export function createMemoryCapabilityHandler({
       if (hasValue(raw.retentionClass) && !isDetailRetentionClass(raw.retentionClass)) {
         throw validationError(index, 'retentionClass', 'retentionClass 非法');
       }
-      const retentionClass = hasValue(raw.retentionClass) ? raw.retentionClass : 'conversation';
+      if (raw.role === 'tool' && raw.detailKind === 'document_slice') {
+        throw validationError(index, 'detailKind', 'tool role 不能使用 document_slice');
+      }
+      const expectedRetentionClass = raw.role === 'tool' || raw.detailKind === 'tool_output'
+        ? 'tool_output'
+        : raw.detailKind === 'document_slice' ? 'document_slice' : 'conversation';
+      if (raw.retentionClass === 'pinned' && actor.type !== 'user' && actor.type !== 'system') {
+        throw validationError(index, 'retentionClass', 'pinned 仅允许 user/system 显式治理');
+      }
+      if (hasValue(raw.retentionClass) && raw.retentionClass !== 'pinned'
+        && raw.retentionClass !== expectedRetentionClass) {
+        throw validationError(index, 'retentionClass', 'retentionClass 与 role/detailKind 不一致', {
+          expected: expectedRetentionClass,
+        });
+      }
+      const retentionClass = hasValue(raw.retentionClass) ? raw.retentionClass : expectedRetentionClass;
       if (hasValue(raw.expiresAt)
         && (typeof raw.expiresAt !== 'number' || !Number.isFinite(raw.expiresAt) || raw.expiresAt < 0)) {
         throw validationError(index, 'expiresAt', 'expiresAt 必须是非负数字');
@@ -4203,6 +4344,14 @@ export function createMemoryCapabilityHandler({
           counts: includeCounts ? stats.counts : null,
           detailQuota: detailLimitsForConfig(),
           detailRetentionDays: { ...DETAIL_RETENTION_DAYS, pinned: 0 },
+          idempotency: {
+            running: idempotencyMaintenanceStatus.running,
+            intervalMs: idempotencyMaintenanceStatus.intervalMs,
+            lastAttemptAt: idempotencyMaintenanceStatus.lastAttemptAt,
+            lastSuccessAt: idempotencyMaintenanceStatus.lastSuccessAt,
+            lastError: idempotencyMaintenanceStatus.lastError,
+            lastResult: idempotencyMaintenanceStatus.lastResult,
+          },
           domains: includeCounts
             ? stats.domains.map((entry) => ({
               domain: entry.domain,
@@ -4730,5 +4879,16 @@ export function createMemoryCapabilityHandler({
     dispose,
     isEnabled: () => isMemoryRuntimeEnabled(getConfig()),
     tokenId: () => tokenRecord?.tokenId ?? null,
+    runIdempotencyMaintenance,
+    idempotencyIdle: () => idempotencyMaintenanceRun ?? Promise.resolve(null),
+    idempotencyMaintenance: () => ({
+      ...idempotencyMaintenanceStatus,
+      lastError: idempotencyMaintenanceStatus.lastError
+        ? { ...idempotencyMaintenanceStatus.lastError }
+        : null,
+      lastResult: idempotencyMaintenanceStatus.lastResult
+        ? { ...idempotencyMaintenanceStatus.lastResult }
+        : null,
+    }),
   });
 }

@@ -1627,7 +1627,11 @@ class SpoolContractTests(BaseCase):
             ))
         self.assertEqual(len(server.ingests), 1)
         self.assertIn("behind", server.ingests[0]["chunks"][0]["text"])
-        self.assertEqual(provider._spool.orphan_dead_pending_count(), 1)
+        self.assertEqual(
+            provider._spool.orphan_dead_pending_count()
+            + provider._spool.quarantine_count(),
+            1,
+        )
 
     def test_orphan_survives_restart(self) -> None:
         spool = memory_plugin._Spool(self.spool_path, 100)
@@ -1648,6 +1652,37 @@ class SpoolContractTests(BaseCase):
             reopened.orphan_dead_pending_items()[0]["payload"]["requestId"],
             "orphan-restart",
         )
+
+    def test_orphan_write_failure_quarantines_and_restarts(self) -> None:
+        spool = memory_plugin._Spool(self.spool_path, 100)
+        item_id = spool.append("ingest", {
+            "requestId": "quarantine-restart",
+            "chunks": [{"role": "user", "text": "quarantine"}],
+        })
+        with spool._lock:
+            spool._items[0]["deadPending"] = {
+                "reason": "x", "attempts": 5, "at": int(time.time() * 1000)
+            }
+        original = spool._write_atomic
+
+        def fail_orphan(path: Path, records: List[Dict[str, Any]]) -> None:
+            if path.name == "orphan-dead-pending.jsonl":
+                raise memory_plugin._SpoolUnavailable("orphan read-only")
+            return original(path, records)
+
+        with mock.patch.object(spool, "_write_atomic", side_effect=fail_orphan):
+            self.assertGreater(spool.orphan_dead_pending_live(item_id, "x"), 0)
+        self.assertEqual(spool.depth(), 0)
+        self.assertEqual(spool.orphan_dead_pending_count(), 0)
+        self.assertEqual(spool.quarantine_count(), 1)
+        self.assertTrue(
+            (self.hermes_home / "mebular-memory" / "quarantine.jsonl").exists()
+        )
+        reopened = memory_plugin._Spool(self.spool_path, 100)
+        self.assertEqual(reopened.quarantine_count(), 1)
+        self.assertTrue(reopened.try_quarantine_dead(item_id, "recovered"))
+        self.assertEqual(reopened.quarantine_count(), 0)
+        self.assertEqual(reopened.dead_count(), 1)
 
     def test_orphan_cap_and_abandoned_head_skip(self) -> None:
         now = int(time.time() * 1000)

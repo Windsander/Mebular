@@ -1753,6 +1753,7 @@ class _Spool:
         self._dead_path = path.with_name("dead.jsonl")
         self._dead_pending_path = path.with_name("dead-pending.jsonl")
         self._orphan_path = path.with_name("orphan-dead-pending.jsonl")
+        self._quarantine_path = path.with_name("quarantine.jsonl")
         self._limit = max(1, int(limit))
         self._max_bytes = max(1, int(max_bytes))
         self._lock = threading.RLock()
@@ -1760,6 +1761,7 @@ class _Spool:
         self._dead: List[Dict[str, Any]] = []
         self._dead_pending: List[Dict[str, Any]] = []
         self._orphan_dead_pending: List[Dict[str, Any]] = []
+        self._quarantine: List[Dict[str, Any]] = []
         self._dead_write_failures = 0
         self._dead_write_abandoned = 0
         self._dead_write_abandoned_cleaned = 0
@@ -1963,6 +1965,40 @@ class _Spool:
             changed = True
         return changed
 
+    def _load_quarantine(self, now: int) -> bool:
+        self._secure_file(self._quarantine_path)
+        changed = False
+        try:
+            lines = self._quarantine_path.read_text(encoding="utf-8").splitlines()
+        except FileNotFoundError:
+            return False
+        except Exception as error:
+            logger.warning("Mebular quarantine spool unreadable (%s)", type(error).__name__)
+            return False
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                raw = json.loads(line)
+            except Exception:
+                changed = True
+                continue
+            item = self._normalise_record(raw, now=now)
+            if item is None:
+                changed = True
+                continue
+            pending = item.get("deadPending")
+            if not isinstance(pending, dict):
+                pending = {"reason": "dead_write_failed", "attempts": 0, "at": now}
+            pending["quarantined"] = True
+            item["deadPending"] = pending
+            self._quarantine.append(item)
+        before = len(self._quarantine)
+        self._quarantine = self._trim_orphan_locked(self._quarantine, now=now)
+        if len(self._quarantine) != before:
+            changed = True
+        return changed
+
     def _load(self) -> None:
         now = _now_ms()
         self._secure_file(self._path)
@@ -2003,6 +2039,8 @@ class _Spool:
         if self._load_dead_pending(now):
             changed = True
         if self._load_orphan(now):
+            changed = True
+        if self._load_quarantine(now):
             changed = True
         dead_before_trim = len(self._dead)
         self._dead = self._dead_records_bounded_locked(
@@ -2047,7 +2085,25 @@ class _Spool:
         if len(deduped_orphan) != len(self._orphan_dead_pending):
             self._orphan_dead_pending = deduped_orphan
             changed = True
-        terminal_ids = dead_ids | all_pending_ids | orphan_ids
+        quarantine_ids: set[str] = set()
+        deduped_quarantine: List[Dict[str, Any]] = []
+        for item in self._quarantine:
+            item_id = str(item.get("id") or "")
+            if (
+                not item_id
+                or item_id in dead_ids
+                or item_id in pending_ids
+                or item_id in orphan_ids
+                or item_id in quarantine_ids
+            ):
+                changed = True
+                continue
+            quarantine_ids.add(item_id)
+            deduped_quarantine.append(item)
+        if len(deduped_quarantine) != len(self._quarantine):
+            self._quarantine = deduped_quarantine
+            changed = True
+        terminal_ids = dead_ids | all_pending_ids | orphan_ids | quarantine_ids
         before_live = len(self._items)
         self._items = [
             item for item in self._items if str(item.get("id") or "") not in terminal_ids
@@ -2075,6 +2131,7 @@ class _Spool:
                 self._persist_dead_locked()
                 self._persist_dead_pending_locked()
                 self._persist_orphan_locked()
+                self._persist_quarantine_locked()
             except _SpoolUnavailable:
                 logger.warning("Mebular spool could not be normalised on load")
 
@@ -2137,6 +2194,9 @@ class _Spool:
 
     def _persist_orphan_locked(self) -> None:
         self._write_atomic(self._orphan_path, self._orphan_dead_pending)
+
+    def _persist_quarantine_locked(self) -> None:
+        self._write_atomic(self._quarantine_path, self._quarantine)
 
     def _dead_records_bounded_locked(
         self,
@@ -2319,6 +2379,14 @@ class _Spool:
         if len(self._orphan_dead_pending) != orphan_before:
             try:
                 self._persist_orphan_locked()
+            except _SpoolUnavailable:
+                pass
+            changed = True
+        quarantine_before = len(self._quarantine)
+        self._quarantine = self._trim_orphan_locked(self._quarantine, now=now)
+        if len(self._quarantine) != quarantine_before:
+            try:
+                self._persist_quarantine_locked()
             except _SpoolUnavailable:
                 pass
             changed = True
@@ -2685,10 +2753,35 @@ class _Spool:
                     self._write_atomic(self._orphan_path, candidate)
                 except _SpoolUnavailable as error:
                     record["deadPending"]["quarantined"] = True
-                    candidate = [*self._orphan_dead_pending, record]
-                    logger.warning(
-                        "Mebular orphan write failed; quarantining in memory: %s", error
+                    quarantine_candidate = self._trim_orphan_locked(
+                        [*self._quarantine, record]
                     )
+                    if not any(
+                        entry.get("id") == record.get("id")
+                        for entry in quarantine_candidate
+                    ):
+                        quarantine_candidate = [*self._quarantine, record]
+                    try:
+                        self._write_atomic(
+                            self._quarantine_path, quarantine_candidate
+                        )
+                    except _SpoolUnavailable:
+                        # Last resort: visible in-memory quarantine.  The live
+                        # FIFO must still advance even when every spill file is
+                        # unwritable.
+                        candidate = [*self._orphan_dead_pending, record]
+                        logger.warning(
+                            "Mebular orphan/quarantine write failed; keeping in memory: %s",
+                            error,
+                        )
+                    else:
+                        self._quarantine = quarantine_candidate
+                        self._items.pop(index)
+                        try:
+                            self._persist_locked()
+                        except _SpoolUnavailable:
+                            pass
+                        return attempts + 1
                 self._orphan_dead_pending = candidate
                 self._items.pop(index)
                 try:
@@ -2795,6 +2888,136 @@ class _Spool:
                 self._dead_write_abandoned += 1
                 try:
                     self._persist_orphan_locked()
+                except _SpoolUnavailable:
+                    pass
+                return True
+            return False
+
+    def quarantine_items(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            return copy.deepcopy(self._quarantine)
+
+    def quarantine_count(self) -> int:
+        with self._lock:
+            return len(self._quarantine)
+
+    def try_quarantine_dead(self, item_id: str, reason: str) -> bool:
+        with self._lock:
+            for index, item in enumerate(self._quarantine):
+                if item.get("id") != item_id:
+                    continue
+                now = _now_ms()
+                record = copy.deepcopy(item)
+                record["deadAt"] = now
+                record["reason"] = str(reason or "dead_write_failed")[:120]
+                candidate = self._dead_records_bounded_locked(
+                    [*self._dead, record],
+                    now=now,
+                    live_bytes=self._bytes_locked()
+                    + self._bytes_locked(self._dead_pending)
+                    + self._bytes_locked([record]),
+                )
+                if not any(entry.get("id") == record.get("id") for entry in candidate):
+                    return False
+                try:
+                    self._write_atomic(self._dead_path, candidate)
+                except _SpoolUnavailable:
+                    self._dead_write_failures += 1
+                    return False
+                self._dead = candidate
+                self._quarantine.pop(index)
+                try:
+                    self._persist_quarantine_locked()
+                except _SpoolUnavailable:
+                    pass
+                return True
+            return False
+
+    def try_quarantine_pending(self, item_id: str, reason: str) -> bool:
+        with self._lock:
+            for index, item in enumerate(self._quarantine):
+                if item.get("id") != item_id:
+                    continue
+                record = copy.deepcopy(item)
+                record["deadPending"] = dict(record.get("deadPending") or {})
+                record["deadPending"]["reason"] = str(reason or "dead_write_failed")[:120]
+                record["deadPending"]["at"] = _now_ms()
+                candidate = self._trim_dead_pending_locked(
+                    [*self._dead_pending, record]
+                )
+                if not any(entry.get("id") == record.get("id") for entry in candidate):
+                    return False
+                try:
+                    self._write_atomic(self._dead_pending_path, candidate)
+                except _SpoolUnavailable:
+                    return False
+                self._dead_pending = candidate
+                self._quarantine.pop(index)
+                try:
+                    self._persist_quarantine_locked()
+                except _SpoolUnavailable:
+                    pass
+                return True
+            return False
+
+    def try_quarantine_orphan(self, item_id: str, reason: str) -> bool:
+        with self._lock:
+            for index, item in enumerate(self._quarantine):
+                if item.get("id") != item_id:
+                    continue
+                record = copy.deepcopy(item)
+                record["deadPending"] = dict(record.get("deadPending") or {})
+                record["deadPending"]["reason"] = str(reason or "dead_write_failed")[:120]
+                record["deadPending"]["at"] = _now_ms()
+                record["deadPending"]["orphaned"] = True
+                candidate = self._trim_orphan_locked(
+                    [*self._orphan_dead_pending, record]
+                )
+                if not any(entry.get("id") == record.get("id") for entry in candidate):
+                    return False
+                try:
+                    self._write_atomic(self._orphan_path, candidate)
+                except _SpoolUnavailable:
+                    return False
+                self._orphan_dead_pending = candidate
+                self._quarantine.pop(index)
+                try:
+                    self._persist_quarantine_locked()
+                except _SpoolUnavailable:
+                    pass
+                return True
+            return False
+
+    def fail_quarantine(self, item_id: str, reason: str) -> int:
+        with self._lock:
+            attempts = 0
+            for item in self._quarantine:
+                if item.get("id") != item_id:
+                    continue
+                pending = item.setdefault("deadPending", {})
+                attempts = int(pending.get("attempts") or 0) + 1
+                pending["attempts"] = attempts
+                pending["reason"] = str(reason or "dead_write_failed")[:120]
+                pending["at"] = _now_ms()
+                break
+            try:
+                self._persist_quarantine_locked()
+            except _SpoolUnavailable:
+                pass
+            return attempts
+
+    def abandon_quarantine(self, item_id: str, reason: str) -> bool:
+        with self._lock:
+            for item in self._quarantine:
+                if item.get("id") != item_id:
+                    continue
+                pending = item.setdefault("deadPending", {})
+                pending["abandoned"] = True
+                pending["reason"] = str(reason or "deadWriteAbandoned")[:120]
+                pending["at"] = _now_ms()
+                self._dead_write_abandoned += 1
+                try:
+                    self._persist_quarantine_locked()
                 except _SpoolUnavailable:
                     pass
                 return True
@@ -4306,6 +4529,40 @@ class MebularMemoryProvider(MemoryProvider):
             return True
         return False
 
+    def _retry_one_quarantine(self, spool: _Spool) -> bool:
+        items = spool.quarantine_items()
+        if not items:
+            return False
+        now = _now_ms()
+        for item in items:
+            pending = item.get("deadPending") if isinstance(item.get("deadPending"), dict) else {}
+            if pending.get("abandoned") is True:
+                continue
+            attempts = int(pending.get("attempts") or 0)
+            last_at = int(pending.get("at") or 0)
+            if (
+                attempts >= _DEAD_WRITE_MAX_ATTEMPTS
+                and now - last_at < _MAX_RETRY_AFTER * 1000
+            ):
+                continue
+            item_id = str(item.get("id") or "")
+            expired = int(item.get("expiresAt") or 0) <= now
+            reason = "retention_expired" if expired else str(
+                pending.get("reason") or "dead_write_failed"
+            )
+            if spool.try_quarantine_dead(item_id, reason):
+                return True
+            if spool.try_quarantine_pending(item_id, reason):
+                return True
+            if spool.try_quarantine_orphan(item_id, reason):
+                return True
+            attempts = spool.fail_quarantine(item_id, reason)
+            if expired and attempts >= _DEAD_WRITE_MAX_ATTEMPTS:
+                spool.abandon_quarantine(item_id, "deadWriteAbandoned")
+                self._record_warning("deadWriteAbandoned")
+            return True
+        return False
+
     def _count_checkpoint_unconfirmed(self, item_id: str) -> None:
         if not item_id:
             return
@@ -4450,6 +4707,9 @@ class MebularMemoryProvider(MemoryProvider):
                     self._wait_retry(0.5)
                     continue
                 if self._retry_one_orphan(spool):
+                    self._wait_retry(0.5)
+                    continue
+                if self._retry_one_quarantine(spool):
                     self._wait_retry(0.5)
                     continue
                 self._wake.wait(timeout=0.5)
@@ -4878,6 +5138,7 @@ class MebularMemoryProvider(MemoryProvider):
                 "deadWriteAbandoned": self._spool.dead_write_abandoned() if self._spool else 0,
                 "deadWriteAbandonedCleaned": self._spool.dead_write_abandoned_cleaned() if self._spool else 0,
                 "orphanDeadPending": self._spool.orphan_dead_pending_count() if self._spool else 0,
+                "quarantine": self._spool.quarantine_count() if self._spool else 0,
                 "liveQuotaEvicted": self._spool.live_quota_evicted() if self._spool else 0,
                 "writerPid": self._spool.writer_pid if self._spool else os.getpid(),
                 "writerScope": "process",

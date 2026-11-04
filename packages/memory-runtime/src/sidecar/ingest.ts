@@ -201,6 +201,8 @@ export interface IngestStatsSnapshot {
   queued: number;
   degraded: boolean;
   lastError: IngestErrorView | null;
+  finalizePending: number;
+  finalizeExhausted: number;
 }
 
 export interface OutboxReplaySummary {
@@ -237,6 +239,8 @@ interface StoredExtraction {
   records: IngestRecordView[];
   detailIds: string[];
   warnings: string[];
+  /** 结构化 Detail 失败；retryable=false 才阻止 extraction completed。 */
+  detailFailures?: Array<{ code: string; retryable: boolean }>;
   degraded: boolean;
   expiresAt: number;
   createdAt: number;
@@ -277,6 +281,7 @@ interface DetailSettlementOutcome {
   failed: number;
   warnings: string[];
   queuedRequestIds: string[];
+  failures: Array<{ code: string; retryable: boolean }>;
 }
 
 interface CandidateEvidence {
@@ -533,6 +538,9 @@ export class IngestService {
   private lastError: IngestErrorView | null = null;
   private finalizeRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private finalizeRetryAttempts = 0;
+  private finalizePending = 0;
+  private finalizeExhausted = 0;
+  private stopped = false;
 
   constructor(options: IngestServiceOptions) {
     this.config = options.config;
@@ -567,11 +575,43 @@ export class IngestService {
       queued: this.queued,
       degraded: this.degraded,
       lastError: this.lastError ? { ...this.lastError } : null,
+      finalizePending: this.finalizePending,
+      finalizeExhausted: this.finalizeExhausted,
     };
+  }
+
+  reconciliationStatus(): {
+    pending: number;
+    exhausted: number;
+    timerActive: boolean;
+    stopped: boolean;
+    lastError: IngestErrorView | null;
+  } {
+    return {
+      pending: this.finalizePending,
+      exhausted: this.finalizeExhausted,
+      timerActive: this.finalizeRetryTimer !== null,
+      stopped: this.stopped,
+      lastError: this.lastError ? { ...this.lastError } : null,
+    };
+  }
+
+  /** 停止后台收口定时器；停止后不再调度或执行新的收口写入。 */
+  stop(): void {
+    this.stopped = true;
+    this.clearFinalizeRetryTimer();
+  }
+
+  private clearFinalizeRetryTimer(): void {
+    if (!this.finalizeRetryTimer) return;
+    clearTimeout(this.finalizeRetryTimer);
+    this.finalizeRetryTimer = null;
   }
 
   /** 启动后调用：已有 outbox 视为仍需重放的降级状态。 */
   async init(): Promise<void> {
+    this.stopped = false;
+    this.finalizeRetryAttempts = 0;
     await this.reconcileReplayFinalizations().catch(() => 0);
     const outbox = await this.local.outbox.stats();
     if (outbox.items > 0) {
@@ -947,6 +987,7 @@ export class IngestService {
       detailIds: detailOutcome.ids,
       warnings: [...warnings],
       degraded: degraded || outcome.degraded,
+      ...(detailOutcome.failures.length > 0 ? { detailFailures: detailOutcome.failures } : {}),
       agentId,
       ...(agentName ? { agentName } : {}),
       ...(explicitThreadId ? { threadId: explicitThreadId } : {}),
@@ -1097,6 +1138,7 @@ export class IngestService {
         records: outcome.records,
         detailIds: detailOutcome.ids.length > 0 ? detailOutcome.ids : extraction.detailIds,
         warnings,
+        detailFailures: [...(extraction.detailFailures ?? []), ...detailOutcome.failures],
         degraded: outcome.degraded || detailOutcome.queued > 0 || detailOutcome.failed > 0,
       });
       await this.linkExtractionToOutbox(extraction.stagingChunkIds, updated.id);
@@ -1848,27 +1890,67 @@ export class IngestService {
     item: OutboxItem,
     outcome: OutboxReplayCompletion,
   ): Promise<void> {
+    if (this.stopped) return;
     try {
       await this.finalizeReplayedExtractionsUnlocked(item, outcome);
       await this.local.outbox.markNeedsFinalize(item.id, false, {
         owner: item.replayLeaseOwner,
-      }).catch(() => false);
+        item,
+      }).catch(() => null);
+      this.finalizePending = Math.max(0, this.finalizePending - 1);
+      const remaining = await this.local.outbox.listNeedsFinalize().catch(() => null);
+      if (remaining) {
+        this.finalizePending = remaining.length;
+        this.finalizeExhausted = remaining.filter((entry) => entry.exhausted).length;
+      }
       this.finalizeRetryAttempts = 0;
-    } catch (error) {
-      await this.local.outbox.markNeedsFinalize(item.id, true, {
+      this.clearFinalizeRetryTimer();
+      if (this.lastError?.code === 'finalize_failed' || this.lastError?.code === 'finalize_exhausted') {
+        this.lastError = null;
+      }
+      if (this.finalizePending === 0) {
+        const outbox = await this.local.outbox.stats();
+        if (outbox.items === 0 && this.lastError === null) this.degraded = false;
+      }
+    } catch {
+      const marker = await this.local.outbox.markNeedsFinalize(item.id, true, {
         outcome,
         owner: item.replayLeaseOwner,
-      }).catch(() => false);
+        item,
+      }).catch(() => null);
+      this.finalizePending = Math.max(1, this.finalizePending);
+      this.finalizeExhausted = marker?.exhausted ? Math.max(1, this.finalizeExhausted) : this.finalizeExhausted;
       this.degraded = true;
       this.failed += 1;
-      this.lastError = nowView(this.now(), 'finalize_failed', 'extraction 收口失败，等待重试');
-      this.scheduleFinalizeRetry();
+      this.lastError = nowView(
+        this.now(),
+        marker?.exhausted ? 'finalize_exhausted' : 'finalize_failed',
+        marker?.exhausted
+          ? 'extraction 收口多次失败，等待重启或维护扫描'
+          : 'extraction 收口失败，等待重试',
+      );
+      if (marker?.exhausted) {
+        this.clearFinalizeRetryTimer();
+      } else {
+        this.scheduleFinalizeRetry();
+      }
     }
   }
 
   /** 重启/后台有界重试：读取持久化的 needsFinalize 项继续收口。 */
   async reconcileReplayFinalizations(): Promise<number> {
+    if (this.stopped) return 0;
     const pending = await this.local.outbox.listNeedsFinalize();
+    this.finalizePending = pending.length;
+    this.finalizeExhausted = pending.filter((entry) => entry.exhausted).length;
+    if (pending.length === 0) {
+      this.clearFinalizeRetryTimer();
+      this.finalizeRetryAttempts = 0;
+      if (this.lastError?.code === 'finalize_failed' || this.lastError?.code === 'finalize_exhausted') {
+        this.lastError = null;
+      }
+      return 0;
+    }
     let finalized = 0;
     for (const entry of pending) {
       await this.finalizeReplayedOutbox(entry.item, entry.outcome);
@@ -1878,7 +1960,7 @@ export class IngestService {
   }
 
   private scheduleFinalizeRetry(): void {
-    if (this.finalizeRetryTimer || this.finalizeRetryAttempts >= 3) return;
+    if (this.stopped || this.finalizeRetryTimer || this.finalizeRetryAttempts >= 3) return;
     this.finalizeRetryAttempts += 1;
     const delay = Math.min(5_000, 100 * 2 ** (this.finalizeRetryAttempts - 1));
     const timer = setTimeout(() => {
@@ -1967,7 +2049,7 @@ export class IngestService {
         const hasDead = deadDeps.length > 0 || outcome === 'dead';
         const hasActive = outcome === 'retry' || otherActive.length > 0;
 
-        const permanentDetailFailure = hasPermanentDetailFailure(stored.warnings);
+        const permanentDetailFailure = hasPermanentDetailFailure(stored);
         let status: StoredExtraction['status'];
         if (stored.status === 'completed') status = 'completed';
         else if (stored.status === 'failed') status = 'failed';
@@ -2174,7 +2256,10 @@ export class IngestService {
   }): Promise<DetailSettlementOutcome> {
     const linked = records.filter((record) => typeof record.id === 'string' && record.id.length > 0);
     if (chunks.length === 0 || linked.length === 0) {
-      return { ids: [], written: 0, duplicates: 0, queued: 0, failed: 0, warnings: [], queuedRequestIds: [] };
+      return {
+        ids: [], written: 0, duplicates: 0, queued: 0, failed: 0,
+        warnings: [], queuedRequestIds: [], failures: [],
+      };
     }
     const byDomain = new Map<string, Map<string, { chunk: RawChunk; recordIds: string[] }>>();
     let unresolved = false;
@@ -2270,6 +2355,10 @@ export class IngestService {
       failed: oversized,
       warnings: [],
       queuedRequestIds: [],
+      failures: Array.from({ length: oversized }, () => ({
+        code: 'detail_record_ids_exceeded',
+        retryable: false,
+      })),
     };
     const actor = {
       type: 'agent' as const,
@@ -2322,6 +2411,7 @@ export class IngestService {
           const result = resultByClientItemId.get(item.clientItemId);
           if (!result) {
             failedItems.push(item);
+            outcome.failures.push({ code: 'detail_write_result_missing', retryable: true });
             appendWarnings(outcome.warnings, ['detail_write_result_missing']);
             continue;
           }
@@ -2341,16 +2431,20 @@ export class IngestService {
               await this.cacheDetail(id, result, batch, authoritative);
             } catch (error) {
               const code = error instanceof CapabilityClientError ? error.code : 'detail_confirmation_failed';
+              const retryable = retryableCapabilityError(error);
               appendWarnings(outcome.warnings, [`detail_write_failed:${code}`]);
-              if (retryableCapabilityError(error)) failedItems.push(item);
+              outcome.failures.push({ code, retryable });
+              if (retryable) failedItems.push(item);
               else outcome.failed += 1;
             }
             continue;
           }
           const code = typeof result.code === 'string' ? result.code : 'detail_write_failed';
+          const retryable = result.retryable === true || code === 'detail_quota_exceeded'
+            || (status !== 'failed' && status !== 'rejected');
           appendWarnings(outcome.warnings, [`detail_write_failed:${code}`]);
-          if (result.retryable === true || code === 'detail_quota_exceeded'
-            || (status !== 'failed' && status !== 'rejected')) {
+          outcome.failures.push({ code, retryable });
+          if (retryable) {
             failedItems.push(item);
           } else {
             outcome.failed += 1;
@@ -2359,6 +2453,7 @@ export class IngestService {
         const declaredFailed = typeof data.failed === 'number' && data.failed > 0 ? data.failed : 0;
         if (declaredFailed > 0 && outcome.failed === 0 && failedItems.length === 0) {
           outcome.failed = declaredFailed;
+          outcome.failures.push({ code: 'detail_write_failed', retryable: false });
           appendWarnings(outcome.warnings, ['detail_write_result_inconsistent']);
         }
         if (failedItems.length > 0) {
@@ -2369,8 +2464,10 @@ export class IngestService {
         }
       } catch (error) {
         const code = error instanceof CapabilityClientError ? error.code : 'internal';
+        const retryable = retryableCapabilityError(error) || code === 'detail_quota_exceeded';
         appendWarnings(outcome.warnings, [`detail_write_failed:${code}`]);
-        if (retryableCapabilityError(error) || code === 'detail_quota_exceeded') {
+        outcome.failures.push({ code, retryable });
+        if (retryable) {
           await this.enqueueDetail(requestId, actor, batch, batchStagingIds, outcome, batch.length, extractionIds);
         } else {
           outcome.failed += batch.length;
@@ -2760,6 +2857,7 @@ export class IngestService {
     stagingChunkIds: string[];
     messageIds: string[];
     outboxIds?: readonly string[];
+    detailFailures?: ReadonlyArray<{ code: string; retryable: boolean }>;
   }): Promise<StoredExtraction> {
     const now = this.now();
     const extraction: StoredExtraction = {
@@ -2771,6 +2869,9 @@ export class IngestService {
       records: input.records.map((record) => ({ ...record })),
       detailIds: [...input.detailIds],
       warnings: [...input.warnings],
+      ...(input.detailFailures && input.detailFailures.length > 0
+        ? { detailFailures: input.detailFailures.map((failure) => ({ ...failure })) }
+        : {}),
       degraded: input.degraded,
       expiresAt: now + this.extractionTtlMs,
       createdAt: now,
@@ -2816,22 +2917,29 @@ export class IngestService {
   }
 }
 
-function hasPermanentDetailFailure(warnings: readonly string[]): boolean {
+function hasPermanentDetailFailure(stored: StoredExtraction): boolean {
+  if (Array.isArray(stored.detailFailures)) {
+    return stored.detailFailures.some((failure) => failure.retryable === false);
+  }
   const temporaryCodes = new Set([
     'capability_unavailable',
     'timeout',
     'network_error',
+    'http_401',
+    'http_408',
     'http_429',
     'http_500',
     'http_502',
     'http_503',
     'http_504',
+    'capability_token_invalid',
+    'detail_confirmation_failed',
     'detail_quota_exceeded',
     'outbox_full',
     'storage_full',
     'internal',
   ]);
-  for (const warning of warnings) {
+  for (const warning of stored.warnings) {
     if (warning === 'detail_record_ids_exceeded') return true;
     const match = /^detail_write_failed:(.+)$/.exec(warning);
     if (!match) continue;

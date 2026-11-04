@@ -258,6 +258,7 @@ export class SettlementRuntime {
   }
 
   async stop(): Promise<void> {
+    this.ingest.stop();
     this.local.stopMaintenance();
     await this.replayer.stop({ flushMs: 2000 });
   }

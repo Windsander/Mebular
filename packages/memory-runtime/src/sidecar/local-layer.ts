@@ -102,6 +102,22 @@ export interface OutboxCommitted {
   objects?: OutboxCommittedObject[];
 }
 
+export interface OutboxFinalizeMarker {
+  item: OutboxItem;
+  outcome: OutboxReplayCompletion;
+  attempts: number;
+  exhausted: boolean;
+}
+
+interface StoredFinalizeMarker {
+  version: 1;
+  id: string;
+  outcome: OutboxReplayCompletion;
+  attempts: number;
+  at: number;
+  item: OutboxItem;
+}
+
 export interface OutboxEnqueueInput {
   id?: string;
   requestId?: string;
@@ -287,6 +303,7 @@ function isOutboxItem(value: unknown): value is OutboxItem {
 export class BoundedOutbox {
   readonly root: string;
   readonly deadRoot: string;
+  readonly reconcileRoot: string;
   readonly maxItems: number;
   readonly maxBytes: number;
 
@@ -308,6 +325,7 @@ export class BoundedOutbox {
   }) {
     this.root = root;
     this.deadRoot = deadRoot;
+    this.reconcileRoot = join(root, 'reconcile');
     this.maxItems = Math.max(1, Math.floor(maxItems));
     this.maxBytes = Math.max(1, Math.floor(maxBytes));
     this.now = now;
@@ -316,6 +334,7 @@ export class BoundedOutbox {
   async init(): Promise<void> {
     await ensurePrivateDir(this.root);
     await ensurePrivateDir(this.deadRoot);
+    await ensurePrivateDir(this.reconcileRoot);
   }
 
   private pathFor(id: string): string {
@@ -507,59 +526,120 @@ export class BoundedOutbox {
     });
   }
 
-  /** 标记/清除该 outbox 的 extraction 收口待办；dead 已落盘时必须仍可持久化。 */
+  /** 标记/清除该 outbox 的 extraction 收口待办；独立落盘，不随 active/dead 删除而丢失。 */
   async markNeedsFinalize(
     id: string,
     needs: boolean,
     {
       outcome = 'dead',
       owner,
-    }: { outcome?: OutboxReplayCompletion; owner?: string } = {},
-  ): Promise<boolean> {
+      item: snapshot,
+    }: { outcome?: OutboxReplayCompletion; owner?: string; item?: OutboxItem } = {},
+  ): Promise<OutboxFinalizeMarker | null> {
     return this.exclusive(async () => {
-      const activePath = this.pathFor(id);
-      const active = await readJsonFile<OutboxItem>(activePath);
-      if (isOutboxItem(active)) {
-        if (owner !== undefined && active.replayLeaseOwner !== owner) return false;
-        const meta = { ...(active.meta ?? {}) };
-        if (needs) {
-          meta.needsFinalize = true;
-          meta.finalizeOutcome = outcome;
-        } else {
+      const active = await readJsonFile<OutboxItem>(this.pathFor(id));
+      const dead = await readJsonFile<OutboxItem>(this.deadPathFor(id));
+      const source = isOutboxItem(active)
+        ? active
+        : isOutboxItem(dead) ? dead : snapshot;
+      if (!source) return null;
+      if (owner !== undefined && source.replayLeaseOwner !== undefined
+        && source.replayLeaseOwner !== owner) return null;
+
+      const markerPath = this.finalizePathFor(id);
+      if (!needs) {
+        await rm(markerPath, { force: true });
+        for (const path of [this.pathFor(id), this.deadPathFor(id)]) {
+          const current = await readJsonFile<OutboxItem>(path);
+          if (!isOutboxItem(current)) continue;
+          const meta = { ...(current.meta ?? {}) };
           delete meta.needsFinalize;
           delete meta.finalizeOutcome;
+          await writeJsonAtomic(path, { ...current, meta });
         }
-        await writeJsonAtomic(activePath, { ...active, meta });
-        return true;
+        return null;
       }
-      const deadPath = this.deadPathFor(id);
-      const dead = await readJsonFile<OutboxItem>(deadPath);
-      if (!isOutboxItem(dead)) return false;
-      if (owner !== undefined && dead.replayLeaseOwner !== owner) return false;
-      const meta = { ...(dead.meta ?? {}) };
-      if (needs) {
+
+      const existing = await readJsonFile<StoredFinalizeMarker>(markerPath);
+      const attempts = (typeof existing?.attempts === 'number' ? existing.attempts : 0) + 1;
+      const safeItem: OutboxItem = {
+        version: 1,
+        id: source.id,
+        requestId: source.requestId,
+        endpoint: source.endpoint,
+        method: source.method,
+        body: {},
+        createdAt: source.createdAt,
+        attempts: source.attempts,
+        lastAttemptAt: source.lastAttemptAt,
+        lastError: source.lastError,
+        ...(source.meta ? { meta: minimizeOutboxValue(source.meta) as OutboxItem['meta'] } : {}),
+        ...(source.committed
+          ? { committed: minimizeOutboxValue(source.committed) as OutboxItem['committed'] }
+          : {}),
+        ...(source.replayLeaseOwner ? { replayLeaseOwner: source.replayLeaseOwner } : {}),
+      };
+      const marker: StoredFinalizeMarker = {
+        version: 1,
+        id,
+        outcome,
+        attempts,
+        at: this.now(),
+        item: safeItem,
+      };
+      await writeJsonAtomic(markerPath, marker);
+
+      for (const path of [this.pathFor(id), this.deadPathFor(id)]) {
+        const current = await readJsonFile<OutboxItem>(path);
+        if (!isOutboxItem(current)) continue;
+        const meta = { ...(current.meta ?? {}) };
         meta.needsFinalize = true;
         meta.finalizeOutcome = outcome;
-      } else {
-        delete meta.needsFinalize;
-        delete meta.finalizeOutcome;
+        await writeJsonAtomic(path, { ...current, meta });
       }
-      await writeJsonAtomic(deadPath, { ...dead, meta });
-      return true;
+      return {
+        item: safeItem,
+        outcome,
+        attempts,
+        exhausted: attempts >= 3,
+      };
     });
   }
 
-  /** 重启/后台重试读取所有待收口项。 */
-  async listNeedsFinalize(): Promise<Array<{ item: OutboxItem; outcome: OutboxReplayCompletion }>> {
+  /** 重启/后台重试读取所有待收口项；独立 marker 优先于 active/dead 上的旧标记。 */
+  async listNeedsFinalize(): Promise<OutboxFinalizeMarker[]> {
     return this.exclusive(async () => {
-      const items = [...await this.readItems(), ...await this.readDeadItems()];
-      return items
-        .filter((item) => item.meta?.needsFinalize === true)
-        .map((item) => ({
+      const markers = new Map<string, OutboxFinalizeMarker>();
+      const entries = await readdir(this.reconcileRoot, { withFileTypes: true }).catch(() => []);
+      for (const entry of entries) {
+        if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+        const stored = await readJsonFile<StoredFinalizeMarker>(join(this.reconcileRoot, entry.name));
+        if (!stored || stored.version !== 1 || !isOutboxItem(stored.item)) continue;
+        markers.set(stored.id, {
+          item: stored.item,
+          outcome: stored.outcome ?? 'dead',
+          attempts: typeof stored.attempts === 'number' ? stored.attempts : 1,
+          exhausted: (typeof stored.attempts === 'number' ? stored.attempts : 1) >= 3,
+        });
+      }
+      for (const item of [...await this.readItems(), ...await this.readDeadItems()]) {
+        if (item.meta?.needsFinalize !== true || markers.has(item.id)) continue;
+        markers.set(item.id, {
           item,
           outcome: item.meta?.finalizeOutcome ?? 'dead',
-        }));
+          attempts: 1,
+          exhausted: false,
+        });
+      }
+      return [...markers.values()];
     });
+  }
+
+  private finalizePathFor(id: string): string {
+    if (!OUTBOX_ITEM_RE.test(id)) {
+      throw new LocalLayerError('invalid_outbox_item', 'outbox id 格式非法');
+    }
+    return join(this.reconcileRoot, `${id}.json`);
   }
 
   /** 把活动 outbox 项关联到所属 extraction；重放清理时用其排除自身 pending 证据。 */

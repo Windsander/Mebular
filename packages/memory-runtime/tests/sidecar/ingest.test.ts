@@ -2584,6 +2584,7 @@ describe('IngestService settlements', () => {
     expect(marked?.meta?.needsFinalize).toBe(true);
     expect((await service.getExtraction(extractionId))?.status).toBe('pending');
     jest.restoreAllMocks();
+    service.stop();
 
     const restartedLocal = new SidecarLocalLayer({ root: join(home, 'memory-runtime') });
     await restartedLocal.init();
@@ -2605,8 +2606,6 @@ describe('IngestService settlements', () => {
     const recovered = await restartedLocal.outbox.get(item.id)
       ?? await restartedLocal.outbox.getDead(item.id);
     expect(recovered?.meta?.needsFinalize).not.toBe(true);
-    // 让原实例的有界重试定时器结束，避免测试清理临时目录时与后台写并发。
-    await new Promise((resolve) => setTimeout(resolve, 150));
   });
 
   it('putStagingChunk 依赖淘汰等待终态落盘，立即读取即 failed', async () => {
@@ -2647,6 +2646,268 @@ describe('IngestService settlements', () => {
     });
     jest.restoreAllMocks();
     expect((await service.getExtraction(extractionId))?.status).toBe('failed');
+  });
+
+  it('finalize cache 失败后 successful settle 删除 active，重启仍能 completed', async () => {
+    const { home, service, client, fake, local } = await setup();
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const queued = await service.ingest({
+      requestId: 'req_finalize_after_settle',
+      agentId: 'opencode',
+      threadId: 'th_finalize_after_settle',
+      extractor: 'host',
+      chunks: [],
+      candidates: [{ kind: 'observation', content: { content: 'finalize after settle' } }],
+    });
+    const extractionId = queued.data.extraction.id;
+    fake.setFailure(null);
+    jest.spyOn(local.cache, 'set').mockRejectedValueOnce(new Error('EIO'));
+
+    const summary = await new OutboxReplayer({
+      outbox: local.outbox,
+      client,
+      onSettled: (item, data) => service.applyReplayedOutbox(item, data),
+      onComplete: (item, outcome) => service.finalizeReplayedOutbox(item, outcome),
+    }).replayOnce();
+    expect(summary).toMatchObject({ settled: 1, remaining: 0 });
+    expect(await local.outbox.stats()).toMatchObject({ items: 0 });
+    const pending = await local.outbox.listNeedsFinalize();
+    expect(pending).toHaveLength(1);
+    expect(pending[0]?.outcome).toBe('settled');
+    expect((await service.getExtraction(extractionId))?.status).toBe('pending');
+    jest.restoreAllMocks();
+    service.stop();
+
+    const restartedLocal = new SidecarLocalLayer({ root: join(home, 'memory-runtime') });
+    await restartedLocal.init();
+    const restartedClient = new CapabilityClient({
+      baseUrl: fake.baseUrl,
+      token: 'cap-token',
+      retries: 0,
+      retryDelayMs: 0,
+    });
+    const restarted = new IngestService({
+      config: defaultSidecarConfig(),
+      local: restartedLocal,
+      client: restartedClient,
+      identity: { cloudId: 'cl_test', profileId: 'default', hostId: 'h_test' },
+      policy: defaultSidecarPolicy(),
+    });
+    await restarted.init();
+    expect((await restarted.getExtraction(extractionId))?.status).toBe('completed');
+    expect(await restartedLocal.outbox.listNeedsFinalize()).toHaveLength(0);
+  });
+
+  it('finalize 连续 3 次失败后 exhausted 可见、无 timer，重启可恢复', async () => {
+    const { home, service, fake, local } = await setup();
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const queued = await service.ingest({
+      requestId: 'req_finalize_exhausted',
+      agentId: 'opencode',
+      threadId: 'th_finalize_exhausted',
+      extractor: 'host',
+      chunks: [],
+      candidates: [{ kind: 'observation', content: { content: 'finalize exhausted' } }],
+    });
+    const extractionId = queued.data.extraction.id;
+    const item = (await local.outbox.list())[0]!;
+    jest.spyOn(local.cache, 'set').mockRejectedValue(new Error('EIO'));
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await service.finalizeReplayedOutbox(item, 'dead');
+    }
+    const status = service.reconciliationStatus();
+    expect(status).toMatchObject({
+      pending: 1,
+      exhausted: 1,
+      timerActive: false,
+      stopped: false,
+    });
+    expect(service.lastErrorView?.code).toBe('finalize_exhausted');
+    expect(service.stats()).toMatchObject({
+      degraded: true,
+      finalizePending: 1,
+      finalizeExhausted: 1,
+    });
+    expect(await local.outbox.listNeedsFinalize()).toHaveLength(1);
+    jest.restoreAllMocks();
+    service.stop();
+
+    const restartedLocal = new SidecarLocalLayer({ root: join(home, 'memory-runtime') });
+    await restartedLocal.init();
+    const restartedClient = new CapabilityClient({
+      baseUrl: fake.baseUrl,
+      token: 'cap-token',
+      retries: 0,
+      retryDelayMs: 0,
+    });
+    const restarted = new IngestService({
+      config: defaultSidecarConfig(),
+      local: restartedLocal,
+      client: restartedClient,
+      identity: { cloudId: 'cl_test', profileId: 'default', hostId: 'h_test' },
+      policy: defaultSidecarPolicy(),
+    });
+    await restarted.init();
+    expect((await restarted.getExtraction(extractionId))?.status).toBe('failed');
+    expect(await restartedLocal.outbox.listNeedsFinalize()).toHaveLength(0);
+    expect(restarted.reconciliationStatus()).toMatchObject({ pending: 0, exhausted: 0 });
+  });
+
+  it('retryable Detail 失败（detail_confirmation_failed/http_401）后续成功不得锁死 failed', async () => {
+    for (const code of ['detail_confirmation_failed', 'http_401']) {
+      const { service, client, fake, local } = await setup();
+      jest.spyOn(client, 'detailWrite').mockImplementationOnce(async (body: any) => ({
+        ok: true,
+        requestId: `req_retryable_${code}`,
+        capabilityVersion: 1,
+        status: 200,
+        degraded: false,
+        warnings: [],
+        data: {
+          results: [{
+            clientItemId: body.items[0].clientItemId,
+            status: 'failed',
+            domain: 'agent:opencode',
+            detailKind: 'raw_chunk',
+            code,
+            retryable: true,
+          }],
+          created: 0,
+          duplicates: 0,
+          failed: 1,
+          partial: true,
+        },
+      } as any));
+      jest.spyOn(client, 'write').mockImplementationOnce(async (body: any) => {
+        const [first, second] = body.items;
+        fake.nodes.push({
+          id: `rec-retryable-${code}`,
+          type: 'episode',
+          kind: 'observation',
+          domain: 'agent:opencode',
+          ownerType: 'agent',
+          ownerId: 'opencode',
+          contentHash: `retryable-${code}`,
+          content: first.content,
+          provenance: {},
+        });
+        return {
+          ok: true,
+          requestId: body.requestId,
+          capabilityVersion: 1,
+          status: 200,
+          degraded: false,
+          warnings: [],
+          data: {
+            results: [
+              {
+                clientItemId: first.clientItemId,
+                status: 'created',
+                id: `rec-retryable-${code}`,
+                type: 'episode',
+                kind: 'observation',
+                domain: 'agent:opencode',
+              },
+              {
+                clientItemId: second.clientItemId,
+                status: 'failed',
+                kind: 'observation',
+                domain: 'agent:opencode',
+                code: 'capability_unavailable',
+                retryable: true,
+              },
+            ],
+            created: 1,
+            duplicates: 0,
+            failed: 1,
+            partial: true,
+          },
+        } as any;
+      });
+      const queued = await service.ingest({
+        requestId: `req_retryable_${code}`,
+        agentId: 'opencode',
+        threadId: `th_retryable_${code}`,
+        extractor: 'host',
+        chunks: [{ role: 'user', text: `retryable ${code}`, messageId: `m_retryable_${code}` }],
+        candidates: [
+          { kind: 'observation', content: { content: `retryable ${code} A` }, sourceMessageIds: [`m_retryable_${code}`] },
+          { kind: 'observation', content: { content: `retryable ${code} B` }, sourceMessageIds: [`m_retryable_${code}`] },
+        ],
+      });
+      const extractionId = queued.data.extraction.id;
+      expect(queued.status).toBe(202);
+      expect(queued.data.extraction.status).toBe('pending');
+      fake.setFailure(null);
+
+      const summary = await new OutboxReplayer({
+        outbox: local.outbox,
+        client,
+        onSettled: (item, data) => service.applyReplayedOutbox(item, data),
+        onComplete: (item, outcome) => service.finalizeReplayedOutbox(item, outcome),
+      }).replayOnce();
+      expect(summary.remaining).toBe(0);
+      expect((await service.getExtraction(extractionId))?.status).toBe('completed');
+    }
+  });
+
+  it('finalize 恢复成功后清理 lastError/degraded/timer', async () => {
+    const { service, fake, local } = await setup();
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    await service.ingest({
+      requestId: 'req_finalize_recovery_state',
+      agentId: 'opencode',
+      threadId: 'th_finalize_recovery_state',
+      extractor: 'host',
+      chunks: [],
+      candidates: [{ kind: 'observation', content: { content: 'finalize recovery state' } }],
+    });
+    const item = (await local.outbox.list())[0]!;
+    await local.outbox.completeReplay(item.id, { outcome: 'dead', error: 'retention_expired' });
+    jest.spyOn(local.cache, 'set').mockRejectedValueOnce(new Error('EIO'));
+    await service.finalizeReplayedOutbox(await local.outbox.getDead(item.id) ?? item, 'dead');
+    expect(service.lastErrorView?.code).toBe('finalize_failed');
+    expect(service.reconciliationStatus().timerActive).toBe(true);
+    jest.restoreAllMocks();
+
+    await service.reconcileReplayFinalizations();
+    expect(service.lastErrorView).toBeNull();
+    expect(service.reconciliationStatus()).toMatchObject({
+      pending: 0,
+      exhausted: 0,
+      timerActive: false,
+    });
+    expect(service.stats()).toMatchObject({ degraded: false });
+  });
+
+  it('stop 清除 finalize timer 且不再产生收口写入', async () => {
+    const { service, fake, local } = await setup();
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const queued = await service.ingest({
+      requestId: 'req_finalize_stop',
+      agentId: 'opencode',
+      threadId: 'th_finalize_stop',
+      extractor: 'host',
+      chunks: [],
+      candidates: [{ kind: 'observation', content: { content: 'finalize stop' } }],
+    });
+    const extractionId = queued.data.extraction.id;
+    const item = (await local.outbox.list())[0]!;
+    jest.spyOn(local.cache, 'set').mockRejectedValueOnce(new Error('EIO'));
+    await service.finalizeReplayedOutbox(item, 'dead');
+    expect(service.reconciliationStatus().timerActive).toBe(true);
+    service.stop();
+    expect(service.reconciliationStatus()).toMatchObject({
+      timerActive: false,
+      stopped: true,
+    });
+    jest.restoreAllMocks();
+    const markersBefore = await local.outbox.listNeedsFinalize();
+    expect(markersBefore).toHaveLength(1);
+    await service.finalizeReplayedOutbox(item, 'settled');
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(await local.outbox.listNeedsFinalize()).toHaveLength(1);
+    expect((await service.getExtraction(extractionId))?.status).toBe('pending');
   });
 
   it('Detail outbox 满时显式 503，不把失败吞成已完成', async () => {

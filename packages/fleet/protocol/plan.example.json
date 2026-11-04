@@ -1,11 +1,11 @@
 {
   "v": 1,
-  "note": "Fleet 黑盒编排 plan 节点夹具 v1。task_plan 是 internal 记忆节点，不进入人类 UI 或 fleet SSE；唯一创建路径是 task_submit 的 optional plan 字段（完整 plan 定义），Fleet 校验后创建 plan 节点与 root task。taskId 规则：step=${planId}#${version}#${stepId}，root=${planId}#${version}#root；planId/stepId 不得含 #，stepId 不得为 root。",
+  "note": "Fleet 黑盒编排 plan 节点夹具 v1。task_plan 是 internal 记忆节点，不进入人类 UI 或 fleet SSE；唯一创建路径是 task_submit 的 optional plan 字段（完整 plan 定义），Fleet 校验后创建 plan 节点与 root task。taskId 规则：step=${planId}#${version}#${stepId}，root=${planId}#${version}#root；planId/stepId 不得含 #，stepId 不得为 root。root task 的 target 固定为保留 sentinel {device:'__plan__',agent:'__plan__'}，旧/新 worker 都必须跳过。",
   "submission": {
     "tool": "task_submit",
     "arguments": {
       "intent": "提交一个完整 plan",
-      "to": { "device": "device-A", "agent": "__plan__" },
+      "to": { "device": "__plan__", "agent": "__plan__" },
       "plan": {
         "v": 1,
         "kind": "task_plan",
@@ -34,12 +34,26 @@
       "planId": "plan-submit-001",
       "version": 1,
       "rootTaskId": "plan-submit-001#1#root",
-      "taskId": "plan-submit-001#1#root"
+      "taskId": "plan-submit-001#1#root",
+      "rootTarget": { "device": "__plan__", "agent": "__plan__" }
     }
   },
   "idempotency": {
     "repeatSame": "同 planId + version + 规范化内容 → 返回已有 plan/rootTaskId，不重复写 plan 或 root task",
     "conflict": "同 planId + version 但规范化内容不同 → PLAN_CONFLICT；不创建任何对象"
+  },
+  "controls": {
+    "retryPlanOwnedTask": {
+      "tool": "task_retry",
+      "arguments": { "taskId": "plan-submit-001#1#work" },
+      "expect": { "ok": false, "error": "PLAN_RETRY_REQUIRED", "taskId": "plan-submit-001#1#work" }
+    },
+    "cancelPlan": {
+      "tool": "task_cancel",
+      "arguments": { "taskId": "plan-submit-001#1#root" },
+      "expect": { "ok": true, "taskId": "plan-submit-001#1#root", "status": "failed", "reason": "CANCELLED" },
+      "note": "plan 级取消；级联取消该 version 全部非终态 step task 及 sub-plan 派生树；已提交 MR 不撤销"
+    }
   },
   "plan": {
     "v": 1,

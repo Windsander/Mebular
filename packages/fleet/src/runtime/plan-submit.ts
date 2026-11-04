@@ -160,7 +160,12 @@ async function submitTaskPlanUnlocked(
     }
   }
 
-  await ensurePlanRootTask(plan, options.store, options.caller, { intent: options.intent });
+  try {
+    await ensurePlanRootTask(plan, options.store, options.caller, { intent: options.intent });
+  } catch (error) {
+    if (error instanceof PlanValidationError) return failure(error.code, error.errors, plan);
+    throw error;
+  }
   const rootTaskId = planRootTaskId(plan.planId, plan.version);
   return {
     ok: true,

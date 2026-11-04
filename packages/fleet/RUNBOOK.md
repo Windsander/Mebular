@@ -28,6 +28,13 @@ fleet security revoke --dir ~/.mebular --device device-B
 fleet doctor      --dir ~/.mebular --json
 ```
 
+## 2.1 Plan materializer（P2）
+
+- plan 节点提交后，由 **plan owner 设备**上的 `fleet node --run-forever` 或 `fleet worker --run-forever` 周期性推进（两者都会 tick materializer）；daemon 模式经内部 `/app/plans` 读取 plan。
+- materializer 只创建依赖已满足且显式 `to` 的 step task；join/reduce/MR 执行属后续阶段。
+- 进程重启后从 plan + task 事件恢复，不需要 cursor；确定性 taskId/eventId 保证不重复建 task。
+- 默认只推进 owner device 的 plan；未授权设备不应运行 coordinator。
+
 ## 3. 供给与水位
 
 - 供给 = **信任 ∩ 本机订阅 ∩ 对端订阅**；没有对端×按域白名单；

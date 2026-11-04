@@ -1,11 +1,12 @@
 // P2 daemon /app/plans：internal plan 节点写入/读取、幂等/冲突、embedded 一致性、
 // 记忆列表/域计数/SSE 不暴露 plan；/app/nodes 仍拒绝 task_plan。
 import { describe, it, expect, beforeAll, afterAll } from '@jest/globals';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Mebular, MemoryService } from '@mebular/core';
-import { startHttpServer } from '../../packages/mcp/src/serve.mjs';
+import { startHttpServer, hashToken } from '../../packages/mcp/src/serve.mjs';
 import { fleetEventFromEvent } from '../../packages/mcp/src/fleet-events.mjs';
 
 const fleet = await import('../../packages/fleet/dist/index.js');
@@ -48,6 +49,46 @@ function plan(overrides = {}) {
       { stepId: 'work', kind: 'task', intent: 'work', dependsOn: [], to: { device: 'device-B', agent: 'worker' }, acceptance: { kind: 'non-empty-result' } },
       { stepId: 'gate', kind: 'reduce', intent: 'gate', dependsOn: ['work'], join: { mode: 'all' }, acceptance: { kind: 'non-empty-result' } },
       { stepId: 'mr', kind: 'mr', intent: 'mr', dependsOn: ['gate'], acceptance: { kind: 'mr-once' } },
+    ],
+    ...overrides,
+  };
+}
+
+function parentPlan(overrides = {}) {
+  return plan({
+    planId: 'plan-daemon-parent-001',
+    goal: 'daemon parent',
+    policy: {
+      allowedDevices: ['device-B'],
+      allowedAgents: ['worker'],
+      requireCapabilities: ['fleet.task'],
+      maxParallel: 2,
+      allowSubcontract: true,
+    },
+    ...overrides,
+  });
+}
+
+function childPlan(parentId, overrides = {}) {
+  return {
+    v: 1,
+    kind: 'task_plan',
+    planId: 'plan-daemon-child-001',
+    version: 1,
+    parent: { planId: parentId, version: 1, stepId: 'work' },
+    owner: { device: 'device-A', agent: 'planner' },
+    goal: 'daemon child',
+    createdAt: 300,
+    budget: { maxSteps: 2, maxAttemptsPerStep: 1 },
+    policy: {
+      allowedDevices: ['device-B'],
+      allowedAgents: ['worker'],
+      requireCapabilities: ['fleet.task'],
+      maxParallel: 1,
+      allowSubcontract: false,
+    },
+    steps: [
+      { stepId: 'child-work', kind: 'task', intent: 'child-work', dependsOn: [], to: { device: 'device-B', agent: 'worker' }, acceptance: { kind: 'non-empty-result' } },
     ],
     ...overrides,
   };
@@ -178,5 +219,271 @@ describe('P2 daemon /app/plans', () => {
     const nodes = (await app.graph.listNodes({ type: 'task_plan' }))
       .filter((node) => node.content?.planId === concurrent.planId);
     expect(nodes).toHaveLength(1);
+  });
+
+  it('B2/B5：作者、createdBy、namespace、完整 DAG/MR/policy 校验', async () => {
+    const store = new fleet.DaemonTaskPlanStore({ endpoint: base, namespace: 'tasks' });
+
+    // createdBy：GET + daemon store 保留作者。
+    const listed = await request('/app/plans?namespace=tasks&planId=plan-daemon-001');
+    expect(listed.status).toBe(200);
+    expect(listed.body.nodes[0].createdBy).toBe('device-A');
+    expect((await store.listStored()).find((entry) => entry.plan.planId === 'plan-daemon-001'))
+      .toMatchObject({ createdBy: 'device-A' });
+
+    // B2：写入设备 ≠ owner.device。
+    const wrongOwner = plan({ planId: 'plan-daemon-author-mismatch-001', owner: { device: 'device-B', agent: 'worker' } });
+    const byOwner = await request('/app/plans', { method: 'POST', body: { plan: wrongOwner, namespace: 'tasks' } });
+    expect(byOwner.status).toBe(422);
+    expect(byOwner.body).toMatchObject({ ok: false, error: 'PLAN_POLICY' });
+    await expect(store.append(wrongOwner)).rejects.toMatchObject({ code: 'PLAN_POLICY' });
+    expect((await app.graph.listNodes({ type: 'task_plan' }))
+      .some((node) => node.content?.planId === wrongOwner.planId)).toBe(false);
+
+    // B5：namespace 只能是任务板 namespace。
+    const badNs = await request('/app/plans', {
+      method: 'POST',
+      body: { plan: plan({ planId: 'plan-daemon-bad-namespace-001' }), namespace: 'other' },
+    });
+    expect(badNs.status).toBe(400);
+    expect(badNs.body.error).toBe('namespace_invalid');
+    const badNsGet = await request('/app/plans?namespace=other');
+    expect(badNsGet.status).toBe(400);
+    expect(badNsGet.body.error).toBe('namespace_invalid');
+
+    // B5：非法 DAG / MR / sentinel 都必须走完整 validatePlan。
+    const cycle = plan({
+      planId: 'plan-daemon-bad-cycle-001',
+      steps: [
+        { stepId: 'a', kind: 'task', intent: 'a', dependsOn: ['b'], acceptance: { kind: 'non-empty-result' } },
+        { stepId: 'b', kind: 'task', intent: 'b', dependsOn: ['a'], acceptance: { kind: 'non-empty-result' } },
+        { stepId: 'gate', kind: 'reduce', intent: 'g', dependsOn: ['a'], join: { mode: 'all' }, acceptance: { kind: 'non-empty-result' } },
+        { stepId: 'mr', kind: 'mr', intent: 'm', dependsOn: ['gate'], acceptance: { kind: 'mr-once' } },
+      ],
+    });
+    const cycleReply = await request('/app/plans', { method: 'POST', body: { plan: cycle, namespace: 'tasks' } });
+    expect(cycleReply.status).toBe(422);
+    expect(cycleReply.body.error).toBe('PLAN_CYCLE');
+
+    const noMr = plan({
+      planId: 'plan-daemon-bad-mr-001',
+      steps: [
+        { stepId: 'work', kind: 'task', intent: 'w', dependsOn: [], to: { device: 'device-B', agent: 'worker' }, acceptance: { kind: 'non-empty-result' } },
+      ],
+    });
+    const noMrReply = await request('/app/plans', { method: 'POST', body: { plan: noMr, namespace: 'tasks' } });
+    expect(noMrReply.status).toBe(422);
+    expect(noMrReply.body.error).toBe('PLAN_MR');
+
+    const sentinel = plan({
+      planId: 'plan-daemon-bad-sentinel-001',
+      steps: [
+        { stepId: 'work', kind: 'task', intent: 'w', dependsOn: [], to: { device: '__plan__', agent: '__plan__' }, acceptance: { kind: 'non-empty-result' } },
+        { stepId: 'gate', kind: 'reduce', intent: 'g', dependsOn: ['work'], join: { mode: 'all' }, acceptance: { kind: 'non-empty-result' } },
+        { stepId: 'mr', kind: 'mr', intent: 'm', dependsOn: ['gate'], acceptance: { kind: 'mr-once' } },
+      ],
+    });
+    const sentinelReply = await request('/app/plans', { method: 'POST', body: { plan: sentinel, namespace: 'tasks' } });
+    expect(sentinelReply.status).toBe(422);
+    expect(sentinelReply.body.error).toBe('PLAN_SCHEMA');
+
+    // B5/B6：子 plan 父 task 缺失 → PLAN_STATE_INVALID；TaskBudget 不足 → PLAN_BUDGET；policy 放宽 → PLAN_POLICY。
+    const parent = parentPlan();
+    expect((await request('/app/plans', { method: 'POST', body: { plan: parent, namespace: 'tasks' } })).status).toBe(200);
+    const missingTaskChild = childPlan(parent.planId, { planId: 'plan-daemon-child-missing-task-001' });
+    const missingTaskReply = await request('/app/plans', { method: 'POST', body: { plan: missingTaskChild, namespace: 'tasks' } });
+    expect(missingTaskReply.status).toBe(409);
+    expect(missingTaskReply.body.error).toBe('PLAN_STATE_INVALID');
+
+    const tasks = new fleet.DaemonTaskEventStore({ endpoint: base, namespace: 'tasks' });
+    const parentStepTaskId = `${parent.planId}#1#work`;
+    expect(await tasks.append({
+      v: 1,
+      eventId: `${parentStepTaskId}#created`,
+      taskId: parentStepTaskId,
+      type: 'created',
+      actor: { device: 'device-A', agent: 'planner' },
+      at: 1,
+      toStatus: 'queued',
+      trace: { chain: [] },
+      to: { device: 'device-B', agent: 'worker' },
+      intent: 'parent-work',
+      budget: { maxDepth: 3, maxChildren: 2, maxTasks: 2 },
+    })).toBe(true);
+
+    const budgetChild = childPlan(parent.planId, { planId: 'plan-daemon-child-budget-001' });
+    const budgetReply = await request('/app/plans', { method: 'POST', body: { plan: budgetChild, namespace: 'tasks' } });
+    expect(budgetReply.status).toBe(422);
+    expect(budgetReply.body.error).toBe('PLAN_BUDGET');
+
+    const policyChild = childPlan(parent.planId, {
+      planId: 'plan-daemon-child-policy-001',
+      policy: { ...childPlan(parent.planId).policy, allowedDevices: ['device-C'] },
+    });
+    const policyReply = await request('/app/plans', { method: 'POST', body: { plan: policyChild, namespace: 'tasks' } });
+    expect(policyReply.status).toBe(422);
+    expect(policyReply.body.error).toBe('PLAN_POLICY');
+
+    const okChild = childPlan(parent.planId, {
+      planId: 'plan-daemon-child-ok-001',
+      budget: { maxSteps: 1, maxAttemptsPerStep: 1 },
+    });
+    const okReply = await request('/app/plans', { method: 'POST', body: { plan: okChild, namespace: 'tasks' } });
+    expect(okReply.status).toBe(200);
+    expect(okReply.body.plan.policy).toMatchObject({ allowedDevices: ['device-B'], maxParallel: 1 });
+  });
+
+  it('B4：daemon CLI 提交 plan → 同一 daemon materializer → task_status.plan', async () => {
+    const cliHome = await mkdtemp(join(tmpdir(), 'fleet-daemon-plans-cli-'));
+    await writeFile(join(cliHome, 'fleet.config.json'), JSON.stringify({
+      v: 1,
+      device: 'device-A',
+      dir: cliHome,
+      storagePath: join(cliHome, 'store.jsonl'),
+      masterKeyFile: join(cliHome, 'master-key.json'),
+      namespace: 'tasks',
+      listen: '/ip4/127.0.0.1/tcp/0',
+      peers: [],
+      agents: [{ name: 'worker', kind: 'echo' }],
+      store: 'daemon',
+      daemon: { endpoint: base },
+    }), { mode: 0o600 });
+    try {
+      const p = plan({ planId: 'plan-daemon-cli-001' });
+      const submitted = await fleet.toolByName('task_submit').handler(
+        { intent: 'daemon cli plan', to: { device: '__plan__', agent: '__plan__' }, plan: p },
+        { dir: cliHome, agent: 'planner' },
+      );
+      expect(submitted).toMatchObject({ ok: true, planId: p.planId, version: 1, rootTaskId: `${p.planId}#1#root` });
+      expect(existsSync(join(cliHome, 'store.jsonl'))).toBe(false);
+
+      const plans = new fleet.DaemonTaskPlanStore({ endpoint: base, namespace: 'tasks' });
+      const tasks = new fleet.DaemonTaskEventStore({ endpoint: base, namespace: 'tasks' });
+      const materializer = new fleet.PlanMaterializer({ device: 'device-A', agent: 'planner', plans, store: tasks });
+      const tick = await materializer.tick();
+      expect(tick.tasksCreated).toContain(`${p.planId}#1#work`);
+
+      const status = await fleet.toolByName('task_status').handler(
+        { taskId: `${p.planId}#1#root` },
+        { dir: cliHome, agent: 'planner' },
+      );
+      expect(status).toMatchObject({
+        ok: true,
+        state: { status: 'running' },
+        plan: {
+          planId: p.planId,
+          version: 1,
+          rootTaskId: `${p.planId}#1#root`,
+          mr: { submitted: false },
+        },
+      });
+      expect(status.plan.steps.find((step) => step.stepId === 'work')).toMatchObject({
+        status: 'dispatched',
+        taskId: `${p.planId}#1#work`,
+      });
+      expect(status.plan.mr).toEqual({ submitted: false });
+
+      const retryMissing = await fleet.toolByName('task_retry').handler(
+        { taskId: 'plan-not-synced#1#work' },
+        { dir: cliHome, agent: 'planner' },
+      );
+      expect(retryMissing).toMatchObject({ ok: false, error: 'PLAN_RETRY_REQUIRED' });
+    } finally {
+      await rm(cliHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  it('/app/plans 过滤 deletedAt；auth/read-only 负例', async () => {
+    const p = plan({ planId: 'plan-daemon-deleted-001' });
+    const created = await request('/app/plans', { method: 'POST', body: { plan: p, namespace: 'tasks' } });
+    expect(created.status).toBe(200);
+    const node = (await app.graph.listNodes({ type: 'task_plan' }))
+      .find((entry) => entry.content?.planId === p.planId);
+    expect(node).toBeTruthy();
+    await app.graph.updateNode(node.id, { deletedAt: Date.now() });
+    const listed = await request(`/app/plans?namespace=tasks&planId=${encodeURIComponent(p.planId)}`);
+    expect(listed.body.count).toBe(0);
+    expect((await new fleet.DaemonTaskPlanStore({ endpoint: base }).list())
+      .some((entry) => entry.planId === p.planId)).toBe(false);
+
+    // read-only：关闭写入后 POST 403，GET 仍可读。
+    const readonlyServer = await startHttpServer({
+      home,
+      app,
+      service,
+      config: { deviceId: 'device-A', sync: { namespaces: ['tasks', 'agents'] }, mcp: { http: { host: '127.0.0.1', port: 0, auth: 'none' } } },
+      buildServer: () => ({ connect: async () => undefined, close: async () => undefined }),
+      host: '127.0.0.1',
+      port: 0,
+      auth: 'none',
+      deviceId: 'device-A',
+      namespace: 'tasks',
+      writesEnabled: false,
+    });
+    try {
+      const readonlyBase = `http://127.0.0.1:${readonlyServer.port}`;
+      const write = await fetch(`${readonlyBase}/app/plans`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ plan: plan({ planId: 'plan-daemon-readonly-001' }), namespace: 'tasks' }),
+      });
+      expect(write.status).toBe(403);
+      expect((await write.json()).error).toBe('read_only');
+      const read = await fetch(`${readonlyBase}/app/plans?namespace=tasks`);
+      expect(read.status).toBe(200);
+    } finally {
+      await readonlyServer.close().catch(() => undefined);
+    }
+
+    // auth/token：无 token 401；memory.read-only 403；memory.write 可写；read token 可读。
+    const authHome = await mkdtemp(join(tmpdir(), 'fleet-daemon-plans-auth-'));
+    const tokensFile = join(authHome, 'tokens.json');
+    const readToken = 'plan-read-token';
+    const writeToken = 'plan-write-token';
+    await writeFile(tokensFile, JSON.stringify({
+      tokens: [
+        { id: 'read', sha256: hashToken(readToken), scope: ['memory.read'], revoked: false },
+        { id: 'write', sha256: hashToken(writeToken), scope: ['memory.write'], revoked: false },
+      ],
+    }));
+    const authServer = await startHttpServer({
+      home: authHome,
+      app,
+      service,
+      config: { deviceId: 'device-A', sync: { namespaces: ['tasks', 'agents'] }, mcp: { http: { host: '127.0.0.1', port: 0, auth: 'bearer' } } },
+      buildServer: () => ({ connect: async () => undefined, close: async () => undefined }),
+      host: '127.0.0.1',
+      port: 0,
+      auth: 'bearer',
+      tokensFile,
+      deviceId: 'device-A',
+      namespace: 'tasks',
+      writesEnabled: true,
+    });
+    try {
+      const authBase = `http://127.0.0.1:${authServer.port}`;
+      const payload = JSON.stringify({ plan: plan({ planId: 'plan-daemon-auth-001' }), namespace: 'tasks' });
+      const noAuth = await fetch(`${authBase}/app/plans`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: payload });
+      expect(noAuth.status).toBe(401);
+      const readOnly = await fetch(`${authBase}/app/plans`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${readToken}` },
+        body: payload,
+      });
+      expect(readOnly.status).toBe(403);
+      const writeOk = await fetch(`${authBase}/app/plans`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${writeToken}` },
+        body: payload,
+      });
+      expect(writeOk.status).toBe(200);
+      const readOk = await fetch(`${authBase}/app/plans?namespace=tasks`, {
+        headers: { authorization: `Bearer ${readToken}` },
+      });
+      expect(readOk.status).toBe(200);
+    } finally {
+      await authServer.close().catch(() => undefined);
+      await rm(authHome, { recursive: true, force: true });
+    }
   });
 });

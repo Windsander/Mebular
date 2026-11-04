@@ -4238,6 +4238,7 @@ export async function startHttpServer({
         // 不开放 task_plan 到 /app/nodes，也不新增公共 MCP 方法/UI。
         if (path === '/app/plans' && req.method === 'POST') {
           if (!app) return sendJson(res, 503, { ok: false, error: 'plans_unavailable', message: '图存储尚未初始化' });
+          if (!writesEnabled) return sendJson(res, 403, { ok: false, error: 'read_only', message: '写能力已关闭' });
           let payload;
           try {
             payload = JSON.parse(body.toString('utf-8') || '{}');
@@ -4248,31 +4249,40 @@ export async function startHttpServer({
             return sendJson(res, 400, { ok: false, error: 'plan body 必须为对象' });
           }
           const lib = await loadFleetPlans();
-          if (!lib || typeof lib.appendTaskPlanNode !== 'function') {
+          if (!lib || typeof lib.appendValidatedTaskPlanNode !== 'function') {
             return sendJson(res, 503, { ok: false, error: 'plans_unavailable', message: 'plan 模块不可用' });
           }
-          const namespace = typeof payload.namespace === 'string' && payload.namespace.length > 0
+          const fleetNamespace = await resolveFleetNamespace({ home, fallback: namespace });
+          const requestedNamespace = typeof payload.namespace === 'string' && payload.namespace.length > 0
             ? payload.namespace
-            : 'tasks';
+            : fleetNamespace;
+          if (requestedNamespace !== fleetNamespace) {
+            return sendJson(res, 400, {
+              ok: false,
+              error: 'namespace_invalid',
+              message: `plan 只能写入任务板 namespace：${fleetNamespace}`,
+            });
+          }
           const planInput = payload.plan !== undefined ? payload.plan : payload.content;
           try {
-            const result = await lib.appendTaskPlanNode(app, planInput, { namespace });
+            const result = await lib.appendValidatedTaskPlanNode(app, planInput, { namespace: fleetNamespace });
             return sendJson(res, 200, {
               ok: true,
               plan: result.plan,
               nodeId: result.nodeId,
+              createdBy: result.createdBy,
               replayed: result.replayed === true,
             });
           } catch (error) {
             const code = typeof error?.code === 'string' ? error.code : null;
-            const status = code === 'PLAN_CONFLICT' ? 409
-              : code === 'PLAN_VERSION' ? 409
-                : code === 'PLAN_SCHEMA' || code === 'PLAN_BUDGET' || code === 'PLAN_POLICY'
-                  || code === 'PLAN_JOIN' || code === 'PLAN_MR' || code === 'PLAN_ACCEPTANCE'
-                  || code === 'PLAN_REUSE' || code === 'PLAN_DUP_STEP' || code === 'PLAN_MISSING_DEP'
-                  || code === 'PLAN_CYCLE'
-                  ? 422
-                  : 500;
+            const status = code === 'PLAN_CONFLICT' || code === 'PLAN_VERSION' || code === 'PLAN_STATE_INVALID'
+              ? 409
+              : code === 'PLAN_SCHEMA' || code === 'PLAN_BUDGET' || code === 'PLAN_POLICY'
+                || code === 'PLAN_JOIN' || code === 'PLAN_MR' || code === 'PLAN_ACCEPTANCE'
+                || code === 'PLAN_REUSE' || code === 'PLAN_DUP_STEP' || code === 'PLAN_MISSING_DEP'
+                || code === 'PLAN_CYCLE'
+                ? 422
+                : 500;
             return sendJson(res, status, {
               ok: false,
               ...(code !== null ? { error: code } : { error: 'plan_write_failed' }),
@@ -4286,10 +4296,18 @@ export async function startHttpServer({
           if (!lib || typeof lib.listTaskPlanNodes !== 'function') {
             return sendJson(res, 503, { ok: false, error: 'plans_unavailable', message: 'plan 模块不可用' });
           }
-          const namespace = url.searchParams.get('namespace') || 'tasks';
+          const fleetNamespace = await resolveFleetNamespace({ home, fallback: namespace });
+          const requestedNamespace = url.searchParams.get('namespace');
+          if (requestedNamespace !== null && requestedNamespace.length > 0 && requestedNamespace !== fleetNamespace) {
+            return sendJson(res, 400, {
+              ok: false,
+              error: 'namespace_invalid',
+              message: `plan 只能读取任务板 namespace：${fleetNamespace}`,
+            });
+          }
           const planId = url.searchParams.get('planId');
           const version = Number(url.searchParams.get('version') ?? '0');
-          let nodes = await lib.listTaskPlanNodes(app, { namespace });
+          let nodes = await lib.listTaskPlanNodes(app, { namespace: fleetNamespace });
           if (planId) nodes = nodes.filter((entry) => entry.plan.planId === planId);
           if (Number.isInteger(version) && version > 0) nodes = nodes.filter((entry) => entry.plan.version === version);
           return sendJson(res, 200, {
@@ -4299,7 +4317,8 @@ export async function startHttpServer({
             nodes: nodes.map((entry) => ({
               id: entry.nodeId,
               type: 'task_plan',
-              namespace,
+              namespace: fleetNamespace,
+              createdBy: entry.createdBy,
               content: entry.plan,
               metadata: {
                 internal: true,

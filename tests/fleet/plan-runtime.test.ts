@@ -23,8 +23,10 @@ import {
   reduceTaskEvents,
   submitTaskPlan,
   toolByName,
+  type PlanAppendResult,
   type TaskEvent,
   type TaskPlan,
+  type TaskPlanWriteStore,
   type TaskState,
   type ToolContext,
 } from '../../packages/fleet/src/index.js';
@@ -122,16 +124,33 @@ describe('P2 task_submit.plan + materializer', () => {
     const replay = await submit(plan({ createdAt: 999 }));
     expect(replay).toMatchObject({ ok: true, deduped: true, rootTaskId: planRootTaskId(p.planId, 1) });
 
+    // B1：同一 device、不同 agent 不能提交/重放。
+    const wrongAgent = await submit(plan({ createdAt: 1000 }), { agent: 'other' });
+    expect(wrongAgent).toMatchObject({ ok: false, error: 'PLAN_POLICY' });
+
     const conflict = await submit(plan({ goal: 'different' }));
     expect(conflict).toMatchObject({ ok: false, error: 'PLAN_CONFLICT' });
 
     const live = await openApp();
-    const plans = await new MebularTaskPlanStore(live).list();
+    const planStore = new MebularTaskPlanStore(live);
+    const plans = await planStore.list();
     expect(plans).toHaveLength(1);
+    expect((await planStore.listStored())[0]).toMatchObject({ createdBy: 'device-A' });
+
+    // B2：写入设备 ≠ owner.device 拒绝；作者不匹配的节点不进入 list。
+    await expect(planStore.append(plan({ planId: 'plan-author-mismatch-001', owner: B })))
+      .rejects.toMatchObject({ code: 'PLAN_POLICY' });
     expect(plans[0]!.steps[0]!.kind).toBe('task');
     const nodes = await live.graph.listNodes({ type: 'task_plan' });
     expect(nodes).toHaveLength(1);
     expect(nodes[0]!.metadata).toMatchObject({ internal: true, internalObject: { kind: 'task_plan' } });
+
+    const forged = plan({ planId: 'plan-forged-author-001', owner: B });
+    await live.graph.createNode('task_plan', forged as unknown as Record<string, unknown>, [], {
+      namespace: 'tasks',
+      metadata: { internal: true, internalObject: { kind: 'task_plan' } },
+    });
+    expect((await planStore.list()).some((entry) => entry.planId === forged.planId)).toBe(false);
 
     const store = new MebularTaskEventStore(live);
     const rootEvents = await store.byTask(planRootTaskId(p.planId, 1));
@@ -243,7 +262,15 @@ describe('P2 task_submit.plan + materializer', () => {
 
     // PLAN_RETRY_REQUIRED：root/step/MR 都不创建新任务；普通 task 旧 retry 不变。
     const before = (await store.all()).length;
-    for (const taskId of [rootId, workId, planTaskId(p.planId, 1, 'mr')]) {
+    for (const taskId of [
+      rootId,
+      workId,
+      planTaskId(p.planId, 1, 'mr'),
+      // B3：plan 节点未同步/不存在也必须 fail closed。
+      'plan-missing#1#root',
+      'plan-missing#1#work',
+      'plan-missing#1#mr',
+    ]) {
       const retry = await toolByName('task_retry')!.handler({ taskId }, ctx({ mebular: live })) as Record<string, unknown>;
       expect(retry).toMatchObject({ ok: false, taskId, error: 'PLAN_RETRY_REQUIRED' });
     }
@@ -305,6 +332,65 @@ describe('P2 task_submit.plan + materializer', () => {
     expect(progress.steps.find((step) => step.stepId === 'collect')).toMatchObject({ status: 'blocked', blockedBy: ['NO_TARGET'] });
   });
 
+  it('B6：父 step task 未物化时拒绝 sub-plan，不写 plan/root', async () => {
+    const parent = plan({
+      planId: 'plan-parent-missing-task-001',
+      policy: {
+        allowedDevices: ['device-B'],
+        allowedAgents: ['worker'],
+        requireCapabilities: ['fleet.task'],
+        maxParallel: 2,
+        allowSubcontract: true,
+      },
+      steps: [
+        { stepId: 'delegate', kind: 'task', intent: 'delegate', dependsOn: [], to: B, acceptance: { kind: 'non-empty-result' } },
+        { stepId: 'gate', kind: 'reduce', intent: 'gate', dependsOn: ['delegate'], join: { mode: 'all' }, acceptance: { kind: 'non-empty-result' } },
+        { stepId: 'mr', kind: 'mr', intent: 'mr', dependsOn: ['gate'], acceptance: { kind: 'mr-once' } },
+      ],
+    });
+    expect((await submit(parent)).ok).toBe(true);
+    const live = await openApp();
+    const store = new MebularTaskEventStore(live);
+    const plans = new MebularTaskPlanStore(live);
+    expect(await store.byTask(planTaskId(parent.planId, 1, 'delegate'))).toHaveLength(0);
+    const child: TaskPlan = {
+      v: 1,
+      kind: 'task_plan',
+      planId: 'plan-child-missing-parent-task-001',
+      version: 1,
+      parent: { planId: parent.planId, version: 1, stepId: 'delegate' },
+      owner: A,
+      goal: 'child',
+      createdAt: 200,
+      budget: { maxSteps: 2, maxAttemptsPerStep: 1 },
+      policy: {
+        allowedDevices: ['device-B'],
+        allowedAgents: ['worker'],
+        requireCapabilities: ['fleet.task'],
+        maxParallel: 1,
+        allowSubcontract: false,
+      },
+      steps: [{ stepId: 'work', kind: 'task', intent: 'child-work', dependsOn: [], to: B, acceptance: { kind: 'non-empty-result' } }],
+    };
+    const denied = await submitTaskPlan({ plan: child, intent: 'submit child', to: SENTINEL, caller: A, plans, store });
+    expect(denied).toMatchObject({ ok: false, error: 'PLAN_STATE_INVALID', created: [] });
+    expect((await plans.list()).map((entry) => entry.planId)).toEqual([parent.planId]);
+    expect(await store.byTask(planRootTaskId(child.planId, 1))).toHaveLength(0);
+
+    // materializer 也不得为缺失父 task 的 sub-plan 创建 root/plan task。
+    const orphanPlans: TaskPlan[] = [parent, child];
+    const readOnlyPlans: TaskPlanWriteStore = {
+      async list() { return [...orphanPlans]; },
+      async get(planId, version) { return orphanPlans.find((entry) => entry.planId === planId && entry.version === version) ?? null; },
+      async append() { throw new Error('read-only'); },
+      async close() {},
+    };
+    const materializer = new PlanMaterializer({ device: 'device-A', agent: 'planner', plans: readOnlyPlans, store });
+    const tick = await materializer.tick();
+    expect(tick.invalid.some((entry) => entry.planId === child.planId && entry.code === 'PLAN_STATE_INVALID')).toBe(true);
+    expect(await store.byTask(planRootTaskId(child.planId, 1))).toHaveLength(0);
+  });
+
   it('sub-plan：owner=提交者、policy 衰减、root/step 由父 step task 派生', async () => {
     const parent = plan({
       planId: 'plan-parent-runtime-001',
@@ -351,12 +437,26 @@ describe('P2 task_submit.plan + materializer', () => {
         { stepId: 'work', kind: 'task', intent: 'child-work', dependsOn: [], to: B, acceptance: { kind: 'non-empty-result' } },
       ],
     };
+    // 用内存 plan store 模拟 B 设备（作者为 B）；父 plan 从 A 同步而来。
+    const childPlans: TaskPlan[] = await plans.list();
+    const childPlanStore: TaskPlanWriteStore = {
+      async list() { return [...childPlans]; },
+      async get(planId, version) { return childPlans.find((entry) => entry.planId === planId && entry.version === version) ?? null; },
+      async append(input): Promise<PlanAppendResult> {
+        const plan = input as TaskPlan;
+        const existing = childPlans.find((entry) => entry.planId === plan.planId && entry.version === plan.version);
+        if (existing !== undefined) return { stored: false, replayed: true, plan: existing, nodeId: 'mem', createdBy: existing.owner.device };
+        childPlans.push(plan);
+        return { stored: true, replayed: false, plan, nodeId: `mem-${childPlans.length}`, createdBy: plan.owner.device };
+      },
+      async close() {},
+    };
     const submitted = await submitTaskPlan({
       plan: child,
       intent: 'submit child',
       to: SENTINEL,
       caller: B,
-      plans,
+      plans: childPlanStore,
       store,
     });
     expect(submitted).toMatchObject({ ok: true, planId: child.planId, version: 1 });
@@ -364,14 +464,14 @@ describe('P2 task_submit.plan + materializer', () => {
     const childRoot = reduceTaskEvents(await store.byTask(childRootId));
     expect(childRoot?.trace).toEqual({ causedBy: delegateTaskId, chain: [delegateTaskId] });
 
-    const childMaterializer = new PlanMaterializer({ device: 'device-B', agent: 'worker', plans, store });
+    const childMaterializer = new PlanMaterializer({ device: 'device-B', agent: 'worker', plans: childPlanStore, store });
     const childTick = await childMaterializer.tick();
     expect(childTick.tasksCreated).toEqual([planTaskId(child.planId, 1, 'work')]);
     const childWork = reduceTaskEvents(await store.byTask(planTaskId(child.planId, 1, 'work')));
     expect(childWork?.trace).toEqual({ causedBy: delegateTaskId, chain: [delegateTaskId] });
 
     const widened = { ...child, planId: 'plan-child-runtime-002', owner: B, policy: { ...child.policy, allowedDevices: ['device-D'] } };
-    const denied = await submitTaskPlan({ plan: widened, intent: 'bad child', to: SENTINEL, caller: B, plans, store });
+    const denied = await submitTaskPlan({ plan: widened, intent: 'bad child', to: SENTINEL, caller: B, plans: childPlanStore, store });
     expect(denied).toMatchObject({ ok: false, error: 'PLAN_POLICY' });
   });
 

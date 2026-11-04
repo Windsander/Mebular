@@ -10,7 +10,9 @@ import {
 } from './config.js';
 import { declareNamespace, offlineMebularOptions, subscribeNamespace } from './onboard.js';
 import { MebularTaskEventStore } from './store/mebular-store.js';
-import { MebularTaskPlanStore } from './store/plan-store.js';
+import { DaemonTaskEventStore } from './store/daemon-store.js';
+import { DaemonTaskPlanStore, MebularTaskPlanStore, type TaskPlanWriteStore } from './store/plan-store.js';
+import type { TaskEventStore } from './store/file-store.js';
 import { negotiationMessageStore, type NegotiationMessage } from './collab/negotiation.js';
 import { chatterMessageStore, FleetChatter } from './collab/chatter.js';
 import { FleetNode } from './runtime/node.js';
@@ -60,8 +62,10 @@ export interface TaskTool {
 }
 
 interface Session {
-  mebular: Mebular;
-  store: MebularTaskEventStore;
+  /** daemon CLI（无 live app）时可为 null；plan/task 走 daemon store。 */
+  mebular: Mebular | null;
+  store: TaskEventStore;
+  planStore: TaskPlanWriteStore;
   node: FleetNode;
   device: string;
   agent: string;
@@ -75,18 +79,36 @@ async function openSession(ctx: ToolContext): Promise<Session> {
   const namespace = ctx.namespace ?? config.namespace;
   const agent = ctx.agent ?? 'board';
   const live = ctx.mebular;
-  let mebular: Mebular;
-  if (live !== undefined) {
-    // 运行中 daemon：复用 live app（同一实例 / 同一 EventLog）——写入即本地 append，推送与 SSE 正常。
-    mebular = live;
-  } else {
+  const useDaemon = live === undefined && config.store === 'daemon';
+  let mebular: Mebular | null = live ?? null;
+  if (!useDaemon && live === undefined) {
     const encryption = await readMasterKeyFile(config.masterKeyFile);
     mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
     await mebular.initialize();
   }
-  const ownsMebular = live === undefined;
+  const ownsMebular = live === undefined && mebular !== null;
   const device = live?.deviceId ?? config.device;
-  const store = new MebularTaskEventStore(mebular, { namespace });
+
+  let store: TaskEventStore;
+  let planStore: TaskPlanWriteStore;
+  if (useDaemon) {
+    if (config.daemon?.endpoint === undefined) {
+      throw new Error('daemon 模式需要 config.daemon.endpoint');
+    }
+    const options = {
+      endpoint: config.daemon.endpoint,
+      namespace,
+      ...(config.daemon.token !== undefined ? { token: config.daemon.token } : {}),
+      ...(config.daemon.tokenFile !== undefined ? { tokenFile: config.daemon.tokenFile } : {}),
+    };
+    store = new DaemonTaskEventStore(options);
+    planStore = new DaemonTaskPlanStore(options);
+  } else {
+    if (mebular === null) throw new Error('embedded 模式缺少本地 Mebular');
+    store = new MebularTaskEventStore(mebular, { namespace });
+    planStore = new MebularTaskPlanStore(mebular, { namespace });
+  }
+
   const node = new FleetNode({
     device,
     agent,
@@ -97,15 +119,26 @@ async function openSession(ctx: ToolContext): Promise<Session> {
   return {
     mebular,
     store,
+    planStore,
     node,
     device,
     agent,
     namespace,
     close: async () => {
       // live app 的生命周期归 daemon（MCP serve）所有：工具调用只结束会话，不关闭它。
-      if (ownsMebular) await mebular.shutdown();
+      if (ownsMebular) await mebular!.shutdown();
+      await planStore.close?.();
+      await store.close();
     },
   };
+}
+
+/** 仅 daemon CLI 无 live app 时为 null；需要本地图的能力必须显式失败，不能私自打开离线写者。 */
+function requireMebular(session: Session): Mebular {
+  if (session.mebular === null) {
+    throw new Error('daemon 模式无本地 Mebular：该工具需要 MCP 守护会话（live app）');
+  }
+  return session.mebular;
 }
 
 function strInput(input: Record<string, unknown>, key: string): string | undefined {
@@ -118,7 +151,7 @@ function requiredString(input: Record<string, unknown>, key: string): string {
   return v;
 }
 
-async function statesOf(store: MebularTaskEventStore): Promise<TaskState[]> {
+async function statesOf(store: TaskEventStore): Promise<TaskState[]> {
   const byTask = new Map<string, TaskEvent[]>();
   for (const e of await store.all()) {
     const list = byTask.get(e.taskId);
@@ -128,8 +161,8 @@ async function statesOf(store: MebularTaskEventStore): Promise<TaskState[]> {
   return [...byTask.keys()].sort().map((id) => reduceTaskEvents(byTask.get(id)!)).filter((s): s is TaskState => s !== null);
 }
 
-function planStoreOf(session: Session): MebularTaskPlanStore {
-  return new MebularTaskPlanStore(session.mebular, { namespace: session.namespace });
+function planStoreOf(session: Session): TaskPlanWriteStore {
+  return session.planStore;
 }
 
 /**
@@ -301,20 +334,17 @@ export const TASK_TOOLS: TaskTool[] = [
       const session = await openSession(ctx);
       try {
         const taskId = requiredString(input, 'taskId');
+        // B3：plan-shaped root/step/MR 一律 fail closed；不依赖 plan 节点是否已同步。
         const parsed = parsePlanTaskId(taskId);
         if (parsed !== null) {
-          const plan = await planStoreOf(session).get(parsed.planId, parsed.version);
-          const owned = plan !== null && (parsed.root || plan.steps.some((step) => step.stepId === parsed.stepId));
-          if (owned) {
-            return {
-              ok: false,
-              taskId,
-              error: 'PLAN_RETRY_REQUIRED',
-              planId: parsed.planId,
-              version: parsed.version,
-              ...(!parsed.root && parsed.stepId !== null ? { stepId: parsed.stepId } : {}),
-            };
-          }
+          return {
+            ok: false,
+            taskId,
+            error: 'PLAN_RETRY_REQUIRED',
+            planId: parsed.planId,
+            version: parsed.version,
+            ...(!parsed.root && parsed.stepId !== null ? { stepId: parsed.stepId } : {}),
+          };
         }
         const state = reduceTaskEvents(await session.store.byTask(taskId));
         if (state === null) throw new Error(`任务不存在：${taskId}`);
@@ -453,7 +483,7 @@ export const TASK_TOOLS: TaskTool[] = [
         if (!['clarify', 'counter', 'accept', 'reject'].includes(kind)) throw new Error('kind 非法');
         const round = Number(input.round);
         if (!Number.isInteger(round) || round < 0) throw new Error('round 必须为非负整数');
-        const store = negotiationMessageStore(session.mebular, session.namespace);
+        const store = negotiationMessageStore(requireMebular(session), session.namespace);
         const message: NegotiationMessage = {
           v: 1,
           messageId: `${taskId}#neg#${round}@${session.device}`,
@@ -480,7 +510,7 @@ export const TASK_TOOLS: TaskTool[] = [
       const session = await openSession(ctx);
       try {
         const quota = new LocalQuota({ limitPerDevice: 1000 });
-        const chatter = new FleetChatter({ device: session.device, quota, store: chatterMessageStore(session.mebular, session.namespace) });
+        const chatter = new FleetChatter({ device: session.device, quota, store: chatterMessageStore(requireMebular(session), session.namespace) });
         const messageId = strInput(input, 'messageId') ?? `${session.device}-${Date.now().toString(36)}`;
         const decision = await chatter.send({
           v: 1,
@@ -504,7 +534,7 @@ export const TASK_TOOLS: TaskTool[] = [
     handler: async (_input, ctx) => {
       const session = await openSession(ctx);
       try {
-        const chatter = new FleetChatter({ device: session.device, quota: new LocalQuota({ limitPerDevice: 1000 }), store: chatterMessageStore(session.mebular, session.namespace) });
+        const chatter = new FleetChatter({ device: session.device, quota: new LocalQuota({ limitPerDevice: 1000 }), store: chatterMessageStore(requireMebular(session), session.namespace) });
         const inbox = await chatter.inbox();
         return { ok: true, count: inbox.length, messages: inbox };
       } finally {
@@ -532,17 +562,18 @@ export const TASK_TOOLS: TaskTool[] = [
     handler: async (_input, ctx) => {
       const session = await openSession(ctx);
       try {
+        const mebular = requireMebular(session);
         const config = await loadToolConfig(ctx.dir);
         const subscribed: string[] = [];
         for (const peer of config.peers) {
-          const namespaces = await session.mebular.getSubscriptions(peer.device);
+          const namespaces = await mebular.getSubscriptions(peer.device);
           if (namespaces.includes(session.namespace)) subscribed.push(peer.device);
         }
-        const entries = await agentDirectoryStore(session.mebular, 'agents').all();
+        const entries = await agentDirectoryStore(mebular, 'agents').all();
         const targets = expandTargets(entries, subscribed);
         let cards: ReturnType<typeof summarizeCapabilityCards> = [];
         try {
-          const cardEntries = await listCapabilityCards(session.mebular, 'agents');
+          const cardEntries = await listCapabilityCards(mebular, 'agents');
           const states = await statesOf(session.store);
           const inflight = new Map<string, number>();
           for (const state of states) {
@@ -554,7 +585,7 @@ export const TASK_TOOLS: TaskTool[] = [
           cards = summarizeCapabilityCards(cardEntries, {
             devices: subscribed,
             online: (device) => {
-              const withPath = session.mebular as { getPeerPath?: (key: string) => unknown };
+              const withPath = mebular as { getPeerPath?: (key: string) => unknown };
               return typeof withPath.getPeerPath === 'function' ? withPath.getPeerPath(device) !== null : false;
             },
             inflight: (device, agent) => inflight.get(`${device}\u0000${agent}`) ?? 0,

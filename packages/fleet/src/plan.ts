@@ -5,7 +5,7 @@
 // - 本模块不读写存储、不依赖墙钟；materializer 与 `task_status` 共用同一套派生逻辑。
 // - 本期只实现 `join.mode="all"`（CR-001）；route/join/MR 执行属 P3/P4，这里只做校验与进度。
 
-import type { FleetEndpoint, TaskBudget } from './protocol/envelope.js';
+import { PLAN_SENTINEL, type FleetEndpoint, type TaskBudget } from './protocol/envelope.js';
 import type { TaskState } from './model.js';
 
 export const TASK_PLAN_KIND = 'task_plan' as const;
@@ -98,9 +98,9 @@ export interface PlanValidationContext {
   existingVersions?: readonly TaskPlan[];
   /** 子 plan 的父 plan（已定位到 parent.version）。 */
   parentPlan?: TaskPlan;
-  /** 父 step task 的有效 TaskBudget（P0 §7.5；缺失时由运行时 treeViolations 兜底）。 */
+  /** 父 step task 的有效 TaskBudget；子 plan 必须存在真实父 step task。 */
   parentStepBudget?: TaskBudget;
-  /** 提交者（owner 必须等于调用设备/Agent；本期 MCP 只强制 device）。 */
+  /** 提交者；plan.owner 必须同时等于调用 device 与 agent。 */
   caller?: FleetEndpoint;
   /** 任务权威状态（用于 reuse 的旧结果校验；undefined = 跳过运行时存在性检查）。 */
   taskStates?: readonly TaskState[];
@@ -241,6 +241,8 @@ function normalizeStep(input: unknown): PlanStep | null {
   if (dependsOn === null) return null;
   const to = input.to === undefined ? undefined : input.to;
   if (to !== undefined && !isEndpoint(to)) return null;
+  if (to !== undefined && isEndpoint(to)
+    && (to.device === PLAN_SENTINEL || to.agent === PLAN_SENTINEL)) return null;
   const route = input.route === undefined ? undefined : normalizeRoute(input.route);
   if (input.route !== undefined && route === null) return null;
   const acceptance = normalizeAcceptance(input.acceptance);
@@ -316,6 +318,9 @@ export function validatePlanShape(input: unknown): PlanValidationResult {
       if (isRecord(raw)) {
         const rawId = raw.stepId;
         if (rawId === 'root') return failure('PLAN_SCHEMA', 'stepId 不得为保留字 root');
+        if (isEndpoint(raw.to) && (raw.to.device === PLAN_SENTINEL || raw.to.agent === PLAN_SENTINEL)) {
+          return failure('PLAN_SCHEMA', `step to 不得使用保留 sentinel：${String(raw.stepId)}`);
+        }
         if (nonEmptyString(rawId) && !PLAN_STEP_ID_PATTERN.test(rawId)) return failure('PLAN_DUP_STEP', `stepId 非法：${rawId}`);
         if (isRecord(raw.join) && raw.join.mode !== 'all') return failure('PLAN_JOIN', `join.mode 本期只允许 all：${String(raw.stepId)}`);
         if (raw.acceptance !== undefined && normalizeAcceptance(raw.acceptance) === null) {
@@ -505,8 +510,9 @@ function normalizePolicyForReplay(plan: TaskPlan, context: PlanValidationContext
 
 function validateParent(plan: TaskPlan, context: PlanValidationContext): PlanValidationResult | null {
   if (plan.parent === undefined) return null;
-  if (context.caller !== undefined && plan.owner.device !== context.caller.device) {
-    return failure('PLAN_POLICY', 'plan owner 必须是提交设备');
+  if (context.caller !== undefined
+    && (plan.owner.device !== context.caller.device || plan.owner.agent !== context.caller.agent)) {
+    return failure('PLAN_POLICY', 'plan owner 必须同时等于提交设备与 Agent');
   }
   const parent = context.parentPlan;
   if (parent === undefined) return failure('PLAN_POLICY', 'parent plan 不存在');
@@ -524,14 +530,15 @@ function validateParent(plan: TaskPlan, context: PlanValidationContext): PlanVal
   if (plan.budget.maxSteps > parent.budget.maxSteps) {
     return failure('PLAN_BUDGET', '子 plan budget.maxSteps 不得大于父 plan');
   }
-  if (context.parentStepBudget !== undefined) {
-    const required = plan.budget.maxSteps + 1;
-    if (context.parentStepBudget.maxTasks < required) {
-      return failure('PLAN_BUDGET', `父 step task 剩余 maxTasks 不足（${context.parentStepBudget.maxTasks} < ${required}）`);
-    }
-    if (context.parentStepBudget.maxChildren < required) {
-      return failure('PLAN_BUDGET', `父 step task 剩余 maxChildren 不足（${context.parentStepBudget.maxChildren} < ${required}）`);
-    }
+  if (context.parentStepBudget === undefined) {
+    return failure('PLAN_STATE_INVALID', '父 step task 不存在或尚未物化');
+  }
+  const required = plan.budget.maxSteps + 1;
+  if (context.parentStepBudget.maxTasks < required) {
+    return failure('PLAN_BUDGET', `父 step task 剩余 maxTasks 不足（${context.parentStepBudget.maxTasks} < ${required}）`);
+  }
+  if (context.parentStepBudget.maxChildren < required) {
+    return failure('PLAN_BUDGET', `父 step task 剩余 maxChildren 不足（${context.parentStepBudget.maxChildren} < ${required}）`);
   }
   return null;
 }
@@ -584,9 +591,10 @@ export function validatePlan(input: unknown, context: PlanValidationContext = {}
   if (!shape.ok) return shape;
   const plan = shape.plan;
 
-  // owner=提交设备：必须先于幂等返回，避免别的设备重放同一 plan。
-  if (context.caller !== undefined && plan.owner.device !== context.caller.device) {
-    return failure('PLAN_POLICY', 'plan owner 必须是提交设备');
+  // owner=提交者（device+agent）：必须先于幂等返回，避免别的设备/Agent 重放同一 plan。
+  if (context.caller !== undefined
+    && (plan.owner.device !== context.caller.device || plan.owner.agent !== context.caller.agent)) {
+    return failure('PLAN_POLICY', 'plan owner 必须同时等于提交设备与 Agent');
   }
 
   const existing = context.existingVersions ?? [];
@@ -990,14 +998,17 @@ export function derivePlanProgress(
   const anyFailed = derived.some((entry) => entry.failed);
   const anyDispatched = derived.some((entry) => entry.status === 'dispatched');
   const anyBlocked = derived.some((entry) => entry.status === 'blocked');
+  const hasStepTask = plan.steps.some((step) => byId.has(planTaskId(plan.planId, plan.version, step.stepId)));
   const mrTaskSubmitted = versions.some((version) => {
-    const mrTaskId = planTaskId(plan.planId, version.version, 'mr');
-    return byId.has(mrTaskId);
+    const mrStep = version.steps.find((step) => step.kind === 'mr');
+    return mrStep !== undefined && byId.has(planTaskId(plan.planId, version.version, mrStep.stepId));
   });
   const mr = plan.parent === undefined
     ? { submitted: mrTaskSubmitted }
     : { applicable: false as const, submitted: false };
 
+  // 优先级固定：cancelled/failed > done > planned（root 仍 queued 且无 step task）
+  // > blocked（root 已推进但有 ready step 被阻塞）> running。
   let status: PlanProgressStatus;
   if (root?.status === 'failed' && root.reason === 'CANCELLED') {
     status = 'cancelled';
@@ -1008,7 +1019,7 @@ export function derivePlanProgress(
     const mrStep = derived.find((entry) => entry.step.kind === 'mr');
     if (root?.status === 'done' && mrStep?.complete === true) status = 'done';
     else if (root === undefined) status = 'planned';
-    else if (root.status === 'queued' && !anyDispatched && derived.every((entry) => entry.status === 'pending' || entry.status === 'blocked')) status = 'planned';
+    else if (root.status === 'queued' && !hasStepTask) status = 'planned';
     else if (anyBlocked && !anyDispatched) status = 'blocked';
     else status = 'running';
   } else {
@@ -1017,7 +1028,7 @@ export function derivePlanProgress(
     const sink = sinks.length === 1 ? derived.find((entry) => entry.step.stepId === sinks[0]!.stepId) : undefined;
     if (root?.status === 'done' && sink?.complete === true) status = 'done';
     else if (root === undefined) status = 'planned';
-    else if (root.status === 'queued' && !anyDispatched) status = 'planned';
+    else if (root.status === 'queued' && !hasStepTask) status = 'planned';
     else if (anyBlocked && !anyDispatched) status = 'blocked';
     else status = 'running';
   }

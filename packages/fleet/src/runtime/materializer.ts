@@ -15,6 +15,7 @@ import type { TaskEventStore } from '../store/file-store.js';
 import type { TaskPlanStore } from '../store/plan-store.js';
 import { admitCreated, effectiveBudget } from '../collab/tree.js';
 import {
+  PlanValidationError,
   planRootTaskId,
   planTaskId,
   validatePlan,
@@ -73,7 +74,10 @@ function derivedTrace(plan: TaskPlan, states: ReadonlyMap<string, TaskState>): {
   if (plan.parent === undefined) return { chain: [] };
   const parentTaskId = planTaskId(plan.parent.planId, plan.parent.version, plan.parent.stepId);
   const parent = states.get(parentTaskId);
-  if (parent === undefined) return { causedBy: parentTaskId, chain: [parentTaskId] };
+  if (parent === undefined) {
+    // B6：sub-plan 的 root/step 必须从真实父 step task 派生，不得伪造只含父 id 的 chain。
+    throw new PlanValidationError('PLAN_STATE_INVALID', [`父 step task 不存在或尚未物化：${parentTaskId}`]);
+  }
   return { causedBy: parentTaskId, chain: [...parent.trace.chain, parentTaskId] };
 }
 
@@ -230,7 +234,16 @@ export class PlanMaterializer {
       }
       const plan = validation.plan;
 
-      const root = await ensurePlanRootTask(plan, this.store, this.endpoint);
+      let root: PlannedRootResult;
+      try {
+        root = await ensurePlanRootTask(plan, this.store, this.endpoint);
+      } catch (error) {
+        if (error instanceof PlanValidationError) {
+          result.invalid.push({ planId: plan.planId, version: plan.version, code: error.code });
+          continue;
+        }
+        throw error;
+      }
       if (root.created) result.rootsCreated += 1;
       states = await statesOf(this.store);
       let rootState = states.find((state) => state.taskId === planRootTaskId(plan.planId, plan.version));

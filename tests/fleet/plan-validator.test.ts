@@ -9,7 +9,9 @@ import {
   planTaskId,
   parsePlanTaskId,
   acceptancePasses,
+  derivePlanProgress,
   type TaskPlan,
+  type TaskState,
 } from '../../packages/fleet/src/index.js';
 
 const A = { device: 'device-A', agent: 'planner' };
@@ -163,6 +165,17 @@ describe('P2 plan schema/validator', () => {
     expect(validatePlan(badAcceptance, { caller: A })).toMatchObject({ ok: false, code: 'PLAN_ACCEPTANCE' });
   });
 
+  it('B7：普通 step to 不得使用 __plan__ sentinel', () => {
+    const sentinelStep = rootPlan({
+      steps: [
+        { stepId: 'collect', kind: 'task', intent: 'collect', dependsOn: [], to: { device: '__plan__', agent: '__plan__' }, acceptance: { kind: 'non-empty-result' } },
+        { stepId: 'gate', kind: 'reduce', intent: 'gate', dependsOn: ['collect'], join: { mode: 'all' }, acceptance: { kind: 'non-empty-result' } },
+        { stepId: 'mr', kind: 'mr', intent: 'mr', dependsOn: ['gate'], acceptance: { kind: 'mr-once' } },
+      ],
+    });
+    expect(validatePlan(sentinelStep, { caller: A })).toMatchObject({ ok: false, code: 'PLAN_SCHEMA' });
+  });
+
   it('子 plan：禁止 MR、唯一 sink、policy 逐字段衰减、owner、父 step 预算', () => {
     const parent = parentPlan();
     const child = childPlan(parent);
@@ -202,6 +215,14 @@ describe('P2 plan schema/validator', () => {
     });
     expect(wrongOwner).toMatchObject({ ok: false, code: 'PLAN_POLICY' });
 
+    // B1：同一 device、不同 agent 也不得提交/重放。
+    const sameDeviceWrongAgent = validatePlan(childPlan(parent, { owner: { device: 'device-B', agent: 'other' } }), {
+      parentPlan: parent,
+      caller: B,
+      parentStepBudget: { maxDepth: 3, maxChildren: 3, maxTasks: 3 },
+    });
+    expect(sameDeviceWrongAgent).toMatchObject({ ok: false, code: 'PLAN_POLICY' });
+
     const overBudget = validatePlan(childPlan(parent, { budget: { maxSteps: 9, maxAttemptsPerStep: 1 } }), {
       parentPlan: parent,
       caller: B,
@@ -217,7 +238,8 @@ describe('P2 plan schema/validator', () => {
 
     // 子 plan 省略 policy 字段时按父 plan 继承后落库；replay 仍需幂等。
     const minimal = childPlan(parent, { policy: {} });
-    const first = validatePlan(minimal, { parentPlan: parent, caller: B });
+    const budget = { maxDepth: 3, maxChildren: 3, maxTasks: 3 };
+    const first = validatePlan(minimal, { parentPlan: parent, caller: B, parentStepBudget: budget });
     expect(first.ok).toBe(true);
     if (first.ok) {
       expect(first.plan.policy).toMatchObject({
@@ -226,10 +248,14 @@ describe('P2 plan schema/validator', () => {
         maxParallel: 2,
         allowSubcontract: false,
       });
-      const replay = validatePlan(minimal, { parentPlan: parent, caller: B, existingVersions: [first.plan] });
+      const replay = validatePlan(minimal, { parentPlan: parent, caller: B, parentStepBudget: budget, existingVersions: [first.plan] });
       expect(replay.ok).toBe(true);
       if (replay.ok) expect(replay.deduped).toBe(true);
     }
+
+    // B6：父 step task 未物化（无 parentStepBudget）→ 拒绝，不创建 plan。
+    expect(validatePlan(childPlan(parent), { parentPlan: parent, caller: B }))
+      .toMatchObject({ ok: false, code: 'PLAN_STATE_INVALID' });
   });
 
   it('版本：>1 必须 supersedes=version-1 且上一版本存在；同版本冲突/幂等', () => {
@@ -291,6 +317,28 @@ describe('P2 plan schema/validator', () => {
         result: { ok: false, code: entry.expectedError },
       });
     }
+  });
+
+  it('mr.submitted 按 kind=mr step 计算，不硬编码 stepId "mr"', () => {
+    const plan = rootPlan({
+      steps: [
+        { stepId: 'collect', kind: 'task', intent: 'c', dependsOn: [], acceptance: { kind: 'non-empty-result' } },
+        { stepId: 'gate', kind: 'reduce', intent: 'g', dependsOn: ['collect'], join: { mode: 'all' }, acceptance: { kind: 'non-empty-result' } },
+        { stepId: 'ship', kind: 'mr', intent: 'm', dependsOn: ['gate'], acceptance: { kind: 'mr-once' } },
+      ],
+    });
+    const mrState: TaskState = {
+      taskId: planTaskId(plan.planId, 1, 'ship'),
+      from: A,
+      to: B,
+      intent: 'm',
+      status: 'queued',
+      attempts: 0,
+      trace: { chain: [] },
+      terminal: false,
+      lastEventId: 'mr-created',
+    };
+    expect(derivePlanProgress(plan, [mrState], [plan]).mr).toEqual({ submitted: true });
   });
 
   it('taskId 解析/acceptance 最小求值', () => {

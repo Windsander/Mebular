@@ -2164,15 +2164,10 @@ function factContentFrom(content: Record<string, unknown>): {
 // ---------- 映射（与既有 provider 输出保持同形） ----------
 
 /**
- * fleet 内部对象的通用 kind（plan/card）：不计入普通域计数，避免主 UI 显示内部对象。
- * 其它既有 internal 对象（如 detail_record）保持历史计数口径不变。
- */
-const FLEET_INTERNAL_COUNT_KINDS = new Set(['agent_capability_card', 'agent_role_card', 'task_plan']);
-
-/**
  * 统一域聚合：`stats()` 与管理面 `namespaceStats()` 共用，避免两套计数规则。
- * `count` 保留历史口径（域内全部节点，含归档/墓碑）；`memoryRecords` 排除内部对象。
- * fleet plan/card 是例外：它们不计入 `count`，只在 `internalObjects`/`internalKinds` 中体现。
+ * `count` = 非内部节点数（排除所有 `metadata.internal === true` / 保留 namespace 的内部对象；
+ * 仍含归档/墓碑）；`memoryRecords` 只统计已知记忆节点类型；
+ * `internalObjects`/`internalKinds` 单独观测内部对象，不进入普通域计数。
  */
 function domainStatsFromNodes(nodes: Node[], options: { includeReserved: boolean }): MemoryDomainStats[] {
   const domains = new Map<string, MemoryDomainStats>();
@@ -2202,8 +2197,6 @@ function domainStatsFromNodes(nodes: Node[], options: { includeReserved: boolean
       if (kind) {
         entry.internalKinds[kind] = (entry.internalKinds[kind] ?? 0) + 1;
       }
-      // plan/card 不得出现在主 UI 域计数里（§4.2）；其它 internal 保持历史计数口径。
-      if (kind === null || !FLEET_INTERNAL_COUNT_KINDS.has(kind)) entry.count += 1;
     } else if (MEMORY_NODE_TYPES.has(node.type)) {
       entry.memoryRecords += 1;
     }

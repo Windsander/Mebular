@@ -161,7 +161,7 @@ describe('Console 管理读面统一走 MemoryService', () => {
     expect((await service.stats()).domains.map((entry) => entry.domain)).not.toContain('__raw__');
 
     const notes = rows.find((entry) => entry.namespace === 'notes');
-    expect(notes).toMatchObject({ count: 4, memoryRecords: 3, internalObjects: 1, declared: false });
+    expect(notes).toMatchObject({ count: 3, memoryRecords: 3, internalObjects: 1, declared: false });
 
     // 只有域公告、没有节点的域仍显示（count=0）。
     await app.declareNamespace({ namespace: 'ledger' });

@@ -577,8 +577,10 @@ export class BoundedOutbox {
     now: number,
     expiredStagingIds: readonly string[],
     operation: (protectedStagingIds: ReadonlySet<string>) => Promise<T> | T,
+    onDead?: (item: OutboxItem) => void | Promise<void>,
   ): Promise<{ expired: number; result: T }> {
-    return this.exclusive(async () => {
+    const deadItems: OutboxItem[] = [];
+    const outcome = await this.exclusive(async () => {
       await this.init();
       const expiredEvidence = new Set(expiredStagingIds);
       let expired = 0;
@@ -590,14 +592,18 @@ export class BoundedOutbox {
         }
         const needsExpiredEvidence = (item.meta?.stagingChunkIds ?? [])
           .some((id) => expiredEvidence.has(id));
-        if ((needsExpiredEvidence || this.deadlineOf(item) <= now)
-          && await this.deadLetterUnlocked(item, 'retention_expired')) {
-          expired += 1;
+        if (needsExpiredEvidence || this.deadlineOf(item) <= now) {
+          if (await this.deadLetterUnlocked(item, 'retention_expired')) {
+            expired += 1;
+            deadItems.push(item);
+          }
         }
       }
       const result = await operation(protectedStagingIds);
       return { expired, result };
     });
+    for (const item of deadItems) await onDead?.(item);
+    return outcome;
   }
 
   private async deadLetterUnlocked(item: OutboxItem, errorCode: string): Promise<boolean> {
@@ -1039,6 +1045,7 @@ export class SidecarLocalLayer {
   private lastCleanupAt = 0;
   private stagingDependencyHandler?: (ids: readonly string[]) => void | Promise<void>;
   private maintenanceDependencyHandler?: (ids: readonly string[]) => void | Promise<void>;
+  private deadLetterHandler?: (item: OutboxItem) => void | Promise<void>;
 
   constructor(options: SidecarLocalLayerOptions) {
     this.root = options.root;
@@ -1132,6 +1139,25 @@ export class SidecarLocalLayer {
     this.maintenanceDependencyHandler = handler;
   }
 
+  setDeadLetterHandler(handler: (item: OutboxItem) => void | Promise<void>): void {
+    this.deadLetterHandler = handler;
+  }
+
+  private async notifyDeadLetters(
+    items: readonly OutboxItem[],
+    { wait = true }: { wait?: boolean } = {},
+  ): Promise<void> {
+    const handler = this.deadLetterHandler;
+    if (!handler || items.length === 0) return;
+    const run = Promise.all(items.map((item) =>
+      Promise.resolve(handler(item)).catch(() => undefined))).then(() => undefined);
+    if (wait) {
+      await run;
+    } else {
+      void run;
+    }
+  }
+
   /** staging 写入后核对容量/TTL 淘汰，依赖已消失证据的重放必须显式 dead。 */
   async putStagingChunk(cloudId: string, chunk: RawChunk) {
     const before = await this.store.listStagingChunks({ includeExpired: true });
@@ -1154,11 +1180,17 @@ export class SidecarLocalLayer {
     if (ids.length === 0) return 0;
     const expired = new Set(ids);
     let failed = 0;
+    const deadItems: OutboxItem[] = [];
     for (const item of await this.outbox.list()) {
       const needed = item.meta?.stagingChunkIds ?? [];
       if (!needed.some((id) => expired.has(id))) continue;
-      if (await this.outbox.deadLetter(item.id, 'retention_expired')) failed += 1;
+      if (await this.outbox.deadLetter(item.id, 'retention_expired')) {
+        failed += 1;
+        deadItems.push(item);
+      }
     }
+    // putStagingChunk 在 ingest chain 内；这里不能等待 finalize 重新进入 chain。
+    void this.notifyDeadLetters(deadItems, { wait: false });
     return failed;
   }
 
@@ -1176,6 +1208,7 @@ export class SidecarLocalLayer {
       now,
       expiredIds,
       (protectedStagingIds) => this.store.cleanup(now, protectedStagingIds),
+      (item) => this.notifyDeadLetters([item]),
     );
     this.lastCleanupAt = now;
     return result;
@@ -1204,6 +1237,7 @@ export class SidecarLocalLayer {
           at,
           expiredIds,
           (protectedStagingIds) => this.store.cleanup(at, protectedStagingIds),
+          (item) => this.notifyDeadLetters([item]),
         );
         const storeResult = dependencyResult.result;
         this.lastCleanupAt = at;

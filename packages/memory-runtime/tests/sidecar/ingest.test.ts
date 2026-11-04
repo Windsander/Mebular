@@ -24,7 +24,12 @@ const harnesses: Harness[] = [];
 
 async function setup(
   policy = defaultSidecarPolicy(),
-  options: { maxOutboxItems?: number; stagingBytes?: number; now?: () => number } = {},
+  options: {
+    maxOutboxItems?: number;
+    stagingBytes?: number;
+    now?: () => number;
+    extractionTtlMs?: number;
+  } = {},
 ): Promise<Harness> {
   const home = await mkdtemp(join(tmpdir(), 'mebular-memory-runtime-ingest-'));
   const local = new SidecarLocalLayer({
@@ -48,6 +53,7 @@ async function setup(
     identity: { cloudId: 'cl_test', profileId: 'default', hostId: 'h_test' },
     policy,
     ...(options.now ? { now: options.now } : {}),
+    ...(options.extractionTtlMs ? { extractionTtlMs: options.extractionTtlMs } : {}),
   });
   await service.init();
   const harness = { home, local, fake, client, service };
@@ -707,7 +713,7 @@ describe('IngestService settlements', () => {
   it('pending 抽取的 staging 过期时，空闲维护显式 failed 且物理删除证据', async () => {
     let clock = Date.UTC(2026, 0, 1);
     let callback: (() => void) | null = null;
-    const { service, local, home } = await setup(defaultSidecarPolicy(), { now: () => clock });
+    const { service, local, home } = await setup(defaultSidecarPolicy(), { now: () => clock, extractionTtlMs: 40 * 24 * 60 * 60 * 1000 });
     const pending = await service.ingest({
       requestId: 'req_pending_staging_expiry',
       agentId: 'opencode',
@@ -1177,7 +1183,7 @@ describe('IngestService settlements', () => {
 
   it('completeExtraction I/O 期间维护等待，不提前删证据或覆盖最终状态', async () => {
     let clock = Date.UTC(2026, 0, 1);
-    const { service, client, fake, local } = await setup(defaultSidecarPolicy(), { now: () => clock });
+    const { service, client, fake, local } = await setup(defaultSidecarPolicy(), { now: () => clock, extractionTtlMs: 40 * 24 * 60 * 60 * 1000 });
     const pending = await service.ingest({
       requestId: 'req_completion_maintenance_race',
       agentId: 'opencode',
@@ -2198,6 +2204,199 @@ describe('IngestService settlements', () => {
       'rec-finalize-race-committed',
     ]));
     expect(view?.detailIds).toContain('detail-finalize-race-committed');
+  });
+
+  it('candidate-only 到期由 replayer 统一收口为 failed', async () => {
+    let clock = Date.UTC(2026, 0, 1);
+    const { service, fake, local } = await setup(defaultSidecarPolicy(), { now: () => clock, extractionTtlMs: 40 * 24 * 60 * 60 * 1000 });
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const queued = await service.ingest({
+      requestId: 'req_candidate_only_deadline',
+      agentId: 'opencode',
+      threadId: 'th_candidate_only_deadline',
+      extractor: 'host',
+      chunks: [],
+      candidates: [{ kind: 'observation', content: { content: 'candidate-only deadline' } }],
+    });
+    const extractionId = queued.data.extraction.id;
+    fake.setFailure(null);
+    clock += 31 * 24 * 60 * 60 * 1000;
+
+    const summary = await new OutboxReplayer({
+      outbox: local.outbox,
+      client: (service as any).client,
+      now: () => clock,
+      onSettled: (item, data) => service.applyReplayedOutbox(item, data),
+      onComplete: (item, outcome) => service.finalizeReplayedOutbox(item, outcome),
+    }).replayOnce();
+    expect(summary).toMatchObject({ dead: 1, remaining: 0 });
+    const view = await service.getExtraction(extractionId);
+    expect(view).toMatchObject({ status: 'failed', degraded: true });
+    expect(view?.warnings).toContain('replay_dead_dependency');
+  });
+
+  it('candidate-only 被 cleanup 移入 dead 时统一收口为 failed', async () => {
+    let clock = Date.UTC(2026, 0, 1);
+    const { service, fake, local } = await setup(defaultSidecarPolicy(), { now: () => clock, extractionTtlMs: 40 * 24 * 60 * 60 * 1000 });
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const queued = await service.ingest({
+      requestId: 'req_candidate_only_cleanup',
+      agentId: 'opencode',
+      threadId: 'th_candidate_only_cleanup',
+      extractor: 'host',
+      chunks: [],
+      candidates: [{ kind: 'observation', content: { content: 'candidate-only cleanup' } }],
+    });
+    const extractionId = queued.data.extraction.id;
+    clock += 31 * 24 * 60 * 60 * 1000;
+    await local.cleanup(clock);
+
+    const view = await service.getExtraction(extractionId);
+    expect(view).toMatchObject({ status: 'failed', degraded: true });
+    expect(view?.warnings).toContain('replay_dead_dependency');
+    expect(await local.outbox.deadCount()).toBe(1);
+  });
+
+  it('staging 依赖缺失被 cleanup 收口时 extraction 显式 failed', async () => {
+    let clock = Date.UTC(2026, 0, 1);
+    const { service, fake, local } = await setup(defaultSidecarPolicy(), { now: () => clock, extractionTtlMs: 40 * 24 * 60 * 60 * 1000 });
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const queued = await service.ingest({
+      requestId: 'req_cleanup_dependency_missing',
+      agentId: 'opencode',
+      threadId: 'th_cleanup_dependency_missing',
+      extractor: 'host',
+      chunks: [{ role: 'user', text: 'cleanup 依赖缺失', messageId: 'm_cleanup_dependency_missing' }],
+      candidates: [{
+        kind: 'observation',
+        content: { content: 'cleanup 依赖缺失' },
+        sourceMessageIds: ['m_cleanup_dependency_missing'],
+      }],
+    });
+    const extractionId = queued.data.extraction.id;
+    clock += 25 * 60 * 60 * 1000;
+    await local.cleanup(clock);
+
+    const view = await service.getExtraction(extractionId);
+    expect(view).toMatchObject({ status: 'failed', degraded: true });
+    expect(view?.warnings).toContain('replay_dead_dependency');
+    expect(await local.store.countStagingChunks({ includeExpired: true })).toBe(0);
+  });
+
+  it('cleanup 先 dead 后 late success 最终 completed，outbox 不留 dead 双态', async () => {
+    let clock = Date.UTC(2026, 0, 1);
+    const { service, client, fake, local } = await setup(defaultSidecarPolicy(), { now: () => clock, extractionTtlMs: 40 * 24 * 60 * 60 * 1000 });
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const queued = await service.ingest({
+      requestId: 'req_late_success_cleanup',
+      agentId: 'opencode',
+      threadId: 'th_late_success_cleanup',
+      extractor: 'host',
+      chunks: [],
+      candidates: [{ kind: 'observation', content: { content: 'cleanup late success' } }],
+    });
+    const extractionId = queued.data.extraction.id;
+    fake.setFailure(null);
+
+    const originalPost = client.post.bind(client);
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    jest.spyOn(client, 'post').mockImplementationOnce(async (endpoint: any, body: any, options: any) => {
+      markStarted();
+      await gate;
+      return originalPost(endpoint, body, options);
+    });
+    const replay = new OutboxReplayer({
+      outbox: local.outbox,
+      client,
+      now: () => clock,
+      onSettled: (item, data) => service.applyReplayedOutbox(item, data),
+      onComplete: (item, outcome) => service.finalizeReplayedOutbox(item, outcome),
+    }).replayOnce();
+    await started;
+
+    clock += 31 * 24 * 60 * 60 * 1000;
+    await local.cleanup(clock);
+    expect((await service.getExtraction(extractionId))?.status).toBe('failed');
+    expect(await local.outbox.deadCount()).toBe(1);
+
+    release();
+    expect(await replay).toMatchObject({ settled: 1, dead: 0, remaining: 0 });
+    const view = await service.getExtraction(extractionId);
+    expect(view).toMatchObject({ status: 'completed' });
+    expect(view?.warnings).not.toContain('replay_dead_dependency');
+    expect(await local.outbox.stats()).toMatchObject({ items: 0 });
+    expect(await local.outbox.deadStats()).toMatchObject({ items: 0 });
+  });
+
+  it('同 id 旧 dead 副本不覆盖重新入队的 active 成功项', async () => {
+    const { service, fake, local } = await setup();
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const queued = await service.ingest({
+      requestId: 'req_old_dead_same_id',
+      agentId: 'opencode',
+      threadId: 'th_old_dead_same_id',
+      extractor: 'host',
+      chunks: [],
+      candidates: [{ kind: 'observation', content: { content: 'old dead same id' } }],
+    });
+    const extractionId = queued.data.extraction.id;
+    const item = (await local.outbox.list())[0]!;
+    expect(await local.outbox.deadLetter(item.id, 'validation_failed')).toBe(true);
+    await local.outbox.enqueue({
+      id: item.id,
+      requestId: item.requestId,
+      endpoint: item.endpoint,
+      body: item.body,
+      createdAt: item.createdAt,
+      ...(item.meta ? { meta: item.meta } : {}),
+    });
+    fake.setFailure(null);
+
+    const summary = await new OutboxReplayer({
+      outbox: local.outbox,
+      client: (service as any).client,
+      onSettled: (itemValue, data) => service.applyReplayedOutbox(itemValue, data),
+      onComplete: (itemValue, outcome) => service.finalizeReplayedOutbox(itemValue, outcome),
+    }).replayOnce();
+    expect(summary).toMatchObject({ settled: 1, dead: 0, remaining: 0 });
+    const view = await service.getExtraction(extractionId);
+    expect(view).toMatchObject({ status: 'completed' });
+    expect(view?.warnings).not.toContain('replay_dead_dependency');
+    expect(await local.outbox.deadCount()).toBe(0);
+  });
+
+  it('completed 收口清除 replay pending/dead 旧 warning', async () => {
+    const { service, fake, local } = await setup();
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const queued = await service.ingest({
+      requestId: 'req_warning_cleanup',
+      agentId: 'opencode',
+      threadId: 'th_warning_cleanup',
+      extractor: 'host',
+      chunks: [],
+      candidates: [{ kind: 'observation', content: { content: 'warning cleanup' } }],
+    });
+    const extractionId = queued.data.extraction.id;
+    const item = (await local.outbox.list())[0]!;
+    await service.finalizeReplayedOutbox(item, 'retry');
+    let view = await service.getExtraction(extractionId);
+    expect(view?.warnings).toContain('replay_dependency_pending');
+
+    fake.setFailure(null);
+    const summary = await new OutboxReplayer({
+      outbox: local.outbox,
+      client: (service as any).client,
+      onSettled: (itemValue, data) => service.applyReplayedOutbox(itemValue, data),
+      onComplete: (itemValue, outcome) => service.finalizeReplayedOutbox(itemValue, outcome),
+    }).replayOnce();
+    expect(summary).toMatchObject({ settled: 1, remaining: 0 });
+    view = await service.getExtraction(extractionId);
+    expect(view).toMatchObject({ status: 'completed' });
+    expect(view?.warnings).not.toContain('replay_dependency_pending');
+    expect(view?.warnings).not.toContain('replay_dead_dependency');
   });
 
   it('Detail outbox 满时显式 503，不把失败吞成已完成', async () => {

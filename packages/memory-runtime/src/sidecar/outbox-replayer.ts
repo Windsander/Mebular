@@ -190,6 +190,7 @@ export class OutboxReplayer {
     const lease = await this.outbox.acquireReplayLease(item.id, { now: this.now(), leaseMs });
     if (lease.state !== 'acquired') {
       if (lease.state === 'expired') {
+        await this.notifyComplete(item.id, 'dead');
         return {
           outcome: 'dead',
           error: { code: 'retention_expired', message: 'outbox 操作已超过截止时间', at: this.now() },

@@ -545,6 +545,7 @@ export class IngestService {
     // putStagingChunk 已在 ingest chain 内；只能使用 unlocked 变体避免 self-chain 死锁。
     this.local.setStagingDependencyHandler((ids) => this.expireStagingDependenciesUnlocked(ids));
     this.local.setMaintenanceDependencyHandler((ids) => this.expireStagingDependencies(ids));
+    this.local.setDeadLetterHandler((item) => this.finalizeReplayedOutbox(item, 'dead'));
   }
 
   get isDegraded(): boolean {
@@ -1866,27 +1867,54 @@ export class IngestService {
         }
         dependencyIds.add(current.id);
 
-        const sources = new Map<string, OutboxItem>();
-        for (const entry of [...active, ...dead]) {
-          if (dependencyIds.has(entry.id)) sources.set(entry.id, entry);
+        // active 优先；同 id 的旧 dead 副本不得覆盖新 attempt。当前成功 attempt
+        // 即使 cleanup 已留下 dead 副本，也不能被算作失败依赖。
+        const activeById = new Map(active.map((entry) => [entry.id, entry]));
+        const deadById = new Map(dead.map((entry) => [entry.id, entry]));
+        const effective = new Map<string, { item: OutboxItem; dead: boolean; current: boolean }>();
+        for (const id of dependencyIds) {
+          if (id === current.id) {
+            if (outcome === 'settled') {
+              effective.set(id, { item: current, dead: false, current: true });
+            } else {
+              const activeEntry = activeById.get(id);
+              if (activeEntry) {
+                effective.set(id, { item: activeEntry, dead: false, current: true });
+              } else {
+                const deadEntry = deadById.get(id);
+                if (deadEntry) effective.set(id, { item: deadEntry, dead: true, current: true });
+              }
+            }
+            continue;
+          }
+          const activeEntry = activeById.get(id);
+          if (activeEntry) {
+            effective.set(id, { item: activeEntry, dead: false, current: false });
+            continue;
+          }
+          const deadEntry = deadById.get(id);
+          if (deadEntry) effective.set(id, { item: deadEntry, dead: true, current: false });
         }
+
+        const sources = new Map<string, OutboxItem>();
+        for (const [id, entry] of effective) sources.set(id, entry.item);
         if (item.committed) {
           sources.set(item.id, {
             ...(sources.get(item.id) ?? item),
             committed: mergeCommittedSources(sources.get(item.id)?.committed, item.committed),
           });
         }
-        const otherActive = active.filter((entry) =>
-          entry.id !== current.id && dependencyIds.has(entry.id));
-        const deadDeps = dead.filter((entry) => dependencyIds.has(entry.id));
+        const otherActive = [...effective.values()].filter((entry) =>
+          !entry.current && !entry.dead);
+        const deadDeps = [...effective.values()].filter((entry) =>
+          !(entry.current && outcome === 'settled') && entry.dead);
         const hasDead = deadDeps.length > 0 || outcome === 'dead';
         const hasActive = outcome === 'retry' || otherActive.length > 0;
 
         let status: StoredExtraction['status'];
-        if (stored.status === 'failed') status = 'failed';
-        else if (hasDead) status = 'failed';
+        if (hasDead) status = 'failed';
         else if (stored.status === 'completed') status = 'completed';
-        else if (hasActive) status = 'pending';
+        else if (hasActive) status = stored.status === 'failed' ? 'failed' : 'pending';
         else status = 'completed';
 
         const records = new Map<string, IngestRecordView>();
@@ -1911,8 +1939,12 @@ export class IngestService {
             if (typeof detail.id === 'string' && detail.id.length > 0) detailIds.add(detail.id);
           }
         }
-        if (hasDead) warnings.add('replay_dead_dependency');
         if (status === 'pending') warnings.add('replay_dependency_pending');
+        else warnings.delete('replay_dependency_pending');
+        if (hasDead) warnings.add('replay_dead_dependency');
+        else warnings.delete('replay_dead_dependency');
+        const realWarnings = [...warnings].filter((warning) =>
+          warning !== 'replay_dependency_pending' && warning !== 'replay_dead_dependency');
 
         const ttlMs = stored.expiresAt - this.now();
         if (ttlMs <= 0) {
@@ -1925,7 +1957,7 @@ export class IngestService {
           records: [...records.values()],
           detailIds: [...detailIds],
           warnings: [...warnings],
-          degraded: status !== 'completed' || stored.degraded,
+          degraded: status !== 'completed' || (stored.degraded && realWarnings.length > 0),
           outboxIds: [...dependencyIds],
         }, { ttlMs });
       }

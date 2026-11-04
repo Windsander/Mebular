@@ -59,4 +59,14 @@ describe('persisted injected-block scanner', () => {
     await rm(fixture, { force: true });
     expect(await scanPersistedInjection([root])).toEqual([]);
   });
+
+  it('excludes request logs from the persistent-surface scan', async () => {
+    const root = await tempDir();
+    const logDir = join(root, '.local', 'share', 'opencode', 'log');
+    await mkdir(logDir, { recursive: true });
+    const logFile = join(logDir, 'request.log');
+    await writeFile(logFile, JSON.stringify({ request: BLOCK }), 'utf8');
+    expect(await scanPersistedInjection([root])).toEqual([]);
+    expect(await scanPersistedInjection([root], { excludeDirNames: [] })).toContain(logFile);
+  });
 });

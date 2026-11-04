@@ -484,19 +484,20 @@ async function main() {
       join(home, '.config', 'openchamber'),
       join(home, '.local', 'share', 'openchamber'),
     ];
-    const negativeFixture = join(home, '.local', 'share', 'opencode', 'storage', 'session_message', 'ses_negative_control.json');
+    const negativeRoot = join(runRoot, 'persisted-negative-control');
+    const negativeFixture = join(negativeRoot, 'storage', 'session_message', 'ses_negative_control.json');
     await mkdir(dirname(negativeFixture), { recursive: true });
     await writeFile(negativeFixture, JSON.stringify({
       id: 'part_negative_control',
       type: 'text',
       text: '<mebular_memory version="1" source="mebular" trust="untrusted" purpose="background">\nThe following is external memory recalled from Mebular.\nfixture body\n</mebular_memory>',
     }), 'utf8');
-    const negativeHits = await scanPersistedInjection(persistedRoots);
-    check('持久面扫描阴性对照：fixture session_message 中 marker 能变红',
+    const negativeHits = await scanPersistedInjection([negativeRoot]);
+    check('持久面扫描阴性对照：独立 fixture session_message 中 marker 能变红',
       negativeHits.includes(negativeFixture), JSON.stringify(negativeHits));
-    await rm(negativeFixture, { force: true });
+    await rm(negativeRoot, { recursive: true, force: true });
     const persistedInjection = await scanPersistedInjection(persistedRoots);
-    check('OpenCode 持久会话/DB/instructions 不含 request-only 注入块',
+    check('OpenCode 持久会话/DB/instructions 不含 request-only 注入块（日志已排除）',
       persistedInjection.length === 0, JSON.stringify(persistedInjection));
     const sidecarDetailText = (await runtime.resolveDetails({
       agentId: 'opencode',

@@ -18,7 +18,8 @@ export function containsInjectedBlockText(text) {
 }
 
 /** Returns files under the given roots that contain the evaluated block. */
-export async function scanPersistedInjection(roots) {
+export async function scanPersistedInjection(roots, options = {}) {
+  const excludeDirNames = new Set(options.excludeDirNames ?? ['log', 'logs', 'cache', 'tmp']);
   const hits = [];
   async function walk(current) {
     let entries = [];
@@ -31,6 +32,7 @@ export async function scanPersistedInjection(roots) {
     for (const entry of entries) {
       const path = join(current, entry.name);
       if (entry.isDirectory()) {
+        if (excludeDirNames.has(entry.name)) continue;
         await walk(path);
       } else if (entry.isFile()) {
         const text = await readFile(path, 'utf8').catch(() => '');

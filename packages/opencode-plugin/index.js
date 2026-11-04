@@ -124,6 +124,7 @@ const DEFAULT_CONFIG = Object.freeze({
   writeRecoveryMs: 1000,
   writeRecoveryMaxMs: 30000,
   writeRecoveryAttempts: 5,
+  disposeWaitMs: 2000,
 });
 
 /** @param {unknown} value */
@@ -883,6 +884,7 @@ export function resolvePluginConfig(input, options = {}) {
     writeRecoveryMs: asInt(merged.writeRecoveryMs, DEFAULT_CONFIG.writeRecoveryMs, 10, 60000),
     writeRecoveryMaxMs: asInt(merged.writeRecoveryMaxMs, DEFAULT_CONFIG.writeRecoveryMaxMs, 10, 300000),
     writeRecoveryAttempts: asInt(merged.writeRecoveryAttempts, DEFAULT_CONFIG.writeRecoveryAttempts, 1, 20),
+    disposeWaitMs: asInt(merged.disposeWaitMs, DEFAULT_CONFIG.disposeWaitMs, 50, 10000),
     configFile: fromFile.found ? configFile : null,
     configFileFound: fromFile.found,
     discoveryPath,
@@ -1221,6 +1223,24 @@ function delay(ms, setTimeoutFn) {
   });
 }
 
+/** Resolves true when the timer fired, false when the lifecycle aborted. */
+function abortableDelay(ms, setTimeoutFn, signal) {
+  if (!signal) return delay(ms, setTimeoutFn).then(() => true);
+  if (signal.aborted) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    let timer = null;
+    const finish = (value) => {
+      if (timer !== null) clearTimeout(timer);
+      signal.removeEventListener?.('abort', onAbort);
+      resolve(value);
+    };
+    const onAbort = () => finish(false);
+    timer = setTimeoutFn(() => finish(true), ms);
+    timer?.unref?.();
+    signal.addEventListener?.('abort', onAbort, { once: true });
+  });
+}
+
 function headerValue(headers, name) {
   if (!headers) return '';
   const wanted = String(name).toLowerCase();
@@ -1331,22 +1351,20 @@ function stableCompactionTimestamp(data, compactionId, eventID = null) {
  * the same summary/count/seq tuple.
  */
 function compactionLogicalId(data, sessionID) {
-  const explicit = asText(data?.compactionId)
-    || asText(data?.compactionID)
-    || asText(data?.eventID)
-    || asText(data?.eventId);
+  const explicit = asText(data?.compactionId) || asText(data?.compactionID);
   if (explicit.length > 0) return explicit;
   const summary = asText(data?.text) || asText(data?.summary);
-  const seq = asText(data?.endSeq)
-    || asText(data?.seq)
-    || asText(data?.lastMessageID)
-    || asText(data?.lastMessageId);
+  const model = isObject(data?.model)
+    ? `${asText(data.model.providerID) || asText(data.model.providerId)}/${asText(data.model.id) || asText(data.model.modelID)}`
+    : '';
   return `cmp_${hashText([
     asText(sessionID),
     summary,
     data?.messageCount ?? '',
-    seq,
+    asText(data?.lastMessageID) || asText(data?.lastMessageId),
+    asText(data?.transcriptHash),
     asText(data?.reason) || '',
+    model,
   ].join('\u0000')).slice(0, 32)}`;
 }
 
@@ -1356,11 +1374,7 @@ function eventDedupeKey(event) {
   const session = asText(data.sessionID) || asText(event?.sessionID);
   if (type === 'session.compaction.ended') {
     const logical = compactionLogicalId(data, session);
-    const seq = asText(data.endSeq)
-      || asText(data.seq)
-      || asText(data.eventID)
-      || asText(data.eventId);
-    return `${type}:logical:${logical}:${seq}`;
+    return `${type}:logical:${logical}`;
   }
   const id = asText(event?.id) || asText(data.eventID) || asText(data.eventId);
   if (id) return `${type}:id:${id}`;
@@ -1436,7 +1450,7 @@ export function createController(dependencies = {}) {
   let authRecoveryTimer = null;
   let authRecoveryAttempt = 0;
   const stats = {
-    context: { attempts: 0, hits: 0, empty: 0, failures: 0, timeouts: 0, deduped: 0, injected: 0, truncated: 0, cooldown: 0 },
+    context: { attempts: 0, hits: 0, empty: 0, failures: 0, timeouts: 0, deduped: 0, injected: 0, truncated: 0, cooldown: 0, retryAfterTruncated: 0 },
     ingest: {
       buffered: 0,
       chunks: 0,
@@ -1446,6 +1460,8 @@ export function createController(dependencies = {}) {
       committed: 0,
       failed: 0,
       failedExtraction: 0,
+      partial: 0,
+      empty: 0,
       pending: 0,
       queued: 0,
       duplicates: 0,
@@ -1459,6 +1475,7 @@ export function createController(dependencies = {}) {
       attempts: 0,
       sent: 0,
       failed: 0,
+      duplicates: 0,
       conflicts: 0,
       pending: 0,
       replayed: 0,
@@ -1471,6 +1488,7 @@ export function createController(dependencies = {}) {
     tools: { maskedAgents: 0, maskedTools: 0, governanceAgents: 0 },
     events: { received: 0, handled: 0, failures: 0, duplicates: 0, subscriptions: 0, reconnects: 0 },
     writes: { rejected: 0, disabled: 0, recovered: 0, authProbes: 0 },
+    lifecycle: { disposeTimeouts: 0, abortedRequests: 0 },
   };
 
   let disabledReason = null;
@@ -1487,6 +1505,7 @@ export function createController(dependencies = {}) {
   let ingestAllowed = enabled && config.ingest;
   let checkpointAllowed = enabled && config.checkpoints;
   let writesDisabled = false;
+  let writesPolicyBlocked = false;
   let recallCooldownUntil = 0;
   let discoveryTimer = null;
   let discoveryCheckedAt = -Infinity;
@@ -1501,6 +1520,8 @@ export function createController(dependencies = {}) {
     degraded: config.discoveryDegraded,
     capabilities: null,
     discovered: config.discoveryFound,
+    url: config.runtimeUrl || null,
+    profileId: null,
   };
   const tokenState = {
     value: config.token,
@@ -1541,6 +1562,8 @@ export function createController(dependencies = {}) {
         config.runtimeUrl = '';
         runtimeState.discovered = false;
         runtimeState.state = result.reason;
+        runtimeState.url = null;
+        checkpointRevisions.clear();
         if (disabledReason === null || disabledReason === 'runtime_not_discovered') {
           disabledReason = result.reason || 'runtime_not_discovered';
         }
@@ -1548,6 +1571,18 @@ export function createController(dependencies = {}) {
       }
       return false;
     }
+    const previousUrl = runtimeState.url;
+    const previousProfileId = runtimeState.profileId;
+    const nextProfileId = asText(discovery.profileId) || null;
+    if (previousUrl !== null
+      && (previousUrl !== discovery.url
+        || (previousProfileId !== null && nextProfileId !== null && previousProfileId !== nextProfileId))) {
+      // A different sidecar instance may reuse the same thread/domain key with
+      // its own revision space. Never carry the previous instance's revision.
+      checkpointRevisions.clear();
+    }
+    runtimeState.url = discovery.url;
+    runtimeState.profileId = nextProfileId;
     config.runtimeUrl = discovery.url;
     config.discoveryFound = true;
     config.discoveryError = null;
@@ -1676,6 +1711,7 @@ export function createController(dependencies = {}) {
       }
       const abortFromLifecycle = () => {
         aborted = true;
+        stats.lifecycle.abortedRequests += 1;
         try {
           controller?.abort();
         } catch {
@@ -1775,8 +1811,10 @@ export function createController(dependencies = {}) {
       refreshToken(true);
       result = await attempt();
     }
-    if (!result.ok && (result.status === 401 || result.status === 403)) {
+    if (!result.ok && result.status === 401) {
       markWritesDisabled('runtime_unauthorized');
+    } else if (!result.ok && result.status === 403) {
+      markWritesPolicyBlocked('runtime_forbidden');
     } else if (result.ok && useAuth && writesDisabled) {
       // A rotated host token recovered on retry; resume ingest/checkpoint.
       clearWritesDisabled('request_succeeded');
@@ -1815,7 +1853,7 @@ export function createController(dependencies = {}) {
   }
 
   function scheduleAuthRecovery() {
-    if (closed || !enabled || !writesDisabled || typeof fetchImpl !== 'function') return;
+    if (closed || !enabled || !writesDisabled || writesPolicyBlocked || typeof fetchImpl !== 'function') return;
     if (authRecoveryTimer !== null) return;
     if (authRecoveryAttempt >= config.writeRecoveryAttempts) {
       status.writeState = {
@@ -1861,6 +1899,7 @@ export function createController(dependencies = {}) {
   }
 
   function markWritesDisabled(reason) {
+    if (writesPolicyBlocked) return;
     if (!writesDisabled) stats.writes.disabled += 1;
     writesDisabled = true;
     status.writeState = {
@@ -1876,8 +1915,26 @@ export function createController(dependencies = {}) {
     scheduleAuthRecovery();
   }
 
+  function markWritesPolicyBlocked(reason) {
+    if (!writesDisabled) stats.writes.disabled += 1;
+    writesDisabled = true;
+    writesPolicyBlocked = true;
+    clearAuthRecovery();
+    status.writeState = {
+      ...(status.writeState ?? {}),
+      disabled: true,
+      state: 'failed',
+      policy: true,
+      reason,
+      attempts: authRecoveryAttempt,
+      nextRetryAt: null,
+      at: now(),
+    };
+    noteFailure(reason);
+  }
+
   function clearWritesDisabled(reason) {
-    if (!writesDisabled) return;
+    if (!writesDisabled || writesPolicyBlocked) return;
     writesDisabled = false;
     clearAuthRecovery();
     authRecoveryAttempt = 0;
@@ -2235,17 +2292,24 @@ export function createController(dependencies = {}) {
     if (!result.ok) {
       stats.context.failures += 1;
       if (result.code === 'timeout') stats.context.timeouts += 1;
-      const retryAfter = Number.isFinite(result.retryAfterRawMs)
+      const rawRetryAfter = Number.isFinite(result.retryAfterRawMs)
         ? result.retryAfterRawMs
         : Number.isFinite(result.retryAfterMs) ? result.retryAfterMs : 0;
-      recallCooldownUntil = now() + Math.max(30_000, retryAfter);
+      const retryAfter = Math.min(rawRetryAfter, config.maxRetryAfterMs);
       noteFailure(result.code === 'timeout' ? 'runtime_timeout' : 'runtime_error');
+      if (rawRetryAfter > retryAfter) {
+        stats.context.retryAfterTruncated += 1;
+        noteFailure('retry_after_truncated');
+      }
+      recallCooldownUntil = now() + Math.max(30_000, retryAfter);
       if (result.status === 409 && result.code === 'mode_mismatch') {
         disableRuntime('runtime_mode_mismatch');
-      } else if (result.status === 401 || result.status === 403) {
+      } else if (result.status === 401) {
         // requestJson already attempted one token-file refresh. A persistent
         // 401 stays visible and injects nothing; it must not spin.
         noteFailure('runtime_unauthorized');
+      } else if (result.status === 403) {
+        noteFailure('runtime_forbidden');
       }
       return;
     }
@@ -2469,6 +2533,7 @@ export function createController(dependencies = {}) {
 
   async function sendIngest(chunks, options = {}) {
     const session = safeThreadId(options.sessionID);
+    const lifecycleSignal = lifecycleAbort?.signal;
     if (!session || chunks.length === 0 || !ingestAllowed || closed) {
       return { ok: false, code: 'ingest_disabled' };
     }
@@ -2513,24 +2578,46 @@ export function createController(dependencies = {}) {
         stats.ingest.chunks += chunks.length;
         stats.ingest.sent += chunks.length;
         const extractionStatus = asText(result.data?.extraction?.status);
-        const queued = result.status === 202 || result.data?.queued === true;
+        const detail = isObject(result.data?.detail) ? result.data.detail : {};
+        const detailQueued = Number(detail.queued) > 0;
+        const detailFailed = Number(detail.failed) > 0;
+        const recordCount = Array.isArray(result.data?.records) ? result.data.records.length : 0;
+        const detailCount = Number.isInteger(detail.written) && detail.written > 0
+          ? detail.written
+          : Array.isArray(detail.ids) ? detail.ids.length : 0;
+        const hasObjects = recordCount > 0 || detailCount > 0
+          || (Number.isInteger(result.data?.accepted?.records) && result.data.accepted.records > 0);
+        const queued = result.data?.queued === true || detailQueued;
+        const pending = result.status === 202
+          || result.data?.pending === true
+          || extractionStatus === 'pending';
         if (extractionStatus === 'failed') {
           stats.ingest.failedExtraction += 1;
           noteFailure('extraction_failed');
+        } else if (detailFailed) {
+          // A 200 completed extraction can still have failed detail writes.
+          // It is a partial result, never committed.
+          stats.ingest.partial += 1;
+          noteFailure('detail_write_failed');
         } else if (queued) {
-          // 202/queued is a durable hand-off, not a graph commit.
           stats.ingest.queued += 1;
-        } else if (extractionStatus === 'pending') {
+        } else if (pending) {
+          // 202 with queued:false is still pending, not queued.
           stats.ingest.pending += 1;
-        } else if (extractionStatus === 'completed') {
-          // The sidecar declares the required writes completed and not queued.
+        } else if (extractionStatus === 'completed' && hasObjects) {
           stats.ingest.committed += 1;
+        } else if (extractionStatus === 'completed') {
+          stats.ingest.empty += 1;
         }
         if (result.data?.duplicate === true) stats.ingest.duplicates += 1;
         return result;
       }
-      if (result.status === 401 || result.status === 403) {
+      if (result.status === 401) {
         markWritesDisabled('runtime_unauthorized');
+        break;
+      }
+      if (result.status === 403) {
+        markWritesPolicyBlocked('runtime_forbidden');
         break;
       }
       if (result.status === 409 && result.code === 'mode_mismatch') {
@@ -2550,7 +2637,12 @@ export function createController(dependencies = {}) {
           stats.ingest.retryAfterTruncated += 1;
           noteFailure('retry_after_truncated');
         }
-        await delay(result.retryAfterMs, setTimeoutFn);
+        const waited = await abortableDelay(
+          result.retryAfterMs,
+          setTimeoutFn,
+          lifecycleSignal,
+        );
+        if (!waited) break;
         if (closed || !enabled || !ingestAllowed || writesDisabled) break;
       }
     }
@@ -2644,17 +2736,25 @@ export function createController(dependencies = {}) {
   }
 
   function checkpointMatches(entry, checkpoint) {
-    if (!isObject(checkpoint)) return false;
+    if (!isObject(checkpoint) || !checkpointDomainMatches(entry, checkpoint)) return false;
     const state = isObject(checkpoint.state) ? checkpoint.state : {};
     const compactionId = asText(state.compactionId) || asText(checkpoint.compactionId);
-    const sourceEventId = asText(state.sourceEventId) || asText(checkpoint.sourceEventId);
-    return (asText(entry.compactionId).length > 0 && compactionId === asText(entry.compactionId))
-      || (asText(entry.eventId).length > 0
-        && (sourceEventId === asText(entry.eventId) || compactionId === asText(entry.eventId)));
+    return asText(entry.compactionId).length > 0 && compactionId === asText(entry.compactionId);
   }
 
   function checkpointRevisionKey(entry) {
     return `${config.agentId}\u0000${entry.domain}`;
+  }
+
+  function checkpointGetPath(entry) {
+    const separator = entry.path.includes('?') ? '&' : '?';
+    return `${entry.path}${separator}domain=${encodeURIComponent(entry.domain)}`;
+  }
+
+  function checkpointDomainMatches(entry, checkpoint) {
+    if (!isObject(checkpoint)) return false;
+    const domain = asText(checkpoint.domain);
+    return domain.length === 0 || domain === entry.domain;
   }
 
   function setCheckpointRevision(entry, revision) {
@@ -2675,37 +2775,48 @@ export function createController(dependencies = {}) {
 
   async function resolveCheckpointRevision(entry) {
     const cached = checkpointRevisions.get(checkpointRevisionKey(entry));
-    if (Number.isInteger(cached) && cached >= 0) {
-      return { revision: cached, source: 'confirmed' };
-    }
-    const current = await requestJson(entry.path, undefined, {
+    const cachedRevision = Number.isInteger(cached) && cached >= 0 ? cached : 0;
+    // Always read the authoritative domain-scoped view for this logical
+    // compaction. A cached revision alone cannot prove the object identity
+    // after an instance switch, delete/recreate, or pending cache overwrite.
+    const current = await requestJson(checkpointGetPath(entry), undefined, {
       method: 'GET',
       timeoutMs: config.checkpointTimeoutMs,
     });
     if (checkpointStopped()) return { failure: 'checkpoint_interrupted' };
     if (!current.ok) {
-      if (current.status === 401 || current.status === 403) return { failure: 'checkpoint_unauthorized' };
+      if (current.status === 401) return { failure: 'checkpoint_unauthorized' };
+      if (current.status === 403) return { failure: 'checkpoint_forbidden' };
       if (current.status === 409 && current.code === 'mode_mismatch') return { failure: 'runtime_mode_mismatch' };
       if (current.code === 'aborted') return { failure: 'checkpoint_interrupted' };
       // No authoritative revision while capability/network is unavailable.
-      // Use the create convention (0) so a real existing checkpoint will
-      // conflict/fail explicitly instead of being silently overwritten.
-      return { revision: 0, source: 'unavailable' };
+      // Reuse the last confirmed revision for this key if present; otherwise
+      // use the create convention (0) so a real collision fails explicitly.
+      return { revision: cachedRevision, source: cachedRevision > 0 ? 'cached_fallback' : 'unavailable' };
     }
     const checkpoint = current.data?.checkpoint;
     const dataSource = asText(current.data?.source);
+    if (isObject(checkpoint)
+      && asText(checkpoint.domain).length > 0
+      && checkpoint.domain !== entry.domain) {
+      return { failure: 'checkpoint_domain_mismatch' };
+    }
     const revision = Number.isInteger(checkpoint?.revision) ? checkpoint.revision : null;
     if (isObject(checkpoint) && checkpoint.pending !== true && revision !== null) {
       setCheckpointRevision(entry, revision);
-      return { revision, source: dataSource || asText(checkpoint.source) || 'get' };
+      return {
+        revision,
+        source: dataSource || asText(checkpoint.source) || 'get',
+        checkpoint,
+      };
     }
     if (!checkpoint && dataSource === 'cloud') {
-      return { revision: 0, source: 'authoritative_absent' };
+      return { revision: 0, source: 'authoritative_absent', checkpoint: null };
     }
     if (checkpoint?.pending === true) {
-      return { revision: 0, source: 'pending_unknown' };
+      return { revision: cachedRevision, source: 'pending_unknown', checkpoint };
     }
-    return { revision: 0, source: 'unavailable' };
+    return { revision: cachedRevision, source: 'unavailable', checkpoint: checkpoint ?? null };
   }
 
   function finishCheckpoint(entry, outcome, detail = {}) {
@@ -2714,12 +2825,14 @@ export function createController(dependencies = {}) {
     const wasPending = removePendingCheckpoint(entry);
     if (outcome === 'committed') {
       setCheckpointRevision(entry, detail.revision);
-      stats.checkpoints.sent += 1;
+      if (detail.duplicate === true) stats.checkpoints.duplicates += 1;
+      else stats.checkpoints.sent += 1;
       status.checkpoint = {
         state: 'committed',
         revision: Number.isFinite(detail.revision) ? detail.revision : null,
         expectedRevision: entry.body?.expectedRevision ?? null,
         revisionSource: entry.revisionSource ?? null,
+        duplicate: detail.duplicate === true,
         pending: stats.checkpoints.pending,
         at: now(),
       };
@@ -2733,6 +2846,8 @@ export function createController(dependencies = {}) {
       reason: detail.reason ?? 'checkpoint_failed',
       pending: stats.checkpoints.pending,
       retryAfterMs: entry.retryAfterMs ?? null,
+      retryAfterRawMs: entry.retryAfterRawMs ?? null,
+      retryAfterTruncated: entry.retryAfterTruncated === true,
       retryAfterLimitedByDeadline: entry.retryAfterLimitedByDeadline === true,
       at: now(),
     };
@@ -2753,16 +2868,23 @@ export function createController(dependencies = {}) {
     entry.mode = mode;
     const base = Math.max(10, config.checkpointRetryMs);
     const exponent = Math.min(Math.max(entry.attempts - 1, 0), 5);
-    const backoff = Number.isFinite(retryAfterMs) && retryAfterMs >= 0
-      ? retryAfterMs
-      : Math.min(base * (2 ** exponent), 30000);
+    const rawRetryAfter = Number.isFinite(retryAfterMs) && retryAfterMs >= 0 ? retryAfterMs : null;
+    const cappedRetryAfter = rawRetryAfter === null
+      ? null
+      : Math.min(rawRetryAfter, config.maxRetryAfterMs);
+    const retryAfterTruncated = rawRetryAfter !== null && cappedRetryAfter < rawRetryAfter;
+    const backoff = cappedRetryAfter === null
+      ? Math.min(base * (2 ** exponent), 30000)
+      : cappedRetryAfter;
     const target = now() + Math.max(1, Math.round(backoff));
     entry.retryAt = Math.min(entry.deadlineAt, target);
-    entry.retryAfterMs = Number.isFinite(retryAfterMs) ? retryAfterMs : null;
-    entry.retryAfterLimitedByDeadline = entry.retryAfterMs !== null && target > entry.deadlineAt;
-    if (entry.retryAfterMs !== null && entry.retryAfterLimitedByDeadline) {
+    entry.retryAfterRawMs = rawRetryAfter;
+    entry.retryAfterMs = cappedRetryAfter;
+    entry.retryAfterTruncated = retryAfterTruncated;
+    entry.retryAfterLimitedByDeadline = cappedRetryAfter !== null && target > entry.deadlineAt;
+    if (retryAfterTruncated || entry.retryAfterLimitedByDeadline) {
       stats.checkpoints.retryAfterTruncated += 1;
-      noteFailure('retry_after_limited_by_deadline');
+      noteFailure(retryAfterTruncated ? 'retry_after_truncated' : 'retry_after_limited_by_deadline');
     }
     clearPendingCheckpointTimer(entry);
     entry.timer = setTimeoutFn(() => {
@@ -2778,6 +2900,8 @@ export function createController(dependencies = {}) {
       expectedRevision: entry.body?.expectedRevision ?? null,
       revisionSource: entry.revisionSource ?? null,
       retryAfterMs: entry.retryAfterMs,
+      retryAfterRawMs: entry.retryAfterRawMs ?? null,
+      retryAfterTruncated: entry.retryAfterTruncated === true,
       retryAt: entry.retryAt,
       deadlineAt: entry.deadlineAt,
       retryAfterLimitedByDeadline: entry.retryAfterLimitedByDeadline,
@@ -2820,7 +2944,7 @@ export function createController(dependencies = {}) {
     entry.attempts += 1;
 
     if (entry.mode === 'poll') {
-      const current = await requestJson(entry.path, undefined, {
+      const current = await requestJson(checkpointGetPath(entry), undefined, {
         method: 'GET',
         timeoutMs: config.checkpointTimeoutMs,
       });
@@ -2845,9 +2969,14 @@ export function createController(dependencies = {}) {
         schedulePendingCheckpoint(entry, 'checkpoint_queued', 'poll');
         return false;
       }
-      if (current.status === 401 || current.status === 403) {
+      if (current.status === 401) {
         markWritesDisabled('runtime_unauthorized');
         finishCheckpoint(entry, 'failed', { reason: 'checkpoint_unauthorized' });
+        return false;
+      }
+      if (current.status === 403) {
+        markWritesPolicyBlocked('runtime_forbidden');
+        finishCheckpoint(entry, 'failed', { reason: 'checkpoint_forbidden' });
         return false;
       }
       if (current.status === 409 && current.code === 'mode_mismatch') {
@@ -2905,7 +3034,7 @@ export function createController(dependencies = {}) {
       stats.checkpoints.conflicts += 1;
       if (entry.rebases < CHECKPOINT_MAX_REBASES) {
         entry.rebases += 1;
-        const current = await requestJson(entry.path, undefined, {
+        const current = await requestJson(checkpointGetPath(entry), undefined, {
           method: 'GET',
           timeoutMs: config.checkpointTimeoutMs,
         });
@@ -2957,9 +3086,14 @@ export function createController(dependencies = {}) {
       return false;
     }
 
-    if (result.status === 401 || result.status === 403) {
+    if (result.status === 401) {
       markWritesDisabled('runtime_unauthorized');
       finishCheckpoint(entry, 'failed', { reason: 'checkpoint_unauthorized' });
+      return false;
+    }
+    if (result.status === 403) {
+      markWritesPolicyBlocked('runtime_forbidden');
+      finishCheckpoint(entry, 'failed', { reason: 'checkpoint_forbidden' });
       return false;
     }
 
@@ -3012,7 +3146,7 @@ export function createController(dependencies = {}) {
     const summary = summaryText.length > 0 ? truncateChars(summaryText, 4000) : null;
     const compactionId = compactionLogicalId(data, session);
     const eventAt = stableCompactionTimestamp(data, compactionId, eventID);
-    const endSeq = asText(data?.endSeq) || asText(data?.seq) || asText(data?.eventID) || asText(data?.eventId) || 'end';
+    const endSeq = asText(data?.endSeq) || asText(data?.seq) || 'end';
     const domain = checkpointDomain(session);
     const fleetTaskId = asText(data?.fleetTaskId) || asText(data?.taskId);
     const recordIds = uniqueStrings(options.recordIds, 200);
@@ -3111,11 +3245,25 @@ export function createController(dependencies = {}) {
         disableRuntime('runtime_mode_mismatch');
       } else if (resolvedRevision.failure === 'checkpoint_unauthorized') {
         markWritesDisabled('runtime_unauthorized');
+      } else if (resolvedRevision.failure === 'checkpoint_forbidden') {
+        markWritesPolicyBlocked('runtime_forbidden');
       }
       finishCheckpoint(entry, 'failed', { reason: resolvedRevision.failure });
       return false;
     }
     entry.revisionSource = resolvedRevision.source;
+    if (resolvedRevision.checkpoint
+      && resolvedRevision.checkpoint.pending !== true
+      && checkpointMatches(entry, resolvedRevision.checkpoint)) {
+      // A restart/fresh-envelope replay may have a different expectedRevision
+      // or sourceEventId but the same logical compactionId. Treat the
+      // existing committed object as the idempotent result, not a new write.
+      finishCheckpoint(entry, 'committed', {
+        revision: resolvedRevision.checkpoint.revision,
+        duplicate: true,
+      });
+      return resolvedRevision.checkpoint;
+    }
     entry.body = {
       ...entry.body,
       requestId: entry.idempotencyKey,
@@ -3191,10 +3339,16 @@ export function createController(dependencies = {}) {
         remember(seenChunks, chunk.key);
         const ingested = await sendIngest([chunk], { sessionID, extractor: 'heuristic' });
         const extractionStatus = asText(ingested?.data?.extraction?.status);
+        const detail = isObject(ingested?.data?.detail) ? ingested.data.detail : {};
         const settled = ingested?.ok === true
           && ingested.data?.queued !== true
+          && ingested.data?.pending !== true
+          && Number(detail.failed ?? 0) === 0
+          && Number(detail.queued ?? 0) === 0
           && extractionStatus !== 'failed'
-          && extractionStatus !== 'pending';
+          && extractionStatus !== 'pending'
+          && Array.isArray(ingested.data?.records)
+          && ingested.data.records.length > 0;
         if (settled && Array.isArray(ingested.data?.records)) {
           recordIds = uniqueStrings(ingested.data.records.map((record) => record?.id), 200);
           detailIds = uniqueStrings(ingested.data.records.flatMap((record) => (
@@ -3402,7 +3556,14 @@ export function createController(dependencies = {}) {
         // Best effort.
       }
     }
-    await Promise.allSettled([...inflight]);
+    const settled = await Promise.race([
+      Promise.allSettled([...inflight]),
+      delay(config.disposeWaitMs, setTimeoutFn).then(() => null),
+    ]);
+    if (settled === null) {
+      stats.lifecycle.disposeTimeouts += 1;
+      status.lifecycle = { disposeTimedOut: true, at: now() };
+    }
   }
 
   async function whenIdle() {
@@ -3444,11 +3605,12 @@ export function createController(dependencies = {}) {
       },
       features: {
         recall: active && recallAllowed,
-        ingest: active && ingestAllowed && capabilities.events,
-        checkpoints: active && checkpointAllowed && capabilities.events,
+        ingest: active && ingestAllowed && capabilities.events && !writesDisabled,
+        checkpoints: active && checkpointAllowed && capabilities.events && !writesDisabled,
         fragments: active && recallAllowed,
         toolMasking: active && config.hideMemoryTools,
         hostModel: active && hostAvailable,
+        writes: active && !writesDisabled,
       },
       model: {
         selected: config.modelSource,
@@ -3475,6 +3637,8 @@ export function createController(dependencies = {}) {
       ingest: {
         committed: stats.ingest.committed,
         failedExtraction: stats.ingest.failedExtraction,
+        partial: stats.ingest.partial,
+        empty: stats.ingest.empty,
         pending: stats.ingest.pending,
         queued: stats.ingest.queued,
         rejected: stats.ingest.rejected,
@@ -3483,6 +3647,10 @@ export function createController(dependencies = {}) {
         ...stats.writes,
         ...(status.writeState ?? {}),
         disabled: writesDisabled,
+      },
+      lifecycle: {
+        ...stats.lifecycle,
+        ...(status.lifecycle ?? {}),
       },
       events: {
         subscribed: stats.events.subscriptions,
@@ -3508,6 +3676,7 @@ export function createController(dependencies = {}) {
     lastWarning: null,
     checkpoint: null,
     writeState: null,
+    lifecycle: null,
     warnings: [...config.warnings],
     eventsError: null,
   };

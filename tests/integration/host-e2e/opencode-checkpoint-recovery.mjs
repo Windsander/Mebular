@@ -16,11 +16,10 @@
 
 import { mkdir, writeFile } from 'node:fs/promises';
 import { createServer as createHttpServer, request as createHttpRequest } from 'node:http';
-import { createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { createController } from '../../../packages/opencode-plugin/index.js';
+import { createController, summaryOnlyCheckpointState } from '../../../packages/opencode-plugin/index.js';
 import { requestSidecar, startRealRuntime } from './lib/real-runtime.mjs';
 
 let passed = 0;
@@ -48,25 +47,27 @@ async function waitFor(predicate, { timeoutMs = 30000, intervalMs = 100 } = {}) 
   return null;
 }
 
-function getFreePort() {
-  return new Promise((resolve, reject) => {
-    const server = createNetServer();
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const { port } = server.address();
-      server.close(() => resolve(port));
-    });
-  });
-}
-
-async function startCapabilityProxy(port, targetPort) {
+async function startCapabilityProxy() {
   let paused = false;
+  let failDetail = false;
+  let targetPort = null;
   const server = createHttpServer((req, res) => {
-    if (paused) {
+    const unavailable = (message) => {
       res.writeHead(503, { 'content-type': 'application/json' });
       res.end(JSON.stringify({
         ok: false,
-        error: { code: 'capability_unavailable', message: 'proxy paused', retryable: true },
+        error: { code: 'capability_unavailable', message, retryable: true },
+      }));
+    };
+    if (paused || targetPort === null) {
+      unavailable(targetPort === null ? 'proxy target not ready' : 'proxy paused');
+      return;
+    }
+    if (failDetail && String(req.url).startsWith('/internal/memory/v1/detail')) {
+      res.writeHead(403, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        ok: false,
+        error: { code: 'forbidden_scope', message: 'detail writes forbidden by negative fixture', retryable: false },
       }));
       return;
     }
@@ -81,27 +82,31 @@ async function startCapabilityProxy(port, targetPort) {
       response.pipe(res);
     });
     upstream.on('error', () => {
-      if (!res.headersSent) {
-        res.writeHead(503, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({
-          ok: false,
-          error: { code: 'capability_unavailable', message: 'proxy upstream failed', retryable: true },
-        }));
-      } else {
-        res.end();
-      }
+      if (!res.headersSent) unavailable('proxy upstream failed');
+      else res.end();
     });
     req.pipe(upstream);
   });
   await new Promise((resolve, reject) => {
     server.once('error', reject);
-    server.listen(port, '127.0.0.1', resolve);
+    server.listen(0, '127.0.0.1', resolve);
   });
+  const { port } = server.address();
   return {
     url: `http://127.0.0.1:${port}`,
+    setTarget(nextPort) { targetPort = nextPort; },
+    setFailDetail(value) { failDetail = value === true; },
     pause() { paused = true; },
     resume() { paused = false; },
-    close: () => new Promise((resolve) => server.close(resolve)),
+    close: () => new Promise((resolve) => {
+      const timer = setTimeout(resolve, 1000);
+      timer.unref?.();
+      if (typeof server.closeAllConnections === 'function') server.closeAllConnections();
+      server.close(() => {
+        clearTimeout(timer);
+        resolve();
+      });
+    }),
   };
 }
 
@@ -133,6 +138,12 @@ function outboxItems(status) {
   return 0;
 }
 
+function deadLetterItems(status) {
+  if (typeof status?.counts?.deadLetter === 'number') return status.counts.deadLetter;
+  if (typeof status?.deadLetter === 'number') return status.deadLetter;
+  return 0;
+}
+
 async function main() {
   const root = join(tmpdir(), `mebular-opencode-checkpoint-recovery-${process.pid}-${Date.now()}`);
   const mebularHome = join(root, 'mebular-home');
@@ -144,9 +155,7 @@ async function main() {
     http: { host: '127.0.0.1', port: 0 },
   }, null, 2), 'utf8');
 
-  const mcpPort = await getFreePort();
-  const proxyPort = await getFreePort();
-  const proxy = await startCapabilityProxy(proxyPort, mcpPort);
+  const proxy = await startCapabilityProxy();
   const previousCapabilityUrl = process.env.MEBULAR_CAPABILITY_URL;
   process.env.MEBULAR_CAPABILITY_URL = proxy.url;
 
@@ -155,10 +164,11 @@ async function main() {
   try {
     runtime = await startRealRuntime({
       root,
-      port: mcpPort,
       memoryRuntime: { enabled: true },
       manageMemoryRuntime: true,
     });
+    proxy.setTarget(Number(new URL(runtime.url).port));
+    proxy.resume();
     const discovery = await runtime.waitForSidecar();
     if (previousCapabilityUrl === undefined) delete process.env.MEBULAR_CAPABILITY_URL;
     else process.env.MEBULAR_CAPABILITY_URL = previousCapabilityUrl;
@@ -227,6 +237,147 @@ async function main() {
       idemCheckpoint?.revision === 1 && idemCheckpoint?.state?.compactionId === 'cmp_real_idem',
       JSON.stringify({ revision: idemCheckpoint?.revision, pending: idemCheckpoint?.pending }));
 
+    // H1: same thread has a default-domain checkpoint. A task-domain GET must
+    // not fall back to the default revision.
+    const domainThread = 'ses_real_domain_scope';
+    const defaultBody = {
+      requestId: 'req_real_default_scope',
+      actor: { type: 'agent', agentId: 'opencode' },
+      agentId: 'opencode',
+      threadId: domainThread,
+      domain: 'default',
+      summary: null,
+      state: summaryOnlyCheckpointState(null, { threadId: domainThread, domain: 'default' }),
+      recordIds: [],
+      detailIds: [],
+      expiresAt: 0,
+      expectedRevision: 0,
+    };
+    const defaultCreated = await requestSidecar(
+      discovery,
+      `/checkpoints/${encodeURIComponent(domainThread)}?agentId=opencode`,
+      {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(defaultBody),
+      },
+    );
+    check('真实 default checkpoint 创建 revision 1',
+      defaultCreated.status === 200 && defaultCreated.data?.checkpoint?.revision === 1,
+      JSON.stringify({ status: defaultCreated.status, revision: defaultCreated.data?.checkpoint?.revision }));
+    await controller.handleEvent({
+      id: 'evt_real_domain_scope',
+      type: 'session.compaction.ended',
+      data: {
+        sessionID: domainThread,
+        compactionId: 'cmp_real_domain_scope',
+        at: 1700000000000,
+        reason: 'auto',
+      },
+    });
+    check('task checkpoint 在 default 同 thread 下仍成功 revision 1', Boolean(await waitFor(
+      () => controller.getStatus().counts.checkpoints.sent >= 2,
+    )));
+    const taskScoped = await runtime.sidecarCheckpoint(domainThread, 'opencode');
+    const defaultScoped = await requestSidecar(
+      discovery,
+      `/checkpoints/${encodeURIComponent(domainThread)}?agentId=opencode&domain=default`,
+    );
+    check('task revision 1 且 default checkpoint 未变化',
+      taskScoped?.domain === `task:${domainThread}`
+      && taskScoped?.revision === 1
+      && taskScoped?.state?.compactionId === 'cmp_real_domain_scope'
+      && defaultScoped.data?.checkpoint?.domain === 'default'
+      && defaultScoped.data?.checkpoint?.revision === 1
+      && defaultScoped.data?.checkpoint?.state?.compactionId !== 'cmp_real_domain_scope',
+      JSON.stringify({
+        task: { domain: taskScoped?.domain, revision: taskScoped?.revision },
+        default: {
+          domain: defaultScoped.data?.checkpoint?.domain,
+          revision: defaultScoped.data?.checkpoint?.revision,
+        },
+      }));
+    const domainPut = putBodies.find((body) => body.threadId === domainThread);
+    check('task checkpoint 首次 PUT expectedRevision=0',
+      domainPut?.expectedRevision === 0,
+      JSON.stringify({ expectedRevision: domainPut?.expectedRevision }));
+
+    // M1: restart/fresh-envelope replay of the same logical compaction is a
+    // no-op duplicate, not a new revision.
+    const restartThread = 'ses_real_restart';
+    const restartEvent = {
+      id: 'evt_restart_1',
+      type: 'session.compaction.ended',
+      data: {
+        sessionID: restartThread,
+        compactionId: 'cmp_real_restart',
+        at: 1700000000000,
+        reason: 'auto',
+      },
+    };
+    await controller.handleEvent(restartEvent);
+    check('重启前 checkpoint committed', Boolean(await waitFor(
+      () => controller.getStatus().counts.checkpoints.sent >= 3,
+    )));
+    const beforeRestart = await runtime.sidecarCheckpoint(restartThread, 'opencode');
+    await controller.dispose();
+    controller = createController({
+      ctx: makeFakeCtx(),
+      env: {},
+      homeDir: mebularHome,
+      config: {
+        agentId: 'opencode',
+        checkpointRetryMs: 100,
+        checkpointPendingTimeoutMs: 20000,
+        checkpointTimeoutMs: 3000,
+      },
+      fetchImpl,
+    });
+    await controller.start();
+    await controller.handleEvent({
+      ...restartEvent,
+      id: 'evt_restart_fresh_envelope',
+      data: { ...restartEvent.data, eventID: 'different_transport_event_id' },
+    });
+    const afterRestart = await runtime.sidecarCheckpoint(restartThread, 'opencode');
+    check('重启/fresh envelope 重放同一逻辑 compaction 不新增 revision',
+      beforeRestart?.revision === 1
+      && afterRestart?.revision === 1
+      && controller.getStatus().counts.checkpoints.duplicates >= 1,
+      JSON.stringify({
+        before: beforeRestart?.revision,
+        after: afterRestart?.revision,
+        duplicates: controller.getStatus().counts.checkpoints.duplicates,
+      }));
+
+    // M3: real sidecar ingest with a permanent detail-write failure must be
+    // reported as partial, never committed.
+    const partialThread = 'ses_real_partial';
+    const committedBeforePartial = controller.getStatus().counts.ingest.committed;
+    proxy.setFailDetail(true);
+    await controller.handleContext({
+      sessionID: partialThread,
+      messages: [{ id: 'msg_partial_user', role: 'user', content: '以后默认用 partial-detail 主题' }],
+      system: [],
+      tools: {},
+    });
+    await controller.handleEvent({
+      type: 'session.execution.succeeded',
+      data: { sessionID: partialThread },
+    });
+    await controller.whenIdle();
+    proxy.setFailDetail(false);
+    const partialStatus = controller.getStatus();
+    check('真实 partial 200（detail failed）不计入 committed',
+      partialStatus.counts.ingest.partial >= 1
+      && partialStatus.counts.ingest.committed === committedBeforePartial,
+      JSON.stringify({
+        partial: partialStatus.counts.ingest.partial,
+        committed: partialStatus.counts.ingest.committed,
+        accepted: partialStatus.counts.ingest.accepted,
+        counts: partialStatus.counts.ingest,
+      }));
+
     // H2: revision advances, delete, recreate with one conflict recovery.
     const revThread = 'ses_real_revision';
     const sendCompaction = async (compactionId) => {
@@ -262,11 +413,10 @@ async function main() {
     );
     check('真实 sidecar 删除 checkpoint', deleted.status === 200 && deleted.data?.deleted === true,
       JSON.stringify({ status: deleted.status, deleted: deleted.data?.deleted }));
-    const conflictsBefore = controller.getStatus().counts.checkpoints.conflicts;
     await sendCompaction('cmp_real_rev_3');
-    check('删除后重建通过一次冲突恢复提交', Boolean(await waitFor(
+    check('删除后用权威 GET 重建提交', Boolean(await waitFor(
       () => controller.getStatus().counts.checkpoints.sent >= sentBeforeRevision + 3,
-    )) && controller.getStatus().counts.checkpoints.conflicts >= conflictsBefore + 1);
+    )));
     const recreated = await runtime.sidecarCheckpoint(revThread, 'opencode');
     check('删除后重建为 revision 1',
       recreated?.revision === 1 && recreated?.state?.compactionId === 'cmp_real_rev_3',
@@ -314,8 +464,11 @@ async function main() {
       return outboxItems(status) === 0 ? status : null;
     });
     check('outbox 已清空且无 dead letter（能力恢复后重放成功）',
-      Boolean(drained) && (drained?.deadLetter ?? 0) === 0,
-      JSON.stringify(drained?.counts));
+      Boolean(drained) && deadLetterItems(drained) === 0,
+      JSON.stringify({ deadLetter: deadLetterItems(drained), counts: drained?.counts }));
+    check('checkpoint 写失败计数为 0（revision 冲突计入 conflicts）',
+      controller.getStatus().counts.checkpoints.failed === 0,
+      JSON.stringify(controller.getStatus().counts.checkpoints));
     const outboxCheckpoint = await runtime.sidecarCheckpoint(outboxThread, 'opencode');
     check('202 恢复后只有一个 revision 且匹配 compactionId',
       outboxCheckpoint?.revision === 1
@@ -337,8 +490,8 @@ async function main() {
     if (previousCapabilityUrl === undefined) delete process.env.MEBULAR_CAPABILITY_URL;
     else process.env.MEBULAR_CAPABILITY_URL = previousCapabilityUrl;
     if (controller) await controller.dispose().catch(() => undefined);
-    await proxy.close().catch(() => undefined);
     if (runtime) await runtime.cleanup().catch(() => undefined);
+    await proxy.close().catch(() => undefined);
   }
 
   console.log(`\n${failed === 0 ? '✓' : '✗'} OpenCode checkpoint recovery（真实 sidecar/capability，fake host）：${passed} passed, ${failed} failed`);

@@ -99,6 +99,7 @@ export async function createFakeRuntime(options = {}) {
     checkpoints: [],
     checkpointReads: [],
     checkpointRevisions: {},
+    checkpointStates: {},
     ingestAttempts: 0,
     ingestFailureCount: 0,
     ingestDuplicates: 0,
@@ -344,6 +345,7 @@ export async function createFakeRuntime(options = {}) {
           source: 'cloud',
           stale: false,
           degraded: false,
+          state: state.checkpointStates[threadId] ?? {},
         } : null,
         pending: false,
       }), requestId);
@@ -391,6 +393,7 @@ export async function createFakeRuntime(options = {}) {
       }
       const revision = (state.checkpointRevisions[threadId] ?? 0) + 1;
       state.checkpointRevisions[threadId] = revision;
+      state.checkpointStates[threadId] = body?.state ?? {};
       const response = envelope(requestId, {
         source: 'cloud',
         degraded: false,
@@ -449,6 +452,7 @@ export async function createFakeRuntime(options = {}) {
       state.checkpoints.length = 0;
       state.checkpointReads.length = 0;
       state.checkpointRevisions = {};
+      state.checkpointStates = {};
       state.ingestAttempts = 0;
       state.ingestFailureCount = 0;
       state.ingestDuplicates = 0;

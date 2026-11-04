@@ -288,7 +288,19 @@ export function apply(ctx, config = {}) {
     writePhase('detail-partial-done', { ingest: summarizeIngest() });
     await waitContinue();
 
-    emitCompaction('fault-disable', 50, faultSummary('disabled in-flight checkpoint summary'));
+    emitCompaction('fault-delete', 70, faultSummary('delete recreate checkpoint summary'));
+    await sleep(1200);
+    writePhase('delete-ready', { state: summarizeCompaction('fault-delete') });
+    await waitContinue();
+
+    // Same logical compaction after an external delete: the adapter must verify
+    // absence and recreate with a nonce requestId instead of replaying old 200.
+    emitCompaction('fault-delete', 70, faultSummary('delete recreate checkpoint summary'));
+    await sleep(1800);
+    writePhase('delete-recreated', { state: summarizeCompaction('fault-delete') });
+    await waitContinue();
+
+    emitCompaction('fault-disable', 80, faultSummary('disabled in-flight checkpoint summary'));
     await sleep(200);
     writePhase('disable-inflight', { state: summarizeCompaction('fault-disable') });
     await waitContinue();

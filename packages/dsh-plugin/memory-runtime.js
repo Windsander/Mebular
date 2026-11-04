@@ -1764,7 +1764,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
         auth: { mode: 'none', tokenPresent: false, failures: 0, lastStatus: null, lastCode: null, lastAt: null },
         recall: { attempts: 0, hits: 0, empty: 0, failures: 0, skipped: 0, deduped: 0, cooling: 0, anchors: 0 },
         ingest: {
-          queued: 0, sent: 0, accepted: 0, committed: 0, pending: 0, partial: 0,
+          queued: 0, sent: 0, accepted: 0, committed: 0, pending: 0, partial: 0, degraded: 0,
           extractionFailed: 0, batches: 0, failed: 0, dropped: 0, duplicates: 0, skipped: 0,
           retries: 0, exhausted: 0, interrupted: 0, lastError: null,
         },
@@ -1819,7 +1819,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
     auth: { failures: 0, lastStatus: null, lastCode: null, lastAt: null },
     recall: { attempts: 0, hits: 0, empty: 0, failures: 0, skipped: 0, deduped: 0, cooling: 0 },
     ingest: {
-      queued: 0, sent: 0, accepted: 0, committed: 0, pending: 0, partial: 0,
+      queued: 0, sent: 0, accepted: 0, committed: 0, pending: 0, partial: 0, degraded: 0,
       extractionFailed: 0, batches: 0, failed: 0, dropped: 0, duplicates: 0, skipped: 0, inherited: 0,
       retries: 0, exhausted: 0, interrupted: 0, lastError: null,
     },
@@ -1836,8 +1836,10 @@ export function createMemoryRuntimeAdapter(options = {}) {
   const trackers = new Map();
   const compactions = new Map();
   const checkpointRevisions = new Map();
+  const checkpointLatest = new Map();
   const checkpointOperations = new Map();
   const pendingCheckpoints = new Map();
+  const checkpointReconcileIssues = new Map();
   const featureGenerations = { recall: 0, ingest: 0, checkpoint: 0, maintenance: 0 };
   let recallCooldownUntil = 0;
   let rateLimitUntil = 0;
@@ -2671,7 +2673,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
           const sidecarPending = acceptedResult.status === 202
             || data.queued === true
             || extractionStatus === 'pending';
-          const partial = detailFailed || detailQueued || data.degraded === true;
+          const partial = detailFailed || detailQueued;
           stats.ingest.accepted += group.length;
           if (extractionStatus === 'failed' || detailFailed) {
             stats.ingest.failed += group.length;
@@ -2686,12 +2688,13 @@ export function createMemoryRuntimeAdapter(options = {}) {
               `ingest:${stats.ingest.lastError.code}`,
               'memory runtime accepted an ingest batch but extraction/detail failed; it is not committed',
             );
-          } else if (sidecarPending || detailQueued || data.degraded === true) {
+          } else if (sidecarPending || detailQueued) {
             stats.ingest.pending += group.length;
             if (partial) stats.ingest.partial += group.length;
           } else {
             stats.ingest.sent += group.length;
             if (extractionStatus === 'completed') stats.ingest.committed += group.length;
+            if (data.degraded === true) stats.ingest.degraded += group.length;
           }
           continue;
         }
@@ -2739,6 +2742,35 @@ export function createMemoryRuntimeAdapter(options = {}) {
       && Number.isInteger(remoteState.endSeq)
       && remoteState.endSeq !== state.endSeq) return false;
     return true;
+  }
+
+  /**
+   * True when the authoritative checkpoint is a newer/different logical
+   * operation that the pending write must not overwrite. A sequential newer
+   * compaction may safely update an older checkpoint, but an old retried
+   * compaction must never replace a newer one.
+   */
+  function checkpointSupersedesState(checkpoint, state) {
+    const remoteState = isObject(checkpoint?.state) ? checkpoint.state : {};
+    const remoteEnd = Number.isInteger(remoteState.endSeq) ? remoteState.endSeq : null;
+    const localEnd = Number.isInteger(state?.endSeq) ? state.endSeq : null;
+    if (remoteState.compactionId === state.compactionId) {
+      if (remoteEnd !== null && localEnd !== null) return remoteEnd > localEnd;
+      return true;
+    }
+    if (remoteEnd !== null && localEnd !== null) return remoteEnd >= localEnd;
+    return true;
+  }
+
+  function rememberAuthoritativeCheckpoint(revisionKey, current) {
+    if (!current?.ok || !current.exists) return;
+    checkpointLatest.set(revisionKey, {
+      compactionId: current.checkpoint?.state?.compactionId ?? null,
+      endSeq: Number.isInteger(current.checkpoint?.state?.endSeq)
+        ? current.checkpoint.state.endSeq
+        : null,
+      revision: current.revision,
+    });
   }
 
   /**
@@ -2815,18 +2847,25 @@ export function createMemoryRuntimeAdapter(options = {}) {
     return { ok: true, exists: checkpoint !== null, revision, checkpoint };
   }
 
+  function isRetryableAuthorityFailure(current) {
+    if (!isObject(current) || current.ok !== false) return false;
+    if (current.reason === 'checkpoint_read_not_fresh'
+      || current.reason === 'checkpoint_revision_unreadable') return true;
+    return isRetryableRuntimeFailure({
+      ok: false,
+      code: current.reason,
+      status: current.status,
+      retryAfterMs: current.retryAfterMs,
+    });
+  }
+
   async function resolveCheckpointAuthority(threadId, domain, requestOptions = {}) {
     let last = null;
     let attempt = 0;
     for (;;) {
       last = await readCheckpointAuthority(threadId, domain, requestOptions);
       if (last.ok) return last;
-      const retryable = isRetryableRuntimeFailure({
-        ok: false,
-        code: last.reason,
-        status: last.status,
-        retryAfterMs: last.retryAfterMs,
-      });
+      const retryable = isRetryableAuthorityFailure(last);
       if (!retryable || attempt >= config.checkpointRetries) return last;
       attempt += 1;
       await abortableDelay(
@@ -2839,7 +2878,36 @@ export function createMemoryRuntimeAdapter(options = {}) {
     }
   }
 
-  function markCheckpointCommitted(state, revision, { reconciled = false } = {}) {
+  function noteCheckpointIssue(operationKey, state, error, kind = 'needs_reconcile') {
+    checkpointReconcileIssues.set(operationKey, {
+      compactionId: state?.compactionId ?? null,
+      endSeq: Number.isInteger(state?.endSeq) ? state.endSeq : null,
+      kind,
+      error,
+      at: now(),
+    });
+    while (checkpointReconcileIssues.size > 128) {
+      const oldest = checkpointReconcileIssues.keys().next().value;
+      if (oldest === undefined) break;
+      checkpointReconcileIssues.delete(oldest);
+    }
+  }
+
+  function markCheckpointSuperseded(state, operationKey) {
+    state.committed = false;
+    state.pending = false;
+    state.failed = true;
+    state.superseded = true;
+    state.needsReconcile = false;
+    state.revision = null;
+    state.error = 'checkpoint_superseded';
+    stats.checkpoints.failed += 1;
+    noteCheckpointIssue(operationKey, state, state.error, 'superseded');
+    pendingCheckpoints.delete(operationKey);
+    checkpointOperations.set(operationKey, { failed: true, superseded: true });
+  }
+
+  function markCheckpointCommitted(state, revision, { reconciled = false, count = true } = {}) {
     state.committed = true;
     state.pending = false;
     state.failed = false;
@@ -2847,11 +2915,20 @@ export function createMemoryRuntimeAdapter(options = {}) {
     state.error = null;
     state.revision = revision;
     state.lastCommittedRevision = revision;
-    pendingCheckpoints.delete(checkpointOperationKey(state));
+    const operationKey = checkpointOperationKey(state);
+    pendingCheckpoints.delete(operationKey);
+    checkpointReconcileIssues.delete(operationKey);
     checkpointRevisions.set(checkpointRevisionKey(state.threadId, state.domain), revision);
-    if (reconciled) stats.checkpoints.reconciled += 1;
-    else stats.checkpoints.sent += 1;
-    stats.checkpoints.committed += 1;
+    checkpointLatest.set(checkpointRevisionKey(state.threadId, state.domain), {
+      compactionId: state.compactionId ?? null,
+      endSeq: Number.isInteger(state.endSeq) ? state.endSeq : null,
+      revision,
+    });
+    if (count) {
+      if (reconciled) stats.checkpoints.reconciled += 1;
+      else stats.checkpoints.sent += 1;
+      stats.checkpoints.committed += 1;
+    }
   }
 
   function rememberPendingCheckpoint(state, record) {
@@ -2874,6 +2951,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
       old.state.needsReconcile = true;
       old.state.error = 'reconcile_exhausted';
       stats.checkpoints.needsReconcile += 1;
+      noteCheckpointIssue(oldKey, old.state, old.state.error, 'needs_reconcile');
       pendingCheckpoints.delete(oldKey);
     }
     state.pending = true;
@@ -2907,6 +2985,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
       if (record.kind === 'preflight') {
         if (current.ok) {
           checkpointRevisions.set(record.revisionKey, current.revision);
+          rememberAuthoritativeCheckpoint(record.revisionKey, current);
           if (current.exists && checkpointMatchesState(current.checkpoint, record.state)) {
             markCheckpointCommitted(record.state, current.revision, { reconciled: true });
             checkpointOperations.set(operationKey, {
@@ -2914,6 +2993,10 @@ export function createMemoryRuntimeAdapter(options = {}) {
               committedRevision: current.revision,
             });
             pendingCheckpoints.delete(operationKey);
+            continue;
+          }
+          if (current.exists && checkpointSupersedesState(current.checkpoint, record.state)) {
+            markCheckpointSuperseded(record.state, operationKey);
             continue;
           }
           pendingCheckpoints.delete(operationKey);
@@ -2930,18 +3013,14 @@ export function createMemoryRuntimeAdapter(options = {}) {
         }
         record.attempts += 1;
         record.lastError = current.reason;
-        const retryable = isRetryableRuntimeFailure({
-          ok: false,
-          code: current.reason,
-          status: current.status,
-          retryAfterMs: current.retryAfterMs,
-        });
+        const retryable = isRetryableAuthorityFailure(current);
         if (!retryable || record.attempts >= 4) {
           record.state.pending = false;
           record.state.needsReconcile = false;
           record.state.failed = true;
           record.state.error = `revision_unavailable:${record.lastError ?? 'unknown'}`;
           stats.checkpoints.failed += 1;
+          noteCheckpointIssue(operationKey, record.state, record.state.error, 'preflight_failed');
           pendingCheckpoints.delete(operationKey);
           continue;
         }
@@ -2949,12 +3028,17 @@ export function createMemoryRuntimeAdapter(options = {}) {
         continue;
       }
       if (current.ok && current.exists && checkpointMatchesState(current.checkpoint, record.state)) {
+        rememberAuthoritativeCheckpoint(record.revisionKey, current);
         markCheckpointCommitted(record.state, current.revision, { reconciled: true });
         checkpointOperations.set(operationKey, {
           requestId: record.requestId,
           committedRevision: current.revision,
         });
         pendingCheckpoints.delete(operationKey);
+        continue;
+      }
+      if (current.ok && current.exists && checkpointSupersedesState(current.checkpoint, record.state)) {
+        markCheckpointSuperseded(record.state, operationKey);
         continue;
       }
       record.attempts += 1;
@@ -2968,6 +3052,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
         record.state.needsReconcile = true;
         record.state.error = `reconcile_exhausted:${record.lastError ?? 'unknown'}`;
         stats.checkpoints.needsReconcile += 1;
+        noteCheckpointIssue(operationKey, record.state, record.state.error, 'needs_reconcile');
         pendingCheckpoints.delete(operationKey);
         continue;
       }
@@ -3007,28 +3092,64 @@ export function createMemoryRuntimeAdapter(options = {}) {
         const oldest = checkpointOperations.keys().next().value;
         if (oldest !== undefined) checkpointOperations.delete(oldest);
       }
-      const priorOperation = checkpointOperations.get(operationKey);
+      let priorOperation = checkpointOperations.get(operationKey);
+      const generation = featureGenerations.checkpoint;
+      const summaryText = state.summary.text.trim();
+      const domain = config.domain?.startsWith('task:') ? config.domain : `task:${state.threadId}`;
+      state.domain = domain;
+      const revisionKey = checkpointRevisionKey(state.threadId, domain);
+      let needsRecreateNonce = false;
+      let verifyReplay = false;
       if (Number.isInteger(priorOperation?.committedRevision)) {
-        state.committed = true;
-        state.pending = false;
-        state.failed = false;
-        state.needsReconcile = false;
-        state.error = null;
-        state.revision = priorOperation.committedRevision;
-        state.lastCommittedRevision = priorOperation.committedRevision;
-        stats.checkpoints.duplicates += 1;
-        return;
+        // The operation cache is not proof after an external delete. Verify the
+        // graph object still exists before claiming committed.
+        const current = await resolveCheckpointAuthority(state.threadId, domain, {
+          signal: retryAbort?.signal,
+          generation,
+        });
+        if (!current.ok) {
+          state.committed = false;
+          state.pending = true;
+          state.failed = false;
+          state.needsReconcile = true;
+          state.error = `checkpoint_unconfirmed:${current.reason}`;
+          stats.checkpoints.pending += 1;
+          stats.checkpoints.needsReconcile += 1;
+          checkpointOperations.set(operationKey, { requestId: priorOperation.requestId, pending: true });
+          rememberPendingCheckpoint(state, { requestId: priorOperation.requestId });
+          state.needsReconcile = true;
+          return;
+        }
+        rememberAuthoritativeCheckpoint(revisionKey, current);
+        if (current.exists && checkpointMatchesState(current.checkpoint, state)) {
+          state.lastCommittedRevision = current.revision;
+          markCheckpointCommitted(state, current.revision, { reconciled: true, count: false });
+          checkpointOperations.set(operationKey, {
+            requestId: priorOperation.requestId,
+            committedRevision: current.revision,
+          });
+          stats.checkpoints.duplicates += 1;
+          return;
+        }
+        if (current.exists && checkpointSupersedesState(current.checkpoint, state)) {
+          markCheckpointSuperseded(state, operationKey);
+          return;
+        }
+        if (!current.exists) {
+          // Deleted after the cached commit: force a recreate requestId so the
+          // capability idempotency ledger cannot replay the old 200.
+          needsRecreateNonce = true;
+          verifyReplay = true;
+          priorOperation = null;
+          checkpointOperations.delete(operationKey);
+          checkpointRevisions.set(revisionKey, 0);
+        }
       }
       state.committed = false;
       state.pending = true;
       state.failed = false;
       state.needsReconcile = false;
       state.error = null;
-      const generation = featureGenerations.checkpoint;
-      const summaryText = state.summary.text.trim();
-      const domain = config.domain?.startsWith('task:') ? config.domain : `task:${state.threadId}`;
-      state.domain = domain;
-      const revisionKey = checkpointRevisionKey(state.threadId, domain);
       await reconcilePendingCheckpoints({ revisionKey, force: true });
       const reconciledOperation = checkpointOperations.get(operationKey);
       if (Number.isInteger(reconciledOperation?.committedRevision)) {
@@ -3052,12 +3173,17 @@ export function createMemoryRuntimeAdapter(options = {}) {
         });
         if (current.ok && current.exists && checkpointMatchesState(current.checkpoint, state)) {
           state.lastCommittedRevision = current.revision;
+          rememberAuthoritativeCheckpoint(revisionKey, current);
           markCheckpointCommitted(state, current.revision, { reconciled: true });
           checkpointOperations.set(operationKey, {
             requestId: reconciledOperation.requestId,
             committedRevision: current.revision,
           });
           stats.checkpoints.duplicates += 1;
+          return;
+        }
+        if (current.ok && current.exists && checkpointSupersedesState(current.checkpoint, state)) {
+          markCheckpointSuperseded(state, operationKey);
           return;
         }
         state.committed = false;
@@ -3124,12 +3250,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
           generation,
         });
         if (!current.ok) {
-          const retryable = isRetryableRuntimeFailure({
-            ok: false,
-            code: current.reason,
-            status: current.status,
-            retryAfterMs: current.retryAfterMs,
-          });
+          const retryable = isRetryableAuthorityFailure(current);
           state.committed = false;
           if (!retryable) {
             state.pending = false;
@@ -3150,6 +3271,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
           });
           return;
         }
+        rememberAuthoritativeCheckpoint(revisionKey, current);
         expectedRevision = current.revision;
         checkpointRevisions.set(revisionKey, expectedRevision);
         if (current.exists && checkpointMatchesState(current.checkpoint, state)) {
@@ -3161,6 +3283,16 @@ export function createMemoryRuntimeAdapter(options = {}) {
           });
           return;
         }
+        if (current.exists && checkpointSupersedesState(current.checkpoint, state)) {
+          markCheckpointSuperseded(state, operationKey);
+          return;
+        }
+        if (!current.exists) needsRecreateNonce = true;
+      }
+      const latest = checkpointLatest.get(revisionKey);
+      if (isObject(latest) && checkpointSupersedesState({ state: latest }, state)) {
+        markCheckpointSuperseded(state, operationKey);
+        return;
       }
       state.lastCommittedRevision = Number.isInteger(expectedRevision) ? expectedRevision : null;
       const body = {
@@ -3174,9 +3306,17 @@ export function createMemoryRuntimeAdapter(options = {}) {
         expectedRevision,
       };
       const path = `/checkpoints/${encodeURIComponent(state.threadId)}`;
+      const baseSeed = [
+        state.sessionId,
+        state.compactionId,
+        state.endSeq,
+        expectedRevision,
+      ].join('\u0000');
       const baseRequestId = typeof priorOperation?.requestId === 'string' && priorOperation.requestId.length > 0
         ? priorOperation.requestId
-        : `dsh_${hashText(`${state.sessionId}\u0000${state.compactionId}\u0000${state.endSeq}\u0000${expectedRevision}`).slice(0, 40)}`;
+        : needsRecreateNonce
+          ? `dsh_${hashText(baseSeed).slice(0, 40)}_recreate_${randomUUID()}`
+          : `dsh_${hashText(baseSeed).slice(0, 40)}`;
       let requestId = baseRequestId;
       const useRequestId = (value) => {
         requestId = value.slice(0, 200);
@@ -3221,12 +3361,24 @@ export function createMemoryRuntimeAdapter(options = {}) {
             generation,
           });
           if (current.ok) {
+            rememberAuthoritativeCheckpoint(revisionKey, current);
             expectedRevision = current.revision;
             body.expectedRevision = expectedRevision;
             checkpointRevisions.set(revisionKey, expectedRevision);
+            if (current.exists && checkpointSupersedesState(current.checkpoint, state)) {
+              markCheckpointSuperseded(state, operationKey);
+              return;
+            }
             // A revision change is a new logical attempt, so it gets a new
-            // requestId while preserving the operation's idempotent identity.
-            useRequestId(`${baseRequestId}_r${expectedRevision}`);
+            // requestId. A deleted key uses a recreate nonce so the capability
+            // idempotency ledger cannot replay the old 200.
+            if (!current.exists) {
+              needsRecreateNonce = true;
+              verifyReplay = true;
+            }
+            useRequestId(current.exists
+              ? `${baseRequestId}_r${expectedRevision}`
+              : `${baseRequestId}_recreate_${randomUUID()}`);
             if (current.exists && checkpointMatchesState(current.checkpoint, state)) {
               state.lastCommittedRevision = current.revision;
               markCheckpointCommitted(state, current.revision, { reconciled: true });
@@ -3271,6 +3423,43 @@ export function createMemoryRuntimeAdapter(options = {}) {
       }
       const committedRevision = committedCheckpointRevision(result);
       if (committedRevision !== null) {
+        if (needsRecreateNonce && verifyReplay) {
+          // A create/recreate 200 may be an old idempotent replay. Only commit
+          // after a fresh authoritative GET confirms the object still exists.
+          const verified = await resolveCheckpointAuthority(state.threadId, domain, {
+            signal: retryAbort?.signal,
+            generation,
+          });
+          if (!verified.ok) {
+            state.committed = false;
+            state.pending = true;
+            state.failed = false;
+            state.needsReconcile = true;
+            state.error = `checkpoint_replay_unverified:${verified.reason}`;
+            stats.checkpoints.pending += 1;
+            stats.checkpoints.needsReconcile += 1;
+            checkpointOperations.set(operationKey, { requestId, pending: true });
+            rememberPendingCheckpoint(state, { requestId });
+            state.needsReconcile = true;
+            return;
+          }
+          if (!verified.exists
+            || !checkpointMatchesState(verified.checkpoint, state)
+            || verified.revision !== committedRevision) {
+            state.committed = false;
+            state.pending = false;
+            state.failed = true;
+            state.needsReconcile = false;
+            state.error = verified.exists
+              ? 'checkpoint_replay_mismatch'
+              : 'checkpoint_replay_missing';
+            stats.checkpoints.failed += 1;
+            noteCheckpointIssue(operationKey, state, state.error, 'replay_failed');
+            checkpointOperations.set(operationKey, { requestId, failed: true });
+            return;
+          }
+          rememberAuthoritativeCheckpoint(revisionKey, verified);
+        }
         state.lastCommittedRevision = committedRevision;
         markCheckpointCommitted(state, committedRevision);
         checkpointOperations.set(operationKey, { requestId, committedRevision });
@@ -3382,6 +3571,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
         pending: false,
         failed: false,
         skipped: false,
+        superseded: false,
         conflict: false,
         revision: null,
         lastCommittedRevision: null,
@@ -4088,8 +4278,10 @@ export function createMemoryRuntimeAdapter(options = {}) {
         recalls.clear();
         compactions.clear();
         checkpointRevisions.clear();
+        checkpointLatest.clear();
         checkpointOperations.clear();
         pendingCheckpoints.clear();
+        checkpointReconcileIssues.clear();
       });
     return disposal;
   }
@@ -4146,8 +4338,9 @@ export function createMemoryRuntimeAdapter(options = {}) {
         ...stats.checkpoints,
         queued: checkpointQueue.size(),
         reconciling: pendingCheckpoints.size,
-        needsReconcileGauge: [...compactions.values()]
-          .filter((entry) => entry.needsReconcile === true).length,
+        needsReconcileGauge: [...checkpointReconcileIssues.values()]
+          .filter((entry) => entry.kind === 'needs_reconcile').length,
+        issues: [...checkpointReconcileIssues.values()].slice(-20),
       },
       tools: {
         ...stats.tools,
@@ -4166,6 +4359,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
         queueOverflow: state.queueOverflow === true,
         failed: state.failed,
         skipped: state.skipped === true,
+        superseded: state.superseded === true,
         conflict: state.conflict === true,
         revision: Number.isInteger(state.revision) ? state.revision : null,
         lastCommittedRevision: Number.isInteger(state.lastCommittedRevision)

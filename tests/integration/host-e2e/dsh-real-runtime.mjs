@@ -190,6 +190,7 @@ async function startSidecar(runtimeRoot, { proxy = null } = {}) {
     root: runtimeRoot,
     memoryRuntime: { enabled: true },
     manageMemoryRuntime: true,
+    writesEnabled: true,
   });
   proxy?.setTarget(runtime.url);
   const discovery = await runtime.waitForSidecar();
@@ -467,6 +468,30 @@ async function setDiscoveryMode(runtime, mode) {
   await writeFile(path, JSON.stringify(record, null, 2), { encoding: 'utf8', mode: 0o600 });
 }
 
+async function disableMemoryRuntime(runtime) {
+  const consolePage = await fetch(`${runtime.url}/console/`);
+  const csrf = consolePage.headers.get('x-mebular-csrf');
+  if (typeof csrf !== 'string' || csrf.length === 0) {
+    return { status: 0, body: { error: 'csrf_missing' } };
+  }
+  const response = await fetch(`${runtime.url}/admin/api/config`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-mebular-csrf': csrf,
+      cookie: `mebular_csrf=${csrf}`,
+    },
+    body: JSON.stringify({ patch: { memoryRuntime: { enabled: false } } }),
+  });
+  let body = null;
+  try {
+    body = await response.json();
+  } catch {
+    body = null;
+  }
+  return { status: response.status, body };
+}
+
 async function runFaultScenario({ runtime, tap, discovery, phasePath, continueFile, proxy }) {
   await waitPhase(phasePath, 'start');
   await continueProbe(continueFile);
@@ -622,6 +647,38 @@ async function runFaultScenario({ runtime, tap, discovery, phasePath, continueFi
   proxy.setMode('forward');
   await continueProbe(continueFile);
 
+  const deleteReady = await waitPhase(phasePath, 'delete-ready');
+  const deletePutsBefore = sidecarRequestsFromTap(tap).filter((request) => request.method === 'PUT'
+    && request.body?.state?.compactionId === 'fault-delete');
+  check('删除前同一 compaction 已提交一次', deleteReady?.state?.compaction?.committed === true
+    && deletePutsBefore.length === 1, JSON.stringify(deleteReady?.state?.compaction));
+  const deleted = await requestSidecar(discovery, `/checkpoints/${encodeURIComponent(THREAD_ID)}?agentId=dsh&domain=${encodeURIComponent(`task:${THREAD_ID}`)}`, {
+    method: 'DELETE',
+  });
+  check('真实 sidecar checkpoint 已删除',
+    deleted.status === 200 && deleted.data?.deleted === true,
+    JSON.stringify({ status: deleted.status, data: deleted.data }));
+  await continueProbe(continueFile);
+
+  const recreated = await waitPhase(phasePath, 'delete-recreated');
+  const deletePutsAfter = sidecarRequestsFromTap(tap).filter((request) => request.method === 'PUT'
+    && request.body?.state?.compactionId === 'fault-delete');
+  const deletedCheckpoint = await runtime.sidecarCheckpoint(THREAD_ID, 'dsh').catch(() => null);
+  check('删除后重复 compaction 使用 recreate requestId 真实重建并确认对象存在',
+    recreated?.state?.compaction?.committed === true
+    && deletePutsAfter.length === 2
+    && deletePutsAfter[1].body?.requestId !== deletePutsAfter[0].body?.requestId
+    && /_recreate_/u.test(deletePutsAfter[1].body?.requestId ?? '')
+    && deletedCheckpoint?.state?.compactionId === 'fault-delete'
+    && Number.isInteger(deletedCheckpoint?.revision),
+    JSON.stringify({
+      compaction: recreated?.state?.compaction,
+      puts: deletePutsAfter.map((request) => request.body?.requestId),
+      checkpoint: deletedCheckpoint?.state?.compactionId ?? null,
+      revision: deletedCheckpoint?.revision ?? null,
+    }));
+  await continueProbe(continueFile);
+
   const inFlight = await waitPhase(phasePath, 'disable-inflight');
   check('热禁用 in-flight checkpoint 尚未显示 committed',
     inFlight?.state?.compaction?.committed === false,
@@ -629,7 +686,12 @@ async function runFaultScenario({ runtime, tap, discovery, phasePath, continueFi
   const beforeDisableSideEffects = sidecarRequestsFromTap(tap).filter((request) => (
     request.path.startsWith(`${SIDECAR_API}/context`) || request.path === `${SIDECAR_API}/ingest`
   )).length;
+  const sidecarBeforeDisable = await runtime.sidecarCheckpoint(THREAD_ID, 'dsh').catch(() => null);
   await setDiscoveryMode(runtime, 'mcp');
+  const disableResult = await disableMemoryRuntime(runtime);
+  check('hot disable 通过 admin config 撤销 memoryRuntime capability',
+    disableResult.status === 200 && disableResult.body?.ok === true,
+    JSON.stringify({ status: disableResult.status, body: disableResult.body }));
   await continueProbe(continueFile);
 
   const disabled = await waitPhase(phasePath, 'disabled-done');
@@ -646,6 +708,7 @@ async function runFaultScenario({ runtime, tap, discovery, phasePath, continueFi
     && disablePuts.length === 1
     && disablePuts[0].blockedBeforeSidecar === true
     && disablePuts[0].upstreamStatus === undefined
+    && sidecarBeforeDisable?.state?.compactionId !== 'fault-disable'
     && sidecarAfterDisable?.state?.compactionId !== 'fault-disable'
     && afterDisableRequests.length === beforeDisableSideEffects
     && disabled?.state?.runtimeEnabled === false,
@@ -842,7 +905,7 @@ async function runScenario({ mode, root, dshBin, dshInstall, dshVersion, pluginT
     if (tap !== null) {
       check('tap 状态不包含 host token', !JSON.stringify(tap.state).includes(hostToken));
     }
-    if (discovery !== null && mode !== 'fail-open') {
+    if (discovery !== null && mode !== 'fail-open' && mode !== 'faults') {
       check('Memory capability status 不含 host token', !JSON.stringify(await runtime.status()).includes(hostToken));
     }
     console.log(`  artifacts：${world.state.artifactsDir}`);

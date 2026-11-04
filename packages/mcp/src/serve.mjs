@@ -1020,7 +1020,13 @@ export async function startHttpServer({
     })
     : null;
   let memoryRuntimeLifecycle = Promise.resolve();
+  let lifecycleClosing = false;
   const enqueueMemoryRuntimeLifecycle = (operation) => {
+    if (lifecycleClosing) {
+      const error = new Error('MCP 正在关闭：拒绝新的 Memory Runtime 生命周期操作');
+      error.code = 'closing';
+      return Promise.reject(error);
+    }
     const run = memoryRuntimeLifecycle.then(operation, operation);
     memoryRuntimeLifecycle = run.catch(() => undefined);
     return run;
@@ -3204,6 +3210,13 @@ export async function startHttpServer({
 
     // 控制台配置写入：curated 合并 + 原子写 + .bak 备份（全部需重启生效）
     if (path === '/admin/api/config') {
+      if (lifecycleClosing) {
+        return sendJson(res, 409, {
+          ok: false,
+          error: 'closing',
+          message: 'MCP 正在关闭：不再接受配置写入或新的生命周期操作',
+        });
+      }
       const input = parseJsonBody(body);
       if (!input || typeof input.patch !== 'object') {
         return sendJson(res, 400, { error: 'bad_request', errorKey: 'config_patch_invalid', message: '需要 { patch: { ... } }' });
@@ -3261,24 +3274,35 @@ export async function startHttpServer({
         const targetEnabled = isMemoryRuntimeEnabled(config);
         const commandChanged = changedPaths.some((changed) => changed === 'memoryRuntime.command'
           || changed === 'memoryRuntime.startTimeoutMs');
-        await enqueueMemoryRuntimeLifecycle(async () => {
-          // 较新的配置已改变目标时，旧操作不得撤销新 token 或停止新 child。
-          if (isMemoryRuntimeEnabled(config) !== targetEnabled) return;
-          if (targetEnabled) {
-            await memoryCapability.prepare();
-            if (memoryRuntimeSupervisor && isMemoryRuntimeEnabled(config)) {
-              if (commandChanged) {
-                await memoryRuntimeSupervisor.restart({ includeAttached: false, force: false }).catch(() => undefined);
-              } else {
-                await memoryRuntimeSupervisor.start().catch(() => undefined);
+        try {
+          await enqueueMemoryRuntimeLifecycle(async () => {
+            // 较新的配置已改变目标时，旧操作不得撤销新 token 或停止新 child。
+            if (isMemoryRuntimeEnabled(config) !== targetEnabled) return;
+            if (targetEnabled) {
+              await memoryCapability.prepare();
+              if (memoryRuntimeSupervisor && isMemoryRuntimeEnabled(config)) {
+                if (commandChanged) {
+                  await memoryRuntimeSupervisor.restart({ includeAttached: false, force: false }).catch(() => undefined);
+                } else {
+                  await memoryRuntimeSupervisor.start().catch(() => undefined);
+                }
               }
+            } else {
+              // 先撤销 capability，再无冲刷停止/解绑；即使 revoke 失败也继续隔离故障。
+              await memoryCapability.revoke().catch(() => undefined);
+              await memoryRuntimeSupervisor?.stop({ includeAttached: false }).catch(() => undefined);
             }
-          } else {
-            // 先撤销 capability，再无冲刷停止/解绑；即使 revoke 失败也继续隔离故障。
-            await memoryCapability.revoke().catch(() => undefined);
-            await memoryRuntimeSupervisor?.stop({ includeAttached: false }).catch(() => undefined);
+          });
+        } catch (error) {
+          if (error?.code === 'closing') {
+            return sendJson(res, 409, {
+              ok: false,
+              error: 'closing',
+              message: 'MCP 正在关闭：Memory Runtime 生命周期操作未执行',
+            });
           }
-        });
+          throw error;
+        }
       }
 
       // G1：全部即时生效项 → 不重启，就地生效（前端随即刷新 effective）
@@ -4449,6 +4473,7 @@ export async function startHttpServer({
   const close = () => {
     if (closePromise) return closePromise;
     closePromise = (async () => {
+      lifecycleClosing = true;
       // 先排空热生命周期，再在 listener 仍可达时撤销 capability。
       // attached/manual 同时由 dispose 撤销匹配 discovery，覆盖网络已断开的场景。
       await memoryRuntimeLifecycle.catch(() => undefined);
@@ -4516,6 +4541,7 @@ export async function startHttpServer({
     getState: () => ({
       phase,
       hotInitialized,
+      closing: lifecycleClosing,
       app,
       service,
       config,

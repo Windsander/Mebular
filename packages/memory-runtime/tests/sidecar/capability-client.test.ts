@@ -288,7 +288,7 @@ describe('CapabilityClient', () => {
     expect(fake.requests[1]?.headers['x-request-id']).toBe(fake.requests[0]?.headers['x-request-id']);
   });
 
-  it('capability 撤销只观察一次、不盲目重试，并保留 queued 所需 retryable 语义', async () => {
+  it('capability 撤销只观察一次、不盲目重试，并标记为不可重试的生命周期信号', async () => {
     const fake = await startFake(() => error(404, 'capability_disabled'));
     const observed: string[] = [];
     const client = new CapabilityClient({
@@ -299,7 +299,7 @@ describe('CapabilityClient', () => {
       onCapabilityRevoked: (error) => observed.push(error.code),
     });
     await expect(client.getVersion()).rejects.toMatchObject({
-      code: 'capability_disabled', status: 404, retryable: true,
+      code: 'capability_disabled', status: 404, retryable: false,
     });
     expect(fake.requests).toHaveLength(1);
     expect(observed).toEqual(['capability_disabled']);

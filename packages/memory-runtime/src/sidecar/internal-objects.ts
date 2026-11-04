@@ -26,6 +26,7 @@ import {
   type SidecarPolicy,
 } from './domains.js';
 import { SidecarSettlementError } from './errors.js';
+import type { LifecycleGate } from './lifecycle-gate.js';
 import { LocalLayerError, type OutboxItem, type SidecarLocalLayer } from './local-layer.js';
 import type { SidecarInferenceProvider } from './inference-provider.js';
 
@@ -163,6 +164,7 @@ export interface MemoryObjectServiceOptions {
   };
   policy?: SidecarPolicy | null;
   inference?: SidecarInferenceProvider | null;
+  lifecycle?: LifecycleGate | null;
   now?: () => number;
 }
 
@@ -540,6 +542,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
 
   private readonly client: CapabilityClient | null;
   private readonly models: SidecarInferenceProvider | null;
+  private readonly lifecycle: LifecycleGate | null;
   private readonly now: () => number;
   private readonly serial = new KeyedSerial();
   private policy: SidecarPolicy;
@@ -552,6 +555,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
     this.local = options.local;
     this.client = options.client;
     this.models = options.inference ?? null;
+    this.lifecycle = options.lifecycle ?? null;
     this.identity = options.identity;
     this.policy = options.policy ?? { schema: 1, agents: {} };
     this.now = options.now ?? Date.now;
@@ -693,6 +697,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
   }
 
   private async enqueueObject(requestId: string, body: Record<string, unknown>): Promise<void> {
+    this.lifecycle?.assertAccepting('object.outbox');
     const id = `ob_${sha256Hex(requestId).slice(0, 40)}`;
     try {
       await this.local.outbox.enqueue({

@@ -200,6 +200,7 @@ export interface SidecarStatus extends SidecarStatusSnapshot {
   state: SidecarState;
   degraded: boolean;
   pid: number;
+  startedAt: number;
   uptimeMs: number;
 }
 
@@ -808,6 +809,7 @@ export class SidecarServer {
       state: this.state,
       degraded: this.currentDegraded(),
       pid: process.pid,
+      startedAt: this.startedAt,
       uptimeMs: Math.max(0, this.now() - this.startedAt),
     };
   }

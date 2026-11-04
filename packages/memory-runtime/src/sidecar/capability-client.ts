@@ -180,6 +180,31 @@ export interface CapabilityClientOptions {
   now?: () => number;
   /** 明确 mode/capability 撤销观察；不得用来新增控制协议。 */
   onCapabilityRevoked?: (error: CapabilityClientError) => void;
+  /** 生命周期门闩：draining/dormant 时拒绝新的写请求，并观察晚到的成功。 */
+  lifecycle?: CapabilityLifecycleHooks;
+}
+
+export interface CapabilityLifecycleHooks {
+  acceptsWork(): boolean;
+  generation(): number;
+  noteAmbiguousSuccess(reason: string): void;
+}
+
+const MUTATING_CAPABILITY_PATHS = new Set([
+  '/write',
+  '/update',
+  '/delete',
+  '/archive',
+  '/internal-object',
+  '/detail',
+  '/sync',
+]);
+
+function isMutatingCapabilityCall(path: string, method: string): boolean {
+  if (method === 'GET' || method === 'HEAD') return false;
+  const normalized = path.startsWith('/') ? path : `/${path}`;
+  const head = normalized.split('/')[1] ?? '';
+  return MUTATING_CAPABILITY_PATHS.has(`/${head}`);
 }
 
 export interface CapabilityRequestOptions {
@@ -236,6 +261,7 @@ export class CapabilityClient {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly readToken?: () => string | null | Promise<string | null>;
   private readonly onCapabilityRevoked?: (error: CapabilityClientError) => void;
+  private readonly lifecycle?: CapabilityLifecycleHooks;
   private token: string | null;
 
   constructor(options: CapabilityClientOptions) {
@@ -249,6 +275,7 @@ export class CapabilityClient {
     this.token = typeof options.token === 'string' && options.token.length > 0 ? options.token : null;
     this.readToken = options.readToken;
     this.onCapabilityRevoked = options.onCapabilityRevoked;
+    this.lifecycle = options.lifecycle;
     this.timeoutMs = Number.isFinite(options.timeoutMs) && (options.timeoutMs ?? 0) > 0
       ? Math.floor(options.timeoutMs as number)
       : 5000;
@@ -367,11 +394,26 @@ export class CapabilityClient {
     const method = options.method ?? (options.body === undefined ? 'GET' : 'POST');
     const requestId = `req_${randomUUID()}`;
     const maxAttempts = Math.max(0, options.retries ?? this.retries) + 1;
+    const mutating = isMutatingCapabilityCall(path, method);
+    const lifecycleGeneration = this.lifecycle?.generation();
     let attempt = 0;
     let tokenRefreshed = false;
 
+    if (mutating && this.lifecycle && !this.lifecycle.acceptsWork()) {
+      throw new CapabilityClientError('mode_mismatch', 'Memory Runtime 已休眠：拒绝新的 capability 写入', {
+        status: 409,
+        retryable: false,
+      });
+    }
+
     // 额外一次迭代留给 401 token 轮换后的一次重试。
     for (let iteration = 0; iteration < maxAttempts + 2; iteration += 1) {
+      if (mutating && this.lifecycle && !this.lifecycle.acceptsWork()) {
+        throw new CapabilityClientError('mode_mismatch', 'Memory Runtime 已休眠：拒绝新的 capability 写入', {
+          status: 409,
+          retryable: false,
+        });
+      }
       const token = await this.currentToken();
       const headers: Record<string, string> = {
         accept: 'application/json',
@@ -425,6 +467,15 @@ export class CapabilityClient {
 
       const envelope = isObject(decoded.body) ? decoded.body : null;
       if (decoded.status >= 200 && decoded.status < 300 && envelope?.ok === true) {
+        if (mutating && this.lifecycle
+          && (!this.lifecycle.acceptsWork() || this.lifecycle.generation() !== lifecycleGeneration)) {
+          // 请求发出后生命周期已切换：成功结果不能再当作新提交结算。
+          this.lifecycle.noteAmbiguousSuccess('in_flight_write_after_drain');
+          throw new CapabilityClientError('mode_mismatch', 'capability 写入在休眠后返回，结果不再并入本次结算', {
+            status: 409,
+            retryable: false,
+          });
+        }
         return {
           ok: true,
           requestId: typeof envelope.requestId === 'string' ? envelope.requestId : requestId,
@@ -440,11 +491,11 @@ export class CapabilityClient {
 
       const error = this.errorFromResponse(decoded, requestId);
       if (error.code === 'capability_disabled' || error.code === 'mode_mismatch') {
-        // 撤销不是 permanent write failure：保留 queued 项并立即停止本次重试。
-        // retryable 只防止 outbox 把它死信化；这里直接抛出，不盲目重放。
+        // 撤销/模式不一致是生命周期信号，不是可重试的写失败：
+        // 保留既有 queued 项，但绝不因本次失败新建 outbox。
         const revoked = new CapabilityClientError(error.code, error.message, {
           status: error.status,
-          retryable: true,
+          retryable: false,
           details: error.details,
           requestId,
         });

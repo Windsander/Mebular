@@ -52,6 +52,11 @@ function retryable(error: unknown): boolean {
   return true;
 }
 
+function revoked(error: unknown): boolean {
+  return error instanceof CapabilityClientError
+    && (error.code === 'capability_disabled' || error.code === 'mode_mismatch');
+}
+
 function settledCount(data: unknown): number {
   if (!isObject(data)) return 0;
   const results = Array.isArray(data.results) ? data.results : [];
@@ -181,6 +186,10 @@ export class OutboxReplayer {
       await this.outbox.remove(item.id);
       return { outcome: 'settled', count: settledCount(envelope.data) };
     } catch (error) {
+      if (revoked(error)) {
+        // 撤销后晚到的失败/晚到的成功都不得改写 pending：不重试、不死信、不删除。
+        return { outcome: 'skipped' };
+      }
       const view = errorView(error, this.now());
       if (retryable(error)) {
         const delay = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** Math.min(6, item.attempts));

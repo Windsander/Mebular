@@ -1839,14 +1839,23 @@ export function createMemoryCapabilityHandler({
   let tokenPromise = null;
   let tokenError = null;
   let disposed = false;
+  let revoked = false;
+  let tokenGeneration = 0;
   const hostId = hostIdForHome(home);
 
   async function ensureToken() {
+    if (disposed) {
+      throw new CapabilityError(503, 'capability_unavailable', '能力接口已关闭', undefined, true);
+    }
+    if (revoked) {
+      throw new CapabilityError(401, 'capability_token_invalid', 'capability token 已撤销');
+    }
     const current = tokenRecord;
     if (current && !(typeof current.expiresAt === 'number' && current.expiresAt > 0 && now() >= current.expiresAt)) {
       return current;
     }
     if (!tokenPromise) {
+      const generation = tokenGeneration;
       tokenPromise = ensureCapabilityToken({
         home,
         env,
@@ -1854,7 +1863,12 @@ export function createMemoryCapabilityHandler({
         mcpPid: process.pid,
         ...(ttlMs !== undefined ? { ttlMs } : {}),
       })
-        .then((record) => {
+        .then(async (record) => {
+          if (disposed || revoked || generation !== tokenGeneration) {
+            // 撤销与生成竞态：晚到的生成不得复活 token 文件。
+            await removeCapabilityToken({ home }).catch(() => undefined);
+            throw new CapabilityError(401, 'capability_token_invalid', 'capability token 已撤销');
+          }
           tokenRecord = record;
           tokenError = null;
           return record;
@@ -1871,9 +1885,16 @@ export function createMemoryCapabilityHandler({
     return tokenPromise;
   }
 
-  /** daemon 启动时调用（仅 enabled）：提前生成 token 文件，sidecar 才能发现。 */
+  /** daemon 启动时/显式恢复时调用（仅 enabled）：准备 token 文件，sidecar 才能发现。 */
   async function prepare() {
+    if (disposed) return { enabled: false, tokenId: null };
     if (!isMemoryRuntimeEnabled(getConfig())) return { enabled: false, tokenId: null };
+    // 先让上一代 token 生成收敛，再解除 revoke 门闩；只有显式 prepare 能换发。
+    const pending = tokenPromise;
+    if (pending) await pending.catch(() => undefined);
+    revoked = false;
+    tokenError = null;
+    tokenGeneration += 1;
     try {
       const record = await ensureToken();
       return { enabled: true, tokenId: record.tokenId };
@@ -1884,8 +1905,12 @@ export function createMemoryCapabilityHandler({
 
   /** 停用/关闭：撤销进程内 token 并删除 token 文件（旧 sidecar 下一次请求 401）。 */
   async function revoke() {
+    revoked = true;
+    tokenGeneration += 1;
     tokenRecord = null;
     tokenError = null;
+    const pending = tokenPromise;
+    if (pending) await pending.catch(() => undefined);
     await removeCapabilityToken({ home });
   }
 
@@ -4117,8 +4142,13 @@ export function createMemoryCapabilityHandler({
       }
 
       // 4) Bearer capability token。
+      if (revoked) {
+        res.setHeader('www-authenticate', 'Bearer');
+        throw new CapabilityError(401, 'capability_token_invalid', 'capability token 已撤销');
+      }
       if (tokenError) throw new CapabilityError(503, 'capability_unavailable', '能力令牌不可用', undefined, true);
-      const record = await ensureToken().catch(() => {
+      const record = await ensureToken().catch((error) => {
+        if (error instanceof CapabilityError) throw error;
         throw new CapabilityError(503, 'capability_unavailable', '能力令牌不可用', undefined, true);
       });
       const authorization = req?.headers?.authorization;

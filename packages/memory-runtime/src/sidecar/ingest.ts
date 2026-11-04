@@ -40,6 +40,7 @@ import {
 } from './candidates.js';
 import { SidecarSettlementError } from './errors.js';
 import { heuristicCandidates } from './heuristic.js';
+import type { LifecycleGate } from './lifecycle-gate.js';
 import { LocalLayerError, type OutboxItem, type SidecarLocalLayer } from './local-layer.js';
 import type {
   InferenceExtractionResult,
@@ -195,6 +196,7 @@ export interface IngestServiceOptions {
   };
   policy?: SidecarPolicy | null;
   inference?: SidecarInferenceProvider | null;
+  lifecycle?: LifecycleGate | null;
   now?: () => number;
   idempotencyTtlMs?: number;
   extractionTtlMs?: number;
@@ -398,6 +400,8 @@ function errorView(error: unknown, at: number): IngestErrorView {
 
 function retryableCapabilityError(error: unknown): boolean {
   if (error instanceof CapabilityClientError) {
+    // 撤销/模式不一致是生命周期信号：保留既有 queued 项，但绝不新建 outbox。
+    if (error.code === 'capability_disabled' || error.code === 'mode_mismatch') return false;
     if (error.retryable) return true;
     // token 轮换/网络可能在恢复后成功；保留在 outbox 中等待重放。
     if (error.status === 401 || error.status === 0) return true;
@@ -415,6 +419,7 @@ export class IngestService {
 
   private readonly client: CapabilityClient | null;
   private readonly models: SidecarInferenceProvider | null;
+  private readonly lifecycle: LifecycleGate | null;
   private policy: SidecarPolicy | null;
   private readonly now: () => number;
   private readonly idempotencyTtlMs: number;
@@ -433,6 +438,7 @@ export class IngestService {
     this.local = options.local;
     this.client = options.client;
     this.models = options.inference ?? null;
+    this.lifecycle = options.lifecycle ?? null;
     this.identity = options.identity;
     this.policy = options.policy ?? null;
     this.now = options.now ?? Date.now;
@@ -514,6 +520,7 @@ export class IngestService {
     request: unknown,
     options: { idempotencyKey?: string | null } = {},
   ): Promise<IngestHttpResult> {
+    this.lifecycle?.assertAccepting('ingest');
     return this.chain(() => this.ingestLocked(request, options));
   }
 
@@ -586,6 +593,7 @@ export class IngestService {
       || (extractor === 'auto' && this.config.model.source === 'host')
     );
     if (hostPending) {
+      this.lifecycle?.assertAccepting('ingest.staging');
       const stagingChunkIds = await this.stageChunks({
         agentId,
         threadId,
@@ -624,6 +632,7 @@ export class IngestService {
     }
 
     // 先写本地 staging，确保模型失败/超时不会丢原始材料；staging 不是权威。
+    this.lifecycle?.assertAccepting('ingest.staging');
     const stagingChunkIds = await this.stageChunks({
       agentId,
       threadId,
@@ -640,6 +649,7 @@ export class IngestService {
     if (routedHost.length > 0) {
       this.models?.noteHostCandidates();
     } else if (extractor !== 'heuristic') {
+      this.lifecycle?.assertAccepting('ingest.model');
       const selection = await this.selectExtractionSource(extractor, allowRemote);
       appendWarnings(warnings, selection.warnings);
       degraded = selection.degraded;
@@ -764,6 +774,7 @@ export class IngestService {
     warnings.push(...outcome.warnings);
 
     // 记录成功后才写详情：详情必须链接同域记录；没有记录只保留 staging 到 TTL。
+    this.lifecycle?.assertAccepting('ingest.detail');
     const detailOutcome = await this.settleDetails({
       chunks,
       records: outcome.records,
@@ -1543,6 +1554,7 @@ export class IngestService {
     stagingChunkIds: string[],
     outcome: DetailSettlementOutcome,
   ): Promise<void> {
+    this.lifecycle?.assertAccepting('ingest.detail.outbox');
     const body = { requestId, actor, op: 'write', items };
     const id = `ob_${sha256Hex(`${requestId}\u0000detail`).slice(0, 40)}`;
     try {
@@ -1575,6 +1587,7 @@ export class IngestService {
     if (candidates.length === 0) {
       return { records: [], queued: false, degraded: false, warnings: [], status: 'completed' };
     }
+    this.lifecycle?.assertAccepting('ingest.write');
     const items = candidates.map((candidate) => toWriteItem(candidate, {
       agentId: context.agentId,
       threadId: context.threadId,
@@ -1666,6 +1679,21 @@ export class IngestService {
         status: queued ? 'pending' : records.length > 0 ? 'completed' : 'failed',
       };
     } catch (error) {
+      if (this.lifecycle && !this.lifecycle.acceptsWork()) {
+        throw new SidecarSettlementError(
+          'mode_mismatch',
+          'Memory Runtime 已休眠：写入未结算',
+          { status: 409, retryable: false, details: { phase: this.lifecycle.currentPhase } },
+        );
+      }
+      if (error instanceof CapabilityClientError
+        && (error.code === 'capability_disabled' || error.code === 'mode_mismatch')) {
+        throw new SidecarSettlementError(
+          'mode_mismatch',
+          'capability 已撤销：写入不再入队',
+          { status: 409, retryable: false, details: { reason: error.code } },
+        );
+      }
       if (retryableCapabilityError(error)) {
         await this.enqueueWriteSafe(requestId, actor, items, context);
         this.noteQueued(error);
@@ -1705,6 +1733,7 @@ export class IngestService {
     items: CapabilityWriteItem[],
     context: CandidateContext,
   ): Promise<void> {
+    this.lifecycle?.assertAccepting('ingest.write.outbox');
     const id = `ob_${sha256Hex(requestId).slice(0, 40)}`;
     await this.local.outbox.enqueue({
       id,

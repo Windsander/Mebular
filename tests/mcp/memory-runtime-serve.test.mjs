@@ -17,6 +17,8 @@ const dirs = [];
 const servers = [];
 const savedCloudRoot = process.env.MEBULAR_CLOUD_ROOT;
 const savedCapabilityToken = process.env.MEBULAR_CAPABILITY_TOKEN;
+const savedFakeMode = process.env.FAKE_SIDECAR_MODE;
+const savedFakeDelay = process.env.FAKE_SIDECAR_DELAY_MS;
 
 afterEach(async () => {
   while (servers.length > 0) await servers.pop().close().catch(() => undefined);
@@ -25,6 +27,10 @@ afterEach(async () => {
   else process.env.MEBULAR_CLOUD_ROOT = savedCloudRoot;
   if (savedCapabilityToken === undefined) delete process.env.MEBULAR_CAPABILITY_TOKEN;
   else process.env.MEBULAR_CAPABILITY_TOKEN = savedCapabilityToken;
+  if (savedFakeMode === undefined) delete process.env.FAKE_SIDECAR_MODE;
+  else process.env.FAKE_SIDECAR_MODE = savedFakeMode;
+  if (savedFakeDelay === undefined) delete process.env.FAKE_SIDECAR_DELAY_MS;
+  else process.env.FAKE_SIDECAR_DELAY_MS = savedFakeDelay;
 });
 
 async function tempDir() {
@@ -94,6 +100,38 @@ async function waitFor(check, { timeoutMs = 5000 } = {}) {
 }
 
 describe('serve + Memory Runtime supervisor', () => {
+  it('close 开始后拒绝新的 config PATCH / 生命周期操作', async () => {
+    process.env.FAKE_SIDECAR_MODE = 'slow';
+    process.env.FAKE_SIDECAR_DELAY_MS = '2500';
+    const { home, base, server } = await start({ enabled: false });
+    const consoleResponse = await fetch(`${base}/console/`);
+    const csrf = consoleResponse.headers.get('x-mebular-csrf');
+    const cookie = consoleResponse.headers.get('set-cookie')?.split(';')[0];
+    expect(csrf).toBeTruthy();
+
+    // 先让一个 PATCH 进入生命周期队列并阻塞在慢启动上，close 会等待它。
+    const firstPatch = fetch(`${base}/admin/api/config`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-mebular-csrf': csrf, cookie },
+      body: JSON.stringify({ patch: { 'memoryRuntime.enabled': true } }),
+    });
+    await waitFor(() => existsSync(join(home, 'memory-runtime', 'start.lock')), { timeoutMs: 5000 });
+    const closing = server.close();
+    expect(server.getState().closing).toBe(true);
+
+    const response = await fetch(`${base}/admin/api/config`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-mebular-csrf': csrf, cookie },
+      body: JSON.stringify({ patch: { 'memoryRuntime.enabled': true } }),
+    });
+    expect(response.status).toBe(409);
+    const body = await response.json();
+    expect(body).toMatchObject({ ok: false, error: 'closing' });
+    expect((await firstPatch).status).toBe(200);
+    await closing;
+    servers.splice(servers.indexOf(server), 1);
+  }, 20000);
+
   it('enabled：异步启动 sidecar，overview 只读展示且不泄漏 token；关闭时停止', async () => {
     const { home, server, base } = await start({ enabled: true });
     const ready = await waitFor(async () => {

@@ -236,12 +236,15 @@ export async function refreshCapabilityToken({
   dataDir,
   env = process.env,
   now = Date.now(),
-}: ReadCapabilityTokenOptions): Promise<CapabilityTokenReadResult | null> {
+  allowEnvFallback = true,
+}: ReadCapabilityTokenOptions & { allowEnvFallback?: boolean }): Promise<CapabilityTokenReadResult | null> {
   const path = capabilityTokenPathForDataDir(dataDir);
   try {
     await stat(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    // 生产实例从文件启动时，文件被撤销后不得回退到启动时的陈旧 env token。
+    if (!allowEnvFallback) return null;
     const token = env?.MEBULAR_CAPABILITY_TOKEN;
     if (typeof token !== 'string' || token.length === 0) return null;
     return {

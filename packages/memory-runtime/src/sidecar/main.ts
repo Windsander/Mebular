@@ -62,6 +62,7 @@ import {
   InferenceService,
 } from './inference/index.js';
 import { SettlementRuntime } from './settlement.js';
+import { LifecycleGate } from './lifecycle-gate.js';
 import {
   SidecarServer,
   SidecarServerError,
@@ -446,6 +447,7 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
   let dormantReason: string | null = null;
   let dormantIncomplete = false;
   let requestDormant: ((reason: string) => Promise<boolean>) | null = null;
+  const lifecycle = new LifecycleGate();
 
   if (!options.skipHandshake) {
     let tokenRecord;
@@ -464,6 +466,17 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
     if (tokenRecord.expired) {
       throw new SidecarStartupError('capability_token_expired', 5, 'capability token 已过期');
     }
+    // 生产实例即使由 env 引导，只要存在 capability-token 文件，401 刷新就必须以文件为准。
+    let capabilityTokenFilePresent = false;
+    try {
+      capabilityTokenFilePresent = await readCapabilityToken({
+        dataDir: paths.dataDir,
+        env: {},
+        now: now(),
+      }) !== null;
+    } catch {
+      capabilityTokenFilePresent = false;
+    }
 
     let baseUrl: string;
     try {
@@ -477,13 +490,20 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
         baseUrl,
         token: tokenRecord.token,
         readToken: async () => {
-          const refreshed = await refreshCapabilityToken({ dataDir: paths.dataDir, env, now: now() });
+          const refreshed = await refreshCapabilityToken({
+            dataDir: paths.dataDir,
+            env,
+            now: now(),
+            // 从文件启动的生产实例：文件被撤销后不得回退到启动时的 stale env。
+            allowEnvFallback: !capabilityTokenFilePresent,
+          });
           return refreshed && !refreshed.expired ? refreshed.token : null;
         },
         onCapabilityRevoked: (error) => {
           Object.assign(capability, { reachable: false, error: error.code });
           if (requestDormant) void requestDormant(error.code);
         },
+        lifecycle,
         timeoutMs: config.capability.timeoutMs,
       });
     } catch (error) {
@@ -587,6 +607,7 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
       identity,
       policyPath: paths.policyPath,
       inference: model,
+      lifecycle,
       now,
     });
     // main 拥有生命周期边界；不修改 replayer，也绝不为了等待而启动新 replay。
@@ -611,6 +632,12 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
       // dormant 不创造 dead 副本；保留活动项，待重新授权后按原键处理。
       if (lifecycleMode === 'mcp') return false;
       return deadLetter(id, errorCode);
+    };
+    const enqueueOutbox = local.outbox.enqueue.bind(local.outbox);
+    local.outbox.enqueue = async (input) => {
+      // 所有 ingest/object/detail 入队共用的最后一道生命周期门闩。
+      lifecycle.assertAccepting('outbox.enqueue');
+      return enqueueOutbox(input);
     };
     await settlement.init();
   } catch (error) {
@@ -779,19 +806,25 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
   let heartbeatTask: Promise<void> = Promise.resolve();
   let heartbeatRunning = false;
   let dormantPromise: Promise<boolean> | null = null;
+  let resumingPromise: Promise<void> | null = null;
   requestDormant = (reason: string): Promise<boolean> => {
     if (stopping) return Promise.resolve(false);
+    if (resumingPromise) return resumingPromise.then(() => requestDormant!(reason));
     if (dormantPromise) return dormantPromise;
     if (lifecycleMode === 'mcp') return Promise.resolve(!dormantIncomplete);
     dormantPromise = (async () => {
       lifecycleMode = 'mcp';
       dormantReason = reason;
+      // 同步撤销准入；后续 ingest/staging/model/capability 写与 outbox 入队立即 409。
+      lifecycle.beginDrain(reason);
       // mcp+degraded 是 draining/incomplete；只有全部收尾后才发布 mcp+stopped。
       dormantIncomplete = true;
       server.setState('degraded');
       // setMode 同步撤销准入，再等待已接受请求；后续请求立即 409。
       const idle = server.setMode('mcp', { timeoutMs: 2000 });
       let clean = await stopSettlementWithoutFlush(2000);
+      // 先让已接受的 host 请求结算，再清理模型引擎；否则新启动的引擎可能在停止后复活。
+      if (!await idle) clean = false;
       try {
         const inference = await inferenceService.status();
         const install = inference.install;
@@ -805,8 +838,10 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
       } catch {
         clean = false;
       }
-      if (!await idle) clean = false;
+      // 晚到的成功结果不能被当作 clean 收尾：已失效的 capability 成功不是新提交证据。
+      if (lifecycle.ambiguous) clean = false;
       dormantIncomplete = !clean;
+      lifecycle.finishDrain();
       try {
         const current = await readDiscovery(paths.discoveryPath);
         if (current) {
@@ -870,23 +905,35 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
     if (stopping) return;
     if (reachable) {
       if (lifecycleMode === 'mcp') {
+        // 只有完整 drain 结束后才允许恢复；进行中的 drain 不能被旧的正向探测抢先撤销。
+        if (dormantPromise || lifecycle.currentPhase !== 'dormant') return;
         dormantReason = null;
         dormantIncomplete = false;
         const nextDegraded = settlement.degraded || modelStatus.degraded;
-        try {
-          if (!await publishDiscovery('immersive', nextDegraded ? 'degraded' : 'ready', nextDegraded)) {
-            dormantReason = 'discovery_mismatch';
+        const resume = (async () => {
+          try {
+            if (!await publishDiscovery('immersive', nextDegraded ? 'degraded' : 'ready', nextDegraded)) {
+              dormantReason = 'discovery_mismatch';
+              dormantIncomplete = true;
+              lifecycle.beginDrain('resume_failed');
+              return;
+            }
+            lifecycleMode = 'immersive';
+            lifecycle.resume();
+            await server.setMode('immersive');
+            server.setState(nextDegraded ? 'degraded' : 'ready');
+            settlement.replayer.start();
+          } catch {
+            dormantReason = 'discovery_write_failed';
             dormantIncomplete = true;
-            return;
+            lifecycle.beginDrain('resume_failed');
           }
-          lifecycleMode = 'immersive';
-          await server.setMode('immersive');
-          server.setState(nextDegraded ? 'degraded' : 'ready');
-          settlement.replayer.start();
-        } catch {
-          dormantReason = 'discovery_write_failed';
-          dormantIncomplete = true;
-        }
+        })();
+        const wrapped = resume.finally(() => {
+          if (resumingPromise === wrapped) resumingPromise = null;
+        });
+        resumingPromise = wrapped;
+        await wrapped;
         return;
       }
       const touched = await touchDiscovery(paths.discoveryPath, {
@@ -943,6 +990,7 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
       stopPromise = (async () => {
         stopping = true;
         lifecycleMode = 'mcp';
+        lifecycle.beginDrain('stopping');
         void server.setMode('mcp', { timeoutMs: 0 });
         clearInterval(heartbeat);
         if (parentWatch !== null) clearInterval(parentWatch);
@@ -1028,7 +1076,8 @@ export async function startSidecar(options: StartSidecarOptions = {}): Promise<S
 
   let handle: SidecarHandle;
   try {
-    handle = await startSidecarProcess(options);
+    // lock 与 discovery 必须属于同一实例身份；startedAt 只在这里生成一次。
+    handle = await startSidecarProcess({ ...options, startedAt });
   } catch (error) {
     await releaseStartLock(paths.startLockPath, { pid: process.pid }).catch(() => false);
     throw error;

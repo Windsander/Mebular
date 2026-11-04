@@ -38,6 +38,8 @@ export const MEMORY_RUNTIME_RESTART_BACKOFF_MS = 500;
 export const MEMORY_RUNTIME_RESTART_BACKOFF_MAX_MS = 30_000;
 export const MEMORY_RUNTIME_RESTART_COOLDOWN_MS = 5 * 60 * 1000;
 export const MEMORY_RUNTIME_BIN = 'mebular-memory-runtime';
+/** 默认 sidecar heartbeat 为 5s；禁用/停止必须覆盖至少一个完整心跳 + 有界收尾。 */
+export const MEMORY_RUNTIME_ATTACHED_DORMANT_WAIT_MS = 12_000;
 
 const SIDECAR_KIND = 'mebular-memory-runtime';
 const CAPABILITY_API_VERSION = 1;
@@ -545,6 +547,7 @@ export class MemoryRuntimeSupervisor {
     this.child = null;
     this.childToken = null;
     this.childSecrets = [];
+    this.managedInstance = null;
     this.startPromise = null;
     this.restartTimer = null;
     this.cooldownTimer = null;
@@ -745,6 +748,10 @@ export class MemoryRuntimeSupervisor {
     }
 
     const managed = Boolean(this.child && this.child.pid === discovery.pid);
+    if (managed) {
+      // 记录本实例拥有的 pid/startedAt；child 被强杀后仍可确认 discovery/start.lock 归属。
+      this.managedInstance = { pid: discovery.pid, startedAt: discovery.startedAt };
+    }
     if (this.#homeMismatch(discovery)) {
       this.#setState({
         state: 'failed',
@@ -1366,6 +1373,7 @@ export class MemoryRuntimeSupervisor {
       const body = await response.json().catch(() => null);
       const data = body?.data;
       if (data?.pid !== discovery.pid) return null;
+      if (typeof data.startedAt === 'number' && data.startedAt !== discovery.startedAt) return null;
       const mode = data?.mode;
       const state = data?.state;
       if ((mode !== 'mcp' && mode !== 'immersive') || typeof state !== 'string') return null;
@@ -1378,6 +1386,17 @@ export class MemoryRuntimeSupervisor {
   }
 
   async #waitAttachedDormant(discovery, timeoutMs) {
+    // 陈旧/非法 discovery 无法证明实例身份：不发送 HTTP，立即报告 incomplete。
+    const age = this.now() - discovery.updatedAt;
+    if (!validDiscoveryUrls(discovery)
+      || this.#homeMismatch(discovery)
+      || this.#profileMismatch(discovery)
+      || this.#versionMismatch(discovery)
+      || !Number.isFinite(age)
+      || age < -1000
+      || age > MEMORY_RUNTIME_DISCOVERY_STALE_MS) {
+      return false;
+    }
     const deadline = Date.now() + Math.max(0, timeoutMs);
     for (;;) {
       if (!pidAlive(discovery.pid)) return true;
@@ -1386,6 +1405,28 @@ export class MemoryRuntimeSupervisor {
       if (Date.now() >= deadline) return false;
       await sleep(Math.min(50, Math.max(1, deadline - Date.now())));
     }
+  }
+
+  /**
+   * 显式 stop 前的实例校验：与 attach 使用同一套 freshness/URL/home/profile/version、
+   * health 身份和 token 鉴权的 /status 校验；任何一项无法确认都不得发送信号。
+   */
+  async #verifyLiveInstance(discovery) {
+    if (!discovery || !Number.isInteger(discovery.pid) || !pidAlive(discovery.pid)) return false;
+    if (this.#homeMismatch(discovery) || this.#profileMismatch(discovery) || this.#versionMismatch(discovery)) {
+      return false;
+    }
+    if (!validDiscoveryUrls(discovery)) return false;
+    const age = this.now() - discovery.updatedAt;
+    if (!Number.isFinite(age) || age < -1000 || age > MEMORY_RUNTIME_DISCOVERY_STALE_MS) return false;
+    const health = await this.#fetchHealth(discovery);
+    if (!health.ok || !this.#healthIdentityMatches(discovery, health.body, { allowDormant: true })) {
+      return false;
+    }
+    // 需要 host token 的 /status：确认 pid（以及新实例提供的 startedAt）仍属于同一实例。
+    if (!await this.#readSidecarMode(discovery)) return false;
+    // 探测期间实例可能被替换；确认 discovery 仍是同一 pid/startedAt/url/tokenFile。
+    return sameDiscoveryInstance(await readDiscovery(this.paths.discoveryPath), discovery);
   }
 
   async #proxyHostApi(pathname, { method = 'GET', body = null, timeoutMs = 2500 } = {}) {
@@ -2090,7 +2131,8 @@ export class MemoryRuntimeSupervisor {
     }
 
     let clean = true;
-    const stoppedPids = new Set([child?.pid, lateChild?.pid].filter((pid) => Number.isInteger(pid)));
+    const stoppedPids = new Set([child?.pid, lateChild?.pid, this.managedInstance?.pid]
+      .filter((pid) => Number.isInteger(pid)));
     for (const pid of stoppedPids) {
       if (pidAlive(pid)) {
         clean = false;
@@ -2099,7 +2141,9 @@ export class MemoryRuntimeSupervisor {
       const current = await readDiscovery(this.paths.discoveryPath);
       const knownStartedAt = discoveredAtStop?.pid === pid
         ? discoveredAtStop.startedAt
-        : this.statusState.pid === pid ? this.statusState.startedAt : null;
+        : this.managedInstance?.pid === pid
+          ? this.managedInstance.startedAt
+          : this.statusState.pid === pid ? this.statusState.startedAt : null;
       if (current?.pid === pid && knownStartedAt !== null && current.startedAt === knownStartedAt) {
         const expected = current;
         const removed = await this.#removeDiscoveryIfMatches(expected).catch(() => false);
@@ -2124,18 +2168,62 @@ export class MemoryRuntimeSupervisor {
 
     if (includeAttached) {
       const discovery = await readDiscovery(this.paths.discoveryPath);
-      if (discovery && !this.#homeMismatch(discovery) && !this.#profileMismatch(discovery)) {
-        if (pidAlive(discovery.pid) && !await this.#stopPid(discovery.pid, timeoutMs)) clean = false;
+      const verified = discovery && await this.#verifyLiveInstance(discovery)
+        ? discovery
+        : null;
+      if (verified) {
+        // 信号前二次读取，缩窄操作者重启/替换实例的竞态窗口。
+        const confirmed = await readDiscovery(this.paths.discoveryPath);
+        if (!sameDiscoveryInstance(confirmed, verified)) {
+          clean = false;
+        } else {
+          if (pidAlive(verified.pid) && !await this.#stopPid(verified.pid, timeoutMs)) clean = false;
+          if (!pidAlive(verified.pid)) {
+            const removed = await this.#removeDiscoveryIfMatches(verified).catch(() => false);
+            if (!removed && sameDiscoveryInstance(await readDiscovery(this.paths.discoveryPath), verified)) {
+              clean = false;
+            }
+          }
+        }
+      } else if (discovery) {
+        // 不可验证的 live PID 绝不 kill；只允许清理已退出实例的匹配 discovery。
         if (!pidAlive(discovery.pid)) {
           const removed = await this.#removeDiscoveryIfMatches(discovery).catch(() => false);
           if (!removed && sameDiscoveryInstance(await readDiscovery(this.paths.discoveryPath), discovery)) {
             clean = false;
           }
+        } else {
+          clean = false;
         }
       }
       const lock = await this.#readLockView();
-      if (lock && lock.command === 'serve' && pidAlive(lock.pid)) {
-        if (!await this.#stopPid(lock.pid, timeoutMs)) clean = false;
+      if (lock && lock.command === 'serve') {
+        if (!pidAlive(lock.pid)) {
+          await unlink(this.paths.lockPath).catch(() => {
+            clean = false;
+          });
+        } else {
+          // 只有 lock 与已验证 discovery 的 pid/startedAt 完全一致时才允许信号；
+          // 否则可能是复用 PID 或陈旧锁，必须留给操作者处理并报告 incomplete。
+          const matchesVerified = Boolean(verified)
+            && verified.pid === lock.pid
+            && verified.startedAt === lock.startedAt;
+          if (!matchesVerified) {
+            clean = false;
+          } else {
+            const confirmedLock = await this.#readLockView();
+            const confirmedDiscovery = await readDiscovery(this.paths.discoveryPath);
+            if (!confirmedLock
+              || confirmedLock.pid !== lock.pid
+              || confirmedLock.startedAt !== lock.startedAt
+              || !sameDiscoveryInstance(confirmedDiscovery, verified)
+              || !pidAlive(lock.pid)) {
+              clean = false;
+            } else if (!await this.#stopPid(lock.pid, timeoutMs)) {
+              clean = false;
+            }
+          }
+        }
       }
       const remainingLock = await this.#readLockView();
       if (remainingLock && !pidAlive(remainingLock.pid)) {
@@ -2148,7 +2236,10 @@ export class MemoryRuntimeSupervisor {
       // D1：外部 PID 归操作者；仅撤销匹配 discovery，再验证旧凭据也无法工作。
       await this.#removeDiscoveryIfMatches(attachedDiscovery).catch(() => false);
       if (pidAlive(attachedDiscovery.pid)
-        && !await this.#waitAttachedDormant(attachedDiscovery, Math.min(timeoutMs, 6000))) {
+        && !await this.#waitAttachedDormant(
+          attachedDiscovery,
+          Math.max(timeoutMs, MEMORY_RUNTIME_ATTACHED_DORMANT_WAIT_MS),
+        )) {
         clean = false;
       }
       let remaining = await readDiscovery(this.paths.discoveryPath);
@@ -2161,7 +2252,10 @@ export class MemoryRuntimeSupervisor {
         // 操作者可能在禁用期间替换实例；新实例同样必须撤销并验证，不能漏过。
         await this.#removeDiscoveryIfMatches(remaining).catch(() => false);
         if (pidAlive(remaining.pid)
-          && !await this.#waitAttachedDormant(remaining, Math.min(timeoutMs, 1000))) {
+          && !await this.#waitAttachedDormant(
+            remaining,
+            Math.max(timeoutMs, MEMORY_RUNTIME_ATTACHED_DORMANT_WAIT_MS),
+          )) {
           clean = false;
         }
         remaining = await readDiscovery(this.paths.discoveryPath);
@@ -2170,6 +2264,7 @@ export class MemoryRuntimeSupervisor {
     }
 
     if (clean) {
+      this.managedInstance = null;
       this.#setState({
         state: 'stopped', available: false, degraded: false, managed: false, attached: false,
         pid: null, url: null, healthUrl: null, error: null,

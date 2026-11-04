@@ -110,6 +110,7 @@ async function controlledCapability(token: string) {
     token,
     writeGate: null as Promise<void> | null,
     writeStarted: 0,
+    writeSuccessEvenWhenDisabled: false,
     requests: [] as Array<{ path: string; authorization: string | null }>,
   };
   const server = createServer(async (req, res) => {
@@ -146,7 +147,7 @@ async function controlledCapability(token: string) {
     if (state.writeGate) {
       state.writeStarted += 1;
       await state.writeGate;
-      if (!state.enabled) {
+      if (!state.enabled && !state.writeSuccessEvenWhenDisabled) {
         fail(404, 'capability_disabled');
         return;
       }
@@ -217,6 +218,9 @@ describe('memory-runtime sidecar process', () => {
     expect(handle.discovery.mode).toBe('immersive');
     expect(handle.discovery.degraded).toBe(false);
     expect(handle.discovery.capabilities.ingest).toBe(true);
+    const lock = JSON.parse(await readFile(join(home, 'memory-runtime', 'start.lock'), 'utf8'));
+    // 同一实例的 lock 与 discovery 必须共享 startedAt，强杀后才能确认清理归属。
+    expect(lock.startedAt).toBe(handle.discovery.startedAt);
     if (process.platform !== 'win32') {
       expect((await stat(join(home, 'memory-runtime.json'))).mode & 0o777).toBe(0o600);
       expect((await stat(join(home, 'memory-runtime', 'host-token'))).mode & 0o777).toBe(0o600);
@@ -393,6 +397,100 @@ describe('memory-runtime sidecar process', () => {
     expect(capability.state.requests.some((request) => request.path.endsWith('/write'))).toBe(false);
   }, 15000);
 
+  it('默认 5000ms heartbeat：撤销后旧 URL/token 零副作用，重启用才恢复准入', async () => {
+    const home = await temp();
+    const capability = await controlledCapability('heartbeat-token');
+    const handle = await startSidecar({
+      home,
+      port: 0,
+      // 不缩短 heartbeat：真实默认值必须能在 supervisor 的有界等待内进入 dormant。
+      hostToken: 'host-token',
+      env: {
+        MEBULAR_HOME: home,
+        MEBULAR_CAPABILITY_URL: capability.url,
+        MEBULAR_CAPABILITY_TOKEN: 'heartbeat-token',
+      },
+    });
+    handles.push(handle);
+    await handle.local.outbox.enqueue({
+      id: 'ob_heartbeat',
+      requestId: 'req_heartbeat',
+      endpoint: '/write',
+      body: { value: 'pending' },
+      createdAt: Date.now(),
+    });
+    const before = await handle.local.outbox.stats();
+    const extractSpy = jest.spyOn(handle.model, 'extractCandidates');
+    // 停掉定时重放，确保本用例只观察“禁用后”的 replay 副作用。
+    await handle.settlement.replayer.stop({ flushMs: 0 });
+
+    capability.state.enabled = false;
+    await waitFor(async () => {
+      const discovery = JSON.parse(await readFile(join(home, 'memory-runtime.json'), 'utf8'));
+      return discovery.mode === 'mcp' && discovery.state === 'stopped';
+    }, 15_000);
+    const requestsBefore = capability.state.requests.length;
+    expect(extractSpy).not.toHaveBeenCalled();
+    expect(await handle.local.outbox.stats()).toEqual(before);
+    // dormant 下即使直接触发 replay，也不得产生新的 capability 写或删除 pending。
+    await handle.settlement.replayer.replayOnce();
+    expect(await handle.local.outbox.stats()).toEqual(before);
+    expect(capability.state.requests.slice(requestsBefore)
+      .some((request) => request.path.endsWith('/write'))).toBe(false);
+
+    for (const [method, path] of [
+      ['POST', 'ingest'],
+      ['POST', 'recall'],
+      ['POST', 'context'],
+    ] as Array<[string, string]>) {
+      const response = await fetch(`${handle.url}/${path}`, {
+        method,
+        headers: { ...bearer('host-token'), 'content-type': 'application/json' },
+        body: '{}',
+      });
+      expect(response.status).toBe(409);
+      expect((await response.json() as any).error.code).toBe('mode_mismatch');
+    }
+
+    capability.state.enabled = true;
+    await waitFor(async () => {
+      const discovery = JSON.parse(await readFile(join(home, 'memory-runtime.json'), 'utf8'));
+      return discovery.mode === 'immersive';
+    }, 15_000);
+    const resumed = await fetch(`${handle.url}/status`, { headers: bearer('host-token') });
+    expect((await resumed.json() as any).data.capability).toMatchObject({ reachable: true, error: null });
+  }, 45000);
+
+  it('capability 401 刷新只重读文件：文件被撤销后不复用 stale env，也不复活 token 文件', async () => {
+    const home = await temp();
+    const dataDir = join(home, 'memory-runtime');
+    await mkdir(dataDir, { recursive: true, mode: 0o700 });
+    const tokenPath = join(dataDir, 'capability-token');
+    await writeFile(tokenPath, JSON.stringify({
+      version: 1, token: 'token-a', issuedAt: Date.now(), expiresAt: 0, mcpPid: process.pid,
+    }), { mode: 0o600 });
+    const capability = await controlledCapability('token-a');
+    const handle = await startSidecar({
+      home,
+      port: 0,
+      heartbeatMs: 50,
+      hostToken: 'host-token',
+      env: {
+        MEBULAR_HOME: home,
+        MEBULAR_CAPABILITY_URL: capability.url,
+        MEBULAR_CAPABILITY_TOKEN: 'token-a',
+      },
+    });
+    handles.push(handle);
+    await rm(tokenPath, { force: true });
+    capability.state.token = 'token-b';
+    await waitFor(async () => {
+      const status = await fetch(`${handle.url}/status`, { headers: bearer('host-token') });
+      return (await status.json() as any).data.capability.error === 'capability_token_invalid';
+    });
+    await expect(stat(tokenPath)).rejects.toMatchObject({ code: 'ENOENT' });
+  }, 12000);
+
   it('in-flight replay 撤销后不重写 retry 元数据，clean 前原始 outbox 字节不变', async () => {
     const home = await temp();
     const capability = await controlledCapability('replay-token');
@@ -430,6 +528,153 @@ describe('memory-runtime sidecar process', () => {
     expect(await handle.local.outbox.get('ob_in_flight')).toMatchObject({ attempts: 0, lastAttemptAt: null });
     expect(await handle.local.outbox.deadCount()).toBe(0);
   }, 12000);
+
+  it('in-flight replay 晚到成功后不删除 pending、不当作新提交，且不得发布 clean stopped', async () => {
+    const home = await temp();
+    const capability = await controlledCapability('replay-late-token');
+    const handle = await startSidecar({
+      home,
+      port: 0,
+      heartbeatMs: 50,
+      hostToken: 'host-token',
+      env: {
+        MEBULAR_HOME: home,
+        MEBULAR_CAPABILITY_URL: capability.url,
+        MEBULAR_CAPABILITY_TOKEN: 'replay-late-token',
+      },
+    });
+    handles.push(handle);
+    await handle.local.outbox.enqueue({
+      id: 'ob_late_success', requestId: 'req_late_success', endpoint: '/write', body: { value: 'pending' },
+    });
+    const itemPath = join(handle.paths.dataDir, 'outbox', 'ob_late_success.json');
+    const before = await readFile(itemPath, 'utf8');
+    const settled = jest.spyOn(handle.settlement.ingest, 'applyReplayedOutbox');
+    let release = () => {};
+    capability.state.writeGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const replay = handle.settlement.replayer.replayOnce();
+    await waitFor(async () => capability.state.writeStarted === 1);
+    capability.state.writeSuccessEvenWhenDisabled = true;
+    capability.state.enabled = false;
+    await waitFor(async () => {
+      const discovery = JSON.parse(await readFile(join(home, 'memory-runtime.json'), 'utf8'));
+      return discovery.mode === 'mcp';
+    });
+    release();
+    await replay;
+    await waitFor(async () => {
+      const status = await fetch(`${handle.url}/status`, { headers: bearer('host-token') });
+      return (await status.json() as any).data.state === 'degraded';
+    });
+    expect(settled).not.toHaveBeenCalled();
+    expect(await readFile(itemPath, 'utf8')).toBe(before);
+    expect(await handle.local.outbox.get('ob_late_success')).toMatchObject({ attempts: 0, lastAttemptAt: null });
+    expect(await handle.local.outbox.deadCount()).toBe(0);
+    const discovery = JSON.parse(await readFile(join(home, 'memory-runtime.json'), 'utf8'));
+    expect(discovery).toMatchObject({ mode: 'mcp', state: 'degraded' });
+    const status = await fetch(`${handle.url}/status`, { headers: bearer('host-token') });
+    expect((await status.json() as any).data.warnings).toContain('dormant_incomplete');
+  }, 15000);
+
+  it('in-flight ingest 写入在休眠后成功：返回 409、不写详情/outbox，且不发布 clean stopped', async () => {
+    const home = await temp();
+    const capability = await controlledCapability('ingest-late-token');
+    const handle = await startSidecar({
+      home,
+      port: 0,
+      heartbeatMs: 50,
+      hostToken: 'host-token',
+      env: {
+        MEBULAR_HOME: home,
+        MEBULAR_CAPABILITY_URL: capability.url,
+        MEBULAR_CAPABILITY_TOKEN: 'ingest-late-token',
+      },
+    });
+    handles.push(handle);
+    const before = await handle.local.outbox.stats();
+    let release = () => {};
+    capability.state.writeGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const pending = fetch(`${handle.url}/ingest`, {
+      method: 'POST',
+      headers: { ...bearer('host-token'), 'content-type': 'application/json' },
+      body: JSON.stringify({
+        agentId: 'opencode',
+        chunks: [{ role: 'user', text: '记住：项目使用 pnpm workspace' }],
+        candidates: [{ kind: 'observation', content: { content: '项目使用 pnpm workspace' } }],
+      }),
+    });
+    await waitFor(async () => capability.state.writeStarted === 1);
+    capability.state.writeSuccessEvenWhenDisabled = true;
+    capability.state.enabled = false;
+    await waitFor(async () => {
+      const discovery = JSON.parse(await readFile(join(home, 'memory-runtime.json'), 'utf8'));
+      return discovery.mode === 'mcp';
+    });
+    release();
+    const response = await pending;
+    expect(response.status).toBe(409);
+    expect((await response.json() as any).error.code).toBe('mode_mismatch');
+    expect(await handle.local.outbox.stats()).toEqual(before);
+    expect(capability.state.requests.some((request) => request.path.endsWith('/detail'))).toBe(false);
+    await waitFor(async () => {
+      const status = await fetch(`${handle.url}/status`, { headers: bearer('host-token') });
+      return (await status.json() as any).data.state === 'degraded';
+    });
+    const discovery = JSON.parse(await readFile(join(home, 'memory-runtime.json'), 'utf8'));
+    expect(discovery).toMatchObject({ mode: 'mcp', state: 'degraded' });
+  }, 15000);
+
+  it('in-flight ingest 遇到 capability_disabled：不新建 outbox、不 queued，收尾后可为 clean stopped', async () => {
+    const home = await temp();
+    const capability = await controlledCapability('ingest-disabled-token');
+    const handle = await startSidecar({
+      home,
+      port: 0,
+      heartbeatMs: 50,
+      hostToken: 'host-token',
+      env: {
+        MEBULAR_HOME: home,
+        MEBULAR_CAPABILITY_URL: capability.url,
+        MEBULAR_CAPABILITY_TOKEN: 'ingest-disabled-token',
+      },
+    });
+    handles.push(handle);
+    const before = await handle.local.outbox.stats();
+    let release = () => {};
+    capability.state.writeGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const pending = fetch(`${handle.url}/ingest`, {
+      method: 'POST',
+      headers: { ...bearer('host-token'), 'content-type': 'application/json' },
+      body: JSON.stringify({
+        agentId: 'opencode',
+        chunks: [{ role: 'user', text: '记住：不要入队' }],
+        candidates: [{ kind: 'observation', content: { content: '不要入队' } }],
+      }),
+    });
+    await waitFor(async () => capability.state.writeStarted === 1);
+    capability.state.enabled = false;
+    await waitFor(async () => {
+      const discovery = JSON.parse(await readFile(join(home, 'memory-runtime.json'), 'utf8'));
+      return discovery.mode === 'mcp';
+    });
+    release();
+    const response = await pending;
+    expect(response.status).toBe(409);
+    expect(await handle.local.outbox.stats()).toEqual(before);
+    await waitFor(async () => {
+      const discovery = JSON.parse(await readFile(join(home, 'memory-runtime.json'), 'utf8'));
+      return discovery.mode === 'mcp' && discovery.state === 'stopped';
+    });
+    const status = await fetch(`${handle.url}/status`, { headers: bearer('host-token') });
+    const body = await status.json() as any;
+    expect(body.data.warnings).not.toContain('dormant_incomplete');
+  }, 15000);
 
   it('host 请求未结束时仅为 draining，完成后才发布 clean dormant', async () => {
     const home = await temp();

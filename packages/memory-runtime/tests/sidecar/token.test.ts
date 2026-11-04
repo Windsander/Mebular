@@ -116,6 +116,9 @@ describe('sidecar token', () => {
     await rm(path);
     expect(await refreshCapabilityToken({ dataDir: dir, env, now: 1500 }))
       .toMatchObject({ token: 'stale-env-token', source: 'env' });
+    // 生产文件被撤销后不得回退到启动时的 stale env。
+    expect(await refreshCapabilityToken({ dataDir: dir, env, now: 1500, allowEnvFallback: false }))
+      .toBeNull();
   });
 
   it('不安全的 capability token 权限拒绝使用', async () => {

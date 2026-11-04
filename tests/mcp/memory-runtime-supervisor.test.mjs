@@ -427,6 +427,40 @@ describe('MemoryRuntimeSupervisor：生命周期', () => {
     expect(existsSync(join(home, 'memory-runtime.json'))).toBe(false);
   });
 
+  it('显式 attached stop 对陈旧 discovery/lock 指向无关 live PID 不发信号', async () => {
+    const home = await tempDir();
+    const unrelated = spawn(process.execPath, ['--eval', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    cleanups.push(async () => {
+      if (pidAlive(unrelated.pid)) process.kill(unrelated.pid, 'SIGTERM');
+    });
+    const port = await fakeHealthServer({ pid: process.pid });
+    const startedAt = Date.now() - 60_000;
+    await writeDiscovery(home, { port, pid: unrelated.pid, updatedAt: Date.now() - 16_000, startedAt });
+    await mkdir(join(home, 'memory-runtime'), { recursive: true, mode: 0o700 });
+    await writeFile(join(home, 'memory-runtime', 'start.lock'), JSON.stringify({
+      pid: unrelated.pid,
+      port,
+      startedAt,
+      updatedAt: Date.now() - 16_000,
+      cloudId: null,
+      profileId: 'default',
+      command: 'serve',
+    }), { mode: 0o600 });
+    const supervisor = new MemoryRuntimeSupervisor({
+      home,
+      config: enabledConfig(),
+      env: envFor(home),
+      profileId: () => 'default',
+      spawnImpl: () => { throw new Error('must not spawn'); },
+    });
+    cleanups.push(() => supervisor.dispose());
+    const stopped = await supervisor.stop({ includeAttached: true, timeoutMs: 500 });
+    expect(stopped).toMatchObject({ state: 'degraded', error: { code: 'stop_incomplete' } });
+    expect(pidAlive(unrelated.pid)).toBe(true);
+    expect(existsSync(join(home, 'memory-runtime.json'))).toBe(true);
+    expect(existsSync(join(home, 'memory-runtime', 'start.lock'))).toBe(true);
+  }, 10000);
+
   it('profile / home 不匹配：拒绝接管且不 spawn', async () => {
     const home = await tempDir();
     const port = await fakeHealthServer();
@@ -580,6 +614,42 @@ describe('MemoryRuntimeSupervisor：生命周期', () => {
     expect(pidAlive(replacement.pid)).toBe(true);
     expect(existsSync(join(home, 'memory-runtime.json'))).toBe(false);
   });
+
+  it('managed child 被 SIGKILL 后 stop 清理同实例 discovery/start.lock', async () => {
+    if (process.platform === 'win32') return;
+    const home = await tempDir();
+    await writeCapabilityToken(home);
+    const supervisor = new MemoryRuntimeSupervisor({
+      home,
+      config: enabledConfig({
+        command: fileURLToPath(new URL('../../packages/memory-runtime/bin/mebular-memory-runtime.mjs', import.meta.url)),
+        startTimeoutMs: 8000,
+      }),
+      env: envFor(home, {
+        MEBULAR_CAPABILITY_URL: 'http://127.0.0.1:1/internal/memory/v1',
+        MEBULAR_CAPABILITY_TOKEN: 'capability-secret-token',
+      }),
+      profileId: () => null,
+      healthPollMs: 20,
+    });
+    cleanups.push(() => supervisor.dispose());
+    const started = await supervisor.start();
+    expect(started).toMatchObject({ state: 'degraded', managed: true });
+    const discoveryPath = join(home, 'memory-runtime.json');
+    const lockPath = join(home, 'memory-runtime', 'start.lock');
+    const discovery = JSON.parse(await readFile(discoveryPath, 'utf-8'));
+    const lock = JSON.parse(await readFile(lockPath, 'utf-8'));
+    expect(lock.startedAt).toBe(discovery.startedAt);
+
+    process.kill(discovery.pid, 'SIGKILL');
+    await waitFor(() => !pidAlive(discovery.pid));
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+
+    const stopped = await supervisor.stop({ includeAttached: false, timeoutMs: 1000 });
+    expect(stopped).toMatchObject({ state: 'stopped', error: null });
+    expect(existsSync(discoveryPath)).toBe(false);
+    expect(existsSync(lockPath)).toBe(false);
+  }, 20000);
 
   it('MCP 重启：等待父监督回收旧 managed child，再启动唯一新 child', async () => {
     const home = await tempDir();

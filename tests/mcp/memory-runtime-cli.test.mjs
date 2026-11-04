@@ -200,6 +200,14 @@ describe('mebular memory-runtime CLI', () => {
       headers: { authorization: `Bearer ${firstHostToken}` },
     });
     expect((await dormant.json()).data).toMatchObject({ mode: 'mcp', state: 'stopped' });
+    expect(existsSync(join(home, 'memory-runtime.json'))).toBe(false);
+    const rejected = await fetch(`${firstDiscovery.url}/ingest`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${firstHostToken}`, 'content-type': 'application/json' },
+      body: '{}',
+    });
+    expect(rejected.status).toBe(409);
+    expect((await rejected.json()).error.code).toBe('mode_mismatch');
 
     await writeCapabilityToken(home, 'manual-capability-b');
     const restartedMcp = new MemoryRuntimeSupervisor({

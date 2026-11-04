@@ -85,17 +85,17 @@ function envFor(home, extra = {}) {
   };
 }
 
-async function fakeHealthServer({ pid = process.pid, profileId = 'default', cloudId = null } = {}) {
+async function fakeHealthServer({ pid = process.pid, profileId = 'default', cloudId = null, mode = 'immersive', state = 'ready', ready = true } = {}) {
   const server = createServer((req, res) => {
     res.statusCode = 200;
     res.setHeader('content-type', 'application/json');
     if (req.url?.endsWith('/health')) {
       res.end(JSON.stringify({
         ok: true,
-        state: 'ready',
-        mode: 'immersive',
-        ready: true,
-        degraded: false,
+        state,
+        mode,
+        ready,
+        degraded: mode !== 'immersive' || state !== 'ready',
         pid,
         profileId,
         cloudId,
@@ -607,6 +607,128 @@ describe('MemoryRuntimeSupervisor：生命周期', () => {
     expect(JSON.parse(await readFile(join(home, 'memory-runtime.json'), 'utf-8')).mode).toBe('immersive');
     expect(capabilityRequests.some((request) => request.authorization === `Bearer ${capabilityToken}`)).toBe(true);
   }, 40000);
+
+  it('env-only capability 指纹未变时 stop 不得报告 clean', async () => {
+    const home = await tempDir();
+    await writeCapabilityToken(home).catch(() => undefined);
+    await rm(join(home, 'memory-runtime', 'capability-token'), { force: true });
+    const external = spawn(process.execPath, [FAKE, 'serve'], {
+      env: { ...process.env, ...envFor(home, { MEBULAR_CAPABILITY_TOKEN: 'env-only-token' }) },
+      stdio: 'ignore',
+    });
+    cleanups.push(async () => {
+      if (pidAlive(external.pid)) process.kill(external.pid, 'SIGTERM');
+    });
+    await waitFor(() => existsSync(join(home, 'memory-runtime.json')));
+    const supervisor = new MemoryRuntimeSupervisor({
+      home,
+      config: enabledConfig(),
+      env: envFor(home, { MEBULAR_CAPABILITY_TOKEN: 'env-only-token' }),
+      profileId: () => 'default',
+    });
+    expect(await supervisor.start()).toMatchObject({ state: 'ready', attached: true });
+    expect(await supervisor.stop({ includeAttached: false, timeoutMs: 500 }))
+      .toMatchObject({ state: 'degraded', error: { code: 'disable_incomplete' } });
+  }, 10000);
+
+  it('同一 token 仅重写文件格式仍视为同一代际，不得 clean', async () => {
+    const home = await tempDir();
+    await mkdir(join(home, 'memory-runtime'), { recursive: true, mode: 0o700 });
+    const tokenPath = join(home, 'memory-runtime', 'capability-token');
+    await writeFile(tokenPath, JSON.stringify({
+      version: 1, token: 'same-token', issuedAt: 1, expiresAt: 0, mcpPid: process.pid,
+    }), { mode: 0o600 });
+    const external = spawn(process.execPath, [FAKE, 'serve'], {
+      env: { ...process.env, ...envFor(home, { FAKE_SIDECAR_HEARTBEAT_MS: '500' }) },
+      stdio: 'ignore',
+    });
+    cleanups.push(async () => {
+      if (pidAlive(external.pid)) process.kill(external.pid, 'SIGTERM');
+    });
+    await waitFor(() => existsSync(join(home, 'memory-runtime.json')));
+    const supervisor = new MemoryRuntimeSupervisor({
+      home,
+      config: enabledConfig(),
+      env: envFor(home),
+      profileId: () => 'default',
+    });
+    expect(await supervisor.start()).toMatchObject({ state: 'ready', attached: true });
+    const stopping = supervisor.stop({ includeAttached: false, timeoutMs: 500 });
+    await waitFor(() => !existsSync(join(home, 'memory-runtime.json')), { timeoutMs: 2000 });
+    await writeFile(tokenPath, JSON.stringify({
+      version: 1,
+      token: 'same-token',
+      issuedAt: 2,
+      expiresAt: 0,
+      mcpPid: process.pid,
+    }, null, 2), { mode: 0o600 });
+    expect(await stopping).toMatchObject({
+      state: 'degraded',
+      error: { code: 'disable_incomplete' },
+    });
+  }, 10000);
+
+  it('capability 文件缺失时 stop 后 start 不卡 sidecar_starting', async () => {
+    const home = await tempDir();
+    await rm(join(home, 'memory-runtime', 'capability-token'), { force: true });
+    const external = spawn(process.execPath, [FAKE, 'serve'], {
+      env: { ...process.env, ...envFor(home) },
+      stdio: 'ignore',
+    });
+    cleanups.push(async () => {
+      if (pidAlive(external.pid)) process.kill(external.pid, 'SIGTERM');
+    });
+    await waitFor(() => existsSync(join(home, 'memory-runtime.json')));
+    const supervisor = new MemoryRuntimeSupervisor({
+      home,
+      config: enabledConfig(),
+      env: envFor(home),
+      profileId: () => 'default',
+    });
+    expect(await supervisor.start()).toMatchObject({ state: 'ready', attached: true });
+    expect(await supervisor.stop({ includeAttached: false, timeoutMs: 500 }))
+      .toMatchObject({ state: 'stopped', error: null });
+    const restarted = await supervisor.start();
+    expect(restarted.state).not.toBe('failed');
+    expect(restarted.error?.code).not.toBe('sidecar_starting');
+    expect(restarted).toMatchObject({ state: 'stopped', reason: 'disabled' });
+  }, 15000);
+
+  it('starting/degraded 健康态不得被 acceptDormant 放行停止', async () => {
+    const home = await tempDir();
+    const unrelated = spawn(process.execPath, ['--eval', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    cleanups.push(async () => {
+      if (pidAlive(unrelated.pid)) process.kill(unrelated.pid, 'SIGTERM');
+    });
+    const port = await fakeHealthServer({
+      pid: unrelated.pid,
+      mode: 'mcp',
+      state: 'degraded',
+      ready: false,
+    });
+    await writeDiscovery(home, { port, pid: unrelated.pid, mode: 'mcp', state: 'degraded' });
+    await mkdir(join(home, 'memory-runtime'), { recursive: true, mode: 0o700 });
+    await writeHostToken(home, 'host-token-degraded');
+    await writeFile(join(home, 'memory-runtime', 'start.lock'), JSON.stringify({
+      pid: unrelated.pid,
+      port,
+      startedAt: Date.now(),
+      updatedAt: Date.now(),
+      cloudId: null,
+      profileId: 'default',
+      command: 'serve',
+    }), { mode: 0o600 });
+    const supervisor = new MemoryRuntimeSupervisor({
+      home,
+      config: enabledConfig(),
+      env: envFor(home),
+      profileId: () => 'default',
+      fetchImpl: (url, init) => fetch(url, init),
+    });
+    const stopped = await supervisor.stop({ includeAttached: true, timeoutMs: 500 });
+    expect(stopped).toMatchObject({ state: 'degraded', error: { code: 'stop_incomplete' } });
+    expect(pidAlive(unrelated.pid)).toBe(true);
+  }, 10000);
 
   it('profile / home 不匹配：拒绝接管且不 spawn', async () => {
     const home = await tempDir();

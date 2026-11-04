@@ -233,6 +233,36 @@ describe('mebular memory-runtime CLI', () => {
     expect(pidAlive(second.pid)).toBe(false);
   }, 45000);
 
+  it('discovery 缺失的 dormant manual sidecar 仍可由 restart/stop 通过 start.lock 停止', async () => {
+    const home = await tempDir();
+    await writeConfig(home, { enabled: true, command: FAKE, startTimeoutMs: 3000 });
+    await writeCapabilityToken(home);
+    const env = envFor(home);
+    const started = runCli(env, 'start');
+    expect(started.status).toBe(0);
+    const first = parse(started);
+    pids.push(first.pid);
+    await rm(join(home, 'memory-runtime.json'), { force: true });
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
+
+    const restarted = runCli(env, 'restart');
+    expect(restarted.status).toBe(0);
+    const second = parse(restarted);
+    pids.push(second.pid);
+    expect(second.pid).not.toBe(first.pid);
+    expect(pidAlive(first.pid)).toBe(false);
+    const secondDiscovery = JSON.parse(await readFile(join(home, 'memory-runtime.json'), 'utf-8'));
+    expect(secondDiscovery.pid).toBe(second.pid);
+
+    await rm(join(home, 'memory-runtime.json'), { force: true });
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
+    const stopped = runCli(env, 'stop');
+    expect(stopped.status).toBe(0);
+    expect(parse(stopped)).toMatchObject({ ok: true, action: 'stop', state: 'stopped' });
+    expect(pidAlive(second.pid)).toBe(false);
+    expect(existsSync(join(home, 'memory-runtime', 'start.lock'))).toBe(false);
+  }, 30000);
+
   it('start 未安装 sidecar：退出码 3', async () => {
     const home = await tempDir();
     await writeConfig(home, { enabled: true, command: join(home, 'missing-sidecar.mjs') });

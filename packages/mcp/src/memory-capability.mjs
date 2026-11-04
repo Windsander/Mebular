@@ -1843,6 +1843,8 @@ export function createMemoryCapabilityHandler({
   let tokenGeneration = 0;
   let activeRequests = 0;
   const activeWaiters = new Set();
+  let draining = false;
+  let closePromise = null;
   const hostId = hostIdForHome(home);
 
   function finishActiveRequest() {
@@ -1868,8 +1870,33 @@ export function createMemoryCapabilityHandler({
     return activeRequests === 0;
   }
 
+  /**
+   * 关闭能力面：先进入不可准入 draining，等待已认证请求（含真实图写）完成，
+   * 再撤销 token。drain 超时则报告 incomplete 且不撤销 token，调用方不得声明 clean。
+   */
+  async function close({ timeoutMs = 5000 } = {}) {
+    if (closePromise) return closePromise;
+    draining = true;
+    closePromise = (async () => {
+      const clean = await drain({ timeoutMs });
+      if (clean) await revoke();
+      return { clean, active: activeRequests };
+    })();
+    return closePromise;
+  }
+
+  /** drain 失败时放弃新请求，但不撤销 token / 不声明已撤销。 */
+  function abandon() {
+    draining = true;
+    disposed = true;
+  }
+
+  function beginDrain() {
+    draining = true;
+  }
+
   function assertRequestGeneration(generation, operation = 'write') {
-    if (disposed || revoked || generation !== tokenGeneration) {
+    if (disposed || revoked || draining || generation !== tokenGeneration) {
       throw new CapabilityError(409, 'mode_mismatch', '能力接口已撤销/关闭，写入未提交', {
         operation,
       }, false);
@@ -1928,10 +1955,12 @@ export function createMemoryCapabilityHandler({
   async function prepare() {
     if (disposed) return { enabled: false, tokenId: null };
     if (!isMemoryRuntimeEnabled(getConfig())) return { enabled: false, tokenId: null };
-    // 先让上一代 token 生成收敛，再解除 revoke 门闩；只有显式 prepare 能换发。
+    // 先让上一代 token 生成收敛，再解除 revoke/draining 门闩；只有显式 prepare 能换发。
     const pending = tokenPromise;
     if (pending) await pending.catch(() => undefined);
     revoked = false;
+    draining = false;
+    closePromise = null;
     tokenError = null;
     tokenGeneration += 1;
     try {
@@ -1945,6 +1974,7 @@ export function createMemoryCapabilityHandler({
   /** 停用/关闭：撤销进程内 token 并删除 token 文件（旧 sidecar 下一次请求 401）。 */
   async function revoke() {
     revoked = true;
+    draining = true;
     tokenGeneration += 1;
     tokenRecord = null;
     tokenError = null;
@@ -2860,6 +2890,7 @@ export function createMemoryCapabilityHandler({
       assertRequestGeneration(generation, 'delete');
       const ids = parseIdList(payload);
       const classified = await classifyGovernanceTargets(ids, actor);
+      assertRequestGeneration(generation, 'delete.commit');
       const deleted = [];
       let detailsDeleted = [];
       if (classified.allowed.length > 0) {
@@ -2897,6 +2928,7 @@ export function createMemoryCapabilityHandler({
       const archived = payload.archived !== false;
       const ids = parseIdList(payload);
       const classified = await classifyGovernanceTargets(ids, actor);
+      assertRequestGeneration(generation, 'archive.commit');
       const skipped = [];
       const allowed = [];
       for (const id of classified.allowed) {
@@ -4169,6 +4201,9 @@ export function createMemoryCapabilityHandler({
     activeRequests += 1;
     try {
       if (disposed) throw new CapabilityError(503, 'capability_unavailable', '能力接口已关闭', undefined, true);
+      if (draining && !revoked) {
+        throw new CapabilityError(409, 'mode_mismatch', '能力接口正在关闭，拒绝新的请求', undefined, false);
+      }
       const requestGeneration = tokenGeneration;
 
       // 1) 挂载开关：轻量模式不创建目录/token/进程，直接 404。
@@ -4817,7 +4852,11 @@ export function createMemoryCapabilityHandler({
     prepare,
     revoke,
     dispose,
+    close,
+    abandon,
+    beginDrain,
     drain,
+    isDraining: () => draining,
     isEnabled: () => isMemoryRuntimeEnabled(getConfig()),
     tokenId: () => tokenRecord?.tokenId ?? null,
   });

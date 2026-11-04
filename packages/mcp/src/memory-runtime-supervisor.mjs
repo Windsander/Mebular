@@ -20,6 +20,7 @@ import { homedir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { APP_VERSION } from './version.mjs';
+import { readCapabilityToken } from './memory-runtime-token.mjs';
 
 export const MEMORY_RUNTIME_DISCOVERY_FILE = 'memory-runtime.json';
 export const MEMORY_RUNTIME_DATA_DIR = 'memory-runtime';
@@ -661,8 +662,10 @@ export class MemoryRuntimeSupervisor {
       });
       if (!response || response.ok !== true) return { ok: false };
       const body = await response.json().catch(() => ({}));
+      const ready = body?.ready !== false;
+      const dormant = acceptDormant && body?.mode === 'mcp' && body?.state === 'stopped';
       return {
-        ok: body?.ok !== false && (acceptDormant || body?.ready !== false),
+        ok: body?.ok !== false && (ready || dormant),
         degraded: body?.degraded === true || body?.state === 'degraded',
         body,
       };
@@ -687,12 +690,45 @@ export class MemoryRuntimeSupervisor {
     return lock;
   }
 
-  /** 当前 capability 凭据指纹；null 表示没有可读的生产 token 文件。 */
+  /** 从 start.lock 构造可验证候选；不写回 discovery，只用于显式 stop。 */
+  #discoveryFromLock(lock) {
+    if (!lock || lock.command !== 'serve' || !Number.isInteger(lock.port) || lock.port <= 0) return null;
+    const base = `http://127.0.0.1:${lock.port}/memory-runtime/v1`;
+    return {
+      schema: 1,
+      kind: SIDECAR_KIND,
+      pid: lock.pid,
+      host: '127.0.0.1',
+      port: lock.port,
+      url: base,
+      healthUrl: `${base}/health`,
+      tokenFile: this.paths.hostTokenPath,
+      cloudId: lock.cloudId,
+      profileId: lock.profileId,
+      runtimeVersion: APP_VERSION,
+      apiVersion: 1,
+      capabilityApiVersion: CAPABILITY_API_VERSION,
+      minMcpVersion: '0.3.0',
+      maxMcpVersion: '0.3.x',
+      state: 'stopped',
+      mode: 'mcp',
+      degraded: true,
+      startedAt: lock.startedAt,
+      updatedAt: this.now(),
+      capabilities: {},
+    };
+  }
+
+  /** 当前实际 capability token（env 优先，其次生产文件）的指纹；null 表示没有可用凭据。 */
   async #capabilityFingerprint() {
     try {
-      const tokenFile = join(this.paths.dataDir, MEMORY_RUNTIME_CAPABILITY_TOKEN_FILE);
-      const raw = await readFile(tokenFile, 'utf-8');
-      return createHash('sha256').update(raw).digest('hex');
+      const record = await readCapabilityToken({
+        home: this.paths.home,
+        env: this.env,
+        now: this.now(),
+      });
+      if (!record?.token) return null;
+      return createHash('sha256').update(record.token).digest('hex');
     } catch {
       return null;
     }
@@ -1422,7 +1458,7 @@ export class MemoryRuntimeSupervisor {
    * 显式 stop 前的实例校验：与 attach 使用同一套 freshness/URL/home/profile/version、
    * health 身份和 token 鉴权的 /status 校验；任何一项无法确认都不得发送信号。
    */
-  async #verifyLiveInstance(discovery) {
+  async #verifyLiveInstance(discovery, { requireDiscovery = true } = {}) {
     if (!discovery || !Number.isInteger(discovery.pid) || !pidAlive(discovery.pid)) return false;
     if (this.#homeMismatch(discovery) || this.#profileMismatch(discovery) || this.#versionMismatch(discovery)) {
       return false;
@@ -1435,7 +1471,13 @@ export class MemoryRuntimeSupervisor {
       return false;
     }
     // 需要 host token 的 /status：确认 pid（以及新实例提供的 startedAt）仍属于同一实例。
-    if (!await this.#readSidecarMode(discovery)) return false;
+    const observed = await this.#readSidecarMode(discovery);
+    if (!observed) return false;
+    if (health.body?.ready === false
+      && !(observed.mode === 'mcp' && observed.state === 'stopped')) {
+      return false;
+    }
+    if (!requireDiscovery) return true;
     // 探测期间实例可能被替换；确认 discovery 仍是同一 pid/startedAt/url/tokenFile。
     return sameDiscoveryInstance(await readDiscovery(this.paths.discoveryPath), discovery);
   }
@@ -2050,6 +2092,37 @@ export class MemoryRuntimeSupervisor {
         });
         return this.snapshot();
       }
+      // 已验证的 dormant 外部/manual 实例不是“正在启动”：不要卡在 sidecar_starting。
+      const dormantCandidate = this.#discoveryFromLock(lock);
+      if (dormantCandidate && await this.#verifyLiveInstance(dormantCandidate, { requireDiscovery: false })) {
+        const observed = await this.#readSidecarMode(dormantCandidate);
+        if (observed?.mode === 'mcp' && observed.state === 'stopped') {
+          const resumeDeadline = this.now() + Math.min(500, this.configuredStartTimeout());
+          while (this.now() < resumeDeadline) {
+            const discovery = await readDiscovery(this.paths.discoveryPath);
+            if (discovery) {
+              const ready = await this.#refreshDiscovery({ fetchHealth: true });
+              if (ready) return this.snapshot();
+              break;
+            }
+            await sleep(50);
+          }
+          this.#setState({
+            state: 'stopped',
+            available: false,
+            degraded: false,
+            managed: false,
+            attached: false,
+            pid: lock.pid,
+            url: null,
+            healthUrl: null,
+            reason: 'disabled',
+            error: null,
+            lock: this.lockView,
+          });
+          return this.snapshot();
+        }
+      }
       const deadline = this.now() + Math.max(100, this.configuredStartTimeout());
       const ready = await this.#waitForDiscovery(deadline);
       if (ready) {
@@ -2222,7 +2295,24 @@ export class MemoryRuntimeSupervisor {
             && verified.pid === lock.pid
             && verified.startedAt === lock.startedAt;
           if (!matchesVerified) {
-            clean = false;
+            // discovery 已被 stop 删除时，从 start.lock + health/status identity + pid/startedAt 验证；
+            // 不重建 discovery，也不对不可验证的复用 PID 发信号。
+            const candidate = this.#discoveryFromLock(lock);
+            const verifiedFromLock = candidate
+              && await this.#verifyLiveInstance(candidate, { requireDiscovery: false });
+            if (!verifiedFromLock) {
+              clean = false;
+            } else {
+              const confirmedLock = await this.#readLockView();
+              if (!confirmedLock
+                || confirmedLock.pid !== lock.pid
+                || confirmedLock.startedAt !== lock.startedAt
+                || !pidAlive(lock.pid)) {
+                clean = false;
+              } else if (!await this.#stopPid(lock.pid, timeoutMs)) {
+                clean = false;
+              }
+            }
           } else {
             const confirmedLock = await this.#readLockView();
             const confirmedDiscovery = await readDiscovery(this.paths.discoveryPath);
@@ -2277,7 +2367,10 @@ export class MemoryRuntimeSupervisor {
       if (needsDormant(remaining)) clean = false;
       // 能力仍有效且凭据未撤销/未换代：不能把“可能被同一 token 唤醒”的实例报告为 clean stopped。
       const capabilityAfter = await this.#capabilityFingerprint();
-      if (capabilityBefore !== null && capabilityAfter === capabilityBefore) clean = false;
+      const credentialUnchanged = capabilityBefore === null
+        ? capabilityAfter !== null
+        : capabilityAfter === capabilityBefore;
+      if (credentialUnchanged) clean = false;
     }
 
     if (clean) {

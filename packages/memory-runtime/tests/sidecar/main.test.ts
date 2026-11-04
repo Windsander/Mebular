@@ -674,6 +674,54 @@ describe('memory-runtime sidecar process', () => {
     expect((await response.json() as any).error.code).toBe('mode_mismatch');
   }, 15000);
 
+  it('drain 回滚不删除 duplicate 已有的 staging', async () => {
+    const home = await temp();
+    const capability = await controlledCapability('staging-duplicate-token');
+    const handle = await startSidecar({
+      home,
+      port: 0,
+      heartbeatMs: 50,
+      hostToken: 'host-token',
+      env: {
+        MEBULAR_HOME: home,
+        MEBULAR_CAPABILITY_URL: capability.url,
+        MEBULAR_CAPABILITY_TOKEN: 'staging-duplicate-token',
+      },
+    });
+    handles.push(handle);
+    const ingest = (messageId: string) => fetch(`${handle.url}/ingest`, {
+      method: 'POST',
+      headers: { ...bearer('host-token'), 'content-type': 'application/json' },
+      body: JSON.stringify({
+        agentId: 'opencode',
+        extractor: 'host',
+        chunks: [{ role: 'user', text: '重复内容', messageId, chunkIndex: 0 }],
+      }),
+    });
+    expect((await ingest('msg-1')).status).toBe(202);
+    await waitFor(async () => (await handle.local.stats()).stagingChunks === 1);
+    const originalPut = handle.local.store.putStagingChunk.bind(handle.local.store);
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let entered = false;
+    handle.local.store.putStagingChunk = async (...args: Parameters<typeof originalPut>) => {
+      entered = true;
+      await gate;
+      return originalPut(...args);
+    };
+    const pending = ingest('msg-2');
+    await waitFor(async () => entered);
+    capability.state.enabled = false;
+    await waitFor(async () => {
+      const discovery = JSON.parse(await readFile(join(home, 'memory-runtime.json'), 'utf8'));
+      return discovery.mode === 'mcp';
+    });
+    release();
+    const response = await pending;
+    expect(response.status).toBe(409);
+    expect((await handle.local.stats()).stagingChunks).toBe(1);
+  }, 15000);
+
   it('in-flight replay 撤销后不重写 retry 元数据，clean 前原始 outbox 字节不变', async () => {
     const home = await temp();
     const capability = await controlledCapability('replay-token');

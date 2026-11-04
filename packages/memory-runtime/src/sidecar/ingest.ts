@@ -1357,8 +1357,8 @@ export class IngestService {
       try {
         const stored = await this.local.store.putStagingChunk(cloudId, chunk);
         if (this.lifecycle && !this.lifecycle.acceptsWork()) {
-          // 写盘期间 drain 开始：撤销刚写入的 staging，再按生命周期错误中止。
-          await this.local.clearStaging([stored.chunk.id]).catch(() => 0);
+          // 写盘期间 drain 开始：只撤销本次新建的 chunk；duplicate 指向既有 staging，必须保留。
+          if (!stored.duplicate) await this.local.clearStaging([stored.chunk.id]).catch(() => 0);
           this.lifecycle.assertAccepting('ingest.staging.chunk.settled');
         }
         ids.push(stored.chunk.id);

@@ -5,7 +5,7 @@
 
 import { describe, it, expect, afterEach } from '@jest/globals';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -60,7 +60,7 @@ const fakeService = {
   }),
 };
 
-async function start({ enabled, beforeConfigWrite = null }) {
+async function start({ enabled, beforeConfigWrite = null, afterConfigRename = null }) {
   const home = await tempDir();
   process.env.MEBULAR_CLOUD_ROOT = join(home, 'cloud');
   delete process.env.MEBULAR_CAPABILITY_TOKEN;
@@ -79,6 +79,7 @@ async function start({ enabled, beforeConfigWrite = null }) {
     writesEnabled: true,
     manageMemoryRuntime: true,
     ...(beforeConfigWrite ? { beforeConfigWrite } : {}),
+    ...(afterConfigRename ? { afterConfigRename } : {}),
   });
   servers.push(server);
   return { home, server, base: `http://127.0.0.1:${server.port}` };
@@ -165,6 +166,39 @@ describe('serve + Memory Runtime supervisor', () => {
       const config = JSON.parse(raw);
       expect(config.memoryRuntime?.enabled).not.toBe(true);
     }
+    await closing;
+    servers.splice(servers.indexOf(server), 1);
+  }, 15000);
+
+  it('rename 后 close 回滚不覆盖并发配置修改', async () => {
+    let release = () => {};
+    let entered = false;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const { home, base, server } = await start({
+      enabled: false,
+      afterConfigRename: async () => {
+        if (entered) return;
+        entered = true;
+        await gate;
+      },
+    });
+    const consoleResponse = await fetch(`${base}/console/`);
+    const csrf = consoleResponse.headers.get('x-mebular-csrf');
+    const cookie = consoleResponse.headers.get('set-cookie')?.split(';')[0];
+    const patch = fetch(`${base}/admin/api/config`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-mebular-csrf': csrf, cookie },
+      body: JSON.stringify({ patch: { 'memoryRuntime.enabled': true } }),
+    });
+    await waitFor(() => entered, { timeoutMs: 5000 });
+    const concurrent = { memoryRuntime: { enabled: false }, concurrent: { writer: 'other' } };
+    await writeFile(join(home, 'config.json'), JSON.stringify(concurrent, null, 2), 'utf-8');
+    const closing = server.close();
+    release();
+    const response = await patch;
+    expect(response.status).toBe(409);
+    expect((await response.json()).error).toBe('config_conflict');
+    expect(JSON.parse(await readFile(join(home, 'config.json'), 'utf-8'))).toEqual(concurrent);
     await closing;
     servers.splice(servers.indexOf(server), 1);
   }, 15000);

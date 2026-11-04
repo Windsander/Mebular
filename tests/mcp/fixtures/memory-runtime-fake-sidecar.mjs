@@ -478,6 +478,7 @@ function writeDiscovery(port) {
   }), { mode: 0o600 });
 }
 
+const heartbeatMs = Math.max(10, Number(env.FAKE_SIDECAR_HEARTBEAT_MS ?? 50));
 const heartbeat = setInterval(() => {
   if (!server || exiting) return;
   try {
@@ -501,7 +502,7 @@ const heartbeat = setInterval(() => {
       }
     }
   }
-}, 50);
+}, heartbeatMs);
 heartbeat.unref();
 
 function cleanup() {

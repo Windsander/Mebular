@@ -429,6 +429,87 @@ describe('sidecar compact / self / checkpoint HTTP', () => {
     expect(recovered.body.data.checkpoint).toMatchObject({ revision: 1, pending: false, source: 'cloud' });
   });
 
+  it('checkpoint：202 pending 不覆盖最后 committed；离线 GET 分离两个视图', async () => {
+    const { server, fake, runtime } = await setup();
+    const url = `${server.url}/checkpoints/th_split?agentId=opencode`;
+
+    const committed = await request(url, 'PUT', {
+      agentId: 'opencode',
+      expectedRevision: 0,
+      state: checkpointState('th_split', 'committed v1', { cursor: 1 }),
+      summary: 'committed one',
+    });
+    expect(committed.status).toBe(200);
+    expect(committed.body.data.checkpoint.revision).toBe(1);
+
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const pending = await request(url, 'PUT', {
+      agentId: 'opencode',
+      expectedRevision: 1,
+      state: checkpointState('th_split', 'pending v2', { cursor: 2 }),
+      summary: 'pending two',
+    });
+    expect(pending.status).toBe(202);
+    expect(pending.body.data.checkpoint).toMatchObject({ revision: null, pending: true });
+
+    const offline = await request(url, 'GET');
+    expect(offline.status).toBe(200);
+    expect(offline.body.data).toMatchObject({
+      source: 'cache',
+      degraded: true,
+      checkpoint: {
+        revision: 1,
+        summary: 'committed one',
+        source: 'cache',
+        stale: true,
+      },
+      pending: true,
+      pendingCheckpoint: {
+        revision: null,
+        pending: true,
+        summary: 'pending two',
+      },
+    });
+    expect(offline.body.data.checkpoint.pending).toBe(false);
+    expect(offline.body.data.pendingCheckpoint.id).toBeNull();
+    expect(JSON.stringify(offline.body)).not.toContain('cap-token');
+
+    fake.setFailure(null);
+    const replayed = await runtime.replayer.replayOnce();
+    expect(replayed.remaining).toBe(0);
+    const recovered = await request(url, 'GET');
+    expect(recovered.body.data.checkpoint).toMatchObject({
+      revision: 2,
+      summary: 'pending two',
+      pending: false,
+      source: 'cloud',
+    });
+  });
+
+  it('checkpoint：只有 pending 时离线 GET 明确 pending-only，不返回伪 committed', async () => {
+    const { server, fake } = await setup();
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const url = `${server.url}/checkpoints/th_pending_only?agentId=opencode`;
+    const pending = await request(url, 'PUT', {
+      agentId: 'opencode',
+      state: checkpointState('th_pending_only', 'offline only', { cursor: 9 }),
+      summary: 'only pending',
+    });
+    expect(pending.status).toBe(202);
+
+    const offline = await request(url, 'GET');
+    expect(offline.status).toBe(200);
+    expect(offline.body.data).toMatchObject({
+      source: 'cache',
+      degraded: true,
+      checkpoint: null,
+      pending: true,
+      pendingUnavailable: false,
+      pendingCheckpoint: { revision: null, pending: true },
+    });
+    expect(offline.body.data.pendingCheckpoint.committed).toBeUndefined();
+  });
+
   it('checkpoint：更早 expiresAt 原样成为 outbox 操作 deadline', async () => {
     const { server, fake, runtime } = await setup();
     fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
@@ -590,6 +671,96 @@ describe('sidecar compact / self / checkpoint HTTP', () => {
       compact: true,
       self: true,
     });
+  });
+
+  it('compact：离线只排队恢复元数据，不提交占位摘要；恢复后真实摘要与 sourceHashes 一次写入', async () => {
+    const { server, fake, runtime } = await setup();
+    const before = JSON.parse(JSON.stringify(fake.records));
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const pending = await request(`${server.url}/compact`, 'POST', {
+      agentId: 'opencode',
+      domain: 'agent:opencode',
+      sourceIds: ['01JSRC1', '01JSRC2'],
+    });
+    expect(pending.status).toBe(202);
+    expect(pending.body.data).toMatchObject({
+      status: 'pending',
+      queued: true,
+      deferred: true,
+      sourceIds: ['01JSRC1', '01JSRC2'],
+      sourceHashes: [],
+    });
+    expect(pending.body.data.summary).toBe('');
+    expect(fake.compacts).toHaveLength(0);
+
+    const [item] = await runtime.local.outbox.list();
+    expect(item).toBeDefined();
+    const body = item!.body as Record<string, unknown>;
+    expect(body.deferredSummary).toBe(true);
+    expect(body.summary).toBeUndefined();
+    expect(body.sourceHashes).toBeUndefined();
+
+    fake.setFailure(null);
+    const replayed = await runtime.replayer.replayOnce();
+    expect(replayed.remaining).toBe(0);
+    expect(fake.compacts).toHaveLength(1);
+    const compact = fake.compacts[0]!;
+    expect(compact.summary).toContain('Mebular uses sidecar');
+    expect(compact.summary).toContain('pnpm workspace build 已通过');
+    expect(compact.summary).not.toBe('Compact · 2 records');
+    expect(compact.sourceIds).toEqual(['01JSRC1', '01JSRC2']);
+    expect(compact.sourceHashes).toHaveLength(2);
+    expect(compact.sourceHashes!.every((hash) => hash.startsWith('sha256:'))).toBe(true);
+    expect(fake.records).toEqual(before);
+  });
+
+  it('compact：离线没有 sourceIds 显式失败，不排队占位；恢复后来源缺失进入 dead', async () => {
+    const { server, fake, runtime } = await setup();
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const noSources = await request(`${server.url}/compact`, 'POST', {
+      agentId: 'opencode',
+      domain: 'agent:opencode',
+    });
+    expect(noSources.status).toBe(503);
+    expect(noSources.body.error.code).toBe('capability_unavailable');
+    expect(await runtime.local.outbox.list()).toHaveLength(0);
+    expect(fake.compacts).toHaveLength(0);
+
+    const queued = await request(`${server.url}/compact`, 'POST', {
+      agentId: 'opencode',
+      domain: 'agent:opencode',
+      sourceIds: ['01JSRC1'],
+    });
+    expect(queued.status).toBe(202);
+    fake.setRecords(fake.records.filter((record) => record.id !== '01JSRC1'));
+    fake.setFailure(null);
+    const replayed = await runtime.replayer.replayOnce();
+    expect(replayed.remaining).toBe(0);
+    const outbox = await runtime.local.outbox.stats();
+    expect(outbox.items).toBe(0);
+    expect((await runtime.local.outbox.deadStats()).items).toBe(1);
+    expect(fake.compacts).toHaveLength(0);
+  });
+
+  it('compact：直接提交占位标题被 capability 拒绝，不产生图对象', async () => {
+    const { fake } = await setup();
+    const response = await fetch(`${fake.baseUrl}/internal-object`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        actor: { type: 'agent', agentId: 'opencode' },
+        kind: 'compact',
+        op: 'upsert',
+        domain: 'agent:opencode',
+        sourceIds: ['01JSRC1'],
+        summary: 'Compact · 1 records',
+      }),
+    });
+    const body = await response.json();
+    if (response.status !== 422) throw new Error(`status=${response.status} body=${JSON.stringify(body)}`);
+    expect(response.status).toBe(422);
+    expect(body.error.code).toBe('compact_summary_placeholder');
+    expect(fake.compacts).toHaveLength(0);
   });
 
   it('compact：capability 不可用时带 sourceIds 进入 outbox，恢复后只写一次', async () => {

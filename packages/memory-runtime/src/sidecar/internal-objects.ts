@@ -181,6 +181,8 @@ interface LoadedSources {
   sourceHashes: string[];
   warnings: string[];
   degraded: boolean;
+  /** capability 不可达但宿主已给出 sourceIds：只排队恢复元数据，不生成占位摘要。 */
+  deferred: boolean;
 }
 
 interface ActorContext {
@@ -478,6 +480,12 @@ function estimateTokens(text: string): number {
   return Math.max(1, Math.ceil([...text].length / 4));
 }
 
+/** `expiresAt=0` 表示无自动过期；只过滤显式且已到的过期时间。 */
+function checkpointExpiredView(view: Record<string, unknown>, at: number): boolean {
+  const expiresAt = typeof view.expiresAt === 'number' ? view.expiresAt : 0;
+  return expiresAt > 0 && expiresAt < at;
+}
+
 export interface CompactSummaryResult {
   summary: string;
   tokenCount: number;
@@ -606,6 +614,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
       const view = this.selfView(object, { source: 'cloud' });
       this.counts.selfRecords += 1;
       await this.cacheSet(this.selfCacheKey(agentId), view);
+      await this.cacheDelete(this.selfPendingCacheKey(agentId));
       return;
     }
     if (kind === 'context_checkpoint') {
@@ -615,6 +624,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
       const view = this.checkpointView(object, { source: 'cloud' });
       this.counts.checkpoints += 1;
       await this.cacheSet(this.checkpointCacheKey(agentId, threadId, view.domain), view);
+      await this.cacheDelete(this.checkpointPendingCacheKey(agentId, threadId, view.domain));
     }
   }
 
@@ -659,8 +669,16 @@ export class MemoryObjectService implements SidecarObjectsApi {
       : `object:v1:checkpoint:${agentId}:${threadId}`;
   }
 
+  private checkpointPendingCacheKey(agentId: string, threadId: string, domain?: string | null): string {
+    return `${this.checkpointCacheKey(agentId, threadId, domain)}:pending`;
+  }
+
   private selfCacheKey(agentId: string): string {
     return `object:v1:self:${agentId}`;
+  }
+
+  private selfPendingCacheKey(agentId: string): string {
+    return `object:v1:self:${agentId}:pending`;
   }
 
   private noteQueued(error: unknown): void {
@@ -882,6 +900,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
     const warnings: string[] = [];
     let degraded = false;
     let records: Array<Record<string, unknown>> = [];
+    let deferred = false;
     try {
       const fetched = await this.capabilityQueryRecords(
         actor,
@@ -893,11 +912,13 @@ export class MemoryObjectService implements SidecarObjectsApi {
       warnings.push(...fetched.warnings);
       degraded = fetched.degraded;
     } catch (error) {
+      // 没有显式 sourceIds 时离线选择来源必须失败；不得用占位摘要排队。
       if (!sourceIds || !retryableCapabilityError(error)) throw capabilityError(error);
-      // capability 不可用但宿主已给出 sourceIds：用 ID 生成确定性占位摘要进入 outbox；
-      // capability 恢复后由同一幂等请求补齐真实摘要与 sourceHashes。
-      warnings.push('capability_unavailable');
+      // capability 不可用但宿主已给出 sourceIds：只持久化恢复元数据，
+      // 恢复后由 capability 重新读取来源、生成真实摘要并一次写入。
+      warnings.push('capability_unavailable', 'compact_deferred');
       degraded = true;
+      deferred = true;
     }
 
     const byId = new Map<string, SourceRecord>();
@@ -916,26 +937,18 @@ export class MemoryObjectService implements SidecarObjectsApi {
       });
     }
 
+    if (sourceIds && deferred && byId.size === 0) {
+      return {
+        records: [],
+        sourceIds: [...sourceIds],
+        sourceHashes: [],
+        warnings,
+        degraded,
+        deferred: true,
+      };
+    }
+
     if (sourceIds) {
-      if (degraded && byId.size === 0) {
-        // capability 不可用但宿主已给出 sourceIds：用 ID 生成占位摘要进入 outbox。
-        // 不带 sourceHashes，由 capability 恢复后按真实内容补齐或标记 stale。
-        const synthetic = sourceIds.map((id) => ({
-          id,
-          domain,
-          kind: 'record',
-          content: {},
-          text: '',
-          updatedAt: null,
-        }));
-        return {
-          records: synthetic,
-          sourceIds: [...sourceIds],
-          sourceHashes: [],
-          warnings,
-          degraded,
-        };
-      }
       const missing = sourceIds.filter((id) => !byId.has(id));
       if (missing.length > 0) {
         // 在请求域内找不到全部来源：按契约拒绝跨域 compact；不泄漏源内容。
@@ -956,6 +969,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
         sourceHashes: hashes,
         warnings,
         degraded,
+        deferred: false,
       };
     }
 
@@ -975,6 +989,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
       sourceHashes: sorted.map((record) => `sha256:${sha256Hex(canonicalJson(record.content))}`),
       warnings,
       degraded,
+      deferred: false,
     };
   }
 
@@ -1080,67 +1095,80 @@ export class MemoryObjectService implements SidecarObjectsApi {
 
     return this.serial.run(`compact:${domain}`, async () => {
       const loaded = await this.loadCompactSources(actor, domain, sourceIds, limit);
-      const built = buildCompactSummary(
-        loaded.records.map((record) => ({ id: record.id, kind: record.kind, content: record.content })),
-        strategy,
-      );
-      const effectiveHashes = loaded.sourceHashes;
       const warnings = [...loaded.warnings];
-      let summary = built.summary;
-      let tokenCount = built.tokenCount;
+      const effectiveHashes = loaded.sourceHashes;
+      let summary = '';
+      let tokenCount = 0;
       let summaryExtractor: 'heuristic' | 'local' | 'api' = 'heuristic';
       let summaryModel: string | null = 'heuristic';
       let modelDegraded = false;
       const allowRemote = body.allowRemote === true;
 
-      // compact 摘要可选模型；失败保留确定性摘要，不丢源记录、不回退到第三方。
-      if (strategy === 'summary' && this.models) {
-        const selection = await this.models.selectOptionalSource(allowRemote);
-        for (const warning of selection.warnings) {
-          if (!warnings.includes(warning)) warnings.push(warning);
-        }
-        modelDegraded = selection.degraded;
-        if (selection.source) {
-          let outcome;
-          try {
-            outcome = await this.models.summarize({
-              source: selection.source,
-              text: built.summary,
-              allowRemote,
-            });
-          } catch {
-            outcome = {
-              ok: false,
-              degraded: true,
-              reason: 'model_unavailable',
-              warnings: ['model_unavailable'],
-              latencyMs: 0,
-            };
+      if (!loaded.deferred) {
+        const built = buildCompactSummary(
+          loaded.records.map((record) => ({ id: record.id, kind: record.kind, content: record.content })),
+          strategy,
+        );
+        summary = built.summary;
+        tokenCount = built.tokenCount;
+
+        // compact 摘要可选模型；失败保留确定性摘要，不丢源记录、不回退到第三方。
+        if (strategy === 'summary' && this.models) {
+          const selection = await this.models.selectOptionalSource(allowRemote);
+          for (const warning of selection.warnings) {
+            if (!warnings.includes(warning)) warnings.push(warning);
           }
-          if (outcome.ok && outcome.summary) {
-            summary = outcome.summary.slice(0, MAX_SUMMARY_CHARS);
-            tokenCount = estimateTokens(summary);
-            summaryExtractor = selection.source;
-            summaryModel = outcome.model ?? selection.source;
-            modelDegraded = modelDegraded || outcome.degraded;
-            for (const warning of outcome.warnings) {
-              if (!warnings.includes(warning)) warnings.push(warning);
+          modelDegraded = selection.degraded;
+          if (selection.source) {
+            let outcome;
+            try {
+              outcome = await this.models.summarize({
+                source: selection.source,
+                text: built.summary,
+                allowRemote,
+              });
+            } catch {
+              outcome = {
+                ok: false,
+                degraded: true,
+                reason: 'model_unavailable',
+                warnings: ['model_unavailable'],
+                latencyMs: 0,
+              };
             }
-            this.models.clearFailure(selection.source);
-          } else {
-            for (const warning of [...outcome.warnings, outcome.reason ?? 'model_unavailable', 'compact_fallback_heuristic']) {
-              if (warning && !warnings.includes(warning)) warnings.push(warning);
+            if (outcome.ok && outcome.summary) {
+              summary = outcome.summary.slice(0, MAX_SUMMARY_CHARS);
+              tokenCount = estimateTokens(summary);
+              summaryExtractor = selection.source;
+              summaryModel = outcome.model ?? selection.source;
+              modelDegraded = modelDegraded || outcome.degraded;
+              for (const warning of outcome.warnings) {
+                if (!warnings.includes(warning)) warnings.push(warning);
+              }
+              this.models.clearFailure(selection.source);
+            } else {
+              for (const warning of [...outcome.warnings, outcome.reason ?? 'model_unavailable', 'compact_fallback_heuristic']) {
+                if (warning && !warnings.includes(warning)) warnings.push(warning);
+              }
+              modelDegraded = true;
+              this.models.noteFailure(
+                selection.source,
+                outcome.reason ?? 'model_unavailable',
+                outcome.warnings.length > 0 ? outcome.warnings : ['model_unavailable'],
+              );
             }
-            modelDegraded = true;
-            this.models.noteFailure(
-              selection.source,
-              outcome.reason ?? 'model_unavailable',
-              outcome.warnings.length > 0 ? outcome.warnings : ['model_unavailable'],
-            );
+          } else if (selection.degraded) {
+            if (!warnings.includes('compact_fallback_heuristic')) warnings.push('compact_fallback_heuristic');
           }
-        } else if (selection.degraded) {
-          if (!warnings.includes('compact_fallback_heuristic')) warnings.push('compact_fallback_heuristic');
         }
+      }
+
+      if (dryRun && loaded.deferred) {
+        throw new SidecarSettlementError(
+          'capability_unavailable',
+          'capability API 不可用，无法解析 compact 来源；未生成占位摘要',
+          { status: 503, retryable: true, details: { domain } },
+        );
       }
 
       const base = {
@@ -1155,6 +1183,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
         stale: false,
         strategy,
         dryRun,
+        ...(loaded.deferred ? { deferred: true } : {}),
       };
 
       if (dryRun) {
@@ -1177,18 +1206,24 @@ export class MemoryObjectService implements SidecarObjectsApi {
         sourceIds: loaded.sourceIds,
         sourceHashes: effectiveHashes,
       });
+      // deferred 模式只持久化恢复元数据；capability 恢复后重新读取来源、
+      // 生成真实摘要与同一来源集的 sourceHashes，绝不提交占位摘要。
       const capabilityBody: Record<string, unknown> = {
         requestId,
         actor: actor.actor,
         kind: 'compact',
         op: 'upsert',
         domain,
-        summary,
         sourceIds: loaded.sourceIds,
-        ...(effectiveHashes.length === loaded.sourceIds.length ? { sourceHashes: effectiveHashes } : {}),
+        ...(loaded.deferred
+          ? { deferredSummary: true }
+          : {
+            summary,
+            ...(effectiveHashes.length === loaded.sourceIds.length ? { sourceHashes: effectiveHashes } : {}),
+            tokenCount,
+            model: { extractor: summaryExtractor, model: summaryModel, version: '0.3.0' },
+          }),
         strategy,
-        tokenCount,
-        model: { extractor: summaryExtractor, model: summaryModel, version: '0.3.0' },
         provenance: {
           source: 'runtime',
           extractor: summaryExtractor,
@@ -1197,7 +1232,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
         },
       };
 
-      if (!this.client) {
+      if (loaded.deferred && !this.client) {
         await this.enqueueObject(requestId, capabilityBody).catch((error) => {
           this.noteFailed(error);
           throw error;
@@ -1212,9 +1247,17 @@ export class MemoryObjectService implements SidecarObjectsApi {
             queued: true,
             degraded: true,
           },
-          warnings,
+          warnings: [...new Set(warnings)],
           degraded: true,
         };
+      }
+
+      if (!this.client) {
+        throw new SidecarSettlementError(
+          'capability_unavailable',
+          'capability API 不可用且未给出 sourceIds，无法生成 compact',
+          { status: 503, retryable: true, details: { domain } },
+        );
       }
 
       try {
@@ -1485,6 +1528,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
         const view = this.checkpointView(object, { source: 'cloud' });
         this.counts.checkpoints += 1;
         await this.cacheSet(this.checkpointCacheKey(agentId, threadId, domain), view);
+        await this.cacheDelete(this.checkpointPendingCacheKey(agentId, threadId, domain));
         await this.markHealthyIfOutboxEmpty();
         return {
           status: 200,
@@ -1590,7 +1634,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
       source: 'cache',
       stale: true,
     };
-    await this.cacheSet(this.checkpointCacheKey(agentId, threadId, domain), view);
+    await this.cacheSet(this.checkpointPendingCacheKey(agentId, threadId, domain), view);
     this.noteQueued(error ?? new SidecarSettlementError('capability_unavailable', 'capability API 不可用，已进入 outbox'));
     return {
       status: 202,
@@ -1617,9 +1661,10 @@ export class MemoryObjectService implements SidecarObjectsApi {
       : requireDomain(options.domain);
     const domains = domain ? [domain] : [...new Set([`task:${threadId}`, 'default'])];
     const keys = domains.map((entry) => this.checkpointCacheKey(agentId, threadId, entry));
+    const pendingKeys = domains.map((entry) => this.checkpointPendingCacheKey(agentId, threadId, entry));
     if (!this.client) {
       this.noteReadDegraded(new SidecarSettlementError('capability_unavailable', 'capability API 不可用'));
-      return this.cachedCheckpoint(agentId, threadId, keys);
+      return this.cachedCheckpoint(agentId, threadId, keys, pendingKeys);
     }
     try {
       for (const entry of domains) {
@@ -1645,44 +1690,92 @@ export class MemoryObjectService implements SidecarObjectsApi {
       }
       for (const key of keys) await this.cacheDelete(key);
       await this.markHealthyIfOutboxEmpty();
+      // capability 可达但没有已提交对象：pending 仍只作为 pending 元数据返回，
+      // 绝不能因为 outbox 里有写入就伪造 committed。
+      const pending = await this.firstPendingCheckpoint(agentId, threadId, pendingKeys);
       return {
         status: 200,
-        data: { checkpoint: null, source: 'cloud', degraded: false },
-        warnings: [],
+        data: {
+          checkpoint: null,
+          source: 'cloud',
+          ...(pending
+            ? { pending: true, pendingCheckpoint: pending }
+            : { pending: false, pendingCheckpoint: null }),
+          degraded: false,
+        },
+        warnings: pending ? ['checkpoint_pending_only'] : [],
         degraded: false,
       };
     } catch (error) {
       if (!retryableCapabilityError(error)) throw capabilityError(error);
       this.noteReadDegraded(error);
-      return this.cachedCheckpoint(agentId, threadId, keys);
+      return this.cachedCheckpoint(agentId, threadId, keys, pendingKeys);
     }
   }
 
-  private async cachedCheckpoint(agentId: string, threadId: string, keys: string[]): Promise<ObjectHttpResult> {
+  private async firstPendingCheckpoint(
+    agentId: string,
+    threadId: string,
+    pendingKeys: string[],
+  ): Promise<CheckpointView | null> {
+    for (const key of pendingKeys) {
+      const pending = await this.cacheGet<CheckpointView>(key);
+      if (!pending || pending.pending !== true) continue;
+      if (checkpointExpiredView(pending, this.now())) continue;
+      return {
+        ...pending,
+        agentId: pending.agentId || agentId,
+        threadId: pending.threadId || threadId,
+        source: 'cache',
+        stale: true,
+        pending: true,
+      };
+    }
+    return null;
+  }
+
+  private async cachedCheckpoint(
+    agentId: string,
+    threadId: string,
+    keys: string[],
+    pendingKeys: string[],
+  ): Promise<ObjectHttpResult> {
+    const warnings = ['capability_unavailable'];
+    let expired = false;
+    let committed: CheckpointView | null = null;
     for (const key of keys) {
       const cached = await this.cacheGet<CheckpointView>(key);
       if (!cached) continue;
-      return {
-        status: 200,
-        data: {
-          checkpoint: {
-            ...cached,
-            agentId: cached.agentId || agentId,
-            threadId: cached.threadId || threadId,
-            source: 'cache',
-            stale: true,
-          },
-          source: 'cache',
-          degraded: true,
-        },
-        warnings: ['capability_unavailable', 'cache_stale'],
-        degraded: true,
+      // 旧版本可能把 pending 写进 committed key；读取时一律拒绝。
+      if (cached.pending === true || (cached.source === 'cache' && cached.stale === true && cached.revision === null)) continue;
+      if (checkpointExpiredView(cached, this.now())) {
+        expired = true;
+        continue;
+      }
+      committed = {
+        ...cached,
+        agentId: cached.agentId || agentId,
+        threadId: cached.threadId || threadId,
+        source: 'cache',
+        stale: true,
       };
+      break;
     }
+    const pending = await this.firstPendingCheckpoint(agentId, threadId, pendingKeys);
+    if (expired && !committed) warnings.push('checkpoint_expired');
+    if (committed) warnings.push('cache_stale');
+    if (pending) warnings.push('checkpoint_pending');
     return {
       status: 200,
-      data: { checkpoint: null, source: 'cache', degraded: true },
-      warnings: ['capability_unavailable'],
+      data: {
+        checkpoint: committed,
+        source: 'cache',
+        pending: pending !== null,
+        pendingCheckpoint: pending,
+        pendingUnavailable: pending === null,
+        degraded: true,
+      },
+      warnings: [...new Set(warnings)],
       degraded: true,
     };
   }
@@ -1717,8 +1810,10 @@ export class MemoryObjectService implements SidecarObjectsApi {
         });
         for (const entry of new Set([`task:${threadId}`, 'default', ...(domain ? [domain] : [])])) {
           await this.cacheDelete(this.checkpointCacheKey(agentId, threadId, entry));
+          await this.cacheDelete(this.checkpointPendingCacheKey(agentId, threadId, entry));
         }
         await this.cacheDelete(this.checkpointCacheKey(agentId, threadId));
+        await this.cacheDelete(this.checkpointPendingCacheKey(agentId, threadId));
         await this.markHealthyIfOutboxEmpty();
         return {
           status: 200,
@@ -1820,6 +1915,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
         const view = this.selfView(object, { source: 'cloud' });
         this.counts.selfRecords += 1;
         await this.cacheSet(this.selfCacheKey(agentId), view);
+        await this.cacheDelete(this.selfPendingCacheKey(agentId));
         await this.markHealthyIfOutboxEmpty();
         return {
           status: 200,
@@ -1886,7 +1982,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
       source: 'cache',
       stale: true,
     };
-    await this.cacheSet(this.selfCacheKey(agentId), view);
+    await this.cacheSet(this.selfPendingCacheKey(agentId), view);
     this.noteQueued(error);
     return {
       status: 202,
@@ -1945,31 +2041,39 @@ export class MemoryObjectService implements SidecarObjectsApi {
 
   private async cachedSelf(agentId: string, key: string): Promise<ObjectHttpResult> {
     const cached = await this.cacheGet<SelfRecordView>(key);
+    const pending = await this.cacheGet<SelfRecordView>(this.selfPendingCacheKey(agentId));
+    const committed = cached && cached.pending !== true
+      ? {
+        ...cached,
+        agentId: cached.agentId || agentId,
+        domain: cached.domain || agentDomain(agentId),
+        source: 'cache' as const,
+        stale: true,
+      }
+      : null;
+    const pendingView = pending && pending.pending === true
+      ? {
+        ...pending,
+        agentId: pending.agentId || agentId,
+        domain: pending.domain || agentDomain(agentId),
+        source: 'cache' as const,
+        stale: true,
+      }
+      : null;
     return {
       status: 200,
       data: {
-        selfRecord: cached
-          ? {
-            ...cached,
-            agentId: cached.agentId || agentId,
-            domain: cached.domain || agentDomain(agentId),
-            source: 'cache',
-            stale: true,
-          }
-          : null,
-        self: cached
-          ? {
-            ...cached,
-            agentId: cached.agentId || agentId,
-            domain: cached.domain || agentDomain(agentId),
-            source: 'cache',
-            stale: true,
-          }
-          : null,
+        selfRecord: committed,
+        self: committed,
         source: 'cache',
+        pending: pendingView !== null,
+        pendingSelfRecord: pendingView,
+        pendingUnavailable: pendingView === null,
         degraded: true,
       },
-      warnings: cached ? ['capability_unavailable', 'cache_stale'] : ['capability_unavailable'],
+      warnings: committed
+        ? ['capability_unavailable', 'cache_stale', ...(pendingView ? ['self_pending'] : [])]
+        : ['capability_unavailable', ...(pendingView ? ['self_pending'] : [])],
       degraded: true,
     };
   }

@@ -113,6 +113,7 @@ const DEFAULT_TYPES = ['fact', 'preference', 'episode', 'observation', 'skill', 
 const WRITE_ENDPOINTS = new Set(['write', 'update', 'delete', 'archive', 'internal-object', 'sync']);
 const INTERNAL_OBJECT_KINDS = ['compact', 'self_record', 'context_checkpoint'];
 const WRITE_KINDS = new Set(['fact', 'preference', 'episode', 'observation', 'skill', 'entity']);
+const RECORD_NODE_TYPES = new Set(['fact', 'preference', 'episode', 'observation', 'skill', 'entity', 'meta']);
 const EPISODE_KINDS = new Set(['conversation', 'task', 'decision', 'error', 'observation', 'other']);
 const ENTITY_KINDS = new Set(['user', 'project', 'tool', 'concept', 'organization', 'location', 'other']);
 const SOURCE_VALUES = new Set(['mcp', 'runtime', 'host', 'import', 'legacy']);
@@ -966,6 +967,72 @@ async function isCompactStale(app, node) {
     }
   }
   return false;
+}
+
+/** capability 侧确定性摘要：用于离线 deferred compact 恢复，禁止占位摘要落图。 */
+function compactSourceText(node) {
+  const content = isObject(node?.content) ? node.content : {};
+  switch (node?.type) {
+    case 'fact':
+    case 'preference': {
+      const subject = typeof content.subject === 'string' ? content.subject : '';
+      const predicate = typeof content.predicate === 'string' ? content.predicate : '';
+      const object = typeof content.object === 'string' ? content.object : '';
+      if (subject && predicate && object) return `${subject} ${predicate} ${object}`.trim();
+      break;
+    }
+    case 'episode':
+      if (typeof content.title === 'string' && content.title.trim()) return content.title.trim();
+      break;
+    case 'skill':
+    case 'entity':
+      if (typeof content.name === 'string' && content.name.trim()) {
+        const description = typeof content.description === 'string' ? content.description.trim() : '';
+        return description ? `${content.name.trim()}：${description}` : content.name.trim();
+      }
+      break;
+    default:
+      break;
+  }
+  if (typeof content.content === 'string' && content.content.trim()) return content.content.trim();
+  if (typeof content.description === 'string' && content.description.trim()) return content.description.trim();
+  if (typeof content.summary === 'string' && content.summary.trim()) return content.summary.trim();
+  if (Object.keys(content).length === 0) return '';
+  try {
+    const serialized = JSON.stringify(content);
+    return serialized === '{}' ? '' : serialized;
+  } catch {
+    return '';
+  }
+}
+
+function buildCompactSummaryFromNodes(nodes, strategy = 'summary') {
+  const sorted = [...nodes].sort((a, b) => String(a.id ?? '').localeCompare(String(b.id ?? '')));
+  const lines = [];
+  const seen = new Set();
+  const kinds = new Map();
+  for (const node of sorted) {
+    const type = typeof node.type === 'string' ? node.type : 'record';
+    kinds.set(type, (kinds.get(type) ?? 0) + 1);
+    const text = compactSourceText(node).replace(/\s+/g, ' ').trim().slice(0, 240);
+    if (!text) continue;
+    if (strategy === 'dedupe') {
+      const key = text.toLocaleLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+    }
+    lines.push(`- [${type}] ${text}`);
+  }
+  const kindSummary = [...kinds.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([kind, count]) => `${kind}:${count}`)
+    .join(' ');
+  const header = `Compact · ${sorted.length} records${kindSummary ? ` · ${kindSummary}` : ''}`;
+  const summary = (lines.length > 0 ? `${header}\n${lines.join('\n')}` : header).slice(0, MAX_COMPACT_SUMMARY_BYTES);
+  return {
+    summary,
+    tokenCount: Math.max(1, Math.ceil([...summary].length / 4)),
+  };
 }
 
 export function requestIdOf(req) {
@@ -1856,6 +1923,15 @@ export function createMemoryCapabilityHandler({
     lastError: null,
     lastResult: null,
   };
+  let checkpointMaintenanceRun = null;
+  const checkpointMaintenanceStatus = {
+    running: false,
+    batchSize: 50,
+    lastAttemptAt: null,
+    lastSuccessAt: null,
+    lastError: null,
+    lastResult: null,
+  };
   const hostId = hostIdForHome(home);
 
   async function ensureToken() {
@@ -1910,7 +1986,9 @@ export function createMemoryCapabilityHandler({
   async function dispose() {
     disposed = true;
     stopIdempotencyMaintenance();
+    checkpointMaintenanceStatus.running = false;
     await idempotencyMaintenanceRun?.catch(() => undefined);
+    await checkpointMaintenanceRun?.catch(() => undefined);
     await revoke();
   }
 
@@ -2088,10 +2166,13 @@ export function createMemoryCapabilityHandler({
       if (idempotencyTimer || disposed) return;
       idempotencyTimer = setIntervalFn(() => {
         void runIdempotencyMaintenance();
+        void runCheckpointMaintenance();
       }, idempotencyMaintenanceStatus.intervalMs);
       idempotencyTimer?.unref?.();
       idempotencyMaintenanceStatus.running = true;
+      checkpointMaintenanceStatus.running = true;
       void runIdempotencyMaintenance();
+      void runCheckpointMaintenance();
     }
 
     function stopIdempotencyMaintenance() {
@@ -2100,6 +2181,58 @@ export function createMemoryCapabilityHandler({
         idempotencyTimer = null;
       }
       idempotencyMaintenanceStatus.running = false;
+    }
+
+
+    // [internal-object-write] 内部对象允许直接 GraphStore 写入；普通 MemoryRecord 禁止。
+    function runCheckpointMaintenance() {
+      if (checkpointMaintenanceRun) return checkpointMaintenanceRun;
+      const at = now();
+      checkpointMaintenanceStatus.lastAttemptAt = at;
+      checkpointMaintenanceRun = (async () => {
+        try {
+          const appValue = getApp?.() ?? null;
+          if (!appValue) {
+            const result = { removed: 0, scanned: 0, checkedAt: at, skipped: 'capability_unavailable' };
+            checkpointMaintenanceStatus.lastResult = result;
+            return result;
+          }
+          const nodes = await listNodesOfType(appValue, 'context_checkpoint');
+          const expired = nodes
+            .filter((node) => node && !node.deletedAt
+              && isV2CheckpointNode(node)
+              && internalObjectKind(node) === 'context_checkpoint'
+              && checkpointExpired(node, at))
+            .slice(0, checkpointMaintenanceStatus.batchSize);
+          let removed = 0;
+          for (const node of expired) {
+            await appValue.graph.deleteNode(node.id);
+            removed += 1;
+          }
+          const result = {
+            removed,
+            scanned: nodes.length,
+            remainingExpired: Math.max(0, nodes.filter((node) => node && !node.deletedAt
+              && isV2CheckpointNode(node)
+              && internalObjectKind(node) === 'context_checkpoint'
+              && checkpointExpired(node, at)).length - removed),
+            checkedAt: at,
+          };
+          checkpointMaintenanceStatus.lastSuccessAt = at;
+          checkpointMaintenanceStatus.lastError = null;
+          checkpointMaintenanceStatus.lastResult = result;
+          return result;
+        } catch (error) {
+          const code = typeof error?.code === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(error.code)
+            ? error.code
+            : 'checkpoint_maintenance_failed';
+          checkpointMaintenanceStatus.lastError = { code, at };
+          return checkpointMaintenanceStatus.lastError;
+        } finally {
+          checkpointMaintenanceRun = null;
+        }
+      })();
+      return checkpointMaintenanceRun;
     }
 
 
@@ -3049,7 +3182,6 @@ export function createMemoryCapabilityHandler({
         && internalObjectMetadata(node).identityKey === identityKey) ?? null;
     }
 
-    // [internal-object-write] 内部对象允许直接 GraphStore 写入；普通 MemoryRecord 禁止。
     async function handleCompactObject(payload, actor) {      const op = payload.op;
       if (!['upsert', 'get', 'list', 'delete'].includes(op)) {
         throw new CapabilityError(400, 'internal_kind_invalid', 'compact op 必须是 upsert/get/list/delete');
@@ -3090,13 +3222,9 @@ export function createMemoryCapabilityHandler({
         }
         const provenanceInput = parseProvenanceInput(payload.provenance, 0);
         assertDomainWrite(actor, domain, provenanceInput, payload.threadId);
-        const summary = nonEmptyString(payload.summary, 'summary', 0);
-        if (Buffer.byteLength(summary, 'utf-8') > MAX_COMPACT_SUMMARY_BYTES) {
-          throw new CapabilityError(413, 'payload_too_large', 'summary 超过 64 KiB');
-        }
-        const tokenCount = optionalNumber(payload.tokenCount, 'tokenCount', 0);
-        if (tokenCount !== undefined && tokenCount < 0) {
-          throw validationError(0, 'tokenCount', 'tokenCount 不能为负数');
+        const deferredSummary = payload.deferredSummary === true;
+        if (!deferredSummary && payload.summary !== undefined && typeof payload.summary !== 'string') {
+          throw validationError(0, 'summary', 'summary 必须是字符串');
         }
         const model = isObject(payload.model) ? jsonClone(payload.model) : undefined;
         if (model && byteSize(model) > MAX_JSON_FIELD_BYTES) {
@@ -3120,6 +3248,29 @@ export function createMemoryCapabilityHandler({
             });
           }
           sourceNodes.push(source);
+        }
+        let summary;
+        let tokenCount;
+        if (deferredSummary) {
+          const regenerated = buildCompactSummaryFromNodes(sourceNodes, strategy);
+          if (!regenerated.summary.includes('\n')) {
+            throw new CapabilityError(422, 'compact_summary_placeholder', 'compact 来源没有可摘要正文');
+          }
+          summary = regenerated.summary;
+          tokenCount = regenerated.tokenCount;
+        } else {
+          summary = nonEmptyString(payload.summary, 'summary', 0);
+          if (Buffer.byteLength(summary, 'utf-8') > MAX_COMPACT_SUMMARY_BYTES) {
+            throw new CapabilityError(413, 'payload_too_large', 'summary 超过 64 KiB');
+          }
+          // 只有标题/计数的占位摘要不得落图；恢复路径应使用 deferredSummary。
+          if (/^Compact · \d+ records(?: · [^\n]*)?$/.test(summary.trim())) {
+            throw new CapabilityError(422, 'compact_summary_placeholder', 'compact 摘要不能是占位标题');
+          }
+          tokenCount = optionalNumber(payload.tokenCount, 'tokenCount', 0);
+          if (tokenCount !== undefined && tokenCount < 0) {
+            throw validationError(0, 'tokenCount', 'tokenCount 不能为负数');
+          }
         }
         const effectiveSourceHashes = sourceHashes.length > 0
           ? [...sourceHashes]
@@ -3333,6 +3484,81 @@ export function createMemoryCapabilityHandler({
         warnings: [],
         degraded: false,
       };
+    }
+
+    function checkpointGraphReferences(state, payload) {
+      const recordIds = [
+        ...(Array.isArray(payload.recordIds) ? payload.recordIds : []),
+        ...(Array.isArray(state?.references?.recordIds) ? state.references.recordIds : []),
+        ...(Array.isArray(state?.decisions) ? state.decisions.flatMap((entry) => entry?.recordIds ?? []) : []),
+        ...(isObject(state?.progress)
+          ? ['done', 'doing', 'blocked'].flatMap((key) => (
+            Array.isArray(state.progress[key]) ? state.progress[key].flatMap((entry) => entry?.recordIds ?? []) : []
+          ))
+          : []),
+      ];
+      const detailIds = [
+        ...(Array.isArray(payload.detailIds) ? payload.detailIds : []),
+        ...(Array.isArray(state?.references?.detailIds) ? state.references.detailIds : []),
+      ];
+      return {
+        recordIds: [...new Set(recordIds.filter((id) => typeof id === 'string' && id.length > 0))],
+        detailIds: [...new Set(detailIds.filter((id) => typeof id === 'string' && id.length > 0))],
+      };
+    }
+
+    async function validateCheckpointGraphReferences(appValue, { recordIds, detailIds }) {
+      let referenceDomain = null;
+      for (const id of recordIds) {
+        const node = await appValue.graph.getNode(id);
+        if (!node || node.deletedAt) {
+          throw new CapabilityError(404, 'not_found', 'checkpoint 引用的 MemoryRecord 不存在或已删除', { id });
+        }
+        if (isInternalNode(node) || !RECORD_NODE_TYPES.has(node.type)) {
+          throw new CapabilityError(400, 'invalid_reference_type', 'checkpoint recordIds 必须是 MemoryRecord', {
+            id,
+            type: node.type,
+          });
+        }
+        const domain = domainOfNamespace(node.namespace);
+        if (domain.startsWith('__')) {
+          throw new CapabilityError(400, 'invalid_reference_type', 'checkpoint 不能引用内部域对象', { id, domain });
+        }
+        if (referenceDomain !== null && domain !== referenceDomain) {
+          throw new CapabilityError(400, 'domain_mismatch', 'checkpoint 引用必须位于同一域', {
+            domain: referenceDomain,
+            referenceDomain: domain,
+            id,
+          });
+        }
+        referenceDomain = domain;
+      }
+      for (const id of detailIds) {
+        const node = await appValue.graph.getNode(id);
+        if (!node || node.deletedAt) {
+          throw new CapabilityError(404, 'not_found', 'checkpoint 引用的 DetailRecord 不存在或已删除', { id });
+        }
+        if (node.type !== 'detail_record') {
+          throw new CapabilityError(400, 'invalid_reference_type', 'checkpoint detailIds 必须是 DetailRecord', {
+            id,
+            type: node.type,
+          });
+        }
+        const content = isObject(node.content) ? node.content : {};
+        const expiresAt = typeof content.expiresAt === 'number' ? content.expiresAt : 0;
+        if (expiresAt > 0 && expiresAt < now()) {
+          throw new CapabilityError(400, 'reference_expired', 'checkpoint 不能引用已过期 DetailRecord', { id });
+        }
+        const domain = domainOfNamespace(node.namespace);
+        if (referenceDomain !== null && domain !== referenceDomain) {
+          throw new CapabilityError(400, 'domain_mismatch', 'checkpoint 引用必须位于同一域', {
+            domain: referenceDomain,
+            referenceDomain: domain,
+            id,
+          });
+        }
+        referenceDomain = domain;
+      }
     }
 
     async function handleCheckpointObject(payload, actor) {
@@ -3567,14 +3793,21 @@ export function createMemoryCapabilityHandler({
           throw new CapabilityError(403, 'forbidden_scope', '只有 user/system 可以抢占租约');
         }
       }
-      const recordIds = stringArray(payload.recordIds, 'recordIds', 0, {
+      const payloadRecordIds = stringArray(payload.recordIds, 'recordIds', 0, {
         maxItems: MAX_COMPACT_SOURCES,
         maxChars: 128,
       }) ?? [];
-      const detailIds = stringArray(payload.detailIds, 'detailIds', 0, {
+      const payloadDetailIds = stringArray(payload.detailIds, 'detailIds', 0, {
         maxItems: MAX_COMPACT_SOURCES,
         maxChars: 128,
-      }) ?? state.references.detailIds;
+      }) ?? [];
+      const graphReferences = checkpointGraphReferences(state, {
+        recordIds: payloadRecordIds,
+        detailIds: payloadDetailIds,
+      });
+      await validateCheckpointGraphReferences(appValue, graphReferences);
+      const recordIds = graphReferences.recordIds;
+      const detailIds = graphReferences.detailIds;
       const expiresAt = payload.expiresAt === undefined || payload.expiresAt === null
         ? 0
         : optionalNumber(payload.expiresAt, 'expiresAt', 0);
@@ -3650,6 +3883,8 @@ export function createMemoryCapabilityHandler({
         degraded: checkpointDegraded(view),
       };
     }
+
+
 
     // [/internal-object-write]
     async function handleInternalObject(payload, actor) {
@@ -4922,6 +5157,17 @@ export function createMemoryCapabilityHandler({
     tokenId: () => tokenRecord?.tokenId ?? null,
     runIdempotencyMaintenance,
     idempotencyIdle: () => idempotencyMaintenanceRun ?? Promise.resolve(null),
+    runCheckpointMaintenance,
+    checkpointMaintenanceIdle: () => checkpointMaintenanceRun ?? Promise.resolve(null),
+    checkpointMaintenance: () => ({
+      ...checkpointMaintenanceStatus,
+      lastError: checkpointMaintenanceStatus.lastError
+        ? { ...checkpointMaintenanceStatus.lastError }
+        : null,
+      lastResult: checkpointMaintenanceStatus.lastResult
+        ? { ...checkpointMaintenanceStatus.lastResult }
+        : null,
+    }),
     idempotencyMaintenance: () => ({
       ...idempotencyMaintenanceStatus,
       lastError: idempotencyMaintenanceStatus.lastError

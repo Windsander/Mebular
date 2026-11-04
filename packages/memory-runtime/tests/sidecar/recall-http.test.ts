@@ -632,4 +632,100 @@ describe('sidecar recall/context HTTP', () => {
     expect(noSummary.body.data.degraded).toBe(true);
     expect(noSummary.body.data.warnings).toContain('summary_unavailable');
   });
+
+  it('/context includeSelf：顺序、关闭、合法缺失、capability 不可用时不注入 cache', async () => {
+    const { server, fake } = await setup();
+    fake.selfRecords.push({
+      id: '01JSELFHTTP',
+      domain: 'agent:opencode',
+      agentId: 'opencode',
+      revision: 1,
+      content: { displayName: 'OpenCode HTTP', goals: ['stabilize context'] },
+      createdAt: NOW - 1000,
+      updatedAt: NOW - 1000,
+    } as any);
+    fake.checkpoints.push({
+      id: '01JCKPTHTTP',
+      domain: 'task:th_http_self',
+      agentId: 'opencode',
+      threadId: 'th_http_self',
+      revision: 1,
+      state: {
+        schema: 2,
+        contentMode: 'structured',
+        task: { key: 'task:th_http_self', threadId: 'th_http_self', fleetTaskId: null },
+        goal: 'HTTP self order',
+        constraints: [],
+        decisions: [],
+        progress: { done: [], doing: [], blocked: [] },
+        nextSteps: [{ id: 'n1', text: 'verify order' }],
+        files: [],
+        openQuestions: [],
+        references: { recordIds: [], detailIds: [], messageIds: [], fleetTaskId: null, urls: [] },
+      },
+      summary: null,
+      recordIds: [],
+      lease: null,
+      expiresAt: 0,
+      createdAt: NOW - 500,
+      updatedAt: NOW - 500,
+    } as any);
+
+    const included = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_http_self',
+      turnId: 'turn_http_self_1',
+      query: '我的偏好是什么？',
+      includeSelf: true,
+      includeCheckpoint: true,
+    });
+    expect(included.status).toBe(200);
+    expect(included.body.data.blocks.map((block: any) => block.kind)).toEqual(['self', 'checkpoint', 'fragment']);
+    expect(included.body.data.blocks[0].content).toContain('OpenCode HTTP');
+    expect(included.body.data.blocks[0].provenance).toBeTruthy();
+
+    const excluded = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_http_self',
+      turnId: 'turn_http_self_2',
+      query: '我的偏好是什么？',
+      includeSelf: false,
+      includeCheckpoint: true,
+    });
+    expect(excluded.body.data.blocks.map((block: any) => block.kind)).toEqual(['checkpoint', 'fragment']);
+
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const offline = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_http_self',
+      turnId: 'turn_http_self_3',
+      query: '我的偏好是什么？',
+      includeSelf: true,
+      includeCheckpoint: true,
+    });
+    expect(offline.status).toBe(200);
+    expect(offline.body.data.blocks).toEqual([]);
+    expect(offline.body.data.degraded).toBe(true);
+    expect(offline.body.data.warnings).toEqual(expect.arrayContaining([
+      'self_stale',
+      'checkpoint_stale',
+    ]));
+    fake.setFailure(null);
+  });
+
+  it('/context includeSelf：SelfRecord 不存在时非 degraded 空且无 self 块', async () => {
+    const { server, fake } = await setup();
+    fake.selfRecords.length = 0;
+    const context = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_http_self_absent',
+      turnId: 'turn_http_self_absent',
+      query: '我的偏好是什么？',
+      includeSelf: true,
+    });
+    expect(context.status).toBe(200);
+    expect(context.body.data.blocks.some((block: any) => block.kind === 'self')).toBe(false);
+    expect(context.body.data.degraded).toBe(false);
+    expect(context.body.data.warnings).not.toContain('self_unavailable');
+  });
 });

@@ -16,6 +16,11 @@ import {
 
 const A = { device: 'device-A', agent: 'planner' };
 const B = { device: 'device-B', agent: 'worker' };
+const C = { device: 'device-C', agent: 'worker' };
+
+function parentTaskState(overrides: Partial<Pick<TaskState, 'to' | 'status'>> = {}): Pick<TaskState, 'to' | 'status'> {
+  return { to: B, status: 'queued', ...overrides };
+}
 
 function rootPlan(overrides: Partial<TaskPlan> = {}): TaskPlan {
   return {
@@ -183,6 +188,7 @@ describe('P2 plan schema/validator', () => {
       parentPlan: parent,
       caller: B,
       parentStepBudget: { maxDepth: 3, maxChildren: 3, maxTasks: 3 },
+      parentTaskState: parentTaskState(),
     });
     expect(ok.ok).toBe(true);
     if (ok.ok) {
@@ -201,7 +207,7 @@ describe('P2 plan schema/validator', () => {
     const widen = childPlan(parent, {
       policy: { allowedDevices: ['device-C'], allowedAgents: ['worker'], requireCapabilities: [], maxParallel: 2, allowSubcontract: false },
     });
-    expect(validatePlan(widen, { parentPlan: parent, caller: B })).toMatchObject({ ok: false, code: 'PLAN_POLICY' });
+    expect(validatePlan(widen, { parentPlan: parent, caller: B, parentTaskState: parentTaskState() })).toMatchObject({ ok: false, code: 'PLAN_POLICY' });
 
     const denySubcontract = validatePlan(childPlan(parent), {
       parentPlan: parentPlan({ policy: { ...parent.policy, allowSubcontract: false } }),
@@ -226,6 +232,7 @@ describe('P2 plan schema/validator', () => {
     const overBudget = validatePlan(childPlan(parent, { budget: { maxSteps: 9, maxAttemptsPerStep: 1 } }), {
       parentPlan: parent,
       caller: B,
+      parentTaskState: parentTaskState(),
     });
     expect(overBudget).toMatchObject({ ok: false, code: 'PLAN_BUDGET' });
 
@@ -233,13 +240,14 @@ describe('P2 plan schema/validator', () => {
       parentPlan: parent,
       caller: B,
       parentStepBudget: { maxDepth: 3, maxChildren: 2, maxTasks: 2 },
+      parentTaskState: parentTaskState(),
     });
     expect(tooSmall).toMatchObject({ ok: false, code: 'PLAN_BUDGET' });
 
     // 子 plan 省略 policy 字段时按父 plan 继承后落库；replay 仍需幂等。
     const minimal = childPlan(parent, { policy: {} });
     const budget = { maxDepth: 3, maxChildren: 3, maxTasks: 3 };
-    const first = validatePlan(minimal, { parentPlan: parent, caller: B, parentStepBudget: budget });
+    const first = validatePlan(minimal, { parentPlan: parent, caller: B, parentStepBudget: budget, parentTaskState: parentTaskState() });
     expect(first.ok).toBe(true);
     if (first.ok) {
       expect(first.plan.policy).toMatchObject({
@@ -248,7 +256,7 @@ describe('P2 plan schema/validator', () => {
         maxParallel: 2,
         allowSubcontract: false,
       });
-      const replay = validatePlan(minimal, { parentPlan: parent, caller: B, parentStepBudget: budget, existingVersions: [first.plan] });
+      const replay = validatePlan(minimal, { parentPlan: parent, caller: B, parentStepBudget: budget, parentTaskState: parentTaskState(), existingVersions: [first.plan] });
       expect(replay.ok).toBe(true);
       if (replay.ok) expect(replay.deduped).toBe(true);
     }
@@ -256,6 +264,46 @@ describe('P2 plan schema/validator', () => {
     // B6：父 step task 未物化（无 parentStepBudget）→ 拒绝，不创建 plan。
     expect(validatePlan(childPlan(parent), { parentPlan: parent, caller: B }))
       .toMatchObject({ ok: false, code: 'PLAN_STATE_INVALID' });
+  });
+
+  it('B8：sub-plan 绑定父 step 的执行者/活动状态/kind', () => {
+    const parent = parentPlan();
+    const budget = { maxDepth: 3, maxChildren: 3, maxTasks: 3 };
+    const base = {
+      parentPlan: parent,
+      caller: B,
+      parentStepBudget: budget,
+      parentTaskState: parentTaskState(),
+    };
+    for (const status of ['queued', 'claimed', 'running'] as const) {
+      expect(validatePlan(childPlan(parent), { ...base, parentTaskState: parentTaskState({ status }) }).ok).toBe(true);
+    }
+    for (const status of ['done', 'failed'] as const) {
+      expect(validatePlan(childPlan(parent), { ...base, parentTaskState: parentTaskState({ status }) }))
+        .toMatchObject({ ok: false, code: 'PLAN_STATE_INVALID' });
+    }
+
+    // 父 step task 分配给 B，C 提交 child → 拒绝。
+    const byC = childPlan(parent, { owner: { device: 'device-C', agent: 'worker' } });
+    expect(validatePlan(byC, { ...base, caller: C })).toMatchObject({ ok: false, code: 'PLAN_POLICY' });
+    // 父 task 分配对象与 child owner 不一致。
+    expect(validatePlan(childPlan(parent), {
+      ...base,
+      parentTaskState: parentTaskState({ to: { device: 'device-C', agent: 'worker' } }),
+    })).toMatchObject({ ok: false, code: 'PLAN_POLICY' });
+
+    for (const kind of ['join', 'reduce', 'mr'] as const) {
+      const forbiddenParent: TaskPlan = {
+        ...parent,
+        steps: parent.steps.map((step) => step.stepId === 'delegate'
+          ? { ...step, kind, ...((kind === 'join' || kind === 'reduce') ? { join: { mode: 'all' as const } } : {}) }
+          : step),
+      };
+      expect(validatePlan(childPlan(parent), {
+        ...base,
+        parentPlan: forbiddenParent,
+      })).toMatchObject({ ok: false, code: 'PLAN_POLICY' });
+    }
   });
 
   it('版本：>1 必须 supersedes=version-1 且上一版本存在；同版本冲突/幂等', () => {
@@ -302,6 +350,7 @@ describe('P2 plan schema/validator', () => {
       parentPlan: fixture.subPlan.parent,
       caller: B,
       parentStepBudget: fixture.subPlan.parentStepTaskBudget,
+      parentTaskState: { to: B, status: 'queued' },
     }).ok).toBe(true);
     for (const [name, entry] of Object.entries(fixture.invalid)) {
       const input = entry.plan ?? entry.child!;
@@ -310,6 +359,7 @@ describe('P2 plan schema/validator', () => {
             parentPlan: entry.parent ?? fixture.subPlan.parent,
             caller: B,
             ...(entry.parentStepTaskBudget !== undefined ? { parentStepBudget: entry.parentStepTaskBudget } : {}),
+            parentTaskState: { to: B, status: 'queued' as const },
           }
         : { caller: A };
       expect({ name, result: validatePlan(input, context) }).toMatchObject({

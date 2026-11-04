@@ -939,7 +939,7 @@ async function runTaskTool(cliName: string, args: Args): Promise<number> {
   const reserved = new Set(['input', 'dir', 'namespace', 'agent', 'version']);
   for (const [key, value] of Object.entries(args)) {
     if (reserved.has(key) || value === undefined) continue;
-    if (key === 'budget' || key === 'to' || key === 'cursor') {
+    if (key === 'budget' || key === 'to' || key === 'cursor' || key === 'plan') {
       input[key] = typeof value === 'string' ? JSON.parse(value) : value;
     } else if (typeof value === 'string' && /^-?[0-9]+$/.test(value)) {
       input[key] = Number(value);

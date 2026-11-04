@@ -475,6 +475,84 @@ describe('P2 task_submit.plan + materializer', () => {
     expect(denied).toMatchObject({ ok: false, error: 'PLAN_POLICY' });
   });
 
+  it('B8：child 绑定父 task 的 to/active 状态；done 父 task 拒绝新 child', async () => {
+    const parent = plan({
+      planId: 'plan-parent-b8-001',
+      policy: {
+        allowedDevices: ['device-A', 'device-B'],
+        allowedAgents: ['planner', 'worker'],
+        requireCapabilities: ['fleet.task'],
+        maxParallel: 2,
+        allowSubcontract: true,
+      },
+      steps: [
+        { stepId: 'delegate', kind: 'task', intent: 'delegate', dependsOn: [], to: A, acceptance: { kind: 'non-empty-result' } },
+        { stepId: 'gate', kind: 'reduce', intent: 'gate', dependsOn: ['delegate'], join: { mode: 'all' }, acceptance: { kind: 'non-empty-result' } },
+        { stepId: 'mr', kind: 'mr', intent: 'mr', dependsOn: ['gate'], acceptance: { kind: 'mr-once' } },
+      ],
+    });
+    await submit(parent);
+    const live = await openApp();
+    const store = new MebularTaskEventStore(live);
+    const plans = new MebularTaskPlanStore(live);
+    const materializer = new PlanMaterializer({ device: 'device-A', agent: 'planner', plans, store });
+    await materializer.tick();
+    const delegateTaskId = planTaskId(parent.planId, 1, 'delegate');
+    expect(reduceTaskEvents(await store.byTask(delegateTaskId))?.to).toEqual(A);
+
+    const child: TaskPlan = {
+      v: 1,
+      kind: 'task_plan',
+      planId: 'plan-child-b8-001',
+      version: 1,
+      parent: { planId: parent.planId, version: 1, stepId: 'delegate' },
+      owner: A,
+      goal: 'child',
+      createdAt: 400,
+      budget: { maxSteps: 1, maxAttemptsPerStep: 1 },
+      policy: {
+        allowedDevices: ['device-A'],
+        allowedAgents: ['planner'],
+        requireCapabilities: ['fleet.task'],
+        maxParallel: 1,
+        allowSubcontract: false,
+      },
+      steps: [{ stepId: 'work', kind: 'task', intent: 'child-work', dependsOn: [], to: A, acceptance: { kind: 'non-empty-result' } }],
+    };
+    const submitted = await submitTaskPlan({ plan: child, intent: 'child', to: SENTINEL, caller: A, plans, store });
+    expect(submitted).toMatchObject({ ok: true, rootTaskId: planRootTaskId(child.planId, 1) });
+    const childRoot = reduceTaskEvents(await store.byTask(planRootTaskId(child.planId, 1)));
+    expect(childRoot?.trace).toEqual({ causedBy: delegateTaskId, chain: [delegateTaskId] });
+
+    await store.append({
+      v: 1,
+      eventId: `${delegateTaskId}#done@device-A`,
+      taskId: delegateTaskId,
+      type: 'done',
+      actor: A,
+      at: Date.now(),
+      toStatus: 'done',
+      trace: { chain: [] },
+      payloadRef: 'delegate-result',
+    });
+    expect(reduceTaskEvents(await store.byTask(delegateTaskId))?.status).toBe('done');
+    const rejected = await submitTaskPlan({
+      plan: { ...child, planId: 'plan-child-b8-002', createdAt: 401 },
+      intent: 'child after done',
+      to: SENTINEL,
+      caller: A,
+      plans,
+      store,
+    });
+    expect(rejected).toMatchObject({ ok: false, error: 'PLAN_STATE_INVALID', created: [] });
+    expect(await store.byTask(planRootTaskId('plan-child-b8-002', 1))).toHaveLength(0);
+
+    // 失败 child 不得把已 done 的父 step 变回 dispatched。
+    await materializer.tick();
+    expect(reduceTaskEvents(await store.byTask(delegateTaskId))?.status).toBe('done');
+    expect((await store.byTask(planTaskId(child.planId, 1, 'work'))).length).toBe(0);
+  });
+
   it('新版本 reuse：旧任务 done+acceptance 通过则不建新 task；root 使用新 version', async () => {
     const v1 = plan({ planId: 'plan-reuse-runtime-001' });
     await submit(v1);

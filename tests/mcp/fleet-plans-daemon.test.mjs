@@ -3,6 +3,8 @@
 import { describe, it, expect, beforeAll, afterAll } from '@jest/globals';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Mebular, MemoryService } from '@mebular/core';
@@ -10,6 +12,7 @@ import { startHttpServer, hashToken } from '../../packages/mcp/src/serve.mjs';
 import { fleetEventFromEvent } from '../../packages/mcp/src/fleet-events.mjs';
 
 const fleet = await import('../../packages/fleet/dist/index.js');
+const execFileAsync = promisify(execFile);
 
 let home;
 let app;
@@ -59,12 +62,17 @@ function parentPlan(overrides = {}) {
     planId: 'plan-daemon-parent-001',
     goal: 'daemon parent',
     policy: {
-      allowedDevices: ['device-B'],
-      allowedAgents: ['worker'],
+      allowedDevices: ['device-A', 'device-B'],
+      allowedAgents: ['planner', 'worker'],
       requireCapabilities: ['fleet.task'],
       maxParallel: 2,
       allowSubcontract: true,
     },
+    steps: [
+      { stepId: 'work', kind: 'task', intent: 'work', dependsOn: [], to: { device: 'device-A', agent: 'planner' }, acceptance: { kind: 'non-empty-result' } },
+      { stepId: 'gate', kind: 'reduce', intent: 'gate', dependsOn: ['work'], join: { mode: 'all' }, acceptance: { kind: 'non-empty-result' } },
+      { stepId: 'mr', kind: 'mr', intent: 'mr', dependsOn: ['gate'], acceptance: { kind: 'mr-once' } },
+    ],
     ...overrides,
   });
 }
@@ -81,14 +89,14 @@ function childPlan(parentId, overrides = {}) {
     createdAt: 300,
     budget: { maxSteps: 2, maxAttemptsPerStep: 1 },
     policy: {
-      allowedDevices: ['device-B'],
-      allowedAgents: ['worker'],
+      allowedDevices: ['device-A'],
+      allowedAgents: ['planner'],
       requireCapabilities: ['fleet.task'],
       maxParallel: 1,
       allowSubcontract: false,
     },
     steps: [
-      { stepId: 'child-work', kind: 'task', intent: 'child-work', dependsOn: [], to: { device: 'device-B', agent: 'worker' }, acceptance: { kind: 'non-empty-result' } },
+      { stepId: 'child-work', kind: 'task', intent: 'child-work', dependsOn: [], to: { device: 'device-A', agent: 'planner' }, acceptance: { kind: 'non-empty-result' } },
     ],
     ...overrides,
   };
@@ -306,7 +314,7 @@ describe('P2 daemon /app/plans', () => {
       at: 1,
       toStatus: 'queued',
       trace: { chain: [] },
-      to: { device: 'device-B', agent: 'worker' },
+      to: { device: 'device-A', agent: 'planner' },
       intent: 'parent-work',
       budget: { maxDepth: 3, maxChildren: 2, maxTasks: 2 },
     })).toBe(true);
@@ -330,7 +338,26 @@ describe('P2 daemon /app/plans', () => {
     });
     const okReply = await request('/app/plans', { method: 'POST', body: { plan: okChild, namespace: 'tasks' } });
     expect(okReply.status).toBe(200);
-    expect(okReply.body.plan.policy).toMatchObject({ allowedDevices: ['device-B'], maxParallel: 1 });
+    expect(okReply.body.plan.policy).toMatchObject({ allowedDevices: ['device-A'], maxParallel: 1 });
+
+    // B8：父 task 已 done 后不得再派生 child。
+    expect(await tasks.append({
+      v: 1,
+      eventId: `${parentStepTaskId}#done@device-A`,
+      taskId: parentStepTaskId,
+      type: 'done',
+      actor: { device: 'device-A', agent: 'planner' },
+      at: 2,
+      toStatus: 'done',
+      trace: { chain: [] },
+      payloadRef: 'parent-result',
+    })).toBe(true);
+    const afterDone = await request('/app/plans', {
+      method: 'POST',
+      body: { plan: childPlan(parent.planId, { planId: 'plan-daemon-child-after-done-001' }), namespace: 'tasks' },
+    });
+    expect(afterDone.status).toBe(409);
+    expect(afterDone.body.error).toBe('PLAN_STATE_INVALID');
   });
 
   it('B4：daemon CLI 提交 plan → 同一 daemon materializer → task_status.plan', async () => {
@@ -350,10 +377,17 @@ describe('P2 daemon /app/plans', () => {
     }), { mode: 0o600 });
     try {
       const p = plan({ planId: 'plan-daemon-cli-001' });
-      const submitted = await fleet.toolByName('task_submit').handler(
-        { intent: 'daemon cli plan', to: { device: '__plan__', agent: '__plan__' }, plan: p },
-        { dir: cliHome, agent: 'planner' },
-      );
+      // 真实 CLI 进程：验证 `--plan '<json>'` 与 daemon store 选择，不只走 handler。
+      const { stdout: cliOut } = await execFileAsync(process.execPath, [
+        join(process.cwd(), 'packages', 'fleet', 'dist', 'cli.js'),
+        'task_submit',
+        '--dir', cliHome,
+        '--agent', 'planner',
+        '--intent', 'daemon cli plan',
+        '--to', JSON.stringify({ device: '__plan__', agent: '__plan__' }),
+        '--plan', JSON.stringify(p),
+      ], { encoding: 'utf-8' });
+      const submitted = JSON.parse(cliOut);
       expect(submitted).toMatchObject({ ok: true, planId: p.planId, version: 1, rootTaskId: `${p.planId}#1#root` });
       expect(existsSync(join(cliHome, 'store.jsonl'))).toBe(false);
 

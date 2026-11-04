@@ -100,6 +100,8 @@ export interface PlanValidationContext {
   parentPlan?: TaskPlan;
   /** 父 step task 的有效 TaskBudget；子 plan 必须存在真实父 step task。 */
   parentStepBudget?: TaskBudget;
+  /** 父 step task 的分配对象/状态；绑定 sub-plan 与真实父执行者。 */
+  parentTaskState?: Pick<TaskState, 'to' | 'status'>;
   /** 提交者；plan.owner 必须同时等于调用 device 与 agent。 */
   caller?: FleetEndpoint;
   /** 任务权威状态（用于 reuse 的旧结果校验；undefined = 跳过运行时存在性检查）。 */
@@ -521,7 +523,20 @@ function validateParent(plan: TaskPlan, context: PlanValidationContext): PlanVal
   if (parent.policy.allowSubcontract !== true) return failure('PLAN_POLICY', '父 plan policy 禁止分包');
   const parentStep = parent.steps.find((step) => step.stepId === plan.parent!.stepId);
   if (parentStep === undefined) return failure('PLAN_POLICY', 'parent step 不存在');
-  if (parentStep.kind === 'mr') return failure('PLAN_POLICY', 'parent step 不得是 MR');
+  if (parentStep.kind !== 'task') {
+    return failure('PLAN_POLICY', `只有 kind=task 的父 step 可以派生 sub-plan（当前 ${parentStep.kind}）`);
+  }
+
+  const parentTask = context.parentTaskState;
+  if (parentTask === undefined) {
+    return failure('PLAN_STATE_INVALID', '父 step task 不存在或尚未物化');
+  }
+  if (parentTask.status !== 'queued' && parentTask.status !== 'claimed' && parentTask.status !== 'running') {
+    return failure('PLAN_STATE_INVALID', `父 step task 已终态，不能派生 sub-plan：${parentTask.status}`);
+  }
+  if (parentTask.to.device !== plan.owner.device || parentTask.to.agent !== plan.owner.agent) {
+    return failure('PLAN_POLICY', '父 step task 的分配对象必须等于 sub-plan owner');
+  }
 
   const parentPolicy = effectiveParentPolicy(parent.policy);
   const childPolicy = effectiveChildPolicy(plan.policy, parentPolicy);

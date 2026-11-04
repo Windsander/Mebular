@@ -235,11 +235,13 @@ export async function appendValidatedTaskPlanNode(
     : planTaskId(candidate.parent.planId, candidate.parent.version, candidate.parent.stepId);
   const parentTask = parentTaskId === null ? undefined : stateById.get(parentTaskId);
   const parentStepBudget = parentTask === undefined ? undefined : effectiveBudget(parentTask, stateById);
+  const parentTaskState = parentTask === undefined ? undefined : { to: parentTask.to, status: parentTask.status };
 
   const validation = validatePlan(candidate, {
     existingVersions: versions,
     ...(parentPlan !== undefined ? { parentPlan } : {}),
     ...(parentStepBudget !== undefined ? { parentStepBudget } : {}),
+    ...(parentTaskState !== undefined ? { parentTaskState } : {}),
     taskStates,
     caller: candidate.owner,
   });

@@ -34,6 +34,9 @@ fleet doctor      --dir ~/.mebular --json
 - materializer 只创建依赖已满足且显式 `to` 的 step task；join/reduce/MR 执行属后续阶段。
 - 进程重启后从 plan + task 事件恢复，不需要 cursor；确定性 taskId/eventId 保证不重复建 task。
 - 默认只推进 owner device 的 plan；未授权设备不应运行 coordinator。
+- **daemon CLI 边界**：无 live app 时 `task_targets` / `task_negotiate` / `chatter_*` 为 fail-closed（不回退本地离线 Mebular）；MCP live 路径正常。daemon-backed 读取留 P6。
+- **/app/plans 信任边界**：owner/agent 是设备级 app token 下的自证；该内部端点不在 P2 扩权。
+- **测试空白**：双守护进程 E2E 留 P4/P6；本轮覆盖单守护 + CLI/materializer，不覆盖双 daemon 并发。
 
 ## 3. 供给与水位
 

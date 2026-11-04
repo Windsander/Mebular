@@ -746,7 +746,7 @@ describe('ingest and compaction', () => {
     expect(ingest).toHaveLength(1);
     expect(ingest[0].body.chunks[0]).toMatchObject({ role: 'system' });
     expect(ingest[0].body.chunks[0].text).toContain('compaction');
-    const checkpoint = fetchImpl.callsFor('/checkpoints/ses_1');
+    const checkpoint = fetchImpl.callsFor('/checkpoints/ses_1').filter((call) => call.method === 'PUT');
     expect(checkpoint).toHaveLength(1);
     expect(checkpoint[0].method).toBe('PUT');
     expect(checkpoint[0].body).toMatchObject({
@@ -790,7 +790,7 @@ describe('ingest and compaction', () => {
         messageCount: 7,
       },
     });
-    const checkpoint = fetchImpl.callsFor('/checkpoints/ses_1');
+    const checkpoint = fetchImpl.callsFor('/checkpoints/ses_1').filter((call) => call.method === 'PUT');
     expect(checkpoint).toHaveLength(1);
     expect(checkpoint[0].body.state).toMatchObject({
       schema: 2,
@@ -819,6 +819,75 @@ describe('ingest and compaction', () => {
     expect(controller.getStatus().counts.ingest.failed).toBe(1);
   });
 
+  it('separates committed, failed-extraction, pending and queued ingest outcomes', async () => {
+    const fetchImpl = createFetch({
+      '/ingest': (call) => {
+        const threadId = call.body?.threadId;
+        if (threadId === 'ses_m1_failed') {
+          return jsonResponse({
+            ok: true,
+            data: {
+              accepted: { chunks: 1, records: 0 },
+              records: [],
+              queued: false,
+              extraction: { id: 'ex_failed', status: 'failed', extractor: 'heuristic', records: [], warnings: ['extract_failed'] },
+            },
+          });
+        }
+        if (threadId === 'ses_m1_pending') {
+          return jsonResponse({
+            ok: true,
+            data: {
+              accepted: { chunks: 1, records: 0 },
+              records: [],
+              queued: false,
+              extraction: { id: 'ex_pending', status: 'pending', extractor: 'heuristic', records: [], warnings: [] },
+            },
+          });
+        }
+        if (threadId === 'ses_m1_queued') {
+          return jsonResponse({
+            ok: true,
+            data: {
+              accepted: { chunks: 1, records: 0 },
+              records: [],
+              queued: true,
+              extraction: { id: 'ex_queued', status: 'pending', extractor: 'heuristic', records: [], warnings: [] },
+            },
+          }, { status: 202 });
+        }
+        return jsonResponse({
+          ok: true,
+          data: {
+            accepted: { chunks: 1, records: 0 },
+            records: [],
+            queued: false,
+            extraction: { id: 'ex_done', status: 'completed', extractor: 'heuristic', records: [], warnings: [] },
+          },
+        });
+      },
+    });
+    const { controller } = controllerWith({
+      fetchImpl,
+      ctx: { contextMessages: [{ id: 'u1', type: 'user', text: 'ingest dimension test' }] },
+    });
+    for (const sessionID of ['ses_m1_failed', 'ses_m1_pending', 'ses_m1_queued', 'ses_m1_completed']) {
+      await controller.handleEvent({ type: 'session.execution.succeeded', data: { sessionID } });
+    }
+    const status = controller.getStatus();
+    expect(status.counts.ingest.accepted).toBe(4);
+    expect(status.counts.ingest.failedExtraction).toBe(1);
+    expect(status.counts.ingest.pending).toBe(1);
+    expect(status.counts.ingest.queued).toBe(1);
+    expect(status.counts.ingest.committed).toBe(1);
+    expect(status.ingest).toMatchObject({
+      failedExtraction: 1,
+      pending: 1,
+      queued: 1,
+      committed: 1,
+    });
+  });
+
   it('honors Retry-After for one bounded 429 ingest retry', async () => {
     const times = [];
     const fetchImpl = createFetch({
@@ -841,6 +910,29 @@ describe('ingest and compaction', () => {
     expect(times[1] - times[0]).toBeGreaterThanOrEqual(35);
     expect(controller.getStatus().counts.ingest.failed).toBe(1);
     expect(controller.getStatus().counts.ingest.sent).toBe(0);
+  });
+
+  it('records explicit Retry-After truncation instead of silently shortening it', async () => {
+    const times = [];
+    const fetchImpl = createFetch({
+      '/ingest': () => {
+        times.push(Date.now());
+        return jsonResponse(
+          { ok: false, error: { code: 'rate_limited' } },
+          { ok: false, status: 429, headers: { 'retry-after': '120' } },
+        );
+      },
+    });
+    const { controller } = controllerWith({
+      fetchImpl,
+      config: { maxRetryAfterMs: 30 },
+      ctx: { contextMessages: [{ id: 'u1', type: 'user', text: 'long retry-after' }] },
+    });
+    await controller.handleEvent({ type: 'session.execution.succeeded', data: { sessionID: 'ses_retry_long' } });
+    expect(fetchImpl.callsFor('/ingest')).toHaveLength(2);
+    expect(times[1] - times[0]).toBeGreaterThanOrEqual(20);
+    expect(controller.getStatus().counts.ingest.retryAfterTruncated).toBe(1);
+    expect(controller.getStatus().lastWarning).toMatchObject({ code: 'retry_after_truncated' });
   });
 });
 
@@ -1436,14 +1528,14 @@ describe('event collection hardening', () => {
       data: { sessionID: 'ses_1', reason: 'auto', messageCount: 42, lastMessageID: 'msg_9' },
     });
     expect(fetchImpl.callsFor('/ingest')).toHaveLength(0);
-    const checkpoint = fetchImpl.callsFor('/checkpoints/ses_1');
+    const checkpoint = fetchImpl.callsFor('/checkpoints/ses_1').filter((call) => call.method === 'PUT');
     expect(checkpoint).toHaveLength(1);
     expect(checkpoint[0].body.summary).toBeNull();
     expect(checkpoint[0].body.sync).toBeUndefined();
     expect(checkpoint[0].body.domain).toBe('task:ses_1');
     expect(checkpoint[0].body.state).toMatchObject({
       kind: 'compaction',
-      compactionId: 'evt_no_summary',
+      compactionId: expect.stringMatching(/^cmp_[0-9a-f]{32}$/),
       sourceEventId: 'evt_no_summary',
       messageCount: 42,
       lastMessageId: 'msg_9',
@@ -1477,6 +1569,196 @@ describe('event collection hardening', () => {
     expect(controller.getStatus().counts.checkpoints.sent).toBe(1);
   });
 
+  it('keeps checkpoint requestId and body deterministic across a lost response retry', async () => {
+    let puts = 0;
+    const bodies = [];
+    const fetchImpl = createFetch({
+      '/checkpoints/ses_idem': (call) => {
+        if (call.method === 'GET') {
+          return jsonResponse({ ok: true, data: { checkpoint: null, source: 'cloud' } });
+        }
+        puts += 1;
+        bodies.push(call.body);
+        if (puts === 1) throw new Error('simulated lost response after commit');
+        return jsonResponse({
+          ok: true,
+          data: { checkpoint: { revision: 1, pending: false, state: { compactionId: 'cmp_idem' } }, source: 'cloud' },
+        });
+      },
+    });
+    const { controller } = controllerWith({
+      fetchImpl,
+      config: { checkpointRetryMs: 10, checkpointPendingTimeoutMs: 500 },
+    });
+    await controller.handleEvent({
+      id: 'evt_idem',
+      type: 'session.compaction.ended',
+      data: {
+        sessionID: 'ses_idem',
+        compactionId: 'cmp_idem',
+        at: 1700000000000,
+        reason: 'auto',
+        messageCount: 2,
+      },
+    });
+    expect(await waitFor(() => controller.getStatus().counts.checkpoints.sent === 1)).toBeTruthy();
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0].requestId).toMatch(/^opencode_/);
+    expect(bodies[0].expectedRevision).toBe(0);
+    expect(bodies[0].state.at).toBe(1700000000000);
+    expect(bodies[0].state.host.at).toBe(1700000000000);
+    expect(bodies[1]).toEqual(bodies[0]);
+    expect(controller.getStatus().counts.checkpoints.failed).toBe(0);
+  });
+
+  it('preflights checkpoint revision and carries expectedRevision forward', async () => {
+    let currentRevision = 0;
+    let gets = 0;
+    const puts = [];
+    const fetchImpl = createFetch({
+      '/checkpoints/ses_rev': (call) => {
+        if (call.method === 'GET') {
+          gets += 1;
+          return jsonResponse({
+            ok: true,
+            data: {
+              checkpoint: currentRevision > 0
+                ? { revision: currentRevision, pending: false, state: {} }
+                : null,
+              source: 'cloud',
+            },
+          });
+        }
+        puts.push(call.body);
+        if (call.body.expectedRevision !== currentRevision) {
+          return jsonResponse({ ok: false, error: { code: 'revision_mismatch' } }, { ok: false, status: 409 });
+        }
+        currentRevision += 1;
+        return jsonResponse({
+          ok: true,
+          data: {
+            checkpoint: {
+              revision: currentRevision,
+              pending: false,
+              state: { compactionId: call.body.state.compactionId },
+            },
+            source: 'cloud',
+          },
+        });
+      },
+    });
+    const { controller } = controllerWith({ fetchImpl });
+    for (const [index, compactionId] of ['cmp_rev_1', 'cmp_rev_2'].entries()) {
+      await controller.handleEvent({
+        id: `evt_rev_${index}`,
+        type: 'session.compaction.ended',
+        data: { sessionID: 'ses_rev', compactionId, at: 1700000000000 + index },
+      });
+    }
+    expect(gets).toBe(1);
+    expect(puts.map((body) => body.expectedRevision)).toEqual([0, 1]);
+    expect(puts.every((body) => body.requestId.startsWith('opencode_'))).toBe(true);
+    expect(currentRevision).toBe(2);
+    expect(controller.getStatus().checkpoints.last).toMatchObject({ state: 'committed', revision: 2 });
+  });
+
+  it('recovers a stale cached revision after checkpoint deletion with a create retry', async () => {
+    let currentRevision = 0;
+    let gets = 0;
+    const puts = [];
+    const fetchImpl = createFetch({
+      '/checkpoints/ses_recreate': (call) => {
+        if (call.method === 'GET') {
+          gets += 1;
+          return jsonResponse({
+            ok: true,
+            data: {
+              checkpoint: currentRevision > 0
+                ? { revision: currentRevision, pending: false, state: {} }
+                : null,
+              source: 'cloud',
+            },
+          });
+        }
+        puts.push(call.body);
+        if (call.body.expectedRevision !== currentRevision) {
+          return jsonResponse({ ok: false, error: { code: 'revision_mismatch' } }, { ok: false, status: 409 });
+        }
+        currentRevision += 1;
+        return jsonResponse({
+          ok: true,
+          data: {
+            checkpoint: {
+              revision: currentRevision,
+              pending: false,
+              state: { compactionId: call.body.state.compactionId },
+            },
+            source: 'cloud',
+          },
+        });
+      },
+    });
+    const { controller } = controllerWith({ fetchImpl });
+    for (const [index, compactionId] of ['cmp_recreate_1', 'cmp_recreate_2'].entries()) {
+      await controller.handleEvent({
+        id: `evt_recreate_${index}`,
+        type: 'session.compaction.ended',
+        data: { sessionID: 'ses_recreate', compactionId, at: 1700000000000 + index },
+      });
+    }
+    expect(currentRevision).toBe(2);
+    currentRevision = 0;
+    await controller.handleEvent({
+      id: 'evt_recreate_3',
+      type: 'session.compaction.ended',
+      data: { sessionID: 'ses_recreate', compactionId: 'cmp_recreate_3', at: 1700000000003 },
+    });
+    expect(puts.map((body) => body.expectedRevision)).toEqual([0, 1, 2, 0]);
+    expect(gets).toBe(2);
+    expect(currentRevision).toBe(1);
+    expect(controller.getStatus().counts.checkpoints.conflicts).toBe(1);
+    expect(controller.getStatus().checkpoints.last).toMatchObject({ state: 'committed', revision: 1 });
+  });
+
+  it('keeps different compactions with identical summary/count separate', async () => {
+    const fetchImpl = createFetch();
+    const { controller } = controllerWith({ fetchImpl });
+    for (const [index, compactionId] of ['cmp_same_a', 'cmp_same_b'].entries()) {
+      await controller.handleEvent({
+        id: `evt_same_${index}`,
+        type: 'session.compaction.ended',
+        data: {
+          sessionID: 'ses_same',
+          compactionId,
+          endSeq: String(index + 1),
+          reason: 'auto',
+          text: 'identical summary',
+          messageCount: 2,
+        },
+      });
+    }
+    const puts = fetchImpl.callsFor('/checkpoints/ses_same').filter((call) => call.method === 'PUT');
+    expect(puts).toHaveLength(2);
+    expect(puts.map((call) => call.body.state.compactionId)).toEqual(['cmp_same_a', 'cmp_same_b']);
+  });
+
+  it('dedupes a fresh-envelope replay by compactionId/seq instead of the envelope id', async () => {
+    const fetchImpl = createFetch();
+    const { controller } = controllerWith({ fetchImpl });
+    const data = {
+      sessionID: 'ses_envelope',
+      compactionId: 'cmp_envelope',
+      endSeq: '42',
+      reason: 'auto',
+      text: 'same logical compaction',
+      messageCount: 3,
+    };
+    await controller.handleEvent({ id: 'envelope_1', type: 'session.compaction.ended', data });
+    await controller.handleEvent({ id: 'envelope_2', type: 'session.compaction.ended', data });
+    expect(fetchImpl.callsFor('/checkpoints/ses_envelope').filter((call) => call.method === 'PUT')).toHaveLength(1);
+    expect(controller.getStatus().counts.events.duplicates).toBe(1);
+  });
+
   it('does not count a 202 checkpoint as committed until an authoritative read confirms it', async () => {
     const fetchImpl = createFetch({
       'PUT /checkpoints/ses_202': () => jsonResponse({
@@ -1495,7 +1777,7 @@ describe('event collection hardening', () => {
     await controller.handleEvent({
       id: 'evt_202',
       type: 'session.compaction.ended',
-      data: { sessionID: 'ses_202', reason: 'auto', text: 'queued checkpoint body' },
+      data: { sessionID: 'ses_202', compactionId: 'evt_202', reason: 'auto', text: 'queued checkpoint body' },
     });
     let status = controller.getStatus();
     expect(status.counts.checkpoints.sent).toBe(0);
@@ -1572,7 +1854,7 @@ describe('event collection hardening', () => {
       reason: 'checkpoint_revision_conflict',
     });
     expect(puts).toBe(2);
-    expect(gets).toBe(1);
+    expect(gets).toBe(2);
   });
 
   it('bounds checkpoint 5xx retries and fails visibly at the deadline', async () => {
@@ -1603,6 +1885,122 @@ describe('event collection hardening', () => {
       reason: 'checkpoint_pending_expired',
     });
     expect(puts).toBeGreaterThan(1);
+  });
+
+  it('makes writesDisabled rejections visible and leaves enabled true', async () => {
+    let ingestCalls = 0;
+    const fetchImpl = createFetch({
+      '/ingest': () => {
+        ingestCalls += 1;
+        return jsonResponse({ ok: false, error: { code: 'unauthorized' } }, { ok: false, status: 401 });
+      },
+      '/context': HIT,
+    });
+    const { controller } = controllerWith({
+      fetchImpl,
+      config: { writeRecoveryMs: 1000, writeRecoveryMaxMs: 1000, writeRecoveryAttempts: 3 },
+      ctx: { contextMessages: [{ id: 'u1', type: 'user', text: 'write auth test' }] },
+    });
+    await controller.handleEvent({ type: 'session.execution.succeeded', data: { sessionID: 'ses_write_auth' } });
+    let status = controller.getStatus();
+    expect(status.enabled).toBe(true);
+    expect(status.writes.disabled).toBe(true);
+    expect(status.writes.reason).toBe('runtime_unauthorized');
+    expect(ingestCalls).toBe(1);
+
+    await controller.handleEvent({
+      type: 'session.text.ended',
+      data: { sessionID: 'ses_write_auth', assistantMessageID: 'a2', text: 'rejected chunk' },
+    });
+    status = controller.getStatus();
+    expect(ingestCalls).toBe(1);
+    expect(status.writes.rejected).toBeGreaterThan(0);
+    expect(status.counts.ingest.rejected).toBeGreaterThan(0);
+    expect(status.writes.lastRejected).toMatchObject({ kind: 'ingest' });
+
+    await controller.handleEvent({
+      id: 'evt_write_auth_checkpoint',
+      type: 'session.compaction.ended',
+      data: { sessionID: 'ses_write_auth', compactionId: 'cmp_write_auth', reason: 'auto' },
+    });
+    status = controller.getStatus();
+    expect(status.counts.checkpoints.rejected).toBe(1);
+    expect(status.writes.lastRejected).toMatchObject({ kind: 'checkpoint' });
+    expect(status.checkpoints.last).toMatchObject({ state: 'failed', reason: 'checkpoint_unauthorized' });
+
+    const event = hookEvent(userMessages('recover writes'));
+    await controller.handleContext(event);
+    status = controller.getStatus();
+    expect(status.writes.disabled).toBe(false);
+    expect(status.counts.writes.recovered).toBeGreaterThanOrEqual(1);
+    await controller.dispose();
+  });
+
+  it('runs a bounded auth probe and re-enables writes after success', async () => {
+    let statusCalls = 0;
+    const fetchImpl = createFetch({
+      '/ingest': () => jsonResponse({ ok: false, error: { code: 'unauthorized' } }, { ok: false, status: 401 }),
+      '/status': () => {
+        statusCalls += 1;
+        if (statusCalls === 1) {
+          return jsonResponse({ ok: false, error: { code: 'unauthorized' } }, { ok: false, status: 401 });
+        }
+        return jsonResponse({ ok: true, data: { runtimeVersion: '0.3.0', mode: 'immersive', capabilities: {} } });
+      },
+    });
+    const { controller } = controllerWith({
+      fetchImpl,
+      config: { writeRecoveryMs: 10, writeRecoveryMaxMs: 10, writeRecoveryAttempts: 3 },
+      ctx: { contextMessages: [{ id: 'u1', type: 'user', text: 'auth probe test' }] },
+    });
+    await controller.handleEvent({ type: 'session.execution.succeeded', data: { sessionID: 'ses_probe' } });
+    expect(controller.getStatus().writes.disabled).toBe(true);
+    expect(await waitFor(() => controller.getStatus().writes.disabled === false)).toBeTruthy();
+    expect(controller.getStatus().counts.writes.authProbes).toBeGreaterThanOrEqual(1);
+    expect(controller.getStatus().counts.writes.recovered).toBeGreaterThanOrEqual(1);
+    await controller.dispose();
+  });
+
+  it('does not retry early when Retry-After exceeds the checkpoint deadline', async () => {
+    let puts = 0;
+    const fetchImpl = createFetch({
+      '/checkpoints/ses_checkpoint_retry_after': (call) => {
+        if (call.method === 'GET') {
+          return jsonResponse({ ok: true, data: { checkpoint: null, source: 'cloud' } });
+        }
+        puts += 1;
+        return jsonResponse(
+          { ok: false, error: { code: 'rate_limited' } },
+          { ok: false, status: 429, headers: { 'retry-after': '120' } },
+        );
+      },
+    });
+    const { controller } = controllerWith({
+      fetchImpl,
+      config: { checkpointRetryMs: 10, checkpointPendingTimeoutMs: 80 },
+    });
+    await controller.handleEvent({
+      id: 'evt_checkpoint_retry_after',
+      type: 'session.compaction.ended',
+      data: { sessionID: 'ses_checkpoint_retry_after', compactionId: 'cmp_retry_after' },
+    });
+    expect(puts).toBe(1);
+    let status = controller.getStatus();
+    expect(status.checkpoints.last).toMatchObject({
+      state: 'pending',
+      retryAfterMs: 120000,
+      retryAfterLimitedByDeadline: true,
+    });
+    expect(await waitFor(() => controller.getStatus().counts.checkpoints.pending === 0)).toBeTruthy();
+    expect(puts).toBe(1);
+    status = controller.getStatus();
+    expect(status.checkpoints.last).toMatchObject({
+      state: 'failed',
+      reason: 'checkpoint_pending_expired',
+      retryAfterMs: 120000,
+      retryAfterLimitedByDeadline: true,
+    });
+    expect(status.counts.checkpoints.retryAfterTruncated).toBeGreaterThanOrEqual(1);
   });
 
   it('does not retry a persistent checkpoint 401 as pending', async () => {
@@ -1690,6 +2088,43 @@ describe('event subscription reconnect and hot disable', () => {
     expect(fetchImpl.callsFor('/ingest')).toHaveLength(1);
     expect(fetchImpl.callsFor('/checkpoints/ses_compact_replay').filter((call) => call.method === 'PUT')).toHaveLength(1);
     expect(controller.getStatus().counts.events.duplicates).toBe(1);
+  });
+
+  it('does not register a late checkpoint response after dispose', async () => {
+    let releasePreflight;
+    let signalStarted;
+    const started = new Promise((resolve) => { signalStarted = resolve; });
+    const fetchImpl = async (url, init = {}) => {
+      const path = new URL(url).pathname.replace(/^\/memory-runtime\/v1/, '');
+      if (path === '/checkpoints/ses_late' && (init.method ?? 'GET') === 'GET') {
+        signalStarted();
+        await new Promise((resolve) => { releasePreflight = resolve; });
+        return jsonResponse({ ok: true, data: { checkpoint: null, source: 'cloud' } });
+      }
+      return jsonResponse({ ok: false, error: { code: 'not_found' } }, { ok: false, status: 404 });
+    };
+    const { controller } = controllerWith({
+      fetchImpl,
+      config: { checkpointPendingTimeoutMs: 500 },
+    });
+    const task = controller.handleEvent({
+      id: 'evt_late',
+      type: 'session.compaction.ended',
+      data: { sessionID: 'ses_late', compactionId: 'cmp_late', text: 'late response' },
+    });
+    await started;
+    const disposing = controller.dispose();
+    releasePreflight();
+    await Promise.all([task, disposing]);
+    const status = controller.getStatus();
+    expect(status.counts.checkpoints.pending).toBe(0);
+    expect(status.counts.checkpoints.sent).toBe(0);
+    expect(status.counts.checkpoints.failed).toBe(1);
+    expect(status.counts.checkpoints.interrupted).toBe(1);
+    expect(status.checkpoints.last).toMatchObject({
+      state: 'failed',
+      reason: 'checkpoint_interrupted',
+    });
   });
 
   it('cancels subscription, buffer timer and pending checkpoint after discovery disappears', async () => {

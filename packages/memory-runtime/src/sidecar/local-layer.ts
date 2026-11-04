@@ -732,6 +732,7 @@ export class SidecarLocalLayer {
   private maintenanceLastResult: LocalMaintenanceStatus['lastResult'] = null;
   private lastCleanupAt = 0;
   private stagingDependencyHandler?: (ids: readonly string[]) => void | Promise<void>;
+  private maintenanceDependencyHandler?: (ids: readonly string[]) => void | Promise<void>;
 
   constructor(options: SidecarLocalLayerOptions) {
     this.root = options.root;
@@ -821,6 +822,10 @@ export class SidecarLocalLayer {
     this.stagingDependencyHandler = handler;
   }
 
+  setMaintenanceDependencyHandler(handler: (ids: readonly string[]) => void | Promise<void>): void {
+    this.maintenanceDependencyHandler = handler;
+  }
+
   /** staging 写入后核对容量/TTL 淘汰，依赖已消失证据的重放必须显式 dead。 */
   async putStagingChunk(cloudId: string, chunk: RawChunk) {
     const before = await this.store.listStagingChunks({ includeExpired: true });
@@ -876,7 +881,7 @@ export class SidecarLocalLayer {
       try {
         const staged = await this.store.listStagingChunks({ includeExpired: true });
         const expiredIds = this.expiredStagingIds(staged, at);
-        const notify = options.beforeStagingCleanup ?? this.stagingDependencyHandler;
+        const notify = options.beforeStagingCleanup ?? this.maintenanceDependencyHandler;
         await notify?.(expiredIds);
         await this.failStagingDependents(expiredIds);
         const storeResult = await this.store.cleanup(at);

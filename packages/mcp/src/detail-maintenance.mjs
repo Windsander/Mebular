@@ -18,8 +18,13 @@ function errorCode(error) {
 
 function safeErrorMessage(error) {
   return String(error?.message ?? error ?? 'detail maintenance failed')
+    .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, '[redacted]')
     .replace(/\bBearer\s+[A-Za-z0-9._~+/-]{8,}=*/gi, 'Bearer [redacted]')
     .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, '[redacted]')
+    .replace(/\bgh[pousr]_[A-Za-z0-9]{16,}\b/g, '[redacted]')
+    .replace(/\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g, '[redacted]')
+    .replace(/\bAKIA[0-9A-Z]{16}\b/g, '[redacted]')
+    .replace(/\bAIza[0-9A-Za-z_-]{20,}\b/g, '[redacted]')
     .replace(/\b(api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|passwd|authorization)\b(\s*[:=]\s*)(["']?)[^\s"',;]{4,}\3/gi, '$1$2$3[redacted]$3')
     .slice(0, 512);
 }

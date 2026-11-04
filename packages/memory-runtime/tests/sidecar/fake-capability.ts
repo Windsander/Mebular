@@ -46,6 +46,7 @@ export interface FakeCapabilityServer {
   setCheckpointLeaseHost: (hostId: string) => void;
   setFailure: (failure: { status: number; code: string; retryable?: boolean } | null) => void;
   setDetailFailure: (failure: { status: number; code: string; retryable?: boolean } | null) => void;
+  setDetailEvicted: (ids: string[]) => void;
   close: () => Promise<void>;
 }
 
@@ -280,6 +281,7 @@ export async function startFakeCapability(options: FakeCapabilityOptions = {}): 
   let details: FakeDetail[] = [];
   let failure: { status: number; code: string; retryable?: boolean } | null = null;
   let detailFailure: { status: number; code: string; retryable?: boolean } | null = null;
+  let detailEvicted: string[] = [];
   let leaseHost = 'h_fake';
   let counter = 0;
 
@@ -1056,6 +1058,7 @@ export async function startFakeCapability(options: FakeCapabilityOptions = {}): 
             duplicates: results.filter((result: any) => result.status === 'duplicate').length,
             failed: results.filter((result: any) => result.status === 'failed').length,
             partial: results.some((result: any) => result.status === 'failed'),
+            evicted: [...detailEvicted],
           }));
           return;
         }
@@ -1228,6 +1231,7 @@ export async function startFakeCapability(options: FakeCapabilityOptions = {}): 
     setDetailFailure: (next) => {
       detailFailure = next;
     },
+    setDetailEvicted: (ids) => { detailEvicted = [...ids]; },
     close: () => new Promise<void>((resolve) => {
       server.close(() => resolve());
       server.closeAllConnections?.();

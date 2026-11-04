@@ -244,7 +244,7 @@ export class SettlementRuntime {
     }
     await this.ingest.init();
     const beforeStagingCleanup = (ids: readonly string[]) => this.ingest.expireStagingDependencies(ids);
-    this.local.setStagingDependencyHandler(beforeStagingCleanup);
+    this.local.setMaintenanceDependencyHandler(beforeStagingCleanup);
     await this.local.runMaintenance({ beforeStagingCleanup }).catch(() => null);
     this.local.startMaintenance({
       ...(this.localMaintenanceIntervalMs !== undefined

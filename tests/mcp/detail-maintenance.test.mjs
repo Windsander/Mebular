@@ -130,7 +130,16 @@ describe('createDetailMaintenance', () => {
 
   it('扫描失败只记录 status 与日志，不抛出，也不影响下一次定时扫描', async () => {
     const now = Date.UTC(2026, 0, 3, 8, 0, 0);
-    const failure = Object.assign(new Error('disk unavailable api_key=sk-maintenance-secret-123456'), { code: 'EIO' });
+    const sentinels = [
+      'sk-maintenance-secret-123456',
+      'ghp_abcdefghijklmnop',
+      'xoxb-1234567890',
+      'AKIAABCDEFGHIJKLMNOP',
+      'AIzaabcdefghijklmnopqrstuvwxyz',
+      '-----BEGIN PRIVATE KEY-----\nmaintenance-private-key-sentinel\n-----END PRIVATE KEY-----',
+      'maintenance-private-key-sentinel',
+    ];
+    const failure = Object.assign(new Error(`disk unavailable api_key=${sentinels[0]} ${sentinels.slice(1, -1).join(' ')}`), { code: 'EIO' });
     const service = {
       pruneExpiredDetails: jest.fn()
         .mockRejectedValueOnce(failure)
@@ -154,10 +163,12 @@ describe('createDetailMaintenance', () => {
     await expect(maintenance.idle()).resolves.toMatchObject({ code: 'EIO' });
     expect(maintenance.status()).toMatchObject({
       running: true,
-      lastError: { reason: 'startup', code: 'EIO', message: 'disk unavailable api_key=[redacted]', at: now },
+      lastError: { reason: 'startup', code: 'EIO', at: now },
     });
-    expect(logger.error).toHaveBeenCalledWith('DETAIL_MAINTENANCE_FAILED EIO disk unavailable api_key=[redacted]');
-    expect(JSON.stringify({ status: maintenance.status(), logger })).not.toContain('sk-maintenance-secret-123456');
+    expect(maintenance.status().lastError.message).toContain('api_key=[redacted]');
+    expect(logger.error).toHaveBeenCalledTimes(1);
+    const diagnosticText = `${maintenance.status().lastError.message}\n${logger.error.mock.calls[0][0]}`;
+    for (const sentinel of sentinels) expect(diagnosticText).not.toContain(sentinel);
 
     callback();
     await maintenance.idle();
@@ -204,7 +215,15 @@ describe('capability 幂等账本周期维护', () => {
     let now = Date.UTC(2026, 0, 5);
     let callback = null;
     const timer = fakeTimer();
-    const sentinel = 'sk-ledger-content-sentinel-123456';
+    const sentinels = [
+      'sk-ledger-content-sentinel-123456',
+      'ghp_abcdefghijklmnop',
+      'xoxb-1234567890',
+      'AKIAABCDEFGHIJKLMNOP',
+      'AIzaabcdefghijklmnopqrstuvwxyz',
+      '-----BEGIN PRIVATE KEY-----\nledger-private-key-sentinel\n-----END PRIVATE KEY-----',
+      'ledger-private-key-sentinel',
+    ];
     const service = {
       writeDetails: async (items) => ({
         results: items.map((item, index) => ({
@@ -216,7 +235,7 @@ describe('capability 幂等账本周期维护', () => {
           domain: item.domain,
           detailKind: item.detailKind,
           contentHash: item.contentHash,
-          message: `api_key=${sentinel}`,
+          message: `api_key=${sentinels[0]} ${sentinels.slice(1, -1).join(' ')}`,
         })),
         created: items.length,
         duplicates: 0,
@@ -279,7 +298,7 @@ describe('capability 幂等账本周期维护', () => {
     expect(res.statusCode).toBe(200);
     const ledgerPath = join(home, 'memory-runtime', 'capability-idempotency.json');
     const initial = await readFile(ledgerPath, 'utf8');
-    expect(initial).not.toContain(sentinel);
+    for (const sentinel of sentinels) expect(initial).not.toContain(sentinel);
     expect(initial).toContain('[redacted]');
 
     now += 24 * 60 * 60 * 1000 + 1_000;
@@ -287,7 +306,7 @@ describe('capability 幂等账本周期维护', () => {
     await handler.idempotencyIdle();
     const expired = await readFile(ledgerPath, 'utf8');
     expect(JSON.parse(expired).entries).toEqual([]);
-    expect(expired).not.toContain(sentinel);
+    for (const sentinel of sentinels) expect(expired).not.toContain(sentinel);
     expect(handler.idempotencyMaintenance().lastResult).toMatchObject({
       removed: 1,
       count: 0,

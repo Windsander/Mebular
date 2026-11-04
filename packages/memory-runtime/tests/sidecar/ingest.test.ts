@@ -748,35 +748,235 @@ describe('IngestService settlements', () => {
     local.stopMaintenance();
   });
 
-  it('capability 配额淘汰后立即失效对应 Detail cache', async () => {
-    const { service, client, local } = await setup();
-    await local.putCachedDetail('detail-evicted-by-quota', {
-      detail: { text: 'old cached detail', expiresAt: 0, availability: ['available'] },
+  it('部分记录 queued 时保留其 staging 证据，不因另一条记录/Detail 成功而提前删除', async () => {
+    const { service, client, fake, local } = await setup();
+    jest.spyOn(client, 'write').mockImplementation(async (body: any) => {
+      const [first, second] = body.items;
+      fake.nodes.push({
+        id: 'rec-partial-user',
+        type: 'fact',
+        kind: 'preference',
+        domain: 'user',
+        ownerType: 'user',
+        ownerId: 'u_test',
+        contentHash: 'partial-hash',
+        content: first.content,
+        provenance: {},
+      });
+      return {
+        ok: true,
+        requestId: body.requestId,
+        capabilityVersion: 1,
+        status: 200,
+        degraded: false,
+        warnings: [],
+        data: {
+          results: [
+            {
+              clientItemId: first.clientItemId,
+              status: 'created',
+              id: 'rec-partial-user',
+              type: 'fact',
+              kind: 'preference',
+              domain: 'user',
+            },
+            {
+              clientItemId: second.clientItemId,
+              status: 'failed',
+              kind: 'preference',
+              domain: 'user',
+              code: 'capability_unavailable',
+              retryable: true,
+            },
+          ],
+          created: 1,
+          duplicates: 0,
+          failed: 1,
+          partial: true,
+        },
+      } as any;
     });
-    jest.spyOn(client, 'detailWrite').mockResolvedValue({
-      ok: true,
-      requestId: 'req_quota_cache_invalidation',
-      capabilityVersion: 1,
-      status: 200,
-      degraded: false,
-      warnings: [{ code: 'detail_quota_evicted', ids: ['detail-evicted-by-quota'] }] as unknown as string[],
-      data: {
-        results: [{
-          clientItemId: 'det_quota_cache_invalidation',
-          status: 'created',
-          id: 'detail-new-after-quota',
-          domain: 'user',
-          detailKind: 'raw_chunk',
-        }],
-        created: 1,
-        duplicates: 0,
-        failed: 0,
-        partial: false,
+
+    const result = await service.ingest({
+      requestId: 'req_partial_record_queued',
+      agentId: 'opencode',
+      threadId: 'th_partial_record_queued',
+      extractor: 'host',
+      chunks: [
+        { role: 'user', text: '我喜欢深色主题', messageId: 'm_partial_dark' },
+        { role: 'user', text: '我喜欢浅色主题', messageId: 'm_partial_light' },
+      ],
+      candidates: [
+        {
+          kind: 'preference',
+          content: { entity: 'user', preferenceType: 'theme', value: 'dark' },
+          sourceMessageIds: ['m_partial_dark'],
+        },
+        {
+          kind: 'preference',
+          content: { entity: 'user', preferenceType: 'theme', value: 'light' },
+          sourceMessageIds: ['m_partial_light'],
+        },
+      ],
+    });
+
+    expect(result.status).toBe(202);
+    expect(result.data.records).toHaveLength(1);
+    expect(result.data.queued).toBe(true);
+    expect(await local.store.countStagingChunks()).toBe(2);
+    const outbox = await local.outbox.list();
+    expect(outbox).toHaveLength(1);
+    expect(outbox[0]?.meta?.kind).toBe('record');
+    expect(outbox[0]?.meta?.stagingChunkIds).toHaveLength(2);
+  });
+
+  it('duplicate Detail 不用当前请求的 expiry/recordIds 覆盖权威缓存', async () => {
+    const { service, fake, local } = await setup();
+    const first = await service.ingest({ requestId: 'req_duplicate_cache_1', ...preferenceRequest() });
+    const detailId = first.data.detailIds[0]!;
+    const authoritativeExpiresAt = Date.now() + 60_000;
+    await local.putCachedDetail(detailId, {
+      detail: {
+        id: detailId,
+        text: 'authoritative cached text',
+        recordIds: ['authoritative-record-id'],
+        expiresAt: authoritativeExpiresAt,
+        availability: ['available'],
       },
     });
 
+    const duplicate = await service.ingest({ requestId: 'req_duplicate_cache_2', ...preferenceRequest() });
+    expect(duplicate.data.detailIds).toEqual([detailId]);
+    expect(fake.details).toHaveLength(1);
+    const cached = await local.getCachedDetail<any>(detailId);
+    expect(cached.detail).toMatchObject({
+      text: 'authoritative cached text',
+      recordIds: ['authoritative-record-id'],
+      expiresAt: authoritativeExpiresAt,
+    });
+  });
+
+  it('第 100 个 message 的显式证据不被 64 条 provenance 上限截断', async () => {
+    const { service, fake } = await setup();
+    const chunks = Array.from({ length: 100 }, (_, index) => ({
+      role: 'user' as const,
+      text: index === 99 ? '第 100 条直接证据' : `无关内容 ${index}`,
+      messageId: `m_evidence_${index}`,
+      chunkIndex: index,
+    }));
+    const result = await service.ingest({
+      requestId: 'req_evidence_message_100',
+      agentId: 'opencode',
+      threadId: 'th_evidence_message_100',
+      extractor: 'host',
+      chunks,
+      candidates: [{
+        kind: 'observation',
+        content: { content: '第 100 条直接证据' },
+        sourceMessageIds: ['m_evidence_99'],
+      }],
+    });
+
+    expect(result.data.detailIds).toHaveLength(1);
+    expect(fake.details).toHaveLength(1);
+    expect(fake.details[0]).toMatchObject({
+      text: '第 100 条直接证据',
+      messageId: 'm_evidence_99',
+    });
+  });
+
+  it('completeExtraction I/O 期间维护等待，不提前删证据或覆盖最终状态', async () => {
+    let clock = Date.UTC(2026, 0, 1);
+    const { service, client, fake, local } = await setup(defaultSidecarPolicy(), { now: () => clock });
+    const pending = await service.ingest({
+      requestId: 'req_completion_maintenance_race',
+      agentId: 'opencode',
+      threadId: 'th_completion_maintenance_race',
+      extractor: 'host',
+      chunks: [{
+        role: 'user',
+        text: '等待回填的证据',
+        messageId: 'm_completion_race',
+        expiresAt: clock + 1_000,
+      }],
+    });
+    let markWriteStarted!: () => void;
+    const writeStarted = new Promise<void>((resolve) => { markWriteStarted = resolve; });
+    let releaseWrite!: () => void;
+    const writeGate = new Promise<void>((resolve) => { releaseWrite = resolve; });
+    jest.spyOn(client, 'write').mockImplementation(async (body: any) => {
+      markWriteStarted();
+      await writeGate;
+      const item = body.items[0];
+      fake.nodes.push({
+        id: 'rec-completion-race',
+        type: 'episode',
+        kind: 'observation',
+        domain: 'agent:opencode',
+        ownerType: 'agent',
+        ownerId: 'opencode',
+        contentHash: 'race-hash',
+        content: item.content,
+        provenance: {},
+      });
+      return {
+        ok: true,
+        requestId: body.requestId,
+        capabilityVersion: 1,
+        status: 200,
+        degraded: false,
+        warnings: [],
+        data: {
+          results: [{
+            clientItemId: item.clientItemId,
+            status: 'created',
+            id: 'rec-completion-race',
+            type: 'episode',
+            kind: 'observation',
+            domain: 'agent:opencode',
+          }],
+          created: 1,
+          duplicates: 0,
+          failed: 0,
+          partial: false,
+        },
+      } as any;
+    });
+
+    const completion = service.completeExtraction(pending.data.extraction.id, [{
+      kind: 'observation',
+      content: { content: '等待回填的证据' },
+    }]);
+    await writeStarted;
+    clock += 1_001;
+    let maintenanceDone = false;
+    const maintenance = local.runMaintenance({
+      now: clock,
+      beforeStagingCleanup: (ids) => service.expireStagingDependencies(ids),
+    }).finally(() => { maintenanceDone = true; });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(maintenanceDone).toBe(false);
+    expect(await local.store.listStagingChunks({ includeExpired: true })).toHaveLength(1);
+
+    releaseWrite();
+    const completed = await completion;
+    await maintenance;
+    expect(completed.extraction.status).toBe('completed');
+    expect((await service.getExtraction(pending.data.extraction.id))?.status).toBe('completed');
+    expect(fake.details).toHaveLength(1);
+    expect(await local.outbox.stats()).toMatchObject({ items: 0 });
+  });
+
+  it('capability 配额淘汰后经真实 client HTTP 路径立即失效 Detail cache', async () => {
+    const { service, fake, local } = await setup();
+    await local.putCachedDetail('detail-evicted-by-quota', {
+      detail: { text: 'old cached detail', expiresAt: 0, availability: ['available'] },
+    });
+    fake.setDetailEvicted(['detail-evicted-by-quota']);
+
     await service.ingest({ requestId: 'req_quota_cache_invalidation', ...preferenceRequest() });
     expect(await local.getCachedDetail('detail-evicted-by-quota')).toBeNull();
+    expect(fake.detailRequests).toHaveLength(1);
   });
 
   it('staging 配额淘汰也立即使依赖抽取 failed', async () => {

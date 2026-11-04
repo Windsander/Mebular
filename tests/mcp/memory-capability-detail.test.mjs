@@ -769,6 +769,7 @@ describe('保留、过期与配额', () => {
     expect(third.body.warnings).toEqual(expect.arrayContaining([
       expect.objectContaining({ code: 'detail_quota_evicted', ids: expect.arrayContaining([firstId]) }),
     ]));
+    expect(third.body.data.evicted).toEqual(expect.arrayContaining([firstId]));
     const firstNode = await detailNode(firstId);
     expect(firstNode.deletedAt).toBeGreaterThan(0);
     expect(firstNode.metadata.deletedReason).toBe('quota_evicted');

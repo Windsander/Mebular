@@ -503,7 +503,9 @@ export class IngestService {
     this.now = options.now ?? Date.now;
     this.idempotencyTtlMs = options.idempotencyTtlMs ?? IDEMPOTENCY_TTL_MS;
     this.extractionTtlMs = options.extractionTtlMs ?? EXTRACTION_TTL_MS;
-    this.local.setStagingDependencyHandler((ids) => this.expireStagingDependencies(ids));
+    // putStagingChunk 已在 ingest chain 内；只能使用 unlocked 变体避免 self-chain 死锁。
+    this.local.setStagingDependencyHandler((ids) => this.expireStagingDependenciesUnlocked(ids));
+    this.local.setMaintenanceDependencyHandler((ids) => this.expireStagingDependencies(ids));
   }
 
   get isDegraded(): boolean {
@@ -868,7 +870,7 @@ export class IngestService {
       context,
       warnings,
     });
-    if (outcome.records.length > 0 && detailOutcome.queued === 0
+    if (outcome.records.length > 0 && !outcome.queued && detailOutcome.queued === 0
       && detailOutcome.failed === 0 && stagingChunkIds.length > 0) {
       await this.clearStaging(stagingChunkIds, warnings);
     } else if (outcome.records.length === 0 && !outcome.queued
@@ -1019,7 +1021,7 @@ export class IngestService {
         },
         warnings,
       });
-      if (outcome.records.length > 0 && detailOutcome.queued === 0
+      if (outcome.records.length > 0 && !outcome.queued && detailOutcome.queued === 0
         && detailOutcome.failed === 0 && extraction.stagingChunkIds.length > 0) {
         await this.clearStaging(extraction.stagingChunkIds, warnings);
       } else if (outcome.records.length === 0 && !outcome.queued
@@ -1074,7 +1076,7 @@ export class IngestService {
       const status = typeof result.status === 'string' ? result.status : 'failed';
       const id = typeof result.id === 'string' ? result.id : '';
       if ((status === 'created' || status === 'duplicate') && id.length > 0) {
-        await this.cacheDetail(id, result, items);
+        if (status === 'created') await this.cacheDetail(id, result, items);
         continue;
       }
       if (result.retryable === true || result.code === 'detail_quota_exceeded') retryableFailure = true;
@@ -1364,7 +1366,10 @@ export class IngestService {
     const result = new Map<string, CandidateEvidence>();
     if (!Array.isArray(rawCandidates)) return result;
     const chunkIds = new Set(chunks.map((chunk) => chunk.id));
-    const messageIds = new Set(this.messageIdsOf(chunks));
+    // provenance 的 64 条展示上限不能截断 100 个 chunk 的证据校验。
+    const messageIds = new Set(chunks
+      .map((chunk) => chunk.messageId)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0));
     for (const raw of rawCandidates) {
       if (!isObject(raw)) continue;
       let normalized: ReturnType<typeof normalizeCandidate>;
@@ -1768,14 +1773,24 @@ export class IngestService {
           { requestId, actor, items: batch },
           { idempotencyKey: requestId },
         );
+        const data: Record<string, unknown> = isObject(response.data) ? response.data : {};
+        const evictedIds = new Set<string>();
+        if (Array.isArray(data.evicted)) {
+          for (const id of data.evicted) {
+            if (typeof id === 'string') evictedIds.add(id);
+          }
+        }
+        // 兼容旧 capability 的结构化 warning；新版以 data.evicted 穿过精简 client。
         const capabilityWarnings = response.warnings as unknown as unknown[];
         for (const warning of capabilityWarnings) {
           if (!isObject(warning) || warning.code !== 'detail_quota_evicted' || !Array.isArray(warning.ids)) continue;
           for (const id of warning.ids) {
-            if (typeof id === 'string') await this.local.invalidateCachedDetail(id).catch(() => false);
+            if (typeof id === 'string') evictedIds.add(id);
           }
         }
-        const data: Record<string, unknown> = isObject(response.data) ? response.data : {};
+        for (const id of evictedIds) {
+          await this.local.invalidateCachedDetail(id).catch(() => false);
+        }
         const results = Array.isArray(data.results) ? data.results : [];
         const failedItems: CapabilityDetailWriteItem[] = [];
         for (const result of results) {
@@ -1784,9 +1799,13 @@ export class IngestService {
           const id = typeof result.id === 'string' ? result.id : '';
           if ((status === 'created' || status === 'duplicate') && id.length > 0) {
             if (!outcome.ids.includes(id)) outcome.ids.push(id);
-            if (status === 'created') outcome.written += 1;
-            else outcome.duplicates += 1;
-            await this.cacheDetail(id, result, batch);
+            if (status === 'created') {
+              outcome.written += 1;
+              await this.cacheDetail(id, result, batch);
+            } else {
+              // duplicate 的权威 expiry/recordIds 可能不同；当前请求不能覆盖现有缓存。
+              outcome.duplicates += 1;
+            }
             continue;
           }
           const code = typeof result.code === 'string' ? result.code : 'detail_write_failed';
@@ -2135,12 +2154,15 @@ export class IngestService {
     return failed;
   }
 
-  /** TTL/配额物理删除 staging 前后调用：pending 抽取必须有显式终态。 */
+  /** 外部维护与 completeExtraction 串行，不能在 I/O 中途删除证据或覆盖最终状态。 */
   async expireStagingDependencies(ids: readonly string[]): Promise<void> {
     if (ids.length === 0) return;
+    await this.chain(() => this.expireStagingDependenciesUnlocked(ids));
+  }
+
+  /** ingest chain 内的配额淘汰使用；调用方已经持有顺序保证。 */
+  private async expireStagingDependenciesUnlocked(ids: readonly string[]): Promise<void> {
     const expired = new Set(ids);
-    // 可能正运行在 ingest 的写盘链内；不能再 self-chain 造成死锁。
-    // JsonCache 自身串行化写入，completeExtraction 也会再次核对 staging 完整性。
     const entries = await this.local.cache.list<StoredExtraction>('extraction:v1:');
     for (const entry of entries) {
       const extraction = entry.value;

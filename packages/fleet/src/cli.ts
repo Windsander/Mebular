@@ -20,6 +20,7 @@ import {
 import { echoResultFor, EchoExecutor, ExecutionLog } from './runtime/executor.js';
 import { FleetNode } from './runtime/node.js';
 import { FleetWorker } from './runtime/worker.js';
+import { CapabilityCardPublisher } from './runtime/card-publisher.js';
 import { FileTaskEventStore } from './store/file-store.js';
 import { MebularTaskEventStore } from './store/mebular-store.js';
 import { DaemonTaskEventStore } from './store/daemon-store.js';
@@ -530,6 +531,11 @@ async function runFleetNode(args: Args): Promise<number> {
     console.log(JSON.stringify({ role: 'node', event: 'join-service', endpoint: `http://${bind}:${joinService.port}`, port: joinService.port }));
   }
   const node = new FleetNode({ device: config.device, store, transport: new NullTransport(), quota: new LocalQuota({ limitPerDevice: config.quotaLimitPerDevice ?? 1_000_000 }) });
+  const cardPublisher = mebular !== null
+    ? new CapabilityCardPublisher({ mebular, config, log: (message) => console.error(message) })
+    : null;
+  if (cardPublisher !== null) await cardPublisher.publish();
+  else console.error('[fleet:caps] skipped: daemon store mode has no local Mebular identity handle');
   const submit = num(args.submit, 0);
   let code = 0;
   if (submit > 0) {
@@ -570,6 +576,7 @@ async function runFleetNode(args: Args): Promise<number> {
     code = ok && done.length === ids.length && resultsMatch ? 0 : 1;
     if (runForever) {
       while (!shutdown.isStopping()) {
+        await cardPublisher?.tick();
         await sleep(200); // 常驻：保持在线供对端同步
       }
     } else {
@@ -578,6 +585,7 @@ async function runFleetNode(args: Args): Promise<number> {
     }
   } else if (runForever) {
     while (!shutdown.isStopping()) {
+      await cardPublisher?.tick();
       await sleep(200);
     }
   } else {
@@ -619,11 +627,19 @@ async function runFleetWorker(args: Args): Promise<number> {
     }
   }
   const log = await ExecutionLog.open(str(args['exec-log'], join(dir, 'exec.jsonl')));
-  const worker = new FleetWorker({ device: config.device, agent: str(args.agent, 'worker'), store, transport: new NullTransport(), registry: buildRegistry(config.agents), log });
+  const registry = buildRegistry(config.agents);
+  const cardPublisher = mebular !== null
+    ? new CapabilityCardPublisher({ mebular, config, registry, log: (message) => console.error(message) })
+    : null;
+  registry.onChange(() => cardPublisher?.onRegistryChange());
+  if (cardPublisher !== null) await cardPublisher.publish();
+  else console.error('[fleet:caps] skipped: daemon store mode has no local Mebular identity handle');
+  const worker = new FleetWorker({ device: config.device, agent: str(args.agent, 'worker'), store, transport: new NullTransport(), registry, log });
   await worker.reconcile();
   const deadline = Date.now() + num(args['timeout-ms'], 60_000);
   while (runForever ? !shutdown.isStopping() : Date.now() < deadline) {
     await worker.pollOnce();
+    await cardPublisher?.tick();
     await sleep(num(args['interval-ms'], 10));
   }
   console.log(JSON.stringify({ role: 'worker', device: config.device, executed: log.size() }));

@@ -18,6 +18,10 @@ import { LocalQuota } from './quota.js';
 import { deriveEdges } from './collab/dag.js';
 import { reduceTaskEvents, type TaskState } from './model.js';
 import { agentDirectoryStore, expandTargets } from './agentdir.js';
+import {
+  listCapabilityCards,
+  summarizeCapabilityCards,
+} from './cards.js';
 import type { TaskEvent, TaskEventType } from './protocol/events.js';
 import { EVENT_TO_STATUS } from './protocol/events.js';
 import { DEFAULT_ROOT_BUDGET, type TaskBudget, type TaskDispatch } from './protocol/envelope.js';
@@ -484,7 +488,23 @@ export const TASK_TOOLS: TaskTool[] = [
         }
         const entries = await agentDirectoryStore(session.mebular, 'agents').all();
         const targets = expandTargets(entries, subscribed);
-        return { ok: true, namespace: session.namespace, subscribed, targets };
+        const cardEntries = await listCapabilityCards(session.mebular, 'agents');
+        const states = await statesOf(session.store);
+        const inflight = new Map<string, number>();
+        for (const state of states) {
+          if (state.terminal) continue;
+          const key = `${state.to.device}\u0000${state.to.agent}`;
+          inflight.set(key, (inflight.get(key) ?? 0) + 1);
+        }
+        const cards = summarizeCapabilityCards(cardEntries, {
+          devices: subscribed,
+          online: (device) => {
+            const withPath = session.mebular as { getPeerPath?: (key: string) => unknown };
+            return typeof withPath.getPeerPath === 'function' ? withPath.getPeerPath(device) !== null : false;
+          },
+          inflight: (device, agent) => inflight.get(`${device}\u0000${agent}`) ?? 0,
+        });
+        return { ok: true, namespace: session.namespace, subscribed, targets, cards };
       } finally {
         await session.close();
       }

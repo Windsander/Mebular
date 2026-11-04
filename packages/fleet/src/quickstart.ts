@@ -27,6 +27,7 @@ import {
   type FleetEncryption,
 } from './config.js';
 import { mebularOptions, offlineMebularOptions, onboardDevice } from './onboard.js';
+import { AGENT_NAMESPACE } from './agentdir.js';
 import { activateJoinInvite, buildJoinToken } from './jointoken.js';
 
 /** 加入码内信任材料的记录形状（Stage 2 将由令牌取代）。 */
@@ -337,7 +338,7 @@ export async function configureDaemonHome(
     sync: {
       autoSync: true,
       pushOnWrite: true,
-      namespaces: [namespace],
+      namespaces: [...new Set([namespace, AGENT_NAMESPACE])],
       antiEntropy: { enabled: true, intervalMs: 600000, jitterRatio: 0.2 },
     },
     joinService: { enabled: true, bind: '0.0.0.0', port: joinPort },

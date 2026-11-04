@@ -6,9 +6,12 @@
 // `capacity`/`load` 为**建议性**（不参与授权与一致性判定）。
 
 import type { Mebular } from '@mebular/core';
+import type { FleetAgentConfig, FleetConfig } from './config.js';
 import { MebularMessageStore } from './store/message-store.js';
 
 export const AGENT_DIRECTORY_MESSAGE_TYPE = 'agent_directory';
+/** 每设备 Agent 目录 / 能力卡的普通分区（P1：能力卡为同分区 internal 节点）。 */
+export const AGENT_NAMESPACE = 'agents';
 
 export interface AgentDirectoryAgent {
   name: string;
@@ -68,7 +71,7 @@ export function validateAgentDirectory(input: unknown): AgentDirectoryValidation
 }
 
 /** 构造目录存储（校验 + 幂等键 `device@version`）。 */
-export function agentDirectoryStore(mebular: Mebular, namespace = 'agents'): MebularMessageStore<AgentDirectoryEntry> {
+export function agentDirectoryStore(mebular: Mebular, namespace = AGENT_NAMESPACE): MebularMessageStore<AgentDirectoryEntry> {
   return new MebularMessageStore<AgentDirectoryEntry>(mebular, {
     type: AGENT_DIRECTORY_MESSAGE_TYPE,
     namespace,
@@ -135,4 +138,83 @@ export function expandTargets(
     }
   }
   return targets;
+}
+
+// ---------------------------------------------------------------------------
+// P1：目录生成/发布（每设备一条，版本单调；同内容不重复发版）
+// ---------------------------------------------------------------------------
+
+function normalizeCapabilities(values: readonly string[] | undefined): string[] {
+  if (values === undefined) return [];
+  return [...new Set(values.map((value) => value.trim()).filter((value) => value.length > 0))].sort();
+}
+
+/** 由 fleet config 编译本机目录条目（只含标签/并发，不含 command/env）。 */
+export function compileAgentDirectory(
+  config: Pick<FleetConfig, 'device' | 'agents'>,
+  options: { version?: number; updatedAt?: number } = {},
+): AgentDirectoryEntry {
+  const agents: AgentDirectoryAgent[] = [...config.agents]
+    .filter((agent) => agent.name !== '')
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+    .map((agent: FleetAgentConfig) => ({
+      name: agent.name,
+      kind: agent.kind,
+      ...(agent.capabilities !== undefined && agent.capabilities.length > 0
+        ? { capabilities: normalizeCapabilities(agent.capabilities) }
+        : {}),
+      ...(agent.concurrency !== undefined ? { concurrency: agent.concurrency } : {}),
+    }));
+  return {
+    v: 1,
+    device: config.device,
+    agents,
+    updatedAt: options.updatedAt ?? Date.now(),
+    version: options.version ?? 1,
+  };
+}
+
+/** 目录内容指纹：忽略 `updatedAt`/`version`，同内容不重复发版。 */
+export function agentDirectoryFingerprint(entry: AgentDirectoryEntry): string {
+  return stable({
+    v: entry.v,
+    device: entry.device,
+    agents: entry.agents.map((agent) => ({
+      name: agent.name,
+      kind: agent.kind,
+      capabilities: agent.capabilities ?? [],
+      ...(agent.concurrency !== undefined ? { concurrency: agent.concurrency } : {}),
+      ...(agent.capacity !== undefined ? { capacity: agent.capacity } : {}),
+    })),
+  });
+}
+
+export interface AgentDirectoryPublishResult {
+  published: boolean;
+  version: number;
+  entry: AgentDirectoryEntry;
+}
+
+/** 发布日期目录：同设备版本单调；内容未变时返回现有版本（不写新节点）。 */
+export async function publishAgentDirectory(
+  mebular: Mebular,
+  config: Pick<FleetConfig, 'device' | 'agents'>,
+  options: { namespace?: string; now?: number } = {},
+): Promise<AgentDirectoryPublishResult> {
+  const store = agentDirectoryStore(mebular, options.namespace ?? AGENT_NAMESPACE);
+  const entries = await store.all();
+  const latest = latestDirectories(entries).find((entry) => entry.device === config.device) ?? null;
+  const candidate = compileAgentDirectory(config, {
+    ...(latest !== null ? { version: latest.version } : {}),
+    ...(options.now !== undefined ? { updatedAt: options.now } : {}),
+  });
+  if (latest !== null && agentDirectoryFingerprint(latest) === agentDirectoryFingerprint(candidate)) {
+    return { published: false, version: latest.version, entry: latest };
+  }
+  const entry: AgentDirectoryEntry = {
+    ...candidate,
+    version: latest === null ? 1 : latest.version + 1,
+  };
+  await store.append(entry);
+  return { published: true, version: entry.version, entry };
 }

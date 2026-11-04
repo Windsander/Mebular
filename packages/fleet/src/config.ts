@@ -7,6 +7,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { chmod, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { PLAN_SENTINEL } from './protocol/envelope.js';
 
 const SUBTLE = globalThis.crypto.subtle;
 
@@ -94,6 +95,11 @@ export interface FleetAgentConfig {
   baseArgs?: string[];
   timeoutMs?: number;
   concurrency?: number;
+  /**
+   * 可选能力标签（P1）：用于生成能力卡与路由硬过滤；旧配置不填仍完全有效。
+   * 只保存标签，不保存 command/env/凭据。
+   */
+  capabilities?: string[];
 }
 
 export interface FleetPeerConfig {
@@ -143,7 +149,15 @@ export function validateFleetConfig(input: unknown): string[] {
   for (const key of ['device', 'dir', 'storagePath', 'masterKeyFile', 'namespace', 'listen']) {
     if (typeof c[key] !== 'string' || (c[key] as string).length === 0) errors.push(`${key} 必须为非空字符串`);
   }
+  if (c.device === PLAN_SENTINEL) errors.push(`device 不得使用保留名 ${PLAN_SENTINEL}`);
   if (!Array.isArray(c.peers)) errors.push('peers 必须为数组');
+  else {
+    for (const peer of c.peers as Array<Record<string, unknown>>) {
+      if (typeof peer?.device !== 'string' || peer.device.length === 0) errors.push('peer.device 必须为非空字符串');
+      else if (peer.device === PLAN_SENTINEL) errors.push(`peer.device 不得使用保留名 ${PLAN_SENTINEL}`);
+      if (peer?.addr !== undefined && typeof peer.addr !== 'string') errors.push('peer.addr 非法');
+    }
+  }
   if (c.store !== undefined && c.store !== 'daemon' && c.store !== 'embedded') errors.push('store 必须为 daemon|embedded');
   if (c.daemon !== undefined) {
     const d = c.daemon as Record<string, unknown>;
@@ -160,11 +174,19 @@ export function validateFleetConfig(input: unknown): string[] {
   if (!Array.isArray(c.agents) || (c.agents as unknown[]).length === 0) errors.push('agents 必须为非空数组');
   for (const agent of (Array.isArray(c.agents) ? c.agents : []) as Array<Record<string, unknown>>) {
     if (typeof agent?.name !== 'string' || agent.name.length === 0) errors.push('agent.name 非法');
+    else if (agent.name === PLAN_SENTINEL) errors.push(`agent.name 不得使用保留名 ${PLAN_SENTINEL}`);
     if (!['echo', 'command', 'hermes', 'openchamber'].includes(String(agent?.kind))) {
       errors.push(`agent.kind 非法：${String(agent?.kind)}`);
     }
     if (agent?.kind === 'command' && (typeof agent.command !== 'string' || agent.command.length === 0)) {
       errors.push('command agent 需要 command');
+    }
+    if (agent?.capabilities !== undefined) {
+      if (!Array.isArray(agent.capabilities)) {
+        errors.push('agent.capabilities 若存在须为字符串数组');
+      } else if (agent.capabilities.some((capability) => typeof capability !== 'string' || capability.length === 0)) {
+        errors.push('agent.capabilities 若存在须为非空字符串数组');
+      }
     }
   }
   return errors;

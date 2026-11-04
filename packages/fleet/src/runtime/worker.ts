@@ -7,6 +7,7 @@
 
 import { randomUUID } from 'node:crypto';
 import type { FleetEndpoint } from '../protocol/envelope.js';
+import { PLAN_SENTINEL } from '../protocol/envelope.js';
 import type { TaskEvent } from '../protocol/events.js';
 import { reduceTaskEvents, type TaskState } from '../model.js';
 import type { TaskEventStore } from '../store/file-store.js';
@@ -187,6 +188,8 @@ export class FleetWorker {
 
   /** 注册表模式：按设备职责认领（agent 由注册表解析）；单执行器模式：设备 + agent 匹配。 */
   private targetsMe(state: TaskState): boolean {
+    // P1/G1：root plan task 的保留 sentinel 必须显式跳过——不执行、不写 failed/UNKNOWN_AGENT。
+    if (state.to.device === PLAN_SENTINEL || state.to.agent === PLAN_SENTINEL) return false;
     if (state.to.device !== this.endpoint.device) return false;
     if (this.registry !== null) return true;
     return state.to.agent === this.endpoint.agent || state.to.agent === '*';

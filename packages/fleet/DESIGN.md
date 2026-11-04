@@ -38,6 +38,7 @@
 ### 2.5.2 每设备 Agent 目录 + 工具面
 
 - **目录**（普通记忆域，默认 `agents`）：每设备一条**签名**记录 `{device, agents:[{name,kind,capabilities?,concurrency,capacity?}], updatedAt, version}`；`task_targets = 订阅任务域的对端 ∩ 其目录 (device,agent)`；`capacity/load` 为**建议性**，不参与授权/一致性。
+- **能力卡（P1）**（同 `agents` 域，internal 记忆节点）：`metadata.internal=true` + `internalObject.kind="agent_capability_card"`；由 config 的 optional `capabilities`、ExecutorRegistry、运行环境编译，设备签名、版本单调、agent 移除发 tombstone。卡片只含标签/限制/工具名，不含 command/env/凭据/原始对话。默认记忆列表、域计数、搜索、图遍历与 fleet SSE 都不返回能力卡；`task_targets` 只额外返回 `cards` 摘要，旧 `targets` 字段与顺序不变。
 - **工具面（MCP 与 CLI 能力完全一致）**：任务工具经**统一 MCP 入口**暴露（`mebular mcp` / HTTP `/mcp`，与记忆面同一入口；
   `fleet mcp` 已删除）+ 等价子命令 `fleet task_*` / `mebular task_*`；对照见下表。
 

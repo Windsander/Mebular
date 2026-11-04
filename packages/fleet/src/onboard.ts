@@ -36,6 +36,7 @@ import {
   type OnboardResult,
 } from './config.js';
 import { CommandAgent, ExecutorRegistry, HermesAgent } from './runtime/agent.js';
+import { AGENT_NAMESPACE } from './agentdir.js';
 import { HttpOpenChamberSeam } from './runtime/openchamber-http.js';
 import { OpenChamberAgent } from './runtime/openchamber.js';
 import { EchoExecutor } from './runtime/executor.js';
@@ -87,7 +88,8 @@ export function mebularOptions(config: FleetConfig, encryption: FleetEncryption)
       autoSync: true,
       pushOnWrite: true,
       pushOnWriteThrottleMs: 20,
-      namespaces: [config.namespace],
+      // `agents` 域承载每设备 Agent 目录与能力卡（P1）：必须随任务域一起同步。
+      namespaces: [...new Set([config.namespace, AGENT_NAMESPACE])],
       antiEntropy: { enabled: true, intervalMs: 600_000, jitterRatio: 0.2 },
     },
   };

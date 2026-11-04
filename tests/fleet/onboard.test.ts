@@ -191,7 +191,7 @@ describe('doctor：peer/同步/身份链 与注册表/选项', () => {
     const cfg = await loadFleetConfig(fleetConfigPath(dir));
     const enc = await readMasterKeyFile(cfg.masterKeyFile);
     const opts = mebularOptions(cfg, enc) as { sync: { namespaces: string[] } };
-    expect(opts.sync.namespaces).toEqual(['tasks']);
+    expect(opts.sync.namespaces).toEqual(['tasks', 'agents']);
   });
 
   it('peer 可达：对端监听 → PASS；不可达 → FAIL', async () => {

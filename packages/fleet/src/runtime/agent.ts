@@ -17,13 +17,27 @@ import type { ExecutionOutcome, TaskExecutor } from './executor.js';
 /** 按 agent 名字选择执行器；**未知 agent 返回 null**（调用方须显式失败，不得静默回退）。 */
 export class ExecutorRegistry {
   private readonly exact = new Map<string, TaskExecutor>();
+  private readonly listeners = new Set<(agent: string) => void>();
   private wildcard: TaskExecutor | null = null;
 
   /** 注册某 agent 名；`'*'` 为通配（仅匹配 `to.agent === '*'`）。 */
   register(agent: string, executor: TaskExecutor): this {
     if (agent === '*') this.wildcard = executor;
     else this.exact.set(agent, executor);
+    for (const listener of this.listeners) {
+      try {
+        listener(agent);
+      } catch {
+        // 监听方失败不得影响注册（能力卡发布是旁路）。
+      }
+    }
     return this;
+  }
+
+  /** 注册变化监听（P1：能力卡自动发布）；返回退订函数。 */
+  onChange(listener: (agent: string) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
   }
 
   resolve(agent: string): TaskExecutor | null {

@@ -63,6 +63,13 @@ interface SubscriptionsReply {
   namespaces?: unknown;
 }
 
+interface PeersReply {
+  ok: boolean;
+  error?: string;
+  message?: string;
+  peers?: Array<{ device?: unknown; publicKeyHex?: unknown }>;
+}
+
 export interface DaemonAgentBackendOptions {
   endpoint: string;
   token?: string;
@@ -109,6 +116,7 @@ export class DaemonAgentBackend implements CapabilityCardBackend, AgentDirectory
 
   async listCards(): Promise<AgentCapabilityCard[]> {
     const cards: AgentCapabilityCard[] = [];
+    const peerKeys = await this.listPeerPublicKeys().catch(() => new Map<string, string>());
     for (const node of await this.listNodes('agent_capability_card')) {
       if (node.metadata?.internal !== true) continue;
       const internalObject = node.metadata.internalObject;
@@ -117,12 +125,38 @@ export class DaemonAgentBackend implements CapabilityCardBackend, AgentDirectory
       if (!validateAgentCapabilityCard(node.content).ok) continue;
       const card = node.content as AgentCapabilityCard;
       if (node.createdBy !== card.device) continue;
-      const publicKey = this.publicKeyFor?.(card.device);
+      const publicKey = this.publicKeyFor?.(card.device) ?? peerKeys.get(card.device);
       if (publicKey === undefined) continue;
       if (!(await verifyAgentCapabilityCardSignature(card, publicKey))) continue;
       cards.push(card);
     }
     return cards;
+  }
+
+  /**
+   * P6：守护内部 `/app/peers` 只返回 sync 已认证在线的 peer（deviceId + Ed25519 公钥）。
+   * 旧守护无此端点时返回空集合，保持“只信任本机公钥”的 fail-closed 行为。
+   */
+  private async listPeerKeys(): Promise<Array<{ device: string; publicKeyHex: string }>> {
+    const url = `${this.endpoint}/app/peers`;
+    const { status, json } = await requestDaemonJson<PeersReply>(url, 'GET', this.token, undefined, this.timeoutMs);
+    if (status !== 200 || json.ok !== true) return [];
+    const out: Array<{ device: string; publicKeyHex: string }> = [];
+    for (const peer of json.peers ?? []) {
+      if (typeof peer?.device !== 'string' || peer.device.length === 0) continue;
+      if (typeof peer.publicKeyHex !== 'string' || !/^[0-9a-f]{64}$/i.test(peer.publicKeyHex)) continue;
+      out.push({ device: peer.device, publicKeyHex: peer.publicKeyHex });
+    }
+    return out;
+  }
+
+  private async listPeerPublicKeys(): Promise<Map<string, string>> {
+    return new Map((await this.listPeerKeys()).map((peer) => [peer.device, peer.publicKeyHex]));
+  }
+
+  /** P6：已认证在线设备（不含本机；由路由 provider 合并 local device）。 */
+  async listOnlineDevices(): Promise<string[]> {
+    return [...new Set((await this.listPeerKeys()).map((peer) => peer.device))].sort();
   }
 
   /** 只读订阅查询：`GET /app/policy/subscriptions?device=`；失败抛错，由路由层 fail-closed。 */

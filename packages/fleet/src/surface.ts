@@ -179,7 +179,7 @@ function planStoreOf(session: Session): TaskPlanWriteStore {
   return session.planStore;
 }
 
-/** P3：daemon 模式复用 P1 卡片后端；无远端公钥时只信任本机（远端 fail-closed）。 */
+/** P3/P6：daemon 模式复用 P1 卡片后端；远端卡用 `/app/peers` 的已认证在线公钥验签。 */
 function routingProviderFor(session: Session): PlanRoutingProvider | null {
   if (session.mebular !== null) {
     return embeddedRoutingProvider({
@@ -211,6 +211,7 @@ function routingProviderFor(session: Session): PlanRoutingProvider | null {
       config: session.config,
       store: session.store,
       roleCards: () => roleCards.list(),
+      onlineDevices: () => backend.listOnlineDevices(),
     });
   }
   return null;
@@ -240,11 +241,22 @@ async function routeHintsForPlan(
       const step = entry.step;
       if (step.kind !== 'task' && step.kind !== 'join' && step.kind !== 'reduce') continue;
       if (step.to === undefined && step.route === undefined) continue;
-      if (entry.taskId !== undefined || entry.via === 'reuse' || entry.failed) continue;
-      const ready = entry.status === 'pending' && (entry.blockedBy === undefined || entry.blockedBy.length === 0);
-      const policyBlocked = entry.status === 'blocked' && entry.step.to !== undefined;
-      if (!ready && !policyBlocked) continue;
+      if (entry.via === 'reuse' || entry.failed) continue;
+      const materialized = entry.taskId !== undefined;
+      if (!materialized) {
+        const ready = entry.status === 'pending' && (entry.blockedBy === undefined || entry.blockedBy.length === 0);
+        const policyBlocked = entry.status === 'blocked' && entry.step.to !== undefined;
+        if (!ready && !policyBlocked) continue;
+      }
       const decision = resolvePlanStepRoute(plan, step, routeInputFromContext(context));
+      if (materialized) {
+        // P6：已物化步骤只做 additive 审计，用当前确定性 route 解释为什么当初会选中该目标；
+        // 不改变既有 status/taskId，也不把 intent/原文写进 why。
+        if (decision.decision === 'assigned') {
+          hints.push({ stepId: step.stepId, code: decision.why.code, why: decision.why });
+        }
+        continue;
+      }
       if (decision.decision === 'assigned') continue;
       hints.push({
         stepId: step.stepId,

@@ -88,6 +88,8 @@ export interface DaemonRoutingProviderOptions {
   store: TaskEventStore;
   /** daemon 模式下没有 sync peer 视图；调用方可注入本机已知在线集合。 */
   online?: (device: string) => boolean;
+  /** P6：守护内部 `/app/peers` 的已认证在线设备；与 local device 合并后参与软排序。 */
+  onlineDevices?: () => Promise<readonly string[]>;
   /** P5：`/app/role-cards` 只读角色卡（author/schema 已过滤）。 */
   roleCards?: () => Promise<readonly AgentRoleCard[]>;
   /** P5：默认 shadow；显式 enabled 才允许软排序。 */
@@ -126,6 +128,21 @@ export function daemonRoutingProvider(options: DaemonRoutingProviderOptions): Pl
       return { devices: [...devices].sort() };
     },
     online: (device: string): boolean => device === config.device || (options.online?.(device) ?? false),
+    ...(options.onlineDevices !== undefined
+      ? {
+          onlineDevices: async (): Promise<readonly string[]> => {
+            const devices = new Set<string>([config.device]);
+            try {
+              for (const device of await options.onlineDevices!()) {
+                if (typeof device === 'string' && device.length > 0) devices.add(device);
+              }
+            } catch {
+              // /app/peers 读取失败：只保留本机在线，远端 fail-closed。
+            }
+            return [...devices].sort();
+          },
+        }
+      : {}),
     observations: async (): Promise<readonly RouteObservation[]> =>
       observeRouteOutcomes(await store.all(), { window: options.window }),
   };

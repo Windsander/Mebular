@@ -175,6 +175,11 @@ export interface PlanRoutingProvider {
   roleCardMode?: RouteRoleCardMode;
   authorized(): Promise<RouteAuthorization> | RouteAuthorization;
   online?(device: string): boolean;
+  /**
+   * P6：daemon 模式的在线集合来自守护内部 `/app/peers`（已认证在线 peer）。
+   * 提供时优先于同步 `online` 回调；读取失败按空集 fail-closed。
+   */
+  onlineDevices?(): Promise<readonly string[]>;
   observations?(): Promise<readonly RouteObservation[]> | readonly RouteObservation[];
   namespace?: string;
   capacity?(device: string, agent: string): number | undefined;
@@ -801,8 +806,16 @@ export async function loadRouteContext(
   }
   // 非阻塞硬化：provider 的 online/capacity 是外部回调；任何异常都按 fail-closed 处理，
   // 不让单个坏回调打断整轮 materializer tick。
+  let onlineDevices: ReadonlySet<string> | undefined;
+  try {
+    const loaded = await provider.onlineDevices?.();
+    if (loaded !== undefined) onlineDevices = new Set(loaded);
+  } catch {
+    onlineDevices = new Set();
+  }
   const safeOnline = (device: string): boolean => {
     try {
+      if (onlineDevices !== undefined) return onlineDevices.has(device);
       return provider.online?.(device) ?? false;
     } catch {
       return false;

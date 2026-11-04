@@ -366,6 +366,52 @@ describe('P5 daemon /app/role-cards', () => {
     expect(JSON.stringify(replay.body)).not.toContain('sk-live-999');
   });
 
+  it('P6：旧卡/远端旧卡 GET 读时重建 summary；自由文本 agent/provenance 被拒', async () => {
+    const legacy = roleCard({
+      agent: 'legacy-read-p6',
+      summary: 'RAW DIALOGUE: full transcript TOKEN=sk-live-legacy',
+      version: 1,
+    });
+    const node = await app.graph.createNode('agent_role_card', legacy, [], {
+      namespace: 'agents',
+      metadata: { internal: true, internalObject: { kind: 'agent_role_card' } },
+    });
+    await app.graph.updateNode(node.id, { createdBy: 'device-A' });
+
+    const listed = await request('/app/role-cards?namespace=agents&agent=legacy-read-p6');
+    expect(listed.status).toBe(200);
+    expect(listed.body.cards).toHaveLength(1);
+    expect(listed.body.cards[0].summary).toBe(
+      fleet.sanitizeAgentRoleCardForWrite(listed.body.cards[0]).summary,
+    );
+    expect(JSON.stringify(listed.body)).not.toContain('RAW DIALOGUE');
+    expect(JSON.stringify(listed.body)).not.toContain('sk-live-legacy');
+
+    const daemonStore = new fleet.DaemonRoleCardStore({ endpoint: base, namespace: 'agents' });
+    const cards = await daemonStore.list();
+    expect(JSON.stringify(cards)).not.toContain('RAW DIALOGUE');
+    expect(cards.find((card) => card.agent === 'legacy-read-p6').summary).not.toContain('RAW DIALOGUE');
+
+    const freeTextAgent = await request('/app/role-cards', {
+      method: 'POST',
+      body: { card: roleCard({ agent: 'worker with spaces', version: 9 }) },
+    });
+    expect(freeTextAgent.status).toBe(422);
+    expect(freeTextAgent.body.error).toBe('role_card_invalid');
+
+    const freeTextSource = await request('/app/role-cards', {
+      method: 'POST',
+      body: {
+        card: roleCard({
+          agent: 'free-text-source-p6',
+          provenance: { ...roleCard().provenance, source: 'RAW DIALOGUE SOURCE' },
+        }),
+      },
+    });
+    expect(freeTextSource.status).toBe(422);
+    expect(freeTextSource.body.error).toBe('role_card_invalid');
+  });
+
   it('daemon 端点需要 bearer token / memory.write scope', async () => {
     const authHome = await mkdtemp(join(tmpdir(), 'fleet-daemon-role-cards-auth-'));
     const tokensFile = join(authHome, 'tokens.json');

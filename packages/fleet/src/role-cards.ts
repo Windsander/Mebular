@@ -158,6 +158,14 @@ const MAX_TAG_LENGTH = 64;
 const MAX_EVIDENCE_ID_LENGTH = 256;
 const MAX_LIST_LENGTH = 32;
 
+/**
+ * P6 硬化：agent / provenance 不是自由文本。只接受安全 token（无空白/路径/URL/引号/
+ * 原始对话），避免旧卡或远端卡把命令、环境变量或摘要原文藏在身份字段里。
+ */
+const ROLE_CARD_AGENT_RE = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$/;
+const ROLE_CARD_SOURCE_RE = /^[a-z][a-z0-9+._-]{0,127}$/;
+const ROLE_CARD_GENERATOR_RE = /^[a-z][a-z0-9._-]{0,63}$/;
+
 export interface RoleCardTrait {
   tag: string;
   confidence: number;
@@ -363,6 +371,7 @@ export function validateAgentRoleCard(input: unknown): RoleCardValidation {
   else if (card.device === PLAN_SENTINEL) errors.push(`device 不得使用保留名 ${PLAN_SENTINEL}`);
   if (!boundedString(card.agent, 128)) errors.push('agent 必须为非空短字符串');
   else if (card.agent === PLAN_SENTINEL) errors.push(`agent 不得使用保留名 ${PLAN_SENTINEL}`);
+  else if (!ROLE_CARD_AGENT_RE.test(card.agent)) errors.push('agent 必须为安全 token（字母数字开头，仅 ._:@-）');
   if (!Number.isInteger(card.version) || (card.version as number) < 0) errors.push('version 必须为非负整数');
   if (!boundedString(card.summary, MAX_SUMMARY_LENGTH) || /[\u0000-\u001f\u007f]/.test(card.summary)) {
     errors.push(`summary 必须为不含控制字符的非空短字符串（<=${MAX_SUMMARY_LENGTH}）`);
@@ -398,7 +407,11 @@ export function validateAgentRoleCard(input: unknown): RoleCardValidation {
   } else {
     scanUnknownKeys(card.provenance, PROVENANCE_KEYS, 'provenance', errors);
     for (const key of ['source', 'generator']) {
-      if (!boundedString(card.provenance[key], 128)) errors.push(`provenance.${key} 必须为非空短字符串`);
+      const value = card.provenance[key];
+      const pattern = key === 'source' ? ROLE_CARD_SOURCE_RE : ROLE_CARD_GENERATOR_RE;
+      if (!boundedString(value, 128) || !pattern.test(value)) {
+        errors.push(`provenance.${key} 必须为安全 token（无空白/路径/引号/原文）`);
+      }
     }
     if (!Number.isInteger(card.provenance.sampleSize) || (card.provenance.sampleSize as number) < 0) {
       errors.push('provenance.sampleSize 必须为非负整数');
@@ -784,8 +797,8 @@ export function generateRoleCards(input: RoleCardGenerateInput): RoleCardDraft[]
   const agents = [...new Set(input.agents.filter((agent) => agent.length > 0 && agent !== PLAN_SENTINEL))].sort();
   const summaries = (input.summaries ?? []).filter((summary) => {
     if (!nonEmptyString(summary.id)) return false;
-    if (summary.device !== undefined && summary.device !== device) return false;
-    return true;
+    // P6：直接 summaries 也必须带 device 且严格等于本机；缺 device 不能归因给任意设备。
+    return summary.device === device;
   });
   const allSamples = collectRoleTaskSamples(input.events);
 
@@ -878,7 +891,9 @@ function validStoredCard(node: RoleCardNodeLike): AgentRoleCard | null {
   if (!validation.ok) return null;
   const card = node.content as AgentRoleCard;
   if (node.createdBy !== card.device) return null;
-  return card;
+  // P6：旧卡/远端旧卡也可能在写路径硬化前落盘；读取时一律按安全字段重建 summary，
+  // 不把历史 raw summary 暴露给 route/task_status/日志。
+  return sanitizeAgentRoleCardForWrite(card);
 }
 
 /** 读取角色卡节点：只返回 internal + schema 合法 + author 绑定（createdBy=device）的卡。 */

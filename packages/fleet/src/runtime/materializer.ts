@@ -265,8 +265,11 @@ export class PlanMaterializer {
 
   /**
    * 新版本接管后，旧版本不再推进：root 写 failed(SUPERSEDED_BY) 并清理未终态 step task。
-   * MR 唯一性优先：只要该 planId 已存在任何 MR task，就不在此处取消旧版本（避免撤销已提交/
-   * 进行中的 MR），由 MR 门禁统一等待/done/failed。
+   *
+   * MR 唯一性优先，但不能让旧 root 永久悬挂：
+   * - 旧版本拥有非终态 MR → 只等待，不清理（避免撤销已创建的 MR）。
+   * - 旧版本拥有终态 MR → 按 MR 回执把旧 root 收敛到 done/failed；已终态 MR 永不撤销。
+   * - 旧版本没有 MR（或从未创建 root）→ 补建缺失 root 后写 SUPERSEDED_BY，并清理该版本。
    */
   private async finalizeOlderVersions(latest: TaskPlan, versions: readonly TaskPlan[]): Promise<void> {
     const older = versions
@@ -274,9 +277,54 @@ export class PlanMaterializer {
       .sort((a, b) => a.version - b.version);
     if (older.length === 0) return;
     const states = await statesOf(this.store);
-    if (planMrTaskRefs(latest.planId, [latest, ...versions], states).length > 0) return;
+    const mrRefs = planMrTaskRefs(latest.planId, [latest, ...versions], states);
     for (const plan of older) {
-      const rootState = states.find((state) => state.taskId === planRootTaskId(plan.planId, plan.version));
+      const rootTaskId = planRootTaskId(plan.planId, plan.version);
+      let rootState = states.find((state) => state.taskId === rootTaskId);
+      const mrStep = plan.steps.find((step) => step.kind === 'mr');
+      const mrRef = mrStep === undefined
+        ? undefined
+        : mrRefs.find((ref) => ref.version === plan.version);
+      if (mrRef !== undefined) {
+        if (rootState === undefined) {
+          try {
+            rootState = (await ensurePlanRootTask(plan, this.store, this.endpoint)).state ?? undefined;
+          } catch (error) {
+            if (error instanceof PlanValidationError) continue;
+            throw error;
+          }
+        }
+        // MR 是 root plan 的唯一完成回执；pending 时旧 root 必须保持 active 等待。
+        if (!mrRef.state.terminal) continue;
+        if (mrRef.state.status === 'done') {
+          const subtree = taskSubtreeCompletion(mrRef.taskId, states);
+          if (!subtree.complete) continue;
+          const accepted = !subtree.failed
+            && acceptancePasses(mrStep!.acceptance, mrRef.state.resultRef);
+          if (rootState !== undefined && !rootState.terminal) {
+            if (accepted) await this.appendRootEvent(rootState, 'done');
+            else await this.appendRootEvent(rootState, 'failed', 'MR_ACCEPTANCE_FAILED');
+          }
+          if (!accepted) await this.cleanupVersion(plan.planId, plan.version);
+          continue;
+        }
+        // MR terminal failed：不重试，旧 root 保留失败证据并清理残留非终态任务。
+        if (rootState !== undefined && !rootState.terminal) {
+          await this.appendRootEvent(rootState, 'failed', 'MR_FAILED');
+        }
+        await this.cleanupVersion(plan.planId, plan.version);
+        continue;
+      }
+
+      // 没有 MR 的旧版本：补建缺失 root（保留失败证据），再标记被新版本取代。
+      if (rootState === undefined) {
+        try {
+          rootState = (await ensurePlanRootTask(plan, this.store, this.endpoint)).state ?? undefined;
+        } catch (error) {
+          if (error instanceof PlanValidationError) continue;
+          throw error;
+        }
+      }
       if (rootState !== undefined && !rootState.terminal) {
         await this.appendRootEvent(rootState, 'failed', `SUPERSEDED_BY:${latest.version}`);
       }

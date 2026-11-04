@@ -8,6 +8,7 @@
 import { AGENT_NAMESPACE } from '../agentdir.js';
 import {
   RoleCardValidationError,
+  sanitizeAgentRoleCardForWrite,
   validateAgentRoleCard,
   type AgentRoleCard,
   type RoleCardAppendResult,
@@ -94,7 +95,7 @@ export class DaemonRoleCardStore implements RoleCardStore {
       if (!isRecord(internalObject) || internalObject.kind !== 'agent_role_card') continue;
       const validation = validateAgentRoleCard(node.content);
       if (!validation.ok) continue;
-      const card = node.content as AgentRoleCard;
+      const card = sanitizeAgentRoleCardForWrite(node.content as AgentRoleCard);
       // 作者绑定：daemon 返回 createdBy，必须等于卡片 device；否则不信任。
       if (node.createdBy !== card.device) continue;
       out.push({ card, nodeId: node.id, createdBy: node.createdBy });

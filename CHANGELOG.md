@@ -16,6 +16,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 The GitHub Release body is extracted from this file: everything between the release's
 `## [vX.Y.Z]` heading and the next `## [` heading. Keep that section self-contained.
 
+## [Unreleased]
+
+Fleet black-box task orchestration (P1–P6). Internal capability/role cards and immutable plans
+stay inside Fleet; the human Console and the 16 task methods keep their existing shape.
+
+### Added
+
+- **Capability cards** — device-signed `agent_capability_card` internal nodes compiled from fleet config, executor registry and runtime, with tombstone/version monotonicity and an internal daemon write/read path (`/app/capability-cards`, `/app/nodes`).
+- **Plan + materializer** — immutable, versioned `task_plan` internal nodes, deterministic root/step task IDs, DAG validation, idempotent materialization, restart recovery, and `task_status.plan` progress without new MCP methods or UI.
+- **Route + policy + why** — hard filters (authorization, policy, capability, payload, online, capacity), deterministic rendezvous tie-break, `NO_TARGET`/`blockedBy`, assign-only behavior, and an additive assigned-step route audit in `task_status.plan`.
+- **Join + MR gate** — `join.mode="all"` only, subtree/acceptance completion, exactly one MR per root plan, v2 retry with explicit `reuse`, plan/step cancel cascades, and `PLAN_RETRY_REQUIRED` for plan-owned tasks.
+- **Role cards (shadow)** — rule-first `agent_role_card` internal nodes with safety-tag allowlists, confidence/evidence refs, default shadow mode, and optional enabled soft ordering that never authorizes or hard-filters.
+- **Daemon internal verified-card read path** — `GET /app/peers` exposes only sync-authenticated online peer public keys, so a daemon coordinator can verify remote capability-card signatures; old daemons keep the previous fail-closed behavior.
+- **P6 acceptance script** — `npm run verify:fleet:p6` runs a five-node embedded loopback plan E2E (branches → join → pre-MR → MR → root) plus dual-daemon card sync/plan collaboration, with fault injection for duplicate delivery, restart, cancel and v2 retry.
+
+### Security and reliability
+
+- **Role-card read sanitization** — embedded, daemon and remote legacy cards rebuild `summary` on read; `agent` and `provenance` accept only safe tokens; direct summary providers must match the local device.
+- **Superseded-version finalization** — old roots are finalized instead of dangling: missing roots are recreated with `SUPERSEDED_BY`, pending MRs are never withdrawn, and terminal MR receipts converge old/current roots deterministically.
+- **MR/cancel semantics hardened** — pending MR cancel is covered, terminal MRs are never withdrawn, and concurrent materializers converge on one logical MR via deterministic event IDs.
+- **No new human UI or MCP methods** — navigation/pages/settings are unchanged; plan/card/role stay out of memory lists, domain counts, search and the star-map fleet SSE.
+
+### Verification
+
+- **P6 evidence** — [0.3.0 Fleet orchestration P6 E2E and regression evidence](docs/quality/0.3.0-fleet-orchestration-e2e.md) records the 21/21 `verify:fleet:p6` run, full Jest results, Console UI smoke, daemon verified-card path and explicit known limits.
+
 ## [v0.3.0] - 2026-10-30
 
 Memory Runtime release. Mebular can now run recall, extraction, compaction and task

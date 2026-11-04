@@ -183,6 +183,7 @@
         "kind": "join",
         "intent": "等待两个实现分支并汇合结果",
         "dependsOn": ["build-api", "build-ui"],
+        "to": { "device": "device-B", "agent": "worker" },
         "join": { "mode": "all" },
         "acceptance": { "kind": "non-empty-result" }
       },
@@ -191,6 +192,7 @@
         "kind": "reduce",
         "intent": "pre-MR gate：校验分支验收并组装 MR 载荷",
         "dependsOn": ["join"],
+        "to": { "device": "device-B", "agent": "worker" },
         "join": { "mode": "all" },
         "acceptance": { "kind": "contains", "all": ["GATE_OK"] }
       },
@@ -256,6 +258,7 @@
         "kind": "join",
         "intent": "等待两个实现分支并汇合结果",
         "dependsOn": ["build-api", "build-ui"],
+        "to": { "device": "device-B", "agent": "worker" },
         "join": { "mode": "all" },
         "acceptance": { "kind": "non-empty-result" }
       },
@@ -264,6 +267,7 @@
         "kind": "reduce",
         "intent": "pre-MR gate：校验分支验收并组装 MR 载荷",
         "dependsOn": ["join"],
+        "to": { "device": "device-B", "agent": "worker" },
         "join": { "mode": "all" },
         "acceptance": { "kind": "contains", "all": ["GATE_OK"] }
       },
@@ -296,7 +300,7 @@
       },
       "steps": [
         { "stepId": "delegate", "kind": "task", "intent": "派生并等待子 plan", "dependsOn": [], "to": { "device": "device-B", "agent": "worker" }, "acceptance": { "kind": "non-empty-result" } },
-        { "stepId": "pre-mr", "kind": "reduce", "intent": "父 plan pre-MR gate", "dependsOn": ["delegate"], "join": { "mode": "all" }, "acceptance": { "kind": "non-empty-result" } },
+        { "stepId": "pre-mr", "kind": "reduce", "intent": "父 plan pre-MR gate", "dependsOn": ["delegate"], "to": { "device": "device-B", "agent": "worker" }, "join": { "mode": "all" }, "acceptance": { "kind": "non-empty-result" } },
         { "stepId": "mr", "kind": "mr", "intent": "父 plan 唯一 MR", "dependsOn": ["pre-mr"], "acceptance": { "kind": "mr-once" } }
       ]
     },

@@ -4158,6 +4158,31 @@ export async function startHttpServer({
             multiaddrs: app.node?.getLocalMultiaddrs?.() ?? [],
           });
         }
+        // P6：守护内部已验证在线 peer 公钥（loopback + memory.read）。
+        // 只来自 sync 握手登记的在线 peer，绝不回退 config.peers 地址簿；
+        // 供 daemon fleet 校验远端能力卡签名，补足无本地 Mebular 句柄的读路径。
+        if (path === '/app/peers' && req.method === 'GET') {
+          const peers = [];
+          try {
+            const sync = app?.sync;
+            if (sync && typeof sync.getOnlinePeers === 'function') {
+              for (const peer of sync.getOnlinePeers()) {
+                const key = typeof sync.getPeerPublicKey === 'function'
+                  ? sync.getPeerPublicKey(peer.deviceId)
+                  : undefined;
+                if (key === undefined) continue;
+                peers.push({
+                  device: peer.deviceId,
+                  peerId: typeof peer.peerId === 'string' ? peer.peerId : null,
+                  publicKeyHex: Buffer.from(key).toString('hex'),
+                });
+              }
+            }
+          } catch {
+            // 同步未启用/未就绪：返回空集合；调用方 fail-closed。
+          }
+          return sendJson(res, 200, { ok: true, count: peers.length, peers });
+        }
         if (path === '/app/namespaces' && req.method === 'GET') {
           const stats = service && typeof service.stats === 'function' ? await service.stats() : null;
           const namespaces = stats

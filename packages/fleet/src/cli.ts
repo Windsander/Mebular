@@ -548,8 +548,14 @@ function routingFor(
       ...(daemon.token !== undefined ? { token: daemon.token } : {}),
       ...(daemon.tokenFile !== undefined ? { tokenFile: daemon.tokenFile } : {}),
     });
-    console.error('[fleet:route] daemon mode: remote capability cards may be unverifiable; remote route targets fail closed (P6 dual-daemon E2E risk)');
-    return daemonRoutingProvider({ backend, config, store, roleCards: () => roleCards.list() });
+    console.error('[fleet:route] daemon mode: remote cards use /app/peers verified online keys; unverifiable targets fail closed');
+    return daemonRoutingProvider({
+      backend,
+      config,
+      store,
+      roleCards: () => roleCards.list(),
+      onlineDevices: () => backend.listOnlineDevices(),
+    });
   }
   return undefined;
 }

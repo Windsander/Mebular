@@ -248,6 +248,11 @@ describe('P3 三机 capability route E2E', () => {
       expect(status.ok).toBe(true);
       expect(status.plan.steps.find((step) => step.stepId === 'api')).toMatchObject({ status: 'done' });
       expect(status.plan.steps.find((step) => step.stepId === 'ui')).toMatchObject({ status: 'done' });
+      // P6 additive：已物化步骤也返回确定性 route 审计（why），但不含 intent/原文。
+      expect(status.plan.steps.find((step) => step.stepId === 'api')?.why).toMatchObject({
+        code: 'ASSIGNED',
+        policy: 'inherited',
+      });
       const explicit = status.plan.steps.find((step) => step.stepId === 'explicit')!;
       expect(explicit).toMatchObject({
         status: 'blocked',

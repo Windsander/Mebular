@@ -13,6 +13,7 @@ const SUITES = [
   { name: 'agents', script: fileURLToPath(new URL('./verify-fleet-agents.mjs', import.meta.url)) },
   { name: 'onboard', script: fileURLToPath(new URL('./verify-fleet-onboard.mjs', import.meta.url)) },
   { name: 'tasks', script: fileURLToPath(new URL('./verify-fleet-tasks.mjs', import.meta.url)) },
+  { name: 'p6', script: fileURLToPath(new URL('./verify-fleet-p6.mjs', import.meta.url)) },
   { name: 'service', script: fileURLToPath(new URL('./verify-fleet-service.mjs', import.meta.url)) },
   { name: 'handoff', script: fileURLToPath(new URL('./verify-fleet-handoff.mjs', import.meta.url)) },
   { name: 'collab', script: fileURLToPath(new URL('./verify-fleet-collab.mjs', import.meta.url)) },

@@ -121,6 +121,7 @@
     "verify:fleet:onboard": "node scripts/verify-fleet-onboard.mjs",
     "verify:star-map:multinode": "node scripts/verify-star-map-multinode.mjs",
     "verify:fleet:tasks": "node scripts/verify-fleet-tasks.mjs",
+    "verify:fleet:p6": "node scripts/verify-fleet-p6.mjs",
     "verify:daemon": "node scripts/verify-daemon.mjs",
     "verify:daemon:cluster": "node scripts/verify-daemon-cluster.mjs",
     "verify:convergence": "node scripts/verify-convergence.mjs",

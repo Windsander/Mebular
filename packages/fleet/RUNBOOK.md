@@ -37,10 +37,10 @@ fleet doctor      --dir ~/.mebular --json
 - 进程重启后从 plan + task 事件恢复，不需要 cursor；确定性 taskId/eventId 保证不重复建 task。
 - 默认只推进 owner device 的 plan；未授权设备不应运行 coordinator。
 - **sub-plan Agent 绑定**：MCP 任务工具缺省 Agent 是 `board`；宿主应注入真实执行 Agent，且必须与父 step task 的 `to.agent` 一致，否则 B8 拒绝。
-- **daemon CLI 边界**：无 live app 时 `task_targets` / `task_negotiate` / `chatter_*` 为 fail-closed（不回退本地离线 Mebular）；MCP live 路径正常。daemon-backed 读取留 P6。
+- **daemon CLI 边界**：无 live app 时 `task_targets` / `task_negotiate` / `chatter_*` 为 fail-closed（不回退本地离线 Mebular）；MCP live 路径正常。plan/task/role card 的 daemon 读写已由 `/app/plans`、任务事件和 `/app/role-cards` 覆盖。
 - **/app/plans 信任边界**：owner/agent 是设备级 app token 下的自证；该内部端点不在 P2 扩权。`parentTaskAccepted` 是 fleet 内部派生上下文（root 是否已存在），外部直接传 true 不构成信任边界。
 - **/app/plans 负例覆盖**：C/join/reduce/mr 的 HTTP 负例可继续依赖 validator；不额外扩 P2 端点测试。
-- **测试空白**：双守护进程 E2E 留 P6；当前覆盖单守护 + CLI/materializer 与三机 loopback join/MR。
+- **双守护 E2E**：`npm run verify:fleet:p6` 启动两个真实 daemon/app loopback，验证 B 的卡片经 sync 到 A、`/app/peers` 的已认证在线公钥验签、daemon materializer 路由到 B、daemon CLI plan submit/status 与 MR 一次。
 
 ## 3. 供给与水位
 
@@ -76,9 +76,42 @@ fleet doctor      --dir ~/.mebular --json
 - **硬过滤**：L1 授权 → policy `allowedDevices/allowedAgents/requireCapabilities` → `route.require`/工具 → payload 可达 → 在线/容量。显式 `to` 不通过即 blocked，**不会改派**。
 - **同 tick 容量**：materializer 每成功 append 一个 task 就实时递增该 `(device, agent)` 的 inflight；后续 step（含显式 `to`）满载返回 `AT_CAPACITY`，不建 task。
 - **无 routing provider**：materializer fail-closed（blocked `routing-unavailable`），不走 P2 无硬过滤路径；生产 CLI embedded/daemon 都会注入 provider。
-- **daemon coordinator 限制**：daemon 没有本地 `Mebular`，远端能力卡通常无法取得已认证公钥验签 → 远端 route/显式 `to` **fail-closed**，不伪造通过；双守护 E2E 的远端公钥/卡片验证留 P6。
+- **daemon 远端卡片验证**：daemon 无本地 `Mebular`，远端能力卡签名通过内部 `GET /app/peers` 返回的**已认证在线 peer 公钥**校验；旧守护没有该端点、或 peer 离线时远端 route/显式 `to` **fail-closed**，不伪造通过。`/app/peers` 只取 sync 握手登记的在线 peer，不回退 `config.peers` 地址簿。
 - **daemon L1 授权**：`DaemonAgentBackend.getSubscriptions()` 走只读 `/app/policy/subscriptions?device=`；只有订阅任务 namespace 的 peer 才进入授权集合，查询失败不授权，**绝不**回退 `config.peers` 地址簿。
-- **可解释性**：`task_status.plan` 的 step 可额外返回 `why`/`blockedBy`；`why.policy="inherited"` 表示实际生效的 plan policy，不是新授权来源。`why` 只含标签/计数/原因码，不含原始对话、command/env/凭据。
-- **角色卡（P5）**：本机 runtime job 从任务历史（可选 memory runtime internal compact/checkpoint 摘要）生成 `agent_role_card` internal 节点，默认 `shadow=true`，只写 `agents` 域；`fleet node/worker --run-forever` 每完成 N 个任务（默认 5）且超过最小间隔（默认 60s）后低频生成。daemon 模式经内部 `/app/role-cards` 写读，author 固定本机守护设备，不新增公共 MCP/UI。写路径（生成器/append/daemon）统一从安全字段重建 `summary`；生成器只写固定安全标签白名单（如 code/test/docs/review）和真实任务/plan ID、内容哈希、ULID/UUID 证据；不复制 intent/摘要原文。
+- **可解释性**：`task_status.plan` 的 step 可额外返回 `why`/`blockedBy`；已物化 step 也会返回当前确定性 route 的 additive 审计 `why`（不改变 status/taskId）。`why.policy="inherited"` 表示实际生效的 plan policy，不是新授权来源。`why` 只含标签/计数/原因码，不含原始对话、command/env/凭据。
+- **角色卡（P5/P6）**：本机 runtime job 从任务历史（可选 memory runtime internal compact/checkpoint 摘要）生成 `agent_role_card` internal 节点，默认 `shadow=true`，只写 `agents` 域；`fleet node/worker --run-forever` 每完成 N 个任务（默认 5）且超过最小间隔（默认 60s）后低频生成。daemon 模式经内部 `/app/role-cards` 写读，author 固定本机守护设备，不新增公共 MCP/UI。写路径（生成器/append/daemon）统一从安全字段重建 `summary`；**读路径（embedded/daemon/远端旧卡）同样重建 summary**，不暴露历史 raw summary。`agent` 与 `provenance.source/generator` 只接受安全 token，拒绝空白/路径/引号/原文；直接 summaries 必须带本机 `device`。生成器只写固定安全标签白名单（如 code/test/docs/review）和真实任务/plan ID、内容哈希、ULID/UUID 证据；不复制 intent/摘要原文。
 - **shadow 语义**：`roleCards.enabled` **默认 false**，在 P6 真实 shadow 报告完成前**不得开启**。默认 route 行为与无卡完全一致（`why.roleCard="shadow-ignored"`；无卡 `"disabled"`）。只有显式 `roleCards.enabled=true`、卡片 `shadow=false` 且 `confidence>=0.5` 时，角色卡才作为 P3 软排序最后一项（`why.roleCard="used-soft"`）；永不参与授权/硬过滤/容量，低置信度/无卡回退能力卡 + 确定性分配。
 - **join/MR**：P4 已实现 join/reduce/MR 门禁；P3 角色卡在 P5 进入 shadow，不做人工审核入口。
+
+## 7. P6 三机 E2E、回归与硬化
+
+### 7.1 一条命令
+
+```bash
+npm run build
+npm run verify:fleet:tasks
+npm run verify:fleet:p6
+```
+
+`verify:fleet:p6` 覆盖：
+- embedded loopback A/B/C/D/J：plan 提交 → B/C/D 分支 → J `all` join → pre-MR reduce → MR(owner A) → root done；MR 恰好一次、任务图无重复、`task_status.plan` 的 status/why/blockedBy；
+- 重复投递/重复提交、coordinator kill/restart、plan cancel 级联、分支失败 v2 + `reuse`；
+- 双 daemon/app loopback：卡片经 sync 到对端、`/app/peers` 已认证公钥验签、daemon materializer 路由、daemon CLI plan submit/status、内部 role/plan 端点。
+
+### 7.2 旧版本与 MR 收敛（P6 硬化）
+
+- 新版本接管后，旧版本 root 不再永久悬挂：缺失 root 会补建并写 `failed(SUPERSEDED_BY:<newVersion>)`；无 MR 的旧版本同时清理未终态 step task。
+- 旧版本已存在 MR 时，MR 唯一性优先：
+  - MR pending → 旧 root 保持 active 等待，MR 不撤销；
+  - MR done → 旧 root 按 MR 回执收敛 done（acceptance/subtree 仍校验），当前版本 root 也按跨版本回执 done；
+  - MR failed/acceptance failed → 旧 root 保留失败证据（`MR_FAILED`/`MR_ACCEPTANCE_FAILED`），不重试 MR。
+- `task_cancel(rootTaskId)` 在 MR pending 时取消该 MR（`failed(CANCELLED)`），之后不得再创建新 MR；已 terminal done 的 MR 永不撤销，root 已终态返回 `already-terminal`。
+- MR 创建使用确定性 taskId/eventId；同进程并发 materializer 由 eventId 串行，跨进程由事件去重收敛。**不要**让两台设备同时以 `coordinateForeignPlans` 运行同一 plan；本期没有 leader 选举，owner 设备是唯一正常 coordinator。
+
+### 7.3 已知限制（P6 记录，不伪造通过）
+
+- daemon 远端卡片验证依赖 `/app/peers` 中**当前在线**的已认证 peer 公钥；peer 离线时远端路由 fail-closed。旧守护无 `/app/peers` 时行为等同 P3 的“只信任本机公钥”。
+- `plan.example.json` 的 join/reduce 步骤必须带 `to` 或 `route`，否则运行时按 `NO_TARGET` 阻塞（协议合法不等于可执行）。
+- 旧 worker 只执行普通 task；`to.device/agent="__plan__"` 的 root task 必须跳过，不写 failed/UNKNOWN_AGENT。
+- 角色卡默认 shadow；P6 未开启生产软排序。`roleCards.enabled=true` 仍是内部/测试配置，需真实 shadow 报告与审核。
+- 本期无 claim/lease/抢单、无跨 plan 依赖、无执行中改图；任何此类需求走 CR。

@@ -477,6 +477,76 @@ describe('P2 daemon /app/plans', () => {
     }
   });
 
+  it('P6：daemon CLI plan cancel（pending MR/步骤级联）与 task_status', async () => {
+    const cliHome = await mkdtemp(join(tmpdir(), 'fleet-daemon-plans-cancel-'));
+    await writeFile(join(cliHome, 'fleet.config.json'), JSON.stringify({
+      v: 1,
+      device: 'device-A',
+      dir: cliHome,
+      storagePath: join(cliHome, 'store.jsonl'),
+      masterKeyFile: join(cliHome, 'master-key.json'),
+      namespace: 'tasks',
+      listen: '/ip4/127.0.0.1/tcp/0',
+      peers: [],
+      agents: [{ name: 'worker', kind: 'echo' }],
+      store: 'daemon',
+      daemon: { endpoint: base },
+    }), { mode: 0o600 });
+    try {
+      const p = plan({ planId: 'plan-daemon-cli-cancel-001' });
+      const cli = (args) => execFileAsync(process.execPath, [
+        join(process.cwd(), 'packages', 'fleet', 'dist', 'cli.js'),
+        ...args,
+        '--dir', cliHome,
+        '--agent', 'planner',
+      ], { encoding: 'utf-8' });
+      const { stdout: submitOut } = await cli([
+        'task_submit',
+        '--intent', 'daemon cli cancel plan',
+        '--to', JSON.stringify({ device: '__plan__', agent: '__plan__' }),
+        '--plan', JSON.stringify(p),
+      ]);
+      expect(JSON.parse(submitOut)).toMatchObject({ ok: true, rootTaskId: `${p.planId}#1#root` });
+
+      const plans = new fleet.DaemonTaskPlanStore({ endpoint: base, namespace: 'tasks' });
+      const tasks = new fleet.DaemonTaskEventStore({ endpoint: base, namespace: 'tasks' });
+      const routingCards = fleet.compileCapabilityCards({
+        config: { device: 'device-B', namespace: 'tasks', agents: [{ name: 'worker', kind: 'echo' }] },
+        now: 1,
+      }).map((card) => ({ ...card, limits: { ...card.limits, maxConcurrency: 8 } }));
+      const materializer = new fleet.PlanMaterializer({
+        device: 'device-A',
+        agent: 'planner',
+        plans,
+        store: tasks,
+        routing: {
+          cards: async () => routingCards,
+          authorized: () => ({ devices: ['device-B'] }),
+          online: () => true,
+          observations: () => [],
+          namespace: 'tasks',
+        },
+      });
+      await materializer.tick();
+      expect(await tasks.byTask(`${p.planId}#1#work`)).not.toHaveLength(0);
+
+      const { stdout: cancelOut } = await cli(['task_cancel', '--taskId', `${p.planId}#1#root`]);
+      expect(JSON.parse(cancelOut)).toMatchObject({ ok: true, status: 'failed', reason: 'CANCELLED' });
+
+      const { stdout: statusOut } = await cli(['task_status', '--taskId', `${p.planId}#1#root`]);
+      const status = JSON.parse(statusOut);
+      expect(status).toMatchObject({ ok: true, plan: { status: 'cancelled', mr: { submitted: false } } });
+      expect(status.plan.steps.find((step) => step.stepId === 'work')).toMatchObject({
+        status: 'failed',
+        blockedBy: ['CANCELLED'],
+      });
+      await materializer.tick();
+      expect(await tasks.byTask(`${p.planId}#1#mr`)).toHaveLength(0);
+    } finally {
+      await rm(cliHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
   it('/app/plans 过滤 deletedAt；auth/read-only 负例', async () => {
     const p = plan({ planId: 'plan-daemon-deleted-001' });
     const created = await request('/app/plans', { method: 'POST', body: { plan: p, namespace: 'tasks' } });

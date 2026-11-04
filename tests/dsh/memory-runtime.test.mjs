@@ -2220,6 +2220,52 @@ describe('@mebular/dsh-plugin memory runtime：compaction checkpoint', () => {
     expect(state.compactions[0]).toMatchObject({ committed: true, pending: false, revision: 4 });
   });
 
+  it('409 后 authority cache/stale 仍按 transient 进入 pending 重试，不永久 failed', async () => {
+    const ctx = fakeContext();
+    let gets = 0;
+    const fetch = checkpointHttp({
+      get: () => {
+        gets += 1;
+        if (gets === 1) return cloudCheckpoint(4, { compactionId: 'older', endSeq: 3 });
+        return jsonResponse(200, {
+          source: 'cache',
+          degraded: true,
+          checkpoint: {
+            revision: 4,
+            source: 'cache',
+            stale: true,
+            degraded: true,
+            pending: false,
+          },
+        });
+      },
+      put: () => jsonFailResponse(409, 'revision_mismatch'),
+    });
+    const session = makeSession();
+    const { adapter } = adapterFor({
+      ctx,
+      config: {
+        enabled: true,
+        recall: false,
+        ingest: false,
+        checkpoints: true,
+        hideMemoryTools: false,
+        checkpointTimeoutMs: 50,
+        checkpointRetries: 0,
+        checkpointReconcileMs: 100,
+      },
+      fetchImpl: fetch.fetchImpl,
+    });
+    const listener = handlerFor(ctx, 'session/event');
+    for (const entry of compactionEvents()) listener(session, entry);
+    await adapter.flush();
+    const state = adapter.getState();
+    expect(state.checkpoints.committed).toBe(0);
+    expect(state.checkpoints.failed).toBe(0);
+    expect(state.checkpoints.pending).toBeGreaterThanOrEqual(1);
+    expect(state.compactions[0]).toMatchObject({ failed: false, superseded: false });
+  });
+
   it('cache/stale authority 视图是 transient：保持 pending 重试，不盲写也不直接 failed', async () => {
     const ctx = fakeContext();
     const fetch = checkpointHttp({
@@ -2257,6 +2303,60 @@ describe('@mebular/dsh-plugin memory runtime：compaction checkpoint', () => {
     expect(adapter.getState().checkpoints.failed).toBe(0);
     expect(adapter.getState().checkpoints.pending).toBe(1);
     expect(adapter.getState().compactions[0]).toMatchObject({ pending: true, failed: false });
+  });
+
+  it('legacy current（无 endSeq/compactionId）可升级，不被永久 superseded', async () => {
+    const ctx = fakeContext();
+    const fetch = checkpointHttp({
+      get: () => cloudCheckpoint(3, { legacy: true }),
+      put: () => cloudCheckpoint(4, { compactionId: 'c1', endSeq: 13 }),
+    });
+    const session = makeSession();
+    const { adapter } = adapterFor({
+      ctx,
+      config: {
+        enabled: true,
+        recall: false,
+        ingest: false,
+        checkpoints: true,
+        hideMemoryTools: false,
+        checkpointTimeoutMs: 100,
+      },
+      fetchImpl: fetch.fetchImpl,
+    });
+    const listener = handlerFor(ctx, 'session/event');
+    for (const entry of compactionEvents()) listener(session, entry);
+    await adapter.flush();
+    const put = fetch.calls.find((call) => call.init.method === 'PUT');
+    expect(put.body.expectedRevision).toBe(3);
+    expect(adapter.getState().compactions[0]).toMatchObject({ committed: true, revision: 4 });
+  });
+
+  it('不同 compaction 相等 endSeq 不永久 supersede，交 revision/409 保护', async () => {
+    const ctx = fakeContext();
+    const fetch = checkpointHttp({
+      get: () => cloudCheckpoint(5, { compactionId: 'other', endSeq: 13 }),
+      put: () => cloudCheckpoint(6, { compactionId: 'c1', endSeq: 13 }),
+    });
+    const session = makeSession();
+    const { adapter } = adapterFor({
+      ctx,
+      config: {
+        enabled: true,
+        recall: false,
+        ingest: false,
+        checkpoints: true,
+        hideMemoryTools: false,
+        checkpointTimeoutMs: 100,
+      },
+      fetchImpl: fetch.fetchImpl,
+    });
+    const listener = handlerFor(ctx, 'session/event');
+    for (const entry of compactionEvents()) listener(session, entry);
+    await adapter.flush();
+    const put = fetch.calls.find((call) => call.init.method === 'PUT');
+    expect(put.body.expectedRevision).toBe(5);
+    expect(adapter.getState().compactions[0]).toMatchObject({ committed: true, revision: 6 });
   });
 
   it('preflight 发现更新/不同 checkpoint 时 superseded，不覆盖', async () => {
@@ -2355,6 +2455,49 @@ describe('@mebular/dsh-plugin memory runtime：compaction checkpoint', () => {
     await adapter.flush();
     expect(fetch.calls.filter((call) => call.init.method === 'PUT')).toHaveLength(0);
     expect(adapter.getState().compactions[0]).toMatchObject({ failed: true, superseded: true });
+  });
+
+  it('prior committed 但权威 current 更旧时清除缓存并重新写入', async () => {
+    const ctx = fakeContext();
+    let firstPhase = true;
+    let legacy = false;
+    const fetch = checkpointHttp({
+      get: () => {
+        if (firstPhase) return cloudEmpty();
+        return legacy
+          ? cloudCheckpoint(2, { legacy: true })
+          : cloudCheckpoint(1, { compactionId: 'c1', endSeq: 13 });
+      },
+      put: (count) => {
+        if (count === 0) return cloudCheckpoint(1, { compactionId: 'c1', endSeq: 13 });
+        return cloudCheckpoint(3, { compactionId: 'c1', endSeq: 13 });
+      },
+    });
+    const session = makeSession();
+    const { adapter } = adapterFor({
+      ctx,
+      config: {
+        enabled: true,
+        recall: false,
+        ingest: false,
+        checkpoints: true,
+        hideMemoryTools: false,
+        checkpointTimeoutMs: 100,
+      },
+      fetchImpl: fetch.fetchImpl,
+    });
+    const listener = handlerFor(ctx, 'session/event');
+    for (const entry of compactionEvents()) listener(session, entry);
+    await adapter.flush();
+    expect(adapter.getState().checkpoints.committed).toBe(1);
+    firstPhase = false;
+    legacy = true;
+    for (const entry of compactionEvents()) listener(session, entry);
+    await adapter.flush();
+    const puts = fetch.calls.filter((call) => call.init.method === 'PUT');
+    expect(puts).toHaveLength(2);
+    expect(puts[1].body.expectedRevision).toBe(2);
+    expect(adapter.getState().compactions.at(-1)).toMatchObject({ committed: true, revision: 3 });
   });
 
   it('删除后重复 compaction 用 recreate nonce 真实重建', async () => {
@@ -2484,6 +2627,45 @@ describe('@mebular/dsh-plugin memory runtime：compaction checkpoint', () => {
     expect(state.compactions.some((entry) => entry.compactionId === 'stuck')).toBe(false);
     expect(state.checkpoints.needsReconcileGauge).toBe(1);
     expect(state.checkpoints.issues.some((entry) => entry.compactionId === 'stuck')).toBe(true);
+  });
+
+  it('needsReconcile 计数单调，不被 128 条 issue 列表上限截断', async () => {
+    const ctx = fakeContext();
+    const fetch = checkpointHttp({
+      get: cloudEmpty,
+      put: () => jsonResponse(202, pendingCheckpointData()),
+    });
+    const session = makeSession();
+    const { adapter } = adapterFor({
+      ctx,
+      config: {
+        enabled: true,
+        recall: false,
+        ingest: false,
+        checkpoints: true,
+        hideMemoryTools: false,
+        checkpointTimeoutMs: 50,
+        checkpointRetries: 0,
+        checkpointReconcileMs: 100,
+        checkpointMaxQueue: 128,
+      },
+      fetchImpl: fetch.fetchImpl,
+    });
+    const listener = handlerFor(ctx, 'session/event');
+    for (let index = 0; index < 128; index += 1) {
+      for (const entry of compactionEvents(`gauge-${index}`, 'gauge', 100 + index * 10)) {
+        listener(session, entry);
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1600));
+    expect(adapter.getState().checkpoints.needsReconcileGauge).toBe(128);
+    for (const entry of compactionEvents('gauge-overflow', 'gauge', 2000)) {
+      listener(session, entry);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1600));
+    const state = adapter.getState();
+    expect(state.checkpoints.needsReconcileGauge).toBe(129);
+    expect(state.checkpoints.issues.length).toBeLessThanOrEqual(128);
   });
 
   it('重复 compaction 使用同一操作身份，不产生第二次图写入', async () => {

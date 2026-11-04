@@ -1840,6 +1840,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
   const checkpointOperations = new Map();
   const pendingCheckpoints = new Map();
   const checkpointReconcileIssues = new Map();
+  const checkpointNeedsReconcileKeys = new Set();
   const featureGenerations = { recall: 0, ingest: 0, checkpoint: 0, maintenance: 0 };
   let recallCooldownUntil = 0;
   let rateLimitUntil = 0;
@@ -2754,12 +2755,13 @@ export function createMemoryRuntimeAdapter(options = {}) {
     const remoteState = isObject(checkpoint?.state) ? checkpoint.state : {};
     const remoteEnd = Number.isInteger(remoteState.endSeq) ? remoteState.endSeq : null;
     const localEnd = Number.isInteger(state?.endSeq) ? state.endSeq : null;
-    if (remoteState.compactionId === state.compactionId) {
-      if (remoteEnd !== null && localEnd !== null) return remoteEnd > localEnd;
-      return true;
-    }
-    if (remoteEnd !== null && localEnd !== null) return remoteEnd >= localEnd;
-    return true;
+    // Legacy/current checkpoints may carry no identity/endSeq. They are not
+    // proof of a newer write; use the authoritative revision + expectedRevision
+    // and let the capability 409 protect against overwrite.
+    if (remoteEnd === null || localEnd === null) return false;
+    // Strictly greater only. Equal endSeq with a different compaction is an
+    // ambiguity for revision/409/time, not a permanent supersede.
+    return remoteEnd > localEnd;
   }
 
   function rememberAuthoritativeCheckpoint(revisionKey, current) {
@@ -2879,6 +2881,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
   }
 
   function noteCheckpointIssue(operationKey, state, error, kind = 'needs_reconcile') {
+    if (kind === 'needs_reconcile') checkpointNeedsReconcileKeys.add(operationKey);
     checkpointReconcileIssues.set(operationKey, {
       compactionId: state?.compactionId ?? null,
       endSeq: Number.isInteger(state?.endSeq) ? state.endSeq : null,
@@ -3000,6 +3003,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
             continue;
           }
           pendingCheckpoints.delete(operationKey);
+          checkpointOperations.delete(operationKey);
           record.state.pending = false;
           record.state.failed = false;
           record.state.needsReconcile = false;
@@ -3143,6 +3147,13 @@ export function createMemoryRuntimeAdapter(options = {}) {
           priorOperation = null;
           checkpointOperations.delete(operationKey);
           checkpointRevisions.set(revisionKey, 0);
+        } else {
+          // The authoritative graph has a different/older checkpoint. The
+          // cached committedRevision is no longer trustworthy; clear it and
+          // write against the current authoritative revision.
+          priorOperation = null;
+          checkpointOperations.delete(operationKey);
+          checkpointRevisions.set(revisionKey, current.revision);
         }
       }
       state.committed = false;
@@ -3389,6 +3400,17 @@ export function createMemoryRuntimeAdapter(options = {}) {
               return;
             }
             continue;
+          }
+          if (isRetryableAuthorityFailure(current)) {
+            state.committed = false;
+            state.pending = true;
+            state.failed = false;
+            state.needsReconcile = false;
+            state.error = `revision_conflict_unresolved:${current.reason}`;
+            stats.checkpoints.pending += 1;
+            checkpointOperations.set(operationKey, { requestId, pending: true });
+            rememberPendingCheckpoint(state, { kind: 'preflight', requestId });
+            return;
           }
           break;
         }
@@ -4282,6 +4304,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
         checkpointOperations.clear();
         pendingCheckpoints.clear();
         checkpointReconcileIssues.clear();
+        checkpointNeedsReconcileKeys.clear();
       });
     return disposal;
   }
@@ -4338,8 +4361,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
         ...stats.checkpoints,
         queued: checkpointQueue.size(),
         reconciling: pendingCheckpoints.size,
-        needsReconcileGauge: [...checkpointReconcileIssues.values()]
-          .filter((entry) => entry.kind === 'needs_reconcile').length,
+        needsReconcileGauge: checkpointNeedsReconcileKeys.size,
         issues: [...checkpointReconcileIssues.values()].slice(-20),
       },
       tools: {

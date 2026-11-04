@@ -687,11 +687,61 @@ async function runFaultScenario({ runtime, tap, discovery, phasePath, continueFi
     request.path.startsWith(`${SIDECAR_API}/context`) || request.path === `${SIDECAR_API}/ingest`
   )).length;
   const sidecarBeforeDisable = await runtime.sidecarCheckpoint(THREAD_ID, 'dsh').catch(() => null);
+  let oldCapabilityToken = '';
+  try {
+    const record = JSON.parse(await readFile(join(runtime.home, 'memory-runtime', 'capability-token'), 'utf8'));
+    oldCapabilityToken = typeof record?.token === 'string' ? record.token : '';
+  } catch {
+    oldCapabilityToken = '';
+  }
   await setDiscoveryMode(runtime, 'mcp');
   const disableResult = await disableMemoryRuntime(runtime);
   check('hot disable 通过 admin config 撤销 memoryRuntime capability',
     disableResult.status === 200 && disableResult.body?.ok === true,
     JSON.stringify({ status: disableResult.status, body: disableResult.body }));
+  const oldTokenResponses = [];
+  if (oldCapabilityToken.length > 0) {
+    for (const [path, body] of [
+      ['/internal/memory/v1/internal-object', {
+        actor: { type: 'agent', agentId: 'dsh' },
+        kind: 'context_checkpoint',
+        op: 'get',
+        agentId: 'dsh',
+        threadId: THREAD_ID,
+      }],
+      ['/internal/memory/v1/write', {
+        actor: { type: 'agent', agentId: 'dsh' },
+        threadId: THREAD_ID,
+        items: [{
+          clientItemId: `disabled-${Date.now()}`,
+          domain: 'default',
+          kind: 'episode',
+          content: { episodeType: 'observation', content: 'disabled write probe' },
+        }],
+      }],
+    ]) {
+      const response = await fetch(`${runtime.url}${path}`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${oldCapabilityToken}`,
+        },
+        body: JSON.stringify(body),
+      });
+      let payload = null;
+      try {
+        payload = await response.json();
+      } catch {
+        payload = null;
+      }
+      oldTokenResponses.push({ path, status: response.status, code: payload?.error?.code ?? null });
+    }
+  }
+  check('禁用后旧 capability token 写 checkpoint/ingest 被拒绝',
+    oldTokenResponses.length === 2
+    && oldTokenResponses.every((entry) => entry.status === 401 || entry.status === 404)
+    && oldTokenResponses.every((entry) => entry.status !== 200),
+    JSON.stringify(oldTokenResponses));
   await continueProbe(continueFile);
 
   const disabled = await waitPhase(phasePath, 'disabled-done');

@@ -51,7 +51,7 @@
     "device": "device-B",
     "agent": "worker",
     "version": 3,
-    "summary": "worker: 42 recent tasks, 38 done (90%), prefers code, review",
+    "summary": "worker: 42 samples; prefers code, review",
     "strengths": [
       { "tag": "code", "confidence": 0.86 },
       { "tag": "review", "confidence": 0.72 }
@@ -63,7 +63,7 @@
     "confidence": 0.78,
     "evidenceRefs": [
       { "kind": "task", "id": "plan-demo-001#1#build-api" },
-      { "kind": "session_summary", "id": "summary-device-B-0007" }
+      { "kind": "session_summary", "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV" }
     ],
     "shadow": true,
     "provenance": {

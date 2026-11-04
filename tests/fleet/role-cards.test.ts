@@ -21,6 +21,7 @@ import {
   listAgentRoleCards,
   publishRoleCards,
   roleCardFingerprint,
+  safeIntentTags,
   validateAgentRoleCard,
   validateFleetConfig,
   type AgentRoleCard,
@@ -40,7 +41,7 @@ function roleCard(overrides: Partial<AgentRoleCard> = {}): AgentRoleCard {
     preferredIntents: ['test'],
     avoid: [],
     confidence: 0.6,
-    evidenceRefs: [{ kind: 'task', id: 'task-1' }],
+    evidenceRefs: [{ kind: 'task', id: 'task-device-A-00000001' }],
     shadow: true,
     provenance: {
       source: 'task-history',
@@ -100,7 +101,7 @@ describe('P5 角色卡 schema / 隐私', () => {
     }).ok).toBe(false);
     expect(validateAgentRoleCard({
       ...roleCard(),
-      evidenceRefs: [{ kind: 'task', id: 'task-1', text: 'raw dialogue' }],
+      evidenceRefs: [{ kind: 'task', id: 'task-device-A-00000001', text: 'raw dialogue' }],
     }).ok).toBe(false);
   });
 
@@ -108,20 +109,24 @@ describe('P5 角色卡 schema / 隐私', () => {
     const positive = roleCard({
       evidenceRefs: [
         { kind: 'task', id: 'task-device-A-0123abcd' },
+        { kind: 'task', id: 'task-device-A-0123abcd~c0' },
         { kind: 'task', id: 'plan-demo-001#2#build-api' },
+        { kind: 'task', id: 'plan-demo-001#2#build-api~c1~c0' },
         { kind: 'summary', id: `sha256:${'a'.repeat(64)}` },
-        { kind: 'checkpoint', id: 'summary-device-B-0007' },
+        { kind: 'checkpoint', id: '01ARZ3NDEKTSV4RRFFQ69G5FAV' },
       ],
     });
     expect(validateAgentRoleCard(positive)).toEqual({ ok: true, errors: [] });
 
     const negatives: Array<Partial<AgentRoleCard>> = [
-      { evidenceRefs: [{ kind: 'raw', id: 'task-1' } as never] },
+      { evidenceRefs: [{ kind: 'raw', id: 'task-device-A-0123abcd' } as never] },
       { evidenceRefs: [{ kind: 'task', id: 'RAW DIALOGUE: please ignore' }] },
       { evidenceRefs: [{ kind: 'task', id: 'sk-live-1234567890' }] },
+      { evidenceRefs: [{ kind: 'task', id: 'task-sk-live-1234567890' }] },
       { evidenceRefs: [{ kind: 'summary', id: 'hunter2' }] },
       { evidenceRefs: [{ kind: 'summary', id: 'sha256:not-a-hash' }] },
-      { evidenceRefs: [{ kind: 'task', id: 'task-1\nRAW' }] },
+      { evidenceRefs: [{ kind: 'summary', id: 'summary-device-B-0007' }] },
+      { evidenceRefs: [{ kind: 'task', id: 'task-device-A-00000001\nRAW' }] },
     ];
     for (const override of negatives) expect(validateAgentRoleCard(roleCard(override)).ok).toBe(false);
   });
@@ -133,6 +138,24 @@ describe('P5 角色卡 schema / 隐私', () => {
     expect(validateAgentRoleCard(roleCard({ strengths: [{ tag: 'test', confidence: 0.5 }], preferredIntents: ['test', 'deploy'] }))).toEqual({ ok: true, errors: [] });
   });
 
+  it('B4：safeIntentTags 不被原型继承击穿，analysis alias 正常', () => {
+    expect(safeIntentTags('constructor')).toEqual([]);
+    expect(safeIntentTags('__proto__')).toEqual([]);
+    expect(safeIntentTags('toString')).toEqual([]);
+    expect(safeIntentTags('analysis')).toEqual(['analysis']);
+    expect(safeIntentTags('analyze this')).toEqual(['analysis']);
+    const events = [
+      ...task('task-device-A-00000010', 'constructor', { at: 100 }),
+      ...task('task-device-A-00000011', '__proto__', { at: 101 }),
+      ...task('task-device-A-00000012', 'analysis', { at: 102 }),
+    ];
+    const [card] = generateRoleCards({ device: 'device-A', agents: ['worker'], events, now: 200 });
+    expect(card).toBeDefined();
+    expect(card!.preferredIntents).toEqual(['analysis']);
+    expect(JSON.stringify(card)).not.toContain('[object Object]');
+    expect(JSON.stringify(card)).not.toMatch(/function|null/);
+  });
+
   it('生成器不复制 intent/原始对话/短 secret：只写安全标签与统计', () => {
     const sources = [
       'deploy sk-live-1234567890',
@@ -140,7 +163,7 @@ describe('P5 角色卡 schema / 隐私', () => {
       'tok_abc123',
       'write-tests',
     ];
-    const events = sources.flatMap((intent, index) => task(`task-${index}`, intent, { at: 100 + index }));
+    const events = sources.flatMap((intent, index) => task(`task-device-A-${String(index).padStart(8, '0')}`, intent, { at: 100 + index }));
     const cards = generateRoleCards({ device: 'device-A', agents: ['worker'], events, now: 200 });
     expect(cards).toHaveLength(1);
     const serialized = JSON.stringify(cards[0]);
@@ -151,12 +174,12 @@ describe('P5 角色卡 schema / 隐私', () => {
     expect(cards[0]!.preferredIntents).toContain('test');
     expect(cards[0]!.preferredIntents.every((tag) => (ROLE_CARD_SAFE_TAGS as readonly string[]).includes(tag))).toBe(true);
     expect(cards[0]!.strengths.every((entry) => (ROLE_CARD_SAFE_TAGS as readonly string[]).includes(entry.tag))).toBe(true);
-    expect(cards[0]!.evidenceRefs).toContainEqual({ kind: 'task', id: 'task-0' });
+    expect(cards[0]!.evidenceRefs).toContainEqual({ kind: 'task', id: 'task-device-A-00000000' });
 
     const rawSummary = generateRoleCards({
       device: 'device-A',
       agents: ['worker'],
-      events: task('task-summary', 'deploy', { at: 300 }),
+      events: task('task-device-A-0000000d', 'deploy', { at: 300 }),
       summaries: [{
         id: 'RAW DIALOGUE SUMMARY ID',
         device: 'device-A',
@@ -194,12 +217,12 @@ describe('P5 角色卡 schema / 隐私', () => {
 
 describe('P5 任务历史聚合 + 可选内部摘要', () => {
   it('样本量/成功率/一致性决定 confidence；1 个样本为低置信度', () => {
-    const one = generateRoleCards({ device: 'device-A', agents: ['worker'], events: task('task-1', 'write-tests'), now: 200 });
+    const one = generateRoleCards({ device: 'device-A', agents: ['worker'], events: task('task-device-A-00000001', 'write-tests'), now: 200 });
     expect(one[0]!.confidence).toBeLessThan(ROLE_CARD_DEFAULT_CONFIDENCE_THRESHOLD);
     expect(one[0]!.shadow).toBe(true);
     expect(one[0]!.provenance).toMatchObject({ source: 'task-history', sampleSize: 1, generator: ROLE_CARD_GENERATOR });
 
-    const events = Array.from({ length: 8 }, (_, index) => task(`task-${index}`, 'write-tests', { at: 100 + index, success: index !== 7 })).flat();
+    const events = Array.from({ length: 8 }, (_, index) => task(`task-device-A-${String(index).padStart(8, '0')}`, 'write-tests', { at: 100 + index, success: index !== 7 })).flat();
     const many = generateRoleCards({ device: 'device-A', agents: ['worker'], events, now: 120 });
     expect(many[0]!.confidence).toBeGreaterThanOrEqual(ROLE_CARD_DEFAULT_CONFIDENCE_THRESHOLD);
     expect(many[0]!.provenance.sampleSize).toBe(8);
@@ -211,22 +234,22 @@ describe('P5 任务历史聚合 + 可选内部摘要', () => {
 
   it('只聚合本机真实执行者，排除 plan sentinel / 通配 agent / 非终态', () => {
     const events = [
-      ...task('task-ok', 'write', { at: 10 }),
-      ...task('task-remote', 'write', { at: 11, device: 'device-B' }),
-      ...task('task-wild', 'write', { at: 12, agent: '*' }),
-      mkEvent('created', 'task-pending', { at: 13, to: { device: 'device-A', agent: 'worker' }, intent: 'pending' }),
-      mkEvent('created', 'task-plan', { at: 14, to: { device: '__plan__', agent: '__plan__' }, intent: 'plan' }),
+      ...task('task-device-A-0000000a', 'write', { at: 10 }),
+      ...task('task-device-B-0000000b', 'write', { at: 11, device: 'device-B' }),
+      ...task('task-device-A-0000000c', 'write', { at: 12, agent: '*' }),
+      mkEvent('created', 'task-device-A-0000000e', { at: 13, to: { device: 'device-A', agent: 'worker' }, intent: 'pending' }),
+      mkEvent('created', 'task-device-A-0000000f', { at: 14, to: { device: '__plan__', agent: '__plan__' }, intent: 'plan' }),
     ];
     const samples = collectRoleTaskSamples(events);
     // 纯派生样本包含远端任务；生成本机角色卡时才按 device/agent 过滤。
-    expect(samples.map((sample) => sample.taskId).sort()).toEqual(['task-ok', 'task-remote']);
+    expect(samples.map((sample) => sample.taskId).sort()).toEqual(['task-device-A-0000000a', 'task-device-B-0000000b']);
     const cards = generateRoleCards({ device: 'device-A', agents: ['worker'], events, now: 20 });
     expect(cards[0]!.provenance.sampleSize).toBe(1);
   });
 
   it('fixture 摘要只贡献证据 ID/意图，不复制 summary 原文；没有摘要不阻塞', () => {
     const summaries: RoleSummary[] = [{
-      id: 'compact-1',
+      id: '01ARZ3NDEKTSV4RRFFQ69G5FAW',
       device: 'device-A',
       agent: 'worker',
       summary: 'RAW DIALOGUE SHOULD NOT BE COPIED',
@@ -235,16 +258,16 @@ describe('P5 任务历史聚合 + 可选内部摘要', () => {
     const withSummary = generateRoleCards({
       device: 'device-A',
       agents: ['worker'],
-      events: task('task-1', 'write-tests'),
+      events: task('task-device-A-00000001', 'write-tests'),
       summaries,
       now: 200,
     });
     expect(withSummary[0]!.provenance.source).toBe('task-history+internal-summary');
-    expect(withSummary[0]!.evidenceRefs).toContainEqual({ kind: 'summary', id: 'compact-1' });
+    expect(withSummary[0]!.evidenceRefs).toContainEqual({ kind: 'summary', id: '01ARZ3NDEKTSV4RRFFQ69G5FAW' });
     expect(withSummary[0]!.preferredIntents).toContain('review');
     expect(JSON.stringify(withSummary[0])).not.toContain('RAW DIALOGUE');
 
-    const without = generateRoleCards({ device: 'device-A', agents: ['worker'], events: task('task-1', 'write-tests'), now: 200 });
+    const without = generateRoleCards({ device: 'device-A', agents: ['worker'], events: task('task-device-A-00000001', 'write-tests'), now: 200 });
     expect(without[0]!.provenance.source).toBe('task-history');
     expect(without[0]!.evidenceRefs.some((ref) => ref.kind === 'summary')).toBe(false);
   });
@@ -255,6 +278,7 @@ describe('P5 任务历史聚合 + 可选内部摘要', () => {
     try {
       const compact = await app.graph.createNode('compact', {
         summary: 'RAW DIALOGUE MUST NOT LEAVE THE COMPACT',
+        device: 'device-A',
         ownerId: 'agent:worker',
         intents: ['review-code'],
         updatedAt: 50,
@@ -264,10 +288,12 @@ describe('P5 任务历史聚合 + 可选内部摘要', () => {
       });
       await app.graph.createNode('compact', {
         summary: 'visible non-internal compact',
+        device: 'device-A',
         ownerId: 'agent:worker',
       }, [], { namespace: 'tasks' });
       const checkpoint = await app.graph.createNode('context_checkpoint', {
         goal: 'raw checkpoint goal',
+        device: 'device-A',
         agent: 'worker',
         updatedAt: 60,
       }, [], {
@@ -276,8 +302,17 @@ describe('P5 任务历史聚合 + 可选内部摘要', () => {
       });
       await app.graph.createNode('compact', {
         summary: 'other agent summary',
+        device: 'device-A',
         ownerId: 'agent:other',
         intents: ['deploy'],
+      }, [], {
+        namespace: 'tasks',
+        metadata: { internal: true, internalObject: { kind: 'compact' } },
+      });
+      await app.graph.createNode('compact', {
+        summary: 'no device summary',
+        ownerId: 'agent:worker',
+        intents: ['ops'],
       }, [], {
         namespace: 'tasks',
         metadata: { internal: true, internalObject: { kind: 'compact' } },
@@ -294,6 +329,7 @@ describe('P5 任务历史聚合 + 可选内部摘要', () => {
       expect(JSON.stringify(summaries)).not.toContain('raw checkpoint goal');
       expect(JSON.stringify(summaries)).not.toContain('visible non-internal');
       expect(JSON.stringify(summaries)).not.toContain('other agent summary');
+      expect(JSON.stringify(summaries)).not.toContain('no device summary');
     } finally {
       await app.shutdown().catch(() => undefined);
       await rm(dir, { recursive: true, force: true });
@@ -315,7 +351,7 @@ describe('P5 角色卡存储：版本 / tombstone / 作者 / internal', () => {
 
       const replay = await appendAgentRoleCard(app, roleCard());
       expect(replay).toMatchObject({ stored: false, replayed: true });
-      await expect(appendAgentRoleCard(app, roleCard({ summary: 'changed' }))).rejects.toMatchObject({ code: 'ROLE_CARD_CONFLICT' });
+      await expect(appendAgentRoleCard(app, roleCard({ preferredIntents: ['deploy'] }))).rejects.toMatchObject({ code: 'ROLE_CARD_CONFLICT' });
       await expect(appendAgentRoleCard(app, roleCard({ version: 3 }))).rejects.toMatchObject({ code: 'ROLE_CARD_VERSION_GAP' });
 
       const v2 = await appendAgentRoleCard(app, roleCard({ version: 2, confidence: 0.8, summary: 'v2' }));
@@ -345,10 +381,37 @@ describe('P5 角色卡存储：版本 / tombstone / 作者 / internal', () => {
     }
   });
 
+  it('B3：append/写路径重建 summary，客户端 raw summary 不落盘', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'fleet-role-card-summary-write-'));
+    const app = await openMebular(dir);
+    const rawSummary = 'RAW DIALOGUE: please send token sk-live-1234567890';
+    try {
+      const result = await appendAgentRoleCard(app, roleCard({
+        agent: 'raw-writer',
+        summary: rawSummary,
+        preferredIntents: ['code', 'deploy'],
+        strengths: [{ tag: 'code', confidence: 0.5 }],
+        provenance: {
+          source: 'task-history',
+          sampleSize: 4,
+          generatedAt: 100,
+          generator: ROLE_CARD_GENERATOR,
+        },
+      }));
+      expect(result.card.summary).toBe('raw-writer: 4 samples; prefers code, deploy');
+      const node = (await app.graph.listNodes({ type: ROLE_CARD_KIND })).find((entry) => entry.id === result.nodeId);
+      expect(JSON.stringify(node?.content)).not.toContain('RAW DIALOGUE');
+      expect(JSON.stringify(node?.content)).not.toContain('sk-live-1234567890');
+    } finally {
+      await app.shutdown().catch(() => undefined);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('发布器同内容 no-op；移除 agent 发 tombstone；fingerprint 忽略 generatedAt', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'fleet-role-card-publish-'));
     const app = await openMebular(dir);
-    const events = Array.from({ length: 5 }, (_, index) => task(`task-${index}`, 'write-tests', { at: 100 + index })).flat();
+    const events = Array.from({ length: 5 }, (_, index) => task(`task-device-A-${String(index).padStart(8, '0')}`, 'write-tests', { at: 100 + index })).flat();
     try {
       const first = await publishRoleCards({
         store: { list: () => listAgentRoleCards(app), append: (input) => appendAgentRoleCard(app, input) },
@@ -419,7 +482,7 @@ describe('P5 本机 runtime job', () => {
   it('达到任务阈值后才生成；force 可复跑；摘要失败不影响任务历史；移除 agent 发 tombstone', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'fleet-role-card-job-'));
     const app = await openMebular(dir);
-    let events = task('task-1', 'write-tests', { at: 100 });
+    let events = task('task-device-A-00000001', 'write-tests', { at: 100 });
     try {
       const store = {
         list: () => listAgentRoleCards(app),
@@ -437,7 +500,7 @@ describe('P5 本机 runtime job', () => {
       expect(await job.tick()).toBeNull();
       expect(await listAgentRoleCards(app)).toEqual([]);
 
-      events = [...events, ...task('task-2', 'write-tests', { at: 110 })];
+      events = [...events, ...task('task-device-A-00000002', 'write-tests', { at: 110 })];
       const first = await job.tick();
       expect(first?.published).toBe(1);
       expect(first?.cards[0]).toMatchObject({ version: 1, shadow: true });
@@ -483,7 +546,7 @@ describe('P5 本机 runtime job', () => {
   });
 
   it('默认 shadow=true；显式 shadow=false 才写入非 shadow 卡', () => {
-    const events = Array.from({ length: 5 }, (_, index) => task(`task-${index}`, 'write-tests', { at: 100 + index })).flat();
+    const events = Array.from({ length: 5 }, (_, index) => task(`task-device-A-${String(index).padStart(8, '0')}`, 'write-tests', { at: 100 + index })).flat();
     expect(generateRoleCards({ device: 'device-A', agents: ['worker'], events, now: 200 })[0]!.shadow).toBe(true);
     expect(generateRoleCards({ device: 'device-A', agents: ['worker'], events, now: 200, shadow: false })[0]!.shadow).toBe(false);
   });

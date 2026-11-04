@@ -4427,6 +4427,7 @@ export async function startHttpServer({
           }
           const lib = await loadFleetCards();
           if (!lib || typeof lib.validateAgentRoleCard !== 'function'
+            || typeof lib.sanitizeAgentRoleCardForWrite !== 'function'
             || typeof lib.listAgentRoleCards !== 'function'
             || typeof lib.latestAgentRoleCards !== 'function'
             || typeof lib.roleCardFingerprint !== 'function'
@@ -4444,10 +4445,16 @@ export async function startHttpServer({
           if (!validation.ok) {
             return sendJson(res, 422, { ok: false, error: 'role_card_invalid', errors: validation.errors });
           }
+          // B3：服务端按安全字段重建 summary；客户端传入的原文 summary 一律丢弃。
+          const writeCard = lib.sanitizeAgentRoleCardForWrite(card);
+          const writeValidation = lib.validateAgentRoleCard(writeCard);
+          if (!writeValidation.ok) {
+            return sendJson(res, 422, { ok: false, error: 'role_card_invalid', errors: writeValidation.errors });
+          }
           if (typeof deviceId !== 'string' || deviceId.length === 0) {
             return sendJson(res, 409, { ok: false, error: 'identity_unavailable', message: '本机设备身份不可用' });
           }
-          if (card.device !== deviceId) {
+          if (writeCard.device !== deviceId) {
             return sendJson(res, 403, { ok: false, error: 'device_mismatch', message: '角色卡 device 必须是本机守护设备' });
           }
           const serialize = (fn) => {
@@ -4458,24 +4465,24 @@ export async function startHttpServer({
           try {
             const result = await serialize(async () => {
               const latest = lib.latestAgentRoleCards(await lib.listAgentRoleCards(app, 'agents'))
-                .find((entry) => entry.device === card.device && entry.agent === card.agent) ?? null;
+                .find((entry) => entry.device === writeCard.device && entry.agent === writeCard.agent) ?? null;
               if (latest !== null) {
-                const sameContent = lib.roleCardFingerprint(latest) === lib.roleCardFingerprint(card);
-                if (latest.version === card.version) {
+                const sameContent = lib.roleCardFingerprint(latest) === lib.roleCardFingerprint(writeCard);
+                if (latest.version === writeCard.version) {
                   return sameContent
                     ? { status: 200, body: { ok: true, card: latest, nodeId: null, createdBy: latest.device, replayed: true } }
                     : { status: 409, body: { ok: false, error: 'ROLE_CARD_CONFLICT', message: '同版本角色卡内容冲突' } };
                 }
-                if (latest.version > card.version) {
+                if (latest.version > writeCard.version) {
                   return { status: 409, body: { ok: false, error: 'ROLE_CARD_STALE', message: '角色卡版本落后于已发布版本' } };
                 }
-                if (card.version !== latest.version + 1) {
+                if (writeCard.version !== latest.version + 1) {
                   return { status: 409, body: { ok: false, error: 'ROLE_CARD_VERSION_GAP', message: '角色卡版本必须紧邻上一版本' } };
                 }
-              } else if (card.version !== 1) {
+              } else if (writeCard.version !== 1) {
                 return { status: 409, body: { ok: false, error: 'ROLE_CARD_VERSION_GAP', message: '首版角色卡 version 必须为 1' } };
               }
-              const appended = await lib.appendAgentRoleCard(app, card, 'agents');
+              const appended = await lib.appendAgentRoleCard(app, writeCard, 'agents');
               return {
                 status: 200,
                 body: {

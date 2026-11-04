@@ -54,7 +54,9 @@ export type RoleCardSafeTag = (typeof ROLE_CARD_SAFE_TAGS)[number];
 const SAFE_TAG_SET = new Set<string>(ROLE_CARD_SAFE_TAGS);
 
 const TAG_ALIASES: Readonly<Record<string, RoleCardSafeTag>> = {
+  analysis: 'analysis',
   analytics: 'data',
+  analyze: 'analysis',
   api: 'api',
   backend: 'api',
   bug: 'bugfix',
@@ -97,12 +99,12 @@ const TAG_ALIASES: Readonly<Record<string, RoleCardSafeTag>> = {
 export const ROLE_CARD_EVIDENCE_KINDS = ['task', 'summary', 'checkpoint', 'session_summary', 'compact'] as const;
 
 const EVIDENCE_KIND_SET = new Set<string>(ROLE_CARD_EVIDENCE_KINDS);
-const FLEET_TASK_ID_RE = /^task-[A-Za-z0-9][A-Za-z0-9._:@-]{0,191}$/;
-const PLAN_TASK_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}#[1-9][0-9]*#(?:root|[a-z][a-z0-9_-]{0,63})$/;
+// 非阻塞 #1/#2：真实 fleet task ID = task-<device>-<8hex>，允许 planner 派生子任务 `~cN`。
+const FLEET_TASK_ID_RE = /^task-[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}-[0-9a-f]{8}(?:~c[0-9]+)*$/;
+const PLAN_TASK_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}#[1-9][0-9]*#(?:root|[a-z][a-z0-9_-]{0,63})(?:~c[0-9]+)*$/;
 const HASH_EVIDENCE_ID_RE = /^(?:sha256:[0-9a-f]{64}|sha1:[0-9a-f]{40}|blake3:[0-9a-f]{64})$/;
 const ULID_EVIDENCE_ID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 const UUID_EVIDENCE_ID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
-const STABLE_SUMMARY_ID_RE = /^(?:summary|compact|checkpoint|session)[-_][A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$/;
 
 /** 敏感键：角色卡任何层级都不允许出现（与能力卡同一红线）。 */
 const SENSITIVE_KEYS = new Set([
@@ -269,7 +271,11 @@ export function safeIntentTags(value: unknown): RoleCardSafeTag[] {
   const seen = new Set<string>();
   for (const token of value.toLowerCase().split(/[^a-z0-9]+/)) {
     if (token.length === 0) continue;
-    const tag = TAG_ALIASES[token];
+    const tag = SAFE_TAG_SET.has(token)
+      ? token as RoleCardSafeTag
+      : Object.prototype.hasOwnProperty.call(TAG_ALIASES, token)
+        ? TAG_ALIASES[token]
+        : undefined;
     if (tag === undefined || seen.has(tag)) continue;
     seen.add(tag);
     out.push(tag);
@@ -284,8 +290,7 @@ export function isRoleEvidenceRefId(kind: unknown, id: unknown): boolean {
   if (kind === 'task') return FLEET_TASK_ID_RE.test(id) || PLAN_TASK_ID_RE.test(id);
   return HASH_EVIDENCE_ID_RE.test(id)
     || ULID_EVIDENCE_ID_RE.test(id)
-    || UUID_EVIDENCE_ID_RE.test(id)
-    || STABLE_SUMMARY_ID_RE.test(id);
+    || UUID_EVIDENCE_ID_RE.test(id);
 }
 
 export function isValidRoleEvidenceRef(value: unknown): value is RoleCardEvidenceRef {
@@ -480,6 +485,40 @@ export function roleCardSortEligible(
 }
 
 /**
+ * B3：写路径唯一 summary 生成器。完全忽略客户端/调用方传入的 summary，
+ * 只使用安全字段（Agent 安全标签 + sampleSize + preferredIntents 白名单标签）。
+ */
+export function canonicalRoleCardSummary(input: {
+  agent: string;
+  preferredIntents: readonly string[];
+  sampleSize: number;
+  tombstone?: boolean;
+}): string {
+  const agent = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$/.test(input.agent)
+    ? input.agent
+    : `agent:${createHash('sha256').update(input.agent).digest('hex').slice(0, 16)}`;
+  if (input.tombstone === true) return `${agent}: agent removed`;
+  const sampleSize = Number.isInteger(input.sampleSize) && input.sampleSize >= 0 ? input.sampleSize : 0;
+  const tags = [...new Set(input.preferredIntents.filter((tag) => isRoleCardSafeTag(tag)))].slice(0, 8);
+  return tags.length > 0
+    ? `${agent}: ${sampleSize} samples; prefers ${tags.join(', ')}`
+    : `${agent}: ${sampleSize} samples`;
+}
+
+/** 写路径 sanitization：返回带服务端重建 summary 的卡；不信任调用方 summary。 */
+export function sanitizeAgentRoleCardForWrite<T extends RoleCardDraft | AgentRoleCard>(input: T): T {
+  return {
+    ...input,
+    summary: canonicalRoleCardSummary({
+      agent: input.agent,
+      preferredIntents: input.preferredIntents,
+      sampleSize: input.provenance.sampleSize,
+      ...(input.tombstone === true ? { tombstone: true } : {}),
+    }),
+  };
+}
+
+/**
  * 角色卡软排序分数（0..1）：总体 confidence + 意图命中/回避的轻微调整。
  * 只用于软排序，不参与授权/硬过滤。`why` 只输出分数，不输出摘要原文。
  */
@@ -636,8 +675,8 @@ export function graphRoleSummaryProvider(
           if (!isRecord(content)) continue;
           const agent = summaryAgentOf(content);
           const device = typeof content.device === 'string' && content.device.length > 0 ? content.device : undefined;
-          // 非阻塞 #3：严格按 device/agent 过滤，避免跨 Agent 归因；无 owner 的摘要不参与。
-          if (device !== undefined && device !== options.device) continue;
+          // 非阻塞 #3：要求摘要带 device，且严格按 device/agent 过滤，避免跨设备/跨 Agent 归因。
+          if (device === undefined || device !== options.device) continue;
           if (agent === undefined || !requestedAgents.has(agent)) continue;
           const intents = Array.isArray(content.intents)
             ? [...new Set(content.intents
@@ -783,11 +822,12 @@ export function generateRoleCards(input: RoleCardGenerateInput): RoleCardDraft[]
       ...aggregate.samples.slice(0, 8).map((sample) => ({ kind: 'task' as const, id: sample.taskId })),
       ...agentSummaries.slice(0, 4).map((summary) => ({ kind: 'summary' as const, id: summary.id })),
     ].filter((ref) => isValidRoleEvidenceRef(ref));
-    const successRate = round4(aggregate.successes / Math.max(1, total));
     const preferred = [...preferredIntents, ...summaryIntents];
-    const summary = preferred.length > 0
-      ? `${agent}: ${total} recent tasks, ${aggregate.successes} done (${Math.round(successRate * 100)}%), prefers ${preferred.slice(0, 3).join(', ')}`
-      : `${agent}: ${total} recent tasks, ${aggregate.successes} done (${Math.round(successRate * 100)}%)`;
+    const summary = canonicalRoleCardSummary({
+      agent,
+      preferredIntents: preferred,
+      sampleSize: total,
+    });
 
     return [{
       v: ROLE_CARD_SCHEMA_VERSION,
@@ -895,7 +935,10 @@ export async function appendAgentRoleCard(
 ): Promise<RoleCardAppendResult> {
   const validation = validateAgentRoleCard(input);
   if (!validation.ok) throw new RoleCardValidationError('ROLE_CARD_SCHEMA', validation.errors);
-  const card = input as AgentRoleCard;
+  // B3：服务端重建 summary，绝不信任调用方 summary；生成器与 append/daemon 共用同一规则。
+  const card = sanitizeAgentRoleCardForWrite(input as AgentRoleCard);
+  const sanitizedValidation = validateAgentRoleCard(card);
+  if (!sanitizedValidation.ok) throw new RoleCardValidationError('ROLE_CARD_SCHEMA', sanitizedValidation.errors);
   if (card.device !== mebular.deviceId) {
     throw new RoleCardValidationError('ROLE_CARD_AUTHOR', [
       `卡片 device 必须是写入设备：${card.device} != ${mebular.deviceId}`,

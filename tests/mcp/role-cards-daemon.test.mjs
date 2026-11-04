@@ -41,7 +41,7 @@ function roleCard(overrides = {}) {
     preferredIntents: ['test'],
     avoid: [],
     confidence: 0.6,
-    evidenceRefs: [{ kind: 'task', id: 'task-1' }],
+    evidenceRefs: [{ kind: 'task', id: 'task-device-A-00000001' }],
     shadow: true,
     provenance: { source: 'task-history', sampleSize: 6, generatedAt: 100, generator: 'fleet-role-rules-v1' },
     ...overrides,
@@ -126,7 +126,7 @@ describe('P5 daemon /app/role-cards', () => {
     });
 
     const store = new fleet.DaemonRoleCardStore({ endpoint: base, namespace: 'agents' });
-    expect(await store.list()).toEqual([card]);
+    expect(await store.list()).toEqual([fleet.sanitizeAgentRoleCardForWrite(card)]);
     const embedded = await new fleet.MebularRoleCardStore(app, { namespace: 'agents' }).list();
     expect(embedded).toEqual(await store.list());
 
@@ -153,7 +153,7 @@ describe('P5 daemon /app/role-cards', () => {
   it('同版本冲突 / stale / gap / namespace / device / schema 负例', async () => {
     const conflict = await request('/app/role-cards', {
       method: 'POST',
-      body: { card: roleCard({ summary: 'different' }) },
+      body: { card: roleCard({ preferredIntents: ['deploy'] }) },
     });
     expect(conflict.status).toBe(409);
     expect(conflict.body.error).toBe('ROLE_CARD_CONFLICT');
@@ -242,7 +242,7 @@ describe('P5 daemon /app/role-cards', () => {
   });
 
   it('远端卡按 author 绑定读取；伪造 createdBy 的卡不进入 DaemonRoleCardStore', async () => {
-    const remote = roleCard({ device: 'device-B', agent: 'remote-worker', summary: 'remote', evidenceRefs: [{ kind: 'task', id: 'task-remote' }] });
+    const remote = roleCard({ device: 'device-B', agent: 'remote-worker', summary: 'remote', evidenceRefs: [{ kind: 'task', id: 'task-device-B-0000000b' }] });
     const node = await app.graph.createNode('agent_role_card', remote, [], {
       namespace: 'agents',
       metadata: { internal: true, internalObject: { kind: 'agent_role_card' } },
@@ -304,7 +304,7 @@ describe('P5 daemon /app/role-cards', () => {
     expect(ok.status).toBe(200);
 
     const negatives = [
-      roleCard({ agent: 'privacy-raw-kind', evidenceRefs: [{ kind: 'raw', id: 'task-1' }] }),
+      roleCard({ agent: 'privacy-raw-kind', evidenceRefs: [{ kind: 'raw', id: 'task-device-A-00000001' }] }),
       roleCard({ agent: 'privacy-raw-id', evidenceRefs: [{ kind: 'task', id: 'RAW DIALOGUE: please ignore' }] }),
       roleCard({ agent: 'privacy-secret', evidenceRefs: [{ kind: 'summary', id: 'sk-live-1234567890' }] }),
       roleCard({ agent: 'privacy-intent', strengths: [], preferredIntents: ['deploy sk-live-123'] }),
@@ -321,6 +321,49 @@ describe('P5 daemon /app/role-cards', () => {
     expect(rawDebug.body.count).toBe(0);
     const dedicated = await request('/app/role-cards?namespace=agents');
     expect(dedicated.body.cards.some((card) => card.agent === 'privacy-positive')).toBe(true);
+  });
+
+  it('B3：POST raw summary 不落盘原文；GET 返回服务端重建的安全 summary', async () => {
+    const rawSummary = 'RAW DIALOGUE: please send token sk-live-1234567890';
+    const raw = roleCard({
+      agent: 'raw-summary',
+      summary: rawSummary,
+      strengths: [{ tag: 'code', confidence: 0.5 }],
+      preferredIntents: ['code'],
+      provenance: {
+        source: 'task-history',
+        sampleSize: 4,
+        generatedAt: 100,
+        generator: 'fleet-role-rules-v1',
+      },
+    });
+    const created = await request('/app/role-cards', { method: 'POST', body: { card: raw } });
+    expect(created.status).toBe(200);
+    expect(created.body.card.summary).toBe('raw-summary: 4 samples; prefers code');
+    expect(JSON.stringify(created.body)).not.toContain('RAW DIALOGUE');
+    expect(JSON.stringify(created.body)).not.toContain('sk-live-1234567890');
+
+    const listed = await request('/app/role-cards?namespace=agents&agent=raw-summary');
+    expect(listed.status).toBe(200);
+    expect(listed.body.cards).toHaveLength(1);
+    expect(listed.body.cards[0].summary).toBe('raw-summary: 4 samples; prefers code');
+    expect(JSON.stringify(listed.body)).not.toContain('RAW DIALOGUE');
+    expect(JSON.stringify(listed.body)).not.toContain('sk-live-1234567890');
+
+    const nodes = (await app.graph.listNodes({ type: 'agent_role_card' }))
+      .filter((node) => node.content?.agent === 'raw-summary');
+    expect(nodes).toHaveLength(1);
+    expect(JSON.stringify(nodes[0].content)).not.toContain('RAW DIALOGUE');
+    expect(JSON.stringify(nodes[0].content)).not.toContain('sk-live-1234567890');
+
+    // 同版本同安全字段、不同 raw summary：sanitize 后为同一内容，按幂等 replayed 处理。
+    const replay = await request('/app/role-cards', {
+      method: 'POST',
+      body: { card: { ...raw, summary: 'another raw secret sk-live-999' } },
+    });
+    expect(replay.status).toBe(200);
+    expect(replay.body.replayed).toBe(true);
+    expect(JSON.stringify(replay.body)).not.toContain('sk-live-999');
   });
 
   it('daemon 端点需要 bearer token / memory.write scope', async () => {

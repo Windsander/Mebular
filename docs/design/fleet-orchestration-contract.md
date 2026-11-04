@@ -1077,7 +1077,7 @@ E-<gate>-<n>
 
 **问题**：P0 §4.2 原文禁止新增“公开/内部 HTTP 端点”，但 P1/P2/P5/P6 的实现需要守护内部 app 面来服务无本地 Mebular 句柄的 fleet 客户端。
 
-**批准范围**：只允许以下内部端点，且全部满足 loopback + bearer/scope、internal metadata、无公共 MCP 方法、无人类 UI、无 TaskEvent 线格式变化：
+**批准范围**：只允许以下内部端点。默认部署为 loopback；非 loopback 仅允许 TLS + bearer/scope 且需显式部署，并满足 bearer/scope、internal metadata、无公共 MCP 方法、无人类 UI、无 TaskEvent 线格式变化：
 
 | 端点 | 方法/scope | 约束 |
 |---|---|---|

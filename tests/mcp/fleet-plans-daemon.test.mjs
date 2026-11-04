@@ -405,7 +405,7 @@ describe('P2 daemon /app/plans', () => {
       namespace: 'tasks',
       listen: '/ip4/127.0.0.1/tcp/0',
       peers: [],
-      agents: [{ name: 'worker', kind: 'echo' }],
+      agents: [{ name: 'worker', kind: 'echo' }, { name: 'planner', kind: 'echo' }],
       store: 'daemon',
       daemon: { endpoint: base },
     }), { mode: 0o600 });
@@ -488,7 +488,7 @@ describe('P2 daemon /app/plans', () => {
       namespace: 'tasks',
       listen: '/ip4/127.0.0.1/tcp/0',
       peers: [],
-      agents: [{ name: 'worker', kind: 'echo' }],
+      agents: [{ name: 'worker', kind: 'echo' }, { name: 'planner', kind: 'echo' }],
       store: 'daemon',
       daemon: { endpoint: base },
     }), { mode: 0o600 });

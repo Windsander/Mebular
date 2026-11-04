@@ -1,6 +1,9 @@
-// P7 review blockers：B1 默认 MCP plan owner/MR 执行者；B2 内部端点契约只做回归锚点。
+// P7 review blockers：B1-R 默认 MCP plan owner/MR 执行者；B2 内部端点契约只做回归锚点。
+//
+// 边界：本文件是 handler 级 E2E（直接调用 TASK_TOOLS handler + 真实 Mebular/store/materializer），
+// 不经过真实 MCP stdio/HTTP transport；transport 级默认 plan 未在本轮新增，作为 P7 证据限制记录。
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Mebular } from '@mebular/core';
@@ -179,6 +182,61 @@ describe('B1 默认 MCP plan owner/MR 执行者', () => {
       expect(result.errors.join(' ')).toContain('PLAN_OWNER_UNEXECUTABLE');
       expect(await plans.list()).toEqual([]);
       expect(await store.byTask(planRootTaskId('plan-p7-b1-none-001', 1))).toHaveLength(0);
+    } finally {
+      await live.shutdown().catch(() => undefined);
+    }
+  });
+
+  it('defaultAgent 指向 ghost → 配置拒绝，plan/root 不写', async () => {
+    await onboardDevice({ dir, device: A.device, agents: [{ name: A.agent, kind: 'echo' }] });
+    const { live, store, plans } = await openLive();
+    try {
+      const configPath = join(dir, 'fleet.config.json');
+      const config = JSON.parse(await readFile(configPath, 'utf-8')) as Record<string, unknown>;
+      config.defaultAgent = 'ghost-agent';
+      await writeFile(configPath, JSON.stringify(config, null, 2), { mode: 0o600 });
+
+      await expect(toolByName('task_submit')!.handler(
+        { intent: 'B1-R default ghost', to: SENTINEL, plan: localPlan('plan-p7-b1r-default-ghost-001') },
+        { dir, mebular: live } as ToolContext,
+      )).rejects.toThrow(/defaultAgent/);
+      expect(await plans.list()).toEqual([]);
+      expect(await store.byTask(planRootTaskId('plan-p7-b1r-default-ghost-001', 1))).toHaveLength(0);
+    } finally {
+      await live.shutdown().catch(() => undefined);
+    }
+  });
+
+  it('ctx.agent 指向 ghost → PLAN_OWNER_UNEXECUTABLE，plan/root 不写', async () => {
+    await onboardDevice({ dir, device: A.device, agents: [{ name: A.agent, kind: 'echo' }] });
+    const { live, store, plans } = await openLive();
+    try {
+      const result = await toolByName('task_submit')!.handler(
+        { intent: 'B1-R ctx ghost', to: SENTINEL, plan: localPlan('plan-p7-b1r-ctx-ghost-001') },
+        { dir, mebular: live, agent: 'ghost-agent' } as ToolContext,
+      ) as { ok: boolean; error: string; reason: string; errors: string[] };
+      expect(result).toMatchObject({ ok: false, error: 'PLAN_POLICY', reason: 'PLAN_OWNER_UNEXECUTABLE' });
+      expect(result.errors.join(' ')).toContain('ghost-agent');
+      expect(await plans.list()).toEqual([]);
+      expect(await store.byTask(planRootTaskId('plan-p7-b1r-ctx-ghost-001', 1))).toHaveLength(0);
+    } finally {
+      await live.shutdown().catch(() => undefined);
+    }
+  });
+
+  it('非 board ghost owner + ghost planAgent → 拒绝，不写 plan/root', async () => {
+    await onboardDevice({ dir, device: A.device, agents: [{ name: A.agent, kind: 'echo' }] });
+    const { live, store, plans } = await openLive();
+    try {
+      const plan = localPlan('plan-p7-b1r-ghost-owner-001');
+      plan.owner = { device: A.device, agent: 'ghost-agent' };
+      const result = await toolByName('task_submit')!.handler(
+        { intent: 'B1-R ghost owner', to: SENTINEL, plan },
+        { dir, mebular: live, agent: 'ghost-agent' } as ToolContext,
+      ) as { ok: boolean; error: string; reason: string };
+      expect(result).toMatchObject({ ok: false, error: 'PLAN_POLICY', reason: 'PLAN_OWNER_UNEXECUTABLE' });
+      expect(await plans.list()).toEqual([]);
+      expect(await store.byTask(planRootTaskId('plan-p7-b1r-ghost-owner-001', 1))).toHaveLength(0);
     } finally {
       await live.shutdown().catch(() => undefined);
     }

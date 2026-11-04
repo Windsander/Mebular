@@ -44,7 +44,7 @@ let app: Mebular | null = null;
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'fleet-plan-runtime-'));
-  await onboardDevice({ dir, device: 'device-A', agents: [{ name: 'worker', kind: 'echo' }] });
+  await onboardDevice({ dir, device: 'device-A', agents: [{ name: 'worker', kind: 'echo' }, { name: 'planner', kind: 'echo' }] });
 });
 
 afterEach(async () => {

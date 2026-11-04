@@ -82,6 +82,7 @@ describe('P1 fleet config：capabilities optional + __plan__ 保留名', () => {
     expect(validateFleetConfig({ ...withOptional, defaultAgent: 'worker' })).toEqual([]);
     expect(validateFleetConfig({ ...withOptional, defaultAgent: '' }).join('; ')).toContain('defaultAgent');
     expect(validateFleetConfig({ ...withOptional, defaultAgent: PLAN_SENTINEL }).join('; ')).toContain('defaultAgent');
+    expect(validateFleetConfig({ ...withOptional, defaultAgent: 'ghost-agent' }).join('; ')).toContain('defaultAgent 必须是 agents[].name 之一');
   });
 
   it('capabilities 形状非法被拒', () => {

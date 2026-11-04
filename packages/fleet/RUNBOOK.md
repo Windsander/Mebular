@@ -36,8 +36,8 @@ fleet doctor      --dir ~/.mebular --json
 - **失败/取消**：失败 step 走新 plan version + `reuse`；旧 MR 存在时禁止重试版本。`task_cancel(rootTaskId)` 为 plan 级取消（root failed CANCELLED + 清理该 version 非终态 step task 及派生树，已提交 MR 不撤销）；`task_cancel(stepTaskId)` 只取消该 step 子树，plan 派生为 failed。
 - 进程重启后从 plan + task 事件恢复，不需要 cursor；确定性 taskId/eventId 保证不重复建 task。
 - 默认只推进 owner device 的 plan；未授权设备不应运行 coordinator。
-- **sub-plan Agent 绑定**：MCP 任务工具缺省 Agent 是 `board`；宿主应注入真实执行 Agent，且必须与父 step task 的 `to.agent` 一致，否则 B8 拒绝。
-- **MCP 默认 plan owner（B1）**：普通 task 的默认 agent 仍是 `board`（旧语义不变）；plan 提交使用独立 `planAgent = ctx.agent ?? config.defaultAgent ?? config.agents[0]?.name ?? "board"`。若 `plan.owner.agent="board"` 且 `planAgent` 可执行，服务端把 owner 归一化为 `planAgent`，MR 也落到该 agent；若没有任何可用 Agent（`planAgent="board"` 且 config 无 board），返回 `PLAN_POLICY` + `PLAN_OWNER_UNEXECUTABLE`，不创建 plan/root。非 board 的显式 owner 仍必须等于 `planAgent`。
+- **sub-plan Agent 绑定**：MCP 任务工具缺省 Agent 是 `board`；宿主必须注入真实执行 Agent，且必须与父 step task 的 `to.agent` 一致，否则 B8 拒绝。默认 MCP sub-plan 不会自动把 `ctx.agent` 对齐到父 step；调用方需显式传正确的 `ctx.agent`（或配置 `defaultAgent` 与父 step 一致）。
+- **MCP 默认 plan owner（B1/B1-R）**：普通 task 的默认 agent 仍是 `board`（旧语义不变）；plan 提交使用独立 `planAgent = ctx.agent ?? config.defaultAgent ?? config.agents[0]?.name ?? "board"`。`defaultAgent` 必须是 `config.agents[].name` 之一；最终 `planAgent`（含显式 `ctx.agent`、`defaultAgent`、`agents[0]`、`board` fallback）也必须属于本机配置，否则返回 `PLAN_POLICY` + `PLAN_OWNER_UNEXECUTABLE`，不创建 plan/root。若 `plan.owner.agent="board"` 且 `planAgent !== "board"`，服务端把 owner 归一化为 `planAgent`，MR 也落到该 agent；非 board 的显式 owner 仍必须等于 `planAgent`。
 - **daemon CLI 边界**：无 live app 时 `task_targets` / `task_negotiate` / `chatter_*` 为 fail-closed（不回退本地离线 Mebular）；MCP live 路径正常。plan/task/role card 的 daemon 读写已由 `/app/plans`、任务事件和 `/app/role-cards` 覆盖。
 - **/app/plans 信任边界**：owner/agent 是设备级 app token 下的自证；该内部端点不在 P2 扩权。`parentTaskAccepted` 是 fleet 内部派生上下文（root 是否已存在），外部直接传 true 不构成信任边界。
 - **/app/plans 负例覆盖**：C/join/reduce/mr 的 HTTP 负例可继续依赖 validator；不额外扩 P2 端点测试。
@@ -111,7 +111,7 @@ npm run verify:fleet:p6
 
 ### 7.2.1 CR-003 内部 app 端点（已批准）
 
-只允许 `/app/nodes`（optional metadata；raw debug 拒绝 card/role/plan 写入）、`/app/capability-cards` POST、`/app/plans` POST/GET、`/app/role-cards` POST/GET、`/app/peers` GET；全部 loopback + bearer/scope、internal metadata，不新增公共 MCP/UI/TaskEvent。除此之外仍按“不新增公开/内部 HTTP 端点”执行。
+只允许 `/app/nodes`（optional metadata；raw debug 拒绝 card/role/plan 写入）、`/app/capability-cards` POST、`/app/plans` POST/GET、`/app/role-cards` POST/GET、`/app/peers` GET；默认 loopback；非 loopback 仅 TLS+bearer/scope 且需显式部署；internal metadata，不新增公共 MCP/UI/TaskEvent。除此之外仍按“不新增公开/内部 HTTP 端点”执行。
 
 ### 7.3 已知限制（P6 记录，不伪造通过）
 
@@ -119,5 +119,6 @@ npm run verify:fleet:p6
 - daemon 远端卡片验证依赖 `/app/peers` 中**当前在线**的已认证 peer 公钥；peer 离线时远端路由 fail-closed。旧守护无 `/app/peers` 时行为等同 P3 的“只信任本机公钥”。
 - `plan.example.json` 的 join/reduce 步骤必须带 `to` 或 `route`，否则运行时按 `NO_TARGET` 阻塞（协议合法不等于可执行）。
 - 旧 worker 只执行普通 task；`to.device/agent="__plan__"` 的 root task 必须跳过，不写 failed/UNKNOWN_AGENT。
+- P7 `p7-blockers` 测试是 **handler 级**（直接调用 `TASK_TOOLS` handler + 真实 Mebular/store/materializer），不是真实 MCP transport；真实 MCP stdio/HTTP 默认 plan 仍由 `tests/fleet/surface.test.ts` 的统一入口和既有 MCP 套件覆盖。
 - 角色卡默认 shadow；P6 未开启生产软排序。`roleCards.enabled=true` 仍是内部/测试配置，需真实 shadow 报告与审核。
 - 本期无 claim/lease/抢单、无跨 plan 依赖、无执行中改图；任何此类需求走 CR。

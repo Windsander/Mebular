@@ -40,7 +40,7 @@ stay inside Fleet; the human Console and the 16 task methods keep their existing
 
 ### Fixed
 
-- **Default MCP plan owner** — `task_submit.plan` now uses a plan-specific agent (`ctx.agent` / `config.defaultAgent` / first configured agent) for the default `board` placeholder owner, so the owner and MR executor are actually runnable; an empty agent configuration fails closed with `PLAN_POLICY` + `PLAN_OWNER_UNEXECUTABLE`. Ordinary task defaults remain `board`.
+- **Default MCP plan owner** — `task_submit.plan` now uses a plan-specific agent (`ctx.agent` / `config.defaultAgent` / first configured agent) for the default `board` placeholder owner, so the owner and MR executor are actually runnable. The final `planAgent` must be a real `config.agents[].name`; `defaultAgent` is validated against the agent list. Empty/ghost agent configurations fail closed with `PLAN_POLICY` + `PLAN_OWNER_UNEXECUTABLE` before writing plan/root. Ordinary task defaults remain `board`.
 - **CR-003 internal endpoint whitelist** — the approved internal app endpoints (`/app/nodes`, `/app/capability-cards`, `/app/plans`, `/app/role-cards`, `/app/peers`) are documented as the only allowed internal HTTP surface; no public MCP/UI/TaskEvent changes. Capability-card writes now honor `writesEnabled` and reject non-object bodies; card runtime/provenance source are restricted to safe tokens.
 
 ### Verification

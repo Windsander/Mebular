@@ -347,23 +347,28 @@ type PlanOwnerNormalization =
  * 归一化为本机 planAgent；非 board 的显式 owner 不改写，仍由 submitTaskPlan 校验 equals planAgent。
  * 配置没有任何可用 Agent 时 fail closed，绝不创建 plan/root。
  */
+function planAgentUnavailable(planAgent: string): PlanOwnerNormalization {
+  return {
+    ok: false,
+    error: 'PLAN_POLICY',
+    reason: 'PLAN_OWNER_UNEXECUTABLE',
+    errors: [`PLAN_OWNER_UNEXECUTABLE: planAgent="${planAgent}" 不在本机 config.agents[].name 中；请配置真实执行 Agent 或显式 ctx.agent`],
+    created: [],
+  };
+}
+
 function normalizePlanOwnerForSession(input: unknown, session: Session): PlanOwnerNormalization {
+  // B1-R：最终 planAgent（ctx.agent / defaultAgent / agents[0] / board fallback）必须是本机
+  // 真实注册的 Agent；ghost agent 一律在写 plan/root 前拒绝，即使 plan.owner 也是 ghost。
+  if (!session.config.agents.some((agent) => agent.name === session.planAgent)) {
+    return planAgentUnavailable(session.planAgent);
+  }
   if (typeof input !== 'object' || input === null || Array.isArray(input)) return { ok: true, plan: input };
   const plan = input as Record<string, unknown>;
   const owner = plan.owner;
   if (typeof owner !== 'object' || owner === null || Array.isArray(owner)) return { ok: true, plan: input };
   const ownerAgent = (owner as Record<string, unknown>).agent;
-  if (ownerAgent !== 'board') return { ok: true, plan: input };
-  if (session.planAgent === 'board') {
-    if (session.config.agents.some((agent) => agent.name === 'board')) return { ok: true, plan: input };
-    return {
-      ok: false,
-      error: 'PLAN_POLICY',
-      reason: 'PLAN_OWNER_UNEXECUTABLE',
-      errors: ['PLAN_OWNER_UNEXECUTABLE: plan.owner.agent=board，但当前配置没有可执行 Agent；请配置 agents/defaultAgent 或显式 ctx.agent'],
-      created: [],
-    };
-  }
+  if (ownerAgent !== 'board' || session.planAgent === 'board') return { ok: true, plan: input };
   return {
     ok: true,
     plan: { ...plan, owner: { ...(owner as Record<string, unknown>), agent: session.planAgent } },

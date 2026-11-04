@@ -235,6 +235,15 @@ export function validateFleetConfig(input: unknown): string[] {
       }
     }
   }
+  // B1-R：defaultAgent 必须是本机真实注册的 agents[].name；不能指向 ghost executor。
+  if (typeof c.defaultAgent === 'string' && c.defaultAgent.length > 0 && c.defaultAgent !== PLAN_SENTINEL) {
+    const names = new Set(
+      (Array.isArray(c.agents) ? c.agents : [])
+        .map((agent) => (typeof (agent as Record<string, unknown>)?.name === 'string' ? (agent as Record<string, unknown>).name as string : null))
+        .filter((name): name is string => name !== null),
+    );
+    if (!names.has(c.defaultAgent)) errors.push('defaultAgent 必须是 agents[].name 之一');
+  }
   return errors;
 }
 

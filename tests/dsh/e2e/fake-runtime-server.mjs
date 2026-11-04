@@ -81,6 +81,8 @@ function failure(requestId, code, message, retryable = false) {
  *   ingestFailureCode?: string,
  *   ingestDelayMs?: number,
  *   checkpointFailTimes?: number,
+ *   checkpointPendingTimes?: number,
+ *   checkpointConflictTimes?: number,
  * }} [options]
  */
 export async function createFakeRuntime(options = {}) {
@@ -95,6 +97,8 @@ export async function createFakeRuntime(options = {}) {
     contexts: [],
     ingests: [],
     checkpoints: [],
+    checkpointReads: [],
+    checkpointRevisions: {},
     ingestAttempts: 0,
     ingestFailureCount: 0,
     ingestDuplicates: 0,
@@ -326,7 +330,18 @@ export async function createFakeRuntime(options = {}) {
     }
 
     const checkpointMatch = path.match(/^\/memory-runtime\/v1\/checkpoints\/([^/]+)$/);
+    if (checkpointMatch && req.method === 'GET') {
+      const threadId = decodeURIComponent(checkpointMatch[1]);
+      const revision = state.checkpointRevisions[threadId] ?? 0;
+      state.checkpointReads.push({ requestId, threadId, revision });
+      sendJson(res, 200, envelope(requestId, {
+        checkpoint: revision > 0 ? { revision, pending: false, threadId } : null,
+        pending: false,
+      }), requestId);
+      return;
+    }
     if (checkpointMatch && req.method === 'PUT') {
+      const threadId = decodeURIComponent(checkpointMatch[1]);
       const key = record.idempotencyKey ?? body?.requestId ?? requestId;
       const replay = idempotentCheckpoint.get(key);
       if (replay !== undefined) {
@@ -334,24 +349,52 @@ export async function createFakeRuntime(options = {}) {
         sendJson(res, 200, replay, requestId);
         return;
       }
+      const conflicts = state.checkpoints.filter((entry) => entry.conflict === true).length;
+      if (Number.isInteger(body?.expectedRevision) && conflicts < (opts.checkpointConflictTimes ?? 0)) {
+        state.checkpoints.push({ requestId, key, threadId, status: 409, failed: true, conflict: true });
+        sendJson(res, 409, failure(requestId, 'revision_mismatch', 'fake checkpoint conflict'), requestId);
+        return;
+      }
       if (state.checkpoints.filter((entry) => entry.failed === true).length < (opts.checkpointFailTimes ?? 0)) {
         state.checkpoints.push({ requestId, key, status: 409, failed: true });
         sendJson(res, 409, failure(requestId, 'revision_mismatch', 'fake checkpoint failure'), requestId);
         return;
       }
-      const response = envelope(requestId, { checkpoint: { revision: 1 } });
+      const pending = state.checkpoints.filter((entry) => entry.pending === true).length;
+      if (pending < (opts.checkpointPendingTimes ?? 0)) {
+        const pendingResponse = envelope(requestId, {
+          checkpoint: { revision: null, pending: true, threadId },
+          pending: true,
+          source: 'cache',
+        }, ['capability_unavailable', 'queued_outbox']);
+        state.checkpoints.push({
+          requestId,
+          key,
+          threadId,
+          status: 202,
+          pending: true,
+          committed: false,
+        });
+        sendJson(res, 202, pendingResponse, requestId);
+        return;
+      }
+      const revision = (state.checkpointRevisions[threadId] ?? 0) + 1;
+      state.checkpointRevisions[threadId] = revision;
+      const response = envelope(requestId, { checkpoint: { revision, pending: false, threadId } });
       idempotentCheckpoint.set(key, response);
       state.checkpoints.push({
         requestId,
         key,
         duplicate: false,
-        threadId: decodeURIComponent(checkpointMatch[1]),
+        threadId,
+        expectedRevision: body?.expectedRevision ?? null,
         compactionId: body?.state?.compactionId ?? null,
         summary: typeof body?.summary === 'string' ? body.summary : null,
         stateSchema: body?.state?.schema ?? null,
         contentMode: body?.state?.contentMode ?? null,
         domain: body?.domain ?? null,
         hasSync: Object.prototype.hasOwnProperty.call(body ?? {}, 'sync'),
+        revision,
         committed: true,
       });
       sendJson(res, 200, response, requestId);
@@ -381,6 +424,8 @@ export async function createFakeRuntime(options = {}) {
       state.contexts.length = 0;
       state.ingests.length = 0;
       state.checkpoints.length = 0;
+      state.checkpointReads.length = 0;
+      state.checkpointRevisions = {};
       state.ingestAttempts = 0;
       state.ingestFailureCount = 0;
       state.ingestDuplicates = 0;

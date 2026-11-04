@@ -59,6 +59,28 @@ function sessionEvent(type, seq, data, time = seq) {
   return { type, seq, time, data };
 }
 
+function compactionEvents(compactionId, seqBase = 10, summary = 'the compacted summary') {
+  return [
+    sessionEvent('compaction/start', seqBase, { compactionId, turn: 1 }),
+    sessionEvent('compaction/summary', seqBase + 1, {
+      compactionId,
+      summary: [{ type: 'text', text: summary }],
+      shadowedRange: { start: 1, end: 9 },
+      shadowedSeqs: [1, 2, 3],
+      shadowedTokenCount: 120,
+      provider: 'fake',
+      model: 'no-model',
+    }),
+    sessionEvent('user/message', seqBase + 2, {
+      id: `replacement-${compactionId}`,
+      role: 'user',
+      content: [{ type: 'text', text: summary }],
+      source: { kind: 'compact-checkpoint', compactionId },
+    }),
+    sessionEvent('compaction/end', seqBase + 3, { compactionId, turn: 1 }),
+  ];
+}
+
 async function waitFor(predicate, { timeoutMs = 5000, intervalMs = 20, label = 'condition' } = {}) {
   const started = Date.now();
   for (;;) {
@@ -242,6 +264,69 @@ describe('@mebular/dsh-plugin memory runtime E2E（真实 Cordis + fake Runtime�
     expect(runtime.state.requests.some((request) => (
       request.method === 'PUT' && request.path === '/memory-runtime/v1/checkpoints/dsh_s1'
     ))).toBe(true);
+  });
+
+  it('checkpoint 202 只显示 pending，迟来 200+revision 才显示 committed', async () => {
+    const runtime = await fakeRuntime({ checkpointPendingTimes: 1 });
+    const { ctx } = await startPlugin(runtime, {
+      enabled: true,
+      recall: false,
+      ingest: false,
+      checkpoints: true,
+      hideMemoryTools: false,
+    });
+    const session = makeSession();
+    for (const event of compactionEvents('pending-first', 10, 'first pending summary')) {
+      ctx.emit('session/event', session, event);
+    }
+    const pending = await waitFor(
+      () => runtime.state.checkpoints.find((entry) => entry.pending === true),
+      { label: 'pending checkpoint' },
+    );
+    expect(pending.status).toBe(202);
+    expect(runtime.state.checkpoints.some((entry) => entry.committed === true)).toBe(false);
+
+    for (const event of compactionEvents('committed-second', 20, 'second committed summary')) {
+      ctx.emit('session/event', session, event);
+    }
+    const committed = await waitFor(
+      () => runtime.state.checkpoints.find((entry) => entry.committed === true),
+      { label: 'committed checkpoint' },
+    );
+    expect(committed.compactionId).toBe('committed-second');
+    expect(committed.revision).toBe(1);
+  });
+
+  it('checkpoint revision 冲突先 GET 当前 revision 再重试一次', async () => {
+    const runtime = await fakeRuntime({ checkpointConflictTimes: 1 });
+    const { ctx } = await startPlugin(runtime, {
+      enabled: true,
+      recall: false,
+      ingest: false,
+      checkpoints: true,
+      hideMemoryTools: false,
+    });
+    const session = makeSession();
+    for (const event of compactionEvents('first', 10, 'first checkpoint')) {
+      ctx.emit('session/event', session, event);
+    }
+    const first = await waitFor(
+      () => runtime.state.checkpoints.find((entry) => entry.committed === true && entry.compactionId === 'first'),
+      { label: 'first checkpoint' },
+    );
+    expect(first.revision).toBe(1);
+
+    for (const event of compactionEvents('conflict', 20, 'conflict checkpoint')) {
+      ctx.emit('session/event', session, event);
+    }
+    const committed = await waitFor(
+      () => runtime.state.checkpoints.find((entry) => entry.committed === true && entry.compactionId === 'conflict'),
+      { label: 'conflict retry checkpoint' },
+    );
+    expect(runtime.state.checkpointReads).toHaveLength(1);
+    expect(runtime.state.checkpointReads[0].revision).toBe(1);
+    expect(committed.expectedRevision).toBe(1);
+    expect(committed.revision).toBe(2);
   });
 
   it('ingest 重试复用同一 requestId，重复事件只排队一次，服务端可幂等回放', async () => {

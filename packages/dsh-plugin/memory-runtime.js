@@ -66,6 +66,11 @@ const DEFAULT_CONFIG = Object.freeze({
   maxChunkBytes: 16 * 1024,
   checkpointTimeoutMs: 2500,
   checkpointMaxQueue: 32,
+  checkpointRetries: 2,
+  checkpointRetryBaseMs: 250,
+  recallCooldownMs: 30_000,
+  rateLimitBaseMs: 1000,
+  retryAfterMaxMs: 60_000,
   discoveryRetryMs: 5000,
   tokenCacheTtlMs: 60_000,
   dedupeCacheSize: 512,
@@ -577,6 +582,11 @@ export function resolveMemoryRuntimeConfig(input = {}, options = {}) {
     maxChunkBytes: asInt(raw.maxChunkBytes, DEFAULT_CONFIG.maxChunkBytes, 16, 256 * 1024),
     checkpointTimeoutMs: asInt(raw.checkpointTimeoutMs, DEFAULT_CONFIG.checkpointTimeoutMs, 10, 10_000),
     checkpointMaxQueue: asInt(raw.checkpointMaxQueue, DEFAULT_CONFIG.checkpointMaxQueue, 1, 128),
+    checkpointRetries: asInt(raw.checkpointRetries, DEFAULT_CONFIG.checkpointRetries, 0, 2),
+    checkpointRetryBaseMs: asInt(raw.checkpointRetryBaseMs, DEFAULT_CONFIG.checkpointRetryBaseMs, 1, 10_000),
+    recallCooldownMs: asInt(raw.recallCooldownMs, DEFAULT_CONFIG.recallCooldownMs, 0, 24 * 60 * 60_000),
+    rateLimitBaseMs: asInt(raw.rateLimitBaseMs, DEFAULT_CONFIG.rateLimitBaseMs, 0, 60_000),
+    retryAfterMaxMs: asInt(raw.retryAfterMaxMs, DEFAULT_CONFIG.retryAfterMaxMs, 0, 10 * 60_000),
     discoveryRetryMs: asInt(raw.discoveryRetryMs, DEFAULT_CONFIG.discoveryRetryMs, 0, 60_000),
     tokenCacheTtlMs: asInt(raw.tokenCacheTtlMs, DEFAULT_CONFIG.tokenCacheTtlMs, 0, 10 * 60_000),
     dedupeCacheSize: asInt(raw.dedupeCacheSize, DEFAULT_CONFIG.dedupeCacheSize, 8, 4096),
@@ -1392,6 +1402,43 @@ function abortableDelay(ms, signal, setTimeoutFn = setTimeout, clearTimeoutFn = 
   });
 }
 
+function headerValue(headers, name) {
+  if (headers === null || headers === undefined) return '';
+  if (typeof headers.get === 'function') {
+    const value = headers.get(name);
+    return typeof value === 'string' ? value : '';
+  }
+  if (!isObject(headers)) return '';
+  const wanted = String(name).toLowerCase();
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === wanted && typeof value === 'string') return value;
+  }
+  return '';
+}
+
+/**
+ * Parse `Retry-After` (delta seconds or an HTTP date) into a bounded delay.
+ * A malformed value is ignored so it cannot create an unbounded wait.
+ *
+ * @param {string} value
+ * @param {number} at
+ * @param {number} maxMs
+ * @returns {number | null}
+ */
+function parseRetryAfterMs(value, at, maxMs) {
+  const text = String(value ?? '').trim();
+  if (text.length === 0) return null;
+  let wait = null;
+  if (/^\d+(?:\.\d+)?$/u.test(text)) {
+    wait = Number(text) * 1000;
+  } else {
+    const timestamp = Date.parse(text);
+    if (Number.isFinite(timestamp)) wait = Math.max(0, timestamp - at);
+  }
+  if (wait === null || !Number.isFinite(wait)) return null;
+  return Math.min(Math.max(0, Math.trunc(wait)), Math.max(0, maxMs));
+}
+
 function isRetryableRuntimeFailure(result) {
   if (result?.ok !== false) return false;
   if (result.retryable === true) return true;
@@ -1421,6 +1468,7 @@ function createAbortScope(parent, timeoutMs, setTimeoutFn, clearTimeoutFn) {
   timer?.unref?.();
   return {
     signal: controller.signal,
+    abort: onAbort,
     cleanup() {
       clearTimeoutFn(timer);
       parent?.removeEventListener?.('abort', onAbort);
@@ -1499,6 +1547,24 @@ function createIngestQueue({ max, batchSize, flushMs, isReady, send, setTimeoutF
     return flushing;
   }
 
+  /**
+   * Drop queued (never accepted) items when immersive mode is revoked. The
+   * adapter keeps no durable host spool, so retaining them would replay stale
+   * work after a later re-enable; drop them visibly instead.
+   */
+  function clear() {
+    if (timer !== null) {
+      clearTimeoutFn(timer);
+      timer = null;
+    }
+    const dropped = items.length;
+    items.length = 0;
+    keys.clear();
+    keyOrder.length = 0;
+    if (dropped > 0) stats.interrupted += dropped;
+    return dropped;
+  }
+
   async function dispose(timeoutMs) {
     if (disposed) return;
     disposed = true;
@@ -1518,6 +1584,7 @@ function createIngestQueue({ max, batchSize, flushMs, isReady, send, setTimeoutF
   return {
     enqueue,
     flush,
+    clear,
     dispose,
     schedule,
     size: () => items.length,
@@ -1560,6 +1627,12 @@ function createJobQueue({ max, handler, setTimeoutFn, clearTimeoutFn, stats, set
         try {
           await handler(item);
         } catch {
+          if (isObject(item)) {
+            item.pending = false;
+            item.committed = false;
+            item.failed = true;
+            item.error = item.error ?? 'handler_failed';
+          }
           stats.failed += 1;
         }
       }
@@ -1568,6 +1641,29 @@ function createJobQueue({ max, handler, setTimeoutFn, clearTimeoutFn, stats, set
       if (!disposed && items.length > 0) schedule();
     });
     return running;
+  }
+
+  /**
+   * Drop queued jobs when immersive mode is revoked without calling the handler,
+   * so a later re-enable cannot write checkpoints gathered under the old mode.
+   */
+  function clear() {
+    if (timer !== null) {
+      clearTimeoutFn(timer);
+      timer = null;
+    }
+    const dropped = items.length;
+    for (const item of items) {
+      if (isObject(item)) {
+        item.pending = false;
+        item.committed = false;
+        item.skipped = true;
+        item.error = item.error ?? 'mode_disabled';
+      }
+    }
+    items.length = 0;
+    if (dropped > 0) stats.interrupted = (stats.interrupted ?? 0) + dropped;
+    return dropped;
   }
 
   async function dispose(timeoutMs) {
@@ -1587,6 +1683,7 @@ function createJobQueue({ max, handler, setTimeoutFn, clearTimeoutFn, stats, set
   return {
     enqueue,
     flush,
+    clear,
     dispose,
     schedule,
     size: () => items.length,
@@ -1655,12 +1752,15 @@ export function createMemoryRuntimeAdapter(options = {}) {
           tokenSource: 'none',
         },
         auth: { mode: 'none', tokenPresent: false, failures: 0, lastStatus: null, lastCode: null, lastAt: null },
-        recall: { attempts: 0, hits: 0, empty: 0, failures: 0, skipped: 0, deduped: 0, anchors: 0 },
+        recall: { attempts: 0, hits: 0, empty: 0, failures: 0, skipped: 0, deduped: 0, cooling: 0, anchors: 0 },
         ingest: {
           queued: 0, sent: 0, batches: 0, failed: 0, dropped: 0, duplicates: 0, skipped: 0,
-          retries: 0, exhausted: 0, lastError: null,
+          retries: 0, exhausted: 0, interrupted: 0, lastError: null,
         },
-        checkpoints: { queued: 0, attempts: 0, sent: 0, failed: 0, committed: 0, incomplete: 0, interrupted: 0 },
+        checkpoints: {
+          queued: 0, attempts: 0, retries: 0, sent: 0, failed: 0, committed: 0, pending: 0,
+          conflicts: 0, incomplete: 0, interrupted: 0, skipped: 0,
+        },
         tools: { trackedAgents: 0, restricted: 0, currentDenied: 0 },
         maintenance: { attempts: 0, sent: 0, failures: 0, skipped: 0, running: 0 },
         lastWarning: null,
@@ -1705,12 +1805,15 @@ export function createMemoryRuntimeAdapter(options = {}) {
 
   const stats = {
     auth: { failures: 0, lastStatus: null, lastCode: null, lastAt: null },
-    recall: { attempts: 0, hits: 0, empty: 0, failures: 0, skipped: 0, deduped: 0 },
+    recall: { attempts: 0, hits: 0, empty: 0, failures: 0, skipped: 0, deduped: 0, cooling: 0 },
     ingest: {
       queued: 0, sent: 0, batches: 0, failed: 0, dropped: 0, duplicates: 0, skipped: 0, inherited: 0,
-      retries: 0, exhausted: 0, lastError: null,
+      retries: 0, exhausted: 0, interrupted: 0, lastError: null,
     },
-    checkpoints: { attempts: 0, sent: 0, failed: 0, committed: 0, incomplete: 0, interrupted: 0, dropped: 0 },
+    checkpoints: {
+      attempts: 0, retries: 0, sent: 0, failed: 0, committed: 0, pending: 0, conflicts: 0,
+      incomplete: 0, interrupted: 0, skipped: 0, dropped: 0,
+    },
     tools: { restricted: 0, currentDenied: 0 },
     maintenance: { attempts: 0, sent: 0, failures: 0, skipped: 0 },
   };
@@ -1718,6 +1821,9 @@ export function createMemoryRuntimeAdapter(options = {}) {
   const recalls = new Map();
   const trackers = new Map();
   const compactions = new Map();
+  const checkpointRevisions = new Map();
+  let recallCooldownUntil = 0;
+  let rateLimitUntil = 0;
   const listeners = [];
   const maintenanceRuns = new Set();
   const activeScopes = new Set();
@@ -1774,23 +1880,87 @@ export function createMemoryRuntimeAdapter(options = {}) {
     return runtimeAllows('recall') || runtimeAllows('ingest') || runtimeAllows('checkpoint');
   }
 
+  /**
+   * A revoked mode must stop new immersive work immediately and must not leave
+   * an in-memory queue that would replay after a later re-enable. The discovery
+   * poll itself is allowed to keep running so re-enable needs no host restart.
+   */
+  function stopRevokedWork(recallAllowed, ingestAllowed, checkpointAllowed) {
+    if (!recallAllowed) {
+      anchors.clear();
+      recallCooldownUntil = 0;
+    }
+    if (!ingestAllowed) {
+      ingestQueue?.clear();
+      for (const scope of activeScopes) {
+        try {
+          scope.abort?.();
+        } catch {
+          // Best-effort cancellation of an in-flight maintenance candidate call.
+        }
+      }
+    }
+    if (!checkpointAllowed) checkpointQueue?.clear();
+  }
+
   function noteActivation() {
     const value = discoveryCache?.value ?? null;
+    const recallAllowed = runtimeAllows('recall');
+    const ingestAllowed = runtimeAllows('ingest');
+    const checkpointAllowed = runtimeAllows('checkpoint');
     const key = [
       staticUrl !== null ? 'static' : 'discovery',
-      runtimeAllows('recall') ? 'r' : '-',
-      runtimeAllows('ingest') ? 'i' : '-',
-      runtimeAllows('checkpoint') ? 'c' : '-',
+      recallAllowed ? 'r' : '-',
+      ingestAllowed ? 'i' : '-',
+      checkpointAllowed ? 'c' : '-',
       value?.mode ?? '-',
       value?.state ?? '-',
     ].join(':');
     if (key === lastActivationKey) return;
     lastActivationKey = key;
+    stopRevokedWork(recallAllowed, ingestAllowed, checkpointAllowed);
     refreshTrackedTools();
     if (runtimeActive()) {
       ingestQueue?.schedule(0);
       checkpointQueue?.schedule();
     }
+  }
+
+  function recallCooling() {
+    if (now() < recallCooldownUntil) return true;
+    if (now() < rateLimitUntil) return true;
+    return false;
+  }
+
+  function noteRateLimit(result) {
+    if (!isObject(result) || result.status !== 429) return;
+    const wait = Number.isFinite(result.retryAfterMs)
+      ? Math.min(result.retryAfterMs, config.retryAfterMaxMs)
+      : Math.min(config.rateLimitBaseMs, config.retryAfterMaxMs);
+    rateLimitUntil = Math.max(rateLimitUntil, now() + Math.max(0, wait));
+  }
+
+  function noteRecallFailure(result) {
+    if (!isObject(result) || result.ok !== false) return;
+    if (result.status === 404 || result.status === 405) return;
+    const cooldown = config.recallCooldownMs;
+    const retryAfter = Number.isFinite(result.retryAfterMs) ? result.retryAfterMs : 0;
+    const wait = Math.max(cooldown, retryAfter);
+    if (wait > 0) recallCooldownUntil = Math.max(recallCooldownUntil, now() + wait);
+  }
+
+  async function waitForRateLimit(signal) {
+    const remaining = rateLimitUntil - now();
+    if (remaining <= 0) return;
+    await abortableDelay(Math.min(remaining, config.retryAfterMaxMs), signal, setTimeoutFn, clearTimeoutFn);
+  }
+
+  function retryDelayMs(result, baseMs, attempt) {
+    const retryAfter = Number.isFinite(result?.retryAfterMs)
+      ? Math.min(Math.max(0, result.retryAfterMs), config.retryAfterMaxMs)
+      : 0;
+    const backoff = baseMs * (2 ** Math.max(0, attempt - 1));
+    return Math.max(retryAfter, backoff);
   }
 
   async function ensureRuntime() {
@@ -2070,6 +2240,11 @@ export function createMemoryRuntimeAdapter(options = {}) {
           document = null;
         }
         const status = Number.isInteger(response?.status) ? response.status : null;
+        const retryAfterMs = parseRetryAfterMs(
+          headerValue(response?.headers, 'retry-after'),
+          now(),
+          config.retryAfterMaxMs,
+        );
         const successful = response?.ok === true
           || (response?.ok === undefined && status !== null && status >= 200 && status < 300);
         if (!successful) {
@@ -2080,6 +2255,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
               : `http_${status ?? 'error'}`,
             status,
             retryable: isObject(document?.error) && document.error.retryable === true,
+            ...(retryAfterMs === null ? {} : { retryAfterMs }),
           };
           noteAuthFailure(failure);
           return failure;
@@ -2092,6 +2268,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
               : 'runtime_error',
             status,
             retryable: isObject(document?.error) && document.error.retryable === true,
+            ...(retryAfterMs === null ? {} : { retryAfterMs }),
           };
           noteAuthFailure(failure);
           return failure;
@@ -2099,6 +2276,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
         return {
           ok: true,
           status,
+          ...(retryAfterMs === null ? {} : { retryAfterMs }),
           data: isObject(document) && Object.prototype.hasOwnProperty.call(document, 'data')
             ? document.data
             : document,
@@ -2128,11 +2306,13 @@ export function createMemoryRuntimeAdapter(options = {}) {
   async function runtimeRequest(path, body, requestOptions = {}) {
     if (disposed) return { ok: false, code: 'disposed', retryable: false };
     let result = await performRequest(path, body, requestOptions);
+    noteRateLimit(result);
     // Host token rotation: a 401 invalidates the cached file/env value and
     // retries exactly once with the refreshed token.
     if (result.ok === false && result.status === 401 && requestOptions.authRetry !== false) {
       lastToken = { token: '', source: 'none', at: 0 };
       result = await performRequest(path, body, { ...requestOptions, authRetry: false });
+      noteRateLimit(result);
     }
     return result;
   }
@@ -2158,6 +2338,10 @@ export function createMemoryRuntimeAdapter(options = {}) {
     if (!config.recall || disposed || closing) return null;
     if (!(await ensureRuntime()) || !runtimeAllows('recall')) {
       stats.recall.skipped += 1;
+      return null;
+    }
+    if (recallCooling()) {
+      stats.recall.cooling += 1;
       return null;
     }
     const agent = payload?.agent;
@@ -2214,14 +2398,16 @@ export function createMemoryRuntimeAdapter(options = {}) {
         signal: payload?.signal,
       });
     }
-    if (disposed || payload?.signal?.aborted) return null;
+    if (disposed || payload?.signal?.aborted || !runtimeAllows('recall')) return null;
     if (!result.ok) {
       stats.recall.failures += 1;
+      noteRecallFailure(result);
       if (typeof result.code === 'string' && result.code.startsWith('runtime_')) {
         warnOnce(`recall:${result.code}`, `memory runtime recall unavailable (${result.code})`);
       }
       return null;
     }
+    recallCooldownUntil = 0;
     const message = buildContextMessage(result.data, config);
     if (message === null) {
       stats.recall.empty += 1;
@@ -2374,7 +2560,11 @@ export function createMemoryRuntimeAdapter(options = {}) {
         const retrySignal = retryAbort?.signal;
         let attempt = 0;
         let lastFailure = null;
+        let accepted = false;
         for (;;) {
+          if (disposed || !runtimeAllows('ingest')) break;
+          await waitForRateLimit(retrySignal);
+          if (disposed || !runtimeAllows('ingest')) break;
           const result = await runtimeRequest('/ingest', payload, {
             timeoutMs: config.ingestTimeoutMs,
             idempotencyKey: requestId,
@@ -2383,6 +2573,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
           if (result.ok) {
             stats.ingest.sent += group.length;
             lastFailure = null;
+            accepted = true;
             break;
           }
           lastFailure = result;
@@ -2394,9 +2585,13 @@ export function createMemoryRuntimeAdapter(options = {}) {
           if (!retryable) break;
           attempt += 1;
           stats.ingest.retries += 1;
-          const backoff = config.ingestRetryBaseMs * (2 ** (attempt - 1));
+          const backoff = retryDelayMs(result, config.ingestRetryBaseMs, attempt);
           await abortableDelay(backoff, retrySignal, setTimeoutFn, clearTimeoutFn);
           if (retrySignal?.aborted === true || disposed || closing) break;
+        }
+        if (lastFailure === null && !accepted) {
+          stats.ingest.interrupted += group.length;
+          continue;
         }
         if (lastFailure !== null) {
           stats.ingest.failed += group.length;
@@ -2417,25 +2612,77 @@ export function createMemoryRuntimeAdapter(options = {}) {
     },
   });
 
+  function checkpointRevisionKey(threadId, domain) {
+    return `${config.agentId}\u0000${threadId}\u0000${domain}`;
+  }
+
+  /**
+   * Only an explicit graph-confirmed revision counts as committed. HTTP 202,
+   * `pending:true`, `queued:true`, a missing checkpoint object and a missing
+   * revision all stay pending/failed instead of being reported as committed.
+   *
+   * @param {{ ok?: boolean, status?: number | null, data?: any } | null} result
+   * @returns {number | null}
+   */
+  function committedCheckpointRevision(result) {
+    if (!isObject(result) || result.ok !== true || result.status === 202) return null;
+    const data = isObject(result.data) ? result.data : {};
+    if (data.pending === true || data.queued === true) return null;
+    const checkpoint = isObject(data.checkpoint) ? data.checkpoint : null;
+    if (checkpoint === null || checkpoint.pending === true || checkpoint.queued === true) return null;
+    return Number.isInteger(checkpoint.revision) && checkpoint.revision >= 0
+      ? checkpoint.revision
+      : null;
+  }
+
+  async function currentCheckpointRevision(threadId, domain) {
+    const query = new URLSearchParams({ agentId: config.agentId, domain }).toString();
+    const result = await runtimeRequest(
+      `/checkpoints/${encodeURIComponent(threadId)}?${query}`,
+      undefined,
+      { method: 'GET', timeoutMs: config.checkpointTimeoutMs },
+    );
+    if (!result.ok) return { ok: false, revision: null };
+    const checkpoint = isObject(result.data?.checkpoint) ? result.data.checkpoint : null;
+    const revision = Number.isInteger(checkpoint?.revision)
+      ? checkpoint.revision
+      : Number.isInteger(result.data?.revision)
+        ? result.data.revision
+        : null;
+    return { ok: true, revision };
+  }
+
   const checkpointQueue = createJobQueue({
     max: config.checkpointMaxQueue,
     stats: stats.checkpoints,
     setTimeoutFn,
     clearTimeoutFn,
     handler: async (state) => {
-      if (disposed) return;
+      if (disposed) {
+        state.pending = false;
+        state.failed = true;
+        state.error = 'interrupted';
+        stats.checkpoints.interrupted += 1;
+        return;
+      }
       if (!(await ensureRuntime()) || !runtimeAllows('checkpoint')) {
         state.committed = false;
+        state.pending = false;
         state.failed = true;
-        stats.checkpoints.failed += 1;
+        state.error = 'mode_disabled';
+        stats.checkpoints.interrupted += 1;
         return;
       }
       if (!state.summary || state.summary.text.trim().length === 0 || !state.replacement) {
         state.failed = true;
+        state.pending = false;
         stats.checkpoints.incomplete += 1;
         return;
       }
-      stats.checkpoints.attempts += 1;
+      state.committed = false;
+      state.pending = true;
+      state.failed = false;
+      state.error = null;
       const summaryText = state.summary.text.trim();
       const domain = config.domain?.startsWith('task:') ? config.domain : `task:${state.threadId}`;
       const checkpointOptions = {
@@ -2483,6 +2730,9 @@ export function createMemoryRuntimeAdapter(options = {}) {
         summary: state.summary.text,
         ...(state.sourceCommandId === undefined ? {} : { sourceCommandId: state.sourceCommandId }),
       });
+      const revisionKey = checkpointRevisionKey(state.threadId, domain);
+      const lastCommittedRevision = checkpointRevisions.get(revisionKey);
+      state.lastCommittedRevision = Number.isInteger(lastCommittedRevision) ? lastCommittedRevision : null;
       const body = {
         agentId: config.agentId,
         state: checkpointState,
@@ -2490,23 +2740,99 @@ export function createMemoryRuntimeAdapter(options = {}) {
         recordIds: state.recordIds ?? [],
         detailIds: state.detailIds ?? [],
         domain,
+        ...(Number.isInteger(lastCommittedRevision) ? { expectedRevision: lastCommittedRevision } : {}),
       };
+      const path = `/checkpoints/${encodeURIComponent(state.threadId)}`;
       const idempotencyKey = `dsh_${hashText(`${state.sessionId}\u0000${state.compactionId}\u0000${state.endSeq}`).slice(0, 40)}`;
-      const result = await runtimeRequest(`/checkpoints/${encodeURIComponent(state.threadId)}`, body, {
-        method: 'PUT',
-        timeoutMs: config.checkpointTimeoutMs,
-        idempotencyKey,
-      });
-      if (result.ok) {
+      let result = null;
+      let retries = 0;
+      let revisionRetried = false;
+      for (;;) {
+        if (disposed || !runtimeAllows('checkpoint')) {
+          result = { ok: false, code: 'interrupted', retryable: false };
+          break;
+        }
+        await waitForRateLimit(retryAbort?.signal);
+        if (disposed || !runtimeAllows('checkpoint')) {
+          result = { ok: false, code: 'interrupted', retryable: false };
+          break;
+        }
+        stats.checkpoints.attempts += 1;
+        result = await runtimeRequest(path, body, {
+          method: 'PUT',
+          timeoutMs: config.checkpointTimeoutMs,
+          idempotencyKey,
+        });
+        if (result.ok) break;
+        // A direct (non-queued) host update may resolve one revision conflict by
+        // reading the current revision and repeating the same logical update.
+        // A second conflict is terminal/visible; never force or rebase.
+        if (result.code === 'revision_mismatch' && !revisionRetried) {
+          revisionRetried = true;
+          state.conflict = true;
+          stats.checkpoints.conflicts += 1;
+          const current = await currentCheckpointRevision(state.threadId, domain);
+          if (current.ok && Number.isInteger(current.revision) && current.revision >= 0) {
+            body.expectedRevision = current.revision;
+            continue;
+          }
+          break;
+        }
+        if (result.code === 'revision_mismatch') {
+          state.conflict = true;
+          stats.checkpoints.conflicts += 1;
+          break;
+        }
+        if (!isRetryableRuntimeFailure(result)) break;
+        if (retries >= config.checkpointRetries) break;
+        retries += 1;
+        stats.checkpoints.retries += 1;
+        await abortableDelay(
+          retryDelayMs(result, config.checkpointRetryBaseMs, retries),
+          retryAbort?.signal,
+          setTimeoutFn,
+          clearTimeoutFn,
+        );
+        if (retryAbort?.signal?.aborted === true || disposed || closing) {
+          result = { ok: false, code: 'interrupted', retryable: false };
+          break;
+        }
+      }
+      const committedRevision = committedCheckpointRevision(result);
+      if (committedRevision !== null) {
         state.committed = true;
+        state.pending = false;
         state.failed = false;
+        state.error = null;
+        state.revision = committedRevision;
+        state.lastCommittedRevision = committedRevision;
+        checkpointRevisions.set(revisionKey, committedRevision);
         stats.checkpoints.sent += 1;
         stats.checkpoints.committed += 1;
-      } else {
-        state.committed = false;
-        state.failed = true;
-        stats.checkpoints.failed += 1;
+        return;
       }
+      const pending = result?.ok === true && (
+        result.status === 202
+        || result.data?.pending === true
+        || result.data?.queued === true
+        || result.data?.checkpoint?.pending === true
+        || result.data?.checkpoint?.queued === true
+      );
+      if (pending) {
+        state.committed = false;
+        state.pending = true;
+        state.failed = false;
+        state.error = null;
+        state.revision = null;
+        stats.checkpoints.pending += 1;
+        return;
+      }
+      state.committed = false;
+      state.pending = false;
+      state.failed = true;
+      state.error = result?.code ?? (result?.ok === true ? 'checkpoint_unconfirmed' : 'checkpoint_failed');
+      if (state.error === 'interrupted') stats.checkpoints.interrupted += 1;
+      else stats.checkpoints.failed += 1;
     },
   });
 
@@ -2543,7 +2869,12 @@ export function createMemoryRuntimeAdapter(options = {}) {
         ended: false,
         error: null,
         committed: false,
+        pending: false,
         failed: false,
+        skipped: false,
+        conflict: false,
+        revision: null,
+        lastCommittedRevision: null,
       };
       compactions.set(key, state);
       while (compactions.size > 64) compactions.delete(compactions.keys().next().value);
@@ -2586,9 +2917,21 @@ export function createMemoryRuntimeAdapter(options = {}) {
       }
       if (!state.summary || state.summary.text.trim().length === 0 || !state.replacement) {
         state.failed = true;
+        state.pending = false;
         stats.checkpoints.incomplete += 1;
         return;
       }
+      if (!runtimeAllows('checkpoint')) {
+        state.committed = false;
+        state.pending = false;
+        state.failed = false;
+        state.skipped = true;
+        state.error = 'mode_disabled';
+        stats.checkpoints.skipped += 1;
+        void ensureRuntime();
+        return;
+      }
+      state.pending = true;
       checkpointQueue.enqueue(state);
     }
   }
@@ -2600,7 +2943,14 @@ export function createMemoryRuntimeAdapter(options = {}) {
       return;
     }
     if (COMPACTION_TYPES.has(event.type)) {
-      if (config.checkpoints) handleCompaction(session, event);
+      if (config.checkpoints) {
+        if (runtimeAllows('checkpoint') || event.type === 'compaction/end') {
+          handleCompaction(session, event);
+        } else {
+          stats.checkpoints.skipped += 1;
+          void ensureRuntime();
+        }
+      }
       return;
     }
     // The compaction checkpoint is the replacement user/message immediately
@@ -2610,7 +2960,12 @@ export function createMemoryRuntimeAdapter(options = {}) {
       && event.type === 'user/message'
       && isObject(event.data?.source)
       && event.data.source.kind === 'compact-checkpoint') {
-      handleCompaction(session, event);
+      if (!runtimeAllows('checkpoint')) {
+        stats.checkpoints.skipped += 1;
+        void ensureRuntime();
+      } else {
+        handleCompaction(session, event);
+      }
       return;
     }
     if (!config.ingest) return;
@@ -2847,6 +3202,10 @@ export function createMemoryRuntimeAdapter(options = {}) {
   }
 
   async function runMaintenance(agent) {
+    if (closing || disposed || !runtimeAllows('ingest')) {
+      stats.maintenance.skipped += 1;
+      return;
+    }
     const run = typeof agent?.runMaintenance === 'function' ? agent.runMaintenance : null;
     if (run === null) {
       stats.maintenance.skipped += 1;
@@ -2893,7 +3252,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
         );
         activeScopes.add(scope);
         try {
-          if (scope.signal.aborted) {
+          if (scope.signal.aborted || closing || disposed || !runtimeAllows('ingest')) {
             stats.maintenance.skipped += 1;
             return;
           }
@@ -2941,6 +3300,10 @@ export function createMemoryRuntimeAdapter(options = {}) {
             stats.maintenance.skipped += 1;
             return;
           }
+          if (closing || disposed || !runtimeAllows('ingest')) {
+            stats.maintenance.skipped += 1;
+            return;
+          }
           const candidates = parseCandidateOutput(output, { homeDir });
           if (candidates.length === 0) {
             stats.maintenance.skipped += 1;
@@ -2974,6 +3337,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
 
   function scheduleMaintenance(agent) {
     if (closing || disposed || !config.maintenance.enabled) return;
+    if (!runtimeAllows('ingest')) return;
     const id = typeof agent?.id === 'string' ? agent.id : '';
     const tracker = trackers.get(id);
     if (!tracker || tracker.maintenancePromise !== null) return;
@@ -3177,6 +3541,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
         anchors.clear();
         recalls.clear();
         compactions.clear();
+        checkpointRevisions.clear();
       });
     return disposal;
   }
@@ -3245,7 +3610,14 @@ export function createMemoryRuntimeAdapter(options = {}) {
       compactions: [...compactions.values()].map((state) => ({
         compactionId: state.compactionId,
         committed: state.committed,
+        pending: state.pending === true,
         failed: state.failed,
+        skipped: state.skipped === true,
+        conflict: state.conflict === true,
+        revision: Number.isInteger(state.revision) ? state.revision : null,
+        lastCommittedRevision: Number.isInteger(state.lastCommittedRevision)
+          ? state.lastCommittedRevision
+          : null,
         ended: state.ended,
         error: state.error,
       })),

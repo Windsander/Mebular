@@ -1407,7 +1407,10 @@ class SpoolContractTests(BaseCase):
             status = provider.get_status_config()
             self.assertEqual(status["counts"]["ingestFailed"], 1)
             self.assertEqual(status["counts"]["spoolDeadPending"], 1)
-        records = self.read_jsonl(self.spool_path)
+        self.assertEqual(provider._spool.depth(), 0)
+        records = self.read_jsonl(
+            self.hermes_home / "mebular-memory" / "dead-pending.jsonl"
+        )
         self.assertEqual(len(records), 1)
         self.assertIn("deadPending", records[0])
 
@@ -1469,6 +1472,83 @@ class SpoolContractTests(BaseCase):
         self.assertLessEqual(spool.total_bytes(), 5000)
         self.assertLess(spool.dead_count(), 6)
 
+    def test_dead_pending_is_outside_live_fifo(self) -> None:
+        spool = memory_plugin._Spool(self.spool_path, 100)
+        first_id = spool.append("ingest", {
+            "requestId": "blocked-first",
+            "chunks": [{"role": "user", "text": "first"}],
+        })
+        # Move the first item to dead-pending without touching the live FIFO.
+        spool.mark_dead_pending(first_id, "test_dead")
+        second_id = spool.append("ingest", {
+            "requestId": "next-live",
+            "chunks": [{"role": "user", "text": "second"}],
+        })
+        self.assertEqual(spool.depth(), 1)
+        self.assertEqual(spool.first()["id"], second_id)
+        self.assertEqual(spool.dead_pending_count(), 1)
+        self.assertNotEqual(spool.first()["id"], first_id)
+
+    def test_dead_pending_restart_retries_once(self) -> None:
+        spool = memory_plugin._Spool(self.spool_path, 100)
+        item_id = spool.append("ingest", {
+            "requestId": "restart-dead",
+            "chunks": [{"role": "user", "text": "restart"}],
+        })
+        spool.mark_dead_pending(item_id, "test_dead")
+        self.assertEqual(spool.depth(), 0)
+        self.assertEqual(spool.dead_pending_count(), 1)
+
+        reopened = memory_plugin._Spool(self.spool_path, 100)
+        self.assertEqual(reopened.dead_pending_count(), 1)
+        pending = reopened.dead_pending_items()[0]
+        self.assertEqual(pending["deadPending"]["attempts"], 0)
+        self.assertTrue(reopened.dead_pending(item_id, "test_dead"))
+        self.assertEqual(reopened.dead_pending_count(), 0)
+        self.assertEqual(reopened.dead_count(), 1)
+
+    def test_dead_pending_expiry_abandons_and_releases(self) -> None:
+        server = self.fake_server()
+        provider = self.make_provider(server)
+        provider._spool.append("ingest", {
+            "requestId": "abandon-expired",
+            "chunks": [{"role": "user", "text": "expired"}],
+        })
+        item_id = provider._spool.first()["id"]
+        provider._spool.mark_dead_pending(item_id, "test_dead")
+        with provider._spool._lock:
+            pending = provider._spool._dead_pending[0]
+            pending["expiresAt"] = int(time.time() * 1000) - 1
+            pending["deadPending"]["attempts"] = 5
+            pending["deadPending"]["at"] = int(time.time() * 1000) - 400_000
+        with self._fail_dead_writes(provider._spool):
+            self.assertTrue(provider._retry_one_dead_pending(provider._spool))
+        self.assertEqual(provider._spool.dead_write_abandoned(), 1)
+        self.assertEqual(provider._spool.dead_pending_count(), 1)
+        self.assertTrue(
+            provider._spool.dead_pending_items()[0]["deadPending"]["abandoned"]
+        )
+
+    def test_corrupt_dead_pending_at_is_field_tolerant(self) -> None:
+        self.spool_path.parent.mkdir(parents=True, exist_ok=True)
+        now = int(time.time() * 1000)
+        record = {
+            "id": "pending-bad-at",
+            "kind": "ingest",
+            "payload": {"requestId": "pending-bad-at", "chunks": []},
+            "attempts": 0,
+            "createdAt": now,
+            "expiresAt": now + 60_000,
+            "deadPending": {"reason": "x", "attempts": 2, "at": "not-a-number"},
+        }
+        (self.hermes_home / "mebular-memory").mkdir(parents=True, exist_ok=True)
+        (self.hermes_home / "mebular-memory" / "dead-pending.jsonl").write_text(
+            json.dumps(record) + "\n", encoding="utf-8"
+        )
+        spool = memory_plugin._Spool(self.spool_path, 100)
+        self.assertEqual(spool.dead_pending_count(), 1)
+        self.assertEqual(spool.dead_pending_items()[0]["deadPending"]["attempts"], 0)
+
     def test_corrupt_spool_rows_do_not_crash_initialize(self) -> None:
         self.spool_path.parent.mkdir(parents=True, exist_ok=True)
         valid = {
@@ -1523,11 +1603,54 @@ class SpoolContractTests(BaseCase):
         self.assertTrue(self.wait_until(lambda: first.pending() == 0, timeout=3.0))
         time.sleep(0.2)
         self.assertEqual(len(server.ingests), 2)
-        total_committed = (
-            first.get_status_config()["counts"]["ingestCommitted"]
-            + second.get_status_config()["counts"]["ingestCommitted"]
+        self.assertEqual(
+            first.get_status_config()["counts"]["ingestCommitted"], 2
         )
-        self.assertEqual(total_committed, 2)
+        self.assertEqual(
+            second.get_status_config()["counts"]["ingestCommitted"], 2
+        )
+        self.assertEqual(
+            second.get_status_config()["lastIngest"]["outcome"], "committed"
+        )
+
+    def test_worker_claim_reserves_start_and_replaces_stale_owner(self) -> None:
+        server = self.fake_server()
+        first = self.make_provider(server)
+        second = self.make_provider(server)
+        spool = first._spool
+        self.assertIs(spool.worker_owner(), first)
+        # A starting owner must not be raced by a second provider.
+        spool._worker_owner = first
+        spool._worker_starting = True
+        self.assertFalse(spool.claim_worker(second))
+        spool._worker_starting = False
+        # A live but stale/blocked owner can be safely replaced.
+        spool._worker_heartbeat = 0.0
+        self.assertTrue(spool.claim_worker(second))
+        self.assertIs(spool.worker_owner(), second)
+        second._enqueue({
+            "requestId": "takeover",
+            "chunks": [{"role": "user", "text": "takeover"}],
+        })
+        second._ensure_worker()
+        self.assertTrue(self.wait_until(lambda: second.pending() == 0, timeout=3.0))
+
+    def test_non_owner_shutdown_does_not_drain_shared_spool(self) -> None:
+        server = self.fake_server()
+        server.mode = "error"
+        first = self.make_provider(server)
+        second = self.make_provider(server)
+        first._enqueue({
+            "requestId": "owner-drain",
+            "chunks": [{"role": "user", "text": "owner only"}],
+        })
+        self.assertTrue(self.wait_until(lambda: first.pending() == 1, timeout=2.0))
+        self.assertTrue(self.wait_until(lambda: len(server.ingests) >= 1, timeout=2.0))
+        before = len(server.ingests)
+        second.shutdown()
+        time.sleep(0.2)
+        self.assertEqual(len(server.ingests), before)
+        self.assertEqual(first.pending(), 1)
 
     def test_append_rejection_keeps_dead_diagnostics(self) -> None:
         spool = memory_plugin._Spool(self.spool_path, 100, max_bytes=2000)
@@ -1574,7 +1697,11 @@ class SpoolContractTests(BaseCase):
         text = (
             "Authorization: Basic dXNlcjpwYXNzd29yZA==\n"
             "authorization=Basic dXNlcjpwYXNzd29yZA==\n"
-            "OPENAI_API_KEY=sk-proj-ABCDEFGHIJKLMNOPQRSTUV\n"
+            "OPENAI_API_KEY=plain\n"
+            "ANTHROPIC_API_KEY=plain\n"
+            "GITHUB_TOKEN=plain\n"
+            "MY_API_KEY=plain\n"
+            "apiToken=abc-def-ghij\n"
             "AWS_SECRET_ACCESS_KEY=AbCdEfGhIjKlMnOpQrStUvWxYz012345\n"
             "AWS_SESSION_TOKEN=shortlowercase\n"
             "https://alice:s3cr3t-pass@example.com/path\n"
@@ -1585,13 +1712,18 @@ class SpoolContractTests(BaseCase):
             "Set-Cookie: session=abc; HttpOnly\n"
             "password: short\n"
             "api_key: abc\n"
-            "secret: discussion\n"
+            "secret: hiddenvalue\n"
+            "token: abcdefgh\n"
             'refresh_token="value with spaces"\n'
         )
         redacted, rules = memory_plugin._redact_text(text)
         for sentinel in (
             "dXNlcjpwYXNzd29yZA==",
-            "sk-proj-ABCDEFGHIJKLMNOPQRSTUV",
+            "OPENAI_API_KEY=plain",
+            "ANTHROPIC_API_KEY=plain",
+            "GITHUB_TOKEN=plain",
+            "MY_API_KEY=plain",
+            "abc-def-ghij",
             "AbCdEfGhIjKlMnOpQrStUvWxYz012345",
             "shortlowercase",
             "alice:s3cr3t-pass",
@@ -1600,6 +1732,8 @@ class SpoolContractTests(BaseCase):
             "ASIAABCDEFGHIJKLMNOP",
             "session=abc; theme=dark",
             "session=abc; HttpOnly",
+            "hiddenvalue",
+            "abcdefgh",
             "value with spaces",
         ):
             self.assertNotIn(sentinel, redacted)
@@ -1616,6 +1750,8 @@ class SpoolContractTests(BaseCase):
             "token: authenticator\n"
             "token: rotation\n"
             "token: well-known\n"
+            "password: required\n"
+            "secret: discussion\n"
         )
         redacted, rules = memory_plugin._redact_text(text)
         self.assertEqual(redacted, text)
@@ -1875,6 +2011,18 @@ class SpoolContractTests(BaseCase):
         self.assertTrue(provider.flush(timeout=5.0))
         self.assertNotIn("modeBlocked", provider.get_status_config())
         self.assertEqual(provider.pending(), 0)
+
+    def test_mode_block_with_empty_spool_uses_one_new_work_probe(self) -> None:
+        server = self.fake_server()
+        provider = self.make_provider(server, sync_max_attempts=3)
+        provider._note_mode_blocked("mode_mismatch")
+        provider._mode_new_work_probe_at = 0.0
+        self.assertEqual(provider.pending(), 0)
+        provider.sync_turn("probe new work", "ok", session_id="s1")
+        self.assertTrue(provider.flush(timeout=3.0))
+        self.assertNotIn("modeBlocked", provider.get_status_config())
+        self.assertEqual(provider.pending(), 0)
+        self.assertTrue(server.ingests)
 
     def test_queued_checkpoint_revision_conflict_never_rebases(self) -> None:
         server = self.fake_server()

@@ -114,6 +114,11 @@ const DEFAULT_CONFIG = Object.freeze({
   hostExtractMaxChars: 6000,
   dedupeCacheSize: 1024,
   maxQueue: 256,
+  eventReconnectMs: 1000,
+  eventReconnectMaxMs: 30000,
+  checkpointRetryMs: 1000,
+  checkpointPendingTimeoutMs: 30000,
+  maxRetryAfterMs: 30000,
 });
 
 /** @param {unknown} value */
@@ -794,14 +799,29 @@ export function resolvePluginConfig(input, options = {}) {
 
   const namespaces = uniqueStrings(merged.namespaces, 16).filter((item) => !item.startsWith('__'));
   const domains = uniqueStrings(merged.domains, 16).filter((item) => !item.startsWith('__') && item !== 'system');
+  // `domain` is the single-domain env/config alias documented for OpenCode.
+  // It is a real recall filter, not a decorative key: when present it is
+  // prepended to `domains` and therefore reaches the /context request.
+  const domain = asText(merged.domain);
+  if (domain.length > 0) {
+    if (domain.startsWith('__') || domain === 'system') {
+      warnings.push('domain_invalid');
+    } else if (!domains.includes(domain)) {
+      domains.unshift(domain);
+    }
+  }
   if (domains.length === 0 && namespaces.length > 0) domains.push(...namespaces);
   if (domains.length === 0 && safeNamespace) domains.push(safeNamespace);
 
-  let modelSource = asText(merged.modelSource).toLowerCase();
+  const requestedModelSource = asText(merged.modelSource).toLowerCase();
+  let modelSource = requestedModelSource;
   if (modelSource === 'current' || modelSource === 'host/current' || modelSource === 'generated') {
     modelSource = 'host';
   }
-  if (modelSource !== 'host') modelSource = 'heuristic';
+  if (modelSource !== 'host' && modelSource !== 'heuristic') {
+    if (requestedModelSource.length > 0) warnings.push('model_source_invalid');
+    modelSource = 'heuristic';
+  }
 
   const hiddenToolPrefixes = uniqueStrings(merged.hiddenToolPrefixes, 16);
   if (!hiddenToolPrefixes.includes(MEMORY_TOOL_PREFIX)) {
@@ -850,6 +870,11 @@ export function resolvePluginConfig(input, options = {}) {
     dedupeCacheSize: asInt(merged.dedupeCacheSize, DEFAULT_CONFIG.dedupeCacheSize, 8, 8192),
     maxQueue: asInt(merged.maxQueue, DEFAULT_CONFIG.maxQueue, 1, 2048),
     checkpointTimeoutMs: asInt(merged.checkpointTimeoutMs, DEFAULT_CONFIG.checkpointTimeoutMs, 50, 15000),
+    eventReconnectMs: asInt(merged.eventReconnectMs, DEFAULT_CONFIG.eventReconnectMs, 10, 60000),
+    eventReconnectMaxMs: asInt(merged.eventReconnectMaxMs, DEFAULT_CONFIG.eventReconnectMaxMs, 10, 300000),
+    checkpointRetryMs: asInt(merged.checkpointRetryMs, DEFAULT_CONFIG.checkpointRetryMs, 10, 60000),
+    checkpointPendingTimeoutMs: asInt(merged.checkpointPendingTimeoutMs, DEFAULT_CONFIG.checkpointPendingTimeoutMs, 50, 600000),
+    maxRetryAfterMs: asInt(merged.maxRetryAfterMs, DEFAULT_CONFIG.maxRetryAfterMs, 0, 300000),
     configFile: fromFile.found ? configFile : null,
     configFileFound: fromFile.found,
     discoveryPath,
@@ -1188,6 +1213,84 @@ function delay(ms, setTimeoutFn) {
   });
 }
 
+function headerValue(headers, name) {
+  if (!headers) return '';
+  const wanted = String(name).toLowerCase();
+  if (typeof headers.get === 'function') {
+    const value = headers.get(name);
+    return typeof value === 'string' ? value : '';
+  }
+  if (typeof headers !== 'object') return '';
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() !== wanted) continue;
+    return Array.isArray(value) ? String(value[0] ?? '') : String(value ?? '');
+  }
+  return '';
+}
+
+/** Parse `Retry-After` as delta-seconds or HTTP-date, bounded by the caller. */
+function parseRetryAfterMs(headers, maxMs) {
+  const raw = headerValue(headers, 'retry-after').trim();
+  if (raw.length === 0) return null;
+  let milliseconds = null;
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    milliseconds = seconds * 1000;
+  } else {
+    const date = Date.parse(raw);
+    if (Number.isFinite(date)) milliseconds = Math.max(0, date - Date.now());
+  }
+  if (milliseconds === null) return null;
+  return Math.min(Math.max(0, Math.round(milliseconds)), Math.max(0, maxMs));
+}
+
+function safeJson(value) {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value ?? '');
+  }
+}
+
+function eventDedupeKey(event) {
+  const type = asText(event?.type);
+  const data = isObject(event?.data) ? event.data : {};
+  const id = asText(event?.id) || asText(data.eventID) || asText(data.eventId);
+  if (id) return `${type}:id:${id}`;
+  const session = asText(data.sessionID) || asText(event?.sessionID);
+  // Hosts may re-deliver an event after reconnect with a fresh envelope but
+  // the same logical identifiers. Use those stable fields before falling back
+  // to the whole serialized event.
+  if (type === 'session.text.ended') {
+    return `${type}:${session}:${asText(data.assistantMessageID)}:${hashText(asText(data.text))}`;
+  }
+  if (type === 'session.tool.input.started') {
+    return `${type}:${session}:${asText(data.id)}:${asText(data.name)}`;
+  }
+  if (type === 'session.tool.called') {
+    return `${type}:${session}:${asText(data.id)}:${hashText(safeJson(data.input))}`;
+  }
+  if (type === 'session.tool.success' || type === 'session.tool.failed') {
+    return `${type}:${session}:${asText(data.id)}:${hashText(safeJson({ content: data.content, error: data.error }))}`;
+  }
+  if (type === 'session.compaction.ended') {
+    return `${type}:${session}:${hashText(`${asText(data.text) || asText(data.summary)}:${data.messageCount ?? ''}`)}`;
+  }
+  if (type === 'session.inbox.delivered'
+    || type === 'session.execution.started'
+    || type === 'session.execution.succeeded'
+    || type === 'session.execution.failed'
+    || type === 'session.execution.interrupted'
+    || type === 'session.idle') {
+    // Lifecycle notifications are not logical writes: re-handling one only
+    // re-reads the session and hits chunk/turn dedupe. Do not collapse
+    // legitimate repeated turns in the same session.
+    return null;
+  }
+  return `${type}:hash:${hashText(safeJson(event))}`;
+}
+
+
 /**
  * Create a controller with explicit dependencies. The plugin definition uses
  * this internally; tests use it to drive fake ctx/fetch/session objects.
@@ -1210,22 +1313,37 @@ export function createController(dependencies = {}) {
   let started = false;
   let eventAbort = null;
   let eventTask = null;
+  let eventGeneration = 0;
+  let eventReconnectTimer = null;
+  let eventReconnectAttempt = 0;
+  const eventTasks = new Set();
   const registrations = [];
   const seenTurns = new Map();
   const seenChunks = new Map();
+  const seenEvents = new Map();
   const injectedIds = new Map();
   const buffers = new Map();
   const toolCalls = new Map();
   const contextReads = new Map();
   const recalls = new Map();
+  const pendingCheckpoints = new Map();
   const inflight = new Set();
   const stats = {
     context: { attempts: 0, hits: 0, empty: 0, failures: 0, timeouts: 0, deduped: 0, injected: 0, truncated: 0, cooldown: 0 },
-    ingest: { buffered: 0, chunks: 0, batches: 0, sent: 0, failed: 0, duplicates: 0, contextReads: 0, contextFailures: 0, skipped: 0 },
-    checkpoints: { attempts: 0, sent: 0, failed: 0, conflicts: 0, pending: 0 },
+    ingest: { buffered: 0, chunks: 0, batches: 0, sent: 0, failed: 0, duplicates: 0, queued: 0, contextReads: 0, contextFailures: 0, skipped: 0 },
+    checkpoints: {
+      attempts: 0,
+      sent: 0,
+      failed: 0,
+      conflicts: 0,
+      pending: 0,
+      replayed: 0,
+      expired: 0,
+      interrupted: 0,
+    },
     model: { calls: 0, succeeded: 0, failed: 0, fallbacks: 0, skipped: 0 },
     tools: { maskedAgents: 0, maskedTools: 0, governanceAgents: 0 },
-    events: { received: 0, handled: 0, failures: 0 },
+    events: { received: 0, handled: 0, failures: 0, duplicates: 0, subscriptions: 0, reconnects: 0 },
   };
 
   let disabledReason = null;
@@ -1299,15 +1417,7 @@ export function createController(dependencies = {}) {
         if (disabledReason === null || disabledReason === 'runtime_not_discovered') {
           disabledReason = result.reason || 'runtime_not_discovered';
         }
-        enabled = false;
-        recallAllowed = false;
-        ingestAllowed = false;
-        checkpointAllowed = false;
-        hostAvailable = false;
-        if (typeof status === 'object' && status !== null) {
-          status.enabled = false;
-          status.reason = disabledReason;
-        }
+        disableRuntime(disabledReason, { forceReason: true });
       }
       return false;
     }
@@ -1358,7 +1468,9 @@ export function createController(dependencies = {}) {
       probed = ok;
       if (!ok) return false;
     }
-    return enabled && !closed;
+    const active = enabled && !closed;
+    if (started && active && (ingestAllowed || checkpointAllowed) && capabilities.events) startEventLoop();
+    return active;
   }
 
   async function ensureContextHook() {
@@ -1462,6 +1574,7 @@ export function createController(dependencies = {}) {
               code: isObject(document?.error) && typeof document.error.code === 'string'
                 ? document.error.code
                 : `http_${responseStatus ?? 'error'}`,
+              retryAfterMs: parseRetryAfterMs(response?.headers, config.maxRetryAfterMs),
               document,
             };
           }
@@ -1472,6 +1585,7 @@ export function createController(dependencies = {}) {
               code: isObject(document.error) && typeof document.error.code === 'string'
                 ? document.error.code
                 : 'runtime_error',
+              retryAfterMs: parseRetryAfterMs(response?.headers, config.maxRetryAfterMs),
               document,
             };
           }
@@ -1484,6 +1598,7 @@ export function createController(dependencies = {}) {
               ? document.data
               : document,
             warnings: Array.isArray(document?.warnings) ? document.warnings : [],
+            retryAfterMs: parseRetryAfterMs(response?.headers, config.maxRetryAfterMs),
             document,
           };
         } catch {
@@ -1527,8 +1642,70 @@ export function createController(dependencies = {}) {
     return result;
   }
 
-  function disableRuntime(reason) {
-    if (disabledReason === null) disabledReason = reason;
+  function clearBuffers() {
+    for (const buffer of buffers.values()) {
+      if (buffer.timer !== null) clearTimeoutFn(buffer.timer);
+    }
+    buffers.clear();
+    toolCalls.clear();
+  }
+
+  function clearPendingCheckpointTimer(entry) {
+    if (entry?.timer !== null && entry?.timer !== undefined) {
+      clearTimeoutFn(entry.timer);
+      entry.timer = null;
+    }
+  }
+
+  function removePendingCheckpoint(entry) {
+    if (!entry || !pendingCheckpoints.has(entry.key)) return false;
+    clearPendingCheckpointTimer(entry);
+    pendingCheckpoints.delete(entry.key);
+    stats.checkpoints.pending = pendingCheckpoints.size;
+    return true;
+  }
+
+  /**
+   * A pending checkpoint is only an in-memory intent. Disable/shutdown must
+   * make it visibly failed instead of letting it disappear or hang forever.
+   */
+  function failAllPendingCheckpoints(reason) {
+    if (pendingCheckpoints.size === 0) return 0;
+    const entries = [...pendingCheckpoints.values()];
+    for (const entry of entries) removePendingCheckpoint(entry);
+    stats.checkpoints.failed += entries.length;
+    if (reason === 'checkpoint_disabled') stats.checkpoints.interrupted += entries.length;
+    else if (reason === 'checkpoint_pending_expired') stats.checkpoints.expired += entries.length;
+    status.checkpoint = {
+      state: 'failed',
+      reason,
+      pending: 0,
+      failed: entries.length,
+      at: now(),
+    };
+    noteFailure(reason);
+    return entries.length;
+  }
+
+  function stopEventLoop() {
+    eventGeneration += 1;
+    if (eventReconnectTimer !== null) {
+      clearTimeoutFn(eventReconnectTimer);
+      eventReconnectTimer = null;
+    }
+    try {
+      eventAbort?.abort();
+    } catch {
+      // Best effort.
+    }
+    eventAbort = null;
+    eventTask = null;
+    eventReconnectAttempt = 0;
+  }
+
+  function disableRuntime(reason, options = {}) {
+    if (closed) return;
+    if (disabledReason === null || options.forceReason) disabledReason = reason;
     enabled = false;
     recallAllowed = false;
     ingestAllowed = false;
@@ -1536,6 +1713,11 @@ export function createController(dependencies = {}) {
     hostAvailable = false;
     status.enabled = false;
     status.reason = reason;
+    // Hot disable: cancel event subscription, reconnect/backoff timers and
+    // buffered turns, then fail pending checkpoints. No flush on disable.
+    stopEventLoop();
+    clearBuffers();
+    failAllPendingCheckpoints('checkpoint_disabled');
   }
 
   async function probeRuntime() {
@@ -1763,6 +1945,7 @@ export function createController(dependencies = {}) {
       maxFragments: config.maxFragments,
       maxBytes: config.maxContextBytes,
       tokenBudget: config.recallTokenBudget,
+      limit: config.recallLimit,
       includeOtherAgents: config.includeOtherAgents,
       includeCheckpoint: config.includeCheckpoint,
       includeSelf: config.includeSelf,
@@ -1774,8 +1957,16 @@ export function createController(dependencies = {}) {
     if (!result.ok) {
       stats.context.failures += 1;
       if (result.code === 'timeout') stats.context.timeouts += 1;
-      recallCooldownUntil = now() + 30_000;
+      const retryAfter = Number.isFinite(result.retryAfterMs) ? result.retryAfterMs : 0;
+      recallCooldownUntil = now() + Math.max(30_000, retryAfter);
       noteFailure(result.code === 'timeout' ? 'runtime_timeout' : 'runtime_error');
+      if (result.status === 409 && result.code === 'mode_mismatch') {
+        disableRuntime('runtime_mode_mismatch');
+      } else if (result.status === 401 || result.status === 403) {
+        // requestJson already attempted one token-file refresh. A persistent
+        // 401 stays visible and injects nothing; it must not spin.
+        noteFailure('runtime_unauthorized');
+      }
       return;
     }
     const blocks = contextBlocksFromResponse(result.data);
@@ -2024,14 +2215,31 @@ export function createController(dependencies = {}) {
         stats.ingest.batches += 1;
         stats.ingest.chunks += chunks.length;
         stats.ingest.sent += chunks.length;
+        if (result.status === 202 || result.data?.queued === true || result.data?.pending === true) {
+          // 202/queued is a durable hand-off, not a graph commit. The sidecar
+          // owns replay; the host counter must not imply committed.
+          stats.ingest.queued += 1;
+        }
         if (result.data?.duplicate === true) stats.ingest.duplicates += 1;
         return result;
       }
-      if (result.status === 401 || result.status === 403) break;
+      if (result.status === 401 || result.status === 403) {
+        writesDisabled = true;
+        noteFailure('runtime_unauthorized');
+        break;
+      }
+      if (result.status === 409 && result.code === 'mode_mismatch') {
+        disableRuntime('runtime_mode_mismatch');
+        break;
+      }
       const retryable = result.code === 'timeout'
         || result.code === 'fetch_failed'
         || (typeof result.status === 'number' && (result.status >= 500 || result.status === 429));
       if (!retryable) break;
+      if (attempt === 0 && Number.isFinite(result.retryAfterMs) && result.retryAfterMs > 0) {
+        await delay(result.retryAfterMs, setTimeoutFn);
+        if (closed || !enabled || !ingestAllowed || writesDisabled) break;
+      }
     }
     stats.ingest.failed += 1;
     noteFailure(lastResult?.code === 'timeout' ? 'runtime_timeout' : 'runtime_error');
@@ -2111,6 +2319,214 @@ export function createController(dependencies = {}) {
     return `task:${sessionID}`;
   }
 
+  const CHECKPOINT_MAX_REBASES = 1;
+
+  function checkpointResponsePending(result) {
+    return result.status === 202
+      || result.data?.pending === true
+      || result.data?.checkpoint?.pending === true
+      || result.document?.pending === true;
+  }
+
+  function checkpointMatches(entry, checkpoint) {
+    if (!isObject(checkpoint)) return false;
+    const state = isObject(checkpoint.state) ? checkpoint.state : {};
+    const compactionId = asText(state.compactionId) || asText(checkpoint.compactionId);
+    const sourceEventId = asText(state.sourceEventId) || asText(checkpoint.sourceEventId);
+    return (asText(entry.compactionId).length > 0 && compactionId === asText(entry.compactionId))
+      || (asText(entry.eventId).length > 0
+        && (sourceEventId === asText(entry.eventId) || compactionId === asText(entry.eventId)));
+  }
+
+  function finishCheckpoint(entry, outcome, detail = {}) {
+    const wasPending = removePendingCheckpoint(entry);
+    if (outcome === 'committed') {
+      stats.checkpoints.sent += 1;
+      status.checkpoint = {
+        state: 'committed',
+        revision: Number.isFinite(detail.revision) ? detail.revision : null,
+        pending: stats.checkpoints.pending,
+        at: now(),
+      };
+      return;
+    }
+    stats.checkpoints.failed += 1;
+    if (detail.reason === 'checkpoint_pending_expired') stats.checkpoints.expired += 1;
+    status.checkpoint = {
+      state: 'failed',
+      reason: detail.reason ?? 'checkpoint_failed',
+      pending: stats.checkpoints.pending,
+      at: now(),
+    };
+    noteFailure(detail.reason ?? 'checkpoint_failed');
+    if (wasPending && detail.reason === 'checkpoint_unauthorized') writesDisabled = true;
+  }
+
+  function schedulePendingCheckpoint(entry, reason, mode, retryAfterMs = null) {
+    if (closed || !entry) return;
+    if (!pendingCheckpoints.has(entry.key)) pendingCheckpoints.set(entry.key, entry);
+    stats.checkpoints.pending = pendingCheckpoints.size;
+    entry.pendingReason = reason;
+    entry.mode = mode;
+    const base = Math.max(10, config.checkpointRetryMs);
+    const exponent = Math.min(Math.max(entry.attempts - 1, 0), 5);
+    const backoff = Number.isFinite(retryAfterMs) && retryAfterMs >= 0
+      ? retryAfterMs
+      : Math.min(base * (2 ** exponent), 30000);
+    entry.retryAt = Math.min(entry.deadlineAt, now() + Math.max(1, Math.round(backoff)));
+    clearPendingCheckpointTimer(entry);
+    entry.timer = setTimeoutFn(() => {
+      entry.timer = null;
+      if (closed) return;
+      void track(replayPendingCheckpoint(entry));
+    }, Math.max(1, entry.retryAt - now()));
+    entry.timer?.unref?.();
+    status.checkpoint = {
+      state: 'pending',
+      reason,
+      pending: stats.checkpoints.pending,
+      at: now(),
+    };
+    noteFailure(reason === 'revision_mismatch' ? 'checkpoint_conflict' : 'checkpoint_pending');
+  }
+
+  async function replayPendingCheckpoint(entry) {
+    if (!entry || closed || !pendingCheckpoints.has(entry.key)) return false;
+    if (now() >= entry.deadlineAt) {
+      finishCheckpoint(entry, 'failed', { reason: 'checkpoint_pending_expired' });
+      return false;
+    }
+    stats.checkpoints.replayed += 1;
+    return sendCheckpoint(entry);
+  }
+
+  async function sendCheckpoint(entry) {
+    if (!entry || closed) return false;
+    if (!checkpointAllowed || writesDisabled) {
+      finishCheckpoint(entry, 'failed', { reason: 'checkpoint_unauthorized' });
+      return false;
+    }
+    if (now() >= entry.deadlineAt) {
+      finishCheckpoint(entry, 'failed', { reason: 'checkpoint_pending_expired' });
+      return false;
+    }
+    stats.checkpoints.attempts += 1;
+    entry.attempts += 1;
+
+    if (entry.mode === 'poll') {
+      const current = await requestJson(entry.path, undefined, {
+        method: 'GET',
+        timeoutMs: config.checkpointTimeoutMs,
+      });
+      if (current.ok) {
+        const checkpoint = current.data?.checkpoint;
+        if (isObject(checkpoint)
+          && checkpoint.pending !== true
+          && Number.isFinite(checkpoint.revision)
+          && checkpointMatches(entry, checkpoint)) {
+          // Authoritative read confirms the queued write committed. This is
+          // the only path that turns a 202/pending checkpoint into committed.
+          finishCheckpoint(entry, 'committed', { revision: checkpoint.revision });
+          return checkpoint;
+        }
+        // Still queued, absent, or a different (older) committed revision.
+        // Keep polling until the bounded deadline; never claim committed.
+        schedulePendingCheckpoint(entry, 'checkpoint_queued', 'poll');
+        return false;
+      }
+      if (current.status === 401 || current.status === 403) {
+        finishCheckpoint(entry, 'failed', { reason: 'checkpoint_unauthorized' });
+        return false;
+      }
+      if (current.status === 409 && current.code === 'mode_mismatch') {
+        disableRuntime('runtime_mode_mismatch');
+        finishCheckpoint(entry, 'failed', { reason: 'runtime_mode_mismatch' });
+        return false;
+      }
+      const retryable = current.code === 'timeout'
+        || current.code === 'fetch_failed'
+        || (typeof current.status === 'number' && (current.status >= 500 || current.status === 429));
+      if (retryable) {
+        schedulePendingCheckpoint(entry, current.code ?? 'checkpoint_pending', 'poll', current.retryAfterMs);
+        return false;
+      }
+      finishCheckpoint(entry, 'failed', { reason: current.code ?? 'checkpoint_failed' });
+      return false;
+    }
+
+    const result = await requestJson(entry.path, entry.body, {
+      method: 'PUT',
+      timeoutMs: config.checkpointTimeoutMs,
+      idempotencyKey: entry.idempotencyKey,
+    });
+    if (result.ok) {
+      if (checkpointResponsePending(result)) {
+        // 202 only means the sidecar accepted/queued the write. Poll the
+        // authoritative GET view until it commits or the deadline fails.
+        entry.mode = 'poll';
+        schedulePendingCheckpoint(entry, 'checkpoint_queued', 'poll');
+        return false;
+      }
+      const checkpoint = result.data?.checkpoint ?? true;
+      finishCheckpoint(entry, 'committed', {
+        revision: isObject(checkpoint) && Number.isFinite(checkpoint.revision) ? checkpoint.revision : null,
+      });
+      return checkpoint;
+    }
+
+    if (result.status === 409 && result.code === 'revision_mismatch') {
+      stats.checkpoints.conflicts += 1;
+      if (entry.rebases < CHECKPOINT_MAX_REBASES) {
+        entry.rebases += 1;
+        const current = await requestJson(entry.path, undefined, {
+          method: 'GET',
+          timeoutMs: config.checkpointTimeoutMs,
+        });
+        const revision = current.ok ? current.data?.checkpoint?.revision : null;
+        if (Number.isFinite(revision)) {
+          entry.body = { ...entry.body, expectedRevision: revision };
+          // A retry of a direct update uses a new idempotency key so the
+          // sidecar cannot replay the cached 409 response.
+          entry.idempotencyKey = `${entry.baseIdempotencyKey}_r${revision}`.slice(0, 200);
+          return sendCheckpoint(entry);
+        }
+      }
+      finishCheckpoint(entry, 'failed', { reason: 'checkpoint_revision_conflict' });
+      return false;
+    }
+
+    if (result.status === 409 && result.code === 'checkpoint_lease_held') {
+      if (entry.attempts < 4) {
+        schedulePendingCheckpoint(entry, 'checkpoint_lease_held', 'put', result.retryAfterMs);
+      } else {
+        finishCheckpoint(entry, 'failed', { reason: 'checkpoint_lease_held' });
+      }
+      return false;
+    }
+
+    if (result.status === 409 && result.code === 'mode_mismatch') {
+      disableRuntime('runtime_mode_mismatch');
+      finishCheckpoint(entry, 'failed', { reason: 'runtime_mode_mismatch' });
+      return false;
+    }
+
+    if (result.status === 401 || result.status === 403) {
+      finishCheckpoint(entry, 'failed', { reason: 'checkpoint_unauthorized' });
+      return false;
+    }
+
+    const retryable = result.code === 'timeout'
+      || result.code === 'fetch_failed'
+      || (typeof result.status === 'number' && (result.status >= 500 || result.status === 429));
+    if (retryable) {
+      schedulePendingCheckpoint(entry, result.code ?? 'checkpoint_pending', 'put', result.retryAfterMs);
+      return false;
+    }
+
+    finishCheckpoint(entry, 'failed', { reason: result.code ?? 'checkpoint_failed' });
+    return false;
+  }
+
   async function putCheckpoint(sessionID, data, eventID, options = {}) {
     if (!checkpointAllowed || writesDisabled || closed) return false;
     const session = safeThreadId(sessionID);
@@ -2181,36 +2597,26 @@ export function createController(dependencies = {}) {
     const safeSeq = endSeq.replace(/[^A-Za-z0-9._:-]/g, '_').slice(0, 40);
     const idempotencyKey = `opencode_${session}_${safeCompaction}_${safeSeq}`.slice(0, 190);
     const path = `/checkpoints/${encodeURIComponent(session)}?agentId=${encodeURIComponent(config.agentId)}`;
-    stats.checkpoints.attempts += 1;
-    let result = await requestJson(path, body, {
-      method: 'PUT',
-      timeoutMs: config.checkpointTimeoutMs,
+    const entry = {
+      key: `checkpoint:${idempotencyKey}`,
+      path,
+      body,
+      baseIdempotencyKey: idempotencyKey,
       idempotencyKey,
-    });
-    if (!result.ok && result.code === 'revision_mismatch') {
-      stats.checkpoints.conflicts += 1;
-      const current = await requestJson(path, undefined, {
-        method: 'GET',
-        timeoutMs: config.checkpointTimeoutMs,
-      });
-      const revision = current.ok ? current.data?.checkpoint?.revision : null;
-      if (Number.isFinite(revision)) {
-        result = await requestJson(path, { ...body, expectedRevision: revision }, {
-          method: 'PUT',
-          timeoutMs: config.checkpointTimeoutMs,
-          idempotencyKey: `${idempotencyKey}_r${revision}`.slice(0, 200),
-        });
-      }
-    }
-    if (!result.ok) {
-      stats.checkpoints.failed += 1;
-      stats.checkpoints.pending += 1;
-      noteFailure(result.code === 'revision_mismatch' ? 'checkpoint_conflict' : 'checkpoint_pending');
-      return false;
-    }
-    stats.checkpoints.sent += 1;
-    return result.data?.checkpoint ?? true;
+      session,
+      compactionId,
+      eventId: asText(eventID),
+      attempts: 0,
+      rebases: 0,
+      mode: 'put',
+      pendingReason: null,
+      retryAt: null,
+      deadlineAt: now() + config.checkpointPendingTimeoutMs,
+      timer: null,
+    };
+    return sendCheckpoint(entry);
   }
+
 
   /**
    * Expand a fragment that appeared in this thread's recent /context response.
@@ -2284,6 +2690,15 @@ export function createController(dependencies = {}) {
 
   async function handleEvent(event) {
     if (!enabled || closed || !isObject(event)) return;
+    const eventKey = eventDedupeKey(event);
+    if (eventKey && seenEvents.has(eventKey)) {
+      // Host reconnects may replay an already handled event. The logical
+      // write must stay single-shot; chunk-level dedupe alone is not enough
+      // for compaction/checkpoint events.
+      stats.events.duplicates += 1;
+      return;
+    }
+    if (eventKey) remember(seenEvents, eventKey);
     stats.events.received += 1;
     try {
       const data = isObject(event.data) ? event.data : {};
@@ -2338,26 +2753,71 @@ export function createController(dependencies = {}) {
     }
   }
 
+  function scheduleEventReconnect() {
+    if (closed || !enabled || !capabilities.events) return;
+    if (!ingestAllowed && !checkpointAllowed) return;
+    if (eventReconnectTimer !== null || eventTask !== null) return;
+    const base = Math.max(10, config.eventReconnectMs);
+    const cap = Math.max(base, config.eventReconnectMaxMs);
+    const wait = Math.min(cap, base * (2 ** Math.min(eventReconnectAttempt, 6)));
+    eventReconnectAttempt += 1;
+    stats.events.reconnects += 1;
+    eventReconnectTimer = setTimeoutFn(() => {
+      eventReconnectTimer = null;
+      if (closed || !enabled) return;
+      startEventLoop();
+    }, wait);
+    eventReconnectTimer?.unref?.();
+  }
+
   function startEventLoop() {
+    if (closed || !enabled) return;
     if (eventTask !== null) return;
+    if (!capabilities.events) return;
+    if (!ingestAllowed && !checkpointAllowed) return;
+    if (eventReconnectTimer !== null) {
+      clearTimeoutFn(eventReconnectTimer);
+      eventReconnectTimer = null;
+    }
+    eventGeneration += 1;
+    const generation = eventGeneration;
     eventAbort = typeof AbortController === 'function' ? new AbortController() : null;
     const signal = eventAbort?.signal;
-    eventTask = (async () => {
+    const task = (async () => {
       try {
         const stream = await ctx.event.subscribe({ types: [...EVENT_TYPES], ...(signal ? { signal } : {}) });
-        if (!stream || typeof stream[Symbol.asyncIterator] !== 'function') return;
+        if (!stream || typeof stream[Symbol.asyncIterator] !== 'function') {
+          if (!closed && generation === eventGeneration) status.eventsError = 'event_stream_invalid';
+          return;
+        }
+        if (generation !== eventGeneration || signal?.aborted) return;
+        stats.events.subscriptions += 1;
+        status.eventsError = null;
         for await (const event of stream) {
-          if (closed || signal?.aborted) break;
+          if (closed || generation !== eventGeneration || signal?.aborted) break;
+          if (!isObject(event)) continue;
+          eventReconnectAttempt = 0;
           // Ingest/checkpoint are asynchronous; never hold up the host event
           // stream (or the model turn) on Runtime I/O.
           void handleEvent(event);
         }
       } catch {
-        if (!closed && !signal?.aborted) {
+        if (!closed && generation === eventGeneration && !signal?.aborted) {
           status.eventsError = 'event_stream_failed';
+        }
+      } finally {
+        if (eventTask === task) eventTask = null;
+        eventTasks.delete(task);
+        if (!closed && generation === eventGeneration && enabled) {
+          // A stream that ends (cleanly or with an error) must be replaced;
+          // otherwise the adapter silently stops observing events. The retry
+          // delay is bounded and exponential only while connects yield nothing.
+          scheduleEventReconnect();
         }
       }
     })();
+    eventTask = task;
+    eventTasks.add(task);
   }
 
   async function registerStatusTool() {
@@ -2396,18 +2856,17 @@ export function createController(dependencies = {}) {
       clearTimeoutFn(discoveryTimer);
       discoveryTimer = null;
     }
-    try {
-      eventAbort?.abort();
-    } catch {
-      // Best effort.
+    // No persistent host spool: an interrupted pending checkpoint becomes
+    // visibly failed on shutdown instead of silently disappearing.
+    stopEventLoop();
+    failAllPendingCheckpoints('checkpoint_shutdown');
+    clearBuffers();
+    if (eventTasks.size > 0) {
+      await Promise.race([
+        Promise.allSettled([...eventTasks]),
+        delay(50, setTimeoutFn),
+      ]);
     }
-    if (eventTask !== null) {
-      await Promise.race([eventTask.catch(() => undefined), delay(50, setTimeoutFn)]);
-    }
-    for (const buffer of buffers.values()) {
-      if (buffer.timer !== null) clearTimeoutFn(buffer.timer);
-    }
-    buffers.clear();
     for (const registration of registrations.splice(0)) {
       try {
         await registration.dispose?.();
@@ -2468,6 +2927,10 @@ export function createController(dependencies = {}) {
         effective: active && hostAvailable ? 'host' : 'heuristic',
         hostAvailable: active && hostAvailable,
         reason: config.modelSource === 'host' && !capabilities.generate ? 'generate_unavailable' : null,
+        // The plugin's extractor choice is local to this adapter. It neither
+        // reads nor mirrors the Console model.source setting.
+        sourceScope: 'opencode-plugin',
+        consoleModelSourceIndependent: true,
         ...stats.model,
       },
       agent: {
@@ -2476,6 +2939,18 @@ export function createController(dependencies = {}) {
         namespaces: [...config.namespaces],
         domains: [...config.domains],
         governanceAgents: [...config.governanceAgents],
+      },
+      checkpoints: {
+        pending: stats.checkpoints.pending,
+        last: status.checkpoint,
+      },
+      events: {
+        subscribed: stats.events.subscriptions,
+        reconnects: stats.events.reconnects,
+        duplicates: stats.events.duplicates,
+        reconnectAttempt: eventReconnectAttempt,
+        reconnectScheduled: eventReconnectTimer !== null,
+        error: status.eventsError,
       },
       counts: clone(stats),
       warnings: [...new Set(status.warnings)],
@@ -2491,6 +2966,7 @@ export function createController(dependencies = {}) {
     reason: disabledReason,
     recallReason: null,
     lastWarning: null,
+    checkpoint: null,
     warnings: [...config.warnings],
     eventsError: null,
   };

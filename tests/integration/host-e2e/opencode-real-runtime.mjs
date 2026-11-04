@@ -116,7 +116,7 @@ function opencodeConfig({ providerUrl, pluginOptions }) {
   };
 }
 
-async function scanForToken(dir, token) {
+async function scanForText(dir, needle) {
   const hits = [];
   async function walk(current) {
     let entries = [];
@@ -132,12 +132,16 @@ async function scanForToken(dir, token) {
         await walk(path);
       } else if (entry.isFile()) {
         const text = await readFile(path, 'utf8').catch(() => '');
-        if (text.includes(token)) hits.push(path);
+        if (text.includes(needle)) hits.push(path);
       }
     }
   }
   await walk(dir);
   return hits;
+}
+
+async function scanForToken(dir, token) {
+  return scanForText(dir, token);
 }
 
 function parseSessionID(output) {
@@ -465,6 +469,15 @@ async function main() {
     };
     check('OpenChamber 原生 memory.json 未被改写', nativeAfter.memory === nativeBefore.memory);
     check('OpenChamber 原生 settings.json 未被改写', nativeAfter.settings === nativeBefore.settings);
+    const persistedInjection = (await Promise.all([
+      join(home, '.local', 'share', 'opencode'),
+      join(home, '.local', 'state', 'opencode'),
+      join(home, '.config', 'opencode'),
+      join(home, '.config', 'openchamber'),
+      join(home, '.local', 'share', 'openchamber'),
+    ].map((root) => scanForText(root, 'purpose="background">\nThe following is external memory recalled from Mebular.')))).flat();
+    check('OpenCode 持久会话/DB/instructions 不含 request-only 注入块',
+      persistedInjection.length === 0, JSON.stringify(persistedInjection));
     const sidecarDetailText = (await runtime.resolveDetails({
       agentId: 'opencode',
       domains: ['default', 'user', 'agent:opencode'],

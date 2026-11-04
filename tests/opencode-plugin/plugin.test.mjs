@@ -44,10 +44,28 @@ function jsonResponse(data, options = {}) {
   return {
     ok: options.ok ?? true,
     status: options.status ?? 200,
+    headers: options.headers ?? {},
     async json() {
       return data;
     },
   };
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
+}
+
+async function waitFor(predicate, { timeoutMs = 2000, intervalMs = 5 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = await predicate();
+    if (value) return value;
+    await sleep(intervalMs);
+  }
+  return null;
 }
 
 function ingestResponse(body) {
@@ -130,6 +148,28 @@ function emptyStream(signal) {
   };
 }
 
+function replayStream(events, signal, options = {}) {
+  return {
+    async *[Symbol.asyncIterator]() {
+      for (const event of events) {
+        if (signal?.aborted) return;
+        yield event;
+      }
+      if (options.close) return;
+      while (!signal?.aborted) {
+        await new Promise((resolve) => {
+          const timer = setTimeout(resolve, 5);
+          timer.unref?.();
+          signal?.addEventListener?.('abort', () => {
+            clearTimeout(timer);
+            resolve();
+          }, { once: true });
+        });
+      }
+    },
+  };
+}
+
 function makeCtx(options = {}) {
   const calls = {
     hooks: [],
@@ -186,6 +226,9 @@ function makeCtx(options = {}) {
     event: options.events === false ? undefined : {
       subscribe: async (subscribeOptions) => {
         calls.subscriptions.push(subscribeOptions);
+        if (typeof options.subscribeImpl === 'function') {
+          return options.subscribeImpl(subscribeOptions, calls.subscriptions.length);
+        }
         return options.stream ?? emptyStream(subscribeOptions?.signal);
       },
     },
@@ -464,8 +507,10 @@ describe('context hook', () => {
     const { controller, calls } = made;
     await controller.start();
     const event = hookEvent(userMessages());
+    const messagesBefore = JSON.stringify(event.messages);
     await calls.hooks[0].callback(event);
     expect(event.system).toHaveLength(1);
+    expect(JSON.stringify(event.messages)).toBe(messagesBefore);
     expect(calls.prompts).toBe(0);
     expect(calls.synthetics).toBe(0);
     expect(calls.instructions).toBe(0);
@@ -528,6 +573,8 @@ describe('configuration and status', () => {
     expect(statusText).not.toContain('env-token');
     expect(controller.getStatus().runtime.tokenConfigured).toBe(true);
     expect(controller.getStatus().runtime.tokenSource).toBe('env');
+    expect(controller.getStatus().model.sourceScope).toBe('opencode-plugin');
+    expect(controller.getStatus().model.consoleModelSourceIndependent).toBe(true);
   });
 
   it('honors a plugin config file when env/options do not set a URL', async () => {
@@ -771,6 +818,30 @@ describe('ingest and compaction', () => {
     await expect(controller.handleEvent({ type: 'session.execution.succeeded', data: { sessionID: 'ses_1' } })).resolves.toBeUndefined();
     expect(controller.getStatus().counts.ingest.failed).toBe(1);
   });
+
+  it('honors Retry-After for one bounded 429 ingest retry', async () => {
+    const times = [];
+    const fetchImpl = createFetch({
+      '/ingest': () => {
+        times.push(Date.now());
+        return jsonResponse(
+          { ok: false, error: { code: 'rate_limited' } },
+          { ok: false, status: 429, headers: { 'retry-after': '0.05' } },
+        );
+      },
+    });
+    const { controller } = controllerWith({
+      fetchImpl,
+      config: { maxRetryAfterMs: 1000 },
+      ctx: { contextMessages: [{ id: 'u1', type: 'user', text: 'hello 429' }] },
+    });
+    await controller.handleEvent({ type: 'session.execution.succeeded', data: { sessionID: 'ses_429' } });
+    const ingest = fetchImpl.callsFor('/ingest');
+    expect(ingest).toHaveLength(2);
+    expect(times[1] - times[0]).toBeGreaterThanOrEqual(35);
+    expect(controller.getStatus().counts.ingest.failed).toBe(1);
+    expect(controller.getStatus().counts.ingest.sent).toBe(0);
+  });
 });
 
 describe('current model extraction (host/current)', () => {
@@ -903,6 +974,32 @@ describe('sidecar discovery and host authentication', () => {
     expect(config.ingest).toBe(false);
     expect(config.warnings).toContain('legacy_enabled_ignored');
     expect(config.warnings).toContain('legacy_capture_ignored');
+  });
+
+  it('makes domain and recallLimit real context request fields', async () => {
+    const fetchImpl = createFetch({ '/context': { blocks: [] } });
+    const { controller } = controllerWith({
+      fetchImpl,
+      config: { domain: 'task:ses_cfg', recallLimit: 5 },
+    });
+    await controller.handleContext(hookEvent(userMessages()));
+    const body = fetchImpl.callsFor('/context')[0].body;
+    expect(body.domains).toEqual(['task:ses_cfg']);
+    expect(body.limit).toBe(5);
+
+    const fromEnv = resolvePluginConfig(
+      { runtimeUrl: BASE, recallLimit: 4 },
+      { env: { MEBULAR_MEMORY_RUNTIME_DOMAIN: 'user' }, homeDir: await tempDir() },
+    );
+    expect(fromEnv.domains).toContain('user');
+    expect(fromEnv.recallLimit).toBe(4);
+
+    const invalidModel = resolvePluginConfig(
+      { runtimeUrl: BASE, modelSource: 'console' },
+      { env: {}, homeDir: await tempDir() },
+    );
+    expect(invalidModel.modelSource).toBe('heuristic');
+    expect(invalidModel.warnings).toContain('model_source_invalid');
   });
 
   it('follows discovery appearing after startup without a host-level enabled switch', async () => {
@@ -1380,6 +1477,157 @@ describe('event collection hardening', () => {
     expect(controller.getStatus().counts.checkpoints.sent).toBe(1);
   });
 
+  it('does not count a 202 checkpoint as committed until an authoritative read confirms it', async () => {
+    const fetchImpl = createFetch({
+      'PUT /checkpoints/ses_202': () => jsonResponse({
+        ok: true,
+        data: { checkpoint: { pending: true, revision: null }, pending: true },
+      }, { status: 202 }),
+      'GET /checkpoints/ses_202': () => jsonResponse({
+        ok: true,
+        data: { checkpoint: { pending: false, revision: 7, state: { compactionId: 'evt_202' } } },
+      }),
+    });
+    const { controller } = controllerWith({
+      fetchImpl,
+      config: { checkpointRetryMs: 25, checkpointPendingTimeoutMs: 1000 },
+    });
+    await controller.handleEvent({
+      id: 'evt_202',
+      type: 'session.compaction.ended',
+      data: { sessionID: 'ses_202', reason: 'auto', text: 'queued checkpoint body' },
+    });
+    let status = controller.getStatus();
+    expect(status.counts.checkpoints.sent).toBe(0);
+    expect(status.counts.checkpoints.pending).toBe(1);
+    expect(status.checkpoints.last).toMatchObject({ state: 'pending', reason: 'checkpoint_queued' });
+
+    expect(await waitFor(() => controller.getStatus().counts.checkpoints.sent === 1)).toBeTruthy();
+    status = controller.getStatus();
+    expect(status.counts.checkpoints.pending).toBe(0);
+    expect(status.checkpoints.last).toMatchObject({ state: 'committed', revision: 7 });
+  });
+
+  it('turns an unconfirmed 202 pending checkpoint into a bounded visible failure', async () => {
+    const fetchImpl = createFetch({
+      'PUT /checkpoints/ses_202_lost': () => jsonResponse({
+        ok: true,
+        data: { checkpoint: { pending: true, revision: null }, pending: true },
+      }, { status: 202 }),
+      'GET /checkpoints/ses_202_lost': () => jsonResponse({
+        ok: true,
+        data: { checkpoint: { pending: true, revision: null } },
+      }),
+    });
+    const { controller } = controllerWith({
+      fetchImpl,
+      config: { checkpointRetryMs: 10, checkpointPendingTimeoutMs: 80 },
+    });
+    await controller.handleEvent({
+      id: 'evt_202_lost',
+      type: 'session.compaction.ended',
+      data: { sessionID: 'ses_202_lost', reason: 'auto', text: 'never commits' },
+    });
+    expect(controller.getStatus().counts.checkpoints.pending).toBe(1);
+    expect(await waitFor(() => controller.getStatus().counts.checkpoints.pending === 0)).toBeTruthy();
+    const status = controller.getStatus();
+    expect(status.counts.checkpoints.sent).toBe(0);
+    expect(status.counts.checkpoints.failed).toBe(1);
+    expect(status.counts.checkpoints.expired).toBe(1);
+    expect(status.checkpoints.last).toMatchObject({
+      state: 'failed',
+      reason: 'checkpoint_pending_expired',
+    });
+  });
+
+  it('bounds repeated revision conflicts instead of leaving a permanent pending counter', async () => {
+    let puts = 0;
+    let gets = 0;
+    const fetchImpl = createFetch({
+      '/checkpoints/ses_conflict_forever': (call) => {
+        if (call.method === 'GET') {
+          gets += 1;
+          return jsonResponse({ ok: true, data: { checkpoint: { revision: 4 } } });
+        }
+        puts += 1;
+        return jsonResponse({ ok: false, error: { code: 'revision_mismatch' } }, { ok: false, status: 409 });
+      },
+    });
+    const { controller } = controllerWith({
+      fetchImpl,
+      config: { checkpointRetryMs: 10, checkpointPendingTimeoutMs: 500 },
+    });
+    await controller.handleEvent({
+      id: 'evt_conflict_forever',
+      type: 'session.compaction.ended',
+      data: { sessionID: 'ses_conflict_forever', reason: 'manual', text: 'always conflicts' },
+    });
+    const status = controller.getStatus();
+    expect(status.counts.checkpoints.sent).toBe(0);
+    expect(status.counts.checkpoints.pending).toBe(0);
+    expect(status.counts.checkpoints.failed).toBe(1);
+    expect(status.counts.checkpoints.conflicts).toBe(2);
+    expect(status.checkpoints.last).toMatchObject({
+      state: 'failed',
+      reason: 'checkpoint_revision_conflict',
+    });
+    expect(puts).toBe(2);
+    expect(gets).toBe(1);
+  });
+
+  it('bounds checkpoint 5xx retries and fails visibly at the deadline', async () => {
+    let puts = 0;
+    const fetchImpl = createFetch({
+      '/checkpoints/ses_checkpoint_5xx': () => {
+        puts += 1;
+        return jsonResponse({ ok: false, error: { code: 'runtime_error' } }, { ok: false, status: 500 });
+      },
+    });
+    const { controller } = controllerWith({
+      fetchImpl,
+      config: { checkpointRetryMs: 10, checkpointPendingTimeoutMs: 80 },
+    });
+    await controller.handleEvent({
+      id: 'evt_checkpoint_5xx',
+      type: 'session.compaction.ended',
+      data: { sessionID: 'ses_checkpoint_5xx', reason: 'auto', text: 'retry bounded' },
+    });
+    expect(controller.getStatus().counts.checkpoints.pending).toBe(1);
+    expect(await waitFor(() => controller.getStatus().counts.checkpoints.pending === 0)).toBeTruthy();
+    const status = controller.getStatus();
+    expect(status.counts.checkpoints.sent).toBe(0);
+    expect(status.counts.checkpoints.failed).toBe(1);
+    expect(status.counts.checkpoints.replayed).toBeGreaterThanOrEqual(1);
+    expect(status.checkpoints.last).toMatchObject({
+      state: 'failed',
+      reason: 'checkpoint_pending_expired',
+    });
+    expect(puts).toBeGreaterThan(1);
+  });
+
+  it('does not retry a persistent checkpoint 401 as pending', async () => {
+    const fetchImpl = createFetch({
+      '/checkpoints/ses_checkpoint_401': () => jsonResponse(
+        { ok: false, error: { code: 'unauthorized' } },
+        { ok: false, status: 401 },
+      ),
+    });
+    const { controller } = controllerWith({ fetchImpl });
+    await controller.handleEvent({
+      id: 'evt_checkpoint_401',
+      type: 'session.compaction.ended',
+      data: { sessionID: 'ses_checkpoint_401', reason: 'auto', text: 'unauthorized' },
+    });
+    const status = controller.getStatus();
+    expect(status.counts.checkpoints.pending).toBe(0);
+    expect(status.counts.checkpoints.sent).toBe(0);
+    expect(status.counts.checkpoints.failed).toBe(1);
+    expect(status.checkpoints.last).toMatchObject({
+      state: 'failed',
+      reason: 'checkpoint_unauthorized',
+    });
+  });
+
   it('uses the host/current model only after a completed turn', async () => {
     const { calls, fetchImpl, controller } = controllerWith({
       config: { modelSource: 'current' },
@@ -1393,6 +1641,118 @@ describe('event collection hardening', () => {
     await controller.handleEvent({ type: 'session.execution.succeeded', data: { sessionID: 'ses_current' } });
     expect(calls.generate).toHaveLength(1);
     expect(fetchImpl.callsFor('/ingest')[0].body.extractor).toBe('heuristic');
+  });
+});
+
+describe('event subscription reconnect and hot disable', () => {
+  it('resubscribes after the event stream ends and dedupes replayed events', async () => {
+    const replayed = {
+      id: 'evt_reconnect_1',
+      type: 'session.tool.input.started',
+      data: { sessionID: 'ses_reconnect', id: 't1', name: 'read' },
+    };
+    const { ctx, calls } = makeCtx({
+      subscribeImpl: (subscribeOptions, count) => (
+        count === 1
+          ? replayStream([replayed], subscribeOptions.signal, { close: true })
+          : replayStream([replayed], subscribeOptions.signal)
+      ),
+    });
+    const controller = createController({
+      ctx,
+      config: { runtimeUrl: BASE, eventReconnectMs: 10, eventReconnectMaxMs: 50 },
+      fetchImpl: createFetch(),
+      env: {},
+    });
+    await controller.start();
+    expect(await waitFor(() => controller.getStatus().counts.events.handled === 1)).toBeTruthy();
+    expect(await waitFor(() => calls.subscriptions.length >= 2)).toBeTruthy();
+    expect(await waitFor(() => controller.getStatus().counts.events.duplicates === 1)).toBeTruthy();
+    const status = controller.getStatus();
+    expect(status.counts.events.handled).toBe(1);
+    expect(status.counts.events.duplicates).toBe(1);
+    expect(status.events.subscribed).toBe(2);
+    expect(status.events.reconnects).toBeGreaterThanOrEqual(1);
+    await controller.dispose();
+    expect(calls.subscriptions.at(-1).signal.aborted).toBe(true);
+  });
+
+  it('dedupes a replayed compaction event into one checkpoint write', async () => {
+    const fetchImpl = createFetch();
+    const { controller } = controllerWith({ fetchImpl });
+    const event = {
+      id: 'evt_compact_replay',
+      type: 'session.compaction.ended',
+      data: { sessionID: 'ses_compact_replay', reason: 'auto', text: 'replayed compaction' },
+    };
+    await controller.handleEvent(event);
+    await controller.handleEvent(event);
+    expect(fetchImpl.callsFor('/ingest')).toHaveLength(1);
+    expect(fetchImpl.callsFor('/checkpoints/ses_compact_replay').filter((call) => call.method === 'PUT')).toHaveLength(1);
+    expect(controller.getStatus().counts.events.duplicates).toBe(1);
+  });
+
+  it('cancels subscription, buffer timer and pending checkpoint after discovery disappears', async () => {
+    const home = await tempDir();
+    await writeDiscovery(home);
+    let clock = Date.now();
+    const fetchImpl = createFetch({
+      '/context': HIT,
+      'PUT /checkpoints/ses_hot': () => jsonResponse({
+        ok: true,
+        data: { checkpoint: { pending: true, revision: null }, pending: true },
+      }, { status: 202 }),
+      'GET /checkpoints/ses_hot': () => jsonResponse({
+        ok: true,
+        data: { checkpoint: { pending: true, revision: null } },
+      }),
+    });
+    const { ctx, calls } = makeCtx({
+      subscribeImpl: (subscribeOptions) => replayStream([], subscribeOptions.signal),
+    });
+    const controller = createController({
+      ctx,
+      config: {
+        bufferIdleMs: 100,
+        eventReconnectMs: 10,
+        checkpointRetryMs: 100,
+        checkpointPendingTimeoutMs: 5000,
+      },
+      fetchImpl,
+      env: {},
+      homeDir: home,
+      now: () => clock,
+    });
+    await controller.start();
+    expect(calls.subscriptions).toHaveLength(1);
+
+    await controller.handleEvent({
+      id: 'evt_hot',
+      type: 'session.compaction.ended',
+      data: { sessionID: 'ses_hot', reason: 'auto', text: 'pending across disable' },
+    });
+    expect(controller.getStatus().counts.checkpoints.pending).toBe(1);
+    await controller.handleEvent({
+      type: 'session.text.ended',
+      data: { sessionID: 'ses_hot', assistantMessageID: 'a1', text: 'buffered but not flushed' },
+    });
+
+    await rm(join(home, 'memory-runtime.json'));
+    clock += 6000;
+    const event = hookEvent(userMessages());
+    await controller.handleContext(event);
+    expect(event.system).toHaveLength(0);
+    const status = controller.getStatus();
+    expect(status.enabled).toBe(false);
+    expect(status.counts.checkpoints.pending).toBe(0);
+    expect(status.counts.checkpoints.interrupted).toBe(1);
+    expect(calls.subscriptions[0].signal.aborted).toBe(true);
+
+    const callsAfterDisable = fetchImpl.calls.length;
+    await sleep(250);
+    expect(fetchImpl.calls.length).toBe(callsAfterDisable);
+    expect(calls.subscriptions).toHaveLength(1);
+    await controller.dispose();
   });
 });
 

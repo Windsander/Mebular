@@ -9,7 +9,12 @@
 
 import { CapabilityClient, CapabilityClientError } from './capability-client.js';
 import type { IngestErrorView, OutboxReplaySummary } from './ingest.js';
-import { OUTBOX_REPLAY_LEASE_MS, type BoundedOutbox, type OutboxItem } from './local-layer.js';
+import {
+  OUTBOX_REPLAY_LEASE_MS,
+  type BoundedOutbox,
+  type OutboxItem,
+  type OutboxReplayCompletion,
+} from './local-layer.js';
 
 const RETRY_BASE_MS = 1000;
 const RETRY_MAX_MS = 60_000;
@@ -24,6 +29,8 @@ export interface OutboxReplayerOptions {
   onSummary?: (summary: OutboxReplaySummary) => void;
   /** 成功写回后的对象缓存/计数回填；返回 false 表示仍需重试（部分成功）。 */
   onSettled?: (item: OutboxItem, data: unknown) => void | boolean | Promise<void | boolean>;
+  /** 一次 replay 尝试最终以 retry/dead 结束时通知；成功由 onSettled 自行收口。 */
+  onComplete?: (item: OutboxItem, outcome: OutboxReplayCompletion) => void | Promise<void>;
 }
 
 interface ItemOutcome {
@@ -74,6 +81,7 @@ export class OutboxReplayer {
   private readonly now: () => number;
   private readonly onSummary?: (summary: OutboxReplaySummary) => void;
   private readonly onSettled?: (item: OutboxItem, data: unknown) => void | boolean | Promise<void | boolean>;
+  private readonly onComplete?: (item: OutboxItem, outcome: OutboxReplayCompletion) => void | Promise<void>;
   private timer: ReturnType<typeof setInterval> | null = null;
   private inFlight: Promise<OutboxReplaySummary> | null = null;
 
@@ -85,6 +93,7 @@ export class OutboxReplayer {
     this.now = options.now ?? Date.now;
     this.onSummary = options.onSummary;
     this.onSettled = options.onSettled;
+    this.onComplete = options.onComplete;
   }
 
   start(): void {
@@ -169,55 +178,81 @@ export class OutboxReplayer {
     return Math.max(OUTBOX_REPLAY_LEASE_MS, Math.max(0, timeoutMs) + REPLAY_LEASE_MARGIN_MS);
   }
 
+  private async notifyComplete(id: string, outcome: OutboxReplayCompletion): Promise<void> {
+    if (!this.onComplete || outcome === 'settled' || outcome === 'skipped') return;
+    const item = await this.outbox.get(id) ?? await this.outbox.getDead(id);
+    if (!item) return;
+    await this.onComplete(item, outcome);
+  }
+
   private async replayItem(item: OutboxItem): Promise<ItemOutcome> {
     const leaseMs = this.leaseMs();
     const lease = await this.outbox.acquireReplayLease(item.id, { now: this.now(), leaseMs });
-    if (lease.state === 'leased') return { outcome: 'skipped' };
-    if (lease.state === 'expired') {
-      return {
-        outcome: 'dead',
-        error: { code: 'retention_expired', message: 'outbox 操作已超过截止时间', at: this.now() },
-      };
+    if (lease.state !== 'acquired') {
+      if (lease.state === 'expired') {
+        return {
+          outcome: 'dead',
+          error: { code: 'retention_expired', message: 'outbox 操作已超过截止时间', at: this.now() },
+        };
+      }
+      return { outcome: 'skipped' };
     }
+    const leased = lease.item;
+    const owner = leased.replayLeaseOwner;
     try {
-      const envelope = await this.client!.post(item.endpoint, item.body, {
-        idempotencyKey: item.requestId,
+      const envelope = await this.client!.post(leased.endpoint, leased.body, {
+        idempotencyKey: leased.requestId,
         retries: 0,
       });
-      // 响应已确认：把 lease 续到覆盖本地回读/详情写入阶段。
-      await this.outbox.renewReplayLease(item.id, { now: this.now(), leaseMs });
+      // 响应已确认：把 lease 续到覆盖本地回读/详情写入阶段；owner 不符/已过期则拒绝。
+      await this.outbox.renewReplayLease(leased.id, {
+        owner,
+        now: this.now(),
+        leaseMs,
+      });
       // 权威回读/必需项确认失败不能吞掉；交由同一 retry/dead/deadline 路径处理。
-      const keepForRetry = (await this.onSettled?.(item, envelope.data)) === false;
+      const keepForRetry = (await this.onSettled?.(leased, envelope.data)) === false;
       if (keepForRetry) {
-        const delay = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** Math.min(6, item.attempts));
-        const completion = await this.outbox.completeReplay(item.id, {
+        const delay = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** Math.min(6, leased.attempts));
+        const completion = await this.outbox.completeReplay(leased.id, {
           outcome: 'retry',
+          owner,
           now: this.now(),
           error: 'partial_failure',
           retryDelayMs: delay,
         });
-        return { outcome: completion };
+        await this.notifyComplete(leased.id, completion);
+        return { outcome: completion === 'skipped' ? 'skipped' : completion };
       }
       // HTTP/capability 已确认且本地必需项对账完成；即使响应在 deadline 后到达，
       // 也只能按 committed 移除活动项，不能再由 cleanup 写成 dead。
-      await this.outbox.completeReplay(item.id, { outcome: 'settled', now: this.now() });
+      const completion = await this.outbox.completeReplay(leased.id, {
+        outcome: 'settled',
+        owner,
+        now: this.now(),
+      });
+      await this.notifyComplete(leased.id, completion);
+      if (completion === 'skipped') return { outcome: 'skipped' };
       return { outcome: 'settled', count: settledCount(envelope.data) };
     } catch (error) {
       const view = errorView(error, this.now());
       const canRetry = retryable(error);
-      const delay = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** Math.min(6, item.attempts));
-      const completion = await this.outbox.completeReplay(item.id, {
+      const delay = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** Math.min(6, leased.attempts));
+      const completion = await this.outbox.completeReplay(leased.id, {
         outcome: canRetry ? 'retry' : 'dead',
+        owner,
         now: this.now(),
         error: view.code,
         retryDelayMs: delay,
       });
+      await this.notifyComplete(leased.id, completion);
       if (completion === 'retry') {
         return {
           outcome: 'retry',
           error: { ...view, code: view.code === 'internal' ? 'capability_unavailable' : view.code },
         };
       }
+      if (completion === 'skipped') return { outcome: 'skipped' };
       return { outcome: 'dead', error: view };
     }
   }

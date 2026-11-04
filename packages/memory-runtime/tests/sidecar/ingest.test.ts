@@ -1795,6 +1795,411 @@ describe('IngestService settlements', () => {
     expect(fake.writeRequests).toHaveLength(0);
   });
 
+  it('detail replay 收口 extraction 时合并 committed detailIds/records', async () => {
+    const { service, fake, local } = await setup();
+    const chunk = { role: 'user' as const, text: '详情收口证据 A B', messageId: 'm_finalize_detail', chunkIndex: 0 };
+    await service.ingest({
+      requestId: 'req_finalize_detail_first',
+      agentId: 'opencode',
+      threadId: 'th_finalize_detail',
+      extractor: 'host',
+      chunks: [chunk],
+      candidates: [{
+        kind: 'observation',
+        content: { content: '详情收口证据 A' },
+        sourceMessageIds: ['m_finalize_detail'],
+      }],
+    });
+    fake.setDetailFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const queued = await service.ingest({
+      requestId: 'req_finalize_detail_second',
+      agentId: 'opencode',
+      threadId: 'th_finalize_detail',
+      extractor: 'host',
+      chunks: [chunk],
+      candidates: [{
+        kind: 'observation',
+        content: { content: '详情收口证据 B' },
+        sourceMessageIds: ['m_finalize_detail'],
+      }],
+    });
+    const extractionId = queued.data.extraction.id;
+    const secondRecordId = queued.data.records[0]!.id;
+    expect(queued.data.detail.queued).toBe(1);
+    expect((await service.getExtraction(extractionId))?.detailIds).toEqual([]);
+
+    fake.setDetailFailure(null);
+    const summary = await new OutboxReplayer({
+      outbox: local.outbox,
+      client: (service as any).client,
+      onSettled: (item, data) => service.applyReplayedOutbox(item, data),
+    }).replayOnce();
+    expect(summary).toMatchObject({ settled: 1, remaining: 0 });
+    const view = await service.getExtraction(extractionId);
+    expect(view).toMatchObject({ status: 'completed' });
+    expect(view?.records.map((record) => record.id)).toContain(secondRecordId);
+    expect(view?.detailIds).toContain(fake.details[0]!.id);
+    expect(view?.degraded).toBe(false);
+  });
+
+  it('record replay 收口 extraction 时合并 committed records/detailIds', async () => {
+    const { service, fake, local } = await setup();
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const queued = await service.ingest({
+      requestId: 'req_finalize_record',
+      agentId: 'opencode',
+      threadId: 'th_finalize_record',
+      extractor: 'host',
+      chunks: [{ role: 'user', text: '记录收口证据', messageId: 'm_finalize_record' }],
+      candidates: [{
+        kind: 'observation',
+        content: { content: '记录收口证据' },
+        sourceMessageIds: ['m_finalize_record'],
+      }],
+    });
+    const extractionId = queued.data.extraction.id;
+    expect((await service.getExtraction(extractionId))?.records).toEqual([]);
+    fake.setFailure(null);
+
+    const summary = await new OutboxReplayer({
+      outbox: local.outbox,
+      client: (service as any).client,
+      onSettled: (item, data) => service.applyReplayedOutbox(item, data),
+    }).replayOnce();
+    expect(summary).toMatchObject({ settled: 1, remaining: 0 });
+    const view = await service.getExtraction(extractionId);
+    expect(view).toMatchObject({ status: 'completed' });
+    expect(view?.records.map((record) => record.id)).toEqual([fake.nodes[0]!.id]);
+    expect(view?.detailIds).toContain(fake.details[0]!.id);
+  });
+
+  it('存在 dead Detail 依赖时后续成功重放不得把 extraction 收口为 completed', async () => {
+    const { service, fake, local } = await setup();
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const queued = await service.ingest({
+      requestId: 'req_finalize_dead_dependency',
+      agentId: 'opencode',
+      threadId: 'th_finalize_dead_dependency',
+      extractor: 'host',
+      chunks: [{ role: 'user', text: 'dead 依赖证据', messageId: 'm_finalize_dead' }],
+      candidates: [{
+        kind: 'observation',
+        content: { content: 'dead 依赖证据' },
+        sourceMessageIds: ['m_finalize_dead'],
+      }],
+    });
+    const extractionId = queued.data.extraction.id;
+    await local.outbox.enqueue({
+      id: 'ob_finalize_dead_detail',
+      requestId: 'req_finalize_dead_detail',
+      endpoint: '/detail',
+      body: { items: [] },
+      meta: { kind: 'detail', extractionIds: [extractionId] },
+    });
+    expect(await local.outbox.deadLetter('ob_finalize_dead_detail', 'validation_failed')).toBe(true);
+    fake.setFailure(null);
+
+    const summary = await new OutboxReplayer({
+      outbox: local.outbox,
+      client: (service as any).client,
+      onSettled: (item, data) => service.applyReplayedOutbox(item, data),
+    }).replayOnce();
+    expect(summary).toMatchObject({ settled: 1, remaining: 0 });
+    const view = await service.getExtraction(extractionId);
+    expect(view).toMatchObject({ status: 'failed', degraded: true });
+    expect(view?.warnings).toContain('replay_dead_dependency');
+    expect(view?.records.map((record) => record.id)).toEqual([fake.nodes[0]!.id]);
+  });
+
+  it('仍有活动 Detail 依赖时 extraction 保持 pending，不被成功记录重放提前 completed', async () => {
+    const { service, fake, local } = await setup();
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const queued = await service.ingest({
+      requestId: 'req_finalize_partial_dependency',
+      agentId: 'opencode',
+      threadId: 'th_finalize_partial_dependency',
+      extractor: 'host',
+      chunks: [{ role: 'user', text: 'partial 依赖证据', messageId: 'm_finalize_partial' }],
+      candidates: [{
+        kind: 'observation',
+        content: { content: 'partial 依赖证据' },
+        sourceMessageIds: ['m_finalize_partial'],
+      }],
+    });
+    const extractionId = queued.data.extraction.id;
+    const recordItem = (await local.outbox.list())[0]!;
+    await local.outbox.enqueue({
+      id: 'ob_finalize_partial_detail',
+      requestId: 'req_finalize_partial_detail',
+      endpoint: '/detail',
+      body: { items: [] },
+      meta: { kind: 'detail', extractionIds: [extractionId] },
+    });
+    await service.finalizeReplayedOutbox(recordItem, 'settled');
+
+    const view = await service.getExtraction(extractionId);
+    expect(view).toMatchObject({ status: 'pending', degraded: true });
+    expect(view?.warnings).toContain('replay_dependency_pending');
+  });
+
+  it('无 chunks 的 candidate-only ingest 离线排队，重启后重放仍能收口 extraction', async () => {
+    const { home, service, fake, local } = await setup();
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const queued = await service.ingest({
+      requestId: 'req_candidate_only_queue',
+      agentId: 'opencode',
+      threadId: 'th_candidate_only',
+      extractor: 'host',
+      chunks: [],
+      candidates: [{
+        kind: 'observation',
+        content: { content: 'candidate only 记录' },
+      }],
+    });
+    expect(queued.status).toBe(202);
+    expect(queued.data.stagingChunkIds).toEqual([]);
+    const extractionId = queued.data.extraction.id;
+    const queuedOutbox = await local.outbox.list();
+    expect(queuedOutbox).toHaveLength(1);
+    expect(queuedOutbox[0]!.meta?.extractionIds).toContain(extractionId);
+
+    const restartedLocal = new SidecarLocalLayer({ root: join(home, 'memory-runtime') });
+    await restartedLocal.init();
+    const restartedClient = new CapabilityClient({
+      baseUrl: fake.baseUrl,
+      token: 'cap-token',
+      retries: 0,
+      retryDelayMs: 0,
+    });
+    const restarted = new IngestService({
+      config: defaultSidecarConfig(),
+      local: restartedLocal,
+      client: restartedClient,
+      identity: { cloudId: 'cl_test', profileId: 'default', hostId: 'h_test' },
+      policy: defaultSidecarPolicy(),
+    });
+    await restarted.init();
+    fake.setFailure(null);
+
+    const summary = await new OutboxReplayer({
+      outbox: restartedLocal.outbox,
+      client: restartedClient,
+      onSettled: (item, data) => restarted.applyReplayedOutbox(item, data),
+      onComplete: (item, outcome) => restarted.finalizeReplayedOutbox(item, outcome),
+    }).replayOnce();
+    expect(summary).toMatchObject({ settled: 1, remaining: 0 });
+    const view = await restarted.getExtraction(extractionId);
+    expect(view).toMatchObject({ status: 'completed' });
+    expect(view?.records.map((record) => record.id)).toEqual([fake.nodes[0]!.id]);
+    expect(view?.detailIds).toEqual([]);
+  });
+
+  it('无 chunks 的 candidate-only 重放永久失败时 extraction 收口为 failed', async () => {
+    const { service, fake, local } = await setup();
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const queued = await service.ingest({
+      requestId: 'req_candidate_only_failure',
+      agentId: 'opencode',
+      threadId: 'th_candidate_only_failure',
+      extractor: 'host',
+      chunks: [],
+      candidates: [{
+        kind: 'observation',
+        content: { content: 'candidate only 失败' },
+      }],
+    });
+    const extractionId = queued.data.extraction.id;
+    fake.setFailure({ status: 422, code: 'validation_failed', retryable: false });
+
+    const summary = await new OutboxReplayer({
+      outbox: local.outbox,
+      client: (service as any).client,
+      onSettled: (item, data) => service.applyReplayedOutbox(item, data),
+      onComplete: (item, outcome) => service.finalizeReplayedOutbox(item, outcome),
+    }).replayOnce();
+    expect(summary).toMatchObject({ dead: 1, remaining: 0 });
+    const view = await service.getExtraction(extractionId);
+    expect(view).toMatchObject({ status: 'failed', degraded: true });
+    expect(view?.warnings).toContain('replay_dead_dependency');
+  });
+
+  it('completeExtraction I/O 与 finalize(retry) 串行，completed 不回退为 pending', async () => {
+    const { service, client, fake, local } = await setup();
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const queued = await service.ingest({
+      requestId: 'req_finalize_race_retry',
+      agentId: 'opencode',
+      threadId: 'th_finalize_race_retry',
+      extractor: 'host',
+      chunks: [{ role: 'user', text: '并发 retry 证据', messageId: 'm_finalize_race_retry' }],
+      candidates: [{
+        kind: 'observation',
+        content: { content: '并发 retry 记录' },
+        sourceMessageIds: ['m_finalize_race_retry'],
+      }],
+    });
+    const extractionId = queued.data.extraction.id;
+    const outboxItem = (await local.outbox.list())[0]!;
+    fake.setFailure(null);
+
+    let markWriteStarted!: () => void;
+    const writeStarted = new Promise<void>((resolve) => { markWriteStarted = resolve; });
+    let releaseWrite!: () => void;
+    const writeGate = new Promise<void>((resolve) => { releaseWrite = resolve; });
+    jest.spyOn(client, 'write').mockImplementationOnce(async (body: any) => {
+      markWriteStarted();
+      await writeGate;
+      const item = body.items[0];
+      fake.nodes.push({
+        id: 'rec-finalize-race-retry',
+        type: 'episode',
+        kind: 'observation',
+        domain: 'agent:opencode',
+        ownerType: 'agent',
+        ownerId: 'opencode',
+        contentHash: 'finalize-race-retry',
+        content: item.content,
+        provenance: {},
+      });
+      return {
+        ok: true,
+        requestId: body.requestId,
+        capabilityVersion: 1,
+        status: 200,
+        degraded: false,
+        warnings: [],
+        data: {
+          results: [{
+            clientItemId: item.clientItemId,
+            status: 'created',
+            id: 'rec-finalize-race-retry',
+            type: 'episode',
+            kind: 'observation',
+            domain: 'agent:opencode',
+          }],
+          created: 1,
+          duplicates: 0,
+          failed: 0,
+          partial: false,
+        },
+      } as any;
+    });
+
+    const completion = service.completeExtraction(extractionId, [{
+      kind: 'observation',
+      content: { content: '并发 retry 记录 B' },
+      sourceMessageIds: ['m_finalize_race_retry'],
+    }]);
+    await writeStarted;
+    const finalize = service.finalizeReplayedOutbox(outboxItem, 'retry');
+    await new Promise((resolve) => setImmediate(resolve));
+    expect((await service.getExtraction(extractionId))?.status).toBe('pending');
+    releaseWrite();
+    await completion;
+    await finalize;
+    const view = await service.getExtraction(extractionId);
+    expect(view).toMatchObject({ status: 'completed' });
+    expect(view?.records.map((record) => record.id)).toContain('rec-finalize-race-retry');
+  });
+
+  it('completeExtraction I/O 后 finalize 仍合并 committed records/details，不丢失收口', async () => {
+    const { service, client, fake, local } = await setup();
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const queued = await service.ingest({
+      requestId: 'req_finalize_race_merge',
+      agentId: 'opencode',
+      threadId: 'th_finalize_race_merge',
+      extractor: 'host',
+      chunks: [{ role: 'user', text: '并发 merge 证据', messageId: 'm_finalize_race_merge' }],
+      candidates: [{
+        kind: 'observation',
+        content: { content: '并发 merge 记录' },
+        sourceMessageIds: ['m_finalize_race_merge'],
+      }],
+    });
+    const extractionId = queued.data.extraction.id;
+    const outboxItem = (await local.outbox.list())[0]!;
+    fake.setFailure(null);
+
+    let markWriteStarted!: () => void;
+    const writeStarted = new Promise<void>((resolve) => { markWriteStarted = resolve; });
+    let releaseWrite!: () => void;
+    const writeGate = new Promise<void>((resolve) => { releaseWrite = resolve; });
+    jest.spyOn(client, 'write').mockImplementationOnce(async (body: any) => {
+      markWriteStarted();
+      await writeGate;
+      const item = body.items[0];
+      fake.nodes.push({
+        id: 'rec-finalize-race-merge',
+        type: 'episode',
+        kind: 'observation',
+        domain: 'agent:opencode',
+        ownerType: 'agent',
+        ownerId: 'opencode',
+        contentHash: 'finalize-race-merge',
+        content: item.content,
+        provenance: {},
+      });
+      return {
+        ok: true,
+        requestId: body.requestId,
+        capabilityVersion: 1,
+        status: 200,
+        degraded: false,
+        warnings: [],
+        data: {
+          results: [{
+            clientItemId: item.clientItemId,
+            status: 'created',
+            id: 'rec-finalize-race-merge',
+            type: 'episode',
+            kind: 'observation',
+            domain: 'agent:opencode',
+          }],
+          created: 1,
+          duplicates: 0,
+          failed: 0,
+          partial: false,
+        },
+      } as any;
+    });
+
+    const completion = service.completeExtraction(extractionId, [{
+      kind: 'observation',
+      content: { content: '并发 merge 记录 B' },
+      sourceMessageIds: ['m_finalize_race_merge'],
+    }]);
+    await writeStarted;
+    const finalizeItem = {
+      ...outboxItem,
+      committed: {
+        records: [{
+          id: 'rec-finalize-race-committed',
+          status: 'created',
+          domain: 'agent:opencode',
+          kind: 'observation',
+        }],
+        details: [{
+          id: 'detail-finalize-race-committed',
+          status: 'created',
+          domain: 'agent:opencode',
+          kind: 'raw_chunk',
+        }],
+      },
+    };
+    const finalize = service.finalizeReplayedOutbox(finalizeItem, 'settled');
+    releaseWrite();
+    await completion;
+    await finalize;
+    const view = await service.getExtraction(extractionId);
+    expect(view).toMatchObject({ status: 'completed' });
+    expect(view?.records.map((record) => record.id)).toEqual(expect.arrayContaining([
+      'rec-finalize-race-merge',
+      'rec-finalize-race-committed',
+    ]));
+    expect(view?.detailIds).toContain('detail-finalize-race-committed');
+  });
+
   it('Detail outbox 满时显式 503，不把失败吞成已完成', async () => {
     const { service, fake, local } = await setup(defaultSidecarPolicy(), { maxOutboxItems: 1 });
     await local.outbox.enqueue({

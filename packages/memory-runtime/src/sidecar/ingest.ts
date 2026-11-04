@@ -43,7 +43,13 @@ import {
 } from './candidates.js';
 import { SidecarSettlementError } from './errors.js';
 import { heuristicCandidates } from './heuristic.js';
-import { LocalLayerError, type OutboxItem, type SidecarLocalLayer } from './local-layer.js';
+import {
+  LocalLayerError,
+  type OutboxCommitted,
+  type OutboxItem,
+  type OutboxReplayCompletion,
+  type SidecarLocalLayer,
+} from './local-layer.js';
 import type {
   InferenceExtractionResult,
   InferenceSourceSelection,
@@ -242,6 +248,8 @@ interface StoredExtraction {
   /** @deprecated 旧字段兼容；等于 stagingChunkIds。 */
   rawChunkIds: string[];
   messageIds: string[];
+  /** 属于该 extraction 的 outbox 依赖；用于双向重放与终态收口。 */
+  outboxIds?: string[];
 }
 
 interface IdempotencyEntry {
@@ -282,6 +290,8 @@ interface CandidateContext {
   threadId: string | null;
   messageIds: string[];
   stagingChunkIds: string[];
+  /** 本次沉降的稳定 extraction id；无 staging 的 candidate-only ingest 也用它关联 outbox。 */
+  extractionId?: string;
   extractor: IngestExtractorKind;
   model: string | null;
   source: 'runtime' | 'host';
@@ -676,6 +686,7 @@ export class IngestService {
     for (const candidate of routedHost) warnings.push(...candidate.warnings);
 
     this.ingested += 1;
+    const extractionId = `ext_${randomUUID().replace(/-/g, '')}`;
 
     // 宿主明确要求 host 抽取但没有候选（或配置来源就是 host）：
     // 不偷偷换模型，返回 pending。
@@ -692,6 +703,7 @@ export class IngestService {
       });
       await this.assertStagingComplete(chunks, stagingChunkIds, true);
       const extraction = await this.saveExtraction({
+        id: extractionId,
         status: 'pending',
         extractor: 'host',
         records: [],
@@ -884,6 +896,7 @@ export class IngestService {
       threadId: explicitThreadId,
       messageIds: this.messageIdsOf(chunks),
       stagingChunkIds,
+      extractionId,
       extractor: resolvedExtractor,
       model,
       source: resolvedExtractor === 'host' ? 'host' : 'runtime',
@@ -900,6 +913,7 @@ export class IngestService {
       threadId,
       context,
       warnings,
+      extractionIds: [extractionId],
     });
     if (outcome.records.length > 0 && !outcome.queued && outcome.failed === 0
       && detailOutcome.queued === 0 && detailOutcome.failed === 0 && stagingChunkIds.length > 0) {
@@ -920,6 +934,7 @@ export class IngestService {
           : routed.length > 0 ? 'failed' : 'completed';
 
     const extraction = await this.saveExtraction({
+      id: extractionId,
       status: extractionStatus,
       extractor: resolvedExtractor,
       ...(model ? { model } : {}),
@@ -1031,6 +1046,7 @@ export class IngestService {
         threadId: extraction.threadId ?? null,
         messageIds: extraction.messageIds,
         stagingChunkIds: extraction.stagingChunkIds,
+        extractionId: extraction.id,
         extractor: 'host',
         model: 'host-provided',
         source: 'host',
@@ -1146,7 +1162,7 @@ export class IngestService {
           allOk = false;
           continue;
         }
-        await this.local.outbox.renewReplayLease(item.id, { now: this.now() }).catch(() => false);
+        await this.renewReplayLease(item).catch(() => false);
         const authoritative = await this.confirmDetail(id, detailItem, actor);
         committedDetails.push({
           id,
@@ -1162,15 +1178,22 @@ export class IngestService {
       }
     } catch (error) {
       if (committedDetails.length > 0) {
-        await this.local.outbox.markCommitted(item.id, { details: committedDetails }).catch(() => false);
+        await this.local.outbox.markCommitted(item.id, { details: committedDetails }, {
+          owner: item.replayLeaseOwner,
+        }).catch(() => false);
       }
       throw error;
     }
     if (committedDetails.length > 0) {
-      await this.local.outbox.markCommitted(item.id, { details: committedDetails }).catch(() => false);
+      await this.local.outbox.markCommitted(item.id, { details: committedDetails }, {
+        owner: item.replayLeaseOwner,
+      }).catch(() => false);
     }
-    if (!allOk) return false;
-    await this.finalizeReplayedExtractions(item);
+    if (!allOk) {
+      await this.finalizeReplayedOutbox(item, 'retry');
+      return false;
+    }
+    await this.finalizeReplayedOutbox(item, 'settled');
     if (item.meta?.stagingChunkIds && item.meta.stagingChunkIds.length > 0) {
       try {
         await this.clearStagingAfterReplay(item.meta.stagingChunkIds, item.id, {
@@ -1227,7 +1250,7 @@ export class IngestService {
         ...(record.domain ? { domain: record.domain } : {}),
         ...(record.kind ? { kind: record.kind } : {}),
       })),
-    }).catch(() => false);
+    }, { owner: item.replayLeaseOwner }).catch(() => false);
     const confirmedClientItemIds = new Set(records.map((record) => record.clientItemId));
     const allRecordsConfirmed = expectedClientItemIds.size > 0
       && [...expectedClientItemIds].every((id) => confirmedClientItemIds.has(id));
@@ -1236,9 +1259,11 @@ export class IngestService {
     if (chunks.length !== new Set(stagingChunkIds).size) {
       await this.local.outbox.completeReplay(item.id, {
         outcome: 'dead',
+        owner: item.replayLeaseOwner,
         now: this.now(),
         error: 'retention_expired',
       });
+      await this.finalizeReplayedOutbox(item, 'dead');
       throw new CapabilityClientError('retention_expired', '重放所需 staging 已缺失', {
         status: 410,
         retryable: false,
@@ -1276,15 +1301,22 @@ export class IngestService {
       },
       warnings,
       extractionIds: item.meta?.extractionIds ?? [],
-      touchLease: () => this.local.outbox.renewReplayLease(item.id, { now: this.now() }).then(() => undefined),
+      touchLease: () => this.renewReplayLease(item).then(() => undefined),
     });
+    if (detailOutcome.ids.length > 0) {
+      await this.local.outbox.markCommitted(item.id, {
+        details: detailOutcome.ids.map((id) => ({ id, status: 'created', kind: 'detail_record' })),
+      }, { owner: item.replayLeaseOwner }).catch(() => false);
+    }
     const settled = allRecordsConfirmed && !declaredFailed
       && detailOutcome.queued === 0 && detailOutcome.failed === 0;
     if (settled) {
-      await this.finalizeReplayedExtractions(item);
+      await this.finalizeReplayedOutbox(item, 'settled');
       await this.clearStagingAfterReplay(stagingChunkIds, item.id, {
         excludeExtractionIds: item.meta?.extractionIds ?? [],
       }).catch(() => 0);
+    } else {
+      await this.finalizeReplayedOutbox(item, 'retry');
     }
     return settled;
   }
@@ -1782,29 +1814,119 @@ export class IngestService {
     return chunks.sort((a, b) => a.at - b.at || (a.chunkIndex ?? 0) - (b.chunkIndex ?? 0));
   }
 
-  /** 重放成功后把已无其他活动 outbox 依赖的 extraction 收口，避免永久 pending 证据保护。 */
-  private async finalizeReplayedExtractions(item: OutboxItem): Promise<void> {
+  /** 续租必须沿用取得时的 lease 时长与 owner，禁止回落到 60s 默认值。 */
+  private renewReplayLease(item: OutboxItem): Promise<boolean> {
+    return this.local.outbox.renewReplayLease(item.id, {
+      owner: item.replayLeaseOwner,
+      leaseMs: item.replayLeaseMs,
+      now: this.now(),
+    });
+  }
+
+  /** 重放结果收口入口：与 completeExtraction 共享 chain，避免 pending/completed 读改写竞态。 */
+  async finalizeReplayedOutbox(
+    item: OutboxItem,
+    outcome: OutboxReplayCompletion = 'settled',
+  ): Promise<void> {
+    await this.chain(() => this.finalizeReplayedExtractionsUnlocked(item, outcome));
+  }
+
+  /**
+   * 按所有必需 outbox 依赖的真实状态收口 extraction：
+   * - 合并 committed records/detailIds/warnings；
+   * - 任一依赖 dead/failed 则 failed；
+   * - 仍有 retry/活动依赖则 pending，但已完成状态绝不因旧尝试回退为 pending。
+   */
+  private async finalizeReplayedExtractionsUnlocked(
+    item: OutboxItem,
+    outcome: OutboxReplayCompletion,
+  ): Promise<void> {
     const extractionIds = item.meta?.extractionIds ?? [];
     if (extractionIds.length === 0) return;
     try {
-      const active = await this.local.outbox.list();
-      const stillReferenced = new Set(active
-        .filter((entry) => entry.id !== item.id)
-        .flatMap((entry) => entry.meta?.extractionIds ?? []));
+      const [active, dead] = await Promise.all([
+        this.local.outbox.list(),
+        this.local.outbox.listDead(),
+      ]);
+      const current = await this.local.outbox.get(item.id)
+        ?? await this.local.outbox.getDead(item.id)
+        ?? item;
+      if (item.replayLeaseOwner !== undefined
+        && current.replayLeaseOwner !== item.replayLeaseOwner) {
+        return;
+      }
       for (const extractionId of extractionIds) {
-        if (stillReferenced.has(extractionId)) continue;
         const key = this.extractionCacheKey(extractionId);
         const stored = await this.local.cache.get<StoredExtraction>(key);
-        if (!stored || stored.status !== 'pending') continue;
+        if (!stored || stored.expiresAt <= this.now()) continue;
+
+        const dependencyIds = new Set<string>(stored.outboxIds ?? []);
+        for (const entry of [...active, ...dead]) {
+          if (entry.meta?.extractionIds?.includes(extractionId)) dependencyIds.add(entry.id);
+        }
+        dependencyIds.add(current.id);
+
+        const sources = new Map<string, OutboxItem>();
+        for (const entry of [...active, ...dead]) {
+          if (dependencyIds.has(entry.id)) sources.set(entry.id, entry);
+        }
+        if (item.committed) {
+          sources.set(item.id, {
+            ...(sources.get(item.id) ?? item),
+            committed: mergeCommittedSources(sources.get(item.id)?.committed, item.committed),
+          });
+        }
+        const otherActive = active.filter((entry) =>
+          entry.id !== current.id && dependencyIds.has(entry.id));
+        const deadDeps = dead.filter((entry) => dependencyIds.has(entry.id));
+        const hasDead = deadDeps.length > 0 || outcome === 'dead';
+        const hasActive = outcome === 'retry' || otherActive.length > 0;
+
+        let status: StoredExtraction['status'];
+        if (stored.status === 'failed') status = 'failed';
+        else if (hasDead) status = 'failed';
+        else if (stored.status === 'completed') status = 'completed';
+        else if (hasActive) status = 'pending';
+        else status = 'completed';
+
+        const records = new Map<string, IngestRecordView>();
+        for (const record of stored.records) records.set(record.id, { ...record });
+        const detailIds = new Set(stored.detailIds);
+        const warnings = new Set(stored.warnings);
+        for (const source of sources.values()) {
+          for (const record of source.committed?.records ?? []) {
+            if (typeof record.id !== 'string' || record.id.length === 0) continue;
+            const previous = records.get(record.id);
+            records.set(record.id, {
+              ...(previous ?? {}),
+              id: record.id,
+              ...(record.clientItemId ? { clientItemId: record.clientItemId } : {}),
+              kind: record.kind ?? previous?.kind ?? 'observation',
+              domain: record.domain ?? previous?.domain ?? stored.domain ?? '',
+              ...(record.status ? { status: record.status } : {}),
+              ...(record.status === 'duplicate' ? { duplicate: true } : {}),
+            });
+          }
+          for (const detail of source.committed?.details ?? []) {
+            if (typeof detail.id === 'string' && detail.id.length > 0) detailIds.add(detail.id);
+          }
+        }
+        if (hasDead) warnings.add('replay_dead_dependency');
+        if (status === 'pending') warnings.add('replay_dependency_pending');
+
         const ttlMs = stored.expiresAt - this.now();
         if (ttlMs <= 0) {
           await this.local.cache.delete(key);
           continue;
         }
-        await this.local.cache.set(key, {
+        await this.local.cache.set<StoredExtraction>(key, {
           ...stored,
-          status: 'completed',
-          degraded: false,
+          status,
+          records: [...records.values()],
+          detailIds: [...detailIds],
+          warnings: [...warnings],
+          degraded: status !== 'completed' || stored.degraded,
+          outboxIds: [...dependencyIds],
         }, { ttlMs });
       }
     } catch {
@@ -1812,18 +1934,30 @@ export class IngestService {
     }
   }
 
-  /** 把本次沉降入队的 outbox 项关联到 extraction，重放成功时可排除自身 pending 证据。 */
+  /** 把 outbox 项与 extraction store 双向关联；不依赖 staging，candidate-only ingest 也适用。 */
   private async linkExtractionToOutbox(
     stagingChunkIds: readonly string[],
     extractionId: string,
   ): Promise<void> {
-    if (stagingChunkIds.length === 0) return;
     const wanted = new Set(stagingChunkIds);
+    const outboxIds = new Set<string>();
     try {
       for (const item of await this.local.outbox.list()) {
-        if (!item.meta?.stagingChunkIds?.some((id) => wanted.has(id))) continue;
+        const linkedByMeta = item.meta?.extractionIds?.includes(extractionId) === true;
+        const linkedByStaging = wanted.size > 0
+          && (item.meta?.stagingChunkIds ?? []).some((id) => wanted.has(id));
+        if (!linkedByMeta && !linkedByStaging) continue;
         await this.local.outbox.linkExtraction(item.id, extractionId);
+        outboxIds.add(item.id);
       }
+      const key = this.extractionCacheKey(extractionId);
+      const stored = await this.local.cache.get<StoredExtraction>(key);
+      if (!stored) return;
+      const merged = [...new Set([...(stored.outboxIds ?? []), ...outboxIds])];
+      if (merged.length === (stored.outboxIds ?? []).length) return;
+      const ttlMs = stored.expiresAt - this.now();
+      if (ttlMs <= 0) return;
+      await this.local.cache.set(key, { ...stored, outboxIds: merged }, { ttlMs });
     } catch {
       // 关联失败只影响后续清理时机，不影响已持久化工作。
     }
@@ -2423,6 +2557,7 @@ export class IngestService {
       meta: {
         kind: 'record',
         stagingChunkIds: [...context.stagingChunkIds],
+        ...(context.extractionId ? { extractionIds: [context.extractionId] } : {}),
         ...(evidence ? { evidence } : {}),
         ...(context.threadId ? { domain: context.threadId } : {}),
       },
@@ -2537,6 +2672,7 @@ export class IngestService {
     domain?: string;
     stagingChunkIds: string[];
     messageIds: string[];
+    outboxIds?: readonly string[];
   }): Promise<StoredExtraction> {
     const now = this.now();
     const extraction: StoredExtraction = {
@@ -2558,6 +2694,9 @@ export class IngestService {
       stagingChunkIds: [...input.stagingChunkIds],
       rawChunkIds: [...input.stagingChunkIds],
       messageIds: [...input.messageIds],
+      ...(input.outboxIds && input.outboxIds.length > 0
+        ? { outboxIds: [...new Set(input.outboxIds)] }
+        : {}),
     };
     await this.local.cache.set(this.extractionCacheKey(extraction.id), extraction, {
       ttlMs: this.extractionTtlMs,
@@ -2588,6 +2727,28 @@ export class IngestService {
       expiresAt: extraction.expiresAt,
     };
   }
+}
+
+function mergeCommittedSources(
+  existing: OutboxCommitted | undefined,
+  update: OutboxCommitted | undefined,
+): OutboxCommitted | undefined {
+  if (!existing) return update;
+  if (!update) return existing;
+  const merge = (
+    current: NonNullable<OutboxCommitted['records']> | undefined,
+    next: NonNullable<OutboxCommitted['records']> | undefined,
+  ) => {
+    const merged = new Map<string, NonNullable<OutboxCommitted['records']>[number]>();
+    for (const entry of current ?? []) merged.set(entry.id, { ...entry });
+    for (const entry of next ?? []) merged.set(entry.id, { ...merged.get(entry.id), ...entry });
+    return [...merged.values()];
+  };
+  return {
+    ...(existing.records || update.records ? { records: merge(existing.records, update.records) } : {}),
+    ...(existing.details || update.details ? { details: merge(existing.details, update.details) } : {}),
+    ...(existing.objects || update.objects ? { objects: merge(existing.objects, update.objects) } : {}),
+  };
 }
 
 function nowPlusHours(now: number, hours: number): number {

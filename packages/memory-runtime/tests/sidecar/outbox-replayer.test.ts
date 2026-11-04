@@ -3,6 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BoundedOutbox } from '../../src/sidecar/local-layer.js';
+import { CapabilityClientError } from '../../src/sidecar/capability-client.js';
 import { OutboxReplayer } from '../../src/sidecar/outbox-replayer.js';
 
 const homes: string[] = [];
@@ -235,5 +236,78 @@ describe('OutboxReplayer deadline 与 replay lease', () => {
     releaseFirst();
     await first;
     expect(await outbox.deadStats()).toMatchObject({ items: 0 });
+  });
+
+  it('负例：旧 lease attempt 的 retry/permanent/success 都不能修改 B 的活动项', async () => {
+    for (const scenario of ['retry', 'dead', 'success'] as const) {
+      let clock = 100_000;
+      const { outbox } = await setup(() => clock);
+      const id = `ob_owner_${scenario}`;
+      await outbox.enqueue({
+        id,
+        requestId: `req_owner_${scenario}`,
+        endpoint: '/write',
+        body: { items: [] },
+        createdAt: clock,
+        expiresAt: clock + 300_000,
+      });
+
+      let markAStarted!: () => void;
+      const aStarted = new Promise<void>((resolve) => { markAStarted = resolve; });
+      let releaseA!: () => void;
+      const aGate = new Promise<void>((resolve) => { releaseA = resolve; });
+      const aClient = {
+        post: jest.fn(async () => {
+          markAStarted();
+          await aGate;
+          if (scenario === 'dead') {
+            throw new CapabilityClientError('validation_failed', 'permanent failure', {
+              status: 422,
+              retryable: false,
+            });
+          }
+          return { data: { created: 1, results: [] } };
+        }),
+      } as any;
+      const aReplay = new OutboxReplayer({
+        outbox,
+        client: aClient,
+        now: () => clock,
+        ...(scenario === 'retry' ? { onSettled: () => false } : {}),
+      }).replayOnce();
+      await aStarted;
+
+      clock += 61_000;
+      let markBStarted!: () => void;
+      const bStarted = new Promise<void>((resolve) => { markBStarted = resolve; });
+      let releaseB!: () => void;
+      const bGate = new Promise<void>((resolve) => { releaseB = resolve; });
+      const bClient = {
+        post: jest.fn(async () => {
+          markBStarted();
+          await bGate;
+          return { data: { created: 1, results: [] } };
+        }),
+      } as any;
+      const bReplay = new OutboxReplayer({ outbox, client: bClient, now: () => clock }).replayOnce();
+      await bStarted;
+      const leasedB = await outbox.get(id);
+      expect(leasedB?.replayLeaseOwner).toEqual(expect.any(String));
+
+      releaseA();
+      expect(await aReplay).toMatchObject({ settled: 0, dead: 0, retried: 0, remaining: 1 });
+      const afterA = await outbox.get(id);
+      expect(afterA).toMatchObject({
+        replayLeaseOwner: leasedB!.replayLeaseOwner,
+        replayLeaseUntil: leasedB!.replayLeaseUntil,
+        attempts: 0,
+        lastError: null,
+      });
+      expect(afterA?.nextAttemptAt).toBeUndefined();
+      expect(await outbox.deadStats()).toMatchObject({ items: 0 });
+
+      releaseB();
+      expect(await bReplay).toMatchObject({ settled: 1, remaining: 0 });
+    }
   });
 });

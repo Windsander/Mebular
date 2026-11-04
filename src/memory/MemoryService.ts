@@ -919,10 +919,22 @@ export class MemoryService {
           // 不重写 MemoryRecord，也不创建第二个内容相同的 Detail。
           const recordIds = [...existingRecordIds, ...missingRecordIds];
           if (recordIds.length > MAX_DETAIL_RECORD_IDS) {
-            throw new ValidationError(`recordIds 最多 ${MAX_DETAIL_RECORD_IDS} 项`, {
-              index: plan.index,
-              field: 'recordIds',
+            // 单条详情超限不能拖垮整批：按 item 返回永久失败，其他成功项仍逐项披露。
+            failed += 1;
+            results.push({
+              ...(plan.clientItemId !== undefined ? { clientItemId: plan.clientItemId } : {}),
+              status: 'failed',
+              domain: plan.domain,
+              detailKind: plan.detailKind,
+              contentHash: plan.contentHash,
+              ownerType: plan.ownerType,
+              ownerId: plan.ownerId,
+              code: 'detail_record_ids_exceeded',
+              retryable: false,
+              message: `recordIds 最多 ${MAX_DETAIL_RECORD_IDS} 项`,
+              details: { field: 'recordIds', maxItems: MAX_DETAIL_RECORD_IDS },
             });
+            continue;
           }
           const updated = await this.mebular.graph.updateNode(existing.id, {
             content: {

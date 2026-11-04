@@ -60,6 +60,10 @@ export interface OutboxItem {
   expiresAt?: number;
   /** 有界重放租约；仅用于 cleanup/in-flight 协调，不延长操作 deadline。 */
   replayLeaseUntil?: number;
+  /** 当前 replay attempt 的唯一 owner；旧 attempt 不得续租或完成新 attempt。 */
+  replayLeaseOwner?: string;
+  /** 取得租约时使用的时长；后续续租不得退回到更短的默认值。 */
+  replayLeaseMs?: number;
   /**
    * 已由 capability 确认提交、但本地后续对账未完成的记录/详情。
    * 用于 partial/dead 时如实披露，绝不因本地 staging 缺失而隐去已提交对象。
@@ -126,7 +130,7 @@ export type OutboxReplayLeaseResult =
   | { state: 'acquired'; item: OutboxItem }
   | { state: 'leased' | 'expired' };
 
-export type OutboxReplayCompletion = 'settled' | 'retry' | 'dead';
+export type OutboxReplayCompletion = 'settled' | 'retry' | 'dead' | 'skipped';
 
 export interface CacheEntry<T = unknown> {
   key: string;
@@ -431,6 +435,28 @@ export class BoundedOutbox {
     });
   }
 
+  async getDead(id: string): Promise<OutboxItem | null> {
+    return this.exclusive(async () => {
+      const item = await readJsonFile<OutboxItem>(this.deadPathFor(id));
+      return isOutboxItem(item) ? item : null;
+    });
+  }
+
+  /** 只读 dead 项，用于 extraction 依赖终态收口与诊断。 */
+  async listDead(): Promise<OutboxItem[]> {
+    return this.exclusive(async () => {
+      const entries = await readdir(this.deadRoot, { withFileTypes: true }).catch(() => []);
+      const items: OutboxItem[] = [];
+      for (const entry of entries) {
+        if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+        const item = await readJsonFile<OutboxItem>(join(this.deadRoot, entry.name));
+        if (isOutboxItem(item)) items.push(item);
+      }
+      items.sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+      return items;
+    });
+  }
+
   async remove(id: string): Promise<boolean> {
     return this.exclusive(async () => {
       const path = this.pathFor(id);
@@ -445,12 +471,17 @@ export class BoundedOutbox {
    * 持久化已确认提交对象。若清理已把活动项移入 dead，则合并写入 dead，
    * 保证 partial/dead 仍能披露已提交 ID/对象；绝不复活活动项。
    */
-  async markCommitted(id: string, committed: OutboxCommitted): Promise<boolean> {
+  async markCommitted(
+    id: string,
+    committed: OutboxCommitted,
+    { owner }: { owner?: string } = {},
+  ): Promise<boolean> {
     if (!committed || Object.keys(committed).length === 0) return false;
     return this.exclusive(async () => {
       const activePath = this.pathFor(id);
       const active = await readJsonFile<OutboxItem>(activePath);
       if (isOutboxItem(active)) {
+        if (owner !== undefined && active.replayLeaseOwner !== owner) return false;
         const updated: OutboxItem = {
           ...active,
           committed: mergeCommitted(active.committed, committed),
@@ -461,6 +492,7 @@ export class BoundedOutbox {
       const deadPath = this.deadPathFor(id);
       const dead = await readJsonFile<OutboxItem>(deadPath);
       if (!isOutboxItem(dead)) return false;
+      if (owner !== undefined && dead.replayLeaseOwner !== owner) return false;
       const updated: OutboxItem = {
         ...dead,
         committed: mergeCommitted(dead.committed, committed),
@@ -487,19 +519,30 @@ export class BoundedOutbox {
   }
 
 
-  /** 续租当前 replay；只延长租约，不允许过期或无活动项时复活。 */
+  /** 续租当前 replay；只延长租约，验证 owner 且租约未过期，绝不复用默认短租。 */
   async renewReplayLease(
     id: string,
-    { now = this.now(), leaseMs = OUTBOX_REPLAY_LEASE_MS }: { now?: number; leaseMs?: number } = {},
+    {
+      owner,
+      now = this.now(),
+      leaseMs,
+    }: { owner?: string; now?: number; leaseMs?: number } = {},
   ): Promise<boolean> {
     return this.exclusive(async () => {
       const path = this.pathFor(id);
       const item = await readJsonFile<OutboxItem>(path);
       if (!isOutboxItem(item)) return false;
-      const until = now + Math.max(1, Math.floor(leaseMs));
+      if (!owner || item.replayLeaseOwner !== owner) return false;
+      if (typeof item.replayLeaseUntil !== 'number' || item.replayLeaseUntil <= now) return false;
+      const effectiveLeaseMs = Math.max(
+        1,
+        Math.floor(leaseMs ?? item.replayLeaseMs ?? OUTBOX_REPLAY_LEASE_MS),
+      );
+      const until = now + effectiveLeaseMs;
       const updated: OutboxItem = {
         ...item,
         replayLeaseUntil: Math.max(until, typeof item.replayLeaseUntil === 'number' ? item.replayLeaseUntil : 0),
+        replayLeaseMs: Math.max(effectiveLeaseMs, item.replayLeaseMs ?? 0),
       };
       await writeJsonAtomic(path, updated);
       return true;
@@ -615,25 +658,30 @@ export class BoundedOutbox {
       if (typeof item.replayLeaseUntil === 'number' && item.replayLeaseUntil > now) {
         return { state: 'leased' };
       }
+      const effectiveLeaseMs = Math.max(1, Math.floor(leaseMs));
       const updated: OutboxItem = {
         ...item,
-        replayLeaseUntil: now + Math.max(1, Math.floor(leaseMs)),
+        replayLeaseUntil: now + effectiveLeaseMs,
+        replayLeaseOwner: randomUUID(),
+        replayLeaseMs: effectiveLeaseMs,
       };
       await writeJsonAtomic(this.pathFor(id), updated);
       return { state: 'acquired', item: updated };
     });
   }
 
-  /** 按同一 deadline 完成 replay；只有已确认 settled 才能在过期后仍移除活动项。 */
+  /** 按同一 deadline 完成 replay；验证 owner，retry/dead 还要求租约未过期。 */
   async completeReplay(
     id: string,
     {
       outcome,
+      owner,
       now = this.now(),
       error = 'partial_failure',
       retryDelayMs = 0,
     }: {
       outcome: OutboxReplayCompletion;
+      owner?: string;
       now?: number;
       error?: string;
       retryDelayMs?: number;
@@ -644,12 +692,23 @@ export class BoundedOutbox {
       if (!isOutboxItem(item)) {
         // 清理可能已把同一逻辑操作移入 dead；成功确认仍必须消除该过期 dead，
         // 避免 committed + dead 双态。partial/retry 不得复活已 dead 的项。
+        const dead = await readJsonFile<OutboxItem>(this.deadPathFor(id));
+        if (owner !== undefined && dead?.replayLeaseOwner !== undefined
+          && dead.replayLeaseOwner !== owner) {
+          return 'skipped';
+        }
         if (outcome === 'settled') {
           await rm(this.deadPathFor(id), { force: true });
           return 'settled';
         }
-        const dead = await readJsonFile<OutboxItem>(this.deadPathFor(id));
         return isOutboxItem(dead) ? 'dead' : outcome;
+      }
+      if (owner !== undefined) {
+        if (item.replayLeaseOwner !== owner) return 'skipped';
+        if (outcome !== 'settled'
+          && (typeof item.replayLeaseUntil !== 'number' || item.replayLeaseUntil <= now)) {
+          return 'skipped';
+        }
       }
       if (outcome === 'settled') {
         await rm(this.pathFor(id), { force: true });
@@ -667,6 +726,7 @@ export class BoundedOutbox {
         lastError: redactText(error).text.slice(0, 128),
         nextAttemptAt: now + Math.max(0, Math.floor(retryDelayMs)),
         replayLeaseUntil: 0,
+        replayLeaseOwner: undefined,
       };
       await writeJsonAtomic(this.pathFor(id), updated);
       return 'retry';

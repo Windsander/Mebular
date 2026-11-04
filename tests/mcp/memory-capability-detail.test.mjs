@@ -533,6 +533,53 @@ describe('版本与详情写入', () => {
     expect(otherChunk.body.data.results[0].id).not.toBe(id);
   });
 
+  it('真实 core 批次隔离：duplicate 合并到 201 只失败该项，其他 Detail 仍成功', async () => {
+    const domain = 'agent:opencode';
+    const marker = unique('detail-batch-limit');
+    const recordIds = [];
+    for (let index = 0; index < 200; index += 1) {
+      const node = await app.graph.createNode('episode', { content: `${marker}-${index}` }, undefined, {
+        namespace: domain,
+      });
+      recordIds.push(node.id);
+    }
+    const extra = await app.graph.createNode('episode', { content: `${marker}-extra` }, undefined, {
+      namespace: domain,
+    });
+    const initial = await writeDetail([detailItem(domain, recordIds, marker, {
+      clientItemId: unique('detail-batch-limit-initial'),
+      chunkIndex: 42,
+    })]);
+    expect(initial.status).toBe(200);
+    expect(initial.body.data.created).toBe(1);
+    const detailId = initial.body.data.results[0].id;
+
+    const mixed = await writeDetail([
+      detailItem(domain, [extra.id], marker, {
+        clientItemId: unique('detail-batch-limit-overflow'),
+        chunkIndex: 42,
+      }),
+      detailItem(domain, [extra.id], `${marker}-good`, {
+        clientItemId: unique('detail-batch-limit-good'),
+        chunkIndex: 43,
+      }),
+    ]);
+    expect(mixed.status).toBe(200);
+    expect(mixed.body.data).toMatchObject({ created: 1, failed: 1, partial: true });
+    expect(mixed.body.data.results[0]).toMatchObject({
+      status: 'failed',
+      code: 'detail_record_ids_exceeded',
+      retryable: false,
+    });
+    expect(mixed.body.data.results[1]).toMatchObject({ status: 'created' });
+    expect(mixed.body.data.results[1].id).not.toBe(detailId);
+
+    const existing = await getDetail(detailId, { extra: { maxBytes: 1 } });
+    expect(existing.status).toBe(200);
+    expect(existing.body.data.detail.recordIds).toHaveLength(200);
+    expect(existing.body.data.detail.recordIds).not.toContain(extra.id);
+  });
+
   it('同一文本跨域按域复制：ID 不同、contentHash 相同', async () => {
     const marker = unique('detail-cross-domain-copy');
     const agentRecord = await createRecord('agent:opencode', marker);

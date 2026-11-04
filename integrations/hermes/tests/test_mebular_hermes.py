@@ -1613,8 +1613,10 @@ class SpoolContractTests(BaseCase):
         })
 
         def fail_both(path: Path, records: List[Dict[str, Any]]) -> None:
-            if path.name in {"dead.jsonl", "dead-pending.jsonl"}:
-                raise memory_plugin._SpoolUnavailable("both read-only")
+            if path.name in {
+                "dead.jsonl", "dead-pending.jsonl", "orphan-dead-pending.jsonl"
+            }:
+                raise memory_plugin._SpoolUnavailable("all read-only")
             return original(path, records)
 
         original = provider._spool._write_atomic
@@ -1664,7 +1666,7 @@ class SpoolContractTests(BaseCase):
                     "deadPending": {
                         "reason": "x", "attempts": 1, "at": now,
                         "orphaned": True,
-                        "abandoned": index == 0,
+                        "abandoned": False,
                     },
                 }
                 for index in range(120)
@@ -1672,10 +1674,16 @@ class SpoolContractTests(BaseCase):
             spool._orphan_dead_pending = spool._trim_orphan_locked(
                 spool._orphan_dead_pending
             )
-        self.assertLessEqual(
-            spool.orphan_dead_pending_count(), memory_plugin._ORPHAN_LIMIT
+        self.assertEqual(spool.orphan_dead_pending_count(), 120)
+        self.assertGreaterEqual(
+            spool.orphan_overflow(),
+            120 - memory_plugin._ORPHAN_LIMIT,
         )
-        self.assertGreater(spool.orphan_dropped(), 0)
+        ids = {
+            item["payload"]["requestId"]
+            for item in spool.orphan_dead_pending_items()
+        }
+        self.assertEqual(len(ids), 120)
         # An abandoned head must not prevent retrying the next orphan.
         with spool._lock:
             spool._orphan_dead_pending = [
@@ -1883,6 +1891,32 @@ class SpoolContractTests(BaseCase):
             for item in spool.dead_pending_items()
         ]
         self.assertEqual(after, before)
+
+    def test_accepted_append_marks_dead_pending_overflow(self) -> None:
+        spool = memory_plugin._Spool(self.spool_path, 100, max_bytes=5000)
+        for index in range(5):
+            item_id = spool.append("ingest", {
+                "requestId": f"pending-overflow-{index}",
+                "chunks": [{"role": "user", "text": "x" * 400}],
+            })
+            spool.mark_dead_pending(item_id, "test")
+        before_ids = {
+            item["payload"]["requestId"] for item in spool.dead_pending_items()
+        }
+        spool.append("ingest", {
+            "requestId": "accepted-live",
+            "chunks": [{"role": "user", "text": "y" * 2500}],
+        })
+        self.assertEqual(
+            {item["payload"]["requestId"] for item in spool.dead_pending_items()},
+            before_ids,
+        )
+        self.assertGreater(spool.dead_pending_overflow(), 0)
+        self.assertTrue(any(
+            item["deadPending"].get("overflow") is True
+            and item["deadPending"].get("abandoned") is True
+            for item in spool.dead_pending_items()
+        ))
 
     def test_load_trims_live_bytes_over_budget(self) -> None:
         now = int(time.time() * 1000)

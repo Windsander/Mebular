@@ -1766,6 +1766,7 @@ class _Spool:
         self._dead_pending_dropped = 0
         self._dead_pending_overflow = 0
         self._orphan_dropped = 0
+        self._orphan_overflow = 0
         self._live_quota_evicted = 0
         self._worker_owner: Any = None
         self._worker_heartbeat = time.monotonic()
@@ -2214,13 +2215,25 @@ class _Spool:
                     self._dead_write_abandoned_cleaned += 1
                     continue
             values.append(item)
-        if len(values) > _ORPHAN_LIMIT:
-            dropped = len(values) - _ORPHAN_LIMIT
-            values = values[-_ORPHAN_LIMIT:]
-            self._orphan_dropped += dropped
-        while values and self._bytes_locked(values) > _ORPHAN_MAX_BYTES:
-            values.pop(0)
-            self._orphan_dropped += 1
+        overflow = max(0, len(values) - _ORPHAN_LIMIT)
+        for item in values[:overflow]:
+            pending = item.setdefault("deadPending", {})
+            if pending.get("abandoned") is not True:
+                pending["abandoned"] = True
+                pending["overflow"] = True
+                pending["reason"] = "orphanOverflow"
+                pending["at"] = current
+                self._orphan_overflow += 1
+        if self._bytes_locked(values) > _ORPHAN_MAX_BYTES:
+            for item in values:
+                pending = item.setdefault("deadPending", {})
+                if pending.get("abandoned") is not True:
+                    pending["abandoned"] = True
+                    pending["overflow"] = True
+                    pending["reason"] = "orphanOverflow"
+                    pending["at"] = current
+                    self._orphan_overflow += 1
+                    break
         return values
 
     def _prune_dead_locked(self, now: int) -> None:
@@ -2380,35 +2393,33 @@ class _Spool:
                     raise
                 self._dead = dead_candidate
             total_after = live_after + self._bytes_locked(dead_candidate) + self._bytes_locked(self._dead_pending)
-            trimmed_pending = list(self._dead_pending)
+            overflow_indexes: List[int] = []
             if total_after > self._max_bytes:
-                pending_budget = max(
-                    0,
-                    self._max_bytes - live_after - self._bytes_locked(dead_candidate),
-                )
-                while trimmed_pending and self._bytes_locked(trimmed_pending) > pending_budget:
-                    trimmed_pending.pop(0)
-                if (
-                    live_after
-                    + self._bytes_locked(dead_candidate)
-                    + self._bytes_locked(trimmed_pending)
-                    > self._max_bytes
-                ):
-                    # Reject before mutating any diagnostic file.
-                    raise _SpoolFull("total_bytes")
+                excess = total_after - self._max_bytes
+                for index, item in enumerate(self._dead_pending):
+                    if excess <= 0:
+                        break
+                    overflow_indexes.append(index)
+                    excess -= self._bytes_locked([item])
             self._items.append(record)
             try:
                 self._persist_locked()
             except _SpoolUnavailable:
                 self._items.pop()
                 raise
-            if trimmed_pending != self._dead_pending:
+            if overflow_indexes:
+                for index in overflow_indexes:
+                    pending = self._dead_pending[index].setdefault("deadPending", {})
+                    if pending.get("abandoned") is not True:
+                        pending["abandoned"] = True
+                        pending["overflow"] = True
+                        pending["reason"] = "deadPendingAppendBudget"
+                        pending["at"] = now
+                        self._dead_pending_overflow += 1
                 try:
-                    self._write_atomic(self._dead_pending_path, trimmed_pending)
+                    self._write_atomic(self._dead_pending_path, self._dead_pending)
                 except _SpoolUnavailable:
-                    logger.warning("Mebular dead-pending trim failed after append")
-                else:
-                    self._dead_pending = trimmed_pending
+                    logger.warning("Mebular dead-pending overflow write failed after append")
             return item_id
 
     def first(self) -> Optional[Dict[str, Any]]:
@@ -2673,8 +2684,11 @@ class _Spool:
                 try:
                     self._write_atomic(self._orphan_path, candidate)
                 except _SpoolUnavailable as error:
-                    logger.warning("Mebular orphan write failed; live item retained: %s", error)
-                    return 0
+                    record["deadPending"]["quarantined"] = True
+                    candidate = [*self._orphan_dead_pending, record]
+                    logger.warning(
+                        "Mebular orphan write failed; quarantining in memory: %s", error
+                    )
                 self._orphan_dead_pending = candidate
                 self._items.pop(index)
                 try:
@@ -2868,6 +2882,10 @@ class _Spool:
     def orphan_dropped(self) -> int:
         with self._lock:
             return self._orphan_dropped
+
+    def orphan_overflow(self) -> int:
+        with self._lock:
+            return self._orphan_overflow
 
     def live_quota_evicted(self) -> int:
         with self._lock:
@@ -4429,8 +4447,10 @@ class MebularMemoryProvider(MemoryProvider):
             if item is None:
                 spool.expire()
                 if self._retry_one_dead_pending(spool):
+                    self._wait_retry(0.5)
                     continue
                 if self._retry_one_orphan(spool):
+                    self._wait_retry(0.5)
                     continue
                 self._wake.wait(timeout=0.5)
                 self._wake.clear()
@@ -4854,6 +4874,7 @@ class MebularMemoryProvider(MemoryProvider):
                 "deadPendingOverflow": self._spool.dead_pending_overflow() if self._spool else 0,
                 "orphanLimit": _ORPHAN_LIMIT,
                 "orphanDropped": self._spool.orphan_dropped() if self._spool else 0,
+                "orphanOverflow": self._spool.orphan_overflow() if self._spool else 0,
                 "deadWriteAbandoned": self._spool.dead_write_abandoned() if self._spool else 0,
                 "deadWriteAbandonedCleaned": self._spool.dead_write_abandoned_cleaned() if self._spool else 0,
                 "orphanDeadPending": self._spool.orphan_dead_pending_count() if self._spool else 0,

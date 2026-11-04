@@ -335,7 +335,16 @@ export async function createFakeRuntime(options = {}) {
       const revision = state.checkpointRevisions[threadId] ?? 0;
       state.checkpointReads.push({ requestId, threadId, revision });
       sendJson(res, 200, envelope(requestId, {
-        checkpoint: revision > 0 ? { revision, pending: false, threadId } : null,
+        source: 'cloud',
+        degraded: false,
+        checkpoint: revision > 0 ? {
+          revision,
+          pending: false,
+          threadId,
+          source: 'cloud',
+          stale: false,
+          degraded: false,
+        } : null,
         pending: false,
       }), requestId);
       return;
@@ -350,7 +359,9 @@ export async function createFakeRuntime(options = {}) {
         return;
       }
       const conflicts = state.checkpoints.filter((entry) => entry.conflict === true).length;
-      if (Number.isInteger(body?.expectedRevision) && conflicts < (opts.checkpointConflictTimes ?? 0)) {
+      if (Number.isInteger(body?.expectedRevision)
+        && body.expectedRevision > 0
+        && conflicts < (opts.checkpointConflictTimes ?? 0)) {
         state.checkpoints.push({ requestId, key, threadId, status: 409, failed: true, conflict: true });
         sendJson(res, 409, failure(requestId, 'revision_mismatch', 'fake checkpoint conflict'), requestId);
         return;
@@ -380,7 +391,19 @@ export async function createFakeRuntime(options = {}) {
       }
       const revision = (state.checkpointRevisions[threadId] ?? 0) + 1;
       state.checkpointRevisions[threadId] = revision;
-      const response = envelope(requestId, { checkpoint: { revision, pending: false, threadId } });
+      const response = envelope(requestId, {
+        source: 'cloud',
+        degraded: false,
+        checkpoint: {
+          revision,
+          pending: false,
+          threadId,
+          source: 'cloud',
+          stale: false,
+          degraded: false,
+          state: body?.state ?? {},
+        },
+      });
       idempotentCheckpoint.set(key, response);
       state.checkpoints.push({
         requestId,

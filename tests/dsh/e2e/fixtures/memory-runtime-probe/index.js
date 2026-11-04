@@ -8,7 +8,7 @@
 // No model is started. The probe only emits/awaits events on a fake agent and
 // writes an observation document; assertions happen in the harness.
 
-import { existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 export const name = '@mebular/dsh-memory-runtime-probe';
@@ -64,6 +64,17 @@ export function apply(ctx, config = {}) {
     && process.env.MEMORY_E2E_START_FILE.length > 0
     ? process.env.MEMORY_E2E_START_FILE
     : null;
+  const scenario = typeof process.env.MEMORY_E2E_SCENARIO === 'string'
+    ? process.env.MEMORY_E2E_SCENARIO
+    : 'default';
+  const phaseOut = typeof process.env.MEMORY_E2E_PHASE_OUT === 'string'
+    && process.env.MEMORY_E2E_PHASE_OUT.length > 0
+    ? process.env.MEMORY_E2E_PHASE_OUT
+    : null;
+  const continueFile = typeof process.env.MEMORY_E2E_CONTINUE_FILE === 'string'
+    && process.env.MEMORY_E2E_CONTINUE_FILE.length > 0
+    ? process.env.MEMORY_E2E_CONTINUE_FILE
+    : null;
   const startedAt = new Date().toISOString();
   const state = {
     pid: process.pid,
@@ -90,6 +101,44 @@ export function apply(ctx, config = {}) {
     }
   }
 
+  function writePhase(phase, extra = {}) {
+    state.phase = phase;
+    state.faults = { ...(state.faults ?? {}), ...extra };
+    persist();
+    if (phaseOut === null) return;
+    try {
+      mkdirSync(dirname(phaseOut), { recursive: true });
+      const tmp = `${phaseOut}.tmp-${process.pid}`;
+      writeFileSync(tmp, `${JSON.stringify({ phase, ...extra })}\n`, 'utf-8');
+      renameSync(tmp, phaseOut);
+    } catch {
+      // Best effort.
+    }
+  }
+
+  async function waitContinue() {
+    if (continueFile === null) return;
+    while (!stopped && !existsSync(continueFile)) await sleep(50);
+    if (stopped) return;
+    try {
+      rmSync(continueFile, { force: true });
+    } catch {
+      // Best effort.
+    }
+  }
+
+  function adapterState() {
+    const symbol = Symbol.for('mebular.dsh.memoryRuntime.testState');
+    try {
+      return globalThis?.[symbol]?.()
+        ?? ctx?.[symbol]?.()
+        ?? ctx?.root?.[symbol]?.()
+        ?? null;
+    } catch {
+      return null;
+    }
+  }
+
   function fakeSession() {
     return {
       id: 'memory-e2e-session',
@@ -110,11 +159,102 @@ export function apply(ctx, config = {}) {
     };
   }
 
+  function compactionEvents(compactionId, seqBase, summary) {
+    return [
+      sessionEvent('compaction/start', seqBase, { compactionId, turn: 1 }),
+      sessionEvent('compaction/summary', seqBase + 1, {
+        compactionId,
+        summary: [{ type: 'text', text: summary }],
+        shadowedRange: { start: 1, end: 9 },
+        shadowedSeqs: [1, 2, 3],
+        shadowedTokenCount: 42,
+        provider: 'fake',
+        model: 'no-model',
+      }),
+      sessionEvent('user/message', seqBase + 2, {
+        id: `fault-replacement-${compactionId}`,
+        role: 'user',
+        content: [{ type: 'text', text: summary }],
+        source: { kind: 'compact-checkpoint', compactionId },
+      }),
+      sessionEvent('compaction/end', seqBase + 3, { compactionId, turn: 1 }),
+    ];
+  }
+
+  function summarizeCompaction(checkpointId) {
+    const value = adapterState();
+    return {
+      checkpoint: value?.checkpoints ?? null,
+      compaction: (value?.compactions ?? []).find((entry) => entry.compactionId === checkpointId) ?? null,
+      runtimeEnabled: value?.enabled ?? null,
+    };
+  }
+
+  async function runFaults() {
+    const session = fakeSession();
+    const faultSummary = (label) => [
+      '## Objective',
+      label,
+      '## Next Move',
+      '- continue the fault scenario',
+    ].join('\n');
+    const emitCompaction = (compactionId, seqBase, summary) => {
+      for (const event of compactionEvents(compactionId, seqBase, summary)) {
+        emit('session/event', session, event);
+      }
+    };
+
+    writePhase('start');
+    await waitContinue();
+
+    emitCompaction('fault-429', 10, faultSummary('rate limited checkpoint summary'));
+    await sleep(1000);
+    writePhase('rate-limited-done', { state: summarizeCompaction('fault-429') });
+    await waitContinue();
+
+    emitCompaction('fault-timeout', 20, faultSummary('timeout checkpoint summary'));
+    await sleep(5000);
+    writePhase('timeout-done', { state: summarizeCompaction('fault-timeout') });
+    await waitContinue();
+
+    emitCompaction('fault-outbox', 30, faultSummary('outbox checkpoint summary'));
+    await sleep(1000);
+    writePhase('outbox-pending', { state: summarizeCompaction('fault-outbox') });
+    await waitContinue();
+
+    // Same logical compaction after the sidecar outbox replay: the adapter must
+    // reconcile the pending operation instead of writing a second revision.
+    emitCompaction('fault-outbox', 30, faultSummary('outbox checkpoint summary'));
+    await sleep(1000);
+    writePhase('outbox-reconciled', { state: summarizeCompaction('fault-outbox') });
+    await waitContinue();
+
+    emitCompaction('fault-revision', 40, faultSummary('revision checkpoint summary'));
+    await sleep(2500);
+    writePhase('revision-done', { state: summarizeCompaction('fault-revision') });
+    await waitContinue();
+
+    emitCompaction('fault-disable', 50, faultSummary('disabled in-flight checkpoint summary'));
+    await sleep(200);
+    writePhase('disable-inflight', { state: summarizeCompaction('fault-disable') });
+    await waitContinue();
+    // Force discovery re-read while the PUT is still in flight.
+    emit('tools/change');
+    await sleep(1600);
+    writePhase('disabled-done', { state: summarizeCompaction('fault-disable') });
+    await sleep(100);
+    state.done = true;
+  }
+
   async function run() {
     await sleep(750);
     if (startFile !== null) {
       while (!stopped && !existsSync(startFile)) await sleep(100);
       if (stopped) return;
+    }
+    if (scenario === 'faults') {
+      await runFaults();
+      return;
     }
     const session = fakeSession();
     const toolNames = [
@@ -136,7 +276,7 @@ export function apply(ctx, config = {}) {
     const agent = fakeAgent(session, tools);
 
     emit('agent/created', { agent });
-    await Promise.resolve();
+    await sleep(200);
     state.tools = {
       initialDeny: denies.at(-1) ?? null,
       replayedDeny: null,

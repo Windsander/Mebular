@@ -323,8 +323,9 @@ describe('@mebular/dsh-plugin memory runtime E2E（真实 Cordis + fake Runtime�
       () => runtime.state.checkpoints.find((entry) => entry.committed === true && entry.compactionId === 'conflict'),
       { label: 'conflict retry checkpoint' },
     );
-    expect(runtime.state.checkpointReads).toHaveLength(1);
-    expect(runtime.state.checkpointReads[0].revision).toBe(1);
+    expect(runtime.state.checkpointReads).toHaveLength(2);
+    expect(runtime.state.checkpointReads[0].revision).toBe(0);
+    expect(runtime.state.checkpointReads[1].revision).toBe(1);
     expect(committed.expectedRevision).toBe(1);
     expect(committed.revision).toBe(2);
   });

@@ -1,0 +1,118 @@
+{
+  "v": 1,
+  "note": "Fleet 三张卡夹具 v1。capability/role 是 internal 记忆节点（metadata.internal=true，internalObject.kind 分别为 agent_capability_card / agent_role_card）；status 只是派发方实时计算对象，不落盘、不同步。夹具不含 command、env、凭据或原始对话。",
+  "capability": {
+    "v": 1,
+    "kind": "agent_capability_card",
+    "device": "device-B",
+    "agent": "worker",
+    "version": 7,
+    "capabilities": ["fleet.task", "research", "code.write", "api"],
+    "tools": ["task_submit", "task_status", "task_cancel", "task_targets"],
+    "limits": {
+      "maxConcurrency": 2,
+      "maxPayloadBytes": 262144,
+      "timeoutMs": 300000
+    },
+    "permissions": {
+      "taskNamespaces": ["tasks"],
+      "allowSubcontract": false
+    },
+    "runtime": {
+      "os": "darwin",
+      "arch": "arm64",
+      "runtime": "node",
+      "runtimeVersion": "22.x"
+    },
+    "provenance": {
+      "source": "config+executor-registry+runtime",
+      "configHash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "registryHash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "publishedAt": 1700000000000
+    },
+    "signature": {
+      "alg": "Ed25519",
+      "keyId": "device-B",
+      "sig": "base64:EXAMPLE_SIGNATURE_NOT_A_SECRET"
+    },
+    "tombstone": false
+  },
+  "role": {
+    "v": 1,
+    "kind": "agent_role_card",
+    "device": "device-B",
+    "agent": "worker",
+    "version": 3,
+    "summary": "擅长 API 实现与结构化审查；长任务稳定性一般。",
+    "strengths": [
+      { "tag": "code.write", "confidence": 0.86 },
+      { "tag": "review", "confidence": 0.72 }
+    ],
+    "preferredIntents": ["implement", "review"],
+    "avoid": [
+      { "tag": "long-running", "confidence": 0.64 }
+    ],
+    "confidence": 0.78,
+    "evidenceRefs": [
+      { "kind": "task", "id": "plan-demo-001#1#build-api" },
+      { "kind": "session_summary", "id": "summary-device-B-0007" }
+    ],
+    "shadow": true,
+    "provenance": {
+      "source": "task-history+session-summaries+feedback",
+      "sampleSize": 42,
+      "generatedAt": 1700000000000,
+      "generator": "local-runtime-rules-v1"
+    }
+  },
+  "status": {
+    "v": 1,
+    "kind": "agent_status_view",
+    "device": "device-B",
+    "agent": "worker",
+    "online": true,
+    "inflight": 1,
+    "capacity": 2,
+    "recentSuccessRate": 0.95,
+    "lastLatencyMs": 1200,
+    "samples": {
+      "recent": 20,
+      "window": "local-observation"
+    },
+    "asOf": 1700000000000,
+    "ttlMs": 15000,
+    "computedBy": "device-A"
+  },
+  "capabilityTombstone": {
+    "v": 1,
+    "kind": "agent_capability_card",
+    "device": "device-B",
+    "agent": "retired-worker",
+    "version": 2,
+    "capabilities": [],
+    "tools": [],
+    "limits": {},
+    "permissions": {
+      "taskNamespaces": [],
+      "allowSubcontract": false
+    },
+    "runtime": {
+      "os": "darwin",
+      "arch": "arm64",
+      "runtime": "node",
+      "runtimeVersion": "22.x"
+    },
+    "provenance": {
+      "source": "config+executor-registry+runtime",
+      "configHash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "registryHash": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "publishedAt": 1700000001000
+    },
+    "signature": {
+      "alg": "Ed25519",
+      "keyId": "device-B",
+      "sig": "base64:EXAMPLE_TOMBSTONE_SIGNATURE_NOT_A_SECRET"
+    },
+    "tombstone": true
+  }
+}

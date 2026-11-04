@@ -1,0 +1,236 @@
+{
+  "v": 1,
+  "note": "Fleet 黑盒编排 plan 节点夹具 v1。task_plan 是 internal 记忆节点，不进入 MCP 公共方法、人类 UI 或 fleet SSE。本文件先冻结形状；P2 的 validator/materializer 与测试必须匹配。taskId 规则：${planId}#${version}#${stepId}（planId/stepId 不得含 #）。",
+  "plan": {
+    "v": 1,
+    "kind": "task_plan",
+    "planId": "plan-demo-001",
+    "version": 1,
+    "owner": { "device": "device-A", "agent": "planner" },
+    "goal": "三台设备并行完成实现与审查，经 pre-MR gate 后只提交一次 MR",
+    "createdAt": 1700000000000,
+    "budget": { "maxSteps": 8, "maxAttemptsPerStep": 2 },
+    "policy": {
+      "allowedDevices": ["device-B", "device-C", "device-D"],
+      "allowedAgents": ["worker", "reviewer"],
+      "requireCapabilities": ["fleet.task"],
+      "maxParallel": 3,
+      "allowSubcontract": false
+    },
+    "steps": [
+      {
+        "stepId": "collect",
+        "kind": "task",
+        "intent": "收集需求与约束",
+        "dependsOn": [],
+        "to": { "device": "device-B", "agent": "worker" },
+        "route": { "require": ["research"], "prefer": ["fast"], "strategy": "deterministic" },
+        "acceptance": { "kind": "non-empty-result", "minBytes": 1 }
+      },
+      {
+        "stepId": "build-api",
+        "kind": "task",
+        "intent": "实现 API",
+        "dependsOn": ["collect"],
+        "route": { "require": ["code.write", "api"], "prefer": ["low-latency"], "strategy": "deterministic" },
+        "acceptance": { "kind": "contains", "all": ["API_OK"] }
+      },
+      {
+        "stepId": "build-ui",
+        "kind": "task",
+        "intent": "实现 UI",
+        "dependsOn": ["collect"],
+        "route": { "require": ["code.write", "ui"], "prefer": [], "strategy": "deterministic" },
+        "acceptance": { "kind": "contains", "all": ["UI_OK"] }
+      },
+      {
+        "stepId": "join",
+        "kind": "join",
+        "intent": "等待两个实现分支并汇合结果",
+        "dependsOn": ["build-api", "build-ui"],
+        "join": { "mode": "all" },
+        "acceptance": { "kind": "non-empty-result" }
+      },
+      {
+        "stepId": "pre-mr",
+        "kind": "reduce",
+        "intent": "pre-MR gate：校验分支验收并组装 MR 载荷",
+        "dependsOn": ["join"],
+        "join": { "mode": "all" },
+        "acceptance": { "kind": "contains", "all": ["GATE_OK"] }
+      },
+      {
+        "stepId": "mr",
+        "kind": "mr",
+        "intent": "提交本 plan 唯一一次 MR",
+        "dependsOn": ["pre-mr"],
+        "to": { "device": "device-B", "agent": "reviewer" },
+        "acceptance": { "kind": "mr-once" }
+      }
+    ]
+  },
+  "retry": {
+    "v": 1,
+    "kind": "task_plan",
+    "planId": "plan-demo-001",
+    "version": 2,
+    "supersedesVersion": 1,
+    "retryOfStepId": "build-ui",
+    "reason": "build-ui 分支失败；保留已完成的 collect/build-api，重建下游 join 与 MR",
+    "owner": { "device": "device-A", "agent": "planner" },
+    "goal": "三台设备并行完成实现与审查，经 pre-MR gate 后只提交一次 MR",
+    "createdAt": 1700000001000,
+    "budget": { "maxSteps": 8, "maxAttemptsPerStep": 2 },
+    "policy": {
+      "allowedDevices": ["device-B", "device-C", "device-D"],
+      "allowedAgents": ["worker", "reviewer"],
+      "requireCapabilities": ["fleet.task"],
+      "maxParallel": 3,
+      "allowSubcontract": false
+    },
+    "steps": [
+      {
+        "stepId": "collect",
+        "kind": "task",
+        "intent": "收集需求与约束",
+        "dependsOn": [],
+        "to": { "device": "device-B", "agent": "worker" },
+        "route": { "require": ["research"], "prefer": ["fast"], "strategy": "deterministic" },
+        "acceptance": { "kind": "non-empty-result", "minBytes": 1 },
+        "reuse": { "version": 1 }
+      },
+      {
+        "stepId": "build-api",
+        "kind": "task",
+        "intent": "实现 API",
+        "dependsOn": ["collect"],
+        "route": { "require": ["code.write", "api"], "prefer": ["low-latency"], "strategy": "deterministic" },
+        "acceptance": { "kind": "contains", "all": ["API_OK"] },
+        "reuse": { "version": 1 }
+      },
+      {
+        "stepId": "build-ui",
+        "kind": "task",
+        "intent": "实现 UI",
+        "dependsOn": ["collect"],
+        "route": { "require": ["code.write", "ui"], "prefer": [], "strategy": "deterministic" },
+        "acceptance": { "kind": "contains", "all": ["UI_OK"] }
+      },
+      {
+        "stepId": "join",
+        "kind": "join",
+        "intent": "等待两个实现分支并汇合结果",
+        "dependsOn": ["build-api", "build-ui"],
+        "join": { "mode": "all" },
+        "acceptance": { "kind": "non-empty-result" }
+      },
+      {
+        "stepId": "pre-mr",
+        "kind": "reduce",
+        "intent": "pre-MR gate：校验分支验收并组装 MR 载荷",
+        "dependsOn": ["join"],
+        "join": { "mode": "all" },
+        "acceptance": { "kind": "contains", "all": ["GATE_OK"] }
+      },
+      {
+        "stepId": "mr",
+        "kind": "mr",
+        "intent": "提交本 plan 唯一一次 MR",
+        "dependsOn": ["pre-mr"],
+        "to": { "device": "device-B", "agent": "reviewer" },
+        "acceptance": { "kind": "mr-once" }
+      }
+    ]
+  },
+  "subPlan": {
+    "parent": {
+      "v": 1,
+      "kind": "task_plan",
+      "planId": "plan-demo-002",
+      "version": 1,
+      "owner": { "device": "device-A", "agent": "planner" },
+      "goal": "父 plan：允许 delegate step 派生一个子 plan",
+      "createdAt": 1700000004000,
+      "budget": { "maxSteps": 3, "maxAttemptsPerStep": 1 },
+      "policy": {
+        "allowedDevices": ["device-B", "device-C"],
+        "allowedAgents": ["worker"],
+        "requireCapabilities": ["fleet.task"],
+        "maxParallel": 2,
+        "allowSubcontract": true
+      },
+      "steps": [
+        { "stepId": "delegate", "kind": "task", "intent": "派生并等待子 plan", "dependsOn": [], "acceptance": { "kind": "non-empty-result" } },
+        { "stepId": "pre-mr", "kind": "reduce", "intent": "父 plan pre-MR gate", "dependsOn": ["delegate"], "join": { "mode": "all" }, "acceptance": { "kind": "non-empty-result" } },
+        { "stepId": "mr", "kind": "mr", "intent": "父 plan 唯一 MR", "dependsOn": ["pre-mr"], "acceptance": { "kind": "mr-once" } }
+      ]
+    },
+    "child": {
+      "v": 1,
+      "kind": "task_plan",
+      "planId": "plan-demo-002-child",
+      "version": 1,
+      "parent": { "planId": "plan-demo-002", "version": 1, "stepId": "delegate" },
+      "owner": { "device": "device-A", "agent": "planner" },
+      "goal": "子 plan：policy 收紧，且不提交 MR",
+      "createdAt": 1700000005000,
+      "budget": { "maxSteps": 2, "maxAttemptsPerStep": 1 },
+      "policy": {
+        "allowedDevices": ["device-B"],
+        "allowedAgents": ["worker"],
+        "requireCapabilities": ["fleet.task", "code.write"],
+        "maxParallel": 1,
+        "allowSubcontract": false
+      },
+      "steps": [
+        { "stepId": "work", "kind": "task", "intent": "子 plan 唯一执行 step", "dependsOn": [], "acceptance": { "kind": "non-empty-result" } }
+      ]
+    }
+  },
+  "joinModes": [
+    { "mode": "all" },
+    { "mode": "any" },
+    { "mode": "quorum", "quorum": 2 }
+  ],
+  "invalid": {
+    "cycle": {
+      "expectedError": "PLAN_CYCLE",
+      "plan": {
+        "v": 1,
+        "kind": "task_plan",
+        "planId": "plan-bad-cycle",
+        "version": 1,
+        "owner": { "device": "device-A", "agent": "planner" },
+        "goal": "负例：依赖成环必须被 plan 层拒绝",
+        "createdAt": 1700000002000,
+        "budget": { "maxSteps": 4, "maxAttemptsPerStep": 1 },
+        "policy": { "allowedDevices": ["device-B"], "allowedAgents": ["worker"], "requireCapabilities": [], "maxParallel": 1, "allowSubcontract": false },
+        "steps": [
+          { "stepId": "a", "kind": "task", "intent": "a", "dependsOn": ["b"], "acceptance": { "kind": "non-empty-result" } },
+          { "stepId": "b", "kind": "task", "intent": "b", "dependsOn": ["a"], "acceptance": { "kind": "non-empty-result" } },
+          { "stepId": "pre-mr", "kind": "reduce", "intent": "pre-MR gate", "dependsOn": ["a"], "join": { "mode": "all" }, "acceptance": { "kind": "non-empty-result" } },
+          { "stepId": "mr", "kind": "mr", "intent": "mr", "dependsOn": ["pre-mr"], "acceptance": { "kind": "mr-once" } }
+        ]
+      }
+    },
+    "missingDependency": {
+      "expectedError": "PLAN_MISSING_DEP",
+      "plan": {
+        "v": 1,
+        "kind": "task_plan",
+        "planId": "plan-bad-missing",
+        "version": 1,
+        "owner": { "device": "device-A", "agent": "planner" },
+        "goal": "负例：依赖不存在必须被 plan 层拒绝",
+        "createdAt": 1700000003000,
+        "budget": { "maxSteps": 3, "maxAttemptsPerStep": 1 },
+        "policy": { "allowedDevices": ["device-B"], "allowedAgents": ["worker"], "requireCapabilities": [], "maxParallel": 1, "allowSubcontract": false },
+        "steps": [
+          { "stepId": "a", "kind": "task", "intent": "a", "dependsOn": ["missing"], "acceptance": { "kind": "non-empty-result" } },
+          { "stepId": "pre-mr", "kind": "reduce", "intent": "pre-MR gate", "dependsOn": ["a"], "join": { "mode": "all" }, "acceptance": { "kind": "non-empty-result" } },
+          { "stepId": "mr", "kind": "mr", "intent": "mr", "dependsOn": ["pre-mr"], "acceptance": { "kind": "mr-once" } }
+        ]
+      }
+    }
+  }
+}

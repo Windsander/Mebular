@@ -18,6 +18,7 @@ import { randomUUID } from 'node:crypto';
 import {
   CapabilityClient,
   CapabilityClientError,
+  type CapabilityDetailRecord,
   type CapabilityDetailWriteItem,
 } from './capability-client.js';
 import type { SidecarConfig } from './config.js';
@@ -69,6 +70,7 @@ const MIMES = ['text/plain', 'text/markdown', 'application/json'] as const;
 const EXTRACTORS = ['auto', 'heuristic', 'local', 'host', 'api'] as const;
 const DETAIL_KINDS = ['raw_chunk', 'message', 'tool_output', 'document_slice'] as const;
 const SENSITIVE_FIELD_RE = /^(?:authorization|api[-_]?key|access[-_]?token|refresh[-_]?token|token|secret|password|passwd|credential|private[-_]?key)$/i;
+const SAFE_REDACTION_RULE_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 const DETAIL_RETENTION_DAYS: Record<Exclude<DetailRetentionClass, 'pinned'>, number> = {
   conversation: 30,
   tool_output: 7,
@@ -251,6 +253,7 @@ interface IdempotencyEntry {
 interface SettlementOutcome {
   records: IngestRecordView[];
   queued: boolean;
+  failed: number;
   degraded: boolean;
   warnings: string[];
   status: 'completed' | 'pending' | 'failed';
@@ -351,6 +354,30 @@ function minimizeValue(value: unknown, key?: string): unknown {
     if (entryValue !== undefined) out[entryKey] = minimizeValue(entryValue, entryKey);
   }
   return out;
+}
+
+function safeRedactionRules(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter((rule): rule is string =>
+    typeof rule === 'string' && SAFE_REDACTION_RULE_RE.test(rule)))].slice(0, 64);
+}
+
+/** 幂等哈希、staging、模型和 capability/outbox 必须使用同一份规范化输入。 */
+function normalizeIngestRequest(input: Record<string, unknown>): Record<string, unknown> {
+  const normalized = minimizeValue(input) as Record<string, unknown>;
+  if (Array.isArray(normalized.chunks)) {
+    normalized.chunks = normalized.chunks.map((value) => {
+      if (!isObject(value) || !isObject(value.redaction)) return value;
+      return {
+        ...value,
+        redaction: {
+          ...value.redaction,
+          rules: safeRedactionRules(value.redaction.rules),
+        },
+      };
+    });
+  }
+  return normalized;
 }
 
 function safeErrorMessage(error: unknown): string {
@@ -589,7 +616,7 @@ export class IngestService {
     request: unknown,
     options: { idempotencyKey?: string | null },
   ): Promise<IngestHttpResult> {
-    const input = requireObject(request, 'ingest 请求');
+    const input = normalizeIngestRequest(requireObject(request, 'ingest 请求'));
     const idempotencyKey = this.idempotencyKeyOf(options.idempotencyKey, input.requestId);
     const bodyHash = sha256Hex(canonicalJson(input));
     const idempotencyCacheKey = idempotencyKey ? this.idempotencyCacheKey(idempotencyKey) : null;
@@ -661,6 +688,7 @@ export class IngestService {
         chunks,
         warnings,
       });
+      await this.assertStagingComplete(chunks, stagingChunkIds, true);
       const extraction = await this.saveExtraction({
         status: 'pending',
         extractor: 'host',
@@ -699,6 +727,7 @@ export class IngestService {
       chunks,
       warnings,
     });
+    await this.assertStagingComplete(chunks, stagingChunkIds, false);
 
     let routed: RoutedCandidate[] = routedHost;
     let evidenceByClientItemId = this.evidenceForRouted(
@@ -870,8 +899,8 @@ export class IngestService {
       context,
       warnings,
     });
-    if (outcome.records.length > 0 && !outcome.queued && detailOutcome.queued === 0
-      && detailOutcome.failed === 0 && stagingChunkIds.length > 0) {
+    if (outcome.records.length > 0 && !outcome.queued && outcome.failed === 0
+      && detailOutcome.queued === 0 && detailOutcome.failed === 0 && stagingChunkIds.length > 0) {
       await this.clearStaging(stagingChunkIds, warnings);
     } else if (outcome.records.length === 0 && !outcome.queued
       && detailOutcome.queued === 0 && stagingChunkIds.length > 0) {
@@ -882,9 +911,11 @@ export class IngestService {
     const queued = outcome.queued || detailOutcome.queued > 0;
     const extractionStatus = queued
       ? 'pending'
-      : outcome.records.length > 0
-        ? 'completed'
-        : routed.length > 0 ? 'failed' : 'completed';
+      : outcome.status === 'failed' || detailOutcome.failed > 0
+        ? 'failed'
+        : outcome.records.length > 0
+          ? 'completed'
+          : routed.length > 0 ? 'failed' : 'completed';
 
     const extraction = await this.saveExtraction({
       status: extractionStatus,
@@ -957,7 +988,7 @@ export class IngestService {
         };
       }
       const staged = await this.stagedChunksFor(extraction.stagingChunkIds);
-      if (staged.length !== new Set(extraction.stagingChunkIds).size) {
+      if (staged.length === 0 || staged.length !== new Set(extraction.stagingChunkIds).size) {
         const failed = await this.failExtraction(extraction, 'retention_expired');
         return {
           extraction: this.extractionView(failed),
@@ -1021,8 +1052,8 @@ export class IngestService {
         },
         warnings,
       });
-      if (outcome.records.length > 0 && !outcome.queued && detailOutcome.queued === 0
-        && detailOutcome.failed === 0 && extraction.stagingChunkIds.length > 0) {
+      if (outcome.records.length > 0 && !outcome.queued && outcome.failed === 0
+        && detailOutcome.queued === 0 && detailOutcome.failed === 0 && extraction.stagingChunkIds.length > 0) {
         await this.clearStaging(extraction.stagingChunkIds, warnings);
       } else if (outcome.records.length === 0 && !outcome.queued
         && detailOutcome.queued === 0 && extraction.stagingChunkIds.length > 0) {
@@ -1031,7 +1062,7 @@ export class IngestService {
       const queued = outcome.queued || detailOutcome.queued > 0;
       const updated = await this.saveExtraction({
         ...extraction,
-        status: queued ? 'pending' : outcome.records.length > 0 ? 'completed' : 'failed',
+        status: queued ? 'pending' : outcome.status === 'failed' || detailOutcome.failed > 0 ? 'failed' : 'completed',
         extractor: 'host',
         model: 'host-provided',
         records: outcome.records,
@@ -1062,31 +1093,41 @@ export class IngestService {
   async applyReplayedOutbox(item: OutboxItem, data: unknown): Promise<boolean> {
     if (item.endpoint !== '/detail') {
       if (item.meta?.kind === 'record') {
-        await this.applyReplayedRecord(item, data).catch(() => undefined);
+        return this.applyReplayedRecord(item, data);
       }
       return true;
     }
+    if (!this.client) return false;
     const body: Record<string, unknown> = isObject(item.body) ? item.body : {};
     const items = (Array.isArray(body.items) ? body.items.filter(isObject) : []) as unknown as CapabilityDetailWriteItem[];
+    if (items.length === 0) return false;
+    const bodyActor = isObject(body.actor) ? body.actor : {};
+    if (bodyActor.type !== 'agent' || typeof bodyActor.agentId !== 'string') return false;
+    const actor = {
+      type: 'agent' as const,
+      agentId: bodyActor.agentId,
+      ...(typeof bodyActor.displayName === 'string' ? { displayName: bodyActor.displayName } : {}),
+    };
     const payload: Record<string, unknown> = isObject(data) ? data : {};
+    if (typeof payload.failed === 'number' && payload.failed > 0) return false;
     const results = Array.isArray(payload.results) ? payload.results : [];
-    let retryableFailure = false;
+    const resultByClientItemId = new Map<string, Record<string, unknown>>();
     for (const result of results) {
-      if (!isObject(result)) continue;
+      if (!isObject(result) || typeof result.clientItemId !== 'string') continue;
+      resultByClientItemId.set(result.clientItemId, result);
+    }
+    for (const detailItem of items) {
+      const result = resultByClientItemId.get(detailItem.clientItemId);
+      if (!result) return false;
       const status = typeof result.status === 'string' ? result.status : 'failed';
       const id = typeof result.id === 'string' ? result.id : '';
-      if ((status === 'created' || status === 'duplicate') && id.length > 0) {
-        if (status === 'created') await this.cacheDetail(id, result, items);
-        continue;
-      }
-      if (result.retryable === true || result.code === 'detail_quota_exceeded') retryableFailure = true;
+      if ((status !== 'created' && status !== 'duplicate') || id.length === 0) return false;
+      const authoritative = await this.confirmDetail(id, detailItem, actor);
+      if (status === 'created') await this.cacheDetail(id, result, items, authoritative);
     }
-    if (retryableFailure) return false;
-    const failed = typeof payload.failed === 'number' ? payload.failed : 0;
-    if (failed > 0) return true;
     if (item.meta?.stagingChunkIds && item.meta.stagingChunkIds.length > 0) {
       try {
-        await this.local.clearStaging(item.meta.stagingChunkIds);
+        await this.clearStagingAfterReplay(item.meta.stagingChunkIds, item.id);
       } catch {
         // 清理失败只保留 staging 到 TTL，不影响已沉降详情。
       }
@@ -1094,35 +1135,55 @@ export class IngestService {
     return true;
   }
 
-  private async applyReplayedRecord(item: OutboxItem, data: unknown): Promise<void> {
+  private async applyReplayedRecord(item: OutboxItem, data: unknown): Promise<boolean> {
     const payload: Record<string, unknown> = isObject(data) ? data : {};
+    if (typeof payload.failed === 'number' && payload.failed > 0) return false;
     const results = Array.isArray(payload.results) ? payload.results : [];
+    const bodyItems = isObject(item.body) && Array.isArray(item.body.items) ? item.body.items : [];
+    const expectedRecords = bodyItems.length;
+    if (expectedRecords === 0) return false;
+    const expectedClientItemIds = new Set(bodyItems
+      .filter(isObject)
+      .map((entry) => entry.clientItemId)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0));
     const records: IngestRecordView[] = [];
     for (const [resultIndex, result] of results.entries()) {
       if (!isObject(result)) continue;
       const status = typeof result.status === 'string' ? result.status : 'failed';
       if (status !== 'created' && status !== 'duplicate') continue;
       if (typeof result.id !== 'string' || typeof result.domain !== 'string') continue;
-      const bodyItems = isObject(item.body) && Array.isArray(item.body.items) ? item.body.items : [];
       const bodyItem = bodyItems[resultIndex];
+      const clientItemId = typeof result.clientItemId === 'string'
+        ? result.clientItemId
+        : isObject(bodyItem) && typeof bodyItem.clientItemId === 'string'
+          ? bodyItem.clientItemId
+          : null;
+      // 批次外成功不能顶替缺失项，也不能获得本批证据关联。
+      if (clientItemId === null || !expectedClientItemIds.has(clientItemId)) continue;
       records.push({
         id: result.id,
-        ...(typeof result.clientItemId === 'string'
-          ? { clientItemId: result.clientItemId }
-          : isObject(bodyItem) && typeof bodyItem.clientItemId === 'string'
-            ? { clientItemId: bodyItem.clientItemId }
-            : {}),
+        clientItemId,
         kind: typeof result.kind === 'string' ? result.kind : 'observation',
         domain: result.domain,
         status,
       });
     }
-    if (records.length === 0) return;
+    if (records.length === 0) return false;
+    const confirmedClientItemIds = new Set(records.map((record) => record.clientItemId));
+    const allRecordsConfirmed = expectedClientItemIds.size > 0
+      && [...expectedClientItemIds].every((id) => confirmedClientItemIds.has(id));
     const stagingChunkIds = item.meta?.stagingChunkIds ?? [];
     const chunks = await this.stagedChunksFor(stagingChunkIds);
     if (chunks.length !== new Set(stagingChunkIds).size) {
-      await this.local.outbox.deadLetter(item.id, 'retention_expired');
-      return;
+      await this.local.outbox.completeReplay(item.id, {
+        outcome: 'dead',
+        now: this.now(),
+        error: 'retention_expired',
+      });
+      throw new CapabilityClientError('retention_expired', '重放所需 staging 已缺失', {
+        status: 410,
+        retryable: false,
+      });
     }
     const body: Record<string, unknown> = isObject(item.body) ? item.body : {};
     const actor: Record<string, unknown> = isObject(body.actor) ? body.actor : {};
@@ -1156,9 +1217,10 @@ export class IngestService {
       },
       warnings,
     });
-    if (detailOutcome.queued === 0 && detailOutcome.failed === 0) {
-      await this.local.clearStaging(stagingChunkIds).catch(() => 0);
+    if (allRecordsConfirmed && detailOutcome.queued === 0 && detailOutcome.failed === 0) {
+      await this.clearStagingAfterReplay(stagingChunkIds, item.id).catch(() => 0);
     }
+    return allRecordsConfirmed && detailOutcome.queued === 0 && detailOutcome.failed === 0;
   }
 
   /**
@@ -1510,9 +1572,7 @@ export class IngestService {
       const priorRedaction = isObject(input.redaction) && typeof input.redaction.applied === 'boolean'
         ? {
           applied: input.redaction.applied,
-          rules: Array.isArray(input.redaction.rules)
-            ? input.redaction.rules.filter((rule): rule is string => typeof rule === 'string')
-            : [],
+          rules: safeRedactionRules(input.redaction.rules),
         }
         : { applied: false, rules: [] as string[] };
       const rules = [...priorRedaction.rules];
@@ -1616,11 +1676,28 @@ export class IngestService {
             status: 400,
           });
         }
-        appendWarnings(warnings, ['staging_write_failed']);
-        break;
+        throw new SidecarSettlementError('staging_write_failed', '所需 staging 未能持久化', {
+          status: 503,
+          retryable: true,
+        });
       }
     }
     return ids;
+  }
+
+  private async assertStagingComplete(
+    chunks: RawChunk[],
+    stagingChunkIds: string[],
+    requireEvidence: boolean,
+  ): Promise<void> {
+    const persisted = await this.stagedChunksFor(stagingChunkIds);
+    if (persisted.length !== chunks.length || persisted.length !== stagingChunkIds.length
+      || (requireEvidence && chunks.length === 0)) {
+      throw new SidecarSettlementError('staging_write_failed', 'pending 所需的 staging 未完整持久化', {
+        status: 503,
+        retryable: true,
+      });
+    }
   }
 
   private async stagedChunksFor(ids: readonly string[]): Promise<RawChunk[]> {
@@ -1638,6 +1715,57 @@ export class IngestService {
     } catch {
       appendWarnings(warnings, ['staging_cleanup_failed']);
     }
+  }
+
+  /** record/detail 共享证据只有在所有活动 outbox 依赖结束后才能清理。 */
+  private async clearStagingAfterReplay(ids: readonly string[], excludeItemId: string): Promise<void> {
+    const active = await this.local.outbox.list();
+    const stillUsed = new Set(active
+      .filter((entry) => entry.id !== excludeItemId)
+      .flatMap((entry) => entry.meta?.stagingChunkIds ?? []));
+    const removable = [...new Set(ids.filter((id) => !stillUsed.has(id)))];
+    if (removable.length > 0) await this.local.clearStaging(removable);
+  }
+
+  private async confirmDetail(
+    id: string,
+    item: CapabilityDetailWriteItem,
+    actor: { type: 'agent'; agentId: string; displayName?: string },
+  ): Promise<CapabilityDetailRecord> {
+    const response = await this.client!.detailGet({
+      actor,
+      id,
+      includeText: false,
+      maxBytes: 1,
+      ...(item.threadId ? { threadId: item.threadId } : {}),
+    });
+    const detail = isObject(response.data) && isObject(response.data.detail)
+      ? response.data.detail as CapabilityDetailRecord
+      : null;
+    if (!detail) {
+      throw new CapabilityClientError('detail_confirmation_failed', 'Detail 写入后权威回读为空', {
+        status: 502,
+        retryable: true,
+      });
+    }
+    const recordIds = Array.isArray(detail.recordIds) ? detail.recordIds : [];
+    const expired = typeof detail.expiresAt === 'number' && detail.expiresAt > 0 && detail.expiresAt <= this.now();
+    const available = detail.deletedAt === undefined || detail.deletedAt === null
+      ? !expired && (!Array.isArray(detail.availability) || detail.availability.includes('available'))
+      : false;
+    const expectedHash = item.contentHash ?? `sha256:${sha256Hex(item.text)}`;
+    if (detail.domain !== item.domain
+      || detail.detailKind !== item.detailKind
+      || (typeof detail.contentHash === 'string' && detail.contentHash !== expectedHash)
+      || !item.recordIds.every((recordId) => recordIds.includes(recordId))
+      || !available) {
+      throw new CapabilityClientError('detail_association_mismatch', 'Detail 权威关联与本次证据不一致', {
+        status: 409,
+        retryable: false,
+        details: { id },
+      });
+    }
+    return detail;
   }
 
   /**
@@ -1792,37 +1920,56 @@ export class IngestService {
           await this.local.invalidateCachedDetail(id).catch(() => false);
         }
         const results = Array.isArray(data.results) ? data.results : [];
-        const failedItems: CapabilityDetailWriteItem[] = [];
+        const resultByClientItemId = new Map<string, Record<string, unknown>>();
         for (const result of results) {
-          if (!isObject(result)) continue;
+          if (!isObject(result) || typeof result.clientItemId !== 'string') continue;
+          resultByClientItemId.set(result.clientItemId, result);
+        }
+        const failedItems: CapabilityDetailWriteItem[] = [];
+        for (const item of batch) {
+          const result = resultByClientItemId.get(item.clientItemId);
+          if (!result) {
+            failedItems.push(item);
+            appendWarnings(outcome.warnings, ['detail_write_result_missing']);
+            continue;
+          }
           const status = typeof result.status === 'string' ? result.status : 'failed';
           const id = typeof result.id === 'string' ? result.id : '';
           if ((status === 'created' || status === 'duplicate') && id.length > 0) {
-            if (!outcome.ids.includes(id)) outcome.ids.push(id);
-            if (status === 'created') {
-              outcome.written += 1;
-              await this.cacheDetail(id, result, batch);
-            } else {
-              // duplicate 的权威 expiry/recordIds 可能不同；当前请求不能覆盖现有缓存。
-              outcome.duplicates += 1;
+            try {
+              const authoritative = await this.confirmDetail(id, item, actor);
+              if (!outcome.ids.includes(id)) outcome.ids.push(id);
+              if (status === 'created') {
+                outcome.written += 1;
+                await this.cacheDetail(id, result, batch, authoritative);
+              } else {
+                outcome.duplicates += 1;
+              }
+            } catch (error) {
+              const code = error instanceof CapabilityClientError ? error.code : 'detail_confirmation_failed';
+              appendWarnings(outcome.warnings, [`detail_write_failed:${code}`]);
+              if (retryableCapabilityError(error)) failedItems.push(item);
+              else outcome.failed += 1;
             }
             continue;
           }
           const code = typeof result.code === 'string' ? result.code : 'detail_write_failed';
           appendWarnings(outcome.warnings, [`detail_write_failed:${code}`]);
-          const clientItemId = typeof result.clientItemId === 'string' ? result.clientItemId : null;
-          const item = clientItemId ? batch.find((entry) => entry.clientItemId === clientItemId) : undefined;
-          if (item && (result.retryable === true || code === 'detail_quota_exceeded')) {
+          if (result.retryable === true || code === 'detail_quota_exceeded'
+            || (status !== 'failed' && status !== 'rejected')) {
             failedItems.push(item);
           } else {
             outcome.failed += 1;
           }
         }
+        const declaredFailed = typeof data.failed === 'number' && data.failed > 0 ? data.failed : 0;
+        if (declaredFailed > 0 && outcome.failed === 0 && failedItems.length === 0) {
+          outcome.failed = declaredFailed;
+          appendWarnings(outcome.warnings, ['detail_write_result_inconsistent']);
+        }
         if (failedItems.length > 0) {
-          const failedStagingIds = [...new Set(failedItems
-            .map((item) => detailChunkIds.get(item.clientItemId))
-            .filter((id): id is string => typeof id === 'string'))];
-          await this.enqueueDetail(requestId, actor, failedItems, failedStagingIds, outcome);
+          // 重放必须复用原完整批次与 requestId；成功项由 capability 去重。
+          await this.enqueueDetail(requestId, actor, batch, batchStagingIds, outcome, failedItems.length);
         }
       } catch (error) {
         const code = error instanceof CapabilityClientError ? error.code : 'internal';
@@ -1834,20 +1981,24 @@ export class IngestService {
         }
       }
     }
+    if (outcome.ids.length > 0 && (outcome.queued > 0 || outcome.failed > 0)) {
+      appendWarnings(outcome.warnings, ['detail_partial_settlement']);
+    }
     appendWarnings(warnings, outcome.warnings);
     return outcome;
   }
 
-  private async cacheDetail(id: string, result: Record<string, unknown>, batch: CapabilityDetailWriteItem[]): Promise<void> {
+  private async cacheDetail(
+    id: string,
+    result: Record<string, unknown>,
+    batch: CapabilityDetailWriteItem[],
+    authoritative: CapabilityDetailRecord,
+  ): Promise<void> {
     const clientItemId = typeof result.clientItemId === 'string' ? result.clientItemId : null;
     const item = clientItemId ? batch.find((entry) => entry.clientItemId === clientItemId) : undefined;
     if (!item) return;
-    const retentionClass = item.retentionClass ?? 'conversation';
-    const expiresAt = retentionClass === 'pinned'
-      ? 0
-      : typeof item.expiresAt === 'number' && item.expiresAt > 0
-        ? item.expiresAt
-        : this.now() + DETAIL_RETENTION_DAYS[retentionClass] * DAY_MS;
+    const retentionClass = authoritative.retentionClass ?? item.retentionClass ?? 'conversation';
+    const expiresAt = typeof authoritative.expiresAt === 'number' ? authoritative.expiresAt : 0;
     await this.local.putCachedDetail(id, {
       detail: {
         id,
@@ -1857,13 +2008,13 @@ export class IngestService {
         domain: item.domain,
         role: item.role ?? null,
         text: item.text,
-        recordIds: item.recordIds,
+        recordIds: [...(authoritative.recordIds ?? item.recordIds)],
         threadId: item.threadId ?? null,
         messageId: item.messageId ?? null,
         chunkIndex: item.chunkIndex ?? 0,
         turn: item.turn ?? null,
         retentionClass,
-        contentHash: item.contentHash ?? `sha256:${sha256Hex(item.text)}`,
+        contentHash: authoritative.contentHash ?? item.contentHash ?? `sha256:${sha256Hex(item.text)}`,
         redacted: item.redaction?.applied === true,
         expiresAt,
         availability: ['available'],
@@ -1878,6 +2029,7 @@ export class IngestService {
     items: CapabilityDetailWriteItem[],
     stagingChunkIds: string[],
     outcome: DetailSettlementOutcome,
+    queuedCount = items.length,
   ): Promise<void> {
     const body = { requestId, actor, op: 'write', items };
     const id = `ob_${sha256Hex(`${requestId}\u0000detail`).slice(0, 40)}`;
@@ -1900,7 +2052,7 @@ export class IngestService {
           stagingChunkIds: [...stagingChunkIds],
         },
       });
-      outcome.queued += items.length;
+      outcome.queued += queuedCount;
       outcome.queuedRequestIds.push(requestId);
       appendWarnings(outcome.warnings, ['detail_queued', 'queued_outbox']);
       this.noteQueued({ code: 'detail_queued', message: '详情写入失败，已进入 outbox' });
@@ -1919,7 +2071,7 @@ export class IngestService {
 
   private async settle(candidates: RoutedCandidate[], context: CandidateContext): Promise<SettlementOutcome> {
     if (candidates.length === 0) {
-      return { records: [], queued: false, degraded: false, warnings: [], status: 'completed' };
+      return { records: [], queued: false, failed: 0, degraded: false, warnings: [], status: 'completed' };
     }
     const items = candidates.map((candidate) => toWriteItem(candidate, {
       agentId: context.agentId,
@@ -1952,6 +2104,7 @@ export class IngestService {
       return {
         records: [],
         queued: true,
+        failed: 0,
         degraded: true,
         warnings: [...warnings, 'capability_unavailable', 'queued_outbox'],
         status: 'pending',
@@ -1967,19 +2120,27 @@ export class IngestService {
       const results = Array.isArray(data.results) ? data.results : [];
       const records: IngestRecordView[] = [];
       const failedRetryable: CapabilityWriteItem[] = [];
-      for (const [resultIndex, result] of results.entries()) {
-        if (!isObject(result)) continue;
+      let permanentFailures = 0;
+      const resultByClientItemId = new Map<string, Record<string, unknown>>();
+      for (const result of results) {
+        if (!isObject(result) || typeof result.clientItemId !== 'string') continue;
+        resultByClientItemId.set(result.clientItemId, result);
+      }
+      for (const item of items) {
+        const result = resultByClientItemId.get(item.clientItemId);
+        if (!result) {
+          failedRetryable.push(item);
+          warnings.push('candidate_write_result_missing');
+          continue;
+        }
         const status = typeof result.status === 'string' ? result.status : 'failed';
         const kind = typeof result.kind === 'string' ? result.kind : 'observation';
         const domain = typeof result.domain === 'string' ? result.domain : '';
-        if (status === 'created' || status === 'duplicate') {
+        if ((status === 'created' || status === 'duplicate')
+          && typeof result.id === 'string' && result.id.length > 0) {
           records.push({
-            ...(typeof result.id === 'string' ? { id: result.id } : { id: '' }),
-            ...(typeof result.clientItemId === 'string'
-              ? { clientItemId: result.clientItemId }
-              : items[resultIndex]?.clientItemId
-                ? { clientItemId: items[resultIndex].clientItemId }
-                : {}),
+            id: result.id,
+            clientItemId: item.clientItemId,
             ...(typeof result.type === 'string' ? { type: result.type } : {}),
             kind,
             domain,
@@ -1993,13 +2154,18 @@ export class IngestService {
         }
         const code = typeof result.code === 'string' ? result.code : 'candidate_write_failed';
         warnings.push(`candidate_write_failed:${code}`);
-        const clientItemId = typeof result.clientItemId === 'string' ? result.clientItemId : null;
-        if (clientItemId && result.retryable === true) {
-          const item = items.find((entry) => entry.clientItemId === clientItemId);
-          if (item) failedRetryable.push(item);
+        if (result.retryable === true || (status !== 'failed' && status !== 'rejected')) {
+          failedRetryable.push(item);
+        } else {
+          permanentFailures += 1;
         }
       }
 
+      const declaredFailed = typeof data.failed === 'number' && data.failed > 0 ? data.failed : 0;
+      if (declaredFailed > 0 && failedRetryable.length === 0 && permanentFailures === 0) {
+        permanentFailures = declaredFailed;
+        warnings.push('candidate_write_result_inconsistent');
+      }
       const queued = failedRetryable.length > 0;
       if (queued) {
         const retryRequestId = this.writeRequestId(context.agentId, failedRetryable);
@@ -2007,14 +2173,19 @@ export class IngestService {
         warnings.push('queued_outbox');
         this.noteQueued({ code: 'capability_unavailable', message: '部分候选已进入 outbox' });
       }
+      if (permanentFailures > 0) {
+        this.noteFailed({ code: 'candidate_write_failed', message: '部分候选永久失败' });
+      }
+      if (records.length > 0 && (queued || permanentFailures > 0)) warnings.push('partial_settlement');
       this.noteSettled(records.length);
-      if (!queued) await this.markHealthyIfOutboxEmpty();
+      if (!queued && permanentFailures === 0) await this.markHealthyIfOutboxEmpty();
       return {
         records,
         queued,
-        degraded: queued || this.degraded,
+        failed: permanentFailures,
+        degraded: queued || permanentFailures > 0 || this.degraded,
         warnings,
-        status: queued ? 'pending' : records.length > 0 ? 'completed' : 'failed',
+        status: queued ? 'pending' : permanentFailures > 0 ? 'failed' : records.length > 0 ? 'completed' : 'failed',
       };
     } catch (error) {
       if (retryableCapabilityError(error)) {
@@ -2023,6 +2194,7 @@ export class IngestService {
         return {
           records: [],
           queued: true,
+          failed: 0,
           degraded: true,
           warnings: [...warnings, 'capability_unavailable', 'queued_outbox'],
           status: 'pending',
@@ -2033,6 +2205,7 @@ export class IngestService {
       return {
         records: [],
         queued: false,
+        failed: Math.max(1, items.length),
         degraded: true,
         warnings: [...warnings, `candidate_write_failed:${code}`],
         status: 'failed',

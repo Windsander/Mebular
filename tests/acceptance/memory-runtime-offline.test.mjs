@@ -204,4 +204,67 @@ describe('0.3 离线恢复：outbox / Raw / capability 失败开放', () => {
     expect(finalStaging.some((text) => text.includes(BASELINE_RAW))).toBe(false);
     expect(finalStaging.some((text) => text.includes(QUEUED_RAW))).toBe(false);
   });
+
+  it('规范化 redaction.rules：首次结果未知后同 requestId 重放无 idempotency_conflict', async () => {
+    const marker = `OFFLINE-UNKNOWN-RESULT-${RUN}`;
+    const ruleSecret = 'sk-offline-redaction-rule-sentinel-123456';
+    const privateRule = 'offline-redaction-private-key-sentinel';
+    gate.dropNextAfterResponse();
+    const first = await a.sidecar.ingest({
+      requestId: `req_offline_unknown_result_${RUN}`,
+      agentId: 'hermes',
+      extractor: 'host',
+      chunks: [{
+        role: 'user',
+        text: `我的项目是 ${marker}`,
+        messageId: `m_offline_unknown_${RUN}`,
+        redaction: {
+          applied: true,
+          rules: [
+            ruleSecret,
+            `-----BEGIN PRIVATE KEY-----\n${privateRule}\n-----END PRIVATE KEY-----`,
+            'builtin_secret',
+          ],
+        },
+      }],
+      candidates: [{
+        kind: 'observation',
+        domain: 'agent:hermes',
+        content: { content: marker },
+      }],
+    });
+    expect(first.status).toBe(202);
+    expect(first.data.queued).toBe(true);
+    expect(first.data.queued).toBe(true);
+    const staging = await a.sidecar.stagingTexts();
+    expect(staging.some((text) => text.includes(ruleSecret))).toBe(false);
+    expect(staging.some((text) => text.includes(privateRule))).toBe(false);
+
+    gate.up();
+    const drained = await waitFor(async () => {
+      const status = await a.sidecar.status();
+      return status.counts.outbox === 0 ? status : null;
+    }, { timeoutMs: 60_000, intervalMs: 500, label: 'unknown-result replay' });
+    expect(drained.counts.deadLetter).toBe(0);
+    const committed = assertOk(await a.capability.query({
+      query: marker,
+      agentId: 'hermes',
+      domains: ['agent:hermes'],
+    }), 'unknown-result committed query');
+    expect(committed.records).toHaveLength(1);
+    const recordId = committed.records[0].id;
+    const details = assertOk(await a.capability.request('/detail', {
+      method: 'POST',
+      body: JSON.stringify({
+        actor: { type: 'agent', agentId: 'hermes' },
+        op: 'list',
+        domains: ['agent:hermes'],
+        recordIds: [recordId],
+      }),
+    }), 'normalized detail list');
+    expect(details.details).toHaveLength(1);
+    expect(details.details[0].redaction.rules).toEqual(['builtin_secret']);
+    expect(JSON.stringify(details)).not.toContain(ruleSecret);
+    expect(JSON.stringify(details)).not.toContain(privateRule);
+  });
 });

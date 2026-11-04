@@ -67,7 +67,7 @@ async function setup(options: {
   const home = await mkdtemp(join(tmpdir(), 'mebular-recall-'));
   const local = new SidecarLocalLayer({ root: join(home, 'memory-runtime'), now: () => NOW });
   await local.init();
-  const fake = await startFakeCapability();
+  const fake = await startFakeCapability({ now: () => NOW });
   fake.setRecords(options.records ?? []);
   fake.setCompacts(options.compacts ?? []);
   const client = new CapabilityClient({ baseUrl: fake.baseUrl, token: 'cap-token', retries: 0, retryDelayMs: 0 });

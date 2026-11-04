@@ -2260,10 +2260,28 @@ export function createMemoryCapabilityHandler({
         };
       }
       const result = await execute();
-      // 详情批量部分失败不缓存：同一 outbox 键重放时应重新尝试失败项；
+      // 空/缺项/部分响应不进入幂等缓存：同一 outbox 键必须能重新执行未确认项。
       // 已成功项仍由 clientItemId/contentHash 去重，不会重复写。
-      if (route === 'detail:write' && result?.data?.partial === true) {
-        return result;
+      if ((route === 'write' || route === 'detail:write') && Array.isArray(payload.items)) {
+        const results = result?.data?.results;
+        const expectedIds = payload.items.map((item) => item?.clientItemId).filter((id) => typeof id === 'string');
+        const actualIds = Array.isArray(results)
+          ? results.map((entry) => entry?.clientItemId).filter((id) => typeof id === 'string')
+          : [];
+        const allHaveClientItemIds = expectedIds.length === payload.items.length;
+        const hasUnexpected = allHaveClientItemIds && actualIds.some((id) => !expectedIds.includes(id));
+        const hasMissing = allHaveClientItemIds && expectedIds.some((id) => !actualIds.includes(id));
+        const hasFailedResult = Array.isArray(results) && results.some((entry) =>
+          entry?.status !== 'created' && entry?.status !== 'duplicate');
+        if (result?.data?.partial === true
+          || (typeof result?.data?.failed === 'number' && result.data.failed > 0)
+          || !Array.isArray(results)
+          || results.length !== payload.items.length
+          || hasUnexpected
+          || hasMissing
+          || hasFailedResult) {
+          return result;
+        }
       }
       const entry = {
         key: composite,
@@ -3751,6 +3769,12 @@ export function createMemoryCapabilityHandler({
       }
       if (raw.detailKind === 'raw_chunk' && !hasValue(raw.role)) {
         throw validationError(index, 'role', 'raw_chunk 需要 role');
+      }
+      if (raw.role === 'tool' && raw.detailKind !== 'tool_output') {
+        throw validationError(index, 'detailKind', 'tool role 必须使用 tool_output');
+      }
+      if (raw.detailKind === 'tool_output' && hasValue(raw.role) && raw.role !== 'tool') {
+        throw validationError(index, 'role', 'tool_output 必须使用 tool role');
       }
       if (hasValue(raw.messageId)
         && (typeof raw.messageId !== 'string' || raw.messageId.length > 256)) {

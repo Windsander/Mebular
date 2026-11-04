@@ -4,7 +4,7 @@ import { describe, it, expect, afterEach, jest } from '@jest/globals';
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CapabilityClient } from '../../src/sidecar/capability-client.js';
+import { CapabilityClient, CapabilityClientError } from '../../src/sidecar/capability-client.js';
 import { defaultSidecarConfig } from '../../src/sidecar/config.js';
 import { defaultSidecarPolicy } from '../../src/sidecar/domains.js';
 import { IngestService } from '../../src/sidecar/ingest.js';
@@ -34,7 +34,7 @@ async function setup(
     ...(options.now ? { now: options.now } : {}),
   });
   await local.init();
-  const fake = await startFakeCapability();
+  const fake = await startFakeCapability(options.now ? { now: options.now } : {});
   const client = new CapabilityClient({
     baseUrl: fake.baseUrl,
     token: 'cap-token',
@@ -89,7 +89,8 @@ describe('IngestService settlements', () => {
     expect(second.data.records[0]!.id).toBe(first.data.records[0]!.id);
     expect(second.data.detailIds).toEqual(first.data.detailIds);
     expect(fake.writeRequests).toHaveLength(1);
-    expect(fake.detailRequests).toHaveLength(1);
+    // 每次成功 Detail 写入后都必须做一次权威关联回读。
+    expect(fake.detailRequests).toHaveLength(2);
     expect(fake.details).toHaveLength(1);
     expect(fake.details[0]).toMatchObject({ domain: 'user', detailKind: 'raw_chunk' });
     expect(fake.details[0]!.recordIds).toEqual([first.data.records[0]!.id]);
@@ -119,7 +120,7 @@ describe('IngestService settlements', () => {
     expect(second.data.records[0]).toMatchObject({ status: 'duplicate', duplicate: true });
     expect(second.data.detailIds).toEqual(first.data.detailIds);
     expect(fake.writeRequests).toHaveLength(2);
-    expect(fake.detailRequests).toHaveLength(2);
+    expect(fake.detailRequests).toHaveLength(4);
     expect(fake.nodes).toHaveLength(1);
     expect(fake.details).toHaveLength(1);
     expect(await local.store.countStagingChunks()).toBe(0);
@@ -145,7 +146,7 @@ describe('IngestService settlements', () => {
     expect(result.data.warnings).toContain('legacy_capture_ignored');
     expect(result.data.stagingChunkIds).toHaveLength(1);
     expect(result.data.detailIds).toHaveLength(1);
-    expect(fake.detailRequests).toHaveLength(1);
+    expect(fake.detailRequests).toHaveLength(2);
     expect(await local.store.countStagingChunks()).toBe(0);
   });
 
@@ -379,7 +380,7 @@ describe('IngestService settlements', () => {
     expect(completed.extraction.records).toHaveLength(1);
     expect(completed.extraction.detailIds).toHaveLength(1);
     expect(fake.writeRequests).toHaveLength(1);
-    expect(fake.detailRequests).toHaveLength(1);
+    expect(fake.detailRequests).toHaveLength(2);
     expect(fake.details).toHaveLength(1);
     expect(await local.store.countStagingChunks()).toBe(0);
 
@@ -415,7 +416,7 @@ describe('IngestService settlements', () => {
     service.applyReplaySummary(summary);
     expect(await local.outbox.stats()).toMatchObject({ items: 0 });
     expect(fake.writeRequests).toHaveLength(2);
-    expect(fake.detailRequests).toHaveLength(1);
+    expect(fake.detailRequests).toHaveLength(2);
     expect(fake.details).toHaveLength(1);
     expect(await local.store.countStagingChunks()).toBe(0);
   });
@@ -830,6 +831,39 @@ describe('IngestService settlements', () => {
     expect(outbox[0]?.meta?.stagingChunkIds).toHaveLength(2);
   });
 
+  it('相同 chunk 支撑新记录时补齐规范关联，两个记录均可反向找到 Detail', async () => {
+    const { service, client, fake, local } = await setup();
+    const ingest = (requestId: string, content: string) => service.ingest({
+      requestId,
+      agentId: 'opencode',
+      threadId: 'th_shared_detail_association',
+      extractor: 'host',
+      chunks: [{ role: 'user', text: '共享证据 A B', messageId: 'm_shared_detail', chunkIndex: 0 }],
+      candidates: [{
+        kind: 'observation',
+        content: { content },
+        sourceMessageIds: ['m_shared_detail'],
+      }],
+    });
+    const first = await ingest('req_shared_detail_first', '共享证据 A');
+    const second = await ingest('req_shared_detail_second', '共享证据 B');
+    const firstRecord = first.data.records[0]!.id;
+    const secondRecord = second.data.records[0]!.id;
+    expect(secondRecord).not.toBe(firstRecord);
+    expect(fake.details).toHaveLength(1);
+    expect(fake.details[0]!.recordIds).toEqual(expect.arrayContaining([firstRecord, secondRecord]));
+
+    for (const recordId of [firstRecord, secondRecord]) {
+      const listed = await client.detailList({
+        actor: { type: 'agent', agentId: 'opencode' },
+        domains: ['agent:opencode'],
+        recordIds: [recordId],
+      });
+      expect(listed.data.details.map((detail) => detail.id)).toContain(fake.details[0]!.id);
+    }
+    expect(await local.store.countStagingChunks()).toBe(0);
+  });
+
   it('duplicate Detail 不用当前请求的 expiry/recordIds 覆盖权威缓存', async () => {
     const { service, fake, local } = await setup();
     const first = await service.ingest({ requestId: 'req_duplicate_cache_1', ...preferenceRequest() });
@@ -976,7 +1010,7 @@ describe('IngestService settlements', () => {
 
     await service.ingest({ requestId: 'req_quota_cache_invalidation', ...preferenceRequest() });
     expect(await local.getCachedDetail('detail-evicted-by-quota')).toBeNull();
-    expect(fake.detailRequests).toHaveLength(1);
+    expect(fake.detailRequests).toHaveLength(2);
   });
 
   it('staging 配额淘汰也立即使依赖抽取 failed', async () => {
@@ -1003,6 +1037,489 @@ describe('IngestService settlements', () => {
     expect((await local.store.listStagingChunks()).map((chunk) => chunk.id)).not.toContain(
       pending.data.stagingChunkIds[0],
     );
+  });
+
+  it('重放权威回读异常不得被吞成 settled', async () => {
+    const { service, client, fake, local } = await setup();
+    fake.setDetailFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const queued = await service.ingest({ requestId: 'req_replay_readback_failure', ...preferenceRequest() });
+    expect(queued.data.detail.queued).toBe(1);
+    const item = (await local.outbox.list())[0]!;
+    const itemBody = item.body as any;
+    jest.spyOn(client, 'post').mockResolvedValue({
+      data: {
+        results: [{
+          clientItemId: itemBody.items[0].clientItemId,
+          status: 'created',
+          id: 'detail-readback-failure',
+          domain: 'user',
+          detailKind: 'raw_chunk',
+        }],
+        created: 1,
+        duplicates: 0,
+        failed: 0,
+        partial: false,
+      },
+    } as any);
+    jest.spyOn(client, 'detailGet').mockRejectedValue(new CapabilityClientError(
+      'capability_unavailable',
+      'readback unavailable',
+      { status: 0, retryable: true },
+    ));
+    const summary = await new OutboxReplayer({
+      outbox: local.outbox,
+      client,
+      onSettled: (entry, data) => service.applyReplayedOutbox(entry, data),
+    }).replayOnce();
+    expect(summary).toMatchObject({ settled: 0, retried: 1, remaining: 1 });
+    expect(await local.outbox.stats()).toMatchObject({ items: 1 });
+  });
+
+  it('Detail 空 results 在首次与重放中均不得 completed/settled 或删除证据', async () => {
+    const { service, client, local } = await setup();
+    jest.spyOn(client, 'detailWrite').mockResolvedValue({
+      ok: true,
+      requestId: 'req_detail_empty_results',
+      capabilityVersion: 1,
+      status: 200,
+      degraded: false,
+      warnings: [],
+      data: { results: [], created: 0, duplicates: 0, failed: 0, partial: false },
+    } as any);
+
+    const first = await service.ingest({ requestId: 'req_detail_empty_results', ...preferenceRequest() });
+    expect(first.status).toBe(202);
+    expect(first.data.extraction.status).toBe('pending');
+    expect(first.data.detail.queued).toBe(1);
+    expect(await local.store.countStagingChunks()).toBe(1);
+    expect(await local.outbox.stats()).toMatchObject({ items: 1 });
+
+    jest.spyOn(client, 'post').mockResolvedValue({
+      data: { results: [], created: 0, duplicates: 0, failed: 0, partial: false },
+    } as any);
+    const replayer = new OutboxReplayer({
+      outbox: local.outbox,
+      client,
+      onSettled: (item, data) => service.applyReplayedOutbox(item, data),
+    });
+    const replayed = await replayer.replayOnce();
+    expect(replayed).toMatchObject({ settled: 0, retried: 1, remaining: 1 });
+    expect(await local.outbox.stats()).toMatchObject({ items: 1 });
+    expect(await local.store.countStagingChunks()).toBe(1);
+  });
+
+  it('Detail 缺失 item 在首次与重放中保留活动项、staging 与已提交 ID', async () => {
+    const { service, client, fake, local } = await setup();
+    const original = client.detailWrite.bind(client);
+    let firstClientItemId = '';
+    let firstDetailId = '';
+    const spy = jest.spyOn(client, 'detailWrite');
+    spy.mockImplementationOnce(async (body: any, options: any) => {
+      const firstItem = body.items[0];
+      firstClientItemId = firstItem.clientItemId;
+      const response = await original({ ...body, items: [firstItem] }, options);
+      firstDetailId = response.data.results[0]!.id!;
+      return {
+        ...response,
+        data: {
+          ...response.data,
+          results: response.data.results,
+          created: 1,
+          failed: 0,
+          partial: false,
+        },
+      } as any;
+    });
+    const request = {
+      agentId: 'opencode',
+      threadId: 'th_detail_missing_item',
+      extractor: 'host' as const,
+      chunks: [
+        { role: 'user' as const, text: '证据一', messageId: 'm_detail_missing_1' },
+        { role: 'user' as const, text: '证据二', messageId: 'm_detail_missing_2' },
+      ],
+      candidates: [
+        { kind: 'observation' as const, content: { content: '证据一' }, sourceMessageIds: ['m_detail_missing_1'] },
+        { kind: 'observation' as const, content: { content: '证据二' }, sourceMessageIds: ['m_detail_missing_2'] },
+      ],
+    };
+    const first = await service.ingest({ requestId: 'req_detail_missing_item', ...request });
+    expect(first.status).toBe(202);
+    expect(first.data.detailIds).toEqual([firstDetailId]);
+    expect(first.data.extraction.status).toBe('pending');
+    expect(first.data.detail.queued).toBe(1);
+    expect(await local.store.countStagingChunks()).toBe(2);
+    expect(await local.outbox.stats()).toMatchObject({ items: 1 });
+    const outboxItem = (await local.outbox.list())[0]!;
+    expect((outboxItem.body as any).items).toHaveLength(2);
+    expect(outboxItem.requestId).toBe(fake.detailRequests[0]!.body.requestId);
+
+    jest.spyOn(client, 'post').mockResolvedValue(({
+      ok: true,
+      requestId: 'req_detail_missing_replay',
+      capabilityVersion: 1,
+      status: 200,
+      degraded: false,
+      warnings: [],
+      data: {
+        results: [{
+          clientItemId: firstClientItemId,
+          status: 'duplicate',
+          id: firstDetailId,
+          domain: 'agent:opencode',
+          detailKind: 'raw_chunk',
+        }],
+        created: 0,
+        duplicates: 1,
+        failed: 0,
+        partial: false,
+      },
+    } as any));
+    const replayed = await new OutboxReplayer({
+      outbox: local.outbox,
+      client,
+      onSettled: (item, data) => service.applyReplayedOutbox(item, data),
+    }).replayOnce();
+    expect(replayed).toMatchObject({ settled: 0, retried: 1, remaining: 1 });
+    expect(fake.details).toHaveLength(1);
+    expect(await local.outbox.stats()).toMatchObject({ items: 1 });
+    expect(await local.store.countStagingChunks()).toBe(2);
+  });
+
+  it('合法重复 clientItemId 的不同 domainHint 候选也可完成重放', async () => {
+    const { service, client, fake, local } = await setup();
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    await service.ingest({
+      requestId: 'req_legal_duplicate_client_ids',
+      agentId: 'opencode',
+      threadId: 'th_legal_duplicate_client_ids',
+      extractor: 'host',
+      chunks: [{ role: 'user', text: '同域重复客户端身份', messageId: 'm_legal_duplicate' }],
+      candidates: [
+        { kind: 'observation', content: { content: '同域重复客户端身份' } },
+        { kind: 'observation', domain: 'agent:opencode', content: { content: '同域重复客户端身份' } },
+      ],
+    });
+    const item = (await local.outbox.list())[0]!;
+    const ids = (item.body as any).items.map((entry: any) => entry.clientItemId);
+    expect(ids[0]).toBe(ids[1]);
+    fake.setFailure(null);
+
+    const summary = await new OutboxReplayer({
+      outbox: local.outbox,
+      client,
+      onSettled: (entry, data) => service.applyReplayedOutbox(entry, data),
+    }).replayOnce();
+    expect(summary).toMatchObject({ settled: 2, remaining: 0 });
+    expect(await local.outbox.stats()).toMatchObject({ items: 0 });
+  });
+
+  it('MemoryRecord 重放按 clientItemId 覆盖，额外成功项不能顶替缺失项', async () => {
+    const { service, fake, local } = await setup();
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    await service.ingest({
+      requestId: 'req_record_replay_identity',
+      agentId: 'opencode',
+      threadId: 'th_record_replay_identity',
+      extractor: 'host',
+      chunks: [
+        { role: 'user', text: '身份一', messageId: 'm_record_identity_1' },
+        { role: 'user', text: '身份二', messageId: 'm_record_identity_2' },
+      ],
+      candidates: [
+        { kind: 'observation', content: { content: '身份一' }, sourceMessageIds: ['m_record_identity_1'] },
+        { kind: 'observation', content: { content: '身份二' }, sourceMessageIds: ['m_record_identity_2'] },
+      ],
+    });
+    const item = (await local.outbox.list())[0]!;
+    const bodyItems = (item.body as any).items;
+    for (const [id, itemBody] of [['rec-identity-first', bodyItems[0]], ['rec-identity-extra', bodyItems[1]]] as const) {
+      fake.nodes.push({
+        id,
+        type: 'episode',
+        kind: 'observation',
+        domain: 'agent:opencode',
+        ownerType: 'agent',
+        ownerId: 'opencode',
+        contentHash: `${id}-hash`,
+        content: itemBody.content,
+        provenance: {},
+      });
+    }
+    fake.setFailure(null);
+    const settled = await service.applyReplayedOutbox(item, {
+      results: [
+        {
+          clientItemId: bodyItems[0].clientItemId,
+          status: 'created',
+          id: 'rec-identity-first',
+          type: 'episode',
+          kind: 'observation',
+          domain: 'agent:opencode',
+        },
+        {
+          clientItemId: 'cand_unexpected_extra',
+          status: 'created',
+          id: 'rec-identity-extra',
+          type: 'episode',
+          kind: 'observation',
+          domain: 'agent:opencode',
+        },
+      ],
+      created: 2,
+      duplicates: 0,
+      failed: 0,
+      partial: false,
+    });
+    expect(settled).toBe(false);
+    expect(fake.details.every((detail) => !detail.recordIds.includes('rec-identity-extra'))).toBe(true);
+    expect(await local.outbox.stats()).toMatchObject({ items: 1 });
+    expect(await local.store.countStagingChunks()).toBe(2);
+    expect(await service.applyReplayedOutbox(item, {
+      results: bodyItems.map((entry: any, index: number) => ({
+        clientItemId: entry.clientItemId,
+        status: index === 0 ? 'created' : 'duplicate',
+        id: index === 0 ? 'rec-identity-first' : 'rec-identity-extra',
+        type: 'episode',
+        kind: 'observation',
+        domain: 'agent:opencode',
+      })),
+      created: 2,
+      failed: 1,
+      partial: false,
+    })).toBe(false);
+  });
+
+  it('record/detail 共享 staging 在 record 活动项结束前不得被 detail 提前清理', async () => {
+    const { service, client, fake, local } = await setup();
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    await service.ingest({
+      requestId: 'req_shared_replay_dependencies',
+      agentId: 'opencode',
+      threadId: 'th_shared_replay_dependencies',
+      extractor: 'host',
+      chunks: [
+        { role: 'user', text: '共享重放证据一', messageId: 'm_shared_replay_1' },
+        { role: 'user', text: '共享重放证据二', messageId: 'm_shared_replay_2' },
+      ],
+      candidates: [
+        { kind: 'observation', content: { content: '共享重放证据一' }, sourceMessageIds: ['m_shared_replay_1'] },
+        { kind: 'observation', content: { content: '共享重放证据二' }, sourceMessageIds: ['m_shared_replay_2'] },
+      ],
+    });
+    fake.setFailure(null);
+    jest.spyOn(client, 'detailWrite').mockRejectedValueOnce(new CapabilityClientError(
+      'capability_unavailable',
+      'detail unavailable',
+      { status: 503, retryable: true },
+    ));
+    const firstReplay = await new OutboxReplayer({
+      outbox: local.outbox,
+      client,
+      onSettled: (item, data) => service.applyReplayedOutbox(item, data),
+    }).replayOnce();
+    expect(firstReplay.remaining).toBe(2);
+    const detailItem = (await local.outbox.list()).find((item) => item.endpoint === '/detail')!;
+    const recordItem = (await local.outbox.list()).find((item) => item.meta?.kind === 'record')!;
+
+    const detailResponse = await client.post(detailItem.endpoint, detailItem.body, {
+      idempotencyKey: detailItem.requestId,
+      retries: 0,
+    });
+    expect(await service.applyReplayedOutbox(detailItem, detailResponse.data)).toBe(true);
+    await local.outbox.completeReplay(detailItem.id, { outcome: 'settled' });
+    expect(await local.store.countStagingChunks()).toBe(2);
+    expect((await local.outbox.get(recordItem.id))).not.toBeNull();
+    await local.outbox.recordAttempt(recordItem.id, { error: 'test_ready', retryDelayMs: 0 });
+
+    const finalReplay = await new OutboxReplayer({
+      outbox: local.outbox,
+      client,
+      onSettled: (item, data) => service.applyReplayedOutbox(item, data),
+    }).replayOnce();
+    expect(finalReplay).toMatchObject({ settled: 2, remaining: 0 });
+    expect(await local.store.countStagingChunks()).toBe(0);
+  });
+
+  it('replay lease 内缺失 staging 必须进入 dead 而非永久 retry', async () => {
+    const { service, client, fake, local } = await setup();
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    await service.ingest({ requestId: 'req_missing_staging_dead', ...preferenceRequest() });
+    const ids = (await local.store.listStagingChunks()).map((chunk) => chunk.id);
+    await local.clearStaging(ids);
+    fake.setFailure(null);
+    const summary = await new OutboxReplayer({
+      outbox: local.outbox,
+      client,
+      onSettled: (item, data) => service.applyReplayedOutbox(item, data),
+    }).replayOnce();
+    expect(summary).toMatchObject({ settled: 0, dead: 1, remaining: 0 });
+    expect(await local.outbox.deadCount()).toBe(1);
+  });
+
+  it('Detail 永久部分失败显式 failed，披露已提交 ID 且保留全部仍需证据', async () => {
+    const { service, client, local } = await setup();
+    const original = client.detailWrite.bind(client);
+    jest.spyOn(client, 'detailWrite').mockImplementationOnce(async (body: any, options: any) => {
+      const response = await original({ ...body, items: [body.items[0]] }, options);
+      return {
+        ...response,
+        data: {
+          ...response.data,
+          results: [
+            response.data.results[0],
+            {
+              clientItemId: body.items[1].clientItemId,
+              status: 'failed',
+              domain: body.items[1].domain,
+              detailKind: body.items[1].detailKind,
+              code: 'validation_failed',
+              retryable: false,
+            },
+          ],
+          created: 1,
+          failed: 1,
+          partial: true,
+        },
+      } as any;
+    });
+    const result = await service.ingest({
+      requestId: 'req_detail_permanent_partial',
+      agentId: 'opencode',
+      threadId: 'th_detail_permanent_partial',
+      extractor: 'host',
+      chunks: [
+        { role: 'user', text: '永久部分一', messageId: 'm_detail_permanent_1' },
+        { role: 'user', text: '永久部分二', messageId: 'm_detail_permanent_2' },
+      ],
+      candidates: [
+        { kind: 'observation', content: { content: '永久部分一' }, sourceMessageIds: ['m_detail_permanent_1'] },
+        { kind: 'observation', content: { content: '永久部分二' }, sourceMessageIds: ['m_detail_permanent_2'] },
+      ],
+    });
+
+    expect(result.status).toBe(200);
+    expect(result.data.extraction.status).toBe('failed');
+    expect(result.data.detailIds).toHaveLength(1);
+    expect(result.data.detail.failed).toBe(1);
+    expect(result.data.warnings).toContain('detail_partial_settlement');
+    expect(await local.store.countStagingChunks()).toBe(2);
+    expect(await local.outbox.stats()).toMatchObject({ items: 0 });
+  });
+
+  it('MemoryRecord 同批 created+永久 failed 不得整体 completed 或清除 staging', async () => {
+    const { service, client, fake, local } = await setup();
+    jest.spyOn(client, 'write').mockImplementationOnce(async (body: any) => {
+      const [first, second] = body.items;
+      fake.nodes.push({
+        id: 'rec-record-permanent-partial',
+        type: 'episode',
+        kind: 'observation',
+        domain: 'agent:opencode',
+        ownerType: 'agent',
+        ownerId: 'opencode',
+        contentHash: 'record-permanent-hash',
+        content: first.content,
+        provenance: {},
+      });
+      return {
+        ok: true,
+        requestId: body.requestId,
+        capabilityVersion: 1,
+        status: 200,
+        degraded: false,
+        warnings: [],
+        data: {
+          results: [
+            {
+              clientItemId: first.clientItemId,
+              status: 'created',
+              id: 'rec-record-permanent-partial',
+              type: 'episode',
+              kind: 'observation',
+              domain: 'agent:opencode',
+            },
+            {
+              clientItemId: second.clientItemId,
+              status: 'failed',
+              kind: 'observation',
+              domain: 'agent:opencode',
+              code: 'validation_failed',
+              retryable: false,
+            },
+          ],
+          created: 1,
+          failed: 1,
+          partial: true,
+        },
+      } as any;
+    });
+    const result = await service.ingest({
+      requestId: 'req_record_permanent_partial',
+      agentId: 'opencode',
+      threadId: 'th_record_permanent_partial',
+      extractor: 'host',
+      chunks: [
+        { role: 'user', text: '记录永久部分一', messageId: 'm_record_permanent_1' },
+        { role: 'user', text: '记录永久部分二', messageId: 'm_record_permanent_2' },
+      ],
+      candidates: [
+        { kind: 'observation', content: { content: '记录永久部分一' }, sourceMessageIds: ['m_record_permanent_1'] },
+        { kind: 'observation', content: { content: '记录永久部分二' }, sourceMessageIds: ['m_record_permanent_2'] },
+      ],
+    });
+
+    expect(result.status).toBe(200);
+    expect(result.data.extraction.status).toBe('failed');
+    expect(result.data.records.map((record) => record.id)).toEqual(['rec-record-permanent-partial']);
+    expect(result.data.warnings).toContain('partial_settlement');
+    expect(await local.store.countStagingChunks()).toBe(2);
+    expect(await local.outbox.stats()).toMatchObject({ items: 0 });
+  });
+
+  it('新写入 chunk 被自身配额立即淘汰时不得返回 202 pending', async () => {
+    const { service, local } = await setup(defaultSidecarPolicy(), { stagingBytes: 4 });
+    await expect(service.ingest({
+      requestId: 'req_staging_self_evicted',
+      agentId: 'opencode',
+      extractor: 'host',
+      chunks: [{ role: 'user', text: '12345', messageId: 'm_staging_self_evicted' }],
+    })).rejects.toMatchObject({ code: 'staging_write_failed', status: 503 });
+    expect(await local.store.countStagingChunks()).toBe(0);
+  });
+
+  it('staging 写失败不得返回 202 pending；零证据回填显式 failed', async () => {
+    const { service, local, fake } = await setup();
+    jest.spyOn(local.store, 'putStagingChunk').mockRejectedValueOnce(new Error('EIO'));
+    await expect(service.ingest({
+      requestId: 'req_staging_write_failed',
+      agentId: 'opencode',
+      extractor: 'host',
+      chunks: [{ role: 'user', text: '必须持久化后才能 pending', messageId: 'm_staging_failed' }],
+    })).rejects.toMatchObject({ code: 'staging_write_failed', status: 503 });
+    expect(fake.writeRequests).toHaveLength(0);
+    expect(fake.detailRequests).toHaveLength(0);
+
+    jest.restoreAllMocks();
+    const pending = await service.ingest({
+      requestId: 'req_zero_staging_completion',
+      agentId: 'opencode',
+      threadId: 'th_zero_staging_completion',
+      extractor: 'host',
+      chunks: [{ role: 'user', text: '随后移除全部证据', messageId: 'm_zero_staging' }],
+    });
+    const cacheKey = `extraction:v1:${pending.data.extraction.id}`;
+    const stored = await local.cache.get<any>(cacheKey);
+    stored.stagingChunkIds = [];
+    stored.rawChunkIds = [];
+    await local.cache.set(cacheKey, stored, { ttlMs: 1_000 });
+    const completed = await service.completeExtraction(pending.data.extraction.id, [{
+      kind: 'observation',
+      content: { content: '没有证据不能完成' },
+    }]);
+    expect(completed.extraction.status).toBe('failed');
+    expect(completed.queued).toBe(false);
+    expect(fake.writeRequests).toHaveLength(0);
   });
 
   it('Detail outbox 满时显式 503，不把失败吞成已完成', async () => {

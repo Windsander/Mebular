@@ -399,7 +399,8 @@ export function buildDetailContent(
 export function normalizeRedaction(value: DetailRedaction | undefined): DetailRedaction {
   if (!value) return { applied: false, rules: [] };
   const rules = Array.isArray(value.rules)
-    ? [...new Set(value.rules.filter((rule): rule is string => typeof rule === 'string' && rule.length > 0))]
+    ? [...new Set(value.rules.filter((rule): rule is string =>
+      typeof rule === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/.test(rule)))]
       .slice(0, MAX_DETAIL_REDACTION_RULES)
     : [];
   return { applied: value.applied === true, rules };

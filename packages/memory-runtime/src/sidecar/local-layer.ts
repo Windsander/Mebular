@@ -23,6 +23,7 @@ const OUTBOX_ITEM_RE = /^[A-Za-z0-9._:-]{1,128}$/;
 const DAY_MS = 24 * 60 * 60 * 1000;
 export const OUTBOX_MAX_QUEUE_MS = 30 * DAY_MS;
 export const OUTBOX_DEAD_RETENTION_DAYS = 30;
+export const OUTBOX_REPLAY_LEASE_MS = 60_000;
 export const LOCAL_MAINTENANCE_INTERVAL_MS = 60_000;
 const SENSITIVE_FIELD_RE = /^(?:authorization|api[-_]?key|access[-_]?token|refresh[-_]?token|token|secret|password|passwd|credential|private[-_]?key)$/i;
 
@@ -57,6 +58,8 @@ export interface OutboxItem {
   nextAttemptAt?: number;
   /** 操作级截止时间；缺省为 createdAt + 30 天。 */
   expiresAt?: number;
+  /** 有界重放租约；仅用于 cleanup/in-flight 协调，不延长操作 deadline。 */
+  replayLeaseUntil?: number;
   /**
    * 本地重放元数据（不发给 capability）：
    * 成功后清理对应 staging chunk / detail cache。
@@ -97,6 +100,12 @@ export interface OutboxCleanupResult {
   expired: number;
   deadRemoved: number;
 }
+
+export type OutboxReplayLeaseResult =
+  | { state: 'acquired'; item: OutboxItem }
+  | { state: 'leased' | 'expired' };
+
+export type OutboxReplayCompletion = 'settled' | 'retry' | 'dead';
 
 export interface CacheEntry<T = unknown> {
   key: string;
@@ -405,6 +414,7 @@ export class BoundedOutbox {
       await this.init();
       const item = await readJsonFile<OutboxItem>(this.pathFor(id));
       if (!isOutboxItem(item)) return false;
+      if (typeof item.replayLeaseUntil === 'number' && item.replayLeaseUntil > this.now()) return false;
       return this.deadLetterUnlocked(item, errorCode);
     });
   }
@@ -428,6 +438,69 @@ export class BoundedOutbox {
     });
   }
 
+  /** 在发送前原子取得有界 replay lease；过期项绝不发送。 */
+  async acquireReplayLease(
+    id: string,
+    { now = this.now(), leaseMs = OUTBOX_REPLAY_LEASE_MS }: { now?: number; leaseMs?: number } = {},
+  ): Promise<OutboxReplayLeaseResult> {
+    return this.exclusive(async () => {
+      const item = await readJsonFile<OutboxItem>(this.pathFor(id));
+      if (!isOutboxItem(item)) return { state: 'expired' };
+      if (this.deadlineOf(item) <= now) {
+        await this.deadLetterUnlocked(item, 'retention_expired');
+        return { state: 'expired' };
+      }
+      if (typeof item.replayLeaseUntil === 'number' && item.replayLeaseUntil > now) {
+        return { state: 'leased' };
+      }
+      const updated: OutboxItem = {
+        ...item,
+        replayLeaseUntil: now + Math.max(1, Math.floor(leaseMs)),
+      };
+      await writeJsonAtomic(this.pathFor(id), updated);
+      return { state: 'acquired', item: updated };
+    });
+  }
+
+  /** 按同一 deadline 完成 replay；只有已确认 settled 才能在过期后仍移除活动项。 */
+  async completeReplay(
+    id: string,
+    {
+      outcome,
+      now = this.now(),
+      error = 'partial_failure',
+      retryDelayMs = 0,
+    }: {
+      outcome: OutboxReplayCompletion;
+      now?: number;
+      error?: string;
+      retryDelayMs?: number;
+    },
+  ): Promise<OutboxReplayCompletion> {
+    return this.exclusive(async () => {
+      const item = await readJsonFile<OutboxItem>(this.pathFor(id));
+      if (!isOutboxItem(item)) return outcome;
+      if (outcome === 'settled') {
+        await rm(this.pathFor(id), { force: true });
+        return 'settled';
+      }
+      if (outcome === 'dead' || this.deadlineOf(item) <= now) {
+        await this.deadLetterUnlocked(item, this.deadlineOf(item) <= now ? 'retention_expired' : error);
+        return 'dead';
+      }
+      const updated: OutboxItem = {
+        ...item,
+        attempts: item.attempts + 1,
+        lastAttemptAt: now,
+        lastError: redactText(error).text.slice(0, 128),
+        nextAttemptAt: now + Math.max(0, Math.floor(retryDelayMs)),
+        replayLeaseUntil: 0,
+      };
+      await writeJsonAtomic(this.pathFor(id), updated);
+      return 'retry';
+    });
+  }
+
   /** 清理超过保留期的 dead letter；返回删除数量。 */
   async cleanupDead(now = this.now(), retentionDays = OUTBOX_DEAD_RETENTION_DAYS): Promise<number> {
     return this.exclusive(async () => {
@@ -443,6 +516,7 @@ export class BoundedOutbox {
       let expired = 0;
       for (const item of await this.readItems()) {
         if (this.deadlineOf(item) > now) continue;
+        if (typeof item.replayLeaseUntil === 'number' && item.replayLeaseUntil > now) continue;
         if (await this.deadLetterUnlocked(item, 'retention_expired')) expired += 1;
       }
       const deadRemoved = await this.cleanupDeadUnlocked(now, retentionDays);

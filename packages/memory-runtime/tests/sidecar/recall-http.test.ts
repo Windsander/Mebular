@@ -65,7 +65,7 @@ async function setup(): Promise<Harness> {
   const home = await mkdtemp(join(tmpdir(), 'mebular-recall-http-'));
   const local = new SidecarLocalLayer({ root: join(home, 'memory-runtime'), now: () => NOW });
   await local.init();
-  const fake = await startFakeCapability();
+  const fake = await startFakeCapability({ now: () => NOW });
   fake.setRecords([preference()]);
   const client = new CapabilityClient({ baseUrl: fake.baseUrl, token: 'cap-token', retries: 0, retryDelayMs: 0 });
   const identity = { cloudId: 'cl_test', profileId: 'default', hostId: 'h_test' };

@@ -26,7 +26,9 @@ import {
   MAX_DETAIL_TEXT_BYTES,
   buildDetailContent,
   detailBytes,
+  detailContent,
   detailContentHash,
+  detailInternalObject,
   detailListView,
   detailMatchesFilters,
   detailRecordIds,
@@ -839,7 +841,21 @@ export class MemoryService {
    * - 落库逐项：配额失败只影响该项（结果 code=detail_quota_exceeded），不静默丢弃；
    * - 复用现有图 + 事件日志，不建第二套存储/同步。
    */
+  private detailWriteTail: Promise<void> = Promise.resolve();
+
   async writeDetails(
+    inputs: DetailWriteInput[],
+    options: DetailWriteOptions = {},
+  ): Promise<DetailWriteBatchResult> {
+    const run = this.detailWriteTail.then(
+      () => this.writeDetailsLocked(inputs, options),
+      () => this.writeDetailsLocked(inputs, options),
+    );
+    this.detailWriteTail = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  private async writeDetailsLocked(
     inputs: DetailWriteInput[],
     options: DetailWriteOptions = {},
   ): Promise<DetailWriteBatchResult> {
@@ -893,8 +909,48 @@ export class MemoryService {
       const clientKey = plan.clientItemId !== undefined
         ? detailClientDedupeKey(plan.domain, plan.clientItemId)
         : null;
-      const existing = (clientKey !== null ? dedupe.get(clientKey) : undefined) ?? dedupe.get(contentKey);
+      let existing = (clientKey !== null ? dedupe.get(clientKey) : undefined) ?? dedupe.get(contentKey);
       if (existing) {
+        const existingRecordIds = detailRecordIds(existing);
+        const missingRecordIds = plan.recordIds.filter((id) => !existingRecordIds.includes(id));
+        if (missingRecordIds.length > 0) {
+          const existingId = existing.id;
+          // 同一证据后续支撑新记录：只扩充同域反向关联，保留原 expiresAt/正文，
+          // 不重写 MemoryRecord，也不创建第二个内容相同的 Detail。
+          const recordIds = [...existingRecordIds, ...missingRecordIds];
+          if (recordIds.length > MAX_DETAIL_RECORD_IDS) {
+            throw new ValidationError(`recordIds 最多 ${MAX_DETAIL_RECORD_IDS} 项`, {
+              index: plan.index,
+              field: 'recordIds',
+            });
+          }
+          const updated = await this.mebular.graph.updateNode(existing.id, {
+            content: {
+              ...detailContent(existing),
+              recordIds,
+            },
+            metadata: {
+              ...(isRecord(existing.metadata) ? existing.metadata : {}),
+              internalObject: {
+                ...detailInternalObject(existing),
+                recordIds,
+              },
+            },
+          });
+          if (!updated) {
+            throw new ValidationError('duplicate Detail 关联补齐后读取失败', {
+              index: plan.index,
+              id: existing.id,
+              field: 'recordIds',
+            });
+          }
+          existing = updated;
+          const liveIndex = live.findIndex((node) => node.id === existingId);
+          if (liveIndex >= 0) live[liveIndex] = updated;
+          for (const [alias, node] of dedupe) {
+            if (node.id === existingId) dedupe.set(alias, updated);
+          }
+        }
         duplicates += 1;
         results.push(detailResultEntry('duplicate', plan, existing.id));
         continue;
@@ -1648,6 +1704,12 @@ export class MemoryService {
     }
     if (raw.detailKind === 'raw_chunk' && raw.role === undefined) {
       throw detailValidationError(index, 'role', 'raw_chunk 需要 role');
+    }
+    if (raw.role === 'tool' && raw.detailKind !== 'tool_output') {
+      throw detailValidationError(index, 'detailKind', 'tool role 必须使用 tool_output');
+    }
+    if (raw.detailKind === 'tool_output' && raw.role !== undefined && raw.role !== 'tool') {
+      throw detailValidationError(index, 'role', 'tool_output 必须使用 tool role');
     }
     if (raw.messageId !== undefined
       && (typeof raw.messageId !== 'string' || raw.messageId.length > MAX_DETAIL_MESSAGE_ID_CHARS)) {

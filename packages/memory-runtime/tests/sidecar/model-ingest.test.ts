@@ -114,7 +114,7 @@ async function setup(
   const home = await mkdtemp(join(tmpdir(), 'mebular-sidecar-model-ingest-'));
   const local = new SidecarLocalLayer({ root: join(home, 'memory-runtime'), now: () => NOW });
   await local.init();
-  const fake = await startFakeCapability();
+  const fake = await startFakeCapability({ now: () => NOW });
   const client = new CapabilityClient({
     baseUrl: fake.baseUrl,
     token: 'cap-token',
@@ -446,6 +446,8 @@ describe('sidecar ingest model sources', () => {
       'sk-content-secret-sentinel-123456',
       'content-password-sentinel-9876',
       'content-bearer-sentinel-abcdefgh',
+      'sk-redaction-rule-sentinel-123456',
+      'redaction-private-key-sentinel',
     ];
 
     const result = await service.ingest({
@@ -457,6 +459,14 @@ describe('sidecar ingest model sources', () => {
       chunks: [{
         role: 'user',
         messageId: 'm_redaction_egress',
+        redaction: {
+          applied: true,
+          rules: [
+            sentinels[3],
+            `-----BEGIN PRIVATE KEY-----\n${sentinels[4]}\n-----END PRIVATE KEY-----`,
+            'builtin_secret',
+          ],
+        },
         text: [
           '以后默认用深色主题',
           `api_key=${sentinels[0]}`,
@@ -477,5 +487,6 @@ describe('sidecar ingest model sources', () => {
     ].join('\n');
     for (const sentinel of sentinels) expect(diskAndNetwork).not.toContain(sentinel);
     expect(diskAndNetwork).toContain('[redacted]');
+    expect((fake.detailRequests[0]!.body as any).items[0].redaction.rules).toEqual(['builtin_secret']);
   });
 });

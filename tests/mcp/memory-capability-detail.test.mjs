@@ -1,6 +1,6 @@
 // C1：域内详情对象 + capability `/internal/memory/v1/detail`。
 // 真实 Mebular + MemoryService + 沙箱 home；不启网络/模型。
-import { describe, it, expect, beforeAll, afterAll } from '@jest/globals';
+import { describe, it, expect, beforeAll, afterAll, jest } from '@jest/globals';
 import http from 'node:http';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -324,6 +324,131 @@ describe('版本与详情写入', () => {
     expect(conflict.body.error.code).toBe('idempotency_conflict');
   });
 
+  it('空 results 不进入幂等缓存；同键后续请求必须实际重试', async () => {
+    const marker = unique('detail-empty-idempotency');
+    const firstRecord = await createRecord('agent:opencode', `${marker}-a`);
+    const secondRecord = await createRecord('agent:opencode', `${marker}-b`);
+    const items = [
+      detailItem('agent:opencode', [firstRecord], `${marker}-a`),
+      detailItem('agent:opencode', [secondRecord], `${marker}-b`),
+    ];
+    const key = unique('detail-empty-idempotency-key');
+    const spy = jest.spyOn(service, 'writeDetails').mockResolvedValueOnce({
+      results: [],
+      created: 0,
+      duplicates: 0,
+      failed: 0,
+      partial: false,
+      evicted: [],
+    });
+    try {
+      const first = await writeDetail(items, { headers: { 'idempotency-key': key } });
+      expect(first.body.data.results).toEqual([]);
+      const retry = await writeDetail(items, { headers: { 'idempotency-key': key } });
+      expect(retry.status).toBe(200);
+      expect(retry.body.data.replayed).toBe(false);
+      expect(retry.body.data.created).toBe(2);
+      expect(spy).toHaveBeenCalledTimes(2);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('等长意外 clientItemId 不进入幂等缓存', async () => {
+    const marker = unique('detail-malformed-idempotency');
+    const firstRecord = await createRecord('agent:opencode', `${marker}-a`);
+    const secondRecord = await createRecord('agent:opencode', `${marker}-b`);
+    const items = [
+      detailItem('agent:opencode', [firstRecord], `${marker}-a`, { clientItemId: unique('detail-malformed-a') }),
+      detailItem('agent:opencode', [secondRecord], `${marker}-b`, { clientItemId: unique('detail-malformed-b') }),
+    ];
+    const validResults = items.map((item, index) => ({
+      clientItemId: item.clientItemId,
+      status: 'created',
+      id: `malformed-${index}`,
+      domain: item.domain,
+      detailKind: item.detailKind,
+      contentHash: item.contentHash,
+    }));
+    const spy = jest.spyOn(service, 'writeDetails');
+    spy.mockResolvedValueOnce({
+      results: [{ ...validResults[0], clientItemId: 'cand_unexpected' }, validResults[1]],
+      created: 2,
+      duplicates: 0,
+      failed: 0,
+      partial: false,
+      evicted: [],
+    });
+    try {
+      const firstKey = unique('detail-unexpected-idempotency-key');
+      await writeDetail(items, { headers: { 'idempotency-key': firstKey } });
+      const firstRetry = await writeDetail(items, { headers: { 'idempotency-key': firstKey } });
+      expect(firstRetry.body.data.replayed).toBe(false);
+      expect(spy).toHaveBeenCalledTimes(2);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('failed>0 即使 results 等长也不进入幂等缓存', async () => {
+    const marker = unique('detail-failed-count-idempotency');
+    const firstRecord = await createRecord('agent:opencode', `${marker}-a`);
+    const secondRecord = await createRecord('agent:opencode', `${marker}-b`);
+    const items = [
+      detailItem('agent:opencode', [firstRecord], `${marker}-a`, { clientItemId: unique('detail-failed-count-a') }),
+      detailItem('agent:opencode', [secondRecord], `${marker}-b`, { clientItemId: unique('detail-failed-count-b') }),
+    ];
+    const validResults = items.map((item, index) => ({
+      clientItemId: item.clientItemId,
+      status: 'created',
+      id: `failed-count-${index}`,
+      domain: item.domain,
+      detailKind: item.detailKind,
+      contentHash: item.contentHash,
+    }));
+    const spy = jest.spyOn(service, 'writeDetails');
+    spy.mockResolvedValueOnce({
+      results: validResults,
+      created: 2,
+      duplicates: 0,
+      failed: 1,
+      partial: false,
+      evicted: [],
+    });
+    try {
+      const key = unique('detail-failed-count-idempotency-key');
+      await writeDetail(items, { headers: { 'idempotency-key': key } });
+      const retry = await writeDetail(items, { headers: { 'idempotency-key': key } });
+      expect(retry.body.data.replayed).toBe(false);
+      expect(spy).toHaveBeenCalledTimes(2);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('无 clientItemId 的合法请求保留请求级幂等与冲突检测', async () => {
+    const marker = unique('detail-no-client-id-idempotency');
+    const recordId = await createRecord('agent:opencode', marker);
+    const key = unique('detail-no-client-id-key');
+    const first = await writeDetail([detailItem('agent:opencode', [recordId], marker)], {
+      headers: { 'idempotency-key': key },
+    });
+    expect(first.status).toBe(200);
+    const firstId = first.body.data.results[0].id;
+    const replay = await writeDetail([detailItem('agent:opencode', [recordId], marker)], {
+      headers: { 'idempotency-key': key },
+    });
+    expect(replay.status).toBe(200);
+    expect(replay.body.data.replayed).toBe(true);
+    expect(replay.body.data.results[0].id).toBe(firstId);
+
+    const conflict = await writeDetail([detailItem('agent:opencode', [recordId], `${marker}-different`)], {
+      headers: { 'idempotency-key': key },
+    });
+    expect(conflict.status).toBe(409);
+    expect(conflict.body.error.code).toBe('idempotency_conflict');
+  });
+
   it('同域按 (domain, detailKind, contentHash, chunkIndex) 去重；chunkIndex 不同则另写', async () => {
     const marker = unique('detail-dedupe');
     const recordId = await createRecord('agent:opencode', marker);
@@ -362,6 +487,65 @@ describe('版本与详情写入', () => {
     expect(first.contentHash).toBe(second.contentHash);
     expect((await detailNode(first.id)).namespace).toBe('agent:opencode');
     expect((await detailNode(second.id)).namespace).toBe('default');
+  });
+
+  it('duplicate Detail 补齐新 recordIds，两个记录都能反向查询且保留原 expiresAt', async () => {
+    const marker = unique('detail-duplicate-association');
+    const firstRecord = await createRecord('agent:opencode', `${marker}-first`);
+    const secondRecord = await createRecord('agent:opencode', `${marker}-second`);
+    const originalExpiresAt = Date.now() + 60_000;
+    const first = await writeDetail([detailItem('agent:opencode', [firstRecord], marker, {
+      expiresAt: originalExpiresAt,
+    })]);
+    const detailId = first.body.data.results[0].id;
+
+    const duplicate = await writeDetail([detailItem('agent:opencode', [secondRecord], marker)]);
+    expect(duplicate.status).toBe(200);
+    expect(duplicate.body.data.results[0]).toMatchObject({ status: 'duplicate', id: detailId });
+    const node = await detailNode(detailId);
+    expect(node.content.recordIds).toEqual(expect.arrayContaining([firstRecord, secondRecord]));
+    expect(node.content.expiresAt).toBe(originalExpiresAt);
+
+    for (const recordId of [firstRecord, secondRecord]) {
+      const listed = await listDetails({ extra: { domains: ['agent:opencode'], recordIds: [recordId] } });
+      expect(listed.status).toBe(200);
+      expect(listed.body.data.details.map((detail) => detail.id)).toContain(detailId);
+    }
+  });
+
+  it('同批别名与并发 duplicate 合并不丢已合并 recordIds', async () => {
+    const marker = unique('detail-duplicate-alias');
+    const records = [];
+    for (let index = 0; index < 3; index += 1) {
+      records.push(await createRecord('agent:opencode', `${marker}-${index}`));
+    }
+    const batch = await writeDetail(records.map((recordId, index) => detailItem(
+      'agent:opencode',
+      [recordId],
+      marker,
+      { clientItemId: unique(`detail-alias-${index}`) },
+    )));
+    expect(batch.status).toBe(200);
+    expect(batch.body.data).toMatchObject({ created: 1, duplicates: 2, failed: 0 });
+    const batchId = batch.body.data.results[0].id;
+    expect((await detailNode(batchId)).content.recordIds).toEqual(expect.arrayContaining(records));
+
+    const concurrentMarker = unique('detail-duplicate-concurrent');
+    const firstRecord = await createRecord('agent:opencode', `${concurrentMarker}-a`);
+    const secondRecord = await createRecord('agent:opencode', `${concurrentMarker}-b`);
+    const [first, second] = await Promise.all([
+      writeDetail([detailItem('agent:opencode', [firstRecord], concurrentMarker, {
+        clientItemId: unique('detail-concurrent-a'),
+      })]),
+      writeDetail([detailItem('agent:opencode', [secondRecord], concurrentMarker, {
+        clientItemId: unique('detail-concurrent-b'),
+      })]),
+    ]);
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    const concurrentId = first.body.data.results[0].id;
+    expect((await detailNode(concurrentId)).content.recordIds)
+      .toEqual(expect.arrayContaining([firstRecord, secondRecord]));
   });
 
   it('recordIds 必须非空、存在、同域、非内部；跨域拒绝且不建悬空引用', async () => {
@@ -658,7 +842,7 @@ describe('保留、过期与配额', () => {
       retentionClass: 'conversation',
     })]);
     expect(toolMismatch.status).toBe(422);
-    expect(toolMismatch.body.error.details.field).toBe('retentionClass');
+    expect(toolMismatch.body.error.details.field).toBe('detailKind');
 
     const documentMismatch = await writeDetail([detailItem('agent:opencode', [recordId], `${marker}-doc`, {
       detailKind: 'document_slice',
@@ -681,6 +865,27 @@ describe('保留、过期与配额', () => {
       retentionClass: 'pinned',
       expiresAt: 0,
     });
+  });
+
+  it('受控边界拒绝 tool role 搭配 raw_chunk/message 及非 tool role 的 tool_output', async () => {
+    const marker = unique('detail-tool-kind-mismatch');
+    const recordId = await createRecord('agent:opencode', marker);
+    for (const detailKind of ['raw_chunk', 'message']) {
+      const response = await writeDetail([detailItem('agent:opencode', [recordId], `${marker}-${detailKind}`, {
+        detailKind,
+        role: 'tool',
+        retentionClass: 'tool_output',
+      })]);
+      expect(response.status).toBe(422);
+      expect(response.body.error.details.field).toBe('detailKind');
+    }
+    const wrongRole = await writeDetail([detailItem('agent:opencode', [recordId], `${marker}-role`, {
+      detailKind: 'tool_output',
+      role: 'user',
+      retentionClass: 'tool_output',
+    })]);
+    expect(wrongRole.status).toBe(422);
+    expect(wrongRole.body.error.details.field).toBe('role');
   });
 
   it('过期详情：get 410、list 默认排除；user includeExpired 可见，agent 不可治理读取', async () => {

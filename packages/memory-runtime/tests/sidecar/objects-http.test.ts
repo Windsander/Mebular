@@ -93,7 +93,7 @@ async function setup(records: FakeMemoryRecord[] = compactRecords()): Promise<Ha
   const home = await mkdtemp(join(tmpdir(), 'mebular-objects-http-'));
   const local = new SidecarLocalLayer({ root: join(home, 'memory-runtime'), now: () => NOW });
   await local.init();
-  const fake = await startFakeCapability();
+  const fake = await startFakeCapability({ now: () => NOW });
   fake.setRecords(records);
   const client = new CapabilityClient({ baseUrl: fake.baseUrl, token: 'cap-token', retries: 0, retryDelayMs: 0 });
   const identity = { cloudId: 'cl_test', profileId: 'default', hostId: 'h_test' };
@@ -427,6 +427,22 @@ describe('sidecar compact / self / checkpoint HTTP', () => {
     const recovered = await request(`${server.url}/checkpoints/th_offline?agentId=opencode`, 'GET');
     expect(recovered.status).toBe(200);
     expect(recovered.body.data.checkpoint).toMatchObject({ revision: 1, pending: false, source: 'cloud' });
+  });
+
+  it('checkpoint：更早 expiresAt 原样成为 outbox 操作 deadline', async () => {
+    const { server, fake, runtime } = await setup();
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const expiresAt = NOW + 60_000;
+    const pending = await request(`${server.url}/checkpoints/th_deadline?agentId=opencode`, 'PUT', {
+      agentId: 'opencode',
+      state: checkpointState('th_deadline', 'deadline', { cursor: 1 }),
+      expiresAt,
+    });
+    expect(pending.status).toBe(202);
+    const [item] = await runtime.local.outbox.list();
+    expect(item).toBeDefined();
+    expect(item!).toMatchObject({ expiresAt });
+    expect((item!.body as any).expiresAt).toBe(expiresAt);
   });
 
   it('checkpoint：域/权限约束拒绝其他 Agent 与非法域', async () => {

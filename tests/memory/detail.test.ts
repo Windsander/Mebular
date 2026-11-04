@@ -99,6 +99,18 @@ describe('DetailRecord core model', () => {
     expect(pinned).toBe(0);
   });
 
+  it('core 同样拒绝 tool role 搭配 raw_chunk/message', async () => {
+    const marker = `core-tool-kind-${Date.now()}`;
+    const recordId = await makeRecord('agent:core', marker);
+    for (const detailKind of ['raw_chunk', 'message'] as const) {
+      await expect(service.writeDetails([detailInput('agent:core', [recordId], `${marker}-${detailKind}`, {
+        detailKind,
+        role: 'tool',
+        retentionClass: 'tool_output',
+      })])).rejects.toMatchObject({ details: { field: 'detailKind' } });
+    }
+  });
+
   it('过期维护只墓碑详情，不删除 MemoryRecord；record detailAvailable 读取时派生', async () => {
     const marker = `core-prune-${Date.now()}`;
     const recordId = await makeRecord('agent:core', marker);

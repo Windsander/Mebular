@@ -162,35 +162,51 @@ export class OutboxReplayer {
   }
 
   private async replayItem(item: OutboxItem): Promise<ItemOutcome> {
+    const lease = await this.outbox.acquireReplayLease(item.id, { now: this.now() });
+    if (lease.state === 'leased') return { outcome: 'skipped' };
+    if (lease.state === 'expired') {
+      return {
+        outcome: 'dead',
+        error: { code: 'retention_expired', message: 'outbox 操作已超过截止时间', at: this.now() },
+      };
+    }
     try {
       const envelope = await this.client!.post(item.endpoint, item.body, {
         idempotencyKey: item.requestId,
         retries: 0,
       });
-      let keepForRetry = false;
-      try {
-        keepForRetry = (await this.onSettled?.(item, envelope.data)) === false;
-      } catch {
-        // 回填缓存/计数失败不影响已提交的 capability 写入。
-      }
+      // 权威回读/必需项确认失败不能吞掉；交由同一 retry/dead/deadline 路径处理。
+      const keepForRetry = (await this.onSettled?.(item, envelope.data)) === false;
       if (keepForRetry) {
         const delay = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** Math.min(6, item.attempts));
-        await this.outbox.recordAttempt(item.id, { error: 'partial_failure', retryDelayMs: delay });
-        return { outcome: 'retry' };
+        const completion = await this.outbox.completeReplay(item.id, {
+          outcome: 'retry',
+          now: this.now(),
+          error: 'partial_failure',
+          retryDelayMs: delay,
+        });
+        return { outcome: completion };
       }
-      await this.outbox.remove(item.id);
+      // HTTP/capability 已确认且本地必需项对账完成；即使响应在 deadline 后到达，
+      // 也只能按 committed 移除活动项，不能再由 cleanup 写成 dead。
+      await this.outbox.completeReplay(item.id, { outcome: 'settled', now: this.now() });
       return { outcome: 'settled', count: settledCount(envelope.data) };
     } catch (error) {
       const view = errorView(error, this.now());
-      if (retryable(error)) {
-        const delay = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** Math.min(6, item.attempts));
-        await this.outbox.recordAttempt(item.id, { error: view.code, retryDelayMs: delay });
+      const canRetry = retryable(error);
+      const delay = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** Math.min(6, item.attempts));
+      const completion = await this.outbox.completeReplay(item.id, {
+        outcome: canRetry ? 'retry' : 'dead',
+        now: this.now(),
+        error: view.code,
+        retryDelayMs: delay,
+      });
+      if (completion === 'retry') {
         return {
           outcome: 'retry',
           error: { ...view, code: view.code === 'internal' ? 'capability_unavailable' : view.code },
         };
       }
-      await this.outbox.deadLetter(item.id, view.code);
       return { outcome: 'dead', error: view };
     }
   }

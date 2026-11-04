@@ -2699,12 +2699,15 @@ export function createController(dependencies = {}) {
         const pending = result.status === 202
           || result.data?.pending === true
           || extractionStatus === 'pending';
-        if (extractionStatus === 'failed') {
+        if (detailFailed && hasObjects) {
+          // C05: a detail write partially failed but graph objects already
+          // exist. This is partial, not a pure extraction failure.
+          stats.ingest.partial += 1;
+          noteFailure('detail_write_failed');
+        } else if (extractionStatus === 'failed') {
           stats.ingest.failedExtraction += 1;
           noteFailure('extraction_failed');
         } else if (detailFailed) {
-          // A 200 completed extraction can still have failed detail writes.
-          // It is a partial result, never committed.
           stats.ingest.partial += 1;
           noteFailure('detail_write_failed');
         } else if (queued) {

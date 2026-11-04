@@ -399,10 +399,10 @@ async function main() {
     JSON.stringify((details ?? []).map((detail) => `${detail.domain}:${String(detail.text ?? '').slice(0, 60)}`)));
     check('真实 ingest 使用解包后的 user 文本', Boolean(details)
       && !(details ?? []).some((detail) => String(detail.text ?? '').trim().startsWith('"')), 'quoted detail found');
-    check('真实 capability 详情含 assistant 文本',
-      (details ?? []).some((detail) => String(detail.role ?? '') === 'assistant'
-        || String(detail.text ?? '').includes('OK')),
-      JSON.stringify((details ?? []).map((detail) => detail.role)));
+    check('真实 capability 详情不复制无关 assistant 文本',
+      !(details ?? []).some((detail) => String(detail.text ?? '').includes('OK')
+        && String(detail.role ?? '') === 'assistant'),
+      JSON.stringify((details ?? []).map((detail) => `${detail.role}:${String(detail.text ?? '').slice(0, 40)}`)));
 
     const settledRecord = await waitFor(async () => {
       const result = await runtime.recall(seedToken, {

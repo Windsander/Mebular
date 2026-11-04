@@ -864,15 +864,21 @@ describe('ingest and compaction', () => {
             },
           }, { status: 202 });
         }
-        if (threadId === 'ses_m1_partial') {
+        if (threadId === 'ses_m1_partial' || threadId === 'ses_m1_partial_failed') {
           return jsonResponse({
             ok: true,
             data: {
               accepted: { chunks: 1, records: 1 },
               records: [{ id: 'rec_partial' }],
               queued: false,
-              detail: { ids: ['det_1'], written: 1, duplicates: 0, queued: 0, failed: 1 },
-              extraction: { id: 'ex_partial', status: 'completed', extractor: 'heuristic', records: [], warnings: [] },
+              detail: { ids: [], written: 0, duplicates: 0, queued: 0, failed: 1 },
+              extraction: {
+                id: 'ex_partial',
+                status: threadId === 'ses_m1_partial_failed' ? 'failed' : 'completed',
+                extractor: 'heuristic',
+                records: [],
+                warnings: [],
+              },
             },
           });
         }
@@ -908,22 +914,23 @@ describe('ingest and compaction', () => {
       'ses_m1_pending',
       'ses_m1_pending_202',
       'ses_m1_partial',
+      'ses_m1_partial_failed',
       'ses_m1_queued',
       'ses_m1_completed',
     ]) {
       await controller.handleEvent({ type: 'session.execution.succeeded', data: { sessionID } });
     }
     const status = controller.getStatus();
-    expect(status.counts.ingest.accepted).toBe(6);
+    expect(status.counts.ingest.accepted).toBe(7);
     expect(status.counts.ingest.failedExtraction).toBe(1);
     expect(status.counts.ingest.pending).toBe(2);
-    expect(status.counts.ingest.partial).toBe(1);
+    expect(status.counts.ingest.partial).toBe(2);
     expect(status.counts.ingest.queued).toBe(1);
     expect(status.counts.ingest.committed).toBe(1);
     expect(status.ingest).toMatchObject({
       failedExtraction: 1,
       pending: 2,
-      partial: 1,
+      partial: 2,
       queued: 1,
       committed: 1,
     });

@@ -1,6 +1,15 @@
 {
   "v": 1,
   "note": "Fleet 三张卡夹具 v1。capability/role 是 internal 记忆节点（metadata.internal=true，internalObject.kind 分别为 agent_capability_card / agent_role_card）；status 只是派发方实时计算对象，不落盘、不同步。夹具不含 command、env、凭据或原始对话。",
+  "internalWrapper": {
+    "note": "writer 负责把逻辑卡片包装为 internal 记忆节点；以下为最小 metadata 示例，不规定 node type",
+    "capability": {
+      "metadata": { "internal": true, "internalObject": { "kind": "agent_capability_card" } }
+    },
+    "role": {
+      "metadata": { "internal": true, "internalObject": { "kind": "agent_role_card" } }
+    }
+  },
   "capability": {
     "v": 1,
     "kind": "agent_capability_card",

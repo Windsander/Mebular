@@ -181,6 +181,7 @@ plan 提交的约束：
 - `plan` 必须是 §6.2 的完整记录，包含 `planId`、`version`、`owner`、`goal`、`budget`、`policy`、`steps`；不是内部 ref，也不是 plan 片段。
 - `task_submit` 的旧必填字段 `intent` / `to` 仍保留。plan 提交时：
   - 调用者设备必须是 `plan.owner.device`；跨设备代提交不在本期 scope。
+  - **所有 plan 的 owner = 提交该 plan 的调用设备/Agent**：root plan owner=A；sub-plan 由执行 step 的设备 B/C 提交，owner=B/C。`parent` 只做 provenance/policy 校验，不改变 owner。
   - `to` 必须是 `{ device: "__plan__", agent: "__plan__" }`（保留的设备/Agent sentinel；不是用户设备/执行器）。
   - `intent` 是 root task 的意图摘要；不得为空。
 - `__plan__` 是保留 device/agent sentinel；`fleet.config.json` 不得配置真实 device/agent 为 `__plan__`，否则配置校验失败。
@@ -210,8 +211,23 @@ plan 提交的约束：
 
 - `status` / `step.status` 是**派生值**，不是第二套持久状态机；plan 节点本身不被改写。
 - `via` = `task`（当前版本物化）或 `reuse`（复用旧版本）；`taskId` 只在 `via=task` 时出现，`sourceTaskId` 只在 `via=reuse` 时出现。
+- `mr` 字段必须始终存在：root plan 为 `{submitted:boolean}`；sub-plan 固定为 `{applicable:false, submitted:false}`。
 - `blockedBy` 是 stepId 或原因码数组，用于观测；不是 task 依赖。
 - `plan` 输出允许 additive；P2 不得改变 `state` 的旧字段。
+
+`task_submit.plan` 成功返回的最小形状：
+
+```json
+{ "ok": true, "planId": "plan-submit-001", "version": 1, "rootTaskId": "plan-submit-001#1#root", "taskId": "plan-submit-001#1#root" }
+```
+
+`task_targets.cards` 的最小形状（仅能力卡摘要）：
+
+```json
+[
+  { "device": "device-B", "agent": "worker", "version": 7, "capabilities": ["fleet.task", "code.write"], "online": true, "inflight": 1 }
+]
+```
 
 ### 3.4 旧端兼容
 
@@ -240,6 +256,7 @@ plan 提交的约束：
 - `PLAN_RETRY_REQUIRED` 只对 plan-owned task 生效；不得影响普通 task 的 retry。
 - 错误 shape 最小为 `{ ok:false, taskId, error:"PLAN_RETRY_REQUIRED" }`；允许附加 `planId`/`version`/`stepId` 便于诊断，但不得创建任务。
 - plan 级取消的识别只依赖 rootTaskId（`#root`）；不新增 plan handle 字段或方法。
+- root task 已终态时，`task_cancel(rootTaskId)` 与普通 task 一致返回 `already-terminal`，不再级联取消 step task。
 
 ---
 
@@ -336,7 +353,9 @@ metadata.internalObject.kind =
 - 不包含 command 路径、env、密钥、凭据、原始对话。
 - `capabilities` 是硬过滤标签；不是授权本身，授权仍由 L1/peer/policy 决定。
 - 最新版本按 `(device, agent)` 解析；同版本平局取稳定序列化较大者（确定性）。
-- tombstone 是最后版本；不得在同一版本上原地修改。
+- tombstone 是最后版本；不得在同一版本上原地修改；tombstone 后不得回退到更旧版本。
+- tombstone 允许 `capabilities: []`、`tools: []`、`limits: {}`、`permissions.taskNamespaces: []`；仍保留 `device`/`agent`/`version`/`runtime`/`provenance`/`signature`。
+- 正常能力卡也允许 `limits: {}` 或 `permissions.taskNamespaces: []`（表示无额外限制/无任务域授权）；`agents` 目录可以为空（该设备暂无 Agent）。
 - 签名覆盖规范化后的卡片内容；实现必须固定 canonical JSON 规则。
 - 能力卡只做硬过滤，不做软排序；不做授权。
 
@@ -422,6 +441,7 @@ metadata.internalObject.kind =
 - `planId` 在同一逻辑计划内稳定；`version` 从 `1` 单调递增；`version > 1` 必须有 `supersedesVersion = version - 1`。
 - 旧版本永久保留，用于审计、恢复、MR receipt 检查和 reuse 校验。
 - plan 节点作者 = `plan.owner`；复用既有记忆作者签名/信任，不新增签名协议。
+- plan 节点使用**任务板同一 namespace**（`tasks` 或 `fleet.config.json` 配置的 task namespace）；不新增 `planNamespace` 字段；coordinator 授权检查也基于该 namespace。
 - root task 是 plan 的 orchestration anchor：taskId `${planId}#${version}#root`，target 固定为 `{device:"__plan__", agent:"__plan__"}`，`dispatch="root-only"`，由 materializer 管理生命周期；它不是 step，也不计入 plan step 预算/并发。`__plan__` 是保留设备/Agent sentinel，真实 device/agent 不得使用。
 - **root plan** 的 root task 与 step task 都是 task-tree root（`trace.chain=[]`）；它们之间不建立 task 父子边，plan 关系只由 taskId 命名与 plan 节点表达。
 - **sub-plan** 的 root task 与 step task 必须由父 step task 派生：`trace.causedBy=父 step taskId`，`chain=父 chain + 父 taskId`。这样父 step 的 subtree complete 覆盖整个子 plan；这是 task-tree 派生，不是 plan-to-plan 依赖。
@@ -464,9 +484,9 @@ metadata.internalObject.kind =
 | `version` | 是 | 整数 `>=1`；同一 planId 单调 |
 | `supersedesVersion` | `version>1` 时是 | 必须等于 `version-1`；`version=1` 时禁止 |
 | `retryOfStepId` | 否 | 仅 `version>1`；必须存在于上一版本；不得指向 `mr` |
-| `parent` | 否 | 仅子 plan：`{planId, version, stepId}`；父 step 必须 `allowSubcontract=true`；只用于 provenance/policy 校验，不是执行依赖 |
+| `parent` | 否 | 仅子 plan：`{planId, version, stepId}`；父 **plan policy** 必须 `allowSubcontract=true`；父 stepId 只用于 provenance/定位父 task；step schema 不新增 `allowSubcontract`；不是执行依赖 |
 | `reason` | 否 | 短审计文本；不得含原始对话/凭据 |
-| `owner` | 是 | `{device, agent}` 非空 |
+| `owner` | 是 | `{device, agent}` 非空；必须等于提交该 plan 的调用设备/Agent（root=A，sub-plan=执行 step 的 B/C） |
 | `goal` | 是 | 非空；描述目标，不写原始对话 |
 | `createdAt` | 是 | 有限数字；仅审计，不参与一致性判定 |
 | `budget` | 是 | `{maxSteps, maxAttemptsPerStep}` |
@@ -479,8 +499,8 @@ metadata.internalObject.kind =
 
 `budget`：
 
-- `maxSteps`：整数 `1..256`，必须 `>= steps.length`。
-- `maxAttemptsPerStep`：整数 `1..5`；step 尝试次数 = `1 + 指向该 step 的重试版本数`；超过则拒绝新版本。
+- `maxSteps`：整数 `1..256`，必须 `>= steps.length`；这是**每 plan 上限**，不是父 plan 的“剩余 step 预算”。
+- `maxAttemptsPerStep`：整数 `1..5`；step 尝试次数 = **实际为该 step 重新物化 task 的 plan version 数**（含初始版本）；`reuse` 复用旧任务不计数；超过则拒绝新版本。
 
 `policy`：
 
@@ -490,7 +510,7 @@ metadata.internalObject.kind =
 | `allowedAgents` | 否 | 字符串数组；去重 |
 | `requireCapabilities` | 否 | 字符串数组；去重；所有候选必须满足 |
 | `maxParallel` | 否 | 整数 `1..16`，默认 `8`；有效并发 = `min(plan.policy.maxParallel, 运行时上限)` |
-| `allowSubcontract` | 否 | 布尔，默认 `false`；`false` → step task `dispatch="root-only"`；`true` → `children-ok`，但子 plan policy 必须收紧 |
+| `allowSubcontract` | 否 | 布尔，默认 `false`；**plan-level 语义**：仅表示是否允许派生 sub-plan；`false` 时子 plan 提交被 `PLAN_POLICY` 拒绝。不得映射为 task `dispatch`，也不阻止普通 task-tree 子任务 |
 
 ### 6.3 step schema
 
@@ -514,10 +534,11 @@ metadata.internalObject.kind =
 - `kind=mr`：仅 **root plan**；恰好一个；必须是唯一 sink；不得有依赖它的 step；不得有 `join`；task 一律 `dispatch="root-only"`；acceptance 必须是 `mr-once`。sub-plan 禁止 `kind=mr`。
 - **MR 是 root plan 最后 step**：除 MR 外每个 step 都必须有路径到达 MR；MR 没有后继；root plan 只有一个 sink = MR。
 - **MR 的直接 pre-MR gate 必须是 `kind=join/reduce`**：MR 的 `dependsOn` 必须恰好 1 个 step；该 step 必须是 `join` 或 `reduce`，且 `join.mode="all"` 或 `quorum === dependsOn.length`。`any`、`quorum < dependsOn.length` 对 MR 非法；违规统一 `PLAN_MR`。
+- **root plan 的 MR 依赖闭包必须全为 all/满 quorum**：root plan 内所有 join/reduce 都必须在 MR 依赖闭包内（所有非 MR step 都必须能到达 MR），因此 root plan **禁止任何 `any` 或部分 quorum**；`any`/部分 quorum 只允许出现在 sub-plan（sub-plan 无 MR）。
 - **sub-plan 的最终 step**：sub-plan 没有 MR；必须有唯一 sink（`task`/`join`/`reduce`），其余 step 都有路径到它；sub-plan done = 该 sink complete。
 - `dependsOn` 只允许引用同一 `planId + version` 的 step；跨 plan 依赖禁止。
 - `reuse` 只允许引用同一 `planId` 的更早版本；不得形成跨版本环；被引用 step 必须完成且 acceptance 通过。
-- 子 plan（执行者派生）必须使用新 `planId`，可带 `parent:{planId,version,stepId}`；policy 必须是父 plan 的子集；父 step 通过 task 派生树等待，不得在 plan 里引用子 plan step。
+- 子 plan（执行者派生）必须使用新 `planId`，`owner` = 提交它的执行设备/Agent（如 B/C），可带 `parent:{planId,version,stepId}`；父 **plan policy** 必须 `allowSubcontract=true`；policy 按 §7.5 逐字段收紧；父 step 通过 task 派生树等待，不得在 plan 里引用子 plan step。
 - `parent` 只用于 provenance/policy 校验，不是 `dependsOn`；不构成 plan-to-plan 执行依赖。
 - 子 plan 的 root/step task 必须由父 step task 派生；子 plan 失败 = 父 step 失败，重试必须走父 plan 新版本/新父 step task，不得在同一父 task 下换子 plan 版本。
 - 子 plan 不提交 MR；只有 root plan 的 MR 是本期唯一合并请求。
@@ -552,9 +573,9 @@ metadata.internalObject.kind =
 | `PLAN_DUP_STEP` | `stepId` 重复或不符合正则 |
 | `PLAN_MISSING_DEP` | `dependsOn` 引用不存在的 step、自依赖、重复依赖 |
 | `PLAN_CYCLE` | Kahn 拓扑排序后节点数 != steps.length |
-| `PLAN_BUDGET` | `steps.length > maxSteps`，`maxSteps`/`maxAttemptsPerStep` 越界 |
-| `PLAN_POLICY` | policy 形状/范围非法；子 plan policy 不是父集子集；`parent` 无效或父 step 未允许分包 |
-| `PLAN_MR` | root plan：MR 数量 != 1、MR 有后继、存在非 MR sink、有路径到不了 MR、MR 直接依赖不是恰好 1 个 join/reduce、gate 为 `any` 或 `quorum < dependsOn.length`；sub-plan：出现 MR、或存在非唯一 sink |
+| `PLAN_BUDGET` | `steps.length > maxSteps`，`maxSteps`/`maxAttemptsPerStep` 越界；子 plan `maxSteps > parent.maxSteps`；子 plan 任务装不进父 step task 的剩余 `TaskBudget` |
+| `PLAN_POLICY` | policy 形状/范围非法；子 plan 逐字段衰减不满足 §7.5；`parent` 无效；父 plan policy `allowSubcontract=false`；`owner` 不是提交者 |
+| `PLAN_MR` | root plan：MR 数量 != 1、MR 有后继、存在非 MR sink、有路径到不了 MR、MR 直接依赖不是恰好 1 个 join/reduce、MR 依赖闭包内任意 join/reduce 为 `any` 或 `quorum < dependsOn.length`；sub-plan：出现 MR、或存在非唯一 sink |
 | `PLAN_ACCEPTANCE` | acceptance 形状与 kind 不匹配 |
 | `PLAN_REUSE` | reuse 版本非法、引用不存在、定义变化、旧结果未完成 |
 | `PLAN_CONFLICT` | 同一 `planId + version` 已存在，但规范化内容不同；不创建任何对象 |
@@ -622,7 +643,8 @@ materializer 每轮只做以下事：
    d. 创建 task 前按确定性 taskId 查重；已存在则跳过（幂等）。
 5. 通过 Fleet 内部 API 写 step task；eventId=`${stepTaskId}#created`；
    root plan step 用 trace.chain=[]；sub-plan step 用 trace.causedBy=父 step taskId；
-   dispatch 按 allowSubcontract。该路径不经过 MCP `task_submit`。
+   **不根据 allowSubcontract 设置 task dispatch**（普通 task-tree 子任务仍由既有
+   TaskBudget/root dispatch/planner 控制）。该路径不经过 MCP `task_submit`。
 6. plan 完成/失败/取消时，用既有事件把 root task 推进到 done/failed；root task 不计入
    maxParallel，也不写 plan 状态字段。
 7. 不写 plan 状态、不写 step 状态、不改 plan 节点。
@@ -636,6 +658,7 @@ materializer 每轮只做以下事：
 - step task 只通过 Fleet 内部 API 创建，不调用 MCP `task_submit`；MCP 不暴露 step materialization 入口或 plan ref。
 - root task 由 `task_submit(plan=...)` 创建；materializer 只补状态事件，不重复创建；若发现 plan 存在但 root task 缺失，按确定性 taskId 补建一次。
 - root task 的 `to` 固定为 `{device:"__plan__", agent:"__plan__"}` sentinel；新 worker 显式跳过，旧 worker 因 device 不匹配自然跳过；任何 worker 都不应执行它或写 failed。
+- `allowSubcontract` 只控制 sub-plan 创建；不映射 task `dispatch`，不提供 per-step no-child 语义；普通 task-tree 子任务仍由既有 `TaskBudget`/root dispatch/planner 规则控制。
 - 创建 task 失败（NO_TARGET）不写“失败”状态；step 为 blocked，下一轮重新评估。
 - 预算：`maxSteps` 限制 plan step 数；`maxAttemptsPerStep` 限制重试版本；有效并发 = policy/运行时上限的较小值。
 - 不修改 core 语义；不新增事件类型；不新增 MCP 方法。
@@ -643,7 +666,7 @@ materializer 每轮只做以下事：
 ### 6.9 coordinator 与恢复
 
 - 默认 coordinator = plan owner 设备；但 **正确性不依赖 lease/leader 选举**。
-- 授权设备 = 已订阅 plan namespace、且在 owner 的 L1 授权集合内的设备；`policy.allowedDevices` 只限制 task 目标，不限制 coordinator；未授权设备不得运行 materializer。
+- 授权设备 = 已订阅**任务板 namespace**（plan 节点所在 namespace，即 `tasks`/配置的 task namespace）、且在 owner 的 L1 授权集合内的设备；不新增 plan namespace 字段；`policy.allowedDevices` 只限制 task 目标，不限制 coordinator；未授权设备不得运行 materializer。
 - owner 可以在运维上指定另一授权设备接管；接管不新增 plan 字段、MCP 方法或 UI 入口；确定性 taskId + 确定性 eventId + 既有 eventId 去重保证不重复建 task。
 - materializer 写入的 task `actor` = 当前 coordinator 的 `{device, agent}`；不伪造 owner。
 - root task 生命周期由 materializer 管理：提交时 `created(queued)`；开始推进时用既有 `claimed`/`running`；root plan 在 MR done 后、sub-plan 在唯一 sink complete 后写 `done`；失败/取消写 `failed`（reason 明确）。不新增事件类型。
@@ -664,8 +687,8 @@ materializer 每轮只做以下事：
 | `running` | root task claimed/running，或至少一个 step task 存在，且 plan 未完成 |
 | `blocked` | root task running，有 ready step 但 NO_TARGET/等待 join/等待卡片；无永久失败 |
 | `done` | root task terminal done；root plan 还要 MR task terminal done + `mr-once` 通过；sub-plan 还要唯一 sink step complete |
-| `failed` | 永久失败：依赖失败、acceptance 失败、预算/重试超限、root MR 失败、root task failed |
-| `cancelled` | plan/step 被显式取消 |
+| `failed` | 永久失败：依赖失败、acceptance 失败、预算/重试超限、root MR 失败、root task failed；**单 step cancel/failure 默认也归入 failed**（除非新 plan version 重试） |
+| `cancelled` | **仅 root plan 被显式 `task_cancel(rootTaskId)`**；单 step cancel 不把 plan 标为 cancelled |
 
 `task_status.plan` 返回该派生进度；plan 节点本身不可变、不写状态字段。
 
@@ -763,16 +786,17 @@ policy 只能**单调收紧**，不能放宽：
 ```text
 child.allowedDevices      ⊆ parent.allowedDevices（父缺省 = 全部授权）
 child.allowedAgents       ⊆ parent.allowedAgents
-child.requireCapabilities ⊇ parent.requireCapabilities
+child.requireCapabilities ⊇ parent.requireCapabilities（可要求更多，不能减少）
 child.maxParallel         ≤ parent.maxParallel
 child.allowSubcontract    = parent.allowSubcontract && child.requested
-child.budget.maxSteps     ≤ parent 剩余 step 预算
+child.budget.maxSteps     ≤ parent.budget.maxSteps（每 plan 上限，不是“剩余 step”）
 ```
 
-- 父 `allowSubcontract=false` → 任何子 plan 创建都被拒绝。
-- 子 plan 使用新 `planId` + `parent:{planId,version,stepId}`；父 step 必须 `allowSubcontract=true`；子 plan 不提交 MR；子 plan 的 root/step task 由父 step task 派生，父 step 通过 task 派生树等待子任务，不在 plan 里引用子 plan step。
+- 子 plan 的 root/step task 仍计入**父 step task 的既有 `TaskBudget`**（`maxTasks`/`maxDepth`/`maxChildren`）；`child.maxSteps` 必须能放进父 step task 的剩余 `maxTasks`。不新增预算字段，复用 core `TaskBudget`/`treeViolations`。
+- 父 **plan policy** `allowSubcontract=false` → 子 plan 提交被 `PLAN_POLICY` 拒绝，不创建任何对象；`allowSubcontract=false` 不映射 task `dispatch`，不阻止普通 task-tree 子任务。
+- 子 plan 使用新 `planId` + `parent:{planId,version,stepId}`；step schema 不新增 `allowSubcontract`；子 plan 不提交 MR；子 plan 的 root/step task 由父 step task 派生，父 step 通过 task 派生树等待子任务，不在 plan 里引用子 plan step。
 - `parent` 只用于 provenance/policy 校验，不是执行依赖；`dependsOn` 跨 plan 一律拒绝；`reuse` 只允许同 planId 旧版本。
-- policy 拒绝返回 `POLICY_DENIED`，不静默降级。
+- route policy 拒绝返回 `POLICY_DENIED`；子 plan 结构/policy 校验失败返回 `PLAN_POLICY`；均不静默降级。
 
 ### 7.6 `why` 与原因码
 
@@ -824,7 +848,7 @@ child.budget.maxSteps     ≤ parent 剩余 step 预算
 - **subtree complete**：子树内所有任务 terminal；且全部为 `done`。任一 `failed`/cancelled → step 失败。
 - **step complete**：step task terminal `done` + subtree complete + acceptance 通过。
 - **step failed**：step task failed、子树有失败、或 acceptance 失败；不得原地重试。
-- **plan failed**：存在不可恢复的 step 失败，且没有更新的 plan 版本；MR 永不提前提交。
+- **plan failed**：存在不可恢复的 step 失败、单 step cancel，或永久失败，且没有更新的 plan 版本；MR 永不提前提交。`cancelled` 只用于 root plan 被显式取消。
 
 ### 8.2 join 模式
 
@@ -835,7 +859,7 @@ child.budget.maxSteps     ≤ parent 剩余 step 预算
 | `quorum` | 至少 `quorum` 个依赖 complete | `completed + 仍可能成功的 pending < quorum` | 创建 join/reduce task；对未完成依赖尽力 cancel |
 
 - `quorum` 必须是整数 `1..dependsOn.length`；`all`/`any` 禁止 `quorum`。
-- `any` 或 `quorum < dependsOn.length` 的 join/reduce **不能作为 MR 的直接 pre-MR gate**；MR 前必须再汇合为 `all` 或满 quorum gate（§8.4）。
+- **root plan 禁止任何 `any` 或部分 quorum**：MR 依赖闭包内所有 join/reduce 必须是 `all` 或满 quorum；不能只要求直接 gate 是 all/满 quorum，上游 `any` 也不行。`any`/部分 quorum 只允许出现在 sub-plan（sub-plan 无 MR，§8.4）。
 - join/reduce task 只在条件满足后创建；不提前创建占位 task。
 - 未完成依赖的 cancel 是 best-effort；不改变已满足的 join 条件。
 - join/reduce 自身的 task 仍须 terminal done + subtree complete + acceptance 才算 step complete。
@@ -852,9 +876,11 @@ child.budget.maxSteps     ≤ parent 剩余 step 预算
 
 - **只有 root plan**（无 `parent`）恰好一个 `kind=mr` step；MR 是唯一 sink；所有非 MR step 都有路径到 MR。sub-plan 禁止 MR。
 - **直接 pre-MR gate 必须是 `kind=join/reduce`**：MR 的 `dependsOn` 必须恰好 1 个 step；该 step 必须是 `join` 或 `reduce`；其 `join.mode` 必须是 `all`，或 `quorum === dependsOn.length`。`any`、`quorum < dependsOn.length` 对 MR 非法，统一 `PLAN_MR`。
+- **MR 依赖闭包全为 all/满 quorum**：root plan 内任意 join/reduce 为 `any` 或 `quorum < dependsOn.length` 都非法；不能只校验直接 gate。
 - gate 必须 complete，MR 才能创建；gate 的依赖分支必须全部成功（不得用部分成功提前放行）。
+- **运行时双保险**：创建 MR task 前，必须再次确认该 root plan version 的**所有非 MR step 均 complete**（task done + subtree complete + acceptance 通过），而不只是唯一 gate complete。
 - MR task 一律 `dispatch="root-only"`，不得派生子任务。
-- MR task 创建条件：唯一 pre-MR gate complete + 无既有 MR task + root plan 未失败/取消。
+- MR task 创建条件：所有非 MR step complete + 无既有 MR task + root plan 未失败/取消。
 - **MR 只允许一次**：按 root `planId`（跨版本）唯一。创建新版本 MR 前必须扫描该 root planId 所有旧版本的 MR task：
   - 任一 MR task 存在且非终态 → 等待，不创建新 MR。
   - 任一 MR task terminal done → root plan done，不再创建 MR。
@@ -874,7 +900,7 @@ child.budget.maxSteps     ≤ parent 剩余 step 预算
   - 未受影响的已完成 step 可标 `reuse:{version:旧版本}`；materializer 校验旧任务 terminal done + acceptance 后视为完成，不建新 task。
   - 失败 step 及其下游 join/reduce（root plan 还包括 MR）必须重建（新 taskId）。
   - 若旧 step 结果不满足 acceptance，`reuse` 无效，plan 拒绝；不得静默重跑。
-  - `maxAttemptsPerStep` 超限 → 拒绝新版本。
+  - `maxAttemptsPerStep` 按“新版本是否重新物化该 step”计数；`reuse` 不计数；超限 → 拒绝新版本。
 - 若该 root planId 已存在任一 MR task，禁止创建重试版本；MR 唯一性优先。sub-plan 没有 MR，但仍受 parent 的预算/attempt 限制。
 - **sub-plan 失败视为父 step 失败**：重试必须走父 plan 新版本/新父 step task；不得在同一个父 step task 下提交子 plan 重试版本，否则旧失败子树会污染父 step 的 subtree complete。
 - 成功分支不得被静默跳过；`reuse` 必须是显式字段，并有旧任务证据。
@@ -884,13 +910,14 @@ child.budget.maxSteps     ≤ parent 剩余 step 预算
 
 - plan/step 取消仍只使用既有 `task_cancel` 语义；不新增 MCP 方法、输入字段或 plan handle 字段。
 - **plan 级取消**通过 `task_cancel(rootTaskId)` 识别（root taskId 是 plan version handle）；step 级取消通过 `task_cancel(stepTaskId)`。root taskId 以 `#root` 结尾，step taskId 以 `#${stepId}` 结尾，不需要额外字段。
+- root task 已终态时，`task_cancel(rootTaskId)` 返回 `already-terminal`，不再级联；与普通 task 行为一致。
 - `task_cancel(rootTaskId)` 必须：
   1. 按既有语义把 root task 写为 failed（reason=CANCELLED）；
   2. 停止该 plan version 的**新物化**；
   3. best-effort 取消该 version 所有非终态 step task（按 `${planId}#${version}#` 扫描），并对每个 step task 取消其派生子树（含 sub-plan 的 root/step task）；
   4. 不改 plan 节点；plan 派生状态为 `cancelled`。
 - **永久失败**（分支失败无重试、acceptance 失败、预算/重试超限、root MR 失败等）同样触发第 2–3 步清理：materializer 不再推进该 version，并 best-effort 取消所有非终态 step task 及其派生树；root task 写 failed 并带明确 reason。
-- `task_cancel(stepTaskId)` 仍只取消该 step task 及其派生子树；已终态任务不变；plan 是否永久失败由 materializer 依据 step 终态判定。
+- `task_cancel(stepTaskId)` 仍只取消该 step task 及其派生子树；已终态任务不变；单 step cancel/failure 默认使 plan `failed`（除非新 plan version 重试），**不**把 plan 标为 `cancelled`。`cancelled` 只表示 root plan 被显式取消。
 - 取消是 best-effort 且幂等；单个取消失败不得让已进入 failed/cancelled 的 plan 复活；后续 tick 可以重试取消未终态任务。
 - 已提交 MR 不撤销：MR receipt 一旦 terminal done，取消不撤销 MR，不再提交新 MR；MR 唯一性仍成立。若 MR 尚未提交，取消后不得再创建 MR。
 - sub-plan 取消只影响该 sub-plan version；父 step 因 subtree 中出现 failed/cancelled 而失败，按 §8.5 走父 plan 新版本重试。
@@ -919,8 +946,8 @@ A1–A10 来自上位计划 §7；A11–A13 是 P0 对既有边界（隐私、po
 | ID | 场景 | 期望（必须可断言） | 证据 | Gate |
 |---|---|---|---|---|
 | A1 | 三机 E2E：A 通过 `task_submit.plan` 提交完整 plan，B/C/D 并行，J 验收，MR 提交 | 返回 `planId`/`version`/`rootTaskId`；plan 节点 + root task 创建成功；MR 直接 gate 是 `all` 或满 quorum join/reduce；MR 只提交一次；root task 在 MR 后 done；task 树无环；每任务恰好执行一次 | E2E 脚本日志 + plan/root/step task 导出 + MR receipt | G4/G6 |
-| A2 | kill coordinator / executor 后重启；plan cancel | 从 plan + root task 恢复；不丢任务；不重复执行；taskId 不变；`task_cancel(rootTaskId)` 停止新物化并 best-effort 取消该 version 全部非终态 step task 及其 sub-plan 派生树；已提交 MR 不撤销 | kill/restart 日志 + task 列表计数 + cancel 级联清单 + eventId 去重记录 | G2/G4/G6 |
-| A3 | 一个分支失败后重试/永久失败 | MR 不提前提交；失败分支不静默跳过；新 plan 版本重跑失败分支；成功分支 reuse 有证据；join 重建；MR 一次；gate 仍为 all/满 quorum；永久失败时停止新物化并清理非终态 step task | 两版 plan + task 事件 + join/MR 时间线 + cleanup 清单 | G4 |
+| A2 | kill coordinator / executor 后重启；plan cancel | 从 plan + root task 恢复；不丢任务；不重复执行；taskId 不变；`task_cancel(rootTaskId)` 停止新物化并 best-effort 取消该 version 全部非终态 step task 及其 sub-plan 派生树；已提交 MR 不撤销；root 已终态时 `already-terminal` 且不级联 | kill/restart 日志 + task 列表计数 + cancel 级联清单 + already-terminal 断言 + eventId 去重记录 | G2/G4/G6 |
+| A3 | 一个分支失败后重试/永久失败 | MR 不提前提交；失败分支不静默跳过；新 plan 版本重跑失败分支；成功分支 reuse 有证据；join 重建；MR 一次；root plan 所有 join/reduce 仍为 all/满 quorum；MR 前所有非 MR step complete；永久失败时停止新物化并清理非终态 step task | 两版 plan + task 事件 + join/MR 时间线 + all-non-MR-complete 断言 + cleanup 清单 | G4 |
 | A4 | 重复投递同一事件/重复 materializer tick/重复 plan 提交 | 同 planId+version+规范化内容重复提交返回已有 plan/root task；内容不同 → `PLAN_CONFLICT`；不重复建 plan/root task/task/join/MR；状态收敛 | 幂等测试/冲突负例/故障注入日志 | G2/G4/G6 |
 | A5 | plan 含环/缺依赖/重复 step/非法 MR gate | plan 层拒绝；不创建 plan 节点、root task 或任何 step task；task 层无环；`PLAN_CONFLICT` 不产生部分对象 | validator 负例输出 + plan/root/task 计数为 0 | G2 |
 | A6 | 目标无能力/未授权/显式 to 越权 | 不会被选中；返回 `NO_TARGET`/`why`；不创建 task；显式 to 也不得改派 | route 决策日志 + 负例断言 | G3 |
@@ -929,7 +956,7 @@ A1–A10 来自上位计划 §7；A11–A13 是 P0 对既有边界（隐私、po
 | A9 | MCP 检查 | 16 个方法名称/必填字段不变；无 `plan_*`/`agent_card_*`；旧 `task_submit` 显式 `to` 正常；`task_submit.plan` 完整 plan 提交可用 | tool-surface 快照 + 旧调用回归 + plan 提交回归 | G1/G6 |
 | A10 | 旧 worker/peer/config + root sentinel | 旧 worker 执行普通 task；旧 worker 看到 root task（`to.device="__plan__"`）不执行、不写 failed/UNKNOWN_AGENT、不影响 plan 状态；旧 peer 忽略 plan/card；旧 config 有效；coordinator 必须新版本 | 兼容性报告 + 旧端进程日志 + root task 状态不变断言 | G1/G2/G4/G6 |
 | A11 | 隐私与敏感信息 | capability/role card、plan、日志、SSE 不含原始对话/command/env/凭据；role 只存摘要/标签/evidenceRefs | 静态 grep + 运行时导出 + 隐私测试 | G5/G6 |
-| A12 | policy 衰减/子 plan/确定性 | 子 plan policy ⊆ 父；`allowSubcontract=false` 拒绝子 plan；跨 plan 依赖拒绝；同输入 tie-break 恒定 | 负例测试 + 两次路由结果一致 | G3/G4 |
+| A12 | policy 衰减/子 plan/预算/owner/确定性 | allowedDevices/Agents ⊆ 父；requireCapabilities ⊇ 父；maxParallel ≤ 父；allowSubcontract 仅父=true 时可 true；child.maxSteps ≤ parent.maxSteps；child root/step task 装入父 step task 的 TaskBudget；owner=提交者（sub-plan B/C）；`allowSubcontract=false` 拒绝子 plan；普通 task-tree 子任务不受该字段影响；跨 plan 依赖拒绝；同输入 tie-break 恒定 | 负例测试 + 预算/treeViolations 断言 + 两次路由结果一致 | G3/G4 |
 | A13 | plan-owned `task_retry` 负例 | root/step/MR task 调 `task_retry` → `PLAN_RETRY_REQUIRED`，不创建新任务、不写 created、不污染 subtree；普通 task retry 旧行为不变 | 负例断言 + task 计数不变 + 普通 task 回归 | G2/G4 |
 
 验收判定：
@@ -1116,7 +1143,8 @@ E-<gate>-<n>
 - [ ] root task target 固定 `{device:"__plan__", agent:"__plan__"}`；新 worker 显式跳过；旧 worker 因 device 不匹配不执行、不写 failed。
 - [ ] plan 级 cancel 通过 rootTaskId 识别并级联清理；`task_retry` 对 plan-owned task 返回 `PLAN_RETRY_REQUIRED`；旧普通 task 行为不变。
 - [ ] route/policy/why/NO_TARGET/assign-only 冻结。
-- [ ] join/MR/subtree complete/acceptance/重试规则冻结；MR 直接 gate 必须 all/满 quorum。
+- [ ] join/MR/subtree complete/acceptance/重试规则冻结；root plan 所有 join/reduce all/满 quorum；MR 前所有非 MR step complete。
+- [ ] 子 plan policy 逐字段衰减、预算/owner 规则冻结；`allowSubcontract` 仅 plan-level，不映射 task dispatch。
 - [ ] A1–A13 验收矩阵、per-session review、CR/版本、handoff 模板齐全。
 - [ ] 只新增本文档 + 两个 protocol fixture；未改 `src/`、`tests/`、`packages/console/`、`packages/mcp/`。
 - [ ] fixtures 是合法 JSON 且为规范来源。
@@ -1126,7 +1154,7 @@ E-<gate>-<n>
 
 - [ ] `agents[].capabilities` 只是 optional；旧 config 仍有效；真实 device/agent 不得配置为保留 sentinel `__plan__`。
 - [ ] 能力卡从 config + ExecutorRegistry + 运行环境编译；字段符合 §5.1。
-- [ ] 版本单调、设备签名、tombstone；最新版本按 `(device, agent)` 解析。
+- [ ] 版本单调、设备签名、tombstone；最新版本按 `(device, agent)` 解析；tombstone 允许空 `limits`/`taskNamespaces`/`capabilities`/`tools`，不回退旧版本。
 - [ ] 三机互见能力卡；旧 `task_submit` 显式 `to` 完全不变。
 - [ ] 旧 worker 回归：root task `to.device="__plan__"` 不被旧 worker 执行、不写 failed/UNKNOWN_AGENT、不影响 plan 状态。
 - [ ] internal 可见性：记忆列表/域计数/搜索隐藏。
@@ -1145,6 +1173,7 @@ E-<gate>-<n>
 - [ ] root task target 固定 `{device:"__plan__", agent:"__plan__"}`；新 worker 显式跳过；旧 worker 看到 root task 不执行、不写 failed、不影响 plan 状态。
 - [ ] `task_retry` 对 plan-owned root/step/MR 返回 `PLAN_RETRY_REQUIRED`，不创建任务；普通 task retry 不变。
 - [ ] materializer 只推进 ready step；step task 走 Fleet 内部 API，不走 MCP；append 幂等；重复物化不重复建 task。
+- [ ] `maxAttemptsPerStep` 按“新版本是否重新物化该 step”计数；`reuse` 不计数。
 - [ ] root task 由提交创建、由 materializer 管理状态；kill/restart 不重复创建。
 - [ ] coordinator kill/restart 后从 plan + root task 恢复；不丢任务、不重复执行。
 - [ ] `task_status` 返回 plan 进度；MCP 方法数仍 16；旧 worker 能执行普通 task。
@@ -1157,7 +1186,7 @@ E-<gate>-<n>
 - [ ] route 解析 `require`/`prefer`/`strategy`；硬过滤顺序符合 §7.2。
 - [ ] 状态排序与 rendezvous tie-break 确定；同输入同结果。
 - [ ] `why`/`NO_TARGET` 可解释；无能力/未授权不会被选中；显式 `to` 不改派。
-- [ ] policy 衰减符合 §7.5；子 plan 只能收紧；跨 plan 依赖拒绝。
+- [ ] policy 逐字段衰减符合 §7.5（devices/agents subset、caps superset、maxParallel、allowSubcontract AND、child.maxSteps ≤ parent.maxSteps）；owner=提交者；子 plan root/step 任务装入父 step task TaskBudget；`allowSubcontract=false` 拒绝子 plan；跨 plan 依赖拒绝。
 - [ ] 本期 assign-only；无 claim/lease/抢单。
 - [ ] 角色卡未接入（P5 前）；MCP 方法数 16；UI 零新增。
 - 证据：三机分配、越权负例、两次路由一致性、why 日志。
@@ -1167,13 +1196,15 @@ E-<gate>-<n>
 
 - [ ] `all`/`any`/`quorum` 行为符合 §8.2；只在条件满足后创建 join/reduce。
 - [ ] subtree complete/acceptance 正确；后代失败不被掩盖。
-- [ ] MR 是 root plan 唯一最后 step；直接 pre-MR gate 是 join/reduce 且 `all` 或满 quorum；gate 必须先完成；root task 在 MR 后 done；sub-plan 不提交 MR。
-- [ ] `any` 或 `quorum < dependsOn.length` 作为 MR 直接 gate 被 `PLAN_MR` 拒绝；部分分支成功不会提前 MR。
+- [ ] MR 是 root plan 唯一最后 step；直接 pre-MR gate 是 join/reduce 且 `all` 或满 quorum；root plan 的 MR 依赖闭包内所有 join/reduce 都是 all/满 quorum；gate 必须先完成；root task 在 MR 后 done；sub-plan 不提交 MR。
+- [ ] `any` 或 `quorum < dependsOn.length` 出现在 root plan 任意位置（含上游）都被 `PLAN_MR` 拒绝；部分分支成功不会提前 MR。
+- [ ] 创建 MR 前运行时再次断言该 root plan version 所有非 MR step complete（done + subtree + acceptance），不只依赖 gate。
 - [ ] MR 按 root planId 只提交一次；重复投递/重复版本不重复 MR。
 - [ ] 分支失败不提前 MR；重试新 plan 版本；reuse 有证据；join 重建；retry 后 gate 仍为 all/满 quorum。
 - [ ] `task_cancel(rootTaskId)` 是 plan 级取消：停止新物化，best-effort 取消该 version 全部非终态 step task 及 sub-plan 派生树；永久失败同样清理；已提交 MR 不撤销。
 - [ ] `task_cancel(stepTaskId)` 只取消该 step 及其派生子树；普通 task_cancel 旧语义不变。
 - [ ] `task_retry` 对 plan-owned root/step/MR 返回 `PLAN_RETRY_REQUIRED`，不创建派生任务；普通 task retry 不变。
+- [ ] 子 plan owner=提交者；policy 逐字段衰减；child.maxSteps ≤ parent.maxSteps；child 任务装入父 step TaskBudget；`allowSubcontract=false` 拒绝子 plan；普通 task-tree 子任务不受影响。
 - [ ] kill/restart 可恢复；plan 环拒绝；task 层无环；cancel 支持子树与 plan 级级联。
 - [ ] 无跨 plan 依赖；MCP 方法数 16；UI 零新增。
 - 证据：三机并行→J→pre-MR→MR、分支失败/重试、kill/restart、plan cancel 级联、task_retry 负例、重复投递、环负例。
@@ -1250,6 +1281,8 @@ E-<gate>-<n>
 | 三张卡生成/可见性 | §5 | G1/G5 | A7/A11 |
 | plan 创建路径/幂等/PLAN_CONFLICT | §3.3 / §6.1 / §6.5 | G0/G2 | A1/A4/A9 |
 | root target sentinel/旧 worker 回归 | §3.3 / §3.4 / §6.1 / §6.9 | G0/G1/G2/G4/G6 | A10 |
+| MR 依赖闭包 all/满 quorum + 全非 MR complete | §6.3 / §6.5 / §8.2 / §8.4 | G4 | A3 |
+| 子 plan policy/预算/owner/allowSubcontract | §6.2 / §6.3 / §6.5 / §7.5 | G3/G4 | A12 |
 | plan 级 cancel 级联 | §3.5 / §8.6 | G4 | A2/A3 |
 | plan-owned task_retry 拒绝 | §3.5 / §6.7 / §8.5 | G2/G4 | A13 |
 | plan 不可变/版本/DAG/materializer | §6 | G2 | A2/A4/A5 |
@@ -1265,21 +1298,26 @@ E-<gate>-<n>
 ## 16. 协议夹具
 
 - [`packages/fleet/protocol/plan.example.json`](../../packages/fleet/protocol/plan.example.json)
+  - `internalWrapper`：writer 负责包装的最小 `metadata.internal=true` + `internalObject.kind="task_plan"` 示例。
   - `submission`：`task_submit` 携带完整 plan 的提交形状（`intent` / `to` / `plan`）与期望返回 `planId`/`version`/`rootTaskId`；`to` 固定 sentinel `{device:"__plan__", agent:"__plan__"}`。
-  - `idempotency`：同 planId+version+规范化内容返回已有；内容不同 `PLAN_CONFLICT`。
-  - `controls`：plan-owned `task_retry` → `PLAN_RETRY_REQUIRED`；`task_cancel(rootTaskId)` → plan 级取消。
+  - `idempotency.repeatSame` / `idempotency.conflict`：具体 payload 与 expect；同内容返回已有，内容不同 `PLAN_CONFLICT`。
+  - `controls.retryRoot` / `retryStep` / `retryMr`：三种 plan-owned task 的 `PLAN_RETRY_REQUIRED` 负例。
+  - `controls.cancelPlan` / `cancelTerminalRoot`：plan 级取消与已终态 `already-terminal` 不级联。
   - `plan`：root plan v1；三机并行 + join + pre-MR reduce（`all`）+ MR。
   - `retry`：同一 root `planId` 的 v2；`build-ui` 重跑，`collect`/`build-api` reuse，join/MR 重建。
-  - `subPlan.parent` / `subPlan.child`：子 plan 的 `parent`、policy 收紧、无 MR、唯一 sink；实现时 child root/step task 由父 step task 派生。
-  - `joinModes`：`all` / `any` / `quorum` 的 `join` 形状（仅用于非 MR gate；MR 直接 gate 必须 `all` 或满 quorum）。
+  - `subPlan.parent` / `subPlan.child`：父 plan owner=A；子 plan owner=B；`parent`、policy 收紧、无 MR、唯一 sink；`subPlan.submission` 为 caller=B 的完整 `task_submit.plan` 外层；`parentStepTaskBudget` 说明父 step 的 runtime TaskBudget 足够。
+  - `joinModes`：`all` / `any` / `quorum` 的 `join` 形状；`any`/部分 quorum 只允许 sub-plan，root plan 禁止。
   - `invalid.cycle`：`PLAN_CYCLE` 负例。
   - `invalid.missingDependency`：`PLAN_MISSING_DEP` 负例。
   - `invalid.mrGateAny`：MR 直接 gate 为 `any` → `PLAN_MR` 负例。
+  - `invalid.mrGateUpstreamAny`：上游 join 为 `any`、直接 gate 为 `all` → `PLAN_MR` 负例。
+  - `invalid.subPlanDenied`：父 plan policy `allowSubcontract=false` → `PLAN_POLICY` 负例。
 - [`packages/fleet/protocol/card.example.json`](../../packages/fleet/protocol/card.example.json)
+  - `internalWrapper`：capability/role 的最小 internal metadata 包装示例。
   - `capability`：能力卡（签名、版本、provenance、无敏感字段）。
   - `role`：角色卡（shadow、confidence、evidenceRefs、无原始对话）。
   - `status`：状态视图（实时、TTL、不落盘）。
-  - `capabilityTombstone`：agent 移除后的 tombstone 示例。
+  - `capabilityTombstone`：agent 移除后的 tombstone 示例；允许空 `capabilities`/`tools`/`limits`/`taskNamespaces`。
 
 夹具是规范来源：P1–P5 的实现/测试必须先匹配夹具，再扩展 optional 字段；不得让实现先行导致形状漂移。P0 不新增 fixture 测试（P1/P2 负责）。
 
@@ -1292,7 +1330,7 @@ E-<gate>-<n>
 - plan/card 在 core 中使用的具体 node `type`（如 `meta`/`fact`）与序列化位置；只要求 `metadata.internal=true` + `internalObject.kind`。
 - 角色卡规则聚合的具体权重/阈值实现（默认低置信度 0.5 不变）。
 - 状态视图的本地刷新间隔/TTL 具体值（`ttlMs` 由实现给定）。
-- materializer 传给 task 的 `TaskBudget` 具体值；只要求不越过 plan policy、`allowSubcontract` 映射正确。
+- materializer 传给 task 的 `TaskBudget` 具体值；只要求不越过 plan policy、子 plan 任务装入父 step task 剩余 `TaskBudget`，且不根据 `allowSubcontract` 改写 task `dispatch`。
 - 证据报告存放位置与格式细节；只要求可复现、可追溯、不含敏感信息。
 - UI 回归使用的截图工具/视口；只要求覆盖既有导航/页面/设置。
 

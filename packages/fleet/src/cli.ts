@@ -25,8 +25,11 @@ import { FileTaskEventStore } from './store/file-store.js';
 import { MebularTaskEventStore } from './store/mebular-store.js';
 import { DaemonTaskEventStore } from './store/daemon-store.js';
 import { DaemonAgentBackend } from './store/daemon-agent-backend.js';
+import { DaemonRoleCardStore } from './store/role-card-store.js';
+import { MebularRoleCardStore, type RoleCardStore } from './role-cards.js';
 import { DaemonTaskPlanStore, MebularTaskPlanStore, type TaskPlanStore } from './store/plan-store.js';
 import { PlanMaterializer } from './runtime/materializer.js';
+import { RoleCardJob } from './runtime/role-card-job.js';
 import { daemonRoutingProvider, embeddedRoutingProvider } from './runtime/routing-context.js';
 import type { PlanRoutingProvider } from './routing.js';
 import { AGENT_NAMESPACE } from './agentdir.js';
@@ -539,8 +542,14 @@ function routingFor(
       ...(daemon.tokenFile !== undefined ? { tokenFile: daemon.tokenFile } : {}),
       ...(localPublicKey !== null ? { publicKeyFor: (device: string) => (device === config.device ? localPublicKey : undefined) } : {}),
     });
+    const roleCards = new DaemonRoleCardStore({
+      endpoint: daemon.endpoint,
+      namespace: AGENT_NAMESPACE,
+      ...(daemon.token !== undefined ? { token: daemon.token } : {}),
+      ...(daemon.tokenFile !== undefined ? { tokenFile: daemon.tokenFile } : {}),
+    });
     console.error('[fleet:route] daemon mode: remote capability cards may be unverifiable; remote route targets fail closed (P6 dual-daemon E2E risk)');
-    return daemonRoutingProvider({ backend, config, store });
+    return daemonRoutingProvider({ backend, config, store, roleCards: () => roleCards.list() });
   }
   return undefined;
 }
@@ -579,6 +588,42 @@ function createCardPublisher(
     });
   }
   return null;
+}
+
+/** P5：角色卡存储（embedded 本机图 / daemon `/app/role-cards`）。 */
+function createRoleCardStore(config: FleetConfig, mebular: Mebular | null): RoleCardStore | null {
+  if (mebular !== null) return new MebularRoleCardStore(mebular, { namespace: AGENT_NAMESPACE });
+  if (config.daemon?.endpoint !== undefined) {
+    return new DaemonRoleCardStore({
+      endpoint: config.daemon.endpoint,
+      namespace: AGENT_NAMESPACE,
+      ...(config.daemon.token !== undefined ? { token: config.daemon.token } : {}),
+      ...(config.daemon.tokenFile !== undefined ? { tokenFile: config.daemon.tokenFile } : {}),
+    });
+  }
+  return null;
+}
+
+/** P5：本机低频角色卡 job；默认 shadow，错误不阻塞 worker/node 主循环。 */
+function createRoleCardJob(
+  config: FleetConfig,
+  store: TaskEventStore,
+  mebular: Mebular | null,
+): RoleCardJob | null {
+  const roleStore = createRoleCardStore(config, mebular);
+  if (roleStore === null) return null;
+  const log = (message: string): void => console.error(message);
+  return new RoleCardJob({
+    device: config.device,
+    agents: config.agents.map((agent) => agent.name),
+    events: store,
+    store: roleStore,
+    ...(config.roleCards?.refreshEveryTasks !== undefined ? { refreshEveryTasks: config.roleCards.refreshEveryTasks } : {}),
+    ...(config.roleCards?.minIntervalMs !== undefined ? { minIntervalMs: config.roleCards.minIntervalMs } : {}),
+    ...(config.roleCards?.window !== undefined ? { window: config.roleCards.window } : {}),
+    shadow: config.roleCards?.shadow ?? (config.roleCards?.enabled !== true),
+    log,
+  });
 }
 
 /**
@@ -627,6 +672,7 @@ async function runFleetNode(args: Args): Promise<number> {
   const cardPublisher = createCardPublisher(config, mebular);
   if (cardPublisher !== null) await cardPublisher.publish();
   else console.error('[fleet:caps] skipped: no embedded Mebular and no daemon endpoint');
+  const roleCardJob = createRoleCardJob(config, store, mebular);
   const submit = num(args.submit, 0);
   let code = 0;
   if (submit > 0) {
@@ -669,16 +715,19 @@ async function runFleetNode(args: Args): Promise<number> {
       while (!shutdown.isStopping()) {
         await tickPlanMaterializer(materializer);
         await cardPublisher?.tick();
+        await roleCardJob?.tick();
         await sleep(200); // 常驻：保持在线供对端同步
       }
     } else {
       const lingerMs = num(args['linger-ms'], 0);
       if (lingerMs > 0) await sleep(lingerMs);
+      await roleCardJob?.tick();
     }
   } else if (runForever) {
     while (!shutdown.isStopping()) {
       await tickPlanMaterializer(materializer);
       await cardPublisher?.tick();
+      await roleCardJob?.tick();
       await sleep(200);
     }
   } else {
@@ -725,6 +774,7 @@ async function runFleetWorker(args: Args): Promise<number> {
   registry.onChange(() => cardPublisher?.onRegistryChange());
   if (cardPublisher !== null) await cardPublisher.publish();
   else console.error('[fleet:caps] skipped: no embedded Mebular and no daemon endpoint');
+  const roleCardJob = createRoleCardJob(config, store, mebular);
   const worker = new FleetWorker({ device: config.device, agent: str(args.agent, 'worker'), store, transport: new NullTransport(), registry, log });
   const routing = routingFor(config, mebular, store, storeMode(config, args));
   const materializer = new PlanMaterializer({
@@ -740,6 +790,7 @@ async function runFleetWorker(args: Args): Promise<number> {
     await tickPlanMaterializer(materializer);
     await worker.pollOnce();
     await cardPublisher?.tick();
+    await roleCardJob?.tick();
     await sleep(num(args['interval-ms'], 10));
   }
   console.log(JSON.stringify({ role: 'worker', device: config.device, executed: log.size() }));

@@ -32,6 +32,7 @@ import type { TaskEvent, TaskEventType } from './protocol/events.js';
 import { EVENT_TO_STATUS } from './protocol/events.js';
 import { DEFAULT_ROOT_BUDGET, type TaskBudget, type TaskDispatch } from './protocol/envelope.js';
 import { DaemonAgentBackend } from './store/daemon-agent-backend.js';
+import { DaemonRoleCardStore } from './store/role-card-store.js';
 import {
   loadRouteContext,
   resolvePlanStepRoute,
@@ -199,7 +200,18 @@ function routingProviderFor(session: Session): PlanRoutingProvider | null {
         ? { publicKeyFor: (device: string) => (device === session.config.device ? localPublicKey : undefined) }
         : {}),
     });
-    return daemonRoutingProvider({ backend, config: session.config, store: session.store });
+    const roleCards = new DaemonRoleCardStore({
+      endpoint: daemon.endpoint,
+      namespace: AGENT_NAMESPACE,
+      ...(daemon.token !== undefined ? { token: daemon.token } : {}),
+      ...(daemon.tokenFile !== undefined ? { tokenFile: daemon.tokenFile } : {}),
+    });
+    return daemonRoutingProvider({
+      backend,
+      config: session.config,
+      store: session.store,
+      roleCards: () => roleCards.list(),
+    });
   }
   return null;
 }

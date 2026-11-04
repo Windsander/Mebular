@@ -13,6 +13,15 @@ import {
   latestCapabilityCards,
   type AgentCapabilityCard,
 } from './cards.js';
+import {
+  ROLE_CARD_DEFAULT_CONFIDENCE_THRESHOLD,
+  activeAgentRoleCards,
+  latestAgentRoleCards,
+  roleCardForTarget,
+  roleCardScore,
+  roleCardSortEligible,
+  type AgentRoleCard,
+} from './role-cards.js';
 import type { FleetEndpoint } from './protocol/envelope.js';
 import type { TaskEvent } from './protocol/events.js';
 import { reduceTaskEvents, type TaskState } from './model.js';
@@ -20,10 +29,18 @@ import type { PlanPolicy, PlanRoute, PlanStep, TaskPlan } from './plan.js';
 
 export const ROUTE_TIE_BREAK = 'rendezvous-sha256' as const;
 export const ROUTE_ROLE_CARD_DISABLED = 'disabled' as const;
+export const ROUTE_ROLE_CARD_SHADOW = 'shadow-ignored' as const;
+export const ROUTE_ROLE_CARD_USED = 'used-soft' as const;
 export const ROUTE_STATUS_TTL_MS = 30_000;
 export const ROUTE_OBSERVATION_WINDOW = 20;
 /** 最近成功率的最小样本；不足时按中性 0.5（契约 §7.3）。 */
 export const ROUTE_MIN_SUCCESS_SAMPLES = 3;
+
+export type RouteRoleCardMode = 'shadow' | 'enabled';
+export type RouteRoleCardStatus =
+  | typeof ROUTE_ROLE_CARD_DISABLED
+  | typeof ROUTE_ROLE_CARD_SHADOW
+  | typeof ROUTE_ROLE_CARD_USED;
 
 export type RouteDecisionCode = 'ASSIGNED' | 'NO_TARGET' | 'POLICY_DENIED';
 export type RouteDecisionOutcome = 'assigned' | 'NO_TARGET' | 'POLICY_DENIED';
@@ -99,7 +116,7 @@ export interface RouteWhy {
   hardFilters: string[];
   ranking: RouteRanking[];
   tieBreak: typeof ROUTE_TIE_BREAK;
-  roleCard: typeof ROUTE_ROLE_CARD_DISABLED;
+  roleCard: RouteRoleCardStatus;
   /** `inherited` = 本轮实际生效的 plan policy（root 或已衰减 sub-plan），不是额外授权源。 */
   policy: 'inherited';
 }
@@ -124,6 +141,10 @@ export interface RouteInput {
   policy?: PlanPolicy;
   /** 已通过 P1 信任校验的卡片（调用方可传未过滤集合）。 */
   cards: readonly AgentCapabilityCard[];
+  /** P5：已通过 author 绑定/schema 校验的角色卡；缺省 = 无卡。 */
+  roleCards?: readonly AgentRoleCard[];
+  /** P5：默认 shadow（只解释不排序）；显式 enabled 才允许最后一项软排序。 */
+  roleCardMode?: RouteRoleCardMode;
   authorization: RouteAuthorization;
   status?: readonly AgentStatusView[];
   observations?: readonly RouteObservation[];
@@ -138,6 +159,8 @@ export interface RouteInput {
 /** materializer / task_status 共用的本轮路由快照（全部为纯派生）。 */
 export interface RouteContext {
   cards: AgentCapabilityCard[];
+  roleCards: AgentRoleCard[];
+  roleCardMode: RouteRoleCardMode;
   authorization: RouteAuthorization;
   status: AgentStatusView[];
   namespace?: string;
@@ -147,6 +170,9 @@ export interface RouteContext {
 
 export interface PlanRoutingProvider {
   cards(): Promise<readonly AgentCapabilityCard[]>;
+  /** P5：只读角色卡（authored/schema 已验证）；缺省 = 无卡。 */
+  roleCards?(): Promise<readonly AgentRoleCard[]> | readonly AgentRoleCard[];
+  roleCardMode?: RouteRoleCardMode;
   authorized(): Promise<RouteAuthorization> | RouteAuthorization;
   online?(device: string): boolean;
   observations?(): Promise<readonly RouteObservation[]> | readonly RouteObservation[];
@@ -165,6 +191,9 @@ interface Candidate {
   successNeutral: boolean;
   latencyMs?: number;
   preferHits: string[];
+  roleCard?: AgentRoleCard;
+  roleCardScore?: number;
+  roleCardReason?: string;
   rendezvous: string;
 }
 
@@ -285,6 +314,9 @@ function candidateFrom(input: RouteInput, target: FleetEndpoint, card: AgentCapa
   const preferHits = prefer.filter((tag) => available.has(tag));
   const sampleCount = status.samples?.recent ?? 0;
   const hasRate = status.recentSuccessRate !== undefined && Number.isFinite(status.recentSuccessRate) && sampleCount >= ROUTE_MIN_SUCCESS_SAMPLES;
+  const roleCard = roleCardForTarget(input.roleCards ?? [], target.device, target.agent);
+  const roleCardEnabled = input.roleCardMode === 'enabled';
+  const roleCardEligible = roleCard !== null && roleCardEnabled && roleCardSortEligible(roleCard);
   return {
     device: target.device,
     agent: target.agent,
@@ -298,6 +330,12 @@ function candidateFrom(input: RouteInput, target: FleetEndpoint, card: AgentCapa
       ? { latencyMs: Math.trunc(status.lastLatencyMs) }
       : {}),
     preferHits,
+    ...(roleCard !== null ? {
+      roleCard,
+      ...(roleCardEligible
+        ? { roleCardScore: roleCardScore(roleCard, input.intent), roleCardReason: 'used-soft' }
+        : { roleCardReason: roleCardEnabled ? 'ineligible' : 'shadow-ignored' }),
+    } : {}),
     rendezvous: rendezvousScore(`${input.planId}#${input.version}#${input.stepId}`, target.device, target.agent),
   };
 }
@@ -316,6 +354,11 @@ function ranked(candidate: Candidate): RouteRanking {
     candidate.successNeutral ? 'success=neutral' : `success=${round4(candidate.successRate)}`,
     candidate.latencyMs === undefined ? 'latency=none' : `latency=${candidate.latencyMs}`,
     ...candidate.preferHits.map((tag) => `prefer=${tag}`),
+    ...(candidate.roleCardReason === undefined
+      ? []
+      : candidate.roleCardScore !== undefined
+        ? [`role=used-soft:${round4(candidate.roleCardScore)}`]
+        : [`role=${candidate.roleCardReason}`]),
   ];
   return {
     device: candidate.device,
@@ -325,7 +368,7 @@ function ranked(candidate: Candidate): RouteRanking {
   };
 }
 
-/** §7.3 固定顺序：在线 → 负载比 ↑ → 成功率 ↓ → 时延 ↑ → prefer 命中 ↓ → rendezvous。 */
+/** §7.3 固定顺序：在线 → 负载比 ↑ → 成功率 ↓ → 时延 ↑ → prefer 命中 ↓ → 角色卡 ↓ → rendezvous。 */
 function compareCandidates(a: Candidate, b: Candidate): number {
   if (a.status.online !== b.status.online) return a.status.online ? -1 : 1;
   const loadA = a.capacity === 0 ? Number.POSITIVE_INFINITY : a.inflight / a.capacity;
@@ -336,10 +379,24 @@ function compareCandidates(a: Candidate, b: Candidate): number {
   const latB = b.latencyMs ?? Number.POSITIVE_INFINITY;
   if (latA !== latB) return latA - latB;
   if (a.preferHits.length !== b.preferHits.length) return b.preferHits.length - a.preferHits.length;
-  // 角色卡在 P5 前不参与；这里保留位置但不读取任何角色卡输入。
+  // P5：仅显式启用、shadow=false、confidence>=0.5 的卡进入最后一项软排序。
+  const roleA = a.roleCardScore ?? 0;
+  const roleB = b.roleCardScore ?? 0;
+  if (roleA !== roleB) return roleB - roleA;
   if (a.rendezvous !== b.rendezvous) return a.rendezvous < b.rendezvous ? 1 : -1;
   if (a.device !== b.device) return a.device < b.device ? -1 : 1;
   return a.agent < b.agent ? -1 : a.agent > b.agent ? 1 : 0;
+}
+
+function roleCardStatus(input: RouteInput, survivors: readonly Candidate[]): RouteRoleCardStatus {
+  const cards = activeAgentRoleCards(latestAgentRoleCards(input.roleCards ?? []));
+  if (cards.length === 0) return ROUTE_ROLE_CARD_DISABLED;
+  if (input.roleCardMode === 'enabled') {
+    return survivors.some((candidate) => candidate.roleCardScore !== undefined)
+      ? ROUTE_ROLE_CARD_USED
+      : ROUTE_ROLE_CARD_DISABLED;
+  }
+  return ROUTE_ROLE_CARD_SHADOW;
 }
 
 function blockedCode(rejected: readonly RouteRejection[], explicit: boolean): string[] {
@@ -427,6 +484,7 @@ export function resolveRoute(input: RouteInput): RouteDecision {
 
   survivors.sort(compareCandidates);
   const ranking = survivors.map(ranked);
+  const roleCard = roleCardStatus(input, survivors);
   const chosenCandidate = survivors[0];
   if (chosenCandidate !== undefined) {
     return {
@@ -437,7 +495,7 @@ export function resolveRoute(input: RouteInput): RouteDecision {
         hardFilters,
         ranking,
         tieBreak: ROUTE_TIE_BREAK,
-        roleCard: ROUTE_ROLE_CARD_DISABLED,
+        roleCard,
         policy: 'inherited',
       },
       rejected,
@@ -455,7 +513,7 @@ export function resolveRoute(input: RouteInput): RouteDecision {
       hardFilters,
       ranking: [],
       tieBreak: ROUTE_TIE_BREAK,
-      roleCard: ROUTE_ROLE_CARD_DISABLED,
+      roleCard,
       policy: 'inherited',
     },
     rejected,
@@ -479,6 +537,90 @@ export function resolvePlanStepRoute(
     ...(step.to !== undefined ? { to: step.to } : {}),
     ...(step.route !== undefined ? { route: step.route } : {}),
   });
+}
+
+export interface RoleCardShadowReport {
+  planId: string;
+  version: number;
+  stepId: string;
+  intent?: string;
+  shadow: {
+    decision: RouteDecision['decision'];
+    chosen: FleetEndpoint | null;
+    roleCard: RouteRoleCardStatus;
+  };
+  enabled: {
+    decision: RouteDecision['decision'];
+    chosen: FleetEndpoint | null;
+    roleCard: RouteRoleCardStatus;
+  };
+  changed: boolean;
+  /** 硬过滤/拒绝集合完全一致（角色卡永不影响授权/能力/容量/policy）。 */
+  hardFiltersEqual: boolean;
+  eligible: Array<{ device: string; agent: string; confidence: number; score: number }>;
+  ignored: Array<{ device: string; agent: string; reason: 'shadow' | 'low-confidence' | 'tombstone' }>;
+}
+
+/**
+ * P5 shadow 对比报告：同一批候选分别按 shadow/enabled 解析，输出 chosen 变化与资格解释。
+ * 只用于内部测试/证据；不写存储、不进入 UI/SSE，也不包含摘要原文。
+ */
+export function buildRoleCardShadowReport(input: RouteInput): RoleCardShadowReport {
+  const shadow = resolveRoute({ ...input, roleCardMode: 'shadow' });
+  const enabled = resolveRoute({ ...input, roleCardMode: 'enabled' });
+  const hardFiltersEqual = shadow.decision === enabled.decision
+    && canonicalShadowRejections(shadow.rejected) === canonicalShadowRejections(enabled.rejected);
+  const latest = latestAgentRoleCards(input.roleCards ?? []);
+  const eligible: RoleCardShadowReport['eligible'] = [];
+  const ignored: RoleCardShadowReport['ignored'] = [];
+  for (const card of latest) {
+    if (card.tombstone === true) {
+      ignored.push({ device: card.device, agent: card.agent, reason: 'tombstone' });
+    } else if (card.shadow !== false) {
+      ignored.push({ device: card.device, agent: card.agent, reason: 'shadow' });
+    } else if (card.confidence < ROLE_CARD_DEFAULT_CONFIDENCE_THRESHOLD) {
+      ignored.push({ device: card.device, agent: card.agent, reason: 'low-confidence' });
+    } else {
+      eligible.push({
+        device: card.device,
+        agent: card.agent,
+        confidence: card.confidence,
+        score: roleCardScore(card, input.intent),
+      });
+    }
+  }
+  return {
+    planId: input.planId,
+    version: input.version,
+    stepId: input.stepId,
+    ...(input.intent !== undefined ? { intent: input.intent } : {}),
+    shadow: {
+      decision: shadow.decision,
+      chosen: shadow.chosen,
+      roleCard: shadow.why.roleCard,
+    },
+    enabled: {
+      decision: enabled.decision,
+      chosen: enabled.chosen,
+      roleCard: enabled.why.roleCard,
+    },
+    changed: !sameEndpoint(shadow.chosen, enabled.chosen),
+    hardFiltersEqual,
+    eligible,
+    ignored,
+  };
+}
+
+function sameEndpoint(a: FleetEndpoint | null, b: FleetEndpoint | null): boolean {
+  if (a === null || b === null) return a === b;
+  return a.device === b.device && a.agent === b.agent;
+}
+
+function canonicalShadowRejections(rejected: readonly RouteRejection[]): string {
+  return [...rejected]
+    .map((entry) => `${entry.device}\u0000${entry.agent}\u0000${entry.code}\u0000${entry.detail ?? ''}`)
+    .sort()
+    .join('|');
 }
 
 /** 状态视图 + 本机观察合成为排序输入（不落盘、不同步）。 */
@@ -620,6 +762,14 @@ export async function loadRouteContext(
     cards = [];
     cardCatalog = 'unavailable';
   }
+  let roleCards: AgentRoleCard[] = [];
+  try {
+    roleCards = activeAgentRoleCards(latestAgentRoleCards(await (provider.roleCards?.() ?? [])));
+  } catch {
+    // 角色卡读取失败 → 无卡（不伪造、不影响 P3 能力卡/授权/状态路径）。
+    roleCards = [];
+  }
+  const roleCardMode: RouteRoleCardMode = provider.roleCardMode ?? 'shadow';
   let authorization: RouteAuthorization = { devices: [] };
   let authorizationAvailable = false;
   try {
@@ -684,6 +834,8 @@ export async function loadRouteContext(
   }
   return {
     cards,
+    roleCards,
+    roleCardMode,
     authorization,
     status,
     ...(provider.namespace !== undefined ? { namespace: provider.namespace } : {}),
@@ -695,9 +847,11 @@ export async function loadRouteContext(
 /** 从 RouteContext 构造 resolver 输入（不含 plan/step 字段）。 */
 export function routeInputFromContext(
   context: RouteContext,
-): Pick<RouteInput, 'cards' | 'authorization' | 'status' | 'namespace'> {
+): Pick<RouteInput, 'cards' | 'roleCards' | 'roleCardMode' | 'authorization' | 'status' | 'namespace'> {
   return {
     cards: context.cards,
+    roleCards: context.roleCards,
+    roleCardMode: context.roleCardMode,
     authorization: context.authorization,
     status: context.status,
     ...(context.namespace !== undefined ? { namespace: context.namespace } : {}),

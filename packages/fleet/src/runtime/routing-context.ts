@@ -12,12 +12,14 @@ import { AGENT_NAMESPACE } from '../agentdir.js';
 import { listCapabilityCards, type AgentCapabilityCard } from '../cards.js';
 import type { CapabilityCardBackend } from '../cards.js';
 import type { FleetConfig } from '../config.js';
+import { listAgentRoleCards, type AgentRoleCard } from '../role-cards.js';
 import type { TaskEventStore } from '../store/file-store.js';
 import {
   observeRouteOutcomes,
   type PlanRoutingProvider,
   type RouteAuthorization,
   type RouteObservation,
+  type RouteRoleCardMode,
 } from '../routing.js';
 
 type EmbeddedRoutingMebular = Pick<Mebular, 'graph' | 'identity' | 'sync'> & {
@@ -27,7 +29,7 @@ type EmbeddedRoutingMebular = Pick<Mebular, 'graph' | 'identity' | 'sync'> & {
 
 export interface EmbeddedRoutingProviderOptions {
   mebular: EmbeddedRoutingMebular;
-  config: Pick<FleetConfig, 'device' | 'namespace' | 'peers'>;
+  config: Pick<FleetConfig, 'device' | 'namespace' | 'peers' | 'roleCards'>;
   store: TaskEventStore;
   /** 本机观察窗口（最近 N 个终态任务）；默认 20。 */
   window?: number;
@@ -36,12 +38,15 @@ export interface EmbeddedRoutingProviderOptions {
 /**
  * embedded provider：读取本机 Mebular 的卡片目录、sync 在线 peer、任务视图与本机观察。
  * 卡片验证仍由 `listCapabilityCards` 完成（author 绑定 + 设备签名 + sync 公钥）。
+ * 角色卡按 P5 默认 shadow；只有配置 `roleCards.enabled=true` 才切换到 enabled。
  */
 export function embeddedRoutingProvider(options: EmbeddedRoutingProviderOptions): PlanRoutingProvider {
   const { mebular, config, store } = options;
   return {
     namespace: config.namespace,
     cards: async (): Promise<readonly AgentCapabilityCard[]> => listCapabilityCards(mebular, AGENT_NAMESPACE),
+    roleCards: async (): Promise<readonly AgentRoleCard[]> => listAgentRoleCards(mebular, AGENT_NAMESPACE),
+    roleCardMode: roleCardModeOf(config),
     authorized: async (): Promise<RouteAuthorization> => {
       const devices = new Set<string>([config.device]);
       for (const peer of config.peers) {
@@ -79,11 +84,19 @@ export interface DaemonRoutingProviderOptions {
     /** 只读订阅查询（`/app/policy/subscriptions?device=`）。 */
     getSubscriptions(device: string): Promise<string[]>;
   };
-  config: Pick<FleetConfig, 'device' | 'namespace' | 'peers'>;
+  config: Pick<FleetConfig, 'device' | 'namespace' | 'peers' | 'roleCards'>;
   store: TaskEventStore;
   /** daemon 模式下没有 sync peer 视图；调用方可注入本机已知在线集合。 */
   online?: (device: string) => boolean;
+  /** P5：`/app/role-cards` 只读角色卡（author/schema 已过滤）。 */
+  roleCards?: () => Promise<readonly AgentRoleCard[]>;
+  /** P5：默认 shadow；显式 enabled 才允许软排序。 */
+  roleCardMode?: RouteRoleCardMode;
   window?: number;
+}
+
+function roleCardModeOf(config: Pick<FleetConfig, 'roleCards'>): RouteRoleCardMode {
+  return config.roleCards?.enabled === true ? 'enabled' : 'shadow';
 }
 
 /**
@@ -97,6 +110,8 @@ export function daemonRoutingProvider(options: DaemonRoutingProviderOptions): Pl
   return {
     namespace: config.namespace,
     cards: async (): Promise<readonly AgentCapabilityCard[]> => backend.listCards(),
+    roleCards: async (): Promise<readonly AgentRoleCard[]> => options.roleCards?.() ?? [],
+    roleCardMode: options.roleCardMode ?? roleCardModeOf(config),
     authorized: async (): Promise<RouteAuthorization> => {
       const devices = new Set<string>([config.device]);
       for (const peer of config.peers) {

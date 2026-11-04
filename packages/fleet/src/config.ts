@@ -108,6 +108,23 @@ export interface FleetPeerConfig {
   addr?: string;
 }
 
+/**
+ * P5 角色卡（optional；旧配置不填仍完全有效）。
+ * 默认 shadow：只生成本机 internal 角色卡，不参与派发。
+ */
+export interface FleetRoleCardsConfig {
+  /** 显式启用软排序（内部/测试配置）；默认 false = shadow。 */
+  enabled?: boolean;
+  /** 卡片 shadow 标记；默认 true。只有 enabled=true 且 shadow=false 才会被 route 使用。 */
+  shadow?: boolean;
+  /** 完成 N 个本机任务后生成（默认 5）。 */
+  refreshEveryTasks?: number;
+  /** 两次生成最小间隔毫秒（默认 60000）。 */
+  minIntervalMs?: number;
+  /** 最近性窗口/每 Agent 样本上限（默认 50）。 */
+  window?: number;
+}
+
 export interface FleetConfig {
   v: 1;
   device: string;
@@ -134,6 +151,8 @@ export interface FleetConfig {
   store?: 'daemon' | 'embedded';
   /** W2 守护 app 端点与令牌（daemon 模式必需） */
   daemon?: { endpoint: string; token?: string; tokenFile?: string };
+  /** P5 角色卡（optional；缺省 shadow，不改变旧派发）。 */
+  roleCards?: FleetRoleCardsConfig;
 }
 
 export const fleetConfigPath = (dir: string): string => join(dir, 'fleet.config.json');
@@ -170,6 +189,27 @@ export function validateFleetConfig(input: unknown): string[] {
     if (typeof js !== 'object' || js === null || typeof js.enabled !== 'boolean') errors.push('joinService 形状非法');
     else if (js.port !== undefined && (typeof js.port !== 'number' || js.port < 0 || js.port > 65535)) errors.push('joinService.port 非法');
     else if (js.bind !== undefined && typeof js.bind !== 'string') errors.push('joinService.bind 非法');
+  }
+  if (c.roleCards !== undefined) {
+    const rc = c.roleCards as Record<string, unknown>;
+    if (typeof rc !== 'object' || rc === null || Array.isArray(rc)) {
+      errors.push('roleCards 必须为对象');
+    } else {
+      if (rc.enabled !== undefined && typeof rc.enabled !== 'boolean') errors.push('roleCards.enabled 必须为布尔');
+      if (rc.shadow !== undefined && typeof rc.shadow !== 'boolean') errors.push('roleCards.shadow 必须为布尔');
+      if (rc.refreshEveryTasks !== undefined
+        && (typeof rc.refreshEveryTasks !== 'number' || !Number.isInteger(rc.refreshEveryTasks) || rc.refreshEveryTasks < 1)) {
+        errors.push('roleCards.refreshEveryTasks 必须为正整数');
+      }
+      if (rc.minIntervalMs !== undefined
+        && (typeof rc.minIntervalMs !== 'number' || !Number.isFinite(rc.minIntervalMs) || rc.minIntervalMs < 0)) {
+        errors.push('roleCards.minIntervalMs 必须为非负数字');
+      }
+      if (rc.window !== undefined
+        && (typeof rc.window !== 'number' || !Number.isInteger(rc.window) || rc.window < 1)) {
+        errors.push('roleCards.window 必须为正整数');
+      }
+    }
   }
   if (!Array.isArray(c.agents)) errors.push('agents 必须为数组');
   for (const agent of (Array.isArray(c.agents) ? c.agents : []) as Array<Record<string, unknown>>) {

@@ -919,6 +919,8 @@ export async function startHttpServer({
   let runtime = initialRuntime;
   // CR-002：守护内串行化能力卡签名/写入，避免同版本并发请求产生重复节点。
   let cardWriteQueue = Promise.resolve();
+  // P5：角色卡写入串行化（同版本幂等/冲突与能力卡同语义）。
+  let roleCardWriteQueue = Promise.resolve();
 
   // 0.3 详情保留维护：service 就绪后启动（启动一次 + 每 24h），热切换复用同一 timer。
   // 失败只记录状态/日志，不阻断 MCP；关闭时显式清理，避免测试/宿主进程残留 timer。
@@ -4184,7 +4186,7 @@ export async function startHttpServer({
             return sendJson(res, 403, {
               ok: false,
               error: 'internal_object_write_forbidden',
-              message: '内部对象必须走各自专用写入端点（能力卡：/app/capability-cards）',
+              message: '内部对象必须走各自专用写入端点（能力卡：/app/capability-cards；角色卡：/app/role-cards）',
             });
           }
           const node = await app.graph.createNode(
@@ -4404,6 +4406,132 @@ export async function startHttpServer({
           } catch (error) {
             return sendJson(res, 500, { ok: false, error: 'capability_card_write_failed', message: String(error?.message ?? error) });
           }
+        }
+        // P5：daemon 角色卡写入/读取（loopback + memory.write/read）。
+        // 只服务 fleet 内部 runtime job/route；不新增公共 MCP 方法/UI，
+        // 也不开放 agent_role_card 到 /app/nodes。author = 本机守护设备。
+        if (path === '/app/role-cards' && req.method === 'POST') {
+          if (!app) return sendJson(res, 503, { ok: false, error: 'role_cards_unavailable', message: '图存储尚未初始化' });
+          if (!writesEnabled) return sendJson(res, 403, { ok: false, error: 'read_only', message: '写能力已关闭' });
+          let payload;
+          try {
+            payload = JSON.parse(body.toString('utf-8') || '{}');
+          } catch {
+            return sendJson(res, 400, { ok: false, error: 'invalid json' });
+          }
+          if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+            return sendJson(res, 400, { ok: false, error: 'role card body 必须为对象' });
+          }
+          const lib = await loadFleetCards();
+          if (!lib || typeof lib.validateAgentRoleCard !== 'function'
+            || typeof lib.listAgentRoleCards !== 'function'
+            || typeof lib.latestAgentRoleCards !== 'function'
+            || typeof lib.roleCardFingerprint !== 'function'
+            || typeof lib.appendAgentRoleCard !== 'function') {
+            return sendJson(res, 503, { ok: false, error: 'role_cards_unavailable', message: '角色卡模块不可用' });
+          }
+          const cardNamespace = typeof payload.namespace === 'string' && payload.namespace.length > 0
+            ? payload.namespace
+            : 'agents';
+          if (cardNamespace !== 'agents') {
+            return sendJson(res, 400, { ok: false, error: 'namespace_invalid', message: '角色卡只能写入 agents 域' });
+          }
+          const card = payload.card !== undefined ? payload.card : payload.content;
+          const validation = lib.validateAgentRoleCard(card);
+          if (!validation.ok) {
+            return sendJson(res, 422, { ok: false, error: 'role_card_invalid', errors: validation.errors });
+          }
+          if (typeof deviceId !== 'string' || deviceId.length === 0) {
+            return sendJson(res, 409, { ok: false, error: 'identity_unavailable', message: '本机设备身份不可用' });
+          }
+          if (card.device !== deviceId) {
+            return sendJson(res, 403, { ok: false, error: 'device_mismatch', message: '角色卡 device 必须是本机守护设备' });
+          }
+          const serialize = (fn) => {
+            const run = roleCardWriteQueue.then(fn, fn);
+            roleCardWriteQueue = run.catch(() => undefined);
+            return run;
+          };
+          try {
+            const result = await serialize(async () => {
+              const latest = lib.latestAgentRoleCards(await lib.listAgentRoleCards(app, 'agents'))
+                .find((entry) => entry.device === card.device && entry.agent === card.agent) ?? null;
+              if (latest !== null) {
+                const sameContent = lib.roleCardFingerprint(latest) === lib.roleCardFingerprint(card);
+                if (latest.version === card.version) {
+                  return sameContent
+                    ? { status: 200, body: { ok: true, card: latest, nodeId: null, createdBy: latest.device, replayed: true } }
+                    : { status: 409, body: { ok: false, error: 'ROLE_CARD_CONFLICT', message: '同版本角色卡内容冲突' } };
+                }
+                if (latest.version > card.version) {
+                  return { status: 409, body: { ok: false, error: 'ROLE_CARD_STALE', message: '角色卡版本落后于已发布版本' } };
+                }
+                if (card.version !== latest.version + 1) {
+                  return { status: 409, body: { ok: false, error: 'ROLE_CARD_VERSION_GAP', message: '角色卡版本必须紧邻上一版本' } };
+                }
+              } else if (card.version !== 1) {
+                return { status: 409, body: { ok: false, error: 'ROLE_CARD_VERSION_GAP', message: '首版角色卡 version 必须为 1' } };
+              }
+              const appended = await lib.appendAgentRoleCard(app, card, 'agents');
+              return {
+                status: 200,
+                body: {
+                  ok: true,
+                  card: appended.card,
+                  nodeId: appended.nodeId,
+                  createdBy: appended.createdBy,
+                  replayed: appended.replayed === true,
+                },
+              };
+            });
+            return sendJson(res, result.status, result.body);
+          } catch (error) {
+            const code = typeof error?.code === 'string' ? error.code : null;
+            const status = code === 'ROLE_CARD_CONFLICT' || code === 'ROLE_CARD_STALE' || code === 'ROLE_CARD_VERSION_GAP'
+              ? 409
+              : code === 'ROLE_CARD_AUTHOR'
+                ? 403
+                : code === 'ROLE_CARD_SCHEMA'
+                  ? 422
+                  : 500;
+            return sendJson(res, status, {
+              ok: false,
+              ...(code !== null ? { error: code } : { error: 'role_card_write_failed' }),
+              ...(Array.isArray(error?.errors) ? { errors: error.errors } : { message: String(error?.message ?? error) }),
+            });
+          }
+        }
+        if (path === '/app/role-cards' && req.method === 'GET') {
+          if (!app) return sendJson(res, 503, { ok: false, error: 'role_cards_unavailable', message: '图存储尚未初始化' });
+          const lib = await loadFleetCards();
+          if (!lib || typeof lib.listAgentRoleCardNodes !== 'function') {
+            return sendJson(res, 503, { ok: false, error: 'role_cards_unavailable', message: '角色卡模块不可用' });
+          }
+          const requested = url.searchParams.get('namespace');
+          if (requested !== null && requested.length > 0 && requested !== 'agents') {
+            return sendJson(res, 400, { ok: false, error: 'namespace_invalid', message: '角色卡只能读取 agents 域' });
+          }
+          const device = url.searchParams.get('device');
+          const agent = url.searchParams.get('agent');
+          let nodes = await lib.listAgentRoleCardNodes(app, { namespace: 'agents' });
+          if (device) nodes = nodes.filter((entry) => entry.card.device === device);
+          if (agent) nodes = nodes.filter((entry) => entry.card.agent === agent);
+          return sendJson(res, 200, {
+            ok: true,
+            count: nodes.length,
+            cards: nodes.map((entry) => entry.card),
+            nodes: nodes.map((entry) => ({
+              id: entry.nodeId,
+              type: 'agent_role_card',
+              namespace: 'agents',
+              createdBy: entry.createdBy,
+              content: entry.card,
+              metadata: {
+                internal: true,
+                internalObject: { kind: 'agent_role_card' },
+              },
+            })),
+          });
         }
         // W2 A4：join 邀请（守护用自身身份生成令牌）
         if (path === '/app/join/invite' && req.method === 'POST') {

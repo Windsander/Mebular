@@ -126,6 +126,7 @@ _SPOOL_DEAD_LIMIT = 500
 _MAX_RETRY_DELAY = 30.0
 _MAX_RETRY_AFTER = 300.0
 _MODE_PROBE_SECONDS = 30.0
+_DEAD_WRITE_MAX_ATTEMPTS = 5
 
 # These failures can be repaired by an operator (token rotation or mode
 # re-enable).  They stay queued, but the worker still applies the configured
@@ -153,6 +154,18 @@ _SECRET_PATTERNS: Tuple[Tuple["re.Pattern[str]", str, str], ...] = (
         # Replace the whole header, including Basic/Digest credentials.
         re.compile(r"(?im)\b(?:proxy-)?authorization\s*:\s*[^\r\n]*"),
         "Authorization: [redacted]",
+        "authorization_header",
+    ),
+    (
+        re.compile(r"(?im)^\s*(?:set-)?cookie\s*:\s*[^\r\n]*"),
+        "Cookie: [redacted]",
+        "cookie_header",
+    ),
+    (
+        re.compile(
+            r"(?im)\b(?:proxy[_-]?)?authorization\s*[:=]\s*(?:basic|digest|bearer)\b[^\r\n]*"
+        ),
+        "authorization=[redacted]",
         "authorization_header",
     ),
     (
@@ -185,17 +198,50 @@ _SECRET_PATTERNS: Tuple[Tuple["re.Pattern[str]", str, str], ...] = (
     ),
 )
 
-_ASSIGNMENT_RE = re.compile(
-    r"\b(?P<key>openai_api_key|aws_secret_access_key|aws_access_key_id|"
+_ASSIGNMENT_KEYS = (
+    r"openai_api_key|aws_secret_access_key|aws_access_key_id|aws_session_token|"
     r"anthropic_api_key|huggingface_token|hf_token|github_token|gitlab_token|"
-    r"api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|client[_-]?secret|"
-    r"secret[_-]?key|private[_-]?key|token|secret|password|passwd|pwd)\b"
-    r"(?P<sep>\s*[:=]\s*)(?P<quote>[\"']?)(?P<value>[^\s\"',;]+)(?P=quote)",
+    r"session_token|security_token|secret[_-]?key|api[_-]?key|apikey|"
+    r"access[_-]?token|refresh[_-]?token|client[_-]?secret|"
+    r"private[_-]?key|set[_-]?cookie|cookie|proxy[_-]?authorization|authorization|"
+    r"token|secret|password|passwd|pwd"
+)
+_QUOTED_ASSIGNMENT_RE = re.compile(
+    rf"\b(?P<key>{_ASSIGNMENT_KEYS})\b"
+    r"(?P<sep>\s*[:=]\s*)(?P<quote>[\"'])(?P<value>[^\"']{1,512})(?P=quote)",
+    re.IGNORECASE,
+)
+_UNQUOTED_ASSIGNMENT_RE = re.compile(
+    rf"\b(?P<key>{_ASSIGNMENT_KEYS})\b"
+    r"(?P<sep>\s*[:=]\s*)(?P<quote>)(?P<value>[^\s\"',;]+)",
     re.IGNORECASE,
 )
 _CJK_ASSIGNMENT_RE = re.compile(
     r"(?P<key>密码|口令|密钥|令牌)(?P<sep>\s*[:：=]\s*)"
     r"(?P<quote>[\"']?)(?P<value>[^\s，,;；\"']+)(?P=quote)"
+)
+_HIGH_RISK_KEYS = frozenset(
+    {
+        "password",
+        "passwd",
+        "pwd",
+        "secret",
+        "secret_key",
+        "api_key",
+        "apikey",
+        "client_secret",
+        "access_token",
+        "refresh_token",
+        "session_token",
+        "aws_session_token",
+        "aws_secret_access_key",
+        "security_token",
+        "cookie",
+        "set_cookie",
+        "authorization",
+        "proxy_authorization",
+        "private_key",
+    }
 )
 _COMMON_SECRET_WORDS = frozenset(
     {
@@ -213,17 +259,22 @@ _COMMON_SECRET_WORDS = frozenset(
         "null",
         "true",
         "false",
+        "wellknown",
+        "well-known",
     }
 )
 
 
-def _looks_secret(value: str) -> bool:
-    """Heuristic for assignment-shaped secrets that avoids normal words."""
+def _normalise_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+
+
+def _looks_ambiguous_secret(value: str) -> bool:
+    """Shape check for words like ``token`` where normal prose is common."""
     candidate = str(value or "").strip().strip("\"'")
     if not candidate or candidate == "[redacted]":
         return False
-    lowered = candidate.lower()
-    if lowered in _COMMON_SECRET_WORDS:
+    if candidate.lower() in _COMMON_SECRET_WORDS:
         return False
     if candidate.startswith(
         ("sk-", "sk_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_",
@@ -232,16 +283,17 @@ def _looks_secret(value: str) -> bool:
         return True
     if re.match(r"^xox[baprs]-", candidate):
         return True
-    if len(candidate) < 6:
+    if len(candidate) < 8:
         return False
     has_digit = any(char.isdigit() for char in candidate)
-    has_symbol = any(not char.isalnum() for char in candidate)
     has_mixed_case = any(char.islower() for char in candidate) and any(
         char.isupper() for char in candidate
     )
-    if has_digit or has_symbol or has_mixed_case:
+    if has_digit:
         return True
-    return len(candidate) >= 16
+    if has_mixed_case and len(candidate) >= 12:
+        return True
+    return len(candidate) >= 24
 
 
 def _redact_assignments(text: str) -> Tuple[str, bool]:
@@ -249,15 +301,24 @@ def _redact_assignments(text: str) -> Tuple[str, bool]:
 
     def replace(match: "re.Match[str]") -> str:
         nonlocal redacted
-        if not _looks_secret(match.group("value")):
+        raw_key = match.group("key")
+        key = _normalise_key(raw_key)
+        value = match.group("value")
+        cjk_high_risk = raw_key in {"密码", "口令", "密钥", "令牌"}
+        if not cjk_high_risk and key not in _HIGH_RISK_KEYS and not _looks_ambiguous_secret(value):
             return match.group(0)
         redacted = True
+        quote = match.group("quote")
         return (
             f"{match.group('key')}{match.group('sep')}"
-            f"{match.group('quote')}[redacted]{match.group('quote')}"
+            f"{quote}[redacted]{quote}"
         )
 
-    for pattern in (_ASSIGNMENT_RE, _CJK_ASSIGNMENT_RE):
+    for pattern in (
+        _QUOTED_ASSIGNMENT_RE,
+        _UNQUOTED_ASSIGNMENT_RE,
+        _CJK_ASSIGNMENT_RE,
+    ):
         text = pattern.sub(replace, text)
     return text, redacted
 
@@ -527,7 +588,7 @@ def _ingest_result_outcome(result: Dict[str, Any]) -> Tuple[str, str, bool]:
         for item in warning_list
     )
 
-    if queued or status == "pending" or detail_queued > 0 or "queued_outbox" in warning_list:
+    if queued or detail_queued > 0 or "queued_outbox" in warning_list:
         return "handoff", "ingest_queued_outbox", degraded
     if status in {"failed", "partial"} or detail_failed > 0 or detail_warning_failure:
         reason = "ingest_failed"
@@ -536,10 +597,13 @@ def _ingest_result_outcome(result: Dict[str, Any]) -> Tuple[str, str, bool]:
                 reason = item
                 break
         return "failed", reason[:120], degraded
-    if status in {"", "completed", "duplicate"} or duplicate:
-        return "committed", "duplicate" if duplicate else "completed", degraded
-    # Unknown/pending status must stay bounded rather than be called committed.
-    return "pending", f"ingest_status_{status or 'unknown'}"[:120], degraded
+    if duplicate or status == "duplicate":
+        return "committed", "duplicate", degraded
+    if status == "completed":
+        return "committed", "completed", degraded
+    # Missing/unknown/pending extraction is not committed.  A pending response
+    # without a queued handoff stays in the host spool under the retry bound.
+    return "pending", f"ingest_status_{status or 'missing'}"[:120], degraded
 
 
 def _checkpoint_result_committed(result: Dict[str, Any]) -> bool:
@@ -1654,6 +1718,8 @@ class _Spool:
         self._items: List[Dict[str, Any]] = []
         self._dead: List[Dict[str, Any]] = []
         self._dead_write_failures = 0
+        self._live_quota_evicted = 0
+        self._worker_owner: Any = None
         self.writer_pid = os.getpid()
         self._load()
 
@@ -1699,6 +1765,17 @@ class _Spool:
                 item["lastError"] = {
                     "code": str(last_error.get("code") or "")[:120],
                     "at": error_at,
+                }
+            dead_pending = record.get("deadPending")
+            if isinstance(dead_pending, dict):
+                try:
+                    pending_attempts = max(0, int(dead_pending.get("attempts") or 0))
+                except Exception:
+                    pending_attempts = 0
+                item["deadPending"] = {
+                    "reason": str(dead_pending.get("reason") or "dead_write_failed")[:120],
+                    "attempts": pending_attempts,
+                    "at": int(dead_pending.get("at") or now),
                 }
             return item
         except Exception:
@@ -1795,6 +1872,8 @@ class _Spool:
         )
         if len(self._dead) != dead_before_trim:
             changed = True
+        if self._enforce_live_budget_locked(now):
+            changed = True
         # Expired pending work reaches an explicit terminal state, not an
         # invisible retry loop.
         expired = [
@@ -1826,6 +1905,8 @@ class _Spool:
         }
         if isinstance(record.get("lastError"), dict):
             serialisable["lastError"] = record["lastError"]
+        if isinstance(record.get("deadPending"), dict):
+            serialisable["deadPending"] = record["deadPending"]
         if record.get("deadAt") is not None:
             serialisable["deadAt"] = int(record.get("deadAt") or 0)
             serialisable["reason"] = record.get("reason")
@@ -1921,6 +2002,21 @@ class _Spool:
             pass
         return True
 
+    def _enforce_live_budget_locked(self, now: int) -> bool:
+        changed = False
+        while self._items and self._bytes_locked() > self._max_bytes:
+            item = self._items[0]
+            if self._dead_item_locked(item, "live_quota_evicted", now):
+                changed = True
+                continue
+            # The dead copy cannot fit either; enforce the byte bound by
+            # dropping the oldest live item and record the visible counter.
+            self._items.pop(0)
+            self._live_quota_evicted += 1
+            changed = True
+            logger.warning("Mebular live spool exceeded byte budget; oldest item dropped")
+        return changed
+
     def _bytes_locked(self, records: Optional[List[Dict[str, Any]]] = None) -> int:
         values = self._items if records is None else records
         return sum(len(self._serialise(record).encode("utf-8")) + 1 for record in values)
@@ -1983,6 +2079,9 @@ class _Spool:
                 raise _SpoolFull("queue_limit")
             record_bytes = self._bytes_locked([record])
             live_after = self._bytes_locked() + record_bytes
+            if live_after > self._max_bytes:
+                # Refuse before touching diagnostic dead evidence.
+                raise _SpoolFull("queue_bytes")
             dead_candidate = self._dead_records_bounded_locked(
                 self._dead, now=now, live_bytes=live_after
             )
@@ -1992,8 +2091,6 @@ class _Spool:
                 except _SpoolUnavailable:
                     raise
                 self._dead = dead_candidate
-            if live_after > self._max_bytes:
-                raise _SpoolFull("queue_bytes")
             self._items.append(record)
             try:
                 self._persist_locked()
@@ -2069,6 +2166,59 @@ class _Spool:
                 return True
             return False
 
+    def claim_worker(self, owner: Any) -> bool:
+        with self._lock:
+            current = self._worker_owner
+            if current is owner:
+                return True
+            if current is not None:
+                try:
+                    if not getattr(current, "_shutdown", False):
+                        worker = getattr(current, "_worker", None)
+                        if worker is not None and worker.is_alive():
+                            return False
+                except Exception:
+                    pass
+            self._worker_owner = owner
+            return True
+
+    def release_worker(self, owner: Any) -> None:
+        with self._lock:
+            if self._worker_owner is owner:
+                self._worker_owner = None
+
+    def worker_owner(self) -> Any:
+        with self._lock:
+            return self._worker_owner
+
+    def mark_dead_pending(self, item_id: str, reason: str) -> int:
+        """Persist the explicit dead-pending state without resending work."""
+        with self._lock:
+            attempts = 0
+            for item in self._items:
+                if item.get("id") != item_id:
+                    continue
+                previous = item.get("deadPending")
+                prior = int(previous.get("attempts") or 0) if isinstance(previous, dict) else 0
+                attempts = prior + 1
+                item["deadPending"] = {
+                    "reason": str(reason or "dead_write_failed")[:120],
+                    "attempts": attempts,
+                    "at": _now_ms(),
+                }
+                break
+            try:
+                self._persist_locked()
+            except _SpoolUnavailable as error:
+                logger.warning("Mebular dead-pending write failed: %s", error)
+            return attempts
+
+    def dead_pending_count(self) -> int:
+        with self._lock:
+            return sum(
+                1 for item in self._items if isinstance(item.get("deadPending"), dict)
+            )
+
     def count(self, kind: Optional[str] = None) -> int:
         with self._lock:
             if kind is None:
@@ -2101,6 +2251,13 @@ class _Spool:
     def dead_write_failures(self) -> int:
         with self._lock:
             return self._dead_write_failures
+
+    def dead_pending_items(self) -> int:
+        return self.dead_pending_count()
+
+    def live_quota_evicted(self) -> int:
+        with self._lock:
+            return self._live_quota_evicted
 
     def oldest_age_ms(self) -> int:
         with self._lock:
@@ -2196,7 +2353,8 @@ class MebularMemoryProvider(MemoryProvider):
         self._discovery_checked_at = 0.0
         self._mode_blocked_reason = ""
         self._mode_blocked_at_ms = 0
-        self._mode_probe_at = 0.0
+        self._mode_next_probe_at = 0.0
+        self._mode_probe_attempts = 0
         self._mode_probe_result = ""
 
         self._lock = threading.RLock()
@@ -2216,11 +2374,17 @@ class MebularMemoryProvider(MemoryProvider):
         self._checkpoint_failures = 0
         self._checkpoint_handoffs = 0
         self._checkpoint_committed = 0
+        self._checkpoint_pending_responses = 0
+        self._checkpoint_unconfirmed = 0
         self._ingest_committed = 0
         self._ingest_failed = 0
         self._ingest_handoffs = 0
         self._ingest_pending_responses = 0
+        self._ingest_partial = 0
+        self._ingest_committed_records = 0
         self._ingest_degraded = 0
+        self._last_ingest: Optional[Dict[str, Any]] = None
+        self._failed_items: set[str] = set()
         self._spool_rejected = 0
         self._spool_write_failures = 0
         self._last_warning: Optional[Dict[str, Any]] = None
@@ -2307,16 +2471,23 @@ class MebularMemoryProvider(MemoryProvider):
             self._recall_block_until = 0.0
             self._mode_blocked_reason = ""
             self._mode_blocked_at_ms = 0
-            self._mode_probe_at = 0.0
+            self._mode_next_probe_at = 0.0
+            self._mode_probe_attempts = 0
             self._mode_probe_result = ""
             self._checkpoint_failures = 0
             self._checkpoint_handoffs = 0
             self._checkpoint_committed = 0
+            self._checkpoint_pending_responses = 0
+            self._checkpoint_unconfirmed = 0
             self._ingest_committed = 0
             self._ingest_failed = 0
             self._ingest_handoffs = 0
             self._ingest_pending_responses = 0
+            self._ingest_partial = 0
+            self._ingest_committed_records = 0
             self._ingest_degraded = 0
+            self._last_ingest = None
+            self._failed_items.clear()
             self._spool_rejected = 0
             self._spool_write_failures = 0
             self._last_warning = None
@@ -2615,54 +2786,25 @@ class MebularMemoryProvider(MemoryProvider):
     def _note_mode_blocked(self, code: str) -> None:
         self._mode_blocked_reason = str(code or "mode_mismatch")
         self._mode_blocked_at_ms = _now_ms()
+        self._mode_next_probe_at = time.monotonic() + _MODE_PROBE_SECONDS
+        self._mode_probe_result = self._mode_blocked_reason
 
     def _note_runtime_success(self) -> None:
         self._mode_blocked_reason = ""
         self._mode_blocked_at_ms = 0
-        self._mode_probe_at = 0.0
+        self._mode_next_probe_at = 0.0
+        self._mode_probe_attempts = 0
         self._mode_probe_result = ""
 
-    def _probe_mode_recovery(self) -> bool:
-        """Bounded, observable recovery probe for config/env discovery.
-
-        A mode mismatch is never retried per turn.  At most once per interval,
-        the host asks the sidecar status route whether an active mode is
-        visible again; only an explicit active mode clears the block.
-        """
-        if not self._mode_blocked_reason:
-            return True
-        client = self._client
-        if client is None:
-            return False
-        now = time.monotonic()
-        if self._mode_probe_at > 0 and now - self._mode_probe_at < _MODE_PROBE_SECONDS:
-            return False
-        self._mode_probe_at = now
-        try:
-            data = client.get(
-                "/status",
-                timeout=max(0.2, min(1.0, float(self._recall_timeout))),
-            )
-        except _RuntimeError as error:
-            self._mode_probe_result = error.code
-            return False
-        except Exception as error:
-            self._mode_probe_result = type(error).__name__
-            return False
-        mode = str(data.get("mode") or "").strip().lower()
-        if mode and mode in _DISCOVERY_ACTIVE_MODES:
-            self._mode_probe_result = "active"
-            self._note_runtime_success()
-            return True
-        self._mode_probe_result = mode or "unknown"
-        return False
+    def _mode_probe_due(self) -> bool:
+        return bool(self._mode_blocked_reason) and time.monotonic() >= self._mode_next_probe_at
 
     def _mode_allows_work(self) -> bool:
         if self._mode and self._mode.lower() not in _DISCOVERY_ACTIVE_MODES:
             return False
-        # A mode mismatch is not a transient retry condition.  Writes stay
-        # dormant until a request succeeds again or fresh discovery shows the
-        # mode was re-enabled.
+        # A mode mismatch is not cleared by a successful read-only status call.
+        # Only fresh discovery, new authorization evidence, or a successful
+        # replay of the same pending operation restores write admission.
         return not self._mode_blocked_reason
 
     def _record_warning(self, code: str) -> None:
@@ -3047,6 +3189,8 @@ class MebularMemoryProvider(MemoryProvider):
                 break
             if thread.is_alive():
                 thread.join(timeout=min(0.2, remaining))
+        if self._spool is not None:
+            self._spool.release_worker(self)
         self._worker = None
         logger.debug("Mebular provider shut down (pending=%s)", self.pending())
 
@@ -3212,11 +3356,13 @@ class MebularMemoryProvider(MemoryProvider):
         self._record_warning(code or "checkpoint_failed")
         logger.debug("Mebular checkpoint failed (%s)", code)
 
-    def _send_checkpoint(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _send_checkpoint(
+        self, payload: Dict[str, Any], *, allow_mode_probe: bool = False
+    ) -> Dict[str, Any]:
         client = self._client
         if client is None:
             raise _RuntimeError("runtime_unavailable", "sidecar URL is not configured")
-        if not self._mode_allows_work():
+        if not allow_mode_probe and not self._mode_allows_work():
             raise _RuntimeError(
                 self._mode_blocked_reason or "mode_mismatch",
                 "immersive mode is paused",
@@ -3271,7 +3417,11 @@ class MebularMemoryProvider(MemoryProvider):
             logger.warning("Mebular checkpoint spool write failed: %s", type(error).__name__)
             self._checkpoint_failed("checkpoint_persist_failed")
             return
-        self._checkpoint_failures += 1
+        with self._lock:
+            if code == "checkpoint_unconfirmed":
+                self._checkpoint_unconfirmed += 1
+            else:
+                self._checkpoint_pending_responses += 1
         self._record_warning(code or "checkpoint_pending")
         self._wake.set()
         logger.debug("Mebular checkpoint pending persisted to spool (%s)", code)
@@ -3392,13 +3542,25 @@ class MebularMemoryProvider(MemoryProvider):
         with self._lock:
             if self._client is None or self._shutdown:
                 return
+            spool = self._spool
+            if spool is not None and not spool.claim_worker(self):
+                owner = spool.worker_owner()
+                wake = getattr(owner, "_wake", None)
+                if wake is not None:
+                    wake.set()
+                return
             if self._worker is not None and self._worker.is_alive():
                 self._wake.set()
                 return
             self._stop.clear()
             self._wake.clear()
             self._worker = _spawn_worker(self._worker_loop, name="mebular-memory-sync")
-            self._worker.start()
+            try:
+                self._worker.start()
+            except Exception:
+                if spool is not None:
+                    spool.release_worker(self)
+                raise
 
     @staticmethod
     def _retry_delay(attempts: int, error: Optional[_RuntimeError] = None) -> float:
@@ -3417,28 +3579,59 @@ class MebularMemoryProvider(MemoryProvider):
             self._wake.wait(timeout=min(0.5, remaining))
             self._wake.clear()
 
-    def _send_spool_item(self, item: Dict[str, Any]) -> Dict[str, Any]:
+    def _send_spool_item(
+        self, item: Dict[str, Any], *, allow_mode_probe: bool = False
+    ) -> Dict[str, Any]:
         payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
         if item.get("kind") == "checkpoint":
-            return self._send_checkpoint(payload)
-        return self._send_ingest(payload)
+            return self._send_checkpoint(payload, allow_mode_probe=allow_mode_probe)
+        return self._send_ingest(payload, allow_mode_probe=allow_mode_probe)
 
     def _dead_spool_item(self, spool: _Spool, item_id: str, reason: str) -> bool:
         if spool.dead(item_id, reason):
             return True
+        spool.mark_dead_pending(item_id, reason)
         self._record_warning("dead_write_failed")
         logger.warning("Mebular spool dead write failed; live item retained (%s)", reason)
         return False
+
+    def _count_ingest_failure(self, item_id: str) -> None:
+        with self._lock:
+            if item_id in self._failed_items:
+                return
+            self._failed_items.add(item_id)
+            self._ingest_failed += 1
 
     def _record_ingest_response(
         self, spool: _Spool, item_id: str, result: Dict[str, Any]
     ) -> Optional[float]:
         outcome, reason, degraded = _ingest_result_outcome(result)
+        records = result.get("records") if isinstance(result.get("records"), list) else []
+        if not records:
+            extraction = result.get("extraction")
+            if isinstance(extraction, dict) and isinstance(extraction.get("records"), list):
+                records = extraction["records"]
+        detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
+        detail_ids = result.get("detailIds")
+        if not isinstance(detail_ids, list):
+            detail_ids = detail.get("ids") if isinstance(detail.get("ids"), list) else []
+        detail_failed = _count_value(detail.get("failed"))
+        with self._lock:
+            if degraded:
+                self._ingest_degraded += 1
+            self._last_ingest = {
+                "outcome": outcome,
+                "reason": reason,
+                "degraded": degraded,
+                "records": len(records),
+                "detailIds": [str(item) for item in detail_ids[:20]],
+                "detailFailed": detail_failed,
+                "at": _now_ms(),
+            }
         if outcome == "committed":
             with self._lock:
                 self._ingest_committed += 1
-                if degraded:
-                    self._ingest_degraded += 1
+                self._ingest_committed_records += len(records)
             if degraded:
                 self._record_warning("ingest_degraded")
             spool.remove(item_id)
@@ -3450,22 +3643,23 @@ class MebularMemoryProvider(MemoryProvider):
             spool.remove(item_id)
             return None
         if outcome == "failed":
+            self._count_ingest_failure(item_id)
             with self._lock:
-                self._ingest_failed += 1
+                if records or detail_failed:
+                    self._ingest_partial += 1
             self._record_warning(reason)
             if self._dead_spool_item(spool, item_id, reason):
                 return None
-            attempts = spool.fail(item_id, "dead_write_failed")
-            return self._retry_delay(attempts)
+            return self._retry_delay(1)
         with self._lock:
             self._ingest_pending_responses += 1
         self._record_warning(reason)
         attempts = spool.fail(item_id, reason)
         if attempts >= self._sync_max_attempts:
-            with self._lock:
-                self._ingest_failed += 1
+            self._count_ingest_failure(item_id)
             if self._dead_spool_item(spool, item_id, f"{reason}:max_attempts"):
                 return None
+            return self._retry_delay(1)
         return self._retry_delay(attempts)
 
     def _record_checkpoint_response(
@@ -3490,16 +3684,29 @@ class MebularMemoryProvider(MemoryProvider):
         return self._retry_delay(attempts)
 
     def _worker_loop(self) -> None:
+        spool = self._spool
+        try:
+            self._worker_loop_inner()
+        finally:
+            if spool is not None:
+                spool.release_worker(self)
+
+    def _worker_loop_inner(self) -> None:
         while not self._stop.is_set():
             self._ensure_runtime()
             spool = self._spool
             if spool is None or self._client is None:
                 return
+            probe = False
             if not self._mode_allows_work():
-                spool.expire()
-                self._wake.wait(timeout=0.5)
-                self._wake.clear()
-                continue
+                if not self._mode_probe_due():
+                    spool.expire()
+                    self._wake.wait(timeout=0.5)
+                    self._wake.clear()
+                    continue
+                probe = True
+                self._mode_probe_attempts += 1
+                self._mode_next_probe_at = time.monotonic() + _MODE_PROBE_SECONDS
             item = spool.first()
             if item is None:
                 spool.expire()
@@ -3507,14 +3714,27 @@ class MebularMemoryProvider(MemoryProvider):
                 self._wake.clear()
                 continue
             item_id = str(item.get("id") or "")
+            dead_pending = item.get("deadPending")
+            if isinstance(dead_pending, dict):
+                attempts = int(dead_pending.get("attempts") or 0)
+                if attempts >= _DEAD_WRITE_MAX_ATTEMPTS:
+                    self._wait_retry(_MAX_RETRY_DELAY)
+                    continue
+                reason = str(dead_pending.get("reason") or "dead_write_failed")
+                if spool.dead(item_id, reason):
+                    continue
+                spool.mark_dead_pending(item_id, reason)
+                self._wait_retry(self._retry_delay(attempts + 1))
+                continue
             if int(item.get("expiresAt") or 0) <= _now_ms():
+                if item.get("kind") != "checkpoint":
+                    self._count_ingest_failure(item_id)
                 if self._dead_spool_item(spool, item_id, "retention_expired"):
                     continue
-                attempts = spool.fail(item_id, "dead_write_failed")
-                self._wait_retry(self._retry_delay(attempts))
+                self._wait_retry(0.5)
                 continue
             try:
-                result = self._send_spool_item(item)
+                result = self._send_spool_item(item, allow_mode_probe=probe)
             except _RuntimeError as error:
                 if error.code in _MODE_CODES:
                     # Mode mismatch is a dormant state, not a transient retry.
@@ -3531,6 +3751,8 @@ class MebularMemoryProvider(MemoryProvider):
                     attempts = spool.fail(item_id, error.code)
                     self._record_warning(error.code)
                     if attempts >= self._sync_max_attempts:
+                        if item.get("kind") != "checkpoint":
+                            self._count_ingest_failure(item_id)
                         if self._dead_spool_item(
                             spool, item_id, f"{error.code}:max_attempts"
                         ):
@@ -3552,6 +3774,8 @@ class MebularMemoryProvider(MemoryProvider):
                     self._wait_retry(self._retry_delay(attempts, error))
                     continue
                 if not error.retryable or error.code in _NON_RETRYABLE_CODES:
+                    if item.get("kind") != "checkpoint":
+                        self._count_ingest_failure(item_id)
                     if self._dead_spool_item(spool, item_id, error.code):
                         self._record_warning(error.code)
                         logger.warning(
@@ -3565,6 +3789,8 @@ class MebularMemoryProvider(MemoryProvider):
                     continue
                 attempts = spool.fail(item_id, error.code)
                 if attempts >= self._sync_max_attempts:
+                    if item.get("kind") != "checkpoint":
+                        self._count_ingest_failure(item_id)
                     if self._dead_spool_item(
                         spool, item_id, f"{error.code}:max_attempts"
                     ):
@@ -3583,6 +3809,8 @@ class MebularMemoryProvider(MemoryProvider):
                 attempts = spool.fail(item_id, type(error).__name__)
                 logger.debug("Mebular spool worker error: %s", type(error).__name__)
                 if attempts >= self._sync_max_attempts:
+                    if item.get("kind") != "checkpoint":
+                        self._count_ingest_failure(item_id)
                     if self._dead_spool_item(
                         spool, item_id, f"{type(error).__name__}:max_attempts"
                     ):
@@ -3596,10 +3824,12 @@ class MebularMemoryProvider(MemoryProvider):
             if delay is not None:
                 self._wait_retry(delay)
 
-    def _send_ingest(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _send_ingest(
+        self, payload: Dict[str, Any], *, allow_mode_probe: bool = False
+    ) -> Dict[str, Any]:
         if self._client is None:
             raise _RuntimeError("runtime_unavailable", "sidecar URL is not configured")
-        if not self._mode_allows_work():
+        if not allow_mode_probe and not self._mode_allows_work():
             raise _RuntimeError(
                 self._mode_blocked_reason or "mode_mismatch",
                 "immersive mode is paused",
@@ -3747,8 +3977,6 @@ class MebularMemoryProvider(MemoryProvider):
             active = not self._mode or self._mode.lower() in _DISCOVERY_ACTIVE_MODES
             if active and refreshed_at > self._mode_blocked_at_ms:
                 self._note_runtime_success()
-            if self._mode_blocked_reason:
-                self._probe_mode_recovery()
         token_file = str(discovery.get("token_file") or "")
         if token_file:
             self._token_file = Path(token_file)
@@ -3856,13 +4084,18 @@ class MebularMemoryProvider(MemoryProvider):
                 "checkpointFailures": self._checkpoint_failures,
                 "checkpointHandoffs": self._checkpoint_handoffs,
                 "checkpointCommitted": self._checkpoint_committed,
+                "checkpointPendingResponses": self._checkpoint_pending_responses,
+                "checkpointUnconfirmed": self._checkpoint_unconfirmed,
                 "ingestCommitted": self._ingest_committed,
                 "ingestFailed": self._ingest_failed,
                 "ingestHandoffs": self._ingest_handoffs,
                 "ingestPendingResponses": self._ingest_pending_responses,
+                "ingestPartial": self._ingest_partial,
+                "ingestCommittedRecords": self._ingest_committed_records,
                 "ingestDegraded": self._ingest_degraded,
                 "spoolPending": self.pending(),
                 "spoolDead": self._spool.dead_count() if self._spool else 0,
+                "spoolDeadPending": self._spool.dead_pending_count() if self._spool else 0,
                 "spoolRejected": self._spool_rejected,
                 "spoolWriteFailures": self._spool_write_failures,
                 "spoolBytes": self._spool.bytes() if self._spool else 0,
@@ -3887,20 +4120,27 @@ class MebularMemoryProvider(MemoryProvider):
                 "rejected": self._spool_rejected,
                 "writeFailures": self._spool_write_failures,
                 "deadWriteFailures": self._spool.dead_write_failures() if self._spool else 0,
+                "deadPending": self._spool.dead_pending_count() if self._spool else 0,
+                "liveQuotaEvicted": self._spool.live_quota_evicted() if self._spool else 0,
                 "writerPid": self._spool.writer_pid if self._spool else os.getpid(),
                 "writerScope": "process",
                 "crossProcessLock": False,
             },
             "pending_ingest": self.pending(),
         }
+        if self._last_ingest:
+            status["lastIngest"] = dict(self._last_ingest)
         if self._last_warning:
             status["lastWarning"] = dict(self._last_warning)
         if self._mode_blocked_reason:
             status["modeBlocked"] = {
                 "reason": self._mode_blocked_reason,
                 "since": self._mode_blocked_at_ms,
-                "probeAt": int(self._mode_probe_at * 1000) if self._mode_probe_at else 0,
-                "probeResult": self._mode_probe_result,
+                "probeAttempts": self._mode_probe_attempts,
+                "nextProbeInMs": max(
+                    0, int((self._mode_next_probe_at - time.monotonic()) * 1000)
+                ) if self._mode_next_probe_at else 0,
+                "lastProbeResult": self._mode_probe_result,
             }
         if not self._writes_enabled:
             status["writes"] = "disabled (non-primary agent context)"

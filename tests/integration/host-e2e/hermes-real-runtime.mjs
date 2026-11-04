@@ -98,7 +98,8 @@ async function scanForToken(dir, token) {
       } else if (entry.isFile() && (entry.name.endsWith('.json')
         || entry.name.endsWith('.jsonl')
         || entry.name.endsWith('.log')
-        || entry.name.endsWith('.txt'))) {
+        || entry.name.endsWith('.txt')
+        || entry.name.endsWith('.md'))) {
         const text = await readFile(path, 'utf8').catch(() => '');
         if (text.includes(token)) hits.push(path);
       }
@@ -328,36 +329,44 @@ async function main() {
       fault?.error ?? faultPython.stderr.slice(-500));
     if (fault !== null && fault.error === undefined) {
       const faultCounts = fault.status?.counts ?? {};
-      check('200 failed 不伪装 committed/dead 可见',
+      check('[boundary] 故障阶段 real/shim 标签完整',
+        fault.boundary?.step === 'real-provider+real-sidecar+real-graph'
+        && Array.isArray(fault.boundary?.responseShimCases)
+        && Array.isArray(fault.boundary?.notGraphCommitClaims),
+        JSON.stringify(fault.boundary));
+      check('[shim] 200 failed 不伪装 committed/dead 可见',
         fault.failedFlushed === true && (faultCounts.ingestFailed ?? 0) >= 1,
         JSON.stringify(faultCounts));
-      check('200 detail.failed/partial 不伪装 committed',
+      check('[shim] 200 detail.failed/partial 不伪装 committed',
         fault.partialFlushed === true && (faultCounts.ingestFailed ?? 0) >= 2,
         JSON.stringify(faultCounts));
-      check('202 queued 记为 handoff 而非 committed',
+      check('[shim] 202 queued 记为 handoff 而非 committed',
         fault.queuedFlushed === true && (faultCounts.ingestHandoffs ?? 0) >= 1,
         JSON.stringify(faultCounts));
-      check('离线一次后恢复并提交',
+      check('[real] 离线一次后恢复并提交',
         fault.offlineFlushed === true && (faultCounts.ingestCommitted ?? 0) >= 2,
         JSON.stringify(faultCounts));
-      check('401/429 有界进入 dead',
+      check('[shim] 401/429 有界进入 dead',
         fault.authFlushed === true && fault.rateFlushed === true
         && (fault.deadRecords ?? 0) >= 4,
         JSON.stringify({ dead: fault.deadRecords, counts: faultCounts }));
-      check('mode mismatch 立即休眠且不增长请求',
+      check('[shim] mode mismatch 立即休眠且不增长请求',
         fault.modeBlocked === true && fault.modeRequestsStable === true,
         JSON.stringify({ blocked: fault.modeBlocked, stable: fault.modeRequestsStable }));
-      check('mode mismatch 恢复探测后可继续写入',
+      check('[negative] /status 200/immersive 不清 mode block',
+        fault.modeStatusDoesNotClear === true,
+        JSON.stringify({ statusCleared: fault.modeStatusDoesNotClear }));
+      check('[real] mode mismatch 同一操作重放后可继续写入',
         fault.modeRecovered === true && fault.modeRecoveryFlushed === true,
         JSON.stringify({ recovered: fault.modeRecovered, flushed: fault.modeRecoveryFlushed }));
-      check('checkpoint 202 只交接宿主副本', fault.checkpointHandoffFlushed === true
+      check('[shim] checkpoint 202 只交接宿主副本', fault.checkpointHandoffFlushed === true
         && fault.checkpointHandoffPending === 0
         && (faultCounts.checkpointHandoffs ?? 0) >= 1,
       JSON.stringify(faultCounts));
-      check('checkpoint 200 无 revision 不提交',
+      check('[shim] checkpoint 200 无 revision 不提交',
         (fault.checkpointUnconfirmedPending ?? 0) >= 1,
         JSON.stringify({ pending: fault.checkpointUnconfirmedPending }));
-      check('checkpoint 合法 revision 后提交',
+      check('[real] checkpoint 合法 revision 后提交',
         fault.checkpointSentinelFlushed === true
         && (faultCounts.checkpointCommitted ?? 0) >= 2,
         JSON.stringify(faultCounts));
@@ -369,6 +378,12 @@ async function main() {
         && !String(fault.deadText ?? '').includes(sentinel));
       const faultLeaks = await scanForToken(faultHome, sentinel);
       check('故障 profile 不落盘脱敏前哨兵', faultLeaks.length === 0, JSON.stringify(faultLeaks));
+      const faultHostTokenLeaks = await scanForToken(faultHome, statusResult.token);
+      check('故障 profile 不落盘 host token（含 .md）',
+        faultHostTokenLeaks.length === 0, JSON.stringify(faultHostTokenLeaks));
+      const faultRuntimeTokenLeaks = await scanForToken(faultHome, runtime.token);
+      check('故障 profile 不落盘 Runtime bearer（含 .md）',
+        faultRuntimeTokenLeaks.length === 0, JSON.stringify(faultRuntimeTokenLeaks));
       const faultCheckpoint = await sidecarCheckpoint(
         discovery, statusResult.token, 'hermes-fault',
       );

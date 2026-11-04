@@ -176,9 +176,8 @@ class _Handler(BaseHTTPRequestHandler):
             })
             return
         if parsed.path == f"{API}/status":
-            if fake.mode == "error" and fake.error_code == "mode_mismatch":
-                self._error(fake.error_status, fake.error_code)
-                return
+            # Real sidecars always report mode=immersive here; this must never
+            # be treated as write-admission evidence after a mode_mismatch.
             self._send(200, self._envelope({
                 "mode": "immersive",
                 "state": "ready",
@@ -1207,7 +1206,9 @@ class SpoolContractTests(BaseCase):
             "extraction": {"status": "completed"},
             "queued": False,
             "degraded": True,
-            "detail": {"ids": [], "written": 0, "duplicates": 0,
+            "records": [{"id": "rec_partial", "kind": "fact", "domain": "user"}],
+            "detailIds": ["det_partial"],
+            "detail": {"ids": ["det_partial"], "written": 1, "duplicates": 0,
                        "queued": 0, "failed": 1},
             "warnings": ["detail_write_failed:detail_quota_exceeded"],
         }
@@ -1219,8 +1220,52 @@ class SpoolContractTests(BaseCase):
         status = provider.get_status_config()
         self.assertEqual(status["counts"]["ingestCommitted"], 0)
         self.assertGreaterEqual(status["counts"]["ingestFailed"], 1)
+        self.assertEqual(status["counts"]["ingestPartial"], 1)
+        self.assertEqual(status["counts"]["ingestDegraded"], 1)
         self.assertEqual(status["counts"]["spoolPending"], 0)
+        self.assertEqual(status["lastIngest"]["records"], 1)
+        self.assertEqual(status["lastIngest"]["detailIds"], ["det_partial"])
         self.assertIn("detail_write_failed", self.read_jsonl(self.dead_spool_path)[-1]["reason"])
+
+    def test_pending_without_queued_is_not_handoff(self) -> None:
+        server = self.fake_server()
+        provider = self.make_provider(server, sync_max_attempts=1)
+        server.ingest_status = 202
+        server.ingest_overrides = {
+            "extraction": {"status": "pending"},
+            "queued": False,
+            "degraded": True,
+            "warnings": [],
+        }
+        provider.sync_turn("pending but not queued", "no", session_id="s1")
+        self.assertTrue(self.wait_until(
+            lambda: provider.get_status_config()["counts"]["spoolDead"] >= 1,
+            timeout=4.0,
+        ))
+        status = provider.get_status_config()
+        self.assertEqual(status["counts"]["ingestHandoffs"], 0)
+        self.assertEqual(status["counts"]["ingestCommitted"], 0)
+        self.assertGreaterEqual(status["counts"]["ingestFailed"], 1)
+        self.assertEqual(status["counts"]["ingestPendingResponses"], 1)
+
+    def test_empty_extraction_is_not_committed(self) -> None:
+        server = self.fake_server()
+        provider = self.make_provider(server, sync_max_attempts=1)
+        server.ingest_overrides = {
+            "extraction": {},
+            "queued": False,
+            "degraded": False,
+            "warnings": [],
+        }
+        provider.sync_turn("empty extraction", "no", session_id="s1")
+        self.assertTrue(self.wait_until(
+            lambda: provider.get_status_config()["counts"]["spoolDead"] >= 1,
+            timeout=4.0,
+        ))
+        status = provider.get_status_config()
+        self.assertEqual(status["counts"]["ingestCommitted"], 0)
+        self.assertGreaterEqual(status["counts"]["ingestFailed"], 1)
+        self.assertEqual(status["counts"]["spoolPending"], 0)
 
     def test_ingest_202_queued_is_handoff_not_committed(self) -> None:
         server = self.fake_server()
@@ -1263,12 +1308,16 @@ class SpoolContractTests(BaseCase):
             lambda: provider.checkpoint_pending() == 1,
             timeout=2.0,
         ))
-        self.assertEqual(provider.get_status_config()["counts"]["checkpointCommitted"], 0)
+        status = provider.get_status_config()
+        self.assertEqual(status["counts"]["checkpointCommitted"], 0)
+        self.assertEqual(status["counts"]["checkpointFailures"], 0)
+        self.assertGreaterEqual(status["counts"]["checkpointUnconfirmed"], 1)
         server.checkpoint_unconfirmed = False
         self.assertTrue(provider.flush(timeout=5.0))
         status = provider.get_status_config()
         self.assertEqual(provider.checkpoint_pending(), 0)
         self.assertEqual(status["counts"]["checkpointCommitted"], 1)
+        self.assertEqual(status["counts"]["checkpointFailures"], 0)
 
     def test_status_mode_is_unknown_without_discovery(self) -> None:
         server = self.fake_server()
@@ -1328,6 +1377,79 @@ class SpoolContractTests(BaseCase):
         self.assertEqual(spool.dead_count(), 0)
         self.assertEqual(spool.dead_write_failures(), 1)
 
+    @staticmethod
+    def _fail_dead_writes(spool: Any) -> Any:
+        original = spool._write_atomic
+
+        def write(path: Path, records: List[Dict[str, Any]]) -> None:
+            if path.name == "dead.jsonl":
+                raise memory_plugin._SpoolUnavailable("read-only dead")
+            original(path, records)
+
+        return mock.patch.object(spool, "_write_atomic", side_effect=write)
+
+    def test_worker_dead_write_failure_enters_dead_pending_without_resend(self) -> None:
+        server = self.fake_server()
+        provider = self.make_provider(server, sync_max_attempts=3)
+        server.mode = "error"
+        server.error_status = 422
+        server.error_code = "invalid_request"
+        with self._fail_dead_writes(provider._spool):
+            provider.sync_turn("nonretryable dead write failure", "no", session_id="s1")
+            self.assertTrue(self.wait_until(
+                lambda: provider.get_status_config()["counts"]["spoolDeadPending"] >= 1,
+                timeout=3.0,
+            ))
+            requests_after_failure = len(server.ingests)
+            self.assertEqual(requests_after_failure, 1)
+            time.sleep(1.2)
+            self.assertEqual(len(server.ingests), requests_after_failure)
+            status = provider.get_status_config()
+            self.assertEqual(status["counts"]["ingestFailed"], 1)
+            self.assertEqual(status["counts"]["spoolDeadPending"], 1)
+        records = self.read_jsonl(self.spool_path)
+        self.assertEqual(len(records), 1)
+        self.assertIn("deadPending", records[0])
+
+    def test_worker_dead_write_failure_after_401_does_not_resend(self) -> None:
+        server = self.fake_server()
+        provider = self.make_provider(server, sync_max_attempts=1)
+        server.mode = "error"
+        server.error_status = 401
+        server.error_code = "unauthorized"
+        with self._fail_dead_writes(provider._spool):
+            provider.sync_turn("auth dead write failure", "no", session_id="s1")
+            self.assertTrue(self.wait_until(
+                lambda: provider.get_status_config()["counts"]["spoolDeadPending"] >= 1,
+                timeout=3.0,
+            ))
+            requests_after_failure = len(server.ingests)
+            self.assertLessEqual(requests_after_failure, 2)
+            time.sleep(1.0)
+            self.assertEqual(len(server.ingests), requests_after_failure)
+            self.assertEqual(
+                provider.get_status_config()["counts"]["ingestFailed"], 1
+            )
+
+    def test_worker_expired_item_dead_write_failure_does_not_send(self) -> None:
+        server = self.fake_server()
+        provider = self.make_provider(server)
+        provider._spool.append("ingest", {
+            "requestId": "expired-dead-failure",
+            "chunks": [{"role": "user", "text": "never send"}],
+        })
+        with provider._spool._lock:
+            provider._spool._items[0]["expiresAt"] = int(time.time() * 1000) - 1
+        with self._fail_dead_writes(provider._spool):
+            provider._wake.set()
+            self.assertTrue(self.wait_until(
+                lambda: provider.get_status_config()["counts"]["spoolDeadPending"] >= 1,
+                timeout=3.0,
+            ))
+            self.assertEqual(server.ingests, [])
+            time.sleep(0.8)
+            self.assertEqual(server.ingests, [])
+
     def test_dead_and_live_share_byte_budget(self) -> None:
         spool = memory_plugin._Spool(self.spool_path, 100, max_bytes=5000)
         ids = []
@@ -1386,37 +1508,114 @@ class SpoolContractTests(BaseCase):
         self.assertEqual(status["spool"]["writerScope"], "process")
         self.assertFalse(status["spool"]["crossProcessLock"])
 
+    def test_two_providers_send_once_and_count_once(self) -> None:
+        server = self.fake_server()
+        first = self.make_provider(server)
+        second = self.make_provider(server)
+        first._enqueue({
+            "requestId": "one-worker",
+            "chunks": [{"role": "user", "text": "send once"}],
+        })
+        second._enqueue({
+            "requestId": "one-worker-b",
+            "chunks": [{"role": "user", "text": "send once too"}],
+        })
+        self.assertTrue(self.wait_until(lambda: first.pending() == 0, timeout=3.0))
+        time.sleep(0.2)
+        self.assertEqual(len(server.ingests), 2)
+        total_committed = (
+            first.get_status_config()["counts"]["ingestCommitted"]
+            + second.get_status_config()["counts"]["ingestCommitted"]
+        )
+        self.assertEqual(total_committed, 2)
+
+    def test_append_rejection_keeps_dead_diagnostics(self) -> None:
+        spool = memory_plugin._Spool(self.spool_path, 100, max_bytes=2000)
+        keep_id = spool.append("ingest", {
+            "requestId": "dead-diagnostic",
+            "chunks": [{"role": "user", "text": "diagnostic"}],
+        })
+        self.assertTrue(spool.dead(keep_id, "test_dead"))
+        dead_before = spool.dead_count()
+        dead_bytes_before = spool.dead_bytes()
+        with self.assertRaises(memory_plugin._SpoolFull):
+            spool.append("ingest", {
+                "requestId": "too-large",
+                "chunks": [{"role": "user", "text": "x" * 5000}],
+            })
+        self.assertEqual(spool.dead_count(), dead_before)
+        self.assertEqual(spool.dead_bytes(), dead_bytes_before)
+
+    def test_load_trims_live_bytes_over_budget(self) -> None:
+        now = int(time.time() * 1000)
+        self.spool_path.parent.mkdir(parents=True, exist_ok=True)
+        records = []
+        for index in range(8):
+            records.append({
+                "id": f"live-{index}",
+                "kind": "ingest",
+                "payload": {
+                    "requestId": f"live-{index}",
+                    "chunks": [{"role": "user", "text": "x" * 400}],
+                },
+                "attempts": 0,
+                "createdAt": now,
+                "expiresAt": now + 60_000,
+            })
+        self.spool_path.write_text(
+            "\n".join(json.dumps(record) for record in records) + "\n",
+            encoding="utf-8",
+        )
+        spool = memory_plugin._Spool(self.spool_path, 100, max_bytes=1500)
+        self.assertLessEqual(spool.bytes(), 1500)
+        self.assertGreater(spool.live_quota_evicted(), 0)
+
     def test_redaction_covers_authorization_basic_and_named_keys(self) -> None:
         text = (
             "Authorization: Basic dXNlcjpwYXNzd29yZA==\n"
+            "authorization=Basic dXNlcjpwYXNzd29yZA==\n"
             "OPENAI_API_KEY=sk-proj-ABCDEFGHIJKLMNOPQRSTUV\n"
             "AWS_SECRET_ACCESS_KEY=AbCdEfGhIjKlMnOpQrStUvWxYz012345\n"
+            "AWS_SESSION_TOKEN=shortlowercase\n"
             "https://alice:s3cr3t-pass@example.com/path\n"
             "hf_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345\n"
             "glpat-ABCDEFGHIJKLMNOPQRSTUV\n"
             "ASIAABCDEFGHIJKLMNOP\n"
+            "Cookie: session=abc; theme=dark\n"
+            "Set-Cookie: session=abc; HttpOnly\n"
+            "password: short\n"
+            "api_key: abc\n"
+            "secret: discussion\n"
+            'refresh_token="value with spaces"\n'
         )
         redacted, rules = memory_plugin._redact_text(text)
         for sentinel in (
             "dXNlcjpwYXNzd29yZA==",
             "sk-proj-ABCDEFGHIJKLMNOPQRSTUV",
             "AbCdEfGhIjKlMnOpQrStUvWxYz012345",
+            "shortlowercase",
             "alice:s3cr3t-pass",
             "hf_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
             "glpat-ABCDEFGHIJKLMNOPQRSTUV",
             "ASIAABCDEFGHIJKLMNOP",
+            "session=abc; theme=dark",
+            "session=abc; HttpOnly",
+            "value with spaces",
         ):
             self.assertNotIn(sentinel, redacted)
         self.assertIn("authorization_header", rules)
+        self.assertIn("cookie_header", rules)
         self.assertIn("url_userinfo", rules)
         self.assertIn("secret_assignment", rules)
+        self.assertIn("password: [redacted]", redacted)
+        self.assertIn("api_key: [redacted]", redacted)
+        self.assertIn("secret: [redacted]", redacted)
 
-    def test_redaction_keeps_normal_words_and_phrases(self) -> None:
+    def test_redaction_keeps_ambiguous_normal_words(self) -> None:
         text = (
             "token: authenticator\n"
-            "password: required\n"
             "token: rotation\n"
-            "secret: discussion\n"
+            "token: well-known\n"
         )
         redacted, rules = memory_plugin._redact_text(text)
         self.assertEqual(redacted, text)
@@ -1652,6 +1851,30 @@ class SpoolContractTests(BaseCase):
         self.assertTrue(provider.flush(timeout=2.0))
         self.assertEqual(provider.pending(), 0)
         self.assertTrue(server.ingests)
+
+    def test_status_success_does_not_clear_mode_block(self) -> None:
+        server = self.fake_server()
+        provider = self.make_provider(server, sync_max_attempts=5)
+        server.mode = "error"
+        server.error_status = 409
+        server.error_code = "mode_mismatch"
+        provider.sync_turn("mode negative", "no", session_id="s1")
+        self.assertTrue(self.wait_until(
+            lambda: "modeBlocked" in provider.get_status_config(),
+            timeout=3.0,
+        ))
+        server.mode = "ok"
+        provider._ensure_runtime(force=True)
+        self.assertIn("modeBlocked", provider.get_status_config())
+        self.assertEqual(provider.prefetch("still blocked"), "")
+        self.assertFalse(any(path == f"{API}/context" for path in server.paths()))
+        self.assertEqual(provider.pending(), 1)
+        # Only replaying the same pending operation may restore write admission.
+        provider._mode_next_probe_at = 0.0
+        provider._wake.set()
+        self.assertTrue(provider.flush(timeout=5.0))
+        self.assertNotIn("modeBlocked", provider.get_status_config())
+        self.assertEqual(provider.pending(), 0)
 
     def test_queued_checkpoint_revision_conflict_never_rebases(self) -> None:
         server = self.fake_server()

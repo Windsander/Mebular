@@ -230,12 +230,6 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         self.proxy.record(method, parsed.path, body)
         mode = self.proxy.mode
 
-        if path.startswith("/memory-runtime/v1/status"):
-            if mode == "mode_mismatch":
-                self._error(409, "mode_mismatch")
-            else:
-                self._forward(method, path, body_bytes)
-            return
         if mode == "mode_mismatch":
             self._error(409, "mode_mismatch")
             return
@@ -355,7 +349,22 @@ def main() -> int:
     provider = plugin.MebularMemoryProvider()
     provider.initialize("hermes-fault", hermes_home=str(hermes_home),
                         platform="cli", agent_context="primary")
-    result: Dict[str, Any] = {"suffix": suffix}
+    result: Dict[str, Any] = {
+        "suffix": suffix,
+        "boundary": {
+            "step": "real-provider+real-sidecar+real-graph",
+            "responseShimCases": [
+                "failed200", "detailpartial", "queued202", "offline_once",
+                "always401", "always429", "mode_mismatch",
+                "checkpoint202", "checkpoint_unconfirmed",
+            ],
+            "graphCommittedCases": ["normal", "offline_once", "mode_recovery"],
+            "notGraphCommitClaims": [
+                "failed200", "detailpartial", "queued202",
+                "checkpoint202", "checkpoint_unconfirmed",
+            ],
+        },
+    }
     try:
         # Normal pass-through: real sidecar/graph commit.
         proxy.mode = "normal"
@@ -397,9 +406,11 @@ def main() -> int:
         result["modeRequestsStable"] = proxy.request_count() == before
         result["modePending"] = int(provider.pending())
         proxy.mode = "normal"
-        provider._mode_probe_at = 0.0
         provider._discovery_checked_at = 0.0
         provider._ensure_runtime(force=True)
+        result["modeStatusDoesNotClear"] = "modeBlocked" in provider.get_status_config()
+        provider._mode_next_probe_at = 0.0
+        provider._wake.set()
         result["modeRecovered"] = wait_until(
             lambda: "modeBlocked" not in provider.get_status_config(), timeout=5.0
         )

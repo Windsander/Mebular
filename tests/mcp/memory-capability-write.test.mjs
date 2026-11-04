@@ -1549,6 +1549,41 @@ describe('POST /internal-object', () => {
     expect(compacts.filter((node) => node.id === object.id)).toHaveLength(1);
   });
 
+  it('compact：deferredSummary 对 200 个 CJK 来源按 UTF-8 字节截断，不超过 64 KiB', async () => {
+    const sourceIds = [];
+    for (let batch = 0; batch < 2; batch += 1) {
+      const items = Array.from({ length: 100 }, (_, index) => ({
+        clientItemId: unique(`cjk-${batch}-${index}`),
+        domain: 'agent:opencode',
+        kind: 'observation',
+        content: { content: `中文来源-${batch}-${index}-${'稳定性'.repeat(300)}` },
+        provenance: { source: 'runtime', extractor: 'heuristic' },
+      }));
+      const written = await post(capability('/write'), writeBody(items), { token });
+      expect(written.status).toBe(200);
+      sourceIds.push(...written.body.data.results.map((result) => result.id));
+    }
+    expect(sourceIds).toHaveLength(200);
+
+    const deferred = await post(capability('/internal-object'), {
+      actor: agent,
+      kind: 'compact',
+      op: 'upsert',
+      domain: 'agent:opencode',
+      sourceIds,
+      strategy: 'summary',
+      deferredSummary: true,
+    }, { token });
+    expect(deferred.status).toBe(200);
+    const object = deferred.body.data.object;
+    expect(object.sourceIds).toHaveLength(200);
+    expect(object.sourceHashes).toHaveLength(200);
+    expect(Buffer.byteLength(object.summary, 'utf8')).toBeLessThanOrEqual(64 * 1024);
+    expect(object.summary).toContain('中文来源');
+    expect(object.summary).toContain('…');
+    expect(object.summary).not.toBe(`Compact · 200 records · episode:200`);
+  });
+
   it('self_record：始终 agent 域、revision 冲突、其他 Agent 拒绝、无 sync 字段', async () => {
     const first = await post(capability('/internal-object'), {
       actor: agent,
@@ -1869,10 +1904,10 @@ describe('POST /internal-object', () => {
 
   it('context_checkpoint schema 2：结构化字段、task 共享 revision、跨 Agent 读、summary_only 降级', async () => {
     const refRecord = await writeOne({
-      domain: 'agent:opencode',
+      domain: 'task:fleet_ckpt_2',
       kind: 'fact',
       content: { subject: unique('ckpt-ref'), predicate: 'supports', object: 'checkpoint references' },
-      provenance: { source: 'runtime' },
+      provenance: { source: 'runtime', threadId: 'fleet_ckpt_2' },
     });
     const refRecordId = refRecord.body.data.results[0].id;
     const refDetail = await post(capability('/detail'), {
@@ -1880,15 +1915,15 @@ describe('POST /internal-object', () => {
       op: 'write',
       items: [{
         clientItemId: unique('ckpt_detail'),
-        domain: 'agent:opencode',
+        domain: 'task:fleet_ckpt_2',
         detailKind: 'raw_chunk',
-        threadId: 'th_ckpt_2',
+        threadId: 'fleet_ckpt_2',
         recordIds: [refRecordId],
         role: 'user',
         text: 'checkpoint evidence detail',
         retentionClass: 'conversation',
         expiresAt: 0,
-        provenance: { source: 'runtime', extractor: 'heuristic' },
+        provenance: { source: 'runtime', extractor: 'heuristic', threadId: 'fleet_ckpt_2' },
       }],
     }, { token });
     expect(refDetail.status).toBe(200);
@@ -2063,10 +2098,10 @@ describe('POST /internal-object', () => {
 
   it('context_checkpoint：引用必须存在、类型正确、存活、同域；拒绝悬空/跨域/墓碑', async () => {
     const refA = await writeOne({
-      domain: 'agent:opencode',
+      domain: 'task:th_refs',
       kind: 'fact',
       content: { subject: unique('ref-a'), predicate: 'is', object: 'live' },
-      provenance: { source: 'runtime' },
+      provenance: { source: 'runtime', threadId: 'th_refs' },
     });
     const recordA = refA.body.data.results[0].id;
     const detailA = await post(capability('/detail'), {
@@ -2074,7 +2109,7 @@ describe('POST /internal-object', () => {
       op: 'write',
       items: [{
         clientItemId: unique('ref-detail'),
-        domain: 'agent:opencode',
+        domain: 'task:th_refs',
         detailKind: 'raw_chunk',
         threadId: 'th_refs',
         recordIds: [recordA],
@@ -2082,7 +2117,7 @@ describe('POST /internal-object', () => {
         text: 'reference evidence',
         retentionClass: 'conversation',
         expiresAt: 0,
-        provenance: { source: 'runtime', extractor: 'heuristic' },
+        provenance: { source: 'runtime', extractor: 'heuristic', threadId: 'th_refs' },
       }],
     }, { token });
     expect(detailA.status).toBe(200);
@@ -2094,6 +2129,13 @@ describe('POST /internal-object', () => {
       provenance: { source: 'runtime' },
     });
     const recordB = refB.body.data.results[0].id;
+    const agentRef = await writeOne({
+      domain: 'agent:opencode',
+      kind: 'observation',
+      content: { content: unique('ref-agent') },
+      provenance: { source: 'runtime' },
+    });
+    const recordAgent = agentRef.body.data.results[0].id;
     const stateFor = (recordIds, detailIds, extra = {}) => ({
       schema: 2,
       contentMode: 'structured',
@@ -2146,6 +2188,14 @@ describe('POST /internal-object', () => {
     expect(crossDomain.status).toBe(400);
     expect(crossDomain.body.error.code).toBe('domain_mismatch');
 
+    const agentRefOnly = await upsert([recordAgent], []);
+    expect(agentRefOnly.status).toBe(400);
+    expect(agentRefOnly.body.error.code).toBe('domain_mismatch');
+
+    const defaultRefOnly = await upsert([recordB], []);
+    expect(defaultRefOnly.status).toBe(400);
+    expect(defaultRefOnly.body.error.code).toBe('domain_mismatch');
+
     const deleted = await post(capability('/delete'), {
       actor: { type: 'user' },
       ids: [recordA],
@@ -2158,31 +2208,35 @@ describe('POST /internal-object', () => {
   });
 
   it('context_checkpoint：显式 expiresAt 读取过滤、expiresAt=0 不过期、周期墓碑不删记录/详情', async () => {
-    const record = await writeOne({
-      domain: 'agent:opencode',
-      kind: 'observation',
-      content: { content: unique('expiry-record') },
-      provenance: { source: 'runtime' },
-    });
-    const recordId = record.body.data.results[0].id;
-    const detail = await post(capability('/detail'), {
-      actor: agent,
-      op: 'write',
-      items: [{
-        clientItemId: unique('expiry-detail'),
-        domain: 'agent:opencode',
-        detailKind: 'raw_chunk',
-        threadId: 'th_expiry',
-        recordIds: [recordId],
-        role: 'user',
-        text: 'expiry evidence',
-        retentionClass: 'conversation',
-        expiresAt: 0,
-        provenance: { source: 'runtime', extractor: 'heuristic' },
-      }],
-    }, { token });
-    const detailId = detail.body.data.results[0].id;
-    const state = (threadId) => ({
+    const makeRefs = async (threadId) => {
+      const record = await writeOne({
+        domain: `task:${threadId}`,
+        kind: 'observation',
+        content: { content: unique(`expiry-record-${threadId}`) },
+        provenance: { source: 'runtime', threadId },
+      });
+      const recordId = record.body.data.results[0].id;
+      const detail = await post(capability('/detail'), {
+        actor: agent,
+        op: 'write',
+        items: [{
+          clientItemId: unique(`expiry-detail-${threadId}`),
+          domain: `task:${threadId}`,
+          detailKind: 'raw_chunk',
+          threadId,
+          recordIds: [recordId],
+          role: 'user',
+          text: 'expiry evidence',
+          retentionClass: 'conversation',
+          expiresAt: 0,
+          provenance: { source: 'runtime', extractor: 'heuristic', threadId },
+        }],
+      }, { token });
+      return { recordId, detailId: detail.body.data.results[0].id };
+    };
+    const expiredRefs = await makeRefs('th_expired');
+    const permanentRefs = await makeRefs('th_permanent');
+    const state = (threadId, { recordId, detailId }) => ({
       schema: 2,
       contentMode: 'structured',
       task: { key: `task:${threadId}`, threadId, fleetTaskId: null },
@@ -2203,9 +2257,9 @@ describe('POST /internal-object', () => {
       agentId: 'opencode',
       threadId: 'th_expired',
       domain: 'task:th_expired',
-      state: state('th_expired'),
-      recordIds: [recordId],
-      detailIds: [detailId],
+      state: state('th_expired', expiredRefs),
+      recordIds: [expiredRefs.recordId],
+      detailIds: [expiredRefs.detailId],
       expiresAt: expiredAt,
     }, { token });
     expect(expired.status).toBe(200);
@@ -2228,9 +2282,9 @@ describe('POST /internal-object', () => {
       agentId: 'opencode',
       threadId: 'th_permanent',
       domain: 'task:th_permanent',
-      state: state('th_permanent'),
-      recordIds: [recordId],
-      detailIds: [detailId],
+      state: state('th_permanent', permanentRefs),
+      recordIds: [permanentRefs.recordId],
+      detailIds: [permanentRefs.detailId],
       expiresAt: 0,
     }, { token });
     expect(permanent.status).toBe(200);
@@ -2256,9 +2310,86 @@ describe('POST /internal-object', () => {
     expect(result.removed).toBeGreaterThanOrEqual(1);
     expect((await app.graph.getNode(expiredId)).deletedAt).toBeGreaterThan(0);
     expect((await app.graph.getNode(permanentId)).deletedAt).toBeUndefined();
-    expect((await app.graph.getNode(recordId)).deletedAt).toBeUndefined();
-    expect((await app.graph.getNode(detailId)).deletedAt).toBeUndefined();
-    expect((await app.graph.getNode(recordId)).type).not.toBe('context_checkpoint');
+    for (const refs of [expiredRefs, permanentRefs]) {
+      expect((await app.graph.getNode(refs.recordId)).deletedAt).toBeUndefined();
+      expect((await app.graph.getNode(refs.detailId)).deletedAt).toBeUndefined();
+    }
+    expect((await app.graph.getNode(expiredRefs.recordId)).type).not.toBe('context_checkpoint');
+  });
+
+  it('context_checkpoint：过期 R2 + 永久 R1，GET 不复活 R1；维护后 upsert 不复用 R2', async () => {
+    const threadId = 'th_revision_highwater';
+    const domain = `task:${threadId}`;
+    const state = (goal) => ({
+      schema: 2,
+      contentMode: 'structured',
+      task: { key: domain, threadId, fleetTaskId: null },
+      goal,
+      constraints: [],
+      decisions: [],
+      progress: { done: [], doing: [], blocked: [] },
+      nextSteps: [{ id: 'n1', text: 'next' }],
+      files: [],
+      openQuestions: [],
+      references: { recordIds: [], detailIds: [], messageIds: [], fleetTaskId: null, urls: [] },
+    });
+    const upsert = (goal, extra = {}) => post(capability('/internal-object'), {
+      actor: agent,
+      kind: 'context_checkpoint',
+      op: 'upsert',
+      agentId: 'opencode',
+      threadId,
+      domain,
+      state: state(goal),
+      ...extra,
+    }, { token });
+
+    const r1 = await upsert('R1 permanent', { expectedRevision: 0, expiresAt: 0 });
+    expect(r1.status).toBe(200);
+    expect(r1.body.data.object.revision).toBe(1);
+    const r1Id = r1.body.data.object.id;
+    const r2 = await upsert('R2 expired', { expectedRevision: 1, expiresAt: Date.now() - 1000 });
+    expect(r2.status).toBe(200);
+    expect(r2.body.data.object.revision).toBe(2);
+    const r2Id = r2.body.data.object.id;
+
+    const get = () => post(capability('/internal-object'), {
+      actor: agent,
+      kind: 'context_checkpoint',
+      op: 'get',
+      agentId: 'opencode',
+      threadId,
+      domain,
+    }, { token });
+    const beforeMaintenance = await get();
+    expect(beforeMaintenance.status).toBe(200);
+    expect(beforeMaintenance.body.data.object).toBeNull();
+
+    const maintenance = createMemoryCapabilityHandler({
+      home,
+      getConfig: () => ({ memoryRuntime: { enabled: true } }),
+      getApp: () => app,
+      getService: () => service,
+      getIdentity: () => ({ cloudId: 'cl_test', userId: 'user' }),
+    });
+    const removed = await maintenance.runCheckpointMaintenance();
+    expect(removed.removed).toBeGreaterThanOrEqual(1);
+    expect((await app.graph.getNode(r2Id)).deletedAt).toBeGreaterThan(0);
+    expect((await app.graph.getNode(r1Id)).deletedAt).toBeUndefined();
+
+    const afterMaintenance = await get();
+    expect(afterMaintenance.body.data.object).toBeNull();
+
+    const staleExpected = await upsert('must conflict', { expectedRevision: 1 });
+    expect(staleExpected.status).toBe(409);
+    expect(staleExpected.body.error.code).toBe('revision_mismatch');
+    expect(staleExpected.body.error.details.currentRevision).toBe(2);
+
+    const r3 = await upsert('R3 after tombstone', { expectedRevision: 2, expiresAt: 0 });
+    expect(r3.status).toBe(200);
+    expect(r3.body.data.object.revision).toBe(3);
+    const current = await get();
+    expect(current.body.data.object).toMatchObject({ revision: 3, summary: null });
   });
 
   it('context_checkpoint default：按 (agentId, threadId) revision 隔离，其他 Agent 不可读', async () => {

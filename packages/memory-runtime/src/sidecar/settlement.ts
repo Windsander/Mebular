@@ -225,7 +225,10 @@ export class SettlementRuntime {
       onSettled: (item, data) => (item.endpoint === '/detail' || item.meta?.kind === 'record'
         ? this.ingest.applyReplayedOutbox(item, data)
         : this.objects.applyReplayedItem(item, data)),
-      onComplete: (item, outcome) => this.ingest.finalizeReplayedOutbox(item, outcome),
+      onComplete: async (item, outcome) => {
+        await this.objects.applyReplayComplete(item, outcome);
+        await this.ingest.finalizeReplayedOutbox(item, outcome);
+      },
     });
     if (options.autoStartReplayer !== false) {
       this.replayer.start();

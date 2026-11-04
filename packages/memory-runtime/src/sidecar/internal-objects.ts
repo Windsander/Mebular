@@ -26,7 +26,7 @@ import {
   type SidecarPolicy,
 } from './domains.js';
 import { SidecarSettlementError } from './errors.js';
-import { LocalLayerError, type OutboxItem, type SidecarLocalLayer } from './local-layer.js';
+import { LocalLayerError, type OutboxItem, type OutboxReplayCompletion, type SidecarLocalLayer } from './local-layer.js';
 import type { SidecarInferenceProvider } from './inference-provider.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -587,9 +587,44 @@ export class MemoryObjectService implements SidecarObjectsApi {
       this.degraded = false;
       this.counts.queued = 0;
       if (summary.settled > 0) this.lastError = null;
+      void this.clearPendingObjectCaches();
       return;
     }
     this.counts.queued = summary.remaining;
+  }
+
+  private async clearPendingObjectCaches(): Promise<void> {
+    try {
+      const entries = await this.local.cache.list('object:v1:pending/');
+      for (const entry of entries) {
+        await this.cacheDelete(entry.key);
+      }
+    } catch {
+      // 清缓存失败不影响 outbox 终态；下一次重放/维护继续。
+    }
+  }
+
+  /**
+   * outbox 条目终态回调：dead/skipped 后必须清掉 pending 视图，
+   * 避免离线 GET 永久显示一个已经不会再重放的 pending。
+   */
+  async applyReplayComplete(item: OutboxItem, outcome: OutboxReplayCompletion): Promise<void> {
+    if (outcome !== 'dead' && outcome !== 'skipped') return;
+    if (item.endpoint !== '/internal-object') return;
+    const body = isObject(item.body) ? item.body : null;
+    if (!body) return;
+    if (body.kind === 'context_checkpoint') {
+      const agentId = typeof body.agentId === 'string' ? body.agentId : null;
+      const threadId = typeof body.threadId === 'string' ? body.threadId : null;
+      const domain = typeof body.domain === 'string' ? body.domain : null;
+      if (agentId && threadId) {
+        await this.cacheDelete(this.checkpointPendingCacheKey(agentId, threadId, domain));
+      }
+      return;
+    }
+    if (body.kind === 'self_record' && typeof body.agentId === 'string') {
+      await this.cacheDelete(this.selfPendingCacheKey(body.agentId));
+    }
   }
 
   /**
@@ -670,7 +705,10 @@ export class MemoryObjectService implements SidecarObjectsApi {
   }
 
   private checkpointPendingCacheKey(agentId: string, threadId: string, domain?: string | null): string {
-    return `${this.checkpointCacheKey(agentId, threadId, domain)}:pending`;
+    // 使用 `/` 分隔的独立前缀：threadId 允许 `:`，不能靠 `:pending` 后缀区分。
+    return domain && domain.startsWith('task:')
+      ? `object:v1:pending/checkpoint/${domain}`
+      : `object:v1:pending/checkpoint/${agentId}/${threadId}`;
   }
 
   private selfCacheKey(agentId: string): string {
@@ -678,7 +716,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
   }
 
   private selfPendingCacheKey(agentId: string): string {
-    return `object:v1:self:${agentId}:pending`;
+    return `object:v1:pending/self/${agentId}`;
   }
 
   private noteQueued(error: unknown): void {
@@ -1680,12 +1718,33 @@ export class MemoryObjectService implements SidecarObjectsApi {
         if (!object) continue;
         const view = this.checkpointView(object, { source: 'cloud' });
         await this.cacheSet(this.checkpointCacheKey(agentId, threadId, view.domain), view);
+        let pending = await this.firstPendingCheckpoint(
+          agentId,
+          threadId,
+          [this.checkpointPendingCacheKey(agentId, threadId, view.domain)],
+        );
+        if (pending
+          && typeof pending.queuedAt === 'number'
+          && typeof view.updatedAt === 'number'
+          && view.updatedAt > pending.queuedAt) {
+          await this.cacheDelete(this.checkpointPendingCacheKey(agentId, threadId, view.domain));
+          pending = null;
+        }
         await this.markHealthyIfOutboxEmpty();
         return {
           status: 200,
-          data: { checkpoint: view, source: 'cloud', degraded: response.degraded },
-          warnings: response.warnings,
-          degraded: response.degraded,
+          data: {
+            checkpoint: view,
+            source: 'cloud',
+            pending: pending !== null,
+            pendingCheckpoint: pending,
+            degraded: response.degraded === true || pending !== null,
+          },
+          warnings: [...new Set([
+            ...response.warnings,
+            ...(pending ? ['checkpoint_pending'] : []),
+          ])],
+          degraded: response.degraded === true || pending !== null,
         };
       }
       for (const key of keys) await this.cacheDelete(key);

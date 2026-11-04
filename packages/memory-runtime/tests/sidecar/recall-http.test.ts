@@ -728,4 +728,67 @@ describe('sidecar recall/context HTTP', () => {
     expect(context.body.data.degraded).toBe(false);
     expect(context.body.data.warnings).not.toContain('self_unavailable');
   });
+
+  it('/context CJK 预算按 UTF-8 字节：self/checkpoint 不超 maxBytes', async () => {
+    const { server, fake } = await setup();
+    fake.selfRecords.push({
+      id: '01JSELFCJK',
+      domain: 'agent:opencode',
+      agentId: 'opencode',
+      revision: 1,
+      content: {
+        displayName: '中文'.repeat(400),
+        goals: ['稳定性'.repeat(300)],
+        boundaries: ['边界'.repeat(200)],
+      },
+      createdAt: NOW - 1000,
+      updatedAt: NOW - 1000,
+    } as any);
+    fake.checkpoints.push({
+      id: '01JCKPTCJK',
+      domain: 'task:th_http_cjk',
+      agentId: 'opencode',
+      threadId: 'th_http_cjk',
+      revision: 1,
+      state: {
+        schema: 2,
+        contentMode: 'structured',
+        task: { key: 'task:th_http_cjk', threadId: 'th_http_cjk', fleetTaskId: null },
+        goal: '检查点目标'.repeat(500),
+        constraints: [],
+        decisions: [],
+        progress: { done: [], doing: [], blocked: [] },
+        nextSteps: [{ id: 'n1', text: '下一步'.repeat(300) }],
+        files: [],
+        openQuestions: [],
+        references: { recordIds: [], detailIds: [], messageIds: [], fleetTaskId: null, urls: [] },
+      },
+      summary: null,
+      recordIds: [],
+      lease: null,
+      expiresAt: 0,
+      createdAt: NOW - 500,
+      updatedAt: NOW - 500,
+    } as any);
+
+    const context = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_http_cjk',
+      turnId: 'turn_http_cjk',
+      query: '我的偏好是什么？',
+      includeSelf: true,
+      includeCheckpoint: true,
+      maxBytes: 2400,
+      tokenBudget: 1200,
+    });
+    expect(context.status).toBe(200);
+    expect(context.body.data.blocks[0].kind).toBe('self');
+    expect(context.body.data.blocks[1].kind).toBe('checkpoint');
+    for (const block of context.body.data.blocks) {
+      expect(Buffer.byteLength(block.content, 'utf8')).toBeLessThanOrEqual(2400);
+      expect(block.bytes).toBe(Buffer.byteLength(block.content, 'utf8'));
+    }
+    expect(context.body.data.estimatedBytes).toBeLessThanOrEqual(2400);
+    expect(context.body.data.estimatedTokens).toBeLessThanOrEqual(1200);
+  });
 });

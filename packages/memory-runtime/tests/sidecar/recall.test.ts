@@ -383,6 +383,59 @@ describe('RecallService', () => {
     expect(fake.detailRequests.some((request) => request.body?.op === 'get')).toBe(true);
   });
 
+  it('详情展开覆盖 canonical detail kinds：tool_output/document_slice 不只查 raw_chunk', async () => {
+    const recordId = '01JDETAILKINDS';
+    const { service, fake } = await setup({
+      records: [record({
+        id: recordId,
+        type: 'episode',
+        kind: 'episode',
+        domain: 'agent:opencode',
+        content: { title: '工具输出记录', content: '构建输出与文档片段', episodeType: 'task' },
+        text: '构建输出与文档片段',
+        detailAvailable: true,
+      })],
+    });
+    fake.details.push(
+      {
+        id: '01JDETAILTOOL',
+        detailKind: 'tool_output',
+        domain: 'agent:opencode',
+        recordIds: [recordId],
+        role: 'tool',
+        text: 'tool output body',
+        retentionClass: 'tool_output',
+        provenance: { source: 'runtime', agentId: 'opencode', threadId: 'th_recall' },
+        createdAt: NOW - 1000,
+      },
+      {
+        id: '01JDETAILDOC',
+        detailKind: 'document_slice',
+        domain: 'agent:opencode',
+        recordIds: [recordId],
+        text: 'document slice body',
+        retentionClass: 'document_slice',
+        provenance: { source: 'runtime', agentId: 'opencode', threadId: 'th_recall' },
+        createdAt: NOW - 900,
+      },
+    );
+    const response = await service.handleRecall({
+      agentId: 'opencode',
+      threadId: 'th_recall',
+      query: '工具输出和文档片段',
+    });
+    const fragment = response.data.fragments.find((entry) => entry.sourceIds.includes(recordId));
+    expect(fragment).toBeDefined();
+    expect(fragment!.detailIds).toEqual(expect.arrayContaining(['01JDETAILTOOL', '01JDETAILDOC']));
+    const listRequest = fake.detailRequests.find((request) => request.body?.op === 'list');
+    expect(listRequest?.body?.detailKinds).toEqual(expect.arrayContaining([
+      'raw_chunk',
+      'message',
+      'tool_output',
+      'document_slice',
+    ]));
+  });
+
   it('详情过期/删除时诚实降级，不伪造原文', async () => {
     const text = '原话：先冻结契约。';
     const detailId = '01JDETAILRECALL02';
@@ -1099,5 +1152,83 @@ describe('RecallService', () => {
     expect(response.data.blocks[0]!.content).toContain('bounded context');
     expect(response.data.estimatedBytes).toBeLessThanOrEqual(640);
     expect(response.data.estimatedTokens).toBeLessThanOrEqual(260);
+  });
+
+  it('提前失败路径也把 self/checkpoint 计入 estimatedBytes/Tokens', async () => {
+    const self = {
+      id: '01JSELFEARLY',
+      domain: 'agent:opencode',
+      agentId: 'opencode',
+      revision: 1,
+      content: { displayName: 'Early Failure Self' },
+      source: 'cloud',
+      stale: false,
+      updatedAt: NOW,
+    };
+    const checkpoint = {
+      id: '01JCKPTEARLY',
+      domain: 'task:th_recall',
+      agentId: 'opencode',
+      threadId: 'th_recall',
+      revision: 1,
+      schema: 2,
+      contentMode: 'structured',
+      structured: true,
+      legacy: false,
+      summary: null,
+      recordIds: [],
+      detailIds: [],
+      lease: null,
+      expiresAt: 0,
+      state: {
+        schema: 2,
+        contentMode: 'structured',
+        task: { key: 'task:th_recall', threadId: 'th_recall', fleetTaskId: null },
+        goal: 'early failure checkpoint',
+        constraints: [],
+        decisions: [],
+        progress: { done: [], doing: [], blocked: [] },
+        nextSteps: [{ id: 'n1', text: 'next' }],
+        files: [],
+        openQuestions: [],
+        references: { recordIds: [], detailIds: [], messageIds: [], fleetTaskId: null, urls: [] },
+      },
+      updatedAt: NOW,
+    };
+    const { service, fake } = await setup({
+      checkpointSource: {
+        async getCheckpoint() {
+          return {
+            status: 200,
+            data: { checkpoint, source: 'cloud', degraded: false },
+            warnings: [],
+            degraded: false,
+          };
+        },
+        async getSelf() {
+          return {
+            status: 200,
+            data: { selfRecord: self, self, source: 'cloud', degraded: false },
+            warnings: [],
+            degraded: false,
+          };
+        },
+      },
+    });
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const response = await service.handleContext({
+      agentId: 'opencode',
+      threadId: 'th_recall',
+      turnId: 'turn_early_failure',
+      query: '我的偏好是什么？',
+      includeSelf: true,
+      includeCheckpoint: true,
+    });
+    expect(response.data.blocks.map((block) => block.kind)).toEqual(['self', 'checkpoint']);
+    const expectedBytes = response.data.blocks.reduce((sum, block) => sum + block.bytes, 0);
+    const expectedTokens = response.data.blocks.reduce((sum, block) => sum + block.tokens, 0);
+    expect(response.data.estimatedBytes).toBe(expectedBytes);
+    expect(response.data.estimatedTokens).toBe(expectedTokens);
+    expect(expectedBytes).toBeGreaterThan(0);
   });
 });

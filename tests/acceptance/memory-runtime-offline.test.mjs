@@ -294,14 +294,14 @@ describe('0.3 离线恢复：outbox / Raw / capability 失败开放', () => {
       nextSteps: [{ id: 'n1', text: 'verify objects' }],
       files: [],
       openQuestions: [],
-      references: { recordIds: [recordId], detailIds: [], messageIds: [], fleetTaskId: null, urls: [] },
+      references: { recordIds: [], detailIds: [], messageIds: [], fleetTaskId: null, urls: [] },
     });
 
     const committed = await a.sidecar.putCheckpoint(threadId, {
       agentId: 'hermes',
       expectedRevision: 0,
       state: state('committed v1'),
-      recordIds: [recordId],
+      recordIds: [],
       summary: 'committed v1',
     });
     expect(committed.status).toBe(200);
@@ -312,7 +312,7 @@ describe('0.3 离线恢复：outbox / Raw / capability 失败开放', () => {
       agentId: 'hermes',
       expectedRevision: 1,
       state: state('pending v2'),
-      recordIds: [recordId],
+      recordIds: [],
       summary: 'pending v2',
     });
     expect(pending.status).toBe(202);
@@ -395,7 +395,7 @@ describe('0.3 离线恢复：outbox / Raw / capability 失败开放', () => {
         content: { content: marker },
       }],
     }), 'context seed ingest');
-    const recordId = seeded.records[0].id;
+    expect(seeded.records).toHaveLength(1);
 
     const self = await a.sidecar.putSelf('hermes', {
       expectedRevision: 0,
@@ -417,9 +417,9 @@ describe('0.3 离线恢复：outbox / Raw / capability 失败开放', () => {
         nextSteps: [{ id: 'n1', text: 'verify blockers' }],
         files: [],
         openQuestions: [],
-        references: { recordIds: [recordId], detailIds: [], messageIds: [], fleetTaskId: null, urls: [] },
+        references: { recordIds: [], detailIds: [], messageIds: [], fleetTaskId: null, urls: [] },
       },
-      recordIds: [recordId],
+      recordIds: [],
       summary: null,
     });
     expect(checkpoint.status).toBe(200);

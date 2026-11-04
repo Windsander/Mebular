@@ -917,10 +917,14 @@ function checkpointRevisionKey(node) {
   return `default:${checkpointAgentId(node) ?? ''}:${checkpointThreadId(node) ?? ''}`;
 }
 
-async function currentCheckpoint(app, { agentId, threadId, domain = null } = {}) {
+async function checkpointRevisions(app, { agentId, threadId, domain = null } = {}) {
   const nodes = await listNodesOfType(app, 'context_checkpoint');
-  const matches = nodes
-    .filter((node) => !node.deletedAt && checkpointMatches(node, agentId, threadId, domain));
+  // 包含墓碑：revision high-water 不得因过期维护删除最新 revision 而回退。
+  return nodes.filter((node) => checkpointMatches(node, agentId, threadId, domain));
+}
+
+async function currentCheckpoint(app, { agentId, threadId, domain = null } = {}) {
+  const matches = await checkpointRevisions(app, { agentId, threadId, domain });
   if (matches.length === 0) return null;
   const keyed = new Map();
   for (const node of matches) {
@@ -931,10 +935,20 @@ async function currentCheckpoint(app, { agentId, threadId, domain = null } = {})
   return [...keyed.values()].sort(compareInternalObjectNodes)[0] ?? null;
 }
 
-async function allCheckpoints(app, agentId, threadId = null) {
+async function highestCheckpointRevision(app, { agentId, threadId, domain = null } = {}) {
+  const matches = await checkpointRevisions(app, { agentId, threadId, domain });
+  let highest = 0;
+  for (const node of matches) {
+    const revision = internalObjectRevision(node);
+    if (typeof revision === 'number' && revision > highest) highest = revision;
+  }
+  return highest;
+}
+
+async function allCheckpoints(app, agentId, threadId = null, { includeDeleted = false } = {}) {
   const nodes = await listNodesOfType(app, 'context_checkpoint');
   return nodes.filter((node) => {
-    if (node.deletedAt || !isV2CheckpointNode(node)) return false;
+    if ((!includeDeleted && node.deletedAt) || !isV2CheckpointNode(node)) return false;
     const domain = domainOfNamespace(node.namespace);
     if (domain.startsWith('task:')) {
       if (threadId !== null && checkpointThreadId(node) !== threadId) return false;
@@ -1006,6 +1020,24 @@ function compactSourceText(node) {
   }
 }
 
+function truncateUtf8(value, maxBytes) {
+  const text = String(value ?? '');
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return { text, truncated: false };
+  let low = 0;
+  let high = text.length;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (Buffer.byteLength(text.slice(0, mid), 'utf8') <= maxBytes) low = mid;
+    else high = mid - 1;
+  }
+  let cut = Math.max(0, low);
+  // 避免把代理对切成半个字符。
+  if (cut > 0 && /[\uD800-\uDBFF]/.test(text[cut - 1])) cut -= 1;
+  const suffix = cut > 0 ? '…' : '';
+  while (cut > 0 && Buffer.byteLength(`${text.slice(0, cut)}${suffix}`, 'utf8') > maxBytes) cut -= 1;
+  return { text: `${text.slice(0, cut)}${suffix}`, truncated: true };
+}
+
 function buildCompactSummaryFromNodes(nodes, strategy = 'summary') {
   const sorted = [...nodes].sort((a, b) => String(a.id ?? '').localeCompare(String(b.id ?? '')));
   const lines = [];
@@ -1028,7 +1060,8 @@ function buildCompactSummaryFromNodes(nodes, strategy = 'summary') {
     .map(([kind, count]) => `${kind}:${count}`)
     .join(' ');
   const header = `Compact · ${sorted.length} records${kindSummary ? ` · ${kindSummary}` : ''}`;
-  const summary = (lines.length > 0 ? `${header}\n${lines.join('\n')}` : header).slice(0, MAX_COMPACT_SUMMARY_BYTES);
+  const rawSummary = lines.length > 0 ? `${header}\n${lines.join('\n')}` : header;
+  const summary = truncateUtf8(rawSummary, MAX_COMPACT_SUMMARY_BYTES).text;
   return {
     summary,
     tokenCount: Math.max(1, Math.ceil([...summary].length / 4)),
@@ -3257,6 +3290,9 @@ export function createMemoryCapabilityHandler({
             throw new CapabilityError(422, 'compact_summary_placeholder', 'compact 来源没有可摘要正文');
           }
           summary = regenerated.summary;
+          if (Buffer.byteLength(summary, 'utf-8') > MAX_COMPACT_SUMMARY_BYTES) {
+            throw new CapabilityError(413, 'payload_too_large', 'summary 超过 64 KiB');
+          }
           tokenCount = regenerated.tokenCount;
         } else {
           summary = nonEmptyString(payload.summary, 'summary', 0);
@@ -3507,7 +3543,7 @@ export function createMemoryCapabilityHandler({
       };
     }
 
-    async function validateCheckpointGraphReferences(appValue, { recordIds, detailIds }) {
+    async function validateCheckpointGraphReferences(appValue, checkpointDomain, { recordIds, detailIds }) {
       let referenceDomain = null;
       for (const id of recordIds) {
         const node = await appValue.graph.getNode(id);
@@ -3524,9 +3560,9 @@ export function createMemoryCapabilityHandler({
         if (domain.startsWith('__')) {
           throw new CapabilityError(400, 'invalid_reference_type', 'checkpoint 不能引用内部域对象', { id, domain });
         }
-        if (referenceDomain !== null && domain !== referenceDomain) {
-          throw new CapabilityError(400, 'domain_mismatch', 'checkpoint 引用必须位于同一域', {
-            domain: referenceDomain,
+        if (domain !== checkpointDomain) {
+          throw new CapabilityError(400, 'domain_mismatch', 'checkpoint 引用必须与 checkpoint 同域', {
+            domain: checkpointDomain,
             referenceDomain: domain,
             id,
           });
@@ -3550,15 +3586,16 @@ export function createMemoryCapabilityHandler({
           throw new CapabilityError(400, 'reference_expired', 'checkpoint 不能引用已过期 DetailRecord', { id });
         }
         const domain = domainOfNamespace(node.namespace);
-        if (referenceDomain !== null && domain !== referenceDomain) {
-          throw new CapabilityError(400, 'domain_mismatch', 'checkpoint 引用必须位于同一域', {
-            domain: referenceDomain,
+        if (domain !== checkpointDomain) {
+          throw new CapabilityError(400, 'domain_mismatch', 'checkpoint 引用必须与 checkpoint 同域', {
+            domain: checkpointDomain,
             referenceDomain: domain,
             id,
           });
         }
         referenceDomain = domain;
       }
+      return referenceDomain;
     }
 
     async function handleCheckpointObject(payload, actor) {
@@ -3625,7 +3662,7 @@ export function createMemoryCapabilityHandler({
         let visible = null;
         for (const domain of candidates) {
           const node = await currentCheckpoint(appValue, { agentId, threadId, domain });
-          if (!node || checkpointExpired(node, now())) continue;
+          if (!node || node.deletedAt || checkpointExpired(node, now())) continue;
           visible = node;
           break;
         }
@@ -3645,16 +3682,17 @@ export function createMemoryCapabilityHandler({
         const threadId = payload.threadId === undefined ? null : parseThreadId(payload.threadId);
         const limit = clampLimit(payload.limit, 20);
         if (!readDomain?.startsWith('task:')) assertInternalObjectActor(actor, agentId);
-        const nodes = (await allCheckpoints(appValue, agentId, threadId))
+        const nodes = (await allCheckpoints(appValue, agentId, threadId, { includeDeleted: true }))
           .filter((node) => (readDomain ? domainOfNamespace(node.namespace) === readDomain : true))
-          .filter((node) => !checkpointExpired(node, now()))
           .sort(compareInternalObjectNodes);
         const latestByKey = new Map();
         for (const node of nodes) {
           const key = checkpointRevisionKey(node);
           if (!latestByKey.has(key)) latestByKey.set(key, node);
         }
-        const views = [...latestByKey.values()].map((node) => checkpointObjectView(node, { userId: identity.userId }));
+        const views = [...latestByKey.values()]
+          .filter((node) => !node.deletedAt && !checkpointExpired(node, now()))
+          .map((node) => checkpointObjectView(node, { userId: identity.userId }));
         return {
           data: { objects: views.slice(0, limit), total: views.length, replayed: false },
           warnings: [...new Set(views.flatMap((view) => checkpointWarnings(view)))],
@@ -3764,7 +3802,7 @@ export function createMemoryCapabilityHandler({
         }
       }
       const current = await currentCheckpoint(appValue, { agentId, threadId, domain });
-      const currentRevision = current ? internalObjectRevision(current) : 0;
+      const currentRevision = await highestCheckpointRevision(appValue, { agentId, threadId, domain });
       if (hasValue(payload.expectedRevision)) {
         if (typeof payload.expectedRevision !== 'number' || !Number.isInteger(payload.expectedRevision) || payload.expectedRevision < 0) {
           throw new CapabilityError(400, 'invalid_request', 'expectedRevision 必须是非负整数');
@@ -3779,7 +3817,7 @@ export function createMemoryCapabilityHandler({
           }, true);
         }
       }
-      const currentContent = isObject(current?.content) ? current.content : {};
+      const currentContent = isObject(current?.content) && !current.deletedAt ? current.content : {};
       const currentLease = isObject(currentContent.lease) ? currentContent.lease : null;
       if (currentLease && typeof currentLease.until === 'number' && currentLease.until > now()
         && currentLease.hostId !== hostId) {
@@ -3805,7 +3843,7 @@ export function createMemoryCapabilityHandler({
         recordIds: payloadRecordIds,
         detailIds: payloadDetailIds,
       });
-      await validateCheckpointGraphReferences(appValue, graphReferences);
+      await validateCheckpointGraphReferences(appValue, domain, graphReferences);
       const recordIds = graphReferences.recordIds;
       const detailIds = graphReferences.detailIds;
       const expiresAt = payload.expiresAt === undefined || payload.expiresAt === null

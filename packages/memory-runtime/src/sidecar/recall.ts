@@ -50,7 +50,7 @@ import {
   truncateLines,
   truncateText,
 } from './text.js';
-import type { RecallTrace } from '../runtime/types.js';
+import { RUNTIME_DETAIL_KINDS, type RecallTrace } from '../runtime/types.js';
 
 const MAX_DOMAINS = 16;
 const MAX_QUERY_CHARS = 2000;
@@ -1079,6 +1079,25 @@ function elapsed(start: number, end: number): number {
   return Math.max(0, Math.round(end - start));
 }
 
+/** UTF-8 字节预算截断；字符数不能代表 CJK/emoji 的实际字节。 */
+function truncateTextBytes(text: string, maxBytes: number): { text: string; truncated: boolean } {
+  const value = String(text ?? '');
+  const limit = Math.max(1, Math.floor(maxBytes));
+  if (byteLength(value) <= limit) return { text: value, truncated: false };
+  let low = 0;
+  let high = value.length;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (byteLength(value.slice(0, mid)) <= limit) low = mid;
+    else high = mid - 1;
+  }
+  let cut = Math.max(0, low);
+  if (cut > 0 && /[\uD800-\uDBFF]/.test(value[cut - 1] ?? '')) cut -= 1;
+  const suffix = cut > 0 ? '…' : '';
+  while (cut > 0 && byteLength(`${value.slice(0, cut)}${suffix}`) > limit) cut -= 1;
+  return { text: `${value.slice(0, cut)}${suffix}`, truncated: true };
+}
+
 export class RecallService {
   readonly config: SidecarConfig;
   readonly local: SidecarLocalLayer;
@@ -1646,7 +1665,8 @@ export class RecallService {
         '任务摘要（降级：仅有 summary，不是完整任务状态）：',
         escaped,
       ].join('\n');
-      return truncateText(text, Math.max(32, maxBytes));
+      const safe = escapeContextTags(text);
+      return truncateTextBytes(safe, Math.max(1, maxBytes));
     }
 
     const linesOf = (value: unknown): string[] => asStringArray(value, 100);
@@ -1722,11 +1742,16 @@ export class RecallService {
       text = build(included);
     }
     if (byteLength(text) > maxBytes) {
-      const sliced = truncateText(text, Math.max(32, maxBytes));
+      const sliced = truncateTextBytes(escapeContextTags(text), Math.max(1, maxBytes));
       text = sliced.text;
       truncated = truncated || sliced.truncated;
     }
-    return { text: escapeContextTags(text), truncated };
+    const safe = escapeContextTags(text);
+    if (byteLength(safe) > maxBytes) {
+      const sliced = truncateTextBytes(safe, Math.max(1, maxBytes));
+      return { text: sliced.text, truncated: true };
+    }
+    return { text: safe, truncated };
   }
 
   private checkpointBlockFromView(view: Record<string, unknown>, maxBytes: number): ContextBlock | null {
@@ -1803,7 +1828,7 @@ export class RecallService {
       `SelfRecord (agent=${request.agentId}, revision=${revision ?? 'unknown'}):`,
       ...lines,
     ].join('\n');
-    const rendered = truncateText(text, Math.max(32, maxBytes));
+    const rendered = truncateTextBytes(escapeContextTags(text), Math.max(1, maxBytes));
     const ownerInfo = deriveOwner(domain, { userId: this.identity.userId ?? undefined });
     const owner: RecallOwner = {
       role: 'agent',
@@ -1813,7 +1838,7 @@ export class RecallService {
     };
     return {
       kind: 'self',
-      content: escapeContextTags(rendered.text),
+      content: rendered.text,
       citations: typeof view.id === 'string'
         ? [{ id: view.id, type: 'self_record', domain }]
         : [],
@@ -2099,6 +2124,8 @@ export class RecallService {
       : { block: null, degraded: false };
     run.selfBlock = selfResult.block;
     run.checkpointBlock = checkpointResult.block;
+    run.estimatedBytes = selfBytes + (checkpointResult.block?.bytes ?? 0);
+    run.estimatedTokens = selfTokens + (checkpointResult.block?.tokens ?? 0);
     degraded = degraded || selfResult.degraded || checkpointResult.degraded;
 
     if (!this.client) {
@@ -2516,7 +2543,7 @@ export class RecallService {
         actor: { type: 'agent', agentId: cue.agentId },
         domains: [domain],
         recordIds: [record.id],
-        detailKinds: ['raw_chunk'],
+        detailKinds: [...RUNTIME_DETAIL_KINDS],
         limit: 3,
         includeText: false,
       });

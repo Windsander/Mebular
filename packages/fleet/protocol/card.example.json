@@ -24,8 +24,7 @@
       "timeoutMs": 300000
     },
     "permissions": {
-      "taskNamespaces": ["tasks"],
-      "allowSubcontract": false
+      "taskNamespaces": ["tasks"]
     },
     "runtime": {
       "os": "darwin",
@@ -102,8 +101,7 @@
     "tools": [],
     "limits": {},
     "permissions": {
-      "taskNamespaces": [],
-      "allowSubcontract": false
+      "taskNamespaces": []
     },
     "runtime": {
       "os": "darwin",

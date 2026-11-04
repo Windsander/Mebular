@@ -131,9 +131,9 @@
     },
     "cancelTerminalRoot": {
       "tool": "task_cancel",
-      "arguments": { "taskId": "plan-submit-001#1#root" },
-      "expect": { "ok": false, "taskId": "plan-submit-001#1#root", "reason": "already-terminal" },
-      "note": "root task 已终态时不再级联，与普通 task_cancel 一致"
+      "arguments": { "taskId": "plan-terminal-001#1#root" },
+      "expect": { "ok": false, "taskId": "plan-terminal-001#1#root", "reason": "already-terminal" },
+      "note": "独立终态 root，不依赖 cancelPlan 执行顺序；root task 已终态时不再级联，与普通 task_cancel 一致"
     }
   },
   "plan": {
@@ -322,13 +322,14 @@
       ]
     },
     "parentStepTaskBudget": {
-      "note": "runtime TaskBudget，非 plan 字段；父 step task 的既有预算必须容纳 child root/step task",
+      "note": "runtime TaskBudget，非 plan 字段；边界值 = child.maxSteps + 1（child root + step tasks），本夹具刚好通过",
       "maxDepth": 3,
-      "maxChildren": 8,
-      "maxTasks": 12
+      "maxChildren": 5,
+      "maxTasks": 5
     },
     "submission": {
       "caller": { "device": "device-B", "agent": "worker" },
+      "note": "caller 是测试上下文，不是 task_submit 输入字段；用于断言调用者=owner",
       "tool": "task_submit",
       "arguments": {
         "intent": "由 B 提交子 plan",
@@ -365,9 +366,7 @@
     }
   },
   "joinModes": [
-    { "mode": "all" },
-    { "mode": "any" },
-    { "mode": "quorum", "quorum": 2 }
+    { "mode": "all" }
   ],
   "invalid": {
     "cycle": {
@@ -410,7 +409,7 @@
       }
     },
     "mrGateAny": {
-      "expectedError": "PLAN_MR",
+      "expectedError": "PLAN_JOIN",
       "plan": {
         "v": 1,
         "kind": "task_plan",
@@ -430,7 +429,7 @@
       }
     },
     "mrGateUpstreamAny": {
-      "expectedError": "PLAN_MR",
+      "expectedError": "PLAN_JOIN",
       "plan": {
         "v": 1,
         "kind": "task_plan",
@@ -479,6 +478,36 @@
         "createdAt": 1700000009001,
         "budget": { "maxSteps": 2, "maxAttemptsPerStep": 1 },
         "policy": { "allowedDevices": ["device-B"], "allowedAgents": ["worker"], "requireCapabilities": ["fleet.task"], "maxParallel": 1, "allowSubcontract": false },
+        "steps": [
+          { "stepId": "work", "kind": "task", "intent": "子 plan work", "dependsOn": [], "acceptance": { "kind": "non-empty-result" } }
+        ]
+      }
+    },
+    "subPlanBudget": {
+      "expectedError": "PLAN_BUDGET",
+      "parentStepTaskBudget": {
+        "note": "child.maxSteps=4 需要 maxTasks/maxChildren >= 5；此处 4 不足",
+        "maxDepth": 3,
+        "maxChildren": 4,
+        "maxTasks": 4
+      },
+      "child": {
+        "v": 1,
+        "kind": "task_plan",
+        "planId": "plan-bad-budget-child",
+        "version": 1,
+        "parent": { "planId": "plan-demo-002", "version": 1, "stepId": "delegate" },
+        "owner": { "device": "device-B", "agent": "worker" },
+        "goal": "负例：父 step task TaskBudget 不足以容纳 child root + maxSteps",
+        "createdAt": 1700000010000,
+        "budget": { "maxSteps": 4, "maxAttemptsPerStep": 1 },
+        "policy": {
+          "allowedDevices": ["device-B"],
+          "allowedAgents": ["worker"],
+          "requireCapabilities": ["fleet.task", "code.write"],
+          "maxParallel": 1,
+          "allowSubcontract": false
+        },
         "steps": [
           { "stepId": "work", "kind": "task", "intent": "子 plan work", "dependsOn": [], "acceptance": { "kind": "non-empty-result" } }
         ]

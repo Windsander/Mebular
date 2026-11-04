@@ -28,17 +28,19 @@ fleet security revoke --dir ~/.mebular --device device-B
 fleet doctor      --dir ~/.mebular --json
 ```
 
-## 2.1 Plan materializer（P2）
+## 2.1 Plan materializer（P2/P4）
 
 - plan 节点提交后，由 **plan owner 设备**上的 `fleet node --run-forever` 或 `fleet worker --run-forever` 周期性推进（两者都会 tick materializer）；daemon 模式经内部 `/app/plans` 读取 plan。
-- materializer 只创建依赖已满足、且 route/显式 `to` 通过硬过滤的 step task；join/reduce/MR 执行属后续阶段。
+- materializer 只创建依赖已满足、且 route/显式 `to` 通过硬过滤的 step task；join/reduce 在全部 `dependsOn` step complete 后才创建。
+- **MR 门禁**：root plan 恰好一个 `kind=mr` sink，target 固定为 plan.owner 的 `{device,agent}`，`dispatch="root-only"`；只有所有非 MR step complete 且直接 pre-MR gate（join/reduce all）complete 才创建。MR 按 root `planId` 跨版本唯一：非终态等待、done 才让 root plan done、failed 不重试。
+- **失败/取消**：失败 step 走新 plan version + `reuse`；旧 MR 存在时禁止重试版本。`task_cancel(rootTaskId)` 为 plan 级取消（root failed CANCELLED + 清理该 version 非终态 step task 及派生树，已提交 MR 不撤销）；`task_cancel(stepTaskId)` 只取消该 step 子树，plan 派生为 failed。
 - 进程重启后从 plan + task 事件恢复，不需要 cursor；确定性 taskId/eventId 保证不重复建 task。
 - 默认只推进 owner device 的 plan；未授权设备不应运行 coordinator。
 - **sub-plan Agent 绑定**：MCP 任务工具缺省 Agent 是 `board`；宿主应注入真实执行 Agent，且必须与父 step task 的 `to.agent` 一致，否则 B8 拒绝。
 - **daemon CLI 边界**：无 live app 时 `task_targets` / `task_negotiate` / `chatter_*` 为 fail-closed（不回退本地离线 Mebular）；MCP live 路径正常。daemon-backed 读取留 P6。
 - **/app/plans 信任边界**：owner/agent 是设备级 app token 下的自证；该内部端点不在 P2 扩权。`parentTaskAccepted` 是 fleet 内部派生上下文（root 是否已存在），外部直接传 true 不构成信任边界。
 - **/app/plans 负例覆盖**：C/join/reduce/mr 的 HTTP 负例可继续依赖 validator；不额外扩 P2 端点测试。
-- **测试空白**：双守护进程 E2E 留 P4/P6；本轮覆盖单守护 + CLI/materializer，不覆盖双 daemon 并发。
+- **测试空白**：双守护进程 E2E 留 P6；当前覆盖单守护 + CLI/materializer 与三机 loopback join/MR。
 
 ## 3. 供给与水位
 
@@ -77,4 +79,4 @@ fleet doctor      --dir ~/.mebular --json
 - **daemon coordinator 限制**：daemon 没有本地 `Mebular`，远端能力卡通常无法取得已认证公钥验签 → 远端 route/显式 `to` **fail-closed**，不伪造通过；双守护 E2E 的远端公钥/卡片验证留 P6。
 - **daemon L1 授权**：`DaemonAgentBackend.getSubscriptions()` 走只读 `/app/policy/subscriptions?device=`；只有订阅任务 namespace 的 peer 才进入授权集合，查询失败不授权，**绝不**回退 `config.peers` 地址簿。
 - **可解释性**：`task_status.plan` 的 step 可额外返回 `why`/`blockedBy`；`why.policy="inherited"` 表示实际生效的 plan policy，不是新授权来源。`why` 只含标签/计数/原因码，不含原始对话、command/env/凭据。
-- **角色卡/join/MR**：P3 角色卡仍未接入（`roleCard="disabled"`）；不创建 join/reduce/MR，留 P4/P5。
+- **角色卡/join/MR**：P4 已实现 join/reduce/MR 门禁；P3 角色卡仍未接入（`roleCard="disabled"`），P5 才进入 shadow。

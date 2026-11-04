@@ -1,11 +1,12 @@
-// P2/P3 materializer：只按 plan + task 事件推进，不维护第二套持久状态机。
+// P2/P3/P4 materializer：只按 plan + task 事件推进，不维护第二套持久状态机。
 //
-// 边界（P0 契约 §6.8 / §7）：
+// 边界（P0 契约 §6.8 / §7 / §8）：
 // - 只推进 ready step；P3 route step 由 routing provider 解析，显式 `to` 也必须过硬过滤。
 // - 确定性 taskId `${planId}#${version}#${stepId}`；eventId `${taskId}#created`；append 幂等。
-// - 不创建 join/reduce/mr task（P4）；这些 step 保持 pending/blocked，不伪造完成。
-// - root task 由提交创建；materializer 只补缺、推进 queued→claimed→running；
-//   root plan 在 MR 能力落地前不得 done。
+// - P4：join/reduce 只在全部依赖 complete 后创建；MR 按 root planId 跨版本唯一，
+//   target 固定 plan.owner + dispatch=root-only；root plan 只在 MR done 后 done。
+// - 失败/取消：root failed 明确 reason，best-effort 取消该 version 非终态 step task 及派生树。
+// - root task 由提交创建；materializer 只补缺、推进 queued→claimed→running。
 
 import type { FleetEndpoint } from '../protocol/envelope.js';
 import { PLAN_SENTINEL } from '../protocol/envelope.js';
@@ -16,12 +17,17 @@ import type { TaskPlanStore } from '../store/plan-store.js';
 import { admitCreated, effectiveBudget } from '../collab/tree.js';
 import {
   PlanValidationError,
+  acceptancePasses,
+  planMrTaskRefs,
   planRootTaskId,
   planTaskId,
+  taskSubtreeCompletion,
   validatePlan,
   derivePlanSteps,
+  type DerivedPlanStep,
   type TaskPlan,
 } from '../plan.js';
+import { cancelPlanVersionTasks } from './plan-control.js';
 import {
   ROUTE_STATUS_TTL_MS,
   loadRouteContext,
@@ -118,6 +124,13 @@ function derivedTrace(plan: TaskPlan, states: ReadonlyMap<string, TaskState>): {
     throw new PlanValidationError('PLAN_STATE_INVALID', [`父 step task 不存在或尚未物化：${parentTaskId}`]);
   }
   return { causedBy: parentTaskId, chain: [...parent.trace.chain, parentTaskId] };
+}
+
+/** 永久失败的 root reason：明确到 step/acceptance；MR 单独标记，便于区分“MR 失败不重试”。 */
+function failureReason(entry: DerivedPlanStep): string {
+  const acceptanceFailed = (entry.blockedBy ?? []).includes('ACCEPTANCE_FAILED');
+  if (entry.step.kind === 'mr') return acceptanceFailed ? 'MR_ACCEPTANCE_FAILED' : 'MR_FAILED';
+  return acceptanceFailed ? `STEP_ACCEPTANCE_FAILED:${entry.step.stepId}` : `STEP_FAILED:${entry.step.stepId}`;
 }
 
 async function statesOf(store: TaskEventStore): Promise<TaskState[]> {
@@ -241,6 +254,36 @@ export class PlanMaterializer {
     return [...latest.values()].sort((a, b) => (a.planId < b.planId ? -1 : a.planId > b.planId ? 1 : 0));
   }
 
+  /** best-effort；单个取消失败不影响 tick，下一轮会再次尝试。 */
+  private async cleanupVersion(planId: string, version: number): Promise<void> {
+    try {
+      await cancelPlanVersionTasks(this.store, planId, version, this.endpoint, 'CANCELLED');
+    } catch {
+      // 清理失败不得让已 failed/cancelled 的 plan 复活。
+    }
+  }
+
+  /**
+   * 新版本接管后，旧版本不再推进：root 写 failed(SUPERSEDED_BY) 并清理未终态 step task。
+   * MR 唯一性优先：只要该 planId 已存在任何 MR task，就不在此处取消旧版本（避免撤销已提交/
+   * 进行中的 MR），由 MR 门禁统一等待/done/failed。
+   */
+  private async finalizeOlderVersions(latest: TaskPlan, versions: readonly TaskPlan[]): Promise<void> {
+    const older = versions
+      .filter((plan) => plan.version < latest.version)
+      .sort((a, b) => a.version - b.version);
+    if (older.length === 0) return;
+    const states = await statesOf(this.store);
+    if (planMrTaskRefs(latest.planId, [latest, ...versions], states).length > 0) return;
+    for (const plan of older) {
+      const rootState = states.find((state) => state.taskId === planRootTaskId(plan.planId, plan.version));
+      if (rootState !== undefined && !rootState.terminal) {
+        await this.appendRootEvent(rootState, 'failed', `SUPERSEDED_BY:${latest.version}`);
+      }
+      await this.cleanupVersion(plan.planId, plan.version);
+    }
+  }
+
   /**
    * 一轮 materialize。可安全重复调用；kill/restart 后从 plan + task 事件恢复。
    */
@@ -294,6 +337,7 @@ export class PlanMaterializer {
       }
       const plan = validation.plan;
 
+      await this.finalizeOlderVersions(plan, versions);
       let root: PlannedRootResult;
       try {
         root = await ensurePlanRootTask(plan, this.store, this.endpoint);
@@ -313,6 +357,8 @@ export class PlanMaterializer {
         continue;
       }
       if (rootState.status === 'failed') {
+        // 永久失败/取消：每轮 best-effort 重试清理未终态 step task 及派生树（§8.6）。
+        await this.cleanupVersion(plan.planId, plan.version);
         result.failed.push(planRootTaskId(plan.planId, plan.version));
         continue;
       }
@@ -328,9 +374,10 @@ export class PlanMaterializer {
       const failedStep = derived.find((entry) => entry.failed);
       if (failedStep !== undefined) {
         if (!rootState.terminal) {
-          await this.appendRootEvent(rootState, 'failed', `STEP_FAILED:${failedStep.step.stepId}`);
+          await this.appendRootEvent(rootState, 'failed', failureReason(failedStep));
           result.failed.push(planRootTaskId(plan.planId, plan.version));
         }
+        await this.cleanupVersion(plan.planId, plan.version);
         continue;
       }
 
@@ -348,6 +395,80 @@ export class PlanMaterializer {
         }
       }
 
+      // root plan：MR 是唯一 sink 与最后门禁；root done 只在 MR done + acceptance 后。
+      if (plan.parent === undefined && !rootState.terminal) {
+        const mrStep = plan.steps.find((step) => step.kind === 'mr');
+        if (mrStep !== undefined) {
+          const allVersions = versionsByPlan.get(plan.planId) ?? [plan];
+          const mrRefs = planMrTaskRefs(plan.planId, allVersions, states);
+          // MR 按 root planId 跨版本唯一：非终态等待；done 完成；failed 永久失败（不重试）。
+          const pendingMr = mrRefs.find((ref) => !ref.state.terminal);
+          if (pendingMr !== undefined) continue;
+          const doneMr = mrRefs.find((ref) => ref.state.status === 'done');
+          if (doneMr !== undefined) {
+            const doneVersion = allVersions.find((version) => version.version === doneMr.version);
+            const doneStep = doneVersion?.steps.find((step) => step.kind === 'mr');
+            const subtree = taskSubtreeCompletion(doneMr.taskId, states);
+            if (subtree.failed) {
+              await this.appendRootEvent(rootState, 'failed', 'MR_FAILED');
+              result.failed.push(planRootTaskId(plan.planId, plan.version));
+              await this.cleanupVersion(plan.planId, plan.version);
+              continue;
+            }
+            if (!subtree.complete) continue;
+            if (doneStep !== undefined && acceptancePasses(doneStep.acceptance, doneMr.state.resultRef)) {
+              await this.appendRootEvent(rootState, 'done');
+              result.completed.push(planRootTaskId(plan.planId, plan.version));
+            } else {
+              await this.appendRootEvent(rootState, 'failed', 'MR_ACCEPTANCE_FAILED');
+              result.failed.push(planRootTaskId(plan.planId, plan.version));
+              await this.cleanupVersion(plan.planId, plan.version);
+            }
+            continue;
+          }
+          const failedMr = mrRefs.find((ref) => ref.state.status === 'failed');
+          if (failedMr !== undefined) {
+            await this.appendRootEvent(rootState, 'failed', 'MR_FAILED');
+            result.failed.push(planRootTaskId(plan.planId, plan.version));
+            await this.cleanupVersion(plan.planId, plan.version);
+            continue;
+          }
+
+          const gate = plan.steps.find((step) => step.stepId === mrStep.dependsOn[0]);
+          const gateEntry = derived.find((entry) => entry.step.stepId === mrStep.dependsOn[0]);
+          const gateReady = gate !== undefined
+            && (gate.kind === 'join' || gate.kind === 'reduce')
+            && gate.join?.mode === 'all'
+            && gateEntry?.complete === true;
+          const allNonMrComplete = derived
+            .filter((entry) => entry.step.kind !== 'mr')
+            .every((entry) => entry.complete);
+          if (gateReady && allNonMrComplete) {
+            const taskId = planTaskId(plan.planId, plan.version, mrStep.stepId);
+            const stateById = new Map(states.map((state) => [state.taskId, state]));
+            if (!stateById.has(taskId)) {
+              const event: TaskEvent = {
+                v: 1,
+                eventId: `${taskId}#created`,
+                taskId,
+                type: 'created',
+                actor: this.endpoint,
+                at: Date.now(),
+                toStatus: 'queued',
+                trace: { chain: [] },
+                to: { device: plan.owner.device, agent: plan.owner.agent },
+                intent: mrStep.intent,
+                dispatch: 'root-only',
+              };
+              if (admitCreated(event, [...stateById.values()], reduceTaskEvents).ok) {
+                if (await appendOnce(this.store, event)) result.tasksCreated.push(taskId);
+              }
+            }
+            continue;
+          }
+        }
+      }
+
       if (rootState.terminal) continue;
 
       const parallel = Math.min(this.maxParallel, plan.policy.maxParallel ?? 8);
@@ -357,7 +478,7 @@ export class PlanMaterializer {
       const ready = derived
         .filter((entry) => entry.status === 'pending'
           && (entry.blockedBy === undefined || entry.blockedBy.length === 0)
-          && entry.step.kind === 'task'
+          && (entry.step.kind === 'task' || entry.step.kind === 'join' || entry.step.kind === 'reduce')
           && (entry.step.to !== undefined || entry.step.route !== undefined))
         .sort((a, b) => (a.step.stepId < b.step.stepId ? -1 : a.step.stepId > b.step.stepId ? 1 : 0));
       if (this.routing !== undefined && ready.length > 0) {

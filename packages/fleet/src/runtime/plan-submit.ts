@@ -13,6 +13,7 @@ import type { TaskPlanWriteStore } from '../store/plan-store.js';
 import { effectiveBudget } from '../collab/tree.js';
 import {
   PlanValidationError,
+  planMrTaskRefs,
   planRootTaskId,
   planTaskId,
   validatePlan,
@@ -134,6 +135,11 @@ async function submitTaskPlanUnlocked(
   const parentStepBudget = parentTask === undefined ? undefined : effectiveBudget(parentTask, stateById);
   const parentTaskState = parentTask === undefined ? undefined : { to: parentTask.to, status: parentTask.status };
   const existingVersion = versions.find((plan) => plan.version === candidate.version);
+  // MR 唯一性优先：root planId 已存在任一 MR task 时禁止创建新版本（含重试）。
+  if (candidate.parent === undefined && candidate.version > 1 && existingVersion === undefined
+    && planMrTaskRefs(candidate.planId, versions, states).length > 0) {
+    return failure('PLAN_MR', ['root plan 已存在 MR task，禁止创建新版本（MR 只允许一次）'], candidate);
+  }
   const childRootExists = existingVersion !== undefined
     && stateById.has(planRootTaskId(candidate.planId, candidate.version));
 

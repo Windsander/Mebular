@@ -13,6 +13,7 @@ import {
   TASK_PLAN_KIND,
   TASK_PLAN_NODE_TYPE,
   canonicalTaskPlan,
+  planMrTaskRefs,
   planRootTaskId,
   planTaskId,
   validatePlan,
@@ -238,6 +239,10 @@ export async function appendValidatedTaskPlanNode(
   const parentStepBudget = parentTask === undefined ? undefined : effectiveBudget(parentTask, stateById);
   const parentTaskState = parentTask === undefined ? undefined : { to: parentTask.to, status: parentTask.status };
   const existingVersion = versions.find((plan) => plan.version === candidate.version);
+  if (candidate.parent === undefined && candidate.version > 1 && existingVersion === undefined
+    && planMrTaskRefs(candidate.planId, versions, taskStates).length > 0) {
+    throw new PlanValidationError('PLAN_MR', ['root plan 已存在 MR task，禁止创建新版本（MR 只允许一次）']);
+  }
   const childRootExists = existingVersion !== undefined
     && stateById.has(planRootTaskId(candidate.planId, candidate.version));
 

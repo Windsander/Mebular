@@ -420,6 +420,41 @@ describe('P2 plan schema/validator', () => {
     expect(derivePlanProgress(plan, [mrState], [plan]).mr).toEqual({ submitted: true });
   });
 
+  it('reuse 旧任务派生子树未完成 → PLAN_REUSE（step complete 含 subtree）', () => {
+    const v1 = rootPlan({ planId: 'plan-reuse-subtree-001' });
+    const bTaskId = planTaskId(v1.planId, 1, 'collect');
+    const state = (taskId: string, status: TaskState['status'], causedBy?: string): TaskState => ({
+      taskId,
+      from: A,
+      to: B,
+      intent: 'x',
+      status,
+      attempts: 0,
+      trace: causedBy !== undefined ? { causedBy, chain: [causedBy] } : { chain: [] },
+      terminal: status === 'done' || status === 'failed',
+      lastEventId: `${taskId}#${status}`,
+      ...(status === 'done' ? { resultRef: 'ok' } : {}),
+    });
+    const v2: TaskPlan = {
+      ...v1,
+      version: 2,
+      supersedesVersion: 1,
+      createdAt: 20,
+      steps: v1.steps.map((step) => step.stepId === 'collect' ? { ...step, reuse: { version: 1 } } : step),
+    };
+    const childId = `${bTaskId}~c0`;
+    expect(validatePlan(v2, {
+      existingVersions: [v1],
+      caller: A,
+      taskStates: [state(bTaskId, 'done'), state(childId, 'running', bTaskId)],
+    })).toMatchObject({ ok: false, code: 'PLAN_REUSE' });
+    expect(validatePlan(v2, {
+      existingVersions: [v1],
+      caller: A,
+      taskStates: [state(bTaskId, 'done'), state(childId, 'done', bTaskId)],
+    }).ok).toBe(true);
+  });
+
   it('taskId 解析/acceptance 最小求值', () => {
     expect(parsePlanTaskId('plan-a#2#root')).toEqual({ planId: 'plan-a', version: 2, stepId: null, root: true });
     expect(parsePlanTaskId('plan-a#2#build-ui')).toMatchObject({ stepId: 'build-ui', root: false });

@@ -199,7 +199,7 @@
         "kind": "mr",
         "intent": "提交本 plan 唯一一次 MR",
         "dependsOn": ["pre-mr"],
-        "to": { "device": "device-B", "agent": "reviewer" },
+        "to": { "device": "device-A", "agent": "planner" },
         "acceptance": { "kind": "mr-once" }
       }
     ]
@@ -272,7 +272,7 @@
         "kind": "mr",
         "intent": "提交本 plan 唯一一次 MR",
         "dependsOn": ["pre-mr"],
-        "to": { "device": "device-B", "agent": "reviewer" },
+        "to": { "device": "device-A", "agent": "planner" },
         "acceptance": { "kind": "mr-once" }
       }
     ]

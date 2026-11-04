@@ -22,13 +22,7 @@ import { NullTransport } from './transport/null.js';
 import { LocalQuota } from './quota.js';
 import { deriveEdges } from './collab/dag.js';
 import { reduceTaskEvents, type TaskState } from './model.js';
-import {
-  derivePlanProgress,
-  derivePlanSteps,
-  parsePlanTaskId,
-  type PlanStepRouteHint,
-  type TaskPlan,
-} from './plan.js';
+import { derivePlanProgress, derivePlanSteps, parsePlanTaskId, type PlanStepRouteHint, type TaskPlan } from './plan.js';
 import { AGENT_NAMESPACE, agentDirectoryStore, expandTargets } from './agentdir.js';
 import {
   listCapabilityCards,
@@ -45,6 +39,7 @@ import {
   type PlanRoutingProvider,
 } from './routing.js';
 import { daemonRoutingProvider, embeddedRoutingProvider } from './runtime/routing-context.js';
+import { cancelPlanVersionTasks, cancelTaskTree } from './runtime/plan-control.js';
 
 export interface ToolContext {
   dir: string;
@@ -231,7 +226,7 @@ async function routeHintsForPlan(
     const hints: PlanStepRouteHint[] = [];
     for (const entry of derived) {
       const step = entry.step;
-      if (step.kind !== 'task') continue;
+      if (step.kind !== 'task' && step.kind !== 'join' && step.kind !== 'reduce') continue;
       if (step.to === undefined && step.route === undefined) continue;
       if (entry.taskId !== undefined || entry.via === 'reuse' || entry.failed) continue;
       const ready = entry.status === 'pending' && (entry.blockedBy === undefined || entry.blockedBy.length === 0);
@@ -400,13 +395,42 @@ export const TASK_TOOLS: TaskTool[] = [
         const state = reduceTaskEvents(await session.store.byTask(taskId));
         if (state === null) throw new Error(`任务不存在：${taskId}`);
         if (state.terminal) return { ok: false, taskId, reason: 'already-terminal', status: state.status };
+        const parsed = parsePlanTaskId(taskId);
+        if (parsed !== null && parsed.root) {
+          // P4 plan 级取消：root failed(CANCELLED) → 停止新物化 → best-effort 清理该 version
+          // 全部非终态 step task 及其派生树；已提交（done）的 MR 不撤销。
+          const actor = { device: session.device, agent: session.agent };
+          await session.store.append({
+            v: 1,
+            eventId: `${taskId}#failed@${session.device}`,
+            taskId,
+            type: 'failed',
+            actor,
+            at: Date.now(),
+            toStatus: 'failed',
+            trace: state.trace,
+            reason: 'CANCELLED',
+          });
+          try {
+            await cancelPlanVersionTasks(session.store, parsed.planId, parsed.version, actor, 'CANCELLED');
+          } catch {
+            // best-effort；后续 materializer tick 会重试清理。
+          }
+          return { ok: true, taskId, status: 'failed', reason: 'CANCELLED' };
+        }
+        const actor = { device: session.device, agent: session.agent };
+        if (parsed !== null) {
+          // P4 step 级取消：只取消该 step task 及其派生子树；plan 状态由 materializer 派生为 failed。
+          await cancelTaskTree(session.store, taskId, actor, { subtree: true, reason: 'CANCELLED' });
+          return { ok: true, taskId, status: 'failed', reason: 'CANCELLED' };
+        }
         const reason = strInput(input, 'reason') ?? 'CANCELLED';
         const event: TaskEvent = {
           v: 1,
           eventId: `${taskId}#failed@${session.device}`,
           taskId,
           type: 'failed',
-          actor: { device: session.device, agent: session.agent },
+          actor,
           at: Date.now(),
           toStatus: 'failed',
           trace: state.trace,

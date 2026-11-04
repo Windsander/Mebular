@@ -3,7 +3,8 @@
 // 边界（P0 契约 §6 / §4.2）：
 // - plan 是不可变的 internal 记忆节点；task 层只保留派生树，plan 依赖不是 TaskEvent 边。
 // - 本模块不读写存储、不依赖墙钟；materializer 与 `task_status` 共用同一套派生逻辑。
-// - 本期只实现 `join.mode="all"`（CR-001）；route resolver 在 `routing.ts`；join/MR 执行属 P4。
+// - 本期只实现 `join.mode="all"`（CR-001）；route resolver 在 `routing.ts`；
+//   join/reduce/MR 物化与门禁在 `runtime/materializer.ts`（P4）。
 
 import { PLAN_SENTINEL, type FleetEndpoint, type TaskBudget } from './protocol/envelope.js';
 import type { TaskState } from './model.js';
@@ -448,6 +449,12 @@ function validateMrShape(plan: TaskPlan): PlanValidationResult | null {
   }
   if (mrSteps.length !== 1) return failure('PLAN_MR', 'root plan 必须恰好一个 kind=mr step');
   const mr = mrSteps[0]!;
+  // MR task 的 target 由 runtime 固定为 plan.owner；step 上不允许 route，显式 to 只能等于 owner。
+  if (mr.route !== undefined) return failure('PLAN_MR', 'MR step 不得使用 route（target 固定为 plan.owner）');
+  if (mr.to !== undefined
+    && (mr.to.device !== plan.owner.device || mr.to.agent !== plan.owner.agent)) {
+    return failure('PLAN_MR', 'MR step 的 to 必须等于 plan.owner');
+  }
   const dependents = new Set(plan.steps.flatMap((step) => step.dependsOn));
   const sinks = plan.steps.filter((step) => !dependents.has(step.stepId));
   if (sinks.length !== 1 || sinks[0]!.stepId !== mr.stepId) return failure('PLAN_MR', 'root plan 的唯一 sink 必须是 MR');
@@ -503,6 +510,10 @@ function validateReuse(plan: TaskPlan, context: PlanValidationContext): PlanVali
       }
       if (!acceptancePasses(step.acceptance, oldTask.resultRef)) {
         return failure('PLAN_REUSE', `reuse 旧任务未通过 acceptance：${step.stepId}`);
+      }
+      const subtree = subtreeCompletion(oldTask.taskId, stateById);
+      if (!subtree.complete || subtree.failed) {
+        return failure('PLAN_REUSE', `reuse 旧任务派生子树未完成：${step.stepId}`);
       }
     }
   }
@@ -685,6 +696,32 @@ export function planRootTaskId(planId: string, version: number): string {
   return planTaskId(planId, version, 'root');
 }
 
+/** P4：root planId 跨版本的 MR task 引用（按版本升序；用于唯一性与进度派生）。 */
+export interface PlanMrTaskRef {
+  version: number;
+  stepId: string;
+  taskId: string;
+  state: TaskState;
+}
+
+export function planMrTaskRefs(
+  planId: string,
+  versions: readonly TaskPlan[],
+  states: readonly TaskState[],
+): PlanMrTaskRef[] {
+  const byId = new Map(states.map((state) => [state.taskId, state]));
+  const refs: PlanMrTaskRef[] = [];
+  for (const plan of [...versions].sort((a, b) => a.version - b.version)) {
+    if (plan.planId !== planId) continue;
+    const mrStep = plan.steps.find((step) => step.kind === 'mr');
+    if (mrStep === undefined) continue;
+    const taskId = planTaskId(planId, plan.version, mrStep.stepId);
+    const state = byId.get(taskId);
+    if (state !== undefined) refs.push({ version: plan.version, stepId: mrStep.stepId, taskId, state });
+  }
+  return refs;
+}
+
 export interface ParsedPlanTaskId {
   planId: string;
   version: number;
@@ -765,6 +802,14 @@ interface SubtreeCompletion {
   failed: boolean;
 }
 
+/** P4：task 派生子树完成判定（所有后代 terminal；任一 failed/cancelled → failed）。 */
+export function taskSubtreeCompletion(taskId: string, states: readonly TaskState[] | ReadonlyMap<string, TaskState>): SubtreeCompletion {
+  const byId = Array.isArray(states)
+    ? new Map((states as readonly TaskState[]).map((state) => [state.taskId, state]))
+    : states as ReadonlyMap<string, TaskState>;
+  return subtreeCompletion(taskId, byId);
+}
+
 function subtreeCompletion(taskId: string, byId: ReadonlyMap<string, TaskState>): SubtreeCompletion {
   const children = new Map<string, string[]>();
   for (const state of byId.values()) {
@@ -828,7 +873,10 @@ function deriveOneStep(
   if (step.reuse !== undefined) {
     const oldTaskId = planTaskId(plan.planId, step.reuse.version, step.stepId);
     const oldTask = byId.get(oldTaskId);
-    if (oldTask !== undefined && oldTask.status === 'done' && acceptancePasses(step.acceptance, oldTask.resultRef)) {
+    const oldSubtree = oldTask === undefined ? undefined : subtreeCompletion(oldTaskId, byId);
+    if (oldTask !== undefined && oldTask.status === 'done'
+      && oldSubtree !== undefined && oldSubtree.complete && !oldSubtree.failed
+      && acceptancePasses(step.acceptance, oldTask.resultRef)) {
       const result: DerivedPlanStep = {
         step,
         status: 'done',
@@ -951,12 +999,12 @@ function deriveOneStep(
     memo.set(step.stepId, result);
     return result;
   }
-  if (step.kind === 'join' || step.kind === 'reduce' || step.kind === 'mr') {
-    // P2 不创建 join/reduce/mr task（P4）；不伪造完成。
+  if (step.kind === 'mr') {
+    // MR 由 materializer 在“所有非 MR step complete + MR 唯一性”门禁后创建；
+    // 依赖已满足时保持 pending，不伪造 blocked/done。
     const result: DerivedPlanStep = {
       step,
-      status: 'blocked',
-      blockedBy: [],
+      status: 'pending',
       complete: false,
       failed: false,
     };
@@ -1086,13 +1134,27 @@ export function derivePlanProgress(
   const anyDispatched = derived.some((entry) => entry.status === 'dispatched');
   const anyBlocked = derived.some((entry) => entry.status === 'blocked');
   const hasStepTask = plan.steps.some((step) => byId.has(planTaskId(plan.planId, plan.version, step.stepId)));
-  const mrTaskSubmitted = versions.some((version) => {
-    const mrStep = version.steps.find((step) => step.kind === 'mr');
-    return mrStep !== undefined && byId.has(planTaskId(plan.planId, version.version, mrStep.stepId));
-  });
+  const mrRefs = plan.parent === undefined ? planMrTaskRefs(plan.planId, versions, states) : [];
+  const mrTaskSubmitted = mrRefs.length > 0;
   const mr = plan.parent === undefined
     ? { submitted: mrTaskSubmitted }
     : { applicable: false as const, submitted: false };
+
+  // MR 回执按 root planId 跨版本唯一：旧版本已 done 的 MR 也算 root 完成证据。
+  let mrDone = derived.find((entry) => entry.step.kind === 'mr')?.complete === true;
+  if (plan.parent === undefined && !mrDone) {
+    for (const ref of mrRefs) {
+      const version = versions.find((candidate) => candidate.version === ref.version);
+      const mrStep = version?.steps.find((step) => step.kind === 'mr');
+      if (mrStep === undefined) continue;
+      if (ref.state.status !== 'done') continue;
+      const subtree = subtreeCompletion(ref.taskId, byId);
+      if (!subtree.complete || subtree.failed) continue;
+      if (!acceptancePasses(mrStep.acceptance, ref.state.resultRef)) continue;
+      mrDone = true;
+      break;
+    }
+  }
 
   // 优先级固定：cancelled/failed > done > planned（root 仍 queued 且无 step task）
   // > blocked（root 已推进但有 ready step 被阻塞）> running。
@@ -1102,9 +1164,8 @@ export function derivePlanProgress(
   } else if (root?.status === 'failed' || anyFailed) {
     status = 'failed';
   } else if (plan.parent === undefined) {
-    // Root plan 只有 MR 完成才 done（MR 执行属 P4；P2 不伪造完成）。
-    const mrStep = derived.find((entry) => entry.step.kind === 'mr');
-    if (root?.status === 'done' && mrStep?.complete === true) status = 'done';
+    // Root plan 只有 MR 完成才 done（§8.4）；MR 回执按 planId 跨版本唯一。
+    if (root?.status === 'done' && mrDone) status = 'done';
     else if (root === undefined) status = 'planned';
     else if (root.status === 'queued' && !hasStepTask) status = 'planned';
     else if (anyBlocked && !anyDispatched) status = 'blocked';

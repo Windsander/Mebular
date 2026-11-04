@@ -109,6 +109,19 @@ export async function ensurePlanRootTask(
   const current = reduceTaskEvents(await store.byTask(taskId));
   if (current !== null) return { created: false, taskId, state: current };
   const allStates = new Map((await statesOf(store)).map((state) => [state.taskId, state]));
+  if (plan.parent !== undefined) {
+    const parentTaskId = planTaskId(plan.parent.planId, plan.parent.version, plan.parent.stepId);
+    const parent = allStates.get(parentTaskId);
+    if (parent === undefined) {
+      throw new PlanValidationError('PLAN_STATE_INVALID', [`父 step task 不存在或尚未物化：${parentTaskId}`]);
+    }
+    // B10：root 缺失时，终态父 task 不得补建 root；未来调用点也不能绕过。
+    if (parent.status === 'done' || parent.status === 'failed') {
+      throw new PlanValidationError('PLAN_STATE_INVALID', [
+        `root task 缺失且父 step task 已终态（${parent.status}）：${parentTaskId}`,
+      ]);
+    }
+  }
   const trigger = derivedTrace(plan, allStates);
   const event: TaskEvent = {
     v: 1,

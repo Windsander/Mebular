@@ -319,6 +319,14 @@ describe('P2 daemon /app/plans', () => {
       budget: { maxDepth: 3, maxChildren: 2, maxTasks: 2 },
     })).toBe(true);
 
+    const rootlessChild = childPlan(parent.planId, {
+      planId: 'plan-daemon-child-rootless-001',
+      budget: { maxSteps: 1, maxAttemptsPerStep: 1 },
+    });
+    expect((await request('/app/plans', { method: 'POST', body: { plan: rootlessChild, namespace: 'tasks' } })).status).toBe(200);
+    expect((await new fleet.DaemonTaskEventStore({ endpoint: base, namespace: 'tasks' })
+      .byTask(`${rootlessChild.planId}#1#root`))).toHaveLength(0);
+
     const budgetChild = childPlan(parent.planId, { planId: 'plan-daemon-child-budget-001' });
     const budgetReply = await request('/app/plans', { method: 'POST', body: { plan: budgetChild, namespace: 'tasks' } });
     expect(budgetReply.status).toBe(422);
@@ -351,7 +359,7 @@ describe('P2 daemon /app/plans', () => {
       at: 2,
       toStatus: 'queued',
       trace: { causedBy: parentStepTaskId, chain: [parentStepTaskId] },
-      to: { device: 'device-A', agent: 'planner' },
+      to: { device: '__plan__', agent: '__plan__' },
       intent: 'child root',
       dispatch: 'root-only',
     })).toBe(true);
@@ -378,6 +386,12 @@ describe('P2 daemon /app/plans', () => {
     const acceptedReplay = await request('/app/plans', { method: 'POST', body: { plan: okChild, namespace: 'tasks' } });
     expect(acceptedReplay.status).toBe(200);
     expect(acceptedReplay.body).toMatchObject({ ok: true, replayed: true });
+
+    // B10：rootless child replay 即使内容相同也不得 dedupe/补 root。
+    const rootlessReplay = await request('/app/plans', { method: 'POST', body: { plan: rootlessChild, namespace: 'tasks' } });
+    expect(rootlessReplay.status).toBe(409);
+    expect(rootlessReplay.body).toMatchObject({ ok: false, error: 'PLAN_STATE_INVALID' });
+    expect(await tasks.byTask(`${rootlessChild.planId}#1#root`)).toHaveLength(0);
   });
 
   it('B4：daemon CLI 提交 plan → 同一 daemon materializer → task_status.plan', async () => {

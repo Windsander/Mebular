@@ -624,6 +624,12 @@ export function validatePlan(input: unknown, context: PlanValidationContext = {}
 
   const existing = context.existingVersions ?? [];
   const sameVersion = existing.find((entry) => entry.version === plan.version);
+  // B10：sub-plan 的父 task 状态/绑定必须先于 dedupe 检查；否则 rootless replay 会绕过
+  // late-child 拒绝并在后续补建 root。已接受 child（parentTaskAccepted=true）仍可通过。
+  if (sameVersion !== undefined && plan.parent !== undefined) {
+    const parentGate = validateParent(plan, context);
+    if (parentGate !== null) return parentGate;
+  }
   if (sameVersion !== undefined) {
     // existing 可能来自 fixture/旧节点（未规范化）；比较前统一 shape 规范化。
     const sameShape = validatePlanShape(sameVersion);

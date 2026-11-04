@@ -14,6 +14,7 @@ import {
   NullTransport,
   PlanMaterializer,
   derivePlanProgress,
+  ensurePlanRootTask,
   loadToolConfig,
   offlineMebularOptions,
   onboardDevice,
@@ -571,6 +572,107 @@ describe('P2 task_submit.plan + materializer', () => {
     expect(parentProgress.steps.find((step) => step.stepId === 'delegate')?.status).toBe('done');
     expect(reduceTaskEvents(await store.byTask(delegateTaskId))?.status).toBe('done');
     await worker.close();
+  });
+
+  it('B10：rootless child replay 在父 done/failed 时拒绝，不补建 root；accepted child 仍可 dedupe', async () => {
+    const makeParent = (planId: string): TaskPlan => plan({
+      planId,
+      policy: {
+        allowedDevices: ['device-A'],
+        allowedAgents: ['planner'],
+        requireCapabilities: ['fleet.task'],
+        maxParallel: 2,
+        allowSubcontract: true,
+      },
+      steps: [
+        { stepId: 'delegate', kind: 'task', intent: 'delegate', dependsOn: [], to: A, acceptance: { kind: 'non-empty-result' } },
+        { stepId: 'gate', kind: 'reduce', intent: 'gate', dependsOn: ['delegate'], join: { mode: 'all' }, acceptance: { kind: 'non-empty-result' } },
+        { stepId: 'mr', kind: 'mr', intent: 'mr', dependsOn: ['gate'], acceptance: { kind: 'mr-once' } },
+      ],
+    });
+    const makeChild = (planId: string, parentId: string): TaskPlan => ({
+      v: 1,
+      kind: 'task_plan',
+      planId,
+      version: 1,
+      parent: { planId: parentId, version: 1, stepId: 'delegate' },
+      owner: A,
+      goal: 'rootless child',
+      createdAt: 500,
+      budget: { maxSteps: 1, maxAttemptsPerStep: 1 },
+      policy: {
+        allowedDevices: ['device-A'],
+        allowedAgents: ['planner'],
+        requireCapabilities: ['fleet.task'],
+        maxParallel: 1,
+        allowSubcontract: false,
+      },
+      steps: [{ stepId: 'work', kind: 'task', intent: 'child-work', dependsOn: [], to: A, acceptance: { kind: 'non-empty-result' } }],
+    });
+
+    const live = await openApp();
+    const store = new MebularTaskEventStore(live);
+    const plans = new MebularTaskPlanStore(live);
+    const materializer = new PlanMaterializer({ device: 'device-A', agent: 'planner', plans, store });
+
+    // done 父 task + rootless child plan node。
+    const parentDone = makeParent('plan-parent-b10-done-001');
+    const parentSubmit = await submit(parentDone, { mebular: live });
+    expect(parentSubmit.ok).toBe(true);
+    await materializer.tick();
+    const doneDelegateId = planTaskId(parentDone.planId, 1, 'delegate');
+    const childDone = makeChild('plan-child-b10-done-001', parentDone.planId);
+    expect((await plans.append(childDone)).stored).toBe(true);
+    expect(await store.byTask(planRootTaskId(childDone.planId, 1))).toHaveLength(0);
+    await store.append({
+      v: 1,
+      eventId: `${doneDelegateId}#done@device-A`,
+      taskId: doneDelegateId,
+      type: 'done',
+      actor: A,
+      at: Date.now(),
+      toStatus: 'done',
+      trace: { chain: [] },
+      payloadRef: 'done',
+    });
+
+    const doneReplay = await toolByName('task_submit')!.handler(
+      { intent: 'rootless replay', to: SENTINEL, plan: childDone },
+      ctx({ mebular: live }),
+    ) as Record<string, unknown>;
+    expect(doneReplay).toMatchObject({ ok: false, error: 'PLAN_STATE_INVALID', created: [] });
+    expect(await store.byTask(planRootTaskId(childDone.planId, 1))).toHaveLength(0);
+    await expect(ensurePlanRootTask(childDone, store, A)).rejects.toMatchObject({ code: 'PLAN_STATE_INVALID' });
+    expect(await store.byTask(planRootTaskId(childDone.planId, 1))).toHaveLength(0);
+    const doneTick = await materializer.tick();
+    expect(doneTick.invalid.some((entry) => entry.planId === childDone.planId && entry.code === 'PLAN_STATE_INVALID')).toBe(true);
+    expect(await store.byTask(planRootTaskId(childDone.planId, 1))).toHaveLength(0);
+
+    // failed 父 task + rootless child plan node。
+    const parentFailed = makeParent('plan-parent-b10-failed-001');
+    await submit(parentFailed, { mebular: live });
+    await materializer.tick();
+    const failedDelegateId = planTaskId(parentFailed.planId, 1, 'delegate');
+    const childFailed = makeChild('plan-child-b10-failed-001', parentFailed.planId);
+    expect((await plans.append(childFailed)).stored).toBe(true);
+    await store.append({
+      v: 1,
+      eventId: `${failedDelegateId}#failed@device-A`,
+      taskId: failedDelegateId,
+      type: 'failed',
+      actor: A,
+      at: Date.now(),
+      toStatus: 'failed',
+      trace: { chain: [] },
+      reason: 'parent failed',
+    });
+    const failedReplay = await toolByName('task_submit')!.handler(
+      { intent: 'rootless replay', to: SENTINEL, plan: childFailed },
+      ctx({ mebular: live }),
+    ) as Record<string, unknown>;
+    expect(failedReplay).toMatchObject({ ok: false, error: 'PLAN_STATE_INVALID', created: [] });
+    expect(await store.byTask(planRootTaskId(childFailed.planId, 1))).toHaveLength(0);
+    await expect(ensurePlanRootTask(childFailed, store, A)).rejects.toMatchObject({ code: 'PLAN_STATE_INVALID' });
   });
 
   it('新版本 reuse：旧任务 done+acceptance 通过则不建新 task；root 使用新 version', async () => {

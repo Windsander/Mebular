@@ -313,6 +313,26 @@ describe('P2 plan schema/validator', () => {
         parentPlan: forbiddenParent,
       })).toMatchObject({ ok: false, code: 'PLAN_POLICY' });
     }
+
+    // B10：同版本 dedupe 也不能绕过父 task 终态检查（rootless replay）。
+    const storedChild = childPlan(parent);
+    expect(validatePlan(storedChild, {
+      ...base,
+      existingVersions: [storedChild],
+      parentTaskState: parentTaskState({ status: 'done' }),
+    })).toMatchObject({ ok: false, code: 'PLAN_STATE_INVALID' });
+    expect(validatePlan(storedChild, {
+      ...base,
+      existingVersions: [storedChild],
+      parentTaskState: parentTaskState({ status: 'failed' }),
+      parentTaskAccepted: true,
+    })).toMatchObject({ ok: false, code: 'PLAN_STATE_INVALID' });
+    expect(validatePlan(storedChild, {
+      ...base,
+      existingVersions: [storedChild],
+      parentTaskState: parentTaskState({ status: 'done' }),
+      parentTaskAccepted: true,
+    })).toMatchObject({ ok: true, deduped: true });
   });
 
   it('版本：>1 必须 supersedes=version-1 且上一版本存在；同版本冲突/幂等', () => {

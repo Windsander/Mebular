@@ -178,6 +178,8 @@ export interface CapabilityClientOptions {
   fetchImpl?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
+  /** 明确 mode/capability 撤销观察；不得用来新增控制协议。 */
+  onCapabilityRevoked?: (error: CapabilityClientError) => void;
 }
 
 export interface CapabilityRequestOptions {
@@ -233,6 +235,7 @@ export class CapabilityClient {
   private readonly fetchImpl: typeof fetch;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly readToken?: () => string | null | Promise<string | null>;
+  private readonly onCapabilityRevoked?: (error: CapabilityClientError) => void;
   private token: string | null;
 
   constructor(options: CapabilityClientOptions) {
@@ -245,6 +248,7 @@ export class CapabilityClient {
     }
     this.token = typeof options.token === 'string' && options.token.length > 0 ? options.token : null;
     this.readToken = options.readToken;
+    this.onCapabilityRevoked = options.onCapabilityRevoked;
     this.timeoutMs = Number.isFinite(options.timeoutMs) && (options.timeoutMs ?? 0) > 0
       ? Math.floor(options.timeoutMs as number)
       : 5000;
@@ -435,6 +439,22 @@ export class CapabilityClient {
       }
 
       const error = this.errorFromResponse(decoded, requestId);
+      if (error.code === 'capability_disabled' || error.code === 'mode_mismatch') {
+        // 撤销不是 permanent write failure：保留 queued 项并立即停止本次重试。
+        // retryable 只防止 outbox 把它死信化；这里直接抛出，不盲目重放。
+        const revoked = new CapabilityClientError(error.code, error.message, {
+          status: error.status,
+          retryable: true,
+          details: error.details,
+          requestId,
+        });
+        try {
+          this.onCapabilityRevoked?.(revoked);
+        } catch {
+          // 生命周期观察器不能改写 capability 响应语义。
+        }
+        throw revoked;
+      }
       if (error.retryable && attempt + 1 < maxAttempts) {
         attempt += 1;
         const delay = decoded.retryAfterMs ?? this.retryDelayMs * 2 ** (attempt - 1);

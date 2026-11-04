@@ -31,11 +31,13 @@ import {
 import {
   buildDiscovery,
   clearDiscovery,
+  isDiscoveryDead,
   isDiscoveryStale,
   readDiscovery,
   touchDiscovery,
   writeDiscovery,
   type SidecarDiscovery,
+  type SidecarMode,
   type SidecarState,
 } from './discovery.js';
 import {
@@ -71,6 +73,7 @@ import {
   TokenError,
   ensureHostToken,
   readCapabilityToken,
+  refreshCapabilityToken,
   removeHostTokenIfMatches,
 } from './token.js';
 import {
@@ -257,6 +260,21 @@ function isObject(value: unknown): value is Record<string, any> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
+async function settleWithin(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      promise.then(() => true, () => true),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), Math.max(0, timeoutMs));
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 interface CapabilityProbe {
   capability: SidecarStatusCapability;
   versionInfo: CapabilityVersionInfo | null;
@@ -424,6 +442,10 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
   let capabilityIdentity: CapabilityIdentity | null = null;
   let capabilityDetailQuota: CapabilityProbe['detailQuota'] = null;
   let warnings: string[] = [];
+  let lifecycleMode: SidecarMode = 'immersive';
+  let dormantReason: string | null = null;
+  let dormantIncomplete = false;
+  let requestDormant: ((reason: string) => Promise<boolean>) | null = null;
 
   if (!options.skipHandshake) {
     let tokenRecord;
@@ -455,8 +477,12 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
         baseUrl,
         token: tokenRecord.token,
         readToken: async () => {
-          const refreshed = await readCapabilityToken({ dataDir: paths.dataDir, env, now: now() });
+          const refreshed = await refreshCapabilityToken({ dataDir: paths.dataDir, env, now: now() });
           return refreshed && !refreshed.expired ? refreshed.token : null;
+        },
+        onCapabilityRevoked: (error) => {
+          Object.assign(capability, { reachable: false, error: error.code });
+          if (requestDormant) void requestDormant(error.code);
         },
         timeoutMs: config.capability.timeoutMs,
       });
@@ -552,6 +578,7 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
   }
 
   let settlement: SettlementRuntime;
+  let activeReplay: Promise<unknown> | null = null;
   try {
     settlement = new SettlementRuntime({
       config,
@@ -562,6 +589,29 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
       inference: model,
       now,
     });
+    // main 拥有生命周期边界；不修改 replayer，也绝不为了等待而启动新 replay。
+    const replayOnce = settlement.replayer.replayOnce.bind(settlement.replayer);
+    settlement.replayer.replayOnce = () => {
+      const run = replayOnce();
+      activeReplay = run;
+      const clear = () => {
+        if (activeReplay === run) activeReplay = null;
+      };
+      void run.then(clear, clear);
+      return run;
+    };
+    const recordAttempt = local.outbox.recordAttempt.bind(local.outbox);
+    const deadLetter = local.outbox.deadLetter.bind(local.outbox);
+    local.outbox.recordAttempt = async (id, attempt) => {
+      // 已开始的 replay 可能在撤销后才收到响应；不得再增长 payload/元数据。
+      if (lifecycleMode === 'mcp') return local.outbox.get(id);
+      return recordAttempt(id, attempt);
+    };
+    local.outbox.deadLetter = async (id, errorCode) => {
+      // dormant 不创造 dead 副本；保留活动项，待重新授权后按原键处理。
+      if (lifecycleMode === 'mcp') return false;
+      return deadLetter(id, errorCode);
+    };
     await settlement.init();
   } catch (error) {
     throw new SidecarStartupError(
@@ -571,6 +621,22 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
     );
   }
 
+  const stopSettlementWithoutFlush = async (timeoutMs = 2000): Promise<boolean> => {
+    let clean = true;
+    try {
+      await settlement.replayer.stop({ flushMs: 0 });
+    } catch {
+      clean = false;
+    }
+    if (activeReplay && !await settleWithin(activeReplay, timeoutMs)) clean = false;
+    return clean;
+  };
+
+  const runtimeDegraded = () => dormantIncomplete
+    || (!options.skipHandshake && !capability.reachable)
+    || settlement.degraded
+    || modelStatus.degraded;
+
   const statusSnapshot = async (): Promise<SidecarStatusSnapshot> => {
     try {
       modelStatus = await model.status();
@@ -578,6 +644,8 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
       // 模型状态探测失败只影响展示，不阻塞 status；沿用最近一次不可用状态。
     }
     const mergedWarnings = [...configWarnings, ...warnings];
+    if (dormantReason && !mergedWarnings.includes(dormantReason)) mergedWarnings.push(dormantReason);
+    if (dormantIncomplete && !mergedWarnings.includes('dormant_incomplete')) mergedWarnings.push('dormant_incomplete');
     for (const warning of modelStatus.warnings) {
       if (!mergedWarnings.includes(warning)) mergedWarnings.push(warning);
     }
@@ -588,7 +656,7 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
       }
     }
     return settlement.statusSnapshot({
-      mode: 'immersive',
+      mode: lifecycleMode,
       identity: { ...identity },
       capability: { ...capability },
       model: modelStatus,
@@ -615,9 +683,7 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
     });
   };
 
-  const degraded = (!options.skipHandshake && !capability.reachable)
-    || settlement.degraded
-    || modelStatus.degraded;
+  const degraded = runtimeDegraded();
   const server = new SidecarServer({
     config,
     hostToken: hostToken.token,
@@ -629,9 +695,9 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
     recall: settlement,
     objects: settlement,
     inference: inferenceService,
-    getDegraded: () => settlement.degraded,
+    getDegraded: runtimeDegraded,
     state: 'starting',
-    degraded: degraded || settlement.degraded,
+    degraded: false,
     now,
     startedAt,
   });
@@ -640,44 +706,48 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
   try {
     listened = await server.listen();
   } catch (error) {
-    await settlement.stop().catch(() => undefined);
+    await stopSettlementWithoutFlush().catch(() => false);
     await removeHostTokenIfMatches(paths.hostTokenPath, hostToken.token).catch(() => undefined);
     throw startupFromUnknown(error);
   }
 
+  let stopping = false;
+  const discoveryCapabilities = (mode: SidecarMode) => ({
+    ingest: mode === 'immersive',
+    recall: mode === 'immersive',
+    context: mode === 'immersive',
+    details: mode === 'immersive',
+    checkpoint: mode === 'immersive',
+    compact: mode === 'immersive',
+    self: mode === 'immersive',
+    models: mode === 'immersive' ? modelStatus.sources : [],
+  });
+  const makeDiscovery = (mode: SidecarMode, state: SidecarState, isDegraded: boolean) => buildDiscovery({
+    pid: process.pid,
+    ...(options.parentPid !== undefined ? { parentPid: options.parentPid } : {}),
+    host: listened.host,
+    port: listened.port,
+    tokenFile: paths.hostTokenPath,
+    cloudId: identity.cloudId,
+    profileId: identity.profileId,
+    runtimeVersion: SIDECAR_RUNTIME_VERSION,
+    apiVersion: SIDECAR_API_VERSION,
+    capabilityApiVersion: SIDECAR_CAPABILITY_API_VERSION,
+    minMcpVersion: SIDECAR_MIN_MCP_VERSION,
+    maxMcpVersion: SIDECAR_MAX_MCP_VERSION,
+    state,
+    mode,
+    degraded: isDegraded,
+    startedAt,
+    updatedAt: now(),
+    capabilities: discoveryCapabilities(mode),
+  });
   let discovery: SidecarDiscovery;
   try {
-    discovery = buildDiscovery({
-      pid: process.pid,
-      host: listened.host,
-      port: listened.port,
-      tokenFile: paths.hostTokenPath,
-      cloudId: identity.cloudId,
-      profileId: identity.profileId,
-      runtimeVersion: SIDECAR_RUNTIME_VERSION,
-      apiVersion: SIDECAR_API_VERSION,
-      capabilityApiVersion: SIDECAR_CAPABILITY_API_VERSION,
-      minMcpVersion: SIDECAR_MIN_MCP_VERSION,
-      maxMcpVersion: SIDECAR_MAX_MCP_VERSION,
-      state: 'ready',
-      mode: 'immersive',
-      degraded,
-      startedAt,
-      updatedAt: now(),
-      capabilities: {
-        ingest: true,
-        recall: true,
-        context: true,
-        details: true,
-        checkpoint: true,
-        compact: true,
-        self: true,
-        models: modelStatus.sources,
-      },
-    });
+    discovery = makeDiscovery('immersive', 'ready', degraded);
     await writeDiscovery(paths.discoveryPath, discovery);
   } catch (error) {
-    await settlement.stop().catch(() => undefined);
+    await stopSettlementWithoutFlush().catch(() => false);
     await server.close().catch(() => undefined);
     await removeHostTokenIfMatches(paths.hostTokenPath, hostToken.token).catch(() => undefined);
     throw new SidecarStartupError(
@@ -687,16 +757,177 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
     );
   }
 
-  let stopping = false;
+  const ownsDiscovery = (current: SidecarDiscovery | null) => current !== null
+    && current.pid === process.pid
+    && current.startedAt === startedAt;
+  const publishDiscovery = async (
+    mode: SidecarMode,
+    state: SidecarState,
+    isDegraded: boolean,
+    { create = true }: { create?: boolean } = {},
+  ): Promise<boolean> => {
+    if (stopping) return false;
+    const current = await readDiscovery(paths.discoveryPath);
+    if (current && !ownsDiscovery(current)) return false;
+    if (!current && !create) return false;
+    const next = makeDiscovery(mode, state, isDegraded);
+    await writeDiscovery(paths.discoveryPath, next);
+    Object.assign(discovery, next);
+    return true;
+  };
+
   let heartbeatTask: Promise<void> = Promise.resolve();
-  const heartbeat = setInterval(() => {
+  let heartbeatRunning = false;
+  let dormantPromise: Promise<boolean> | null = null;
+  requestDormant = (reason: string): Promise<boolean> => {
+    if (stopping) return Promise.resolve(false);
+    if (dormantPromise) return dormantPromise;
+    if (lifecycleMode === 'mcp') return Promise.resolve(!dormantIncomplete);
+    dormantPromise = (async () => {
+      lifecycleMode = 'mcp';
+      dormantReason = reason;
+      // mcp+degraded 是 draining/incomplete；只有全部收尾后才发布 mcp+stopped。
+      dormantIncomplete = true;
+      server.setState('degraded');
+      // setMode 同步撤销准入，再等待已接受请求；后续请求立即 409。
+      const idle = server.setMode('mcp', { timeoutMs: 2000 });
+      let clean = await stopSettlementWithoutFlush(2000);
+      try {
+        const inference = await inferenceService.status();
+        const install = inference.install;
+        if (install && ['downloading', 'verifying', 'installing'].includes(install.state)) {
+          await inferenceService.cancelInstall(install.jobId);
+        }
+        const packId = inference.engine.packId ?? inference.active.packId;
+        if (packId && inference.engine.state !== 'stopped') {
+          await inferenceService.stopEngine(packId);
+        }
+      } catch {
+        clean = false;
+      }
+      if (!await idle) clean = false;
+      dormantIncomplete = !clean;
+      try {
+        const current = await readDiscovery(paths.discoveryPath);
+        if (current) {
+          if (!ownsDiscovery(current)
+            || !await publishDiscovery('mcp', clean ? 'stopped' : 'degraded', server.currentDegraded(), { create: false })) {
+            clean = false;
+            dormantIncomplete = true;
+            server.setState('degraded');
+          }
+        }
+      } catch {
+        clean = false;
+        dormantIncomplete = true;
+      }
+      server.setState(clean ? 'stopped' : 'degraded');
+      return clean;
+    })().finally(() => {
+      dormantPromise = null;
+    });
+    return dormantPromise;
+  };
+
+  const refreshCapability = async (): Promise<boolean> => {
+    if (!client) return false;
+    const lastOkAt = capability.lastOkAt;
+    try {
+      const probe = await probeCapability(client, now);
+      Object.assign(capability, probe.capability, {
+        lastOkAt: probe.capability.reachable ? probe.capability.lastOkAt : lastOkAt,
+      });
+      capabilityVersionInfo = probe.versionInfo;
+      capabilityDetailQuota = probe.detailQuota;
+      warnings = [...probe.warnings];
+      return probe.capability.reachable;
+    } catch (error) {
+      const code = error instanceof SidecarStartupError ? error.code : 'capability_unavailable';
+      Object.assign(capability, {
+        reachable: false,
+        version: capability.version,
+        lastOkAt,
+        error: code,
+      });
+      warnings = [code];
+      return false;
+    }
+  };
+
+  const runHeartbeat = async (): Promise<void> => {
     if (stopping) return;
-    heartbeatTask = touchDiscovery(paths.discoveryPath, {
+    modelStatus = await model.status().catch(() => modelStatus);
+    const current = await readDiscovery(paths.discoveryPath).catch(() => null);
+    if (current && !ownsDiscovery(current)) {
+      await requestDormant('discovery_mismatch');
+      return;
+    }
+    // discovery 被 MCP 显式撤销是独立休眠信号；MCP listener 已关闭时同样有效。
+    if (!current && lifecycleMode === 'immersive') {
+      await requestDormant('discovery_missing');
+    }
+    const reachable = client ? await refreshCapability() : options.skipHandshake === true;
+    if (stopping) return;
+    if (reachable) {
+      if (lifecycleMode === 'mcp') {
+        dormantReason = null;
+        dormantIncomplete = false;
+        const nextDegraded = settlement.degraded || modelStatus.degraded;
+        try {
+          if (!await publishDiscovery('immersive', nextDegraded ? 'degraded' : 'ready', nextDegraded)) {
+            dormantReason = 'discovery_mismatch';
+            dormantIncomplete = true;
+            return;
+          }
+          lifecycleMode = 'immersive';
+          await server.setMode('immersive');
+          server.setState(nextDegraded ? 'degraded' : 'ready');
+          settlement.replayer.start();
+        } catch {
+          dormantReason = 'discovery_write_failed';
+          dormantIncomplete = true;
+        }
+        return;
+      }
+      const touched = await touchDiscovery(paths.discoveryPath, {
+        pid: process.pid,
+        startedAt,
+        now: now(),
+        state: server.currentDegraded() ? 'degraded' : 'ready',
+        mode: 'immersive',
+        degraded: server.currentDegraded(),
+        capabilities: discoveryCapabilities('immersive'),
+      });
+      if (!touched) await requestDormant('discovery_missing');
+      return;
+    }
+
+    if ((capability.error === 'capability_disabled' || capability.error === 'mode_mismatch')
+      && lifecycleMode === 'immersive') {
+      await requestDormant(capability.error);
+    }
+    await touchDiscovery(paths.discoveryPath, {
       pid: process.pid,
+      startedAt,
       now: now(),
-      state: server.state,
-      degraded: server.currentDegraded(),
-    }).then(() => undefined).catch(() => undefined);
+      state: lifecycleMode === 'immersive' ? 'degraded' : server.state,
+      mode: lifecycleMode,
+      degraded: true,
+      capabilities: discoveryCapabilities(lifecycleMode),
+    }).catch(() => false);
+  };
+
+  const heartbeat = setInterval(() => {
+    if (stopping || heartbeatRunning) return;
+    heartbeatRunning = true;
+    heartbeatTask = runHeartbeat()
+      .catch(() => {
+        Object.assign(capability, { reachable: false, error: 'heartbeat_failed' });
+        dormantIncomplete = true;
+      })
+      .finally(() => {
+        heartbeatRunning = false;
+      });
   }, heartbeatMs);
   heartbeat.unref?.();
 
@@ -706,26 +937,25 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
   });
 
   let stopPromise: Promise<void> | null = null;
+  let parentWatch: ReturnType<typeof setInterval> | null = null;
   const stop = (): Promise<void> => {
     if (!stopPromise) {
       stopPromise = (async () => {
         stopping = true;
+        lifecycleMode = 'mcp';
+        void server.setMode('mcp', { timeoutMs: 0 });
         clearInterval(heartbeat);
         if (parentWatch !== null) clearInterval(parentWatch);
         try {
-          await heartbeatTask;
+          await settleWithin(heartbeatTask, 500);
           server.setState('stopping');
-          try {
-            await settlement.stop();
-          } finally {
-            await inferenceService.dispose().catch(() => undefined);
-            await model.dispose();
-          }
-          await server.close();
-        } catch {
-          // 停止路径不阻塞退出；discovery/token 仍在 finally 清理。
+          // 每个故障独立隔离；任何 dispose 失败都不能跳过 HTTP/文件清理。
+          await stopSettlementWithoutFlush(1500);
+          await settleWithin(Promise.resolve().then(() => inferenceService.dispose()), 1500);
+          await settleWithin(Promise.resolve().then(() => model.dispose()), 1500);
+          await settleWithin(Promise.resolve().then(() => server.close()), 2500);
         } finally {
-          await clearDiscovery(paths.discoveryPath, { pid: process.pid }).catch(() => false);
+          await clearDiscovery(paths.discoveryPath, { pid: process.pid, startedAt }).catch(() => false);
           await removeHostTokenIfMatches(paths.hostTokenPath, hostToken.token).catch(() => false);
           resolveWait?.();
         }
@@ -734,7 +964,6 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
     return stopPromise;
   };
 
-  let parentWatch: ReturnType<typeof setInterval> | null = null;
   if (options.parentPid !== undefined) {
     const parentPid = options.parentPid;
     const parentCheckMs = Math.max(50, Math.floor(options.parentCheckMs ?? 2000));
@@ -858,12 +1087,13 @@ export async function getSidecarStatus({
     };
   }
   const alive = isProcessAlive(discovery.pid);
-  const stale = !alive || isDiscoveryStale(discovery, now);
+  const dead = !alive || isDiscoveryDead(discovery, now);
+  const stale = dead || isDiscoveryStale(discovery, now);
   return {
     ok: true,
     installed: true,
     discovered: true,
-    state: alive ? discovery.state : 'stopped',
+    state: dead ? 'stopped' : discovery.state,
     stale,
     runtimeVersion: discovery.runtimeVersion,
     apiVersion: discovery.apiVersion,

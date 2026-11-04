@@ -177,7 +177,7 @@ describe('MCP 模型薄代理 · 读取与映射', () => {
   it('GET 目录/状态返回 sidecar 视图；无 token/path/URL', async () => {
     const { home, base } = await start();
     await ready(base);
-    const hostToken = (await readFile(join(home, 'memory-runtime', 'host-token'), 'utf-8')).trim();
+    const hostToken = JSON.parse(await readFile(join(home, 'memory-runtime', 'host-token'), 'utf-8')).token;
 
     const list = await fetch(`${base}/admin/api/models`);
     expect(list.status).toBe(200);
@@ -187,8 +187,16 @@ describe('MCP 模型薄代理 · 读取与映射', () => {
     expect(body.packs.every((pack) => pack.manifestAvailable === true)).toBe(true);
     expect(body.effectivePack).toBeNull();
     expect(body.runtime.source).toBe('heuristic');
+    expect(body.recommended.alternatives).toEqual([PACK_4B]);
+    expect(body.packs.find((pack) => pack.packId === 'qwen3-14b-instruct-q4_k_m').supported).toBeNull();
     expect(JSON.stringify(body)).not.toContain(hostToken);
-    expect(JSON.stringify(body)).not.toMatch(/tokenFile|installedPath|modelsDir|keyRef|baseUrl/);
+    expect(JSON.stringify(body)).not.toMatch(/tokenFile|installedPath|modelsDir|keyRef|baseUrl|apiKey|endpoint|binaryPath/);
+    expect(JSON.stringify(body)).not.toContain('TEST_MODEL_KEY');
+    expect(JSON.stringify(body)).not.toContain('secret.example.invalid');
+    expect(JSON.stringify(body)).not.toContain('/private/');
+    expect(JSON.stringify(body)).not.toContain('UNLISTED_API_TOKEN');
+    expect(JSON.stringify(body)).not.toContain('UNLISTED_CLIENT_SECRET');
+    expect(JSON.stringify(body)).not.toContain('RAW_MODEL_SECRET');
 
     const status = await fetch(`${base}/admin/api/models/status`);
     expect(status.status).toBe(200);
@@ -201,7 +209,12 @@ describe('MCP 模型薄代理 · 读取与映射', () => {
     });
     expect(statusBody.installedPackIds).toEqual([PACK_4B]);
     expect(JSON.stringify(statusBody)).not.toContain(hostToken);
-    expect(JSON.stringify(statusBody)).not.toMatch(/tokenFile|installedPath|modelsDir/);
+    expect(JSON.stringify(statusBody)).not.toMatch(/tokenFile|installedPath|modelsDir|installPath|enginePath|api_key|keyRef|baseUrl|modelPath/);
+    expect(JSON.stringify(statusBody)).not.toContain('TEST_MODEL_KEY');
+    expect(JSON.stringify(statusBody)).not.toContain('/private/');
+    expect(JSON.stringify(statusBody)).not.toContain('UNLISTED_API_TOKEN');
+    expect(JSON.stringify(statusBody)).not.toContain('UNLISTED_CLIENT_SECRET');
+    expect(JSON.stringify(statusBody)).not.toContain('RAW_MODEL_SECRET');
   });
 
   it('model-source GET/POST：sidecar 拥有来源；local 缺 pack 400，带 pack 走 activate；MCP 不写 config', async () => {
@@ -261,7 +274,7 @@ describe('MCP 模型薄代理 · 写操作映射与门禁', () => {
     const adminOut = join(outDir, 'admin.jsonl');
     const { home, base } = await start({ env: { FAKE_SIDECAR_ADMIN_OUT: adminOut } });
     await ready(base);
-    const hostToken = (await readFile(join(home, 'memory-runtime', 'host-token'), 'utf-8')).trim();
+    const hostToken = JSON.parse(await readFile(join(home, 'memory-runtime', 'host-token'), 'utf-8')).token;
     const auth = await csrf(base);
 
     const installed = await post(base, '/admin/api/models/install', { pack: PACK_4B }, auth);
@@ -271,10 +284,13 @@ describe('MCP 模型薄代理 · 写操作映射与门禁', () => {
       ok: true,
       accepted: true,
       pack: PACK_4B,
-      job: { jobId: 'job_fake_0001', state: 'downloading' },
+      job: { schema: 1, jobId: 'job_fake_0001', state: 'downloading' },
       jobId: 'job_fake_0001',
     });
     expect(JSON.stringify(installedBody)).not.toContain(hostToken);
+    expect(JSON.stringify(installedBody)).not.toContain('TEST_MODEL_KEY');
+    expect(JSON.stringify(installedBody)).not.toContain('/private/');
+    expect(JSON.stringify(installedBody)).not.toContain('UNLISTED_CLIENT_SECRET');
 
     const cancelled = await post(base, '/admin/api/models/cancel', {}, auth);
     expect(cancelled.status).toBe(200);

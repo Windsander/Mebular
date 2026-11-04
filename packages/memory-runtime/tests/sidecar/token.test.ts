@@ -8,6 +8,7 @@ import {
   ensureHostToken,
   generateHostToken,
   readCapabilityToken,
+  refreshCapabilityToken,
   readHostToken,
   removeHostTokenIfMatches,
   TokenError,
@@ -97,6 +98,24 @@ describe('sidecar token', () => {
     expect(expired?.expired).toBe(true);
 
     expect(await readCapabilityToken({ dataDir: join(dir, 'missing'), env: {} })).toBeNull();
+  });
+
+  it('401 刷新优先轮换文件；过期文件不回退 stale env，env-only 覆盖仍可用', async () => {
+    const path = join(dir, 'capability-token');
+    await writeJsonAtomic(path, {
+      version: 1, token: 'rotated-file-token', issuedAt: 1000, expiresAt: 2000, mcpPid: 123,
+    });
+    const env = { MEBULAR_CAPABILITY_TOKEN: 'stale-env-token' };
+    expect(await refreshCapabilityToken({ dataDir: dir, env, now: 1500 }))
+      .toMatchObject({ token: 'rotated-file-token', source: 'file', expired: false });
+    expect(await refreshCapabilityToken({ dataDir: dir, env, now: 2500 })).toBeNull();
+    await writeFile(path, '{ malformed', { mode: 0o600 });
+    expect(await refreshCapabilityToken({ dataDir: dir, env, now: 1500 })).toBeNull();
+    await writeFile(path, JSON.stringify({ version: 2, token: 'wrong-version' }), { mode: 0o600 });
+    expect(await refreshCapabilityToken({ dataDir: dir, env, now: 1500 })).toBeNull();
+    await rm(path);
+    expect(await refreshCapabilityToken({ dataDir: dir, env, now: 1500 }))
+      .toMatchObject({ token: 'stale-env-token', source: 'env' });
   });
 
   it('不安全的 capability token 权限拒绝使用', async () => {

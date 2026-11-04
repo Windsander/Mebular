@@ -228,6 +228,37 @@ export async function readCapabilityToken({
   };
 }
 
+/**
+ * 401 专用刷新：生产轮换以当前 JSON 文件为准，不能让启动时的 stale env 获胜。
+ * 只有文件不存在时才保留显式 env-only 手动覆盖；过期文件不会回退到旧 env。
+ */
+export async function refreshCapabilityToken({
+  dataDir,
+  env = process.env,
+  now = Date.now(),
+}: ReadCapabilityTokenOptions): Promise<CapabilityTokenReadResult | null> {
+  const path = capabilityTokenPathForDataDir(dataDir);
+  try {
+    await stat(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    const token = env?.MEBULAR_CAPABILITY_TOKEN;
+    if (typeof token !== 'string' || token.length === 0) return null;
+    return {
+      token,
+      issuedAt: 0,
+      expiresAt: 0,
+      mcpPid: null,
+      source: 'env',
+      path: null,
+      expired: false,
+    };
+  }
+  const fromFile = await readCapabilityToken({ dataDir, env: {}, now });
+  // 文件存在但损坏/版本错误/过期时绝不回退到启动时的 stale env。
+  return fromFile && !fromFile.expired ? fromFile : null;
+}
+
 /** 停止时删除 host token；不影响 MCP 写入的 capability token。 */
 export async function removeHostToken(tokenFile: string): Promise<void> {
   await rm(tokenFile, { force: true }).catch(() => undefined);

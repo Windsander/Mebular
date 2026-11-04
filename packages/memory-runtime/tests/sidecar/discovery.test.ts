@@ -103,6 +103,27 @@ describe('sidecar discovery', () => {
     expect(isDiscoveryDead({ updatedAt: 1000 }, 1000 + 30_000)).toBe(false);
   });
 
+  it('心跳可发布 dormant，startedAt 防止旧实例改写/清理替换记录', async () => {
+    await writeDiscovery(path, make());
+    expect(await touchDiscovery(path, {
+      pid: 4242, startedAt: 999, now: 3000, mode: 'mcp',
+    })).toBe(false);
+    expect(await touchDiscovery(path, {
+      pid: 4242,
+      startedAt: 1000,
+      now: 3000,
+      state: 'degraded',
+      mode: 'mcp',
+      degraded: true,
+      capabilities: { ingest: false, recall: false, context: false },
+    })).toBe(true);
+    expect(await readDiscovery(path)).toMatchObject({
+      mode: 'mcp', state: 'degraded', capabilities: { ingest: false, recall: false, context: false },
+    });
+    expect(await clearDiscovery(path, { pid: 4242, startedAt: 999 })).toBe(false);
+    expect(await readDiscovery(path)).not.toBeNull();
+  });
+
   it('state 与 mode 分离：starting 状态仍写 immersive 模式', () => {
     const discovery = make({ state: 'starting', mode: 'immersive' });
     expect(discovery.state).toBe('starting');

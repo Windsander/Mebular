@@ -531,6 +531,8 @@ export class IngestService {
   private queued = 0;
   private degraded = false;
   private lastError: IngestErrorView | null = null;
+  private finalizeRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private finalizeRetryAttempts = 0;
 
   constructor(options: IngestServiceOptions) {
     this.config = options.config;
@@ -546,6 +548,7 @@ export class IngestService {
     this.local.setStagingDependencyHandler((ids) => this.expireStagingDependenciesUnlocked(ids));
     this.local.setMaintenanceDependencyHandler((ids) => this.expireStagingDependencies(ids));
     this.local.setDeadLetterHandler((item) => this.finalizeReplayedOutbox(item, 'dead'));
+    this.local.setStagingDeadLetterHandler((item) => this.finalizeReplayedItemDirect(item, 'dead'));
   }
 
   get isDegraded(): boolean {
@@ -569,6 +572,7 @@ export class IngestService {
 
   /** 启动后调用：已有 outbox 视为仍需重放的降级状态。 */
   async init(): Promise<void> {
+    await this.reconcileReplayFinalizations().catch(() => 0);
     const outbox = await this.local.outbox.stats();
     if (outbox.items > 0) {
       this.degraded = true;
@@ -1829,7 +1833,60 @@ export class IngestService {
     item: OutboxItem,
     outcome: OutboxReplayCompletion = 'settled',
   ): Promise<void> {
-    await this.chain(() => this.finalizeReplayedExtractionsUnlocked(item, outcome));
+    await this.chain(() => this.finalizeReplayedItem(item, outcome));
+  }
+
+  /** 已在 ingest chain 内（如 putStagingChunk 依赖淘汰）时直接收口，不能再进入 chain。 */
+  private finalizeReplayedItemDirect(
+    item: OutboxItem,
+    outcome: OutboxReplayCompletion,
+  ): Promise<void> {
+    return this.finalizeReplayedItem(item, outcome);
+  }
+
+  private async finalizeReplayedItem(
+    item: OutboxItem,
+    outcome: OutboxReplayCompletion,
+  ): Promise<void> {
+    try {
+      await this.finalizeReplayedExtractionsUnlocked(item, outcome);
+      await this.local.outbox.markNeedsFinalize(item.id, false, {
+        owner: item.replayLeaseOwner,
+      }).catch(() => false);
+      this.finalizeRetryAttempts = 0;
+    } catch (error) {
+      await this.local.outbox.markNeedsFinalize(item.id, true, {
+        outcome,
+        owner: item.replayLeaseOwner,
+      }).catch(() => false);
+      this.degraded = true;
+      this.failed += 1;
+      this.lastError = nowView(this.now(), 'finalize_failed', 'extraction 收口失败，等待重试');
+      this.scheduleFinalizeRetry();
+    }
+  }
+
+  /** 重启/后台有界重试：读取持久化的 needsFinalize 项继续收口。 */
+  async reconcileReplayFinalizations(): Promise<number> {
+    const pending = await this.local.outbox.listNeedsFinalize();
+    let finalized = 0;
+    for (const entry of pending) {
+      await this.finalizeReplayedOutbox(entry.item, entry.outcome);
+      finalized += 1;
+    }
+    return finalized;
+  }
+
+  private scheduleFinalizeRetry(): void {
+    if (this.finalizeRetryTimer || this.finalizeRetryAttempts >= 3) return;
+    this.finalizeRetryAttempts += 1;
+    const delay = Math.min(5_000, 100 * 2 ** (this.finalizeRetryAttempts - 1));
+    const timer = setTimeout(() => {
+      this.finalizeRetryTimer = null;
+      void this.reconcileReplayFinalizations().catch(() => undefined);
+    }, delay);
+    timer.unref?.();
+    this.finalizeRetryTimer = timer;
   }
 
   /**
@@ -1844,19 +1901,18 @@ export class IngestService {
   ): Promise<void> {
     const extractionIds = item.meta?.extractionIds ?? [];
     if (extractionIds.length === 0) return;
-    try {
-      const [active, dead] = await Promise.all([
-        this.local.outbox.list(),
-        this.local.outbox.listDead(),
-      ]);
-      const current = await this.local.outbox.get(item.id)
-        ?? await this.local.outbox.getDead(item.id)
-        ?? item;
-      if (item.replayLeaseOwner !== undefined
-        && current.replayLeaseOwner !== item.replayLeaseOwner) {
-        return;
-      }
-      for (const extractionId of extractionIds) {
+    const [active, dead] = await Promise.all([
+      this.local.outbox.list(),
+      this.local.outbox.listDead(),
+    ]);
+    const current = await this.local.outbox.get(item.id)
+      ?? await this.local.outbox.getDead(item.id)
+      ?? item;
+    if (item.replayLeaseOwner !== undefined
+      && current.replayLeaseOwner !== item.replayLeaseOwner) {
+      return;
+    }
+    for (const extractionId of extractionIds) {
         const key = this.extractionCacheKey(extractionId);
         const stored = await this.local.cache.get<StoredExtraction>(key);
         if (!stored || stored.expiresAt <= this.now()) continue;
@@ -1911,10 +1967,12 @@ export class IngestService {
         const hasDead = deadDeps.length > 0 || outcome === 'dead';
         const hasActive = outcome === 'retry' || otherActive.length > 0;
 
+        const permanentDetailFailure = hasPermanentDetailFailure(stored.warnings);
         let status: StoredExtraction['status'];
-        if (hasDead) status = 'failed';
-        else if (stored.status === 'completed') status = 'completed';
-        else if (hasActive) status = stored.status === 'failed' ? 'failed' : 'pending';
+        if (stored.status === 'completed') status = 'completed';
+        else if (stored.status === 'failed') status = 'failed';
+        else if (hasDead || permanentDetailFailure) status = 'failed';
+        else if (hasActive) status = 'pending';
         else status = 'completed';
 
         const records = new Map<string, IngestRecordView>();
@@ -1960,9 +2018,6 @@ export class IngestService {
           degraded: status !== 'completed' || (stored.degraded && realWarnings.length > 0),
           outboxIds: [...dependencyIds],
         }, { ttlMs });
-      }
-    } catch {
-      // extraction 状态收口失败只会延后 staging 清理到 TTL，不影响已提交对象。
     }
   }
 
@@ -2759,6 +2814,30 @@ export class IngestService {
       expiresAt: extraction.expiresAt,
     };
   }
+}
+
+function hasPermanentDetailFailure(warnings: readonly string[]): boolean {
+  const temporaryCodes = new Set([
+    'capability_unavailable',
+    'timeout',
+    'network_error',
+    'http_429',
+    'http_500',
+    'http_502',
+    'http_503',
+    'http_504',
+    'detail_quota_exceeded',
+    'outbox_full',
+    'storage_full',
+    'internal',
+  ]);
+  for (const warning of warnings) {
+    if (warning === 'detail_record_ids_exceeded') return true;
+    const match = /^detail_write_failed:(.+)$/.exec(warning);
+    if (!match) continue;
+    if (!temporaryCodes.has(match[1]!)) return true;
+  }
+  return false;
 }
 
 function mergeCommittedSources(

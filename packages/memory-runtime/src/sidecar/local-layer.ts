@@ -80,6 +80,9 @@ export interface OutboxItem {
     domain?: string;
     /** 该 outbox 操作所属的抽取任务；重放成功清理时不得把它当作他人 pending 证据。 */
     extractionIds?: string[];
+    /** dead/expiry 收口失败时持久化，供重启或后台有界重试。 */
+    needsFinalize?: boolean;
+    finalizeOutcome?: OutboxReplayCompletion;
     /** record clientItemId → 实际支撑它的 staging/message 证据。 */
     evidence?: Record<string, { stagingChunkIds: string[]; messageIds: string[] }>;
   };
@@ -444,17 +447,19 @@ export class BoundedOutbox {
 
   /** 只读 dead 项，用于 extraction 依赖终态收口与诊断。 */
   async listDead(): Promise<OutboxItem[]> {
-    return this.exclusive(async () => {
-      const entries = await readdir(this.deadRoot, { withFileTypes: true }).catch(() => []);
-      const items: OutboxItem[] = [];
-      for (const entry of entries) {
-        if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
-        const item = await readJsonFile<OutboxItem>(join(this.deadRoot, entry.name));
-        if (isOutboxItem(item)) items.push(item);
-      }
-      items.sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
-      return items;
-    });
+    return this.exclusive(() => this.readDeadItems());
+  }
+
+  private async readDeadItems(): Promise<OutboxItem[]> {
+    const entries = await readdir(this.deadRoot, { withFileTypes: true }).catch(() => []);
+    const items: OutboxItem[] = [];
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+      const item = await readJsonFile<OutboxItem>(join(this.deadRoot, entry.name));
+      if (isOutboxItem(item)) items.push(item);
+    }
+    items.sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+    return items;
   }
 
   async remove(id: string): Promise<boolean> {
@@ -499,6 +504,61 @@ export class BoundedOutbox {
       };
       await writeJsonAtomic(deadPath, updated);
       return true;
+    });
+  }
+
+  /** 标记/清除该 outbox 的 extraction 收口待办；dead 已落盘时必须仍可持久化。 */
+  async markNeedsFinalize(
+    id: string,
+    needs: boolean,
+    {
+      outcome = 'dead',
+      owner,
+    }: { outcome?: OutboxReplayCompletion; owner?: string } = {},
+  ): Promise<boolean> {
+    return this.exclusive(async () => {
+      const activePath = this.pathFor(id);
+      const active = await readJsonFile<OutboxItem>(activePath);
+      if (isOutboxItem(active)) {
+        if (owner !== undefined && active.replayLeaseOwner !== owner) return false;
+        const meta = { ...(active.meta ?? {}) };
+        if (needs) {
+          meta.needsFinalize = true;
+          meta.finalizeOutcome = outcome;
+        } else {
+          delete meta.needsFinalize;
+          delete meta.finalizeOutcome;
+        }
+        await writeJsonAtomic(activePath, { ...active, meta });
+        return true;
+      }
+      const deadPath = this.deadPathFor(id);
+      const dead = await readJsonFile<OutboxItem>(deadPath);
+      if (!isOutboxItem(dead)) return false;
+      if (owner !== undefined && dead.replayLeaseOwner !== owner) return false;
+      const meta = { ...(dead.meta ?? {}) };
+      if (needs) {
+        meta.needsFinalize = true;
+        meta.finalizeOutcome = outcome;
+      } else {
+        delete meta.needsFinalize;
+        delete meta.finalizeOutcome;
+      }
+      await writeJsonAtomic(deadPath, { ...dead, meta });
+      return true;
+    });
+  }
+
+  /** 重启/后台重试读取所有待收口项。 */
+  async listNeedsFinalize(): Promise<Array<{ item: OutboxItem; outcome: OutboxReplayCompletion }>> {
+    return this.exclusive(async () => {
+      const items = [...await this.readItems(), ...await this.readDeadItems()];
+      return items
+        .filter((item) => item.meta?.needsFinalize === true)
+        .map((item) => ({
+          item,
+          outcome: item.meta?.finalizeOutcome ?? 'dead',
+        }));
     });
   }
 
@@ -1046,6 +1106,7 @@ export class SidecarLocalLayer {
   private stagingDependencyHandler?: (ids: readonly string[]) => void | Promise<void>;
   private maintenanceDependencyHandler?: (ids: readonly string[]) => void | Promise<void>;
   private deadLetterHandler?: (item: OutboxItem) => void | Promise<void>;
+  private stagingDeadLetterHandler?: (item: OutboxItem) => void | Promise<void>;
 
   constructor(options: SidecarLocalLayerOptions) {
     this.root = options.root;
@@ -1143,6 +1204,16 @@ export class SidecarLocalLayer {
     this.deadLetterHandler = handler;
   }
 
+  setStagingDeadLetterHandler(handler: (item: OutboxItem) => void | Promise<void>): void {
+    this.stagingDeadLetterHandler = handler;
+  }
+
+  private async notifyStagingDeadLetters(items: readonly OutboxItem[]): Promise<void> {
+    const handler = this.stagingDeadLetterHandler;
+    if (!handler || items.length === 0) return;
+    for (const item of items) await handler(item);
+  }
+
   private async notifyDeadLetters(
     items: readonly OutboxItem[],
     { wait = true }: { wait?: boolean } = {},
@@ -1150,7 +1221,7 @@ export class SidecarLocalLayer {
     const handler = this.deadLetterHandler;
     if (!handler || items.length === 0) return;
     const run = Promise.all(items.map((item) =>
-      Promise.resolve(handler(item)).catch(() => undefined))).then(() => undefined);
+      Promise.resolve(handler(item)))).then(() => undefined);
     if (wait) {
       await run;
     } else {
@@ -1189,8 +1260,8 @@ export class SidecarLocalLayer {
         deadItems.push(item);
       }
     }
-    // putStagingChunk 在 ingest chain 内；这里不能等待 finalize 重新进入 chain。
-    void this.notifyDeadLetters(deadItems, { wait: false });
+    // putStagingChunk 在 ingest chain 内，使用不重新进入 chain 的直接收口并等待落盘。
+    await this.notifyStagingDeadLetters(deadItems);
     return failed;
   }
 

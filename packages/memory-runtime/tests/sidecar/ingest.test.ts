@@ -10,6 +10,7 @@ import { defaultSidecarPolicy } from '../../src/sidecar/domains.js';
 import { IngestService } from '../../src/sidecar/ingest.js';
 import { SidecarLocalLayer } from '../../src/sidecar/local-layer.js';
 import { OutboxReplayer } from '../../src/sidecar/outbox-replayer.js';
+import { sha256Hex } from '../../src/runtime/local-store.js';
 import { startFakeCapability, type FakeCapabilityServer } from './fake-capability.js';
 
 interface Harness {
@@ -2283,7 +2284,7 @@ describe('IngestService settlements', () => {
     expect(await local.store.countStagingChunks({ includeExpired: true })).toBe(0);
   });
 
-  it('cleanup 先 dead 后 late success 最终 completed，outbox 不留 dead 双态', async () => {
+  it('cleanup 先 dead 后 late success 保持 failed 终态，outbox 不留 dead 双态', async () => {
     let clock = Date.UTC(2026, 0, 1);
     const { service, client, fake, local } = await setup(defaultSidecarPolicy(), { now: () => clock, extractionTtlMs: 40 * 24 * 60 * 60 * 1000 });
     fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
@@ -2325,8 +2326,7 @@ describe('IngestService settlements', () => {
     release();
     expect(await replay).toMatchObject({ settled: 1, dead: 0, remaining: 0 });
     const view = await service.getExtraction(extractionId);
-    expect(view).toMatchObject({ status: 'completed' });
-    expect(view?.warnings).not.toContain('replay_dead_dependency');
+    expect(view).toMatchObject({ status: 'failed' });
     expect(await local.outbox.stats()).toMatchObject({ items: 0 });
     expect(await local.outbox.deadStats()).toMatchObject({ items: 0 });
   });
@@ -2397,6 +2397,256 @@ describe('IngestService settlements', () => {
     expect(view).toMatchObject({ status: 'completed' });
     expect(view?.warnings).not.toContain('replay_dependency_pending');
     expect(view?.warnings).not.toContain('replay_dead_dependency');
+  });
+
+  it('failed 终态不会被其他 outbox 成功升级为 completed', async () => {
+    const { service, fake, local } = await setup();
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const queued = await service.ingest({
+      requestId: 'req_terminal_failed',
+      agentId: 'opencode',
+      threadId: 'th_terminal_failed',
+      extractor: 'host',
+      chunks: [],
+      candidates: [{ kind: 'observation', content: { content: 'terminal failed' } }],
+    });
+    const extractionId = queued.data.extraction.id;
+    const first = (await local.outbox.list())[0]!;
+    await local.outbox.completeReplay(first.id, { outcome: 'dead', error: 'retention_expired' });
+    await service.finalizeReplayedOutbox(first, 'dead');
+    expect((await service.getExtraction(extractionId))?.status).toBe('failed');
+
+    await local.outbox.enqueue({
+      id: 'ob_terminal_failed_other',
+      requestId: 'req_terminal_failed_other',
+      endpoint: '/write',
+      body: first.body,
+      createdAt: Date.now(),
+      ...(first.meta ? { meta: first.meta } : {}),
+    });
+    fake.setFailure(null);
+    const summary = await new OutboxReplayer({
+      outbox: local.outbox,
+      client: (service as any).client,
+      onSettled: (item, data) => service.applyReplayedOutbox(item, data),
+      onComplete: (item, outcome) => service.finalizeReplayedOutbox(item, outcome),
+    }).replayOnce();
+    expect(summary).toMatchObject({ settled: 1, remaining: 0 });
+    expect((await service.getExtraction(extractionId))?.status).toBe('failed');
+  });
+
+  it('completed 终态不会被旧 retry 回退为 pending/failed', async () => {
+    const { service, fake, local } = await setup();
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const queued = await service.ingest({
+      requestId: 'req_terminal_completed',
+      agentId: 'opencode',
+      threadId: 'th_terminal_completed',
+      extractor: 'host',
+      chunks: [],
+      candidates: [{ kind: 'observation', content: { content: 'terminal completed' } }],
+    });
+    const extractionId = queued.data.extraction.id;
+    const item = (await local.outbox.list())[0]!;
+    fake.setFailure(null);
+    const summary = await new OutboxReplayer({
+      outbox: local.outbox,
+      client: (service as any).client,
+      onSettled: (itemValue, data) => service.applyReplayedOutbox(itemValue, data),
+      onComplete: (itemValue, outcome) => service.finalizeReplayedOutbox(itemValue, outcome),
+    }).replayOnce();
+    expect(summary).toMatchObject({ settled: 1, remaining: 0 });
+    expect((await service.getExtraction(extractionId))?.status).toBe('completed');
+
+    await service.finalizeReplayedOutbox(item, 'retry');
+    const view = await service.getExtraction(extractionId);
+    expect(view).toMatchObject({ status: 'completed' });
+    expect(view?.warnings).not.toContain('replay_dependency_pending');
+  });
+
+  it('pending record + 永久 Detail 失败，record replay 成功后 extraction 仍 failed', async () => {
+    const { service, client, fake, local } = await setup();
+    jest.spyOn(client, 'detailWrite').mockImplementationOnce(async (body: any) => ({
+      ok: true,
+      requestId: 'req_permanent_detail_first',
+      capabilityVersion: 1,
+      status: 200,
+      degraded: false,
+      warnings: [],
+      data: {
+        results: [{
+          clientItemId: body.items[0].clientItemId,
+          status: 'failed',
+          domain: 'agent:opencode',
+          detailKind: 'raw_chunk',
+          code: 'validation_failed',
+          retryable: false,
+        }],
+        created: 0,
+        duplicates: 0,
+        failed: 1,
+        partial: true,
+      },
+    } as any));
+    jest.spyOn(client, 'write').mockImplementationOnce(async (body: any) => {
+      const [first, second] = body.items;
+      fake.nodes.push({
+        id: 'rec-permanent-detail-first',
+        type: 'episode',
+        kind: 'observation',
+        domain: 'agent:opencode',
+        ownerType: 'agent',
+        ownerId: 'opencode',
+        contentHash: 'permanent-detail-first',
+        content: first.content,
+        provenance: {},
+      });
+      return {
+        ok: true,
+        requestId: body.requestId,
+        capabilityVersion: 1,
+        status: 200,
+        degraded: false,
+        warnings: [],
+        data: {
+          results: [
+            {
+              clientItemId: first.clientItemId,
+              status: 'created',
+              id: 'rec-permanent-detail-first',
+              type: 'episode',
+              kind: 'observation',
+              domain: 'agent:opencode',
+            },
+            {
+              clientItemId: second.clientItemId,
+              status: 'failed',
+              kind: 'observation',
+              domain: 'agent:opencode',
+              code: 'capability_unavailable',
+              retryable: true,
+            },
+          ],
+          created: 1,
+          duplicates: 0,
+          failed: 1,
+          partial: true,
+        },
+      } as any;
+    });
+    const queued = await service.ingest({
+      requestId: 'req_permanent_detail_first',
+      agentId: 'opencode',
+      threadId: 'th_permanent_detail',
+      extractor: 'host',
+      chunks: [{ role: 'user', text: '永久 Detail 失败证据', messageId: 'm_permanent_detail' }],
+      candidates: [
+        { kind: 'observation', content: { content: '永久 Detail 失败 A' }, sourceMessageIds: ['m_permanent_detail'] },
+        { kind: 'observation', content: { content: '永久 Detail 失败 B' }, sourceMessageIds: ['m_permanent_detail'] },
+      ],
+    });
+    const extractionId = queued.data.extraction.id;
+    expect(queued.status).toBe(202);
+    expect(queued.data.extraction.status).toBe('pending');
+    expect(queued.data.warnings).toContain('detail_write_failed:validation_failed');
+
+    fake.setFailure(null);
+    const summary = await new OutboxReplayer({
+      outbox: local.outbox,
+      client,
+      onSettled: (item, data) => service.applyReplayedOutbox(item, data),
+      onComplete: (item, outcome) => service.finalizeReplayedOutbox(item, outcome),
+    }).replayOnce();
+    expect(summary).toMatchObject({ settled: 1, remaining: 0 });
+    const view = await service.getExtraction(extractionId);
+    expect(view).toMatchObject({ status: 'failed', degraded: true });
+    expect(view?.warnings).toContain('detail_write_failed:validation_failed');
+    expect(view?.records.map((record) => record.id)).toContain(fake.nodes[0]!.id);
+  });
+
+  it('finalize cache 写失败持久化 needsFinalize，重启后恢复 failed', async () => {
+    const { home, service, fake, local } = await setup();
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const queued = await service.ingest({
+      requestId: 'req_finalize_cache_failure',
+      agentId: 'opencode',
+      threadId: 'th_finalize_cache_failure',
+      extractor: 'host',
+      chunks: [],
+      candidates: [{ kind: 'observation', content: { content: 'finalize cache failure' } }],
+    });
+    const extractionId = queued.data.extraction.id;
+    const item = (await local.outbox.list())[0]!;
+    jest.spyOn(local.cache, 'set').mockRejectedValueOnce(new Error('EIO'));
+    await service.finalizeReplayedOutbox(item, 'dead');
+    expect(service.lastErrorView?.code).toBe('finalize_failed');
+    const marked = await local.outbox.get(item.id) ?? await local.outbox.getDead(item.id);
+    expect(marked?.meta?.needsFinalize).toBe(true);
+    expect((await service.getExtraction(extractionId))?.status).toBe('pending');
+    jest.restoreAllMocks();
+
+    const restartedLocal = new SidecarLocalLayer({ root: join(home, 'memory-runtime') });
+    await restartedLocal.init();
+    const restartedClient = new CapabilityClient({
+      baseUrl: fake.baseUrl,
+      token: 'cap-token',
+      retries: 0,
+      retryDelayMs: 0,
+    });
+    const restarted = new IngestService({
+      config: defaultSidecarConfig(),
+      local: restartedLocal,
+      client: restartedClient,
+      identity: { cloudId: 'cl_test', profileId: 'default', hostId: 'h_test' },
+      policy: defaultSidecarPolicy(),
+    });
+    await restarted.init();
+    expect((await restarted.getExtraction(extractionId))?.status).toBe('failed');
+    const recovered = await restartedLocal.outbox.get(item.id)
+      ?? await restartedLocal.outbox.getDead(item.id);
+    expect(recovered?.meta?.needsFinalize).not.toBe(true);
+    // 让原实例的有界重试定时器结束，避免测试清理临时目录时与后台写并发。
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  });
+
+  it('putStagingChunk 依赖淘汰等待终态落盘，立即读取即 failed', async () => {
+    const { service, fake, local } = await setup(defaultSidecarPolicy(), { stagingBytes: 4 });
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const queued = await service.ingest({
+      requestId: 'req_put_staging_wait_finalize',
+      agentId: 'opencode',
+      threadId: 'th_put_staging_wait_finalize',
+      extractor: 'host',
+      chunks: [{ role: 'user', text: 'AAAA', messageId: 'm_put_staging_wait' }],
+      candidates: [{
+        kind: 'observation',
+        content: { content: 'put staging wait finalize' },
+        sourceMessageIds: ['m_put_staging_wait'],
+      }],
+    });
+    const extractionId = queued.data.extraction.id;
+    const originalSet = local.cache.set.bind(local.cache);
+    jest.spyOn(local.cache, 'set').mockImplementation(async (...args: any[]) => {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      return (originalSet as any)(...args);
+    });
+    const text = 'BBBBBB';
+    await local.putStagingChunk('cl_test', {
+      schema: 1,
+      id: 'rc_put_staging_wait_new',
+      threadId: 'th_put_staging_wait_finalize',
+      agentId: 'opencode',
+      hostId: 'h_test',
+      role: 'user',
+      text,
+      mime: 'text/plain',
+      at: Date.now(),
+      contentHash: sha256Hex(text),
+      redaction: { applied: false, rules: [] },
+      expiresAt: Date.now() + 60_000,
+    });
+    jest.restoreAllMocks();
+    expect((await service.getExtraction(extractionId))?.status).toBe('failed');
   });
 
   it('Detail outbox 满时显式 503，不把失败吞成已完成', async () => {

@@ -27,6 +27,9 @@ import { DaemonTaskEventStore } from './store/daemon-store.js';
 import { DaemonAgentBackend } from './store/daemon-agent-backend.js';
 import { DaemonTaskPlanStore, MebularTaskPlanStore, type TaskPlanStore } from './store/plan-store.js';
 import { PlanMaterializer } from './runtime/materializer.js';
+import { daemonRoutingProvider, embeddedRoutingProvider } from './runtime/routing-context.js';
+import type { PlanRoutingProvider } from './routing.js';
+import { AGENT_NAMESPACE } from './agentdir.js';
 import type { TaskEventStore } from './store/file-store.js';
 import { NullTransport } from './transport/null.js';
 import { SpoolTransport } from './transport/spool.js';
@@ -516,6 +519,32 @@ function openPlanStore(config: FleetConfig, args: Args, mebular: Mebular | null)
   return new MebularTaskPlanStore(mebular, { namespace: config.namespace });
 }
 
+/** P3：路由 provider。embedded 读本机卡片/在线 peer；daemon 复用 P1 卡片后端，远端卡不可验证时 fail-closed。 */
+function routingFor(
+  config: FleetConfig,
+  mebular: Mebular | null,
+  store: TaskEventStore,
+  mode: 'daemon' | 'embedded',
+): PlanRoutingProvider | undefined {
+  if (mebular !== null) {
+    return embeddedRoutingProvider({ mebular, config, store });
+  }
+  const daemon = config.daemon;
+  if (mode === 'daemon' && daemon?.endpoint !== undefined) {
+    const localPublicKey = identityPublicKeyForStorage(config.storagePath);
+    const backend = new DaemonAgentBackend({
+      endpoint: daemon.endpoint,
+      namespace: AGENT_NAMESPACE,
+      ...(daemon.token !== undefined ? { token: daemon.token } : {}),
+      ...(daemon.tokenFile !== undefined ? { tokenFile: daemon.tokenFile } : {}),
+      ...(localPublicKey !== null ? { publicKeyFor: (device: string) => (device === config.device ? localPublicKey : undefined) } : {}),
+    });
+    console.error('[fleet:route] daemon mode: remote capability cards may be unverifiable; remote route targets fail closed (P6 dual-daemon E2E risk)');
+    return daemonRoutingProvider({ backend, config, store });
+  }
+  return undefined;
+}
+
 /** P2：materializer tick 失败不得阻断普通任务执行（例如对端守护暂不可用）。 */
 async function tickPlanMaterializer(materializer: PlanMaterializer): Promise<void> {
   try {
@@ -587,11 +616,13 @@ async function runFleetNode(args: Args): Promise<number> {
     console.log(JSON.stringify({ role: 'node', event: 'join-service', endpoint: `http://${bind}:${joinService.port}`, port: joinService.port }));
   }
   const node = new FleetNode({ device: config.device, store, transport: new NullTransport(), quota: new LocalQuota({ limitPerDevice: config.quotaLimitPerDevice ?? 1_000_000 }) });
+  const routing = routingFor(config, mebular, store, storeMode(config, args));
   const materializer = new PlanMaterializer({
     device: config.device,
     agent: str(args.agent, 'board'),
     plans: openPlanStore(config, args, mebular),
     store,
+    ...(routing !== undefined ? { routing } : {}),
   });
   const cardPublisher = createCardPublisher(config, mebular);
   if (cardPublisher !== null) await cardPublisher.publish();
@@ -695,11 +726,13 @@ async function runFleetWorker(args: Args): Promise<number> {
   if (cardPublisher !== null) await cardPublisher.publish();
   else console.error('[fleet:caps] skipped: no embedded Mebular and no daemon endpoint');
   const worker = new FleetWorker({ device: config.device, agent: str(args.agent, 'worker'), store, transport: new NullTransport(), registry, log });
+  const routing = routingFor(config, mebular, store, storeMode(config, args));
   const materializer = new PlanMaterializer({
     device: config.device,
     agent: str(args.agent, 'worker'),
     plans: openPlanStore(config, args, mebular),
     store,
+    ...(routing !== undefined ? { routing } : {}),
   });
   await worker.reconcile();
   const deadline = Date.now() + num(args['timeout-ms'], 60_000);

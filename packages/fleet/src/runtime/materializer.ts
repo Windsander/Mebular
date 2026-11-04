@@ -1,7 +1,7 @@
-// P2 materializer：只按 plan + task 事件推进，不维护第二套持久状态机。
+// P2/P3 materializer：只按 plan + task 事件推进，不维护第二套持久状态机。
 //
-// 边界（P0 契约 §6.8）：
-// - 只推进 ready step；step 必须有显式 `to` 才建 task（route 属 P3）。
+// 边界（P0 契约 §6.8 / §7）：
+// - 只推进 ready step；P3 route step 由 routing provider 解析，显式 `to` 也必须过硬过滤。
 // - 确定性 taskId `${planId}#${version}#${stepId}`；eventId `${taskId}#created`；append 幂等。
 // - 不创建 join/reduce/mr task（P4）；这些 step 保持 pending/blocked，不伪造完成。
 // - root task 由提交创建；materializer 只补缺、推进 queued→claimed→running；
@@ -22,6 +22,14 @@ import {
   derivePlanSteps,
   type TaskPlan,
 } from '../plan.js';
+import {
+  loadRouteContext,
+  resolvePlanStepRoute,
+  routeInputFromContext,
+  type PlanRoutingProvider,
+  type RouteContext,
+  type RouteDecision,
+} from '../routing.js';
 
 export interface PlanMaterializerOptions {
   device: string;
@@ -32,6 +40,33 @@ export interface PlanMaterializerOptions {
   maxParallel?: number;
   /** 断线/排障：允许非 owner 设备运行 coordinator（默认不改变正确性依赖）。 */
   coordinateForeignPlans?: boolean;
+  /**
+   * P3 route provider。提供时显式 `to` 也走完整硬过滤（授权/policy/能力卡/payload/在线/容量），
+   * `route` step 自动解析目标。缺省保留 P2 行为（仅显式 `to` + policy 形状检查），
+   * 生产入口（CLI embedded/daemon）必须显式提供；daemon 无法验证远端卡时 fail-closed。
+   */
+  routing?: PlanRoutingProvider;
+}
+
+export interface PlanMaterializeAssignment {
+  planId: string;
+  version: number;
+  stepId: string;
+  taskId: string;
+  chosen: FleetEndpoint;
+  why: RouteDecision['why'];
+  rejected: RouteDecision['rejected'];
+}
+
+export interface PlanMaterializeBlocked {
+  planId: string;
+  version: number;
+  stepId: string;
+  code: string;
+  blockedBy: string[];
+  detail?: string;
+  why?: RouteDecision['why'];
+  rejected?: RouteDecision['rejected'];
 }
 
 export interface PlanMaterializeResult {
@@ -42,6 +77,8 @@ export interface PlanMaterializeResult {
   completed: string[];
   failed: string[];
   invalid: Array<{ planId: string; version: number; code: string }>;
+  assignments: PlanMaterializeAssignment[];
+  blocked: PlanMaterializeBlocked[];
 }
 
 interface PlannedRootResult {
@@ -147,6 +184,7 @@ export class PlanMaterializer {
   private readonly store: TaskEventStore;
   private readonly maxParallel: number;
   private readonly coordinateForeignPlans: boolean;
+  private readonly routing: PlanRoutingProvider | undefined;
 
   constructor(options: PlanMaterializerOptions) {
     this.endpoint = { device: options.device, agent: options.agent };
@@ -154,6 +192,7 @@ export class PlanMaterializer {
     this.store = options.store;
     this.maxParallel = Math.max(1, options.maxParallel ?? 8);
     this.coordinateForeignPlans = options.coordinateForeignPlans ?? false;
+    this.routing = options.routing;
   }
 
   private async appendRootEvent(
@@ -212,6 +251,8 @@ export class PlanMaterializer {
       completed: [],
       failed: [],
       invalid: [],
+      assignments: [],
+      blocked: [],
     };
     const allPlans = await this.plans.list();
     const versionsByPlan = new Map<string, TaskPlan[]>();
@@ -310,19 +351,79 @@ export class PlanMaterializer {
       const parallel = Math.min(this.maxParallel, plan.policy.maxParallel ?? 8);
       let busy = derived.filter((entry) => entry.status === 'dispatched').length;
       if (busy >= parallel) continue;
+      let routeContext: RouteContext | null = null;
       const ready = derived
         .filter((entry) => entry.status === 'pending'
           && (entry.blockedBy === undefined || entry.blockedBy.length === 0)
           && entry.step.kind === 'task'
-          && entry.step.to !== undefined)
+          && (entry.step.to !== undefined || entry.step.route !== undefined))
         .sort((a, b) => (a.step.stepId < b.step.stepId ? -1 : a.step.stepId > b.step.stepId ? 1 : 0));
+      if (this.routing !== undefined && ready.length > 0) {
+        // 一轮只取一次快照：卡片/授权/状态都在 tick 内保持同一视图，排序可解释且可复现。
+        routeContext = await loadRouteContext(this.routing, {
+          states,
+          events: await this.store.all(),
+          asOf: Date.now(),
+          computedBy: this.endpoint.device,
+        });
+      }
       const stateMap = new Map(states.map((state) => [state.taskId, state]));
       const trigger = derivedTrace(plan, stateMap);
       for (const entry of ready) {
         if (busy >= parallel) break;
         const step = entry.step;
-        const to = step.to;
-        if (to === undefined) continue;
+        let to = step.to;
+        let decision: RouteDecision | null = null;
+        if (step.route !== undefined || routeContext !== null) {
+          if (routeContext === null) {
+            result.blocked.push({
+              planId: plan.planId,
+              version: plan.version,
+              stepId: step.stepId,
+              code: 'NO_TARGET',
+              blockedBy: ['NO_TARGET'],
+              detail: 'routing-unavailable',
+            });
+            continue;
+          }
+          decision = resolvePlanStepRoute(plan, step, routeInputFromContext(routeContext));
+          if (decision.decision !== 'assigned' || decision.chosen === null) {
+            result.blocked.push({
+              planId: plan.planId,
+              version: plan.version,
+              stepId: step.stepId,
+              code: decision.why.code,
+              blockedBy: decision.blockedBy.length > 0 ? decision.blockedBy : ['NO_TARGET'],
+              ...(decision.why !== undefined ? { why: decision.why } : {}),
+              ...(decision.rejected.length > 0 ? { rejected: decision.rejected } : {}),
+            });
+            continue;
+          }
+          // 显式 to 绝不被改派：resolver 保证 chosen===to；这里再做运行时兜底。
+          if (step.to !== undefined
+            && (decision.chosen.device !== step.to.device || decision.chosen.agent !== step.to.agent)) {
+            result.blocked.push({
+              planId: plan.planId,
+              version: plan.version,
+              stepId: step.stepId,
+              code: 'NO_TARGET',
+              blockedBy: ['NO_TARGET'],
+              detail: 'explicit-target-mismatch',
+            });
+            continue;
+          }
+          to = decision.chosen;
+        }
+        if (to === undefined) {
+          result.blocked.push({
+            planId: plan.planId,
+            version: plan.version,
+            stepId: step.stepId,
+            code: 'NO_TARGET',
+            blockedBy: ['NO_TARGET'],
+          });
+          continue;
+        }
         const taskId = planTaskId(plan.planId, plan.version, step.stepId);
         if (stateMap.has(taskId)) continue;
         if ((await this.store.byTask(taskId)).length > 0) continue;
@@ -344,6 +445,17 @@ export class PlanMaterializer {
           result.tasksCreated.push(taskId);
           stateMap.set(taskId, reduceTaskEvents([event])!);
           busy += 1;
+          if (decision !== null) {
+            result.assignments.push({
+              planId: plan.planId,
+              version: plan.version,
+              stepId: step.stepId,
+              taskId,
+              chosen: to,
+              why: decision.why,
+              rejected: decision.rejected,
+            });
+          }
         }
       }
     }

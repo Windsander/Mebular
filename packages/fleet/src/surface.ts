@@ -5,6 +5,7 @@
 
 import { Mebular } from '@mebular/core';
 import {
+  identityPublicKeyForStorage,
   loadToolConfig,
   readMasterKeyFile,
 } from './config.js';
@@ -21,8 +22,14 @@ import { NullTransport } from './transport/null.js';
 import { LocalQuota } from './quota.js';
 import { deriveEdges } from './collab/dag.js';
 import { reduceTaskEvents, type TaskState } from './model.js';
-import { derivePlanProgress, parsePlanTaskId } from './plan.js';
-import { agentDirectoryStore, expandTargets } from './agentdir.js';
+import {
+  derivePlanProgress,
+  derivePlanSteps,
+  parsePlanTaskId,
+  type PlanStepRouteHint,
+  type TaskPlan,
+} from './plan.js';
+import { AGENT_NAMESPACE, agentDirectoryStore, expandTargets } from './agentdir.js';
 import {
   listCapabilityCards,
   summarizeCapabilityCards,
@@ -30,6 +37,14 @@ import {
 import type { TaskEvent, TaskEventType } from './protocol/events.js';
 import { EVENT_TO_STATUS } from './protocol/events.js';
 import { DEFAULT_ROOT_BUDGET, type TaskBudget, type TaskDispatch } from './protocol/envelope.js';
+import { DaemonAgentBackend } from './store/daemon-agent-backend.js';
+import {
+  loadRouteContext,
+  resolvePlanStepRoute,
+  routeInputFromContext,
+  type PlanRoutingProvider,
+} from './routing.js';
+import { daemonRoutingProvider, embeddedRoutingProvider } from './runtime/routing-context.js';
 
 export interface ToolContext {
   dir: string;
@@ -70,6 +85,8 @@ interface Session {
   device: string;
   agent: string;
   namespace: string;
+  /** 本地配置（peers/namespace/daemon）；route 解释与 CLI materializer 共用。 */
+  config: Awaited<ReturnType<typeof loadToolConfig>>;
   close: () => Promise<void>;
 }
 
@@ -124,6 +141,7 @@ async function openSession(ctx: ToolContext): Promise<Session> {
     device,
     agent,
     namespace,
+    config,
     close: async () => {
       // live app 的生命周期归 daemon（MCP serve）所有：工具调用只结束会话，不关闭它。
       if (ownsMebular) await mebular!.shutdown();
@@ -165,9 +183,79 @@ function planStoreOf(session: Session): TaskPlanWriteStore {
   return session.planStore;
 }
 
+/** P3：daemon 模式复用 P1 卡片后端；无远端公钥时只信任本机（远端 fail-closed）。 */
+function routingProviderFor(session: Session): PlanRoutingProvider | null {
+  if (session.mebular !== null) {
+    return embeddedRoutingProvider({
+      mebular: session.mebular,
+      config: session.config,
+      store: session.store,
+    });
+  }
+  const daemon = session.config.daemon;
+  if (daemon?.endpoint !== undefined) {
+    const localPublicKey = identityPublicKeyForStorage(session.config.storagePath);
+    const backend = new DaemonAgentBackend({
+      endpoint: daemon.endpoint,
+      namespace: AGENT_NAMESPACE,
+      ...(daemon.token !== undefined ? { token: daemon.token } : {}),
+      ...(daemon.tokenFile !== undefined ? { tokenFile: daemon.tokenFile } : {}),
+      ...(localPublicKey !== null
+        ? { publicKeyFor: (device: string) => (device === session.config.device ? localPublicKey : undefined) }
+        : {}),
+    });
+    return daemonRoutingProvider({ backend, config: session.config, store: session.store });
+  }
+  return null;
+}
+
+/**
+ * 只对“当前已 ready 但未物化”的 route/显式 to step 计算解释；
+ * 依赖未满足的 step 不提前标 blocked。任何读失败都降级为无 why，不影响旧进度字段。
+ */
+async function routeHintsForPlan(
+  session: Session,
+  plan: TaskPlan,
+  states: readonly TaskState[],
+): Promise<PlanStepRouteHint[] | undefined> {
+  const provider = routingProviderFor(session);
+  if (provider === null) return undefined;
+  try {
+    const derived = derivePlanSteps(plan, states);
+    const context = await loadRouteContext(provider, {
+      states,
+      events: await session.store.all(),
+      asOf: Date.now(),
+      computedBy: session.device,
+    });
+    const hints: PlanStepRouteHint[] = [];
+    for (const entry of derived) {
+      const step = entry.step;
+      if (step.kind !== 'task') continue;
+      if (step.to === undefined && step.route === undefined) continue;
+      if (entry.taskId !== undefined || entry.via === 'reuse' || entry.failed) continue;
+      const ready = entry.status === 'pending' && (entry.blockedBy === undefined || entry.blockedBy.length === 0);
+      const policyBlocked = entry.status === 'blocked' && entry.step.to !== undefined;
+      if (!ready && !policyBlocked) continue;
+      const decision = resolvePlanStepRoute(plan, step, routeInputFromContext(context));
+      if (decision.decision === 'assigned') continue;
+      hints.push({
+        stepId: step.stepId,
+        code: decision.why.code,
+        ...(decision.blockedBy.length > 0 ? { blockedBy: decision.blockedBy } : {}),
+        why: decision.why,
+      });
+    }
+    return hints.length > 0 ? hints : undefined;
+  } catch {
+    // 无卡片/无守护权限等读取失败：不返回 why，旧进度字段不变。
+    return undefined;
+  }
+}
+
 /**
  * `task_status.plan`：仅当 taskId 严格匹配 plan root/step/MR 且 plan 节点存在时返回。
- * 进度是派生值；plan 节点不被改写。
+ * 进度是派生值；plan 节点不被改写。P3 只 additive 增加 step.why/blockedBy。
  */
 async function planProgressOf(
   session: Session,
@@ -179,7 +267,14 @@ async function planProgressOf(
   const plan = await plans.get(parsed.planId, parsed.version);
   if (plan === null) return null;
   if (!parsed.root && !plan.steps.some((step) => step.stepId === parsed.stepId)) return null;
-  return derivePlanProgress(plan, await statesOf(session.store), await plans.list());
+  const states = await statesOf(session.store);
+  const routeHints = await routeHintsForPlan(session, plan, states);
+  return derivePlanProgress(
+    plan,
+    states,
+    await plans.list(),
+    routeHints !== undefined ? { routeHints } : {},
+  );
 }
 
 function summarizeState(s: TaskState): Record<string, unknown> {

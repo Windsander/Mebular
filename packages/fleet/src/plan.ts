@@ -3,7 +3,7 @@
 // 边界（P0 契约 §6 / §4.2）：
 // - plan 是不可变的 internal 记忆节点；task 层只保留派生树，plan 依赖不是 TaskEvent 边。
 // - 本模块不读写存储、不依赖墙钟；materializer 与 `task_status` 共用同一套派生逻辑。
-// - 本期只实现 `join.mode="all"`（CR-001）；route/join/MR 执行属 P3/P4，这里只做校验与进度。
+// - 本期只实现 `join.mode="all"`（CR-001）；route resolver 在 `routing.ts`；join/MR 执行属 P4。
 
 import { PLAN_SENTINEL, type FleetEndpoint, type TaskBudget } from './protocol/envelope.js';
 import type { TaskState } from './model.js';
@@ -724,6 +724,28 @@ export function acceptancePasses(acceptance: PlanAcceptance, resultRef: string |
 export type PlanStepProgressStatus = 'pending' | 'blocked' | 'dispatched' | 'done' | 'failed';
 export type PlanProgressStatus = 'planned' | 'running' | 'blocked' | 'done' | 'failed' | 'cancelled';
 
+/** P3 additive：`task_status.plan` 的 step 级 route why（不含 prompt/原文/凭据）。 */
+export interface PlanStepWhy {
+  code: string;
+  hardFilters: string[];
+  ranking: Array<{ device: string; agent: string; score: number; reasons: string[] }>;
+  tieBreak: string;
+  roleCard: string;
+  policy: string;
+}
+
+/** P3：materializer / task_status 计算出的 route 解释；plan 本身不被改写。 */
+export interface PlanStepRouteHint {
+  stepId: string;
+  code: string;
+  blockedBy?: string[];
+  why?: PlanStepWhy;
+}
+
+export interface DerivePlanProgressOptions {
+  routeHints?: readonly PlanStepRouteHint[];
+}
+
 export interface DerivedPlanStep {
   step: PlanStep;
   status: PlanStepProgressStatus;
@@ -731,6 +753,8 @@ export interface DerivedPlanStep {
   taskId?: string;
   sourceTaskId?: string;
   blockedBy?: string[];
+  /** P3 additive：route/policy 的解释（只含标签/计数/原因码）。 */
+  why?: PlanStepWhy;
   complete: boolean;
   failed: boolean;
   taskState?: TaskState;
@@ -939,7 +963,7 @@ function deriveOneStep(
     memo.set(step.stepId, result);
     return result;
   }
-  if (step.to === undefined) {
+  if (step.to === undefined && step.route === undefined) {
     const result: DerivedPlanStep = {
       step,
       status: 'blocked',
@@ -950,7 +974,7 @@ function deriveOneStep(
     memo.set(step.stepId, result);
     return result;
   }
-  if (!stepTargetAllowed(plan, step.to)) {
+  if (step.to !== undefined && !stepTargetAllowed(plan, step.to)) {
     const result: DerivedPlanStep = {
       step,
       status: 'blocked',
@@ -961,6 +985,7 @@ function deriveOneStep(
     memo.set(step.stepId, result);
     return result;
   }
+  // route-only step：由 materializer/route resolver 决定目标；未解析前保持 pending。
   const result: DerivedPlanStep = {
     step,
     status: 'pending',
@@ -991,6 +1016,8 @@ export interface PlanStepProgress {
   taskId?: string;
   sourceTaskId?: string;
   blockedBy?: string[];
+  /** P3 additive：route/policy 的可解释选择（不含原始对话/凭据）。 */
+  why?: PlanStepWhy;
 }
 
 export interface PlanProgress {
@@ -1011,7 +1038,35 @@ function stepProgress(derived: DerivedPlanStep): PlanStepProgress {
     ...(derived.taskId !== undefined ? { taskId: derived.taskId } : {}),
     ...(derived.sourceTaskId !== undefined ? { sourceTaskId: derived.sourceTaskId } : {}),
     ...(derived.blockedBy !== undefined && derived.blockedBy.length > 0 ? { blockedBy: derived.blockedBy } : {}),
+    ...(derived.why !== undefined ? { why: derived.why } : {}),
   };
+}
+
+/** 只把非 assigned 的 route 解释附加到尚未物化的 step；不改变已有 task/reuse 状态。 */
+function applyRouteHints(
+  derived: readonly DerivedPlanStep[],
+  hints: readonly PlanStepRouteHint[] | undefined,
+): DerivedPlanStep[] {
+  if (hints === undefined || hints.length === 0) return [...derived];
+  const byStep = new Map(hints.map((hint) => [hint.stepId, hint]));
+  return derived.map((entry) => {
+    const hint = byStep.get(entry.step.stepId);
+    if (hint === undefined) return entry;
+    if (entry.via === 'reuse' || entry.taskId !== undefined || entry.failed) {
+      return hint.why !== undefined ? { ...entry, why: hint.why } : entry;
+    }
+    const blockedBy = hint.blockedBy !== undefined && hint.blockedBy.length > 0
+      ? [...hint.blockedBy]
+      : hint.code === 'ASSIGNED'
+        ? []
+        : [hint.code];
+    return {
+      ...entry,
+      status: blockedBy.length > 0 ? 'blocked' : entry.status,
+      ...(blockedBy.length > 0 ? { blockedBy } : {}),
+      ...(hint.why !== undefined ? { why: hint.why } : {}),
+    };
+  });
 }
 
 /** 从 plan + task 事件派生 plan 进度；plan 节点不被改写。 */
@@ -1019,9 +1074,10 @@ export function derivePlanProgress(
   plan: TaskPlan,
   states: readonly TaskState[],
   versions: readonly TaskPlan[] = [plan],
+  options: DerivePlanProgressOptions = {},
 ): PlanProgress {
   const byId = new Map(states.map((state) => [state.taskId, state]));
-  const derived = derivePlanSteps(plan, states);
+  const derived = applyRouteHints(derivePlanSteps(plan, states), options.routeHints);
   const rootTaskId = planRootTaskId(plan.planId, plan.version);
   const root = byId.get(rootTaskId);
   const stepViews = derived.map(stepProgress);

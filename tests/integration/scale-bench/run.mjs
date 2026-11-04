@@ -442,12 +442,27 @@ async function seedDataset({ device, options, runToken, onProgress }) {
 
 function sampleIndices(records, queries) {
   const count = Math.min(records, queries);
-  const step = records / count;
+  const buckets = Math.min(100, records);
+  const perBucket = Math.floor(count / buckets);
+  const extra = count % buckets;
   const indices = [];
-  for (let index = 0; index < count; index += 1) {
-    indices.push(Math.min(records - 1, Math.floor(step * index + step / 2)));
+  for (let bucket = 0; bucket < buckets; bucket += 1) {
+    const pool = [];
+    for (let index = bucket; index < records; index += 100) pool.push(index);
+    const take = Math.min(pool.length, perBucket + (bucket < extra ? 1 : 0));
+    const stride = Math.max(1, Math.floor(pool.length / Math.max(1, take)));
+    const base = (bucket * 7) % pool.length;
+    for (let slot = 0; slot < take; slot += 1) {
+      indices.push(pool[(base + slot * stride) % pool.length]);
+    }
   }
-  return [...new Set(indices)];
+  if (indices.length < count) {
+    const step = records / (count - indices.length + 1);
+    for (let index = indices.length; index < count; index += 1) {
+      indices.push(Math.min(records - 1, Math.floor(step * (index + 1))));
+    }
+  }
+  return [...new Set(indices)].sort((a, b) => a - b);
 }
 
 async function benchmarkReads({ device, options, runToken }) {
@@ -467,9 +482,24 @@ async function benchmarkReads({ device, options, runToken }) {
   let degradedRecalls = 0;
   let degradedContexts = 0;
   const failures = [];
+  const kindStats = new Map();
+  const kindStatFor = (kind) => {
+    const existing = kindStats.get(kind) ?? {
+      kind,
+      samples: 0,
+      expandAttempts: 0,
+      expandHits: 0,
+      missingDetail: 0,
+    };
+    kindStats.set(kind, existing);
+    return existing;
+  };
 
   for (const [position, index] of indices.entries()) {
     const marker = markerFor(runToken, index);
+    const sampleKind = shapeFor(index).bucket;
+    const kindStat = kindStatFor(sampleKind);
+    kindStat.samples += 1;
 
     const capabilityStartedAt = performance.now();
     const capabilityResponse = await device.capability.query({
@@ -532,6 +562,7 @@ async function benchmarkReads({ device, options, runToken }) {
       : null;
     if (fragment && recallData?.recallId) {
       expandAttempts += 1;
+      kindStat.expandAttempts += 1;
       const expandStartedAt = performance.now();
       const expandResponse = await device.sidecar.expand(recallData.recallId, {
         agentId: AGENT_ID,
@@ -546,8 +577,13 @@ async function benchmarkReads({ device, options, runToken }) {
         const list = expandSources.get(source) ?? [];
         list.push(detailExpandMs[detailExpandMs.length - 1]);
         expandSources.set(source, list);
-        if (markerVisible(expandData?.detail?.text, marker)) expandHits += 1;
+        if (markerVisible(expandData?.detail?.text, marker)) {
+          expandHits += 1;
+          kindStat.expandHits += 1;
+        }
       }
+    } else {
+      kindStat.missingDetail += 1;
     }
 
     if (position > 0 && position % 25 === 0) {
@@ -559,15 +595,31 @@ async function benchmarkReads({ device, options, runToken }) {
   for (const [source, values] of [...expandSources.entries()].sort(([a], [b]) => a.localeCompare(b))) {
     bySource[source] = latencySummary(values);
   }
+  const byKind = [...kindStats.values()]
+    .sort((a, b) => a.kind.localeCompare(b.kind))
+    .map((entry) => ({
+      ...entry,
+      coverage: hitRate(entry.expandAttempts, entry.samples),
+      hitRate: hitRate(entry.expandHits, entry.expandAttempts),
+    }));
 
   return {
     samples: indices.length,
     queryLimit: options.limit,
+    sampling: 'stratified by index % 100 detail-kind bucket; equal samples per bucket',
     hitRate: {
       capabilityQuery: hitRate(capabilityHits, indices.length),
       sidecarRecall: hitRate(recallHits, indices.length),
       sidecarContext: hitRate(contextHits, indices.length),
       detailExpand: hitRate(expandHits, expandAttempts),
+    },
+    detailCoverage: {
+      samples: indices.length,
+      expandAttempts,
+      missingDetail: indices.length - expandAttempts,
+      coverageRate: hitRate(expandAttempts, indices.length),
+      hitRate: hitRate(expandHits, expandAttempts),
+      byKind,
     },
     degraded: {
       recalls: degradedRecalls,

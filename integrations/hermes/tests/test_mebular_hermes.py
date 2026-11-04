@@ -1537,10 +1537,12 @@ class SpoolContractTests(BaseCase):
                 "chunks": [{"role": "user", "text": "x"}],
             })
             spool.mark_dead_pending(item_id, "test")
-        self.assertLessEqual(
-            spool.dead_pending_count(), memory_plugin._DEAD_PENDING_LIMIT
+        self.assertEqual(spool.dead_pending_count(), 120)
+        self.assertGreaterEqual(
+            spool.dead_pending_overflow(), 120 - memory_plugin._DEAD_PENDING_LIMIT
         )
-        self.assertGreater(spool.dead_pending_dropped(), 0)
+        ids = {item["payload"]["requestId"] for item in spool.dead_pending_items()}
+        self.assertEqual(len(ids), 120)
         self.assertLessEqual(spool.total_bytes(), spool._max_bytes)
 
     def test_abandoned_dead_pending_survives_restart_and_expires(self) -> None:
@@ -1624,6 +1626,89 @@ class SpoolContractTests(BaseCase):
         self.assertEqual(len(server.ingests), 1)
         self.assertIn("behind", server.ingests[0]["chunks"][0]["text"])
         self.assertEqual(provider._spool.orphan_dead_pending_count(), 1)
+
+    def test_orphan_survives_restart(self) -> None:
+        spool = memory_plugin._Spool(self.spool_path, 100)
+        item_id = spool.append("ingest", {
+            "requestId": "orphan-restart",
+            "chunks": [{"role": "user", "text": "orphan"}],
+        })
+        with spool._lock:
+            spool._items[0]["deadPending"] = {
+                "reason": "x", "attempts": 5, "at": int(time.time() * 1000)
+            }
+        self.assertGreater(spool.orphan_dead_pending_live(item_id, "x"), 0)
+        self.assertEqual(spool.depth(), 0)
+        self.assertEqual(spool.orphan_dead_pending_count(), 1)
+        reopened = memory_plugin._Spool(self.spool_path, 100)
+        self.assertEqual(reopened.orphan_dead_pending_count(), 1)
+        self.assertEqual(
+            reopened.orphan_dead_pending_items()[0]["payload"]["requestId"],
+            "orphan-restart",
+        )
+
+    def test_orphan_cap_and_abandoned_head_skip(self) -> None:
+        now = int(time.time() * 1000)
+        server = self.fake_server()
+        provider = self.make_provider(server)
+        spool = provider._spool
+        with spool._lock:
+            spool._orphan_dead_pending = [
+                {
+                    "id": f"orphan-{index}",
+                    "kind": "ingest",
+                    "payload": {"requestId": f"orphan-{index}", "chunks": []},
+                    "attempts": 0,
+                    "createdAt": now,
+                    "expiresAt": now + 60_000,
+                    "deadPending": {
+                        "reason": "x", "attempts": 1, "at": now,
+                        "orphaned": True,
+                        "abandoned": index == 0,
+                    },
+                }
+                for index in range(120)
+            ]
+            spool._orphan_dead_pending = spool._trim_orphan_locked(
+                spool._orphan_dead_pending
+            )
+        self.assertLessEqual(
+            spool.orphan_dead_pending_count(), memory_plugin._ORPHAN_LIMIT
+        )
+        self.assertGreater(spool.orphan_dropped(), 0)
+        # An abandoned head must not prevent retrying the next orphan.
+        with spool._lock:
+            spool._orphan_dead_pending = [
+                {
+                    "id": "abandoned-head",
+                    "kind": "ingest",
+                    "payload": {"requestId": "abandoned-head", "chunks": []},
+                    "attempts": 0,
+                    "createdAt": now,
+                    "expiresAt": now + 60_000,
+                    "deadPending": {
+                        "reason": "x", "attempts": 1, "at": now,
+                        "orphaned": True, "abandoned": True,
+                    },
+                },
+                {
+                    "id": "retry-next",
+                    "kind": "ingest",
+                    "payload": {"requestId": "retry-next", "chunks": []},
+                    "attempts": 0,
+                    "createdAt": now,
+                    "expiresAt": now + 60_000,
+                    "deadPending": {
+                        "reason": "x", "attempts": 1, "at": now,
+                        "orphaned": True,
+                    },
+                },
+            ]
+        self.assertTrue(provider._retry_one_orphan(spool))
+        self.assertEqual(spool.orphan_dead_pending_count(), 1)
+        self.assertEqual(
+            spool.orphan_dead_pending_items()[0]["id"], "abandoned-head"
+        )
 
     def test_start_timeout_allows_takeover(self) -> None:
         server = self.fake_server()
@@ -1776,6 +1861,29 @@ class SpoolContractTests(BaseCase):
         self.assertEqual(spool.dead_count(), dead_before)
         self.assertEqual(spool.dead_bytes(), dead_bytes_before)
 
+    def test_append_rejection_keeps_dead_pending_unchanged(self) -> None:
+        spool = memory_plugin._Spool(self.spool_path, 100, max_bytes=2000)
+        for index in range(2):
+            item_id = spool.append("ingest", {
+                "requestId": f"pending-keep-{index}",
+                "chunks": [{"role": "user", "text": "pending"}],
+            })
+            spool.mark_dead_pending(item_id, "test")
+        before = [
+            (item["id"], item["deadPending"]["attempts"])
+            for item in spool.dead_pending_items()
+        ]
+        with self.assertRaises(memory_plugin._SpoolFull):
+            spool.append("ingest", {
+                "requestId": "rejected-live",
+                "chunks": [{"role": "user", "text": "x" * 5000}],
+            })
+        after = [
+            (item["id"], item["deadPending"]["attempts"])
+            for item in spool.dead_pending_items()
+        ]
+        self.assertEqual(after, before)
+
     def test_load_trims_live_bytes_over_budget(self) -> None:
         now = int(time.time() * 1000)
         self.spool_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1812,6 +1920,9 @@ class SpoolContractTests(BaseCase):
             "secretKey=abc\n"
             "privateKey=abc\n"
             "mySecretKey=abc\n"
+            "mytoken=abc\n"
+            "myapikey=abc\n"
+            "mysecret=abc\n"
             "AWS_SECRET_ACCESS_KEY=AbCdEfGhIjKlMnOpQrStUvWxYz012345\n"
             "AWS_SESSION_TOKEN=shortlowercase\n"
             "https://alice:s3cr3t-pass@example.com/path\n"
@@ -1837,6 +1948,9 @@ class SpoolContractTests(BaseCase):
             "secretKey=abc",
             "privateKey=abc",
             "mySecretKey=abc",
+            "mytoken=abc",
+            "myapikey=abc",
+            "mysecret=abc",
             "AbCdEfGhIjKlMnOpQrStUvWxYz012345",
             "shortlowercase",
             "alice:s3cr3t-pass",

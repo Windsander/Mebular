@@ -1248,7 +1248,7 @@
     "runtime.access.onHint": "沉浸式：自动按记忆域整理并共享详情；失败开放，对话不受影响。",
     "runtime.access.offHint": "轻量 MCP：只提供记忆工具，不自动整理、不自动注入。",
     "runtime.enable.confirmTitle": "开启沉浸式记忆",
-    "runtime.enable.confirmBody": "开启后，本设备会按记忆域整理对话与任务详情，并共享到本忆云的认证设备。可随时切回轻量。",
+    "runtime.enable.confirmBody": "开启后，本设备会采集对话与任务内容，先脱敏再按记忆域整理；Detail 会同步到本忆云的认证设备，默认保留对话 30 天、工具输出 7 天、文档切片 90 天，显式 pinned 保留至删除。DSH 另在自身 session.v4.jsonl 保存带来源的快照，Mebular 删除不会擦除该副本。仅在你显式启用远程模型/API 时，脱敏后的内容会发送到所配置的远程端点；远程提供方日志不受 Mebular 删除控制。可随时切回轻量。",
     "runtime.enable.confirm": "开启",
     "runtime.enable.on": "已切换到沉浸式",
     "runtime.disable.confirmTitle": "切回轻量 MCP",

@@ -702,6 +702,9 @@ export class MemoryObjectService implements SidecarObjectsApi {
         method: 'POST',
         body,
         createdAt: this.now(),
+        ...(typeof body.expiresAt === 'number' && Number.isFinite(body.expiresAt) && body.expiresAt > 0
+          ? { expiresAt: body.expiresAt }
+          : {}),
       });
     } catch (error) {
       if (error instanceof LocalLayerError) {

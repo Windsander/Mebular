@@ -59,7 +59,7 @@ async function setup(): Promise<Harness> {
   const home = await mkdtemp(join(tmpdir(), 'mebular-sidecar-model-http-'));
   const local = new SidecarLocalLayer({ root: join(home, 'memory-runtime'), now: () => NOW });
   await local.init();
-  const fake = await startFakeCapability();
+  const fake = await startFakeCapability({ now: () => NOW });
   const client = new CapabilityClient({ baseUrl: fake.baseUrl, token: 'cap-token', retries: 0, retryDelayMs: 0 });
   const config: SidecarConfig = defaultSidecarConfig();
   config.http.port = 0;

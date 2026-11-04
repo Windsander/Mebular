@@ -56,6 +56,9 @@ export interface SettlementRuntimeOptions {
   now?: () => number;
   replayerIntervalMs?: number;
   autoStartReplayer?: boolean;
+  localMaintenanceIntervalMs?: number;
+  setIntervalFn?: typeof setInterval;
+  clearIntervalFn?: typeof clearInterval;
 }
 
 export interface NamespaceDomainView {
@@ -148,6 +151,10 @@ export class SettlementRuntime {
   private readonly inference: SidecarInferenceProvider | null;
   private policy: SidecarPolicy;
   private readonly policyPath?: string;
+  private readonly localMaintenanceIntervalMs?: number;
+  private readonly setIntervalFn?: typeof setInterval;
+  private readonly clearIntervalFn?: typeof clearInterval;
+  private readonly now: () => number;
 
   constructor(options: SettlementRuntimeOptions) {
     this.config = options.config;
@@ -157,6 +164,10 @@ export class SettlementRuntime {
     this.inference = options.inference ?? null;
     this.policy = options.policy ?? { schema: 1, agents: {} };
     this.policyPath = options.policyPath;
+    this.localMaintenanceIntervalMs = options.localMaintenanceIntervalMs;
+    this.setIntervalFn = options.setIntervalFn;
+    this.clearIntervalFn = options.clearIntervalFn;
+    this.now = options.now ?? Date.now;
     const ingestOptions: IngestServiceOptions = {
       config: options.config,
       local: options.local,
@@ -214,6 +225,7 @@ export class SettlementRuntime {
       onSettled: (item, data) => (item.endpoint === '/detail' || item.meta?.kind === 'record'
         ? this.ingest.applyReplayedOutbox(item, data)
         : this.objects.applyReplayedItem(item, data)),
+      onComplete: (item, outcome) => this.ingest.finalizeReplayedOutbox(item, outcome),
     });
     if (options.autoStartReplayer !== false) {
       this.replayer.start();
@@ -232,12 +244,24 @@ export class SettlementRuntime {
       }
     }
     await this.ingest.init();
-    // 本地过程数据：dead letter 只保留 30 天。
-    await this.local.outbox.cleanupDead(Date.now(), 30).catch(() => 0);
+    const beforeStagingCleanup = (ids: readonly string[]) => this.ingest.expireStagingDependencies(ids);
+    this.local.setMaintenanceDependencyHandler(beforeStagingCleanup);
+    await this.local.runMaintenance({ beforeStagingCleanup }).catch(() => null);
+    this.local.startMaintenance({
+      ...(this.localMaintenanceIntervalMs !== undefined
+        ? { intervalMs: this.localMaintenanceIntervalMs }
+        : {}),
+      ...(this.setIntervalFn ? { setIntervalFn: this.setIntervalFn } : {}),
+      ...(this.clearIntervalFn ? { clearIntervalFn: this.clearIntervalFn } : {}),
+      beforeStagingCleanup,
+    });
   }
 
   async stop(): Promise<void> {
+    this.local.stopMaintenance();
+    // 先让 replayer 在 finalize 仍可用时完成有界 flush，再关闭收口入口。
     await this.replayer.stop({ flushMs: 2000 });
+    this.ingest.stop();
   }
 
   get degraded(): boolean {
@@ -444,6 +468,44 @@ export class SettlementRuntime {
       .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
     errors.sort((a, b) => b.at - a.at);
     const lastError = base.lastError ?? errors[0] ?? null;
+    const maintenance = this.local.maintenanceStatus();
+    const details: SidecarStatusDetails & { maintenance: typeof maintenance } = {
+      available: true,
+      staging: {
+        chunks: stats.stagingChunks,
+        hours: this.config.detail.stagingHours,
+        maxBytes: this.config.detail.stagingBytes,
+      },
+      cache: {
+        entries: stats.detailCacheEntries,
+        bytes: stats.detailCacheBytes,
+        days: this.config.detail.cacheDays,
+        maxBytes: this.config.detail.cacheBytes,
+      },
+      outbox: { items: outbox.items, bytes: outbox.bytes },
+      quota: {
+        bytesPerDomain: this.config.detail.quotaBytesPerDomain,
+        bytesCloud: this.config.detail.quotaBytesCloud,
+        usedBytes: null,
+        bytes: null,
+      },
+      retentionDays: { conversation: 30, tool_output: 7, document_slice: 90 },
+      maintenance,
+      ...base.details,
+    };
+    const outboxView: SidecarStatusSnapshot['outbox'] & {
+      deadItems: number;
+      deadBytes: number;
+      oldestAgeMs: number | null;
+    } = {
+      items: outbox.items,
+      bytes: outbox.bytes,
+      oldestAt: outbox.oldestAt,
+      deadItems: stats.deadLetter,
+      deadBytes: stats.deadLetterBytes,
+      oldestAgeMs: outbox.oldestAt === null ? null : Math.max(0, this.now() - outbox.oldestAt),
+      ...base.outbox,
+    };
     return {
       ...base,
       counts: {
@@ -469,35 +531,8 @@ export class SettlementRuntime {
         objectWritesFailed: objects.failed,
         ...base.counts,
       },
-      outbox: {
-        items: outbox.items,
-        bytes: outbox.bytes,
-        oldestAt: outbox.oldestAt,
-        ...base.outbox,
-      },
-      details: {
-        available: true,
-        staging: {
-          chunks: stats.stagingChunks,
-          hours: this.config.detail.stagingHours,
-          maxBytes: this.config.detail.stagingBytes,
-        },
-        cache: {
-          entries: stats.detailCacheEntries,
-          bytes: stats.detailCacheBytes,
-          days: this.config.detail.cacheDays,
-          maxBytes: this.config.detail.cacheBytes,
-        },
-        outbox: { items: outbox.items, bytes: outbox.bytes },
-        quota: {
-          bytesPerDomain: this.config.detail.quotaBytesPerDomain,
-          bytesCloud: this.config.detail.quotaBytesCloud,
-          usedBytes: null,
-          bytes: null,
-        },
-        retentionDays: { conversation: 30, tool_output: 7, document_slice: 90 },
-        ...base.details,
-      },
+      outbox: outboxView,
+      details,
       lastError: lastError ?? ingest.lastError,
     };
   }

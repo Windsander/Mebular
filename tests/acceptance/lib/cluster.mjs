@@ -582,6 +582,7 @@ export async function createCluster(options = {}) {
 export async function startCapabilityGate() {
   let target = null;
   let down = false;
+  let dropResponsesAfterResponse = 0;
   const agent = new http.Agent({ keepAlive: false });
   const inflight = new Set();
 
@@ -623,6 +624,13 @@ export async function startCapabilityGate() {
       headers,
       agent,
     }, (upstreamRes) => {
+      if (dropResponsesAfterResponse > 0 && req.url?.endsWith('/write')) {
+        dropResponsesAfterResponse -= 1;
+        // capability 已接收并处理写入，但宿主在读取响应前断开：结果对 sidecar 未知。
+        upstreamRes.destroy();
+        res.destroy();
+        return;
+      }
       res.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
       upstreamRes.pipe(res);
     });
@@ -648,6 +656,10 @@ export async function startCapabilityGate() {
     setTarget(targetUrl) {
       const parsed = new URL(targetUrl);
       target = { host: parsed.hostname, port: Number(parsed.port) };
+    },
+    dropNextAfterResponse() {
+      // CapabilityClient 默认首次 + 两次重试；全部结果未知后才会进入 outbox。
+      dropResponsesAfterResponse = 3;
     },
     down() {
       down = true;

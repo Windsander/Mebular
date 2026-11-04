@@ -122,7 +122,7 @@ async function setup(options: { fetch: ChatFetch; mutateConfig?: (config: Sideca
   await writeFile(modelPath, 'gguf-test', { mode: 0o600 });
   const local = new SidecarLocalLayer({ root: join(home, 'memory-runtime'), now: () => NOW });
   await local.init();
-  const fake = await startFakeCapability();
+  const fake = await startFakeCapability({ now: () => NOW });
   const client = new CapabilityClient({ baseUrl: fake.baseUrl, token: 'cap-token', retries: 0, retryDelayMs: 0 });
   const config = defaultSidecarConfig();
   config.model = modelSettings(modelPath);

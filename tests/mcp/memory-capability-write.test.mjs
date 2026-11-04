@@ -1,6 +1,6 @@
 // W2b：/internal/memory/v1 写端点（write/update/delete/archive/internal-object/sync）。
 // 真实 Mebular + MemoryService + 沙箱 home；不启网络/模型。
-import { describe, it, expect, beforeAll, afterAll } from '@jest/globals';
+import { describe, it, expect, beforeAll, afterAll, jest } from '@jest/globals';
 import http from 'node:http';
 import { createHash } from 'node:crypto';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
@@ -281,6 +281,34 @@ describe('POST /write', () => {
     if (process.platform !== 'win32') {
       const ledger = await stat(join(home, 'memory-runtime', 'capability-idempotency.json'));
       expect(ledger.mode & 0o777).toBe(0o600);
+    }
+  });
+
+  it('malformed write 成功项空 id 不进入幂等账本', async () => {
+    const key = unique('malformed-write-idem-key');
+    const marker = unique('malformed-write-idem');
+    const body = writeBody([{
+      clientItemId: unique('malformed-write-client'),
+      domain: 'agent:opencode',
+      kind: 'observation',
+      content: { content: marker },
+      provenance: { source: 'runtime', extractor: 'heuristic' },
+    }]);
+    const spy = jest.spyOn(service, 'writeRecords');
+    spy.mockResolvedValueOnce([{
+      node: { id: '', type: 'episode', kind: 'observation' },
+      vectorIndexed: true,
+    }]);
+    try {
+      const first = await post(capability('/write'), body, { token, headers: { 'idempotency-key': key } });
+      expect(first.status).toBe(200);
+      expect(first.body.data.results[0].id).toBe('');
+      const retry = await post(capability('/write'), body, { token, headers: { 'idempotency-key': key } });
+      expect(retry.body.data.replayed).toBe(false);
+      expect(retry.body.data.results[0].id).not.toBe('');
+      expect(spy).toHaveBeenCalledTimes(2);
+    } finally {
+      spy.mockRestore();
     }
   });
 

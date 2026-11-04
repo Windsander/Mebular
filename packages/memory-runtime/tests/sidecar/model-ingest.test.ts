@@ -24,6 +24,7 @@ import {
 import type { ChatFetch, ChatFetchResponse } from '../../src/inference/gateway.js';
 import type { LlamaServerEngineOptions } from '../../src/inference/engine.js';
 import { startFakeCapability, type FakeCapabilityServer } from './fake-capability.js';
+import { readHomeFiles } from './acceptance-fixtures.js';
 
 const SECRET = 'sk-ingest-secret-never-log';
 const NOW = 1_760_000_000_000;
@@ -113,7 +114,7 @@ async function setup(
   const home = await mkdtemp(join(tmpdir(), 'mebular-sidecar-model-ingest-'));
   const local = new SidecarLocalLayer({ root: join(home, 'memory-runtime'), now: () => NOW });
   await local.init();
-  const fake = await startFakeCapability();
+  const fake = await startFakeCapability({ now: () => NOW });
   const client = new CapabilityClient({
     baseUrl: fake.baseUrl,
     token: 'cap-token',
@@ -154,6 +155,10 @@ function preferenceRequest(overrides: Record<string, unknown> = {}) {
     chunks: [{ role: 'user', text: '以后默认用深色主题', messageId: 'm1', chunkIndex: 0 }],
     ...overrides,
   };
+}
+
+async function localFileText(home: string): Promise<string> {
+  return (await readHomeFiles(home)).map((file) => file.text).join('\n');
 }
 
 function validCandidates(): string {
@@ -418,5 +423,70 @@ describe('sidecar ingest model sources', () => {
       degraded: true,
       reason: 'model_not_found',
     });
+  });
+
+  it('内容 sentinel 在 staging/outbox/远程模型请求之前已脱敏', async () => {
+    const remoteBodies: string[] = [];
+    const remoteFetch = (async (_url: string, init?: RequestInit) => {
+      remoteBodies.push(String(init?.body ?? ''));
+      return jsonResponse(validCandidates());
+    }) as ChatFetch;
+    const { service, fake, home } = await setup(settings({
+      source: 'api',
+      api: {
+        baseUrl: 'https://api.example.test/v1',
+        model: 'test-model',
+        keyRef: 'env:TEST_SIDECAR_KEY',
+        allowRemote: true,
+        timeoutMs: 50,
+      },
+    }), { fetch: remoteFetch });
+    fake.setDetailFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const sentinels = [
+      'sk-content-secret-sentinel-123456',
+      'content-password-sentinel-9876',
+      'content-bearer-sentinel-abcdefgh',
+      'sk-redaction-rule-sentinel-123456',
+      'redaction-private-key-sentinel',
+    ];
+
+    const result = await service.ingest({
+      requestId: 'req_redaction_before_every_egress',
+      agentId: 'opencode',
+      threadId: 'th_redaction_before_every_egress',
+      extractor: 'api',
+      allowRemote: true,
+      chunks: [{
+        role: 'user',
+        messageId: 'm_redaction_egress',
+        redaction: {
+          applied: true,
+          rules: [
+            sentinels[3],
+            `-----BEGIN PRIVATE KEY-----\n${sentinels[4]}\n-----END PRIVATE KEY-----`,
+            'builtin_secret',
+          ],
+        },
+        text: [
+          '以后默认用深色主题',
+          `api_key=${sentinels[0]}`,
+          `password=${sentinels[1]}`,
+          `Bearer ${sentinels[2]}`,
+        ].join('\n'),
+      }],
+    });
+
+    expect(result.status).toBe(202);
+    expect(remoteBodies).toHaveLength(1);
+    expect(await localFileText(home)).not.toContain(sentinels[0]);
+    const diskAndNetwork = [
+      ...remoteBodies,
+      JSON.stringify(fake.detailRequests.map((request) => request.body)),
+      JSON.stringify(service.stats()),
+      await localFileText(home),
+    ].join('\n');
+    for (const sentinel of sentinels) expect(diskAndNetwork).not.toContain(sentinel);
+    expect(diskAndNetwork).toContain('[redacted]');
+    expect((fake.detailRequests[0]!.body as any).items[0].redaction.rules).toEqual(['builtin_secret']);
   });
 });

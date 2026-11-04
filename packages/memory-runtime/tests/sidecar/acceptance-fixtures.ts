@@ -124,7 +124,7 @@ export async function createAcceptanceHarness(
     ...(options.maxCacheBytes !== undefined ? { maxCacheBytes: options.maxCacheBytes } : {}),
   });
   await local.init();
-  const fake = await startFakeCapability({ filterQuery: options.filterQuery === true });
+  const fake = await startFakeCapability({ filterQuery: options.filterQuery === true, now: () => NOW });
   fake.setRecords(options.records ?? []);
   fake.setCompacts(options.compacts ?? []);
   const client = new CapabilityClient({

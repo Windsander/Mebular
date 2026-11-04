@@ -33,6 +33,7 @@ fleet doctor      --dir ~/.mebular --json
 - 供给 = **信任 ∩ 本机订阅 ∩ 对端订阅**；没有对端×按域白名单；
 - 对端有该域订阅记录时记录权威；没有任何记录时回退 hello 会话声明；
 - `sync.namespaces` 为空 = 订阅全部；控制台订阅开关走 `POST /admin/api/subscriptions`，热生效；
+- **兼容升级（CR-002）**：旧 daemon `config.json` 若只写 `sync.namespaces: ["tasks"]`，启动期会**幂等**追加 `agents`（能力卡/Agent 目录）；无需改 UI 或手工迁移。若该键为空/缺省，仍保持“订阅全部”语义，不会被收窄。
 - 水位按 `(peer, namespace)` 持久化；`fleet` 无独立水位命令，使用 `fleet doctor` 与 admin API 诊断。
 
 ## 4. 移出 / 恢复

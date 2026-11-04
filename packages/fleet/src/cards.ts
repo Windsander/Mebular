@@ -139,6 +139,15 @@ export interface CapabilityCardBackend {
 /** 发布能力卡 + Agent 目录所需的完整后端。 */
 export interface FleetAgentBackend extends CapabilityCardBackend, AgentDirectoryBackend {}
 
+/** 能力卡读取信任选项：默认只返回 author 绑定 + 签名验证通过的卡。 */
+export interface CapabilityCardReadOptions {
+  namespace?: string;
+  /** 调用方注入公钥（远端设备）；未注入时本机用 identity、远端用已认证 sync peer。 */
+  publicKeyFor?: (device: string) => Uint8Array | string | undefined;
+}
+
+type CapabilityCardReader = Pick<Mebular, 'graph'> & Partial<Pick<Mebular, 'identity' | 'sync'>>;
+
 export interface CapabilityCardCompileInput {
   config: Pick<FleetConfig, 'device' | 'namespace' | 'agents'>;
   /** 运行中执行器注册表；其 names 只用于 provenance/注册变化检测，不暴露 command。 */
@@ -383,7 +392,9 @@ function validateCardFields(input: unknown, requireSignature: boolean): Capabili
   if (card.v !== CAPABILITY_CARD_SCHEMA_VERSION) errors.push('v 必须为 1');
   if (card.kind !== CAPABILITY_CARD_KIND) errors.push(`kind 必须为 ${CAPABILITY_CARD_KIND}`);
   if (!nonEmptyString(card.device)) errors.push('device 必须为非空字符串');
+  else if (card.device === PLAN_SENTINEL) errors.push(`device 不得使用保留名 ${PLAN_SENTINEL}`);
   if (!nonEmptyString(card.agent)) errors.push('agent 必须为非空字符串');
+  else if (card.agent === PLAN_SENTINEL) errors.push(`agent 不得使用保留名 ${PLAN_SENTINEL}`);
   if (!Number.isInteger(card.version) || (card.version as number) < 0) errors.push('version 必须为非负整数');
   if (!Array.isArray(card.capabilities) || card.capabilities.some((value) => !nonEmptyString(value))) {
     errors.push('capabilities 必须为非空字符串数组');
@@ -444,11 +455,19 @@ function validateCardFields(input: unknown, requireSignature: boolean): Capabili
   return { ok: errors.length === 0, errors };
 }
 
-/** 读取本机/同步到的卡片（只接受 internal 包装正确的节点）。 */
+/**
+ * 读取能力卡：只返回 **author 绑定 + 签名验证通过** 的卡片。
+ * - `node.createdBy === card.device`；
+ * - 本机 device 用 `mebular.identity` 公钥；远端用已认证 `sync.getPeerPublicKey`；
+ * - 调用方也可注入 `publicKeyFor`（测试/离线校验）。
+ * 没有可信公钥或验证失败 → 丢弃；不把未验证卡交给路由/展示。
+ */
 export async function listCapabilityCards(
-  mebular: Pick<Mebular, 'graph'>,
-  namespace = AGENT_NAMESPACE,
+  mebular: CapabilityCardReader,
+  options: string | CapabilityCardReadOptions = {},
 ): Promise<AgentCapabilityCard[]> {
+  const opts = typeof options === 'string' ? { namespace: options } : options;
+  const namespace = opts.namespace ?? AGENT_NAMESPACE;
   const nodes = await mebular.graph.listNodes({ type: CAPABILITY_CARD_NODE_TYPE });
   const cards: AgentCapabilityCard[] = [];
   for (const node of nodes) {
@@ -458,7 +477,14 @@ export async function listCapabilityCards(
     if (!isRecord(internalObject) || internalObject.kind !== CAPABILITY_CARD_KIND) continue;
     const validation = validateAgentCapabilityCard(node.content);
     if (!validation.ok) continue;
-    cards.push(node.content as unknown as AgentCapabilityCard);
+    const card = node.content as unknown as AgentCapabilityCard;
+    if (node.createdBy !== card.device) continue;
+    const publicKey = opts.publicKeyFor?.(card.device)
+      ?? mebular.identity?.getDeviceKey(card.device)?.publicKey
+      ?? mebular.sync?.getPeerPublicKey?.(card.device);
+    if (publicKey === undefined) continue;
+    if (!(await verifyAgentCapabilityCardSignature(card, publicKey))) continue;
+    cards.push(card);
   }
   return cards;
 }

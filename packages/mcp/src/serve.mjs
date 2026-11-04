@@ -4166,6 +4166,17 @@ export async function startHttpServer({
             && (typeof payload.metadata !== 'object' || payload.metadata === null || Array.isArray(payload.metadata))) {
             return sendJson(res, 400, { ok: false, error: 'metadata 必须为对象' });
           }
+          // [raw-graph-debug] 不是内部对象写路径：能力卡必须走专用 /app/capability-cards，
+          // 角色卡/plan 也不能从这里的通用 metadata 写入口伪造。
+          const protectedInternalTypes = new Set(['agent_capability_card', 'agent_role_card', 'task_plan']);
+          const requestedInternalKind = payload.metadata?.internalObject?.kind;
+          if (protectedInternalTypes.has(type) || protectedInternalTypes.has(requestedInternalKind)) {
+            return sendJson(res, 403, {
+              ok: false,
+              error: 'internal_object_write_forbidden',
+              message: '内部对象必须走各自专用写入端点（能力卡：/app/capability-cards）',
+            });
+          }
           const node = await app.graph.createNode(
             type,
             typeof payload.content === 'object' && payload.content !== null ? payload.content : {},
@@ -4181,6 +4192,7 @@ export async function startHttpServer({
               id: node.id,
               type: node.type,
               namespace: node.namespace ?? 'default',
+              createdBy: node.createdBy,
               ...(node.metadata !== undefined ? { metadata: node.metadata } : {}),
             },
           });
@@ -4205,6 +4217,7 @@ export async function startHttpServer({
               id: n.id,
               type: n.type,
               namespace: n.namespace ?? 'default',
+              createdBy: n.createdBy,
               content: n.content,
               ...(n.metadata !== undefined ? { metadata: n.metadata } : {}),
             })),

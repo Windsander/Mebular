@@ -110,6 +110,8 @@ describe('P1 能力卡 schema / 生成 / 隐私', () => {
     expect(validateAgentCapabilityCard(withCommand).ok).toBe(false);
     const withEnv = { ...capability, runtime: { ...(capability.runtime as object), env: { TOKEN: 'x' } } };
     expect(validateAgentCapabilityCard(withEnv).ok).toBe(false);
+    expect(validateAgentCapabilityCard({ ...capability, agent: PLAN_SENTINEL }).ok).toBe(false);
+    expect(validateAgentCapabilityCard({ ...capability, device: PLAN_SENTINEL }).ok).toBe(false);
   });
 
   it('从 config + registry + 运行环境编译：字段齐全、无 command/env、tools 对齐 16 方法', () => {
@@ -193,6 +195,29 @@ describe('P1 签名 / 发布 / 版本 / tombstone', () => {
       expect(again.tombstoned).toBe(0);
       expect(again.unchanged).toBe(0);
       expect(latestCapabilityCards(await listCapabilityCards(mebular))[0]!.version).toBe(3);
+    } finally {
+      await mebular.shutdown();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('真实 fleet.config.json 空 agents：可加载，最后一张本机卡发 tombstone', async () => {
+    const dir = await tempDir('fleet-cards-empty-agents-');
+    await onboardDevice({ dir, device: 'device-A', agents: [{ name: 'worker', kind: 'echo' }] });
+    const mebular = await openMebular(dir, 'device-A');
+    try {
+      const path = fleetConfigPath(dir);
+      const initial = await loadFleetConfig(path);
+      await publishCapabilityCards({ mebular, config: initial, now: 100 });
+      await saveFleetConfig(path, { ...initial, agents: [] });
+      const loaded = await loadFleetConfig(path);
+      expect(loaded.agents).toEqual([]);
+      const result = await publishCapabilityCards({ mebular, config: loaded, now: 200 });
+      expect(result.tombstoned).toBe(1);
+      const latest = latestCapabilityCards(await listCapabilityCards(mebular));
+      expect(latest).toHaveLength(1);
+      expect(latest[0]!.tombstone).toBe(true);
+      expect(latest[0]!.version).toBe(2);
     } finally {
       await mebular.shutdown();
       await rm(dir, { recursive: true, force: true });
@@ -349,8 +374,16 @@ describe('P1 task_targets.cards additive + 旧调用 + __plan__ worker', () => {
       peerDevice: 'device-B',
     });
     const mebular = await openMebular(dir, 'device-A');
+    const bDir = await tempDir('fleet-cards-targets-b-');
+    const masterB = await Mebular.generateUserMasterKey();
+    const bMebular = new Mebular({
+      storagePath: join(bDir, 'store.jsonl'),
+      deviceId: 'device-B',
+      encryption: { userMasterKey: masterB.publicKey, userMasterPrivateKey: masterB.privateKey },
+      network: { enabled: false },
+    });
+    await bMebular.initialize();
     try {
-      const config = await loadFleetConfig(fleetConfigPath(dir));
       await agentDirectoryStore(mebular, AGENT_NAMESPACE).append({
         v: 1,
         device: 'device-B',
@@ -362,11 +395,10 @@ describe('P1 task_targets.cards additive + 旧调用 + __plan__ worker', () => {
         config: fleetConfig('device-B', [{ name: 'echo', kind: 'echo', capabilities: ['code.write'] }]),
         now: 1,
       })[0]!;
-      const card: AgentCapabilityCard = {
-        ...unsigned,
-        signature: { alg: 'Ed25519', keyId: 'device-B', sig: 'test-signature-not-verified' },
-      };
-      await appendCapabilityCard(mebular, card);
+      const signed = await signAgentCapabilityCard(bMebular, unsigned);
+      const bPublicKey = bMebular.identity.getDeviceKey('device-B')!.publicKey;
+      const nodeId = await appendCapabilityCard(mebular, signed);
+      await mebular.graph.updateNode(nodeId, { createdBy: 'device-B' });
       const store = new MebularTaskEventStore(mebular, { namespace: 'tasks' });
       await store.append(mkEvent('created', 'task-inflight', {
         to: { device: 'device-B', agent: 'echo' },
@@ -376,6 +408,8 @@ describe('P1 task_targets.cards additive + 旧调用 + __plan__ worker', () => {
       const app = {
         deviceId: 'device-A',
         graph: mebular.graph,
+        identity: mebular.identity,
+        sync: { getPeerPublicKey: (device: string) => (device === 'device-B' ? bPublicKey : undefined) },
         getSubscriptions: async (device: string) => (device === 'device-B' ? ['tasks'] : []),
         getPeerPath: (device: string) => (device === 'device-B' ? { kind: 'direct', address: 'test', since: 1 } : null),
         shutdown: async () => undefined,
@@ -401,6 +435,32 @@ describe('P1 task_targets.cards additive + 旧调用 + __plan__ worker', () => {
         },
       ]);
 
+      // 无公钥：cards 降级为空，旧 targets 不受影响。
+      const noKeyApp = {
+        ...app,
+        sync: { getPeerPublicKey: () => undefined },
+      };
+      const noKey = await toolByName('task_targets')!.handler({}, { dir, mebular: noKeyApp as never }) as {
+        targets: Array<Record<string, unknown>>;
+        cards: Array<Record<string, unknown>>;
+      };
+      expect(noKey.targets).toEqual(result.targets);
+      expect(noKey.cards).toEqual([]);
+
+      const brokenGraph = {
+        listNodes: async (filter?: { type?: string }) => {
+          if (filter?.type === CAPABILITY_CARD_KIND) throw new Error('cards read failed');
+          return mebular.graph.listNodes(filter);
+        },
+      };
+      const degraded = await toolByName('task_targets')!.handler({}, {
+        dir,
+        mebular: { ...noKeyApp, graph: brokenGraph } as never,
+      }) as { targets: Array<Record<string, unknown>>; cards: Array<Record<string, unknown>>; cardsWarning?: string };
+      expect(degraded.targets).toEqual(result.targets);
+      expect(degraded.cards).toEqual([]);
+      expect(degraded.cardsWarning).toContain('CARDS_UNAVAILABLE');
+
       const submit = await toolByName('task_submit')!.handler(
         { intent: 'old-explicit-to', to: { device: 'device-B', agent: 'worker' } },
         { dir, mebular: app as never },
@@ -412,8 +472,10 @@ describe('P1 task_targets.cards additive + 旧调用 + __plan__ worker', () => {
       expect(TASK_TOOLS).toHaveLength(16);
       expect(TASK_TOOLS.some((tool) => /^(plan|agent_card)_/.test(tool.name))).toBe(false);
     } finally {
+      await bMebular.shutdown();
       await mebular.shutdown();
       await rm(dir, { recursive: true, force: true });
+      await rm(bDir, { recursive: true, force: true });
     }
   });
 
@@ -446,6 +508,59 @@ describe('P1 task_targets.cards additive + 旧调用 + __plan__ worker', () => {
 });
 
 describe('P1 能力卡读取工具', () => {
+  it('读取信任：author 绑定 + 真签名；无公钥/伪造/篡改/作者不符均不返回', async () => {
+    const dir = await tempDir('fleet-cards-trust-');
+    await onboardDevice({ dir, device: 'device-A', agents: [{ name: 'worker', kind: 'echo' }] });
+    const a = await openMebular(dir, 'device-A');
+    const bDir = await tempDir('fleet-cards-trust-b-');
+    const masterB = await Mebular.generateUserMasterKey();
+    const b = new Mebular({
+      storagePath: join(bDir, 'store.jsonl'),
+      deviceId: 'device-B',
+      encryption: { userMasterKey: masterB.publicKey, userMasterPrivateKey: masterB.privateKey },
+      network: { enabled: false },
+    });
+    await b.initialize();
+    try {
+      const draft = compileCapabilityCards({
+        config: fleetConfig('device-B', [{ name: 'echo', kind: 'echo', capabilities: ['code.write'] }]),
+        now: 1,
+      })[0]!;
+      const signed = await signAgentCapabilityCard(b, draft);
+      const publicKey = b.identity.getDeviceKey('device-B')!.publicKey;
+      const validId = await appendCapabilityCard(a, signed);
+      await a.graph.updateNode(validId, { createdBy: 'device-B' });
+
+      expect((await listCapabilityCards(a, { publicKeyFor: (device) => (device === 'device-B' ? publicKey : undefined) }))
+        .map((card) => card.agent)).toEqual(['echo']);
+      // 无公钥（无 identity / 无在线 peer）→ 不返回。
+      expect(await listCapabilityCards(a)).toEqual([]);
+
+      const fakeSignature: AgentCapabilityCard = {
+        ...signed,
+        agent: 'fake-signature',
+        signature: { ...signed.signature, sig: 'AAAA' },
+      };
+      const fakeId = await appendCapabilityCard(a, fakeSignature);
+      await a.graph.updateNode(fakeId, { createdBy: 'device-B' });
+
+      const tampered: AgentCapabilityCard = { ...signed, agent: 'tampered', capabilities: ['evil'] };
+      const tamperedId = await appendCapabilityCard(a, tampered);
+      await a.graph.updateNode(tamperedId, { createdBy: 'device-B' });
+
+      const wrongAuthor: AgentCapabilityCard = { ...signed, agent: 'wrong-author' };
+      await appendCapabilityCard(a, wrongAuthor); // createdBy = device-A
+
+      const trusted = await listCapabilityCards(a, { publicKeyFor: (device) => (device === 'device-B' ? publicKey : undefined) });
+      expect(trusted.map((card) => card.agent)).toEqual(['echo']);
+    } finally {
+      await b.shutdown();
+      await a.shutdown();
+      await rm(dir, { recursive: true, force: true });
+      await rm(bDir, { recursive: true, force: true });
+    }
+  });
+
   it('activeCapabilityCards 排除 tombstone；latest 按版本取最大', () => {
     const base = compileCapabilityCards({ config: fleetConfig('device-A', [{ name: 'worker', kind: 'echo' }]), now: 1 })[0]!;
     const signed = (version: number, tombstone = false): AgentCapabilityCard => ({

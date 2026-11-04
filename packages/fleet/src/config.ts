@@ -171,7 +171,7 @@ export function validateFleetConfig(input: unknown): string[] {
     else if (js.port !== undefined && (typeof js.port !== 'number' || js.port < 0 || js.port > 65535)) errors.push('joinService.port 非法');
     else if (js.bind !== undefined && typeof js.bind !== 'string') errors.push('joinService.bind 非法');
   }
-  if (!Array.isArray(c.agents) || (c.agents as unknown[]).length === 0) errors.push('agents 必须为非空数组');
+  if (!Array.isArray(c.agents)) errors.push('agents 必须为数组');
   for (const agent of (Array.isArray(c.agents) ? c.agents : []) as Array<Record<string, unknown>>) {
     if (typeof agent?.name !== 'string' || agent.name.length === 0) errors.push('agent.name 非法');
     else if (agent.name === PLAN_SENTINEL) errors.push(`agent.name 不得使用保留名 ${PLAN_SENTINEL}`);
@@ -229,6 +229,17 @@ export function identityDeviceIdForStorage(storagePath: string): string | null {
   try {
     const record = JSON.parse(readFileSync(`${storagePath}.identity.json`, 'utf-8')) as Record<string, unknown>;
     return typeof record?.deviceId === 'string' && record.deviceId.length > 0 ? record.deviceId : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 读 `<storagePath>.identity.json` 的设备公钥 hex（只读；缺失或损坏返回 null）。 */
+export function identityPublicKeyForStorage(storagePath: string): string | null {
+  if (typeof storagePath !== 'string' || storagePath.length === 0) return null;
+  try {
+    const record = JSON.parse(readFileSync(`${storagePath}.identity.json`, 'utf-8')) as Record<string, unknown>;
+    return typeof record?.publicKeyHex === 'string' && record.publicKeyHex.length > 0 ? record.publicKeyHex : null;
   } catch {
     return null;
   }

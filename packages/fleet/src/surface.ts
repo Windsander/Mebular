@@ -488,23 +488,38 @@ export const TASK_TOOLS: TaskTool[] = [
         }
         const entries = await agentDirectoryStore(session.mebular, 'agents').all();
         const targets = expandTargets(entries, subscribed);
-        const cardEntries = await listCapabilityCards(session.mebular, 'agents');
-        const states = await statesOf(session.store);
-        const inflight = new Map<string, number>();
-        for (const state of states) {
-          if (state.terminal) continue;
-          const key = `${state.to.device}\u0000${state.to.agent}`;
-          inflight.set(key, (inflight.get(key) ?? 0) + 1);
+        let cards: ReturnType<typeof summarizeCapabilityCards> = [];
+        let cardsWarning: string | undefined;
+        try {
+          const cardEntries = await listCapabilityCards(session.mebular, 'agents');
+          const states = await statesOf(session.store);
+          const inflight = new Map<string, number>();
+          for (const state of states) {
+            if (state.terminal) continue;
+            const key = `${state.to.device}\u0000${state.to.agent}`;
+            inflight.set(key, (inflight.get(key) ?? 0) + 1);
+          }
+          const targetKeys = new Set(targets.map((target) => `${target.device}\u0000${target.agent}`));
+          cards = summarizeCapabilityCards(cardEntries, {
+            devices: subscribed,
+            online: (device) => {
+              const withPath = session.mebular as { getPeerPath?: (key: string) => unknown };
+              return typeof withPath.getPeerPath === 'function' ? withPath.getPeerPath(device) !== null : false;
+            },
+            inflight: (device, agent) => inflight.get(`${device}\u0000${agent}`) ?? 0,
+          }).filter((card) => targetKeys.has(`${card.device}\u0000${card.agent}`));
+        } catch (error) {
+          cards = [];
+          cardsWarning = `CARDS_UNAVAILABLE: ${(error as Error).message}`;
         }
-        const cards = summarizeCapabilityCards(cardEntries, {
-          devices: subscribed,
-          online: (device) => {
-            const withPath = session.mebular as { getPeerPath?: (key: string) => unknown };
-            return typeof withPath.getPeerPath === 'function' ? withPath.getPeerPath(device) !== null : false;
-          },
-          inflight: (device, agent) => inflight.get(`${device}\u0000${agent}`) ?? 0,
-        });
-        return { ok: true, namespace: session.namespace, subscribed, targets, cards };
+        return {
+          ok: true,
+          namespace: session.namespace,
+          subscribed,
+          targets,
+          cards,
+          ...(cardsWarning !== undefined ? { cardsWarning } : {}),
+        };
       } finally {
         await session.close();
       }

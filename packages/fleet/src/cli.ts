@@ -29,7 +29,7 @@ import type { TaskEventStore } from './store/file-store.js';
 import { NullTransport } from './transport/null.js';
 import { SpoolTransport } from './transport/spool.js';
 import { LocalQuota } from './quota.js';
-import { fleetConfigPath, loadFleetConfig, loadToolConfig, parseAgentSpecs, readMasterKeyFile, type FleetConfig } from './config.js';
+import { fleetConfigPath, loadFleetConfig, loadToolConfig, parseAgentSpecs, readMasterKeyFile, identityPublicKeyForStorage, type FleetConfig } from './config.js';
 import {
   buildRegistry,
   declareNamespace,
@@ -508,11 +508,13 @@ function createCardPublisher(
     return new CapabilityCardPublisher({ mebular, config, ...(registry !== undefined ? { registry } : {}), log });
   }
   if (config.daemon?.endpoint !== undefined) {
+    const localPublicKey = identityPublicKeyForStorage(config.storagePath);
     return new CapabilityCardPublisher({
       backend: new DaemonAgentBackend({
         endpoint: config.daemon.endpoint,
         ...(config.daemon.token !== undefined ? { token: config.daemon.token } : {}),
         ...(config.daemon.tokenFile !== undefined ? { tokenFile: config.daemon.tokenFile } : {}),
+        publicKeyFor: (device) => (device === config.device && localPublicKey !== null ? localPublicKey : undefined),
       }),
       config,
       ...(registry !== undefined ? { registry } : {}),

@@ -15,6 +15,7 @@ import {
 } from '../agentdir.js';
 import {
   validateAgentCapabilityCard,
+  verifyAgentCapabilityCardSignature,
   type AgentCapabilityCard,
   type CapabilityCardBackend,
   type CapabilityCardDraft,
@@ -26,6 +27,7 @@ interface DaemonNode {
   type: string;
   namespace: string;
   content: unknown;
+  createdBy?: string;
   metadata?: Record<string, unknown>;
 }
 
@@ -59,6 +61,8 @@ export interface DaemonAgentBackendOptions {
   tokenFile?: string;
   namespace?: string;
   timeoutMs?: number;
+  /** 卡读取信任：远端公钥由调用方注入；本机公钥可用 identity 文件/守护密钥。 */
+  publicKeyFor?: (device: string) => Uint8Array | string | undefined;
 }
 
 function daemonError(message: string, code?: string): Error {
@@ -73,6 +77,7 @@ export class DaemonAgentBackend implements CapabilityCardBackend, AgentDirectory
   private readonly namespace: string;
   private readonly token: string | undefined;
   private readonly timeoutMs: number;
+  private readonly publicKeyFor: ((device: string) => Uint8Array | string | undefined) | undefined;
 
   constructor(options: DaemonAgentBackendOptions) {
     if (typeof options.endpoint !== 'string' || options.endpoint.length === 0) {
@@ -82,6 +87,7 @@ export class DaemonAgentBackend implements CapabilityCardBackend, AgentDirectory
     this.namespace = options.namespace ?? AGENT_NAMESPACE;
     this.token = readDaemonToken(options);
     this.timeoutMs = options.timeoutMs ?? 15_000;
+    this.publicKeyFor = options.publicKeyFor;
   }
 
   private async listNodes(type: string): Promise<DaemonNode[]> {
@@ -100,7 +106,13 @@ export class DaemonAgentBackend implements CapabilityCardBackend, AgentDirectory
       const internalObject = node.metadata.internalObject;
       if (typeof internalObject !== 'object' || internalObject === null || Array.isArray(internalObject)) continue;
       if ((internalObject as { kind?: unknown }).kind !== 'agent_capability_card') continue;
-      if (validateAgentCapabilityCard(node.content).ok) cards.push(node.content as AgentCapabilityCard);
+      if (!validateAgentCapabilityCard(node.content).ok) continue;
+      const card = node.content as AgentCapabilityCard;
+      if (node.createdBy !== card.device) continue;
+      const publicKey = this.publicKeyFor?.(card.device);
+      if (publicKey === undefined) continue;
+      if (!(await verifyAgentCapabilityCardSignature(card, publicKey))) continue;
+      cards.push(card);
     }
     return cards;
   }

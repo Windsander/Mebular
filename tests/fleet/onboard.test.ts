@@ -64,7 +64,7 @@ describe('config：主密钥与配置 IO', () => {
     expect(reg.resolve('echo')).not.toBeNull();
     expect(reg.resolve('nope')).toBeNull(); // 未知 agent 不静默回退
 
-    expect(validateFleetConfig({ ...base, agents: [] }).some((e) => e.includes('agents'))).toBe(true);
+    expect(validateFleetConfig({ ...base, agents: [] })).toEqual([]);
     expect(validateFleetConfig({ ...base, agents: [{ name: 'x', kind: 'nope' }] }).some((e) => e.includes('agent.kind'))).toBe(true);
     expect(validateFleetConfig({ ...base, agents: [{ name: 'x', kind: 'command' }] }).some((e) => e.includes('需要 command'))).toBe(true);
     expect(validateFleetConfig({ ...base, agents: [{ name: 'x', kind: 'command', command: '' }] }).some((e) => e.includes('需要 command'))).toBe(true);

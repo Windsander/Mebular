@@ -12,6 +12,7 @@ credentials.  Every request is asserted against the sidecar host API
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -110,11 +111,14 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
         return
 
-    def _send(self, status: int, payload: Dict[str, Any]) -> None:
+    def _send(self, status: int, payload: Dict[str, Any],
+              headers: Optional[Dict[str, str]] = None) -> None:
         raw = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(raw)))
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
         self.end_headers()
         try:
             self.wfile.write(raw)
@@ -133,6 +137,10 @@ class _Handler(BaseHTTPRequestHandler):
         }
 
     def _error(self, status: int, code: str, message: str = "fake sidecar error") -> None:
+        fake = self.server.fake
+        headers = {}
+        if fake.retry_after:
+            headers["Retry-After"] = str(fake.retry_after)
         self._send(
             status,
             {
@@ -141,6 +149,7 @@ class _Handler(BaseHTTPRequestHandler):
                 "apiVersion": 1,
                 "error": {"code": code, "message": message, "retryable": status >= 500},
             },
+            headers=headers,
         )
 
     def _body(self) -> Dict[str, Any]:
@@ -168,7 +177,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if parsed.path.startswith(f"{API}/checkpoints/"):
             if fake.mode == "error":
-                self._error(503, "runtime_unavailable")
+                self._error(fake.error_status, fake.error_code)
                 return
             self._send(200, self._envelope({
                 "checkpoint": {
@@ -188,11 +197,27 @@ class _Handler(BaseHTTPRequestHandler):
         if parsed.path.startswith(f"{API}/checkpoints/"):
             fake.checkpoint_puts.append(body)
             if fake.mode == "error":
-                self._error(503, "runtime_unavailable")
+                self._error(fake.error_status, fake.error_code)
                 return
-            if fake.checkpoint_conflict and body.get("expectedRevision") is None:
-                fake.checkpoint_conflict = False
+            if fake.checkpoint_always_conflict or (
+                fake.checkpoint_conflict and body.get("expectedRevision") is None
+            ):
+                if not fake.checkpoint_always_conflict:
+                    fake.checkpoint_conflict = False
                 self._error(409, "revision_mismatch", "revision mismatch")
+                return
+            if fake.checkpoint_pending:
+                self._send(202, self._envelope({
+                    "checkpoint": {
+                        "revision": None,
+                        "pending": True,
+                        "summary": body.get("summary"),
+                        "state": body.get("state"),
+                    },
+                    "pending": True,
+                    "source": "cache",
+                    "degraded": True,
+                }))
                 return
             fake.saved_checkpoint = body
             self._send(200, self._envelope({
@@ -219,7 +244,7 @@ class _Handler(BaseHTTPRequestHandler):
             if fake.mode == "slow":
                 time.sleep(fake.delay)
             if fake.mode == "error":
-                self._error(503, "runtime_not_ready")
+                self._error(fake.error_status, fake.error_code)
                 return
             if fake.context_missing:
                 self._error(404, "not_found", "context route missing")
@@ -250,7 +275,7 @@ class _Handler(BaseHTTPRequestHandler):
             if fake.mode == "slow":
                 time.sleep(fake.delay)
             if fake.mode == "error":
-                self._error(503, "runtime_not_ready")
+                self._error(fake.error_status, fake.error_code)
                 return
             self._send(200, self._envelope({
                 "recallId": "rr_test",
@@ -271,7 +296,7 @@ class _Handler(BaseHTTPRequestHandler):
         if parsed.path.startswith(f"{API}/recall/") and parsed.path.endswith("/expand"):
             fake.expand_requests.append(body)
             if fake.mode == "error":
-                self._error(503, "runtime_not_ready")
+                self._error(fake.error_status, fake.error_code)
                 return
             self._send(200, self._envelope(fake.expand_response))
             return
@@ -282,7 +307,7 @@ class _Handler(BaseHTTPRequestHandler):
             if fake.ingest_delay:
                 time.sleep(fake.ingest_delay)
             if fake.mode == "error":
-                self._error(503, "runtime_not_ready")
+                self._error(fake.error_status, fake.error_code)
                 return
             request_id = str(body.get("requestId") or "")
             duplicate = request_id in fake.seen
@@ -319,6 +344,9 @@ class FakeSidecar:
         self.mode = "ok"
         self.delay = 0.0
         self.ingest_delay = 0.0
+        self.error_status = 503
+        self.error_code = "runtime_not_ready"
+        self.retry_after = ""
         self.context_missing = False
         self.context_blocks: List[str] = []
         self.fragments: List[Dict[str, Any]] = []
@@ -329,6 +357,8 @@ class FakeSidecar:
         self.saved_checkpoint: Optional[Dict[str, Any]] = None
         self.checkpoint_revision = 1
         self.checkpoint_conflict = False
+        self.checkpoint_always_conflict = False
+        self.checkpoint_pending = False
         self.ingest_duplicates: List[bool] = []
         self.expand_requests: List[Dict[str, Any]] = []
         self.expand_response: Dict[str, Any] = {"detail": None}
@@ -362,6 +392,9 @@ class FakeSidecar:
         self.mode = "ok"
         self.delay = 0.0
         self.ingest_delay = 0.0
+        self.error_status = 503
+        self.error_code = "runtime_not_ready"
+        self.retry_after = ""
         self.context_missing = False
         self.context_blocks = []
         self.fragments = []
@@ -372,6 +405,8 @@ class FakeSidecar:
         self.saved_checkpoint = None
         self.checkpoint_revision = 1
         self.checkpoint_conflict = False
+        self.checkpoint_always_conflict = False
+        self.checkpoint_pending = False
         self.ingest_duplicates.clear()
         self.expand_requests.clear()
         self.expand_response = {"detail": None}
@@ -508,6 +543,24 @@ class BaseCase(unittest.TestCase):
                 return True
             time.sleep(0.01)
         return predicate()
+
+    @property
+    def spool_path(self) -> Path:
+        return self.hermes_home / "mebular-memory" / "queue.jsonl"
+
+    @property
+    def dead_spool_path(self) -> Path:
+        return self.hermes_home / "mebular-memory" / "dead.jsonl"
+
+    @staticmethod
+    def read_jsonl(path: Path) -> List[Dict[str, Any]]:
+        if not path.exists():
+            return []
+        records: List[Dict[str, Any]] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                records.append(json.loads(line))
+        return records
 
 
 class DiscoveryTests(BaseCase):
@@ -890,7 +943,7 @@ class ProviderTests(BaseCase):
         self.assertEqual(provider.on_pre_compress([{"role": "user", "content": "x"}]), "")
         self.assertGreaterEqual(provider.checkpoint_pending(), 1)
         server.mode = "ok"
-        self.assertTrue(provider.flush(timeout=2.0))
+        self.assertTrue(provider.flush(timeout=5.0))
         self.assertEqual(provider.checkpoint_pending(), 0)
         self.assertTrue(server.checkpoint_puts)
 
@@ -1031,6 +1084,340 @@ class ProviderTests(BaseCase):
         self.assertNotIn(self.host_token, serialized)
         self.assertEqual(status["apiVersion"], "1")
         self.assertEqual(status["features"]["checkpoints"], True)
+
+
+class SpoolContractTests(BaseCase):
+    def test_spool_redacts_and_minimises_before_disk_and_network(self) -> None:
+        server = self.fake_server()
+        server.mode = "error"
+        provider = self.make_provider(server, sync_max_attempts=20, ingest_timeout=0.2)
+        secret = "SENTINEL-SECRET-1234567890"
+        text = (
+            f"Authorization: Bearer sk-live-{secret}\n"
+            f"api_key={secret}\n"
+            f"password={secret.lower()}\n"
+            f"ghp_{'A1B2C3D4E5F6G7H8I9J0K1L2'}\n"
+            f"密码：{secret}"
+        )
+        provider.sync_turn(text, "noted", session_id="s1")
+        provider._enqueue({
+            "requestId": "minimise-1",
+            "agentId": "hermes",
+            "chunks": [{
+                "role": "user",
+                "text": "ordinary text",
+                "contentHash": "not-a-hash",
+                "secretExtra": secret,
+            }],
+            "extra": secret,
+            "apiToken": secret,
+        })
+        self.assertTrue(self.wait_until(lambda: provider.pending() >= 2, timeout=2.0))
+        self.assertTrue(self.wait_until(lambda: bool(server.ingests), timeout=2.0))
+        raw = self.spool_path.read_text(encoding="utf-8")
+        self.assertNotIn(secret, raw)
+        self.assertNotIn(secret.lower(), raw)
+        self.assertNotIn("A1B2C3D4E5F6G7H8I9J0K1L2", raw)
+        self.assertIn("[redacted]", raw)
+
+        records = self.read_jsonl(self.spool_path)
+        for record in records:
+            self.assertLessEqual(set(record), {
+                "id", "kind", "payload", "attempts", "createdAt", "expiresAt",
+                "lastError",
+            })
+            self.assertIn("id", record)
+            self.assertIn(record["kind"], {"ingest", "checkpoint"})
+            payload = record["payload"]
+            self.assertNotIn("extra", payload)
+            self.assertNotIn("apiToken", payload)
+            if record["kind"] == "ingest":
+                for chunk in payload.get("chunks") or []:
+                    self.assertNotIn("secretExtra", chunk)
+                    expected = hashlib.sha256(chunk["text"].encode("utf-8")).hexdigest()
+                    self.assertEqual(chunk["contentHash"], f"sha256:{expected}")
+
+        self.assertTrue(server.ingests)
+        sent = json.dumps(server.ingests, ensure_ascii=False)
+        self.assertNotIn(secret, sent)
+        self.assertNotIn(secret.lower(), sent)
+        self.assertNotIn(secret, json.dumps(provider.get_status_config(), ensure_ascii=False))
+
+        # The exported sentinel must not be recoverable from any plugin file.
+        for path in (self.hermes_home / "mebular-memory").glob("*"):
+            if path.is_file():
+                self.assertNotIn(secret, path.read_text(encoding="utf-8", errors="ignore"))
+
+    def test_spool_permissions_capacity_and_status_counts(self) -> None:
+        server = self.fake_server()
+        server.mode = "error"
+        provider = self.make_provider(server, queue_limit=3, sync_max_attempts=20)
+        for index in range(6):
+            provider._enqueue({"requestId": f"capacity-{index}", "chunks": []})
+        self.assertLessEqual(provider.pending(), 3)
+        self.assertEqual(stat.S_IMODE(self.spool_path.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(self.spool_path.parent.stat().st_mode), 0o700)
+        status = provider.get_status_config()
+        self.assertEqual(status["spool"]["limit"], 3)
+        self.assertEqual(status["spool"]["retentionDays"], 30)
+        self.assertGreaterEqual(status["spool"]["rejected"], 3)
+        self.assertLessEqual(status["counts"]["spoolPending"], 3)
+        self.assertGreater(status["counts"]["spoolBytes"], 0)
+        # Rejecting new work keeps the oldest bounded evidence instead of
+        # silently evicting it.
+        first = self.read_jsonl(self.spool_path)[0]
+        self.assertEqual(first["payload"]["requestId"], "capacity-0")
+
+    def test_spool_expiry_uses_30_days_or_earlier_deadline(self) -> None:
+        now = int(time.time() * 1000)
+        day = 24 * 60 * 60 * 1000
+        directory = self.hermes_home / "mebular-memory"
+        directory.mkdir(parents=True)
+        records = [
+            {
+                "id": "expired-30d",
+                "kind": "ingest",
+                "payload": {"requestId": "r-30d", "chunks": []},
+                "attempts": 0,
+                "createdAt": now - 31 * day,
+                "expiresAt": now - day,
+            },
+            {
+                "id": "expired-deadline",
+                "kind": "ingest",
+                "payload": {"requestId": "r-deadline", "chunks": []},
+                "attempts": 0,
+                "createdAt": now,
+                "expiresAt": now - 1000,
+            },
+        ]
+        self.spool_path.write_text(
+            "\n".join(json.dumps(record) for record in records) + "\n",
+            encoding="utf-8",
+        )
+        spool = memory_plugin._Spool(self.spool_path, 100)
+        self.assertEqual(spool.depth(), 0)
+        self.assertEqual(spool.dead_count(), 2)
+        self.assertEqual(spool.last_dead_reason(), "retention_expired")
+        self.assertEqual(stat.S_IMODE(self.spool_path.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(self.dead_spool_path.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(self.dead_spool_path.parent.stat().st_mode), 0o700)
+        dead_ids = {record["id"] for record in self.read_jsonl(self.dead_spool_path)}
+        self.assertEqual(dead_ids, {"expired-30d", "expired-deadline"})
+
+    def test_checkpoint_pending_persists_and_replays_with_stable_id(self) -> None:
+        server = self.fake_server()
+        server.mode = "error"
+        provider = self.make_provider(server, sync_max_attempts=20)
+        messages = [
+            {"role": "user", "content": "checkpoint pending"},
+            {"role": "assistant", "content": "noted"},
+        ]
+        provider.on_pre_compress(messages)
+        self.assertGreaterEqual(provider.checkpoint_pending(), 1)
+        records = [record for record in self.read_jsonl(self.spool_path)
+                   if record["kind"] == "checkpoint"]
+        self.assertEqual(len(records), 1)
+        item_id = records[0]["id"]
+        request_id = records[0]["payload"]["requestId"]
+        provider.shutdown()
+
+        # Re-open while still offline: the same persisted item must be visible.
+        second = self.make_provider(server, sync_max_attempts=20)
+        self.assertGreaterEqual(second.checkpoint_pending(), 1)
+        reopened = [record for record in self.read_jsonl(self.spool_path)
+                    if record["kind"] == "checkpoint"]
+        self.assertEqual(reopened[0]["id"], item_id)
+        server.mode = "ok"
+        server.checkpoint_puts.clear()
+        self.assertTrue(second.flush(timeout=3.0))
+        self.assertEqual(second.checkpoint_pending(), 0)
+        self.assertTrue(any(body["requestId"] == request_id
+                            for body in server.checkpoint_puts))
+        self.assertIsNotNone(server.saved_checkpoint)
+
+    def test_checkpoint_202_removes_host_copy_without_claiming_commit(self) -> None:
+        server = self.fake_server()
+        server.checkpoint_pending = True
+        provider = self.make_provider(server)
+        self.assertEqual(provider.on_pre_compress([
+            {"role": "user", "content": "handoff"},
+        ]), "")
+        self.assertTrue(provider.flush(timeout=2.0))
+        self.assertTrue(server.checkpoint_puts)
+        self.assertEqual(provider.checkpoint_pending(), 0)
+        self.assertIsNone(server.saved_checkpoint)
+        status = provider.get_status_config()
+        self.assertEqual(status["counts"]["checkpointHandoffs"], 1)
+        self.assertEqual(status["lastWarning"]["code"], "checkpoint_queued_outbox")
+        self.assertFalse(any(record["kind"] == "checkpoint"
+                             for record in self.read_jsonl(self.spool_path)))
+
+    def test_checkpoint_pending_is_not_reported_when_spool_write_fails(self) -> None:
+        server = self.fake_server()
+        server.mode = "error"
+        provider = self.make_provider(server, sync_max_attempts=20)
+        with mock.patch.object(
+            provider._spool,
+            "append",
+            side_effect=memory_plugin._SpoolUnavailable("disk full"),
+        ):
+            provider.on_pre_compress([{"role": "user", "content": "no durable spool"}])
+        self.assertEqual(provider.checkpoint_pending(), 0)
+        self.assertGreaterEqual(provider.get_status_config()["counts"]["checkpointFailures"], 1)
+        self.assertEqual(
+            provider.get_status_config()["lastWarning"]["code"],
+            "checkpoint_persist_failed",
+        )
+
+    def test_sync_max_attempts_is_a_terminal_bound(self) -> None:
+        server = self.fake_server()
+        server.mode = "error"
+        server.error_status = 503
+        server.error_code = "runtime_not_ready"
+        provider = self.make_provider(server, sync_max_attempts=2, ingest_timeout=0.2)
+        provider.sync_turn("bounded", "retry", session_id="s1")
+        self.assertTrue(self.wait_until(
+            lambda: provider.get_status_config()["counts"]["spoolDead"] >= 1,
+            timeout=5.0,
+        ))
+        self.assertEqual(provider.pending(), 0)
+        dead = self.read_jsonl(self.dead_spool_path)
+        self.assertEqual(len(dead), 1)
+        self.assertEqual(dead[0]["attempts"], 2)
+        self.assertEqual(dead[0]["reason"], "runtime_not_ready:max_attempts")
+        status = provider.get_status_config()
+        self.assertEqual(status["counts"]["spoolDead"], 1)
+        self.assertEqual(status["spool"]["lastDeadReason"], "runtime_not_ready:max_attempts")
+
+    def test_401_is_bounded_and_does_not_grow_pending_forever(self) -> None:
+        server = self.fake_server()
+        server.mode = "error"
+        server.error_status = 401
+        server.error_code = "unauthorized"
+        provider = self.make_provider(server, sync_max_attempts=2, ingest_timeout=0.2)
+        provider.sync_turn("auth one", "no", session_id="s1")
+        self.assertTrue(self.wait_until(
+            lambda: provider.get_status_config()["counts"]["spoolDead"] >= 1,
+            timeout=5.0,
+        ))
+        self.assertEqual(provider.pending(), 0)
+        # Each worker attempt performs one token-refresh retry, then stops.
+        self.assertLessEqual(len(server.ingests), 4)
+        provider.sync_turn("auth two", "no", session_id="s1")
+        self.assertTrue(self.wait_until(
+            lambda: provider.get_status_config()["counts"]["spoolDead"] >= 2,
+            timeout=5.0,
+        ))
+        self.assertEqual(provider.pending(), 0)
+        self.assertLessEqual(len(server.ingests), 8)
+
+    def test_429_retry_after_is_not_a_tight_loop(self) -> None:
+        server = self.fake_server()
+        server.mode = "error"
+        server.error_status = 429
+        server.error_code = "rate_limited"
+        server.retry_after = "1"
+        provider = self.make_provider(server, sync_max_attempts=5, ingest_timeout=0.2)
+        provider.sync_turn("rate limited", "wait", session_id="s1")
+        self.assertTrue(self.wait_until(lambda: len(server.ingests) >= 1, timeout=2.0))
+        first_count = len(server.ingests)
+        time.sleep(0.3)
+        self.assertEqual(len(server.ingests), first_count)
+        self.assertGreaterEqual(provider.pending(), 1)
+
+    def test_mode_mismatch_does_not_grow_spool_or_retry_forever(self) -> None:
+        server = self.fake_server()
+        server.mode = "error"
+        server.error_status = 409
+        server.error_code = "mode_mismatch"
+        provider = self.make_provider(server, sync_max_attempts=5)
+        provider.sync_turn("disabled one", "no", session_id="s1")
+        self.assertTrue(self.wait_until(
+            lambda: "modeBlocked" in provider.get_status_config(),
+            timeout=3.0,
+        ))
+        # The triggering pending item is retained, not retried or deleted.
+        self.assertEqual(provider.pending(), 1)
+        requests_after_disable = len(server.ingests)
+        checkpoint_puts_after_disable = len(server.checkpoint_puts)
+        for index in range(10):
+            provider.sync_turn(f"disabled {index}", "no", session_id="s1")
+        provider.on_pre_compress([{"role": "user", "content": "disabled checkpoint"}])
+        time.sleep(0.3)
+        self.assertEqual(provider.pending(), 1)
+        self.assertEqual(provider.checkpoint_pending(), 0)
+        self.assertEqual(len(server.ingests), requests_after_disable)
+        self.assertEqual(len(server.checkpoint_puts), checkpoint_puts_after_disable)
+        status = provider.get_status_config()
+        self.assertEqual(status["counts"]["spoolPending"], 1)
+        self.assertEqual(status["counts"]["spoolDead"], 0)
+        self.assertIn("modeBlocked", status)
+
+    def test_mode_mismatch_recovers_on_fresh_active_discovery(self) -> None:
+        server = self.fake_server()
+        provider = self.make_provider(server, discovery=True, sync_max_attempts=5)
+        server.mode = "error"
+        server.error_status = 409
+        server.error_code = "mode_mismatch"
+        provider.sync_turn("disabled", "no", session_id="s1")
+        self.assertTrue(self.wait_until(
+            lambda: "modeBlocked" in provider.get_status_config(),
+            timeout=3.0,
+        ))
+        self.assertEqual(provider.pending(), 1)
+
+        server.mode = "ok"
+        self.write_discovery(server, updatedAt=int(time.time() * 1000) + 1000)
+        provider._ensure_runtime(force=True)
+        self.assertNotIn("modeBlocked", provider.get_status_config())
+        self.assertTrue(provider.flush(timeout=2.0))
+        self.assertEqual(provider.pending(), 0)
+        self.assertTrue(server.ingests)
+
+    def test_queued_checkpoint_revision_conflict_never_rebases(self) -> None:
+        server = self.fake_server()
+        provider = self.make_provider(server)
+        server.checkpoint_always_conflict = True
+        payload = provider._checkpoint_payload(
+            [{"role": "user", "content": "queued revision"}], kind="pre_compress"
+        )
+        provider._spool.append("checkpoint", payload)
+        provider._wake.set()
+        self.assertTrue(self.wait_until(
+            lambda: provider.get_status_config()["counts"]["spoolDead"] >= 1,
+            timeout=3.0,
+        ))
+        checkpoint_gets = [
+            entry for entry in server.requests
+            if entry["method"] == "GET" and entry["path"].startswith(f"{API}/checkpoints/")
+        ]
+        self.assertEqual(checkpoint_gets, [])
+        dead = self.read_jsonl(self.dead_spool_path)
+        self.assertEqual(dead[-1]["reason"], "revision_mismatch")
+
+    def test_native_memory_files_are_never_modified(self) -> None:
+        memory_file = self.hermes_home / "MEMORY.md"
+        user_file = self.hermes_home / "USER.md"
+        memory_file.write_text("# Native memory\n- keep me\n", encoding="utf-8")
+        user_file.write_text("# Native user\n- keep me too\n", encoding="utf-8")
+        before = {
+            path: hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in (memory_file, user_file)
+        }
+        server = self.fake_server()
+        provider = self.make_provider(server)
+        provider.on_memory_write("add", "memory", "mirrored?")
+        provider.on_memory_write("replace", "user", "mirrored?")
+        provider.sync_turn("ordinary turn", "noted", session_id="s1")
+        provider.on_pre_compress([{"role": "user", "content": "compress me"}])
+        self.assertTrue(provider.flush(timeout=2.0))
+        provider.shutdown()
+        after = {
+            path: hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in (memory_file, user_file)
+        }
+        self.assertEqual(before, after)
 
 
 class CompanionTests(BaseCase):

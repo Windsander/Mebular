@@ -5,7 +5,7 @@
 
 import { describe, it, expect, afterEach } from '@jest/globals';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -209,7 +209,7 @@ describe('serve + Memory Runtime supervisor', () => {
     try {
       const { home, base } = await start({ enabled: false });
       const lockPath = join(home, 'config.json.write-lock');
-      await writeFile(lockPath, JSON.stringify({ pid: 999999, at: Date.now() }), 'utf-8');
+      await writeFile(lockPath, JSON.stringify({ pid: process.pid, at: Date.now(), owner: 'other-owner' }), 'utf-8');
       const consoleResponse = await fetch(`${base}/console/`);
       const csrf = consoleResponse.headers.get('x-mebular-csrf');
       const cookie = consoleResponse.headers.get('set-cookie')?.split(';')[0];
@@ -227,6 +227,54 @@ describe('serve + Memory Runtime supervisor', () => {
       if (previousTimeout === undefined) delete process.env.MEBULAR_CONFIG_LOCK_TIMEOUT_MS;
       else process.env.MEBULAR_CONFIG_LOCK_TIMEOUT_MS = previousTimeout;
     }
+  }, 15000);
+
+  it('config 锁：死 PID/过期锁可接管并重建，后续写入成功', async () => {
+    const { home, base } = await start({ enabled: false });
+    const lockPath = join(home, 'config.json.write-lock');
+    await writeFile(lockPath, JSON.stringify({
+      pid: 999999,
+      at: Date.now() - 60_000,
+      owner: 'stale-owner',
+    }), 'utf-8');
+    const consoleResponse = await fetch(`${base}/console/`);
+    const csrf = consoleResponse.headers.get('x-mebular-csrf');
+    const cookie = consoleResponse.headers.get('set-cookie')?.split(';')[0];
+    const patch = () => fetch(`${base}/admin/api/config`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-mebular-csrf': csrf, cookie },
+      body: JSON.stringify({ patch: { 'memoryRuntime.enabled': true } }),
+    });
+    const first = await patch();
+    expect(first.status).toBe(200);
+    await waitFor(() => !existsSync(lockPath));
+    const second = await patch();
+    expect(second.status).toBe(200);
+    await waitFor(() => !existsSync(lockPath));
+    expect(JSON.parse(await readFile(join(home, 'config.json'), 'utf-8')).memoryRuntime.enabled).toBe(true);
+  }, 15000);
+
+  it('config 锁获取异常会释放进程内队列，修复后可重建锁并写入', async () => {
+    if (process.platform === 'win32') return;
+    const { home, base } = await start({ enabled: false });
+    const consoleResponse = await fetch(`${base}/console/`);
+    const csrf = consoleResponse.headers.get('x-mebular-csrf');
+    const cookie = consoleResponse.headers.get('set-cookie')?.split(';')[0];
+    const patch = () => fetch(`${base}/admin/api/config`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-mebular-csrf': csrf, cookie },
+      body: JSON.stringify({ patch: { 'memoryRuntime.enabled': true } }),
+    });
+    await chmod(home, 0o500);
+    try {
+      const failed = await patch();
+      expect(failed.status).toBe(500);
+    } finally {
+      await chmod(home, 0o700);
+    }
+    const recovered = await patch();
+    expect(recovered.status).toBe(200);
+    await waitFor(() => !existsSync(join(home, 'config.json.write-lock')));
   }, 15000);
 
   it('enabled：异步启动 sidecar，overview 只读展示且不泄漏 token；关闭时停止', async () => {

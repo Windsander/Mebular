@@ -550,6 +550,7 @@ export class MemoryRuntimeSupervisor {
     this.childSecrets = [];
     this.managedInstance = null;
     this.dormantLock = null;
+    this.dormantLockInvalidated = false;
     this.startPromise = null;
     this.restartTimer = null;
     this.cooldownTimer = null;
@@ -650,7 +651,7 @@ export class MemoryRuntimeSupervisor {
     return body.mode === discovery.mode || (allowDormant && body.mode === 'mcp');
   }
 
-  async #fetchHealth(discovery, { acceptDormant = false, acceptNonReady = false } = {}) {
+  async #fetchHealth(discovery, { acceptDormant = false } = {}) {
     if (!this.fetchImpl || typeof discovery?.healthUrl !== 'string') return { ok: false };
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), Math.max(1, this.healthTimeoutMs));
@@ -666,7 +667,7 @@ export class MemoryRuntimeSupervisor {
       const ready = body?.ready !== false;
       const dormant = acceptDormant && body?.mode === 'mcp' && body?.state === 'stopped';
       return {
-        ok: body?.ok !== false && (ready || dormant || acceptNonReady),
+        ok: body?.ok !== false && (ready || dormant),
         degraded: body?.degraded === true || body?.state === 'degraded',
         body,
       };
@@ -757,6 +758,7 @@ export class MemoryRuntimeSupervisor {
           || lock.startedAt !== this.dormantLock.startedAt
           || !pidAlive(lock.pid)
           || credential !== this.dormantLock.credential) {
+          this.dormantLockInvalidated = true;
           this.dormantLock = null;
         } else {
           this.#setState({
@@ -1485,7 +1487,7 @@ export class MemoryRuntimeSupervisor {
    * 显式 stop 前的实例校验：与 attach 使用同一套 freshness/URL/home/profile/version、
    * health 身份和 token 鉴权的 /status 校验；任何一项无法确认都不得发送信号。
    */
-  async #verifyLiveInstance(discovery, { requireDiscovery = true, allowNonReady = false } = {}) {
+  async #verifyLiveInstance(discovery, { requireDiscovery = true } = {}) {
     if (!discovery || !Number.isInteger(discovery.pid) || !pidAlive(discovery.pid)) return false;
     if (this.#homeMismatch(discovery) || this.#profileMismatch(discovery) || this.#versionMismatch(discovery)) {
       return false;
@@ -1493,18 +1495,14 @@ export class MemoryRuntimeSupervisor {
     if (!validDiscoveryUrls(discovery)) return false;
     const age = this.now() - discovery.updatedAt;
     if (!Number.isFinite(age) || age < -1000 || age > MEMORY_RUNTIME_DISCOVERY_STALE_MS) return false;
-    const health = await this.#fetchHealth(discovery, {
-      acceptDormant: true,
-      acceptNonReady: allowNonReady,
-    });
+    const health = await this.#fetchHealth(discovery, { acceptDormant: true });
     if (!health.ok || !this.#healthIdentityMatches(discovery, health.body, { allowDormant: true })) {
       return false;
     }
     // 需要 host token 的 /status：确认 pid（以及新实例提供的 startedAt）仍属于同一实例。
     const observed = await this.#readSidecarMode(discovery);
     if (!observed) return false;
-    if (!allowNonReady
-      && health.body?.ready === false
+    if (health.body?.ready === false
       && !(observed.mode === 'mcp' && observed.state === 'stopped')) {
       return false;
     }
@@ -2128,35 +2126,45 @@ export class MemoryRuntimeSupervisor {
       if (dormantCandidate && await this.#verifyLiveInstance(dormantCandidate, { requireDiscovery: false })) {
         const observed = await this.#readSidecarMode(dormantCandidate);
         if (observed?.mode === 'mcp' && observed.state === 'stopped') {
-          const resumeDeadline = this.now() + Math.min(500, this.configuredStartTimeout());
-          while (this.now() < resumeDeadline) {
-            const discovery = await readDiscovery(this.paths.discoveryPath);
-            if (discovery) {
-              const ready = await this.#refreshDiscovery({ fetchHealth: true });
-              if (ready) return this.snapshot();
-              break;
+          if (this.dormantLockInvalidated) {
+            // 旧 dormantLock 已因 token 换代失效：进入正常 starting/等待恢复路径。
+            this.dormantLockInvalidated = false;
+          } else {
+            const credential = await this.#capabilityFingerprint();
+            if (this.dormantLock && this.dormantLock.credential !== credential) {
+              this.dormantLock = null;
+            } else {
+              const resumeDeadline = this.now() + Math.min(500, this.configuredStartTimeout());
+              while (this.now() < resumeDeadline) {
+                const discovery = await readDiscovery(this.paths.discoveryPath);
+                if (discovery) {
+                  const ready = await this.#refreshDiscovery({ fetchHealth: true });
+                  if (ready) return this.snapshot();
+                  break;
+                }
+                await sleep(50);
+              }
+              this.#setState({
+                state: 'stopped',
+                available: false,
+                degraded: false,
+                managed: false,
+                attached: false,
+                pid: lock.pid,
+                url: null,
+                healthUrl: null,
+                reason: 'disabled',
+                error: null,
+                lock: this.lockView,
+              });
+              this.dormantLock = {
+                pid: lock.pid,
+                startedAt: lock.startedAt,
+                credential,
+              };
+              return this.snapshot();
             }
-            await sleep(50);
           }
-          this.#setState({
-            state: 'stopped',
-            available: false,
-            degraded: false,
-            managed: false,
-            attached: false,
-            pid: lock.pid,
-            url: null,
-            healthUrl: null,
-            reason: 'disabled',
-            error: null,
-            lock: this.lockView,
-          });
-          this.dormantLock = {
-            pid: lock.pid,
-            startedAt: lock.startedAt,
-            credential: await this.#capabilityFingerprint(),
-          };
-          return this.snapshot();
         }
       }
       const deadline = this.now() + Math.max(100, this.configuredStartTimeout());
@@ -2335,10 +2343,7 @@ export class MemoryRuntimeSupervisor {
             // 不重建 discovery，也不对不可验证的复用 PID 发信号。
             const candidate = this.#discoveryFromLock(lock);
             const verifiedFromLock = candidate
-              && await this.#verifyLiveInstance(candidate, {
-                requireDiscovery: false,
-                allowNonReady: true,
-              });
+              && await this.#verifyLiveInstance(candidate, { requireDiscovery: false });
             if (!verifiedFromLock) {
               clean = false;
             } else {

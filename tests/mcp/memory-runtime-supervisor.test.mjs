@@ -783,6 +783,76 @@ describe('MemoryRuntimeSupervisor：生命周期', () => {
     expect(existsSync(join(home, 'memory-runtime', 'start.lock'))).toBe(false);
   }, 15000);
 
+  it('dormantLock 记录 token A；token 轮换 B 后 start 清除并进入正常状态机', async () => {
+    const home = await tempDir();
+    await writeCapabilityToken(home, 'token-a');
+    const external = spawn(process.execPath, [FAKE, 'serve'], {
+      env: { ...process.env, ...envFor(home, { FAKE_SIDECAR_HEARTBEAT_MS: '50' }) },
+      stdio: 'ignore',
+    });
+    cleanups.push(async () => {
+      if (pidAlive(external.pid)) process.kill(external.pid, 'SIGTERM');
+    });
+    await waitFor(() => existsSync(join(home, 'memory-runtime.json')));
+    const supervisor = new MemoryRuntimeSupervisor({
+      home,
+      config: enabledConfig(),
+      env: envFor(home),
+      profileId: () => 'default',
+    });
+    expect(await supervisor.start()).toMatchObject({ state: 'ready', attached: true });
+    await supervisor.stop({ includeAttached: false, timeoutMs: 500 });
+    // 同一 token A：start 记录 dormantLock A 并保持 stopped。
+    expect(await supervisor.start()).toMatchObject({ state: 'stopped', reason: 'disabled' });
+    expect(await supervisor.status()).toMatchObject({ state: 'stopped', reason: 'disabled' });
+
+    // token B：旧 dormantLock 失效，不得被当前新 token 覆盖成 stopped。
+    await writeCapabilityToken(home, 'token-b');
+    const rotated = await supervisor.start();
+    expect(rotated).not.toMatchObject({ state: 'stopped', reason: 'disabled' });
+  }, 15000);
+
+  for (const variant of [
+    { label: 'mcp degraded', mode: 'mcp', state: 'degraded' },
+    { label: 'immersive starting', mode: 'immersive', state: 'starting' },
+    { label: 'mcp stopping', mode: 'mcp', state: 'stopping' },
+  ]) {
+    it(`lock-only ${variant.label} 不得被显式 stop 误杀`, async () => {
+      const home = await tempDir();
+      const unrelated = spawn(process.execPath, ['--eval', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+      cleanups.push(async () => {
+        if (pidAlive(unrelated.pid)) process.kill(unrelated.pid, 'SIGTERM');
+      });
+      const port = await fakeHealthServer({
+        pid: unrelated.pid,
+        mode: variant.mode,
+        state: variant.state,
+        ready: false,
+      });
+      await mkdir(join(home, 'memory-runtime'), { recursive: true, mode: 0o700 });
+      await writeHostToken(home, 'host-token-nonready');
+      await writeFile(join(home, 'memory-runtime', 'start.lock'), JSON.stringify({
+        pid: unrelated.pid,
+        port,
+        startedAt: Date.now(),
+        updatedAt: Date.now(),
+        cloudId: null,
+        profileId: 'default',
+        command: 'serve',
+      }), { mode: 0o600 });
+      const supervisor = new MemoryRuntimeSupervisor({
+        home,
+        config: enabledConfig(),
+        env: envFor(home),
+        profileId: () => 'default',
+        fetchImpl: (url, init) => fetch(url, init),
+      });
+      const stopped = await supervisor.stop({ includeAttached: true, timeoutMs: 500 });
+      expect(stopped).toMatchObject({ state: 'degraded', error: { code: 'stop_incomplete' } });
+      expect(pidAlive(unrelated.pid)).toBe(true);
+    }, 10000);
+  }
+
   it('profile / home 不匹配：拒绝接管且不 spawn', async () => {
     const home = await tempDir();
     const port = await fakeHealthServer();

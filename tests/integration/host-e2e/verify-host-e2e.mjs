@@ -126,6 +126,8 @@ async function main() {
       : '';
     console.log(`  ${result.code === 0 ? '✓' : '✗'} ${suites[result.name].label}: exit ${result.code}${detail}${structured}`);
   }
+  // Structured summary deliberately carries counts only; per-check details
+  // stay in the suite stdout and are not copied into HOST_E2E_SUMMARY.
   console.log(`HOST_E2E_SUMMARY ${JSON.stringify(results.map((result) => ({
     name: result.name,
     label: suites[result.name].label,

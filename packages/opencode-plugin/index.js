@@ -2594,31 +2594,48 @@ export function createController(dependencies = {}) {
     }));
   }
 
+  // Process-local, bounded knowledge of graph ids actually returned by this
+  // plugin's ingest calls. It is intentionally not persisted and is evicted
+  // by count; ids absent here are never trusted from host checkpoint events.
   function rememberIngestGraphIds(session, data) {
     if (!session || !isObject(data)) return;
     const records = Array.isArray(data.records) ? data.records : [];
-    const recordIds = records.map((record) => asText(record?.id)).filter(Boolean);
-    const detailIds = [
-      ...(Array.isArray(data.detail?.ids) ? data.detail.ids : []),
-      ...records.flatMap((record) => (Array.isArray(record?.detailIds) ? record.detailIds : [])),
-    ].map(asText).filter(Boolean);
-    const rememberSet = (map, ids) => {
+    const rememberSet = (map, key, ids) => {
       if (ids.length === 0) return;
-      let set = map.get(session);
+      let set = map.get(key);
       if (!set) {
         set = new Set();
-        map.set(session, set);
+        map.set(key, set);
       }
       for (const id of ids) set.add(id);
       while (set.size > 512) set.delete(set.values().next().value);
       while (map.size > 128) map.delete(map.keys().next().value);
     };
-    rememberSet(knownRecordIds, recordIds);
-    rememberSet(knownDetailIds, detailIds);
+    const domainForRecord = (record) => asText(record?.domain) || asText(record?.namespace) || 'default';
+    for (const record of records) {
+      const id = asText(record?.id);
+      if (!id) continue;
+      const domain = domainForRecord(record);
+      const key = `${session}\u0000${domain}`;
+      rememberSet(knownRecordIds, key, [id]);
+      rememberSet(
+        knownDetailIds,
+        key,
+        (Array.isArray(record?.detailIds) ? record.detailIds : []).map(asText).filter(Boolean),
+      );
+    }
+    const detailIds = (Array.isArray(data.detail?.ids) ? data.detail.ids : [])
+      .map(asText)
+      .filter(Boolean);
+    if (detailIds.length > 0) {
+      const domains = [...new Set(records.map(domainForRecord))];
+      const domain = domains.length === 1 ? domains[0] : 'default';
+      rememberSet(knownDetailIds, `${session}\u0000${domain}`, detailIds);
+    }
   }
 
-  function knownGraphIdsFor(map, session, ids) {
-    const set = map.get(session) ?? new Set();
+  function knownGraphIdsFor(map, session, domain, ids) {
+    const set = map.get(`${session}\u0000${domain}`) ?? new Set();
     return ids.filter((id) => set.has(id));
   }
 
@@ -2856,8 +2873,11 @@ export function createController(dependencies = {}) {
     const state = isObject(checkpoint.state) ? checkpoint.state : {};
     const compactionId = asText(state.compactionId) || asText(checkpoint.compactionId);
     const sourceEventId = asText(state.sourceEventId) || asText(checkpoint.sourceEventId);
-    if (compactionId.length > 0) return !compactionId.startsWith('cmp_');
-    return /^evt[_:.-]/i.test(sourceEventId);
+    // Only the documented old transport shape is legacy. A new manual id
+    // such as "c1" or "manual-1" must never be treated as legacy merely
+    // because it lacks the cmp_ prefix.
+    return /^evt[_:.-]/i.test(compactionId)
+      || (compactionId.length === 0 && /^evt[_:.-]/i.test(sourceEventId));
   }
 
   function normalizedCheckpointState(checkpoint) {
@@ -3327,15 +3347,25 @@ export function createController(dependencies = {}) {
     const endSeq = asText(data?.endSeq) || asText(data?.seq) || 'end';
     const domain = checkpointDomain(session);
     const fleetTaskId = asText(data?.fleetTaskId) || asText(data?.taskId);
-    const trustedRecordIds = uniqueStrings(Array.isArray(options.recordIds) ? options.recordIds : [], 200);
-    const trustedDetailIds = uniqueStrings(Array.isArray(options.detailIds) ? options.detailIds : [], 200);
+    const trustedRecordIds = knownGraphIdsFor(
+      knownRecordIds,
+      session,
+      domain,
+      uniqueStrings(Array.isArray(options.recordIds) ? options.recordIds : [], 200),
+    );
+    const trustedDetailIds = knownGraphIdsFor(
+      knownDetailIds,
+      session,
+      domain,
+      uniqueStrings(Array.isArray(options.detailIds) ? options.detailIds : [], 200),
+    );
     const hostRecordIds = uniqueStrings(Array.isArray(data?.recordIds) ? data.recordIds : [], 200);
     const hostDetailIds = uniqueStrings([
       ...(Array.isArray(data?.detailIds) ? data.detailIds : []),
       ...(Array.isArray(data?.detail?.ids) ? data.detail.ids : []),
     ], 200);
-    const acceptedHostRecordIds = knownGraphIdsFor(knownRecordIds, session, hostRecordIds);
-    const acceptedHostDetailIds = knownGraphIdsFor(knownDetailIds, session, hostDetailIds);
+    const acceptedHostRecordIds = knownGraphIdsFor(knownRecordIds, session, domain, hostRecordIds);
+    const acceptedHostDetailIds = knownGraphIdsFor(knownDetailIds, session, domain, hostDetailIds);
     const droppedRefs = (hostRecordIds.length - acceptedHostRecordIds.length)
       + (hostDetailIds.length - acceptedHostDetailIds.length);
     if (droppedRefs > 0) {
@@ -3414,6 +3444,7 @@ export function createController(dependencies = {}) {
         eventID,
         data?.eventID,
         data?.eventId,
+        `cmp_${hashText(`${session}:${summary ?? ''}`).slice(0, 32)}`,
       ], 8),
       attempts: 0,
       rebases: 0,
@@ -3806,6 +3837,8 @@ export function createController(dependencies = {}) {
     }
   }
 
+  // Bounded flush: a Retry-After wait or slow host hook must not make this
+  // API hang. Timeout is reported in lifecycle.idleTimeouts.
   async function whenIdle() {
     const settled = await Promise.race([
       Promise.allSettled([...inflight]),

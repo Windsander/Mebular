@@ -4,6 +4,7 @@
 // OpenCode, OpenChamber, Mebular runtime or native memory file is touched.
 
 import { afterEach, describe, expect, it } from '@jest/globals';
+import { createHash } from 'node:crypto';
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -2176,7 +2177,7 @@ describe('event collection hardening', () => {
         ok: true,
         data: {
           accepted: { chunks: 1, records: 1 },
-          records: [{ id: 'rec_evidence', detailIds: ['det_evidence'] }],
+          records: [{ id: 'rec_evidence', domain: 'task:ses_evidence', detailIds: ['det_evidence'] }],
           detail: { ids: ['det_from_detail'], written: 1, duplicates: 0, queued: 0, failed: 0 },
           queued: false,
           extraction: { id: 'ex_evidence', status: 'completed', extractor: 'heuristic', records: [], warnings: [] },
@@ -2251,7 +2252,7 @@ describe('event collection hardening', () => {
           ok: true,
           data: {
             accepted: { chunks: 1, records: 1 },
-            records: [{ id: `rec_same_summary_${ingestCalls}` }],
+            records: [{ id: `rec_same_summary_${ingestCalls}`, domain: 'task:ses_same_summary' }],
             detail: { ids: [], written: 0, duplicates: 0, queued: 0, failed: 0 },
             queued: false,
             extraction: { id: `ex_same_${ingestCalls}`, status: 'completed', extractor: 'heuristic', records: [], warnings: [] },
@@ -2295,6 +2296,66 @@ describe('event collection hardening', () => {
       ['rec_same_summary_2'],
     ]);
     expect(puts[1].expectedRevision).toBe(1);
+  });
+
+  it('accepts only same-domain known refs for a task checkpoint', async () => {
+    const puts = [];
+    const fetchImpl = createFetch({
+      '/ingest': () => jsonResponse({
+        ok: true,
+        data: {
+          accepted: { chunks: 1, records: 2 },
+          records: [
+            { id: 'rec_task_ref', domain: 'task:ses_domain_refs', detailIds: ['det_task_ref'] },
+            { id: 'rec_default_ref', domain: 'default', detailIds: ['det_default_ref'] },
+          ],
+          detail: { ids: [], written: 0, duplicates: 0, queued: 0, failed: 0 },
+          queued: false,
+          extraction: { id: 'ex_domain_refs', status: 'completed', extractor: 'heuristic', records: [], warnings: [] },
+        },
+      }),
+      '/checkpoints/ses_domain_refs': (call) => {
+        if (call.method === 'GET') {
+          return jsonResponse({ ok: true, data: { checkpoint: null, source: 'cloud' } });
+        }
+        puts.push(call.body);
+        return jsonResponse({
+          ok: true,
+          data: {
+            checkpoint: {
+              domain: 'task:ses_domain_refs',
+              revision: 1,
+              pending: false,
+              summary: call.body.summary,
+              recordIds: call.body.recordIds,
+              detailIds: call.body.detailIds,
+              state: call.body.state,
+            },
+            source: 'cloud',
+          },
+        });
+      },
+    });
+    const { controller } = controllerWith({
+      fetchImpl,
+      ctx: { contextMessages: [{ id: 'u1', type: 'user', text: 'domain refs' }] },
+    });
+    await controller.handleEvent({ type: 'session.execution.succeeded', data: { sessionID: 'ses_domain_refs' } });
+    await controller.handleEvent({
+      id: 'evt_domain_refs',
+      type: 'session.compaction.ended',
+      data: {
+        sessionID: 'ses_domain_refs',
+        compactionId: 'cmp_domain_refs',
+        reason: 'auto',
+        recordIds: ['rec_task_ref', 'rec_default_ref'],
+        detailIds: ['det_task_ref', 'det_default_ref'],
+      },
+    });
+    expect(puts).toHaveLength(1);
+    expect(puts[0].recordIds).toEqual(['rec_task_ref']);
+    expect(puts[0].detailIds).toEqual(['det_task_ref']);
+    expect(controller.getStatus().counts.checkpoints.droppedRefs).toBe(2);
   });
 
   it('drops unverified host checkpoint refs instead of writing dangling ids', async () => {
@@ -2364,6 +2425,47 @@ describe('event collection hardening', () => {
     const puts = fetchImpl.callsFor('/checkpoints/ses_envelope_time').filter((call) => call.method === 'PUT');
     expect(puts).toHaveLength(2);
     expect(new Set(puts.map((call) => call.body.state.compactionId)).size).toBe(2);
+  });
+
+  it('does not treat a non-cmp explicit id as legacy when evidence matches', async () => {
+    let stored = null;
+    const puts = [];
+    const fetchImpl = createFetch({
+      '/checkpoints/ses_manual_ids': (call) => {
+        if (call.method === 'GET') {
+          return jsonResponse({ ok: true, data: { checkpoint: stored, source: 'cloud' } });
+        }
+        puts.push(call.body);
+        stored = {
+          domain: 'task:ses_manual_ids',
+          revision: (stored?.revision ?? 0) + 1,
+          pending: false,
+          summary: call.body.summary,
+          recordIds: call.body.recordIds,
+          detailIds: call.body.detailIds,
+          state: call.body.state,
+        };
+        return jsonResponse({ ok: true, data: { checkpoint: stored, source: 'cloud' } });
+      },
+    });
+    const { controller } = controllerWith({ fetchImpl });
+    for (const compactionId of ['c1', 'c2']) {
+      await controller.handleEvent({
+        id: `evt_manual_${compactionId}`,
+        type: 'session.compaction.ended',
+        data: {
+          sessionID: 'ses_manual_ids',
+          compactionId,
+          at: 1700000000000,
+          reason: 'auto',
+          text: 'same manual evidence',
+        },
+      });
+    }
+    expect(puts).toHaveLength(2);
+    expect(puts[1].expectedRevision).toBe(1);
+    expect(stored.revision).toBe(2);
+    expect(controller.getStatus().counts.checkpoints.duplicates).toBe(0);
   });
 
   it('keeps no-id compactions separate when stable event time differs', async () => {
@@ -2436,6 +2538,52 @@ describe('event collection hardening', () => {
     });
     const puts = fetchImpl.callsFor('/checkpoints/ses_legacy_event').filter((call) => call.method === 'PUT');
     expect(puts).toHaveLength(0);
+    expect(controller.getStatus().counts.checkpoints.duplicates).toBe(1);
+  });
+
+  it('recognizes the old cmp_hash fallback checkpoint across a fresh envelope', async () => {
+    const sessionID = 'ses_legacy_hash';
+    const legacyHashId = `cmp_${createHash('sha256').update(`${sessionID}:`).digest('hex').slice(0, 32)}`;
+    const legacyState = {
+      ...summaryOnlyCheckpointState(null, { threadId: sessionID, domain: `task:${sessionID}` }),
+      kind: 'compaction',
+      compactionId: legacyHashId,
+      sourceEventId: 'evt_old_hash_envelope',
+      at: 1700000000000,
+      reason: 'auto',
+    };
+    let puts = 0;
+    const fetchImpl = createFetch({
+      [`/checkpoints/${sessionID}`]: (call) => {
+        if (call.method === 'GET') {
+          return jsonResponse({
+            ok: true,
+            data: {
+              checkpoint: {
+                domain: `task:${sessionID}`,
+                revision: 1,
+                pending: false,
+                summary: null,
+                recordIds: [],
+                detailIds: [],
+                state: legacyState,
+                sourceEventId: 'evt_old_hash_envelope',
+              },
+              source: 'cloud',
+            },
+          });
+        }
+        puts += 1;
+        return jsonResponse({ ok: true, data: { checkpoint: { revision: 2, pending: false } } });
+      },
+    });
+    const { controller } = controllerWith({ fetchImpl });
+    await controller.handleEvent({
+      id: 'evt_fresh_hash_envelope',
+      type: 'session.compaction.ended',
+      data: { sessionID, reason: 'auto', at: 1700000000000 },
+    });
+    expect(puts).toBe(0);
     expect(controller.getStatus().counts.checkpoints.duplicates).toBe(1);
   });
 
@@ -3022,7 +3170,7 @@ describe('event subscription reconnect and hot disable', () => {
         ok: true,
         data: {
           accepted: { chunks: 1, records: 1 },
-          records: [{ id: 'rec_compact_replay' }],
+          records: [{ id: 'rec_compact_replay', domain: 'task:ses_compact_replay' }],
           detail: { ids: [], written: 0, duplicates: 0, queued: 0, failed: 0 },
           queued: false,
           extraction: { id: 'ex_compact_replay', status: 'completed', extractor: 'heuristic', records: [], warnings: [] },

@@ -229,7 +229,32 @@ export async function runApplySupervisor({
   log(`apply: 新实例未健康（${reason}）→ 回滚`);
   // 打标记：回滚实例启动时不得写 applied（否则会短暂谎报「已生效」）
   await writeApplyPending(home, { ...pending, rollingBack: true, reason }).catch(() => undefined);
-  const restored = backupFile ? await restoreBackup({ configFile, backupFile }) : false;
+  let restored = false;
+  let restoreError = null;
+  try {
+    restored = backupFile ? await restoreBackup({ configFile, backupFile }) : false;
+  } catch (error) {
+    restoreError = error;
+  }
+  if (restoreError) {
+    const record = {
+      status: 'rollback-failed',
+      attempt: pending.attempt ?? null,
+      at: new Date(now()).toISOString(),
+      fields,
+      reason,
+      restored: false,
+      backup: backupFile,
+      restoreError: {
+        code: restoreError?.code ?? 'RESTORE_FAILED',
+        message: String(restoreError?.message ?? restoreError),
+      },
+      retries: attempts,
+    };
+    await writeApplyResult(home, record);
+    // 保留 pending（rollingBack=true）：锁释放/人工处理后仍可恢复，不假装回滚完成。
+    return record;
+  }
   if (restored) {
     await restart({ home, kind, env: process.env });
     const after = await health({ home, port, oldPid, since: now(), timeoutMs, now });

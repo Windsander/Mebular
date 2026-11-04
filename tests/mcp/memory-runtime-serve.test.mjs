@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startHttpServer } from '../../packages/mcp/src/serve.mjs';
 import { restoreBackup } from '../../packages/mcp/src/config-apply.mjs';
+import { acquireConfigFileLock } from '../../packages/mcp/src/config-lock.mjs';
 import { pidAlive } from '../../packages/mcp/src/memory-runtime-supervisor.mjs';
 
 const FAKE = fileURLToPath(new URL('./fixtures/memory-runtime-fake-sidecar.mjs', import.meta.url));
@@ -346,6 +347,63 @@ describe('serve + Memory Runtime supervisor', () => {
       else process.env.MEBULAR_CONFIG_LOCK_TIMEOUT_MS = previousTimeout;
     }
   }, 15000);
+
+  it('config 锁：活 PID 无 heartbeat 超时后可接管', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'config-lock-live-stale-'));
+    const configFile = join(home, 'config.json');
+    const lockPath = `${configFile}.write-lock`;
+    await writeFile(lockPath, JSON.stringify({
+      pid: process.pid,
+      at: Date.now() - 60_000,
+      owner: 'old-live-owner',
+    }), 'utf-8');
+    const old = new Date(Date.now() - 60_000);
+    await utimes(lockPath, old, old);
+    const release = await acquireConfigFileLock(configFile, { timeoutMs: 500, staleMs: 50 });
+    expect(release).not.toBeNull();
+    await release();
+    expect(existsSync(lockPath)).toBe(false);
+    await rm(home, { recursive: true, force: true });
+  }, 10000);
+
+  it('config 锁：读锁 EACCES 时按 busy 处理且不删除锁', async () => {
+    if (process.platform === 'win32') return;
+    const home = await mkdtemp(join(tmpdir(), 'config-lock-eacces-'));
+    const configFile = join(home, 'config.json');
+    const lockPath = `${configFile}.write-lock`;
+    await writeFile(lockPath, JSON.stringify({
+      pid: 999999,
+      at: Date.now(),
+      owner: 'unreadable-owner',
+    }), 'utf-8');
+    await chmod(lockPath, 0o000);
+    try {
+      const release = await acquireConfigFileLock(configFile, { timeoutMs: 100, staleMs: 10 });
+      expect(release).toBeNull();
+      expect(existsSync(lockPath)).toBe(true);
+    } finally {
+      await chmod(lockPath, 0o600);
+      await rm(home, { recursive: true, force: true });
+    }
+  }, 10000);
+
+  it('config 锁：硬链接不受支持时回退 open(wx)', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'config-lock-link-fallback-'));
+    const configFile = join(home, 'config.json');
+    const release = await acquireConfigFileLock(configFile, {
+      timeoutMs: 500,
+      linkImpl: async () => {
+        const error = new Error('hard links unsupported');
+        error.code = 'EPERM';
+        throw error;
+      },
+    });
+    expect(release).not.toBeNull();
+    expect(existsSync(`${configFile}.write-lock`)).toBe(true);
+    await release();
+    expect(existsSync(`${configFile}.write-lock`)).toBe(false);
+    await rm(home, { recursive: true, force: true });
+  }, 10000);
 
   it('enabled：异步启动 sidecar，overview 只读展示且不泄漏 token；关闭时停止', async () => {
     const { home, server, base } = await start({ enabled: true });

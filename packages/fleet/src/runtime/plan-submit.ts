@@ -133,6 +133,9 @@ async function submitTaskPlanUnlocked(
   const parentTask = parentTaskId === null ? undefined : stateById.get(parentTaskId);
   const parentStepBudget = parentTask === undefined ? undefined : effectiveBudget(parentTask, stateById);
   const parentTaskState = parentTask === undefined ? undefined : { to: parentTask.to, status: parentTask.status };
+  const existingVersion = versions.find((plan) => plan.version === candidate.version);
+  const childRootExists = existingVersion !== undefined
+    && stateById.has(planRootTaskId(candidate.planId, candidate.version));
 
   let validation;
   try {
@@ -141,6 +144,7 @@ async function submitTaskPlanUnlocked(
       ...(parentPlan !== undefined ? { parentPlan } : {}),
       ...(parentStepBudget !== undefined ? { parentStepBudget } : {}),
       ...(parentTaskState !== undefined ? { parentTaskState } : {}),
+      ...(childRootExists ? { parentTaskAccepted: true } : {}),
       taskStates: states,
       caller: options.caller,
     });

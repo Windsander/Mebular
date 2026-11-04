@@ -340,14 +340,30 @@ describe('P2 daemon /app/plans', () => {
     expect(okReply.status).toBe(200);
     expect(okReply.body.plan.policy).toMatchObject({ allowedDevices: ['device-A'], maxParallel: 1 });
 
-    // B8：父 task 已 done 后不得再派生 child。
+    // 已接受 child：root task 已存在后，父 done 仍允许幂等 replay。
+    const okChildRootId = `${okChild.planId}#1#root`;
+    expect(await tasks.append({
+      v: 1,
+      eventId: `${okChildRootId}#created`,
+      taskId: okChildRootId,
+      type: 'created',
+      actor: { device: 'device-A', agent: 'planner' },
+      at: 2,
+      toStatus: 'queued',
+      trace: { causedBy: parentStepTaskId, chain: [parentStepTaskId] },
+      to: { device: 'device-A', agent: 'planner' },
+      intent: 'child root',
+      dispatch: 'root-only',
+    })).toBe(true);
+
+    // B8/B9：新 child 在父 done 后拒绝；已接受 child replay 仍可用。
     expect(await tasks.append({
       v: 1,
       eventId: `${parentStepTaskId}#done@device-A`,
       taskId: parentStepTaskId,
       type: 'done',
       actor: { device: 'device-A', agent: 'planner' },
-      at: 2,
+      at: 3,
       toStatus: 'done',
       trace: { chain: [] },
       payloadRef: 'parent-result',
@@ -358,6 +374,10 @@ describe('P2 daemon /app/plans', () => {
     });
     expect(afterDone.status).toBe(409);
     expect(afterDone.body.error).toBe('PLAN_STATE_INVALID');
+
+    const acceptedReplay = await request('/app/plans', { method: 'POST', body: { plan: okChild, namespace: 'tasks' } });
+    expect(acceptedReplay.status).toBe(200);
+    expect(acceptedReplay.body).toMatchObject({ ok: true, replayed: true });
   });
 
   it('B4：daemon CLI 提交 plan → 同一 daemon materializer → task_status.plan', async () => {

@@ -547,10 +547,30 @@ describe('P2 task_submit.plan + materializer', () => {
     expect(rejected).toMatchObject({ ok: false, error: 'PLAN_STATE_INVALID', created: [] });
     expect(await store.byTask(planRootTaskId('plan-child-b8-002', 1))).toHaveLength(0);
 
-    // 失败 child 不得把已 done 的父 step 变回 dispatched。
-    await materializer.tick();
+    // B9：已接受 child（root 已存在）可幂等 replay，父 done 不阻塞 materializer。
+    const replay = await submitTaskPlan({ plan: child, intent: 'child', to: SENTINEL, caller: A, plans, store });
+    expect(replay).toMatchObject({ ok: true, deduped: true, rootTaskId: planRootTaskId(child.planId, 1) });
+
+    const childTick = await materializer.tick();
+    const childWorkId = planTaskId(child.planId, 1, 'work');
+    expect(childTick.invalid).toEqual([]);
+    expect(childTick.tasksCreated).toContain(childWorkId);
     expect(reduceTaskEvents(await store.byTask(delegateTaskId))?.status).toBe('done');
-    expect((await store.byTask(planTaskId(child.planId, 1, 'work'))).length).toBe(0);
+    let parentProgress = derivePlanProgress(parent, await statesOf(store), await plans.list());
+    expect(parentProgress.steps.find((step) => step.stepId === 'delegate')?.status).toBe('dispatched');
+
+    const log = await ExecutionLog.open(join(dir, 'b8-exec.jsonl'));
+    const worker = new FleetWorker({
+      device: 'device-A', agent: 'planner', store, transport: new NullTransport(), executor: new EchoExecutor(), log,
+    });
+    await worker.pollOnce();
+    expect(reduceTaskEvents(await store.byTask(childWorkId))?.status).toBe('done');
+    await materializer.tick();
+    await materializer.tick();
+    parentProgress = derivePlanProgress(parent, await statesOf(store), await plans.list());
+    expect(parentProgress.steps.find((step) => step.stepId === 'delegate')?.status).toBe('done');
+    expect(reduceTaskEvents(await store.byTask(delegateTaskId))?.status).toBe('done');
+    await worker.close();
   });
 
   it('新版本 reuse：旧任务 done+acceptance 通过则不建新 task；root 使用新 version', async () => {

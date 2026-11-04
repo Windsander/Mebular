@@ -278,10 +278,19 @@ describe('P2 plan schema/validator', () => {
     for (const status of ['queued', 'claimed', 'running'] as const) {
       expect(validatePlan(childPlan(parent), { ...base, parentTaskState: parentTaskState({ status }) }).ok).toBe(true);
     }
-    for (const status of ['done', 'failed'] as const) {
-      expect(validatePlan(childPlan(parent), { ...base, parentTaskState: parentTaskState({ status }) }))
-        .toMatchObject({ ok: false, code: 'PLAN_STATE_INVALID' });
-    }
+    // B9：新 child 的 done 父 task 拒绝；已接受 child 允许 done；failed 始终拒绝。
+    expect(validatePlan(childPlan(parent), { ...base, parentTaskState: parentTaskState({ status: 'done' }) }))
+      .toMatchObject({ ok: false, code: 'PLAN_STATE_INVALID' });
+    expect(validatePlan(childPlan(parent), {
+      ...base,
+      parentTaskState: parentTaskState({ status: 'done' }),
+      parentTaskAccepted: true,
+    }).ok).toBe(true);
+    expect(validatePlan(childPlan(parent), {
+      ...base,
+      parentTaskState: parentTaskState({ status: 'failed' }),
+      parentTaskAccepted: true,
+    })).toMatchObject({ ok: false, code: 'PLAN_STATE_INVALID' });
 
     // 父 step task 分配给 B，C 提交 child → 拒绝。
     const byC = childPlan(parent, { owner: { device: 'device-C', agent: 'worker' } });

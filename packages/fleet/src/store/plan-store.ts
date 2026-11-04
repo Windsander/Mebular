@@ -13,6 +13,7 @@ import {
   TASK_PLAN_KIND,
   TASK_PLAN_NODE_TYPE,
   canonicalTaskPlan,
+  planRootTaskId,
   planTaskId,
   validatePlan,
   validatePlanShape,
@@ -236,12 +237,16 @@ export async function appendValidatedTaskPlanNode(
   const parentTask = parentTaskId === null ? undefined : stateById.get(parentTaskId);
   const parentStepBudget = parentTask === undefined ? undefined : effectiveBudget(parentTask, stateById);
   const parentTaskState = parentTask === undefined ? undefined : { to: parentTask.to, status: parentTask.status };
+  const existingVersion = versions.find((plan) => plan.version === candidate.version);
+  const childRootExists = existingVersion !== undefined
+    && stateById.has(planRootTaskId(candidate.planId, candidate.version));
 
   const validation = validatePlan(candidate, {
     existingVersions: versions,
     ...(parentPlan !== undefined ? { parentPlan } : {}),
     ...(parentStepBudget !== undefined ? { parentStepBudget } : {}),
     ...(parentTaskState !== undefined ? { parentTaskState } : {}),
+    ...(childRootExists ? { parentTaskAccepted: true } : {}),
     taskStates,
     caller: candidate.owner,
   });

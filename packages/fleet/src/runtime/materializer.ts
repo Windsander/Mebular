@@ -222,11 +222,13 @@ export class PlanMaterializer {
       const parentTask = parentTaskId === null ? undefined : stateById.get(parentTaskId);
       const parentStepBudget = parentTask === undefined ? undefined : effectiveBudget(parentTask, stateById);
       const parentTaskState = parentTask === undefined ? undefined : { to: parentTask.to, status: parentTask.status };
+      const childRootExists = stateById.has(planRootTaskId(latest.planId, latest.version));
       const validation = validatePlan(latest, {
         existingVersions: versions,
         ...(parentPlan !== undefined ? { parentPlan } : {}),
         ...(parentStepBudget !== undefined ? { parentStepBudget } : {}),
         ...(parentTaskState !== undefined ? { parentTaskState } : {}),
+        ...(childRootExists ? { parentTaskAccepted: true } : {}),
         taskStates: states,
         caller: latest.owner,
       });

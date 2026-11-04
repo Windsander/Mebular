@@ -102,6 +102,11 @@ export interface PlanValidationContext {
   parentStepBudget?: TaskBudget;
   /** 父 step task 的分配对象/状态；绑定 sub-plan 与真实父执行者。 */
   parentTaskState?: Pick<TaskState, 'to' | 'status'>;
+  /**
+   * 已接受 child（其确定性 root task 已存在）允许父 task 为 done 后继续物化；
+   * 新提交 child 默认 false，父 task 必须仍为 active。
+   */
+  parentTaskAccepted?: boolean;
   /** 提交者；plan.owner 必须同时等于调用 device 与 agent。 */
   caller?: FleetEndpoint;
   /** 任务权威状态（用于 reuse 的旧结果校验；undefined = 跳过运行时存在性检查）。 */
@@ -531,8 +536,13 @@ function validateParent(plan: TaskPlan, context: PlanValidationContext): PlanVal
   if (parentTask === undefined) {
     return failure('PLAN_STATE_INVALID', '父 step task 不存在或尚未物化');
   }
-  if (parentTask.status !== 'queued' && parentTask.status !== 'claimed' && parentTask.status !== 'running') {
-    return failure('PLAN_STATE_INVALID', `父 step task 已终态，不能派生 sub-plan：${parentTask.status}`);
+  if (parentTask.status === 'done') {
+    // 已接受 child（root 已存在）允许父 task 完成后继续/收尾；新 child 必须父 active。
+    if (context.parentTaskAccepted !== true) {
+      return failure('PLAN_STATE_INVALID', '父 step task 已 done；新 sub-plan 不能在该父 task 下创建');
+    }
+  } else if (parentTask.status !== 'queued' && parentTask.status !== 'claimed' && parentTask.status !== 'running') {
+    return failure('PLAN_STATE_INVALID', `父 step task 已失败，不能派生或继续 sub-plan：${parentTask.status}`);
   }
   if (parentTask.to.device !== plan.owner.device || parentTask.to.agent !== plan.owner.agent) {
     return failure('PLAN_POLICY', '父 step task 的分配对象必须等于 sub-plan owner');

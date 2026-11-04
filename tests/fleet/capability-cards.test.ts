@@ -1,5 +1,5 @@
 // P1：能力卡（agent_capability_card）schema / 发布 / 版本 / tombstone / 隐私 / internal 可见性。
-import { describe, it, expect } from '@jest/globals';
+import { describe, it, expect, jest } from '@jest/globals';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -453,13 +453,22 @@ describe('P1 task_targets.cards additive + 旧调用 + __plan__ worker', () => {
           return mebular.graph.listNodes(filter);
         },
       };
-      const degraded = await toolByName('task_targets')!.handler({}, {
-        dir,
-        mebular: { ...noKeyApp, graph: brokenGraph } as never,
-      }) as { targets: Array<Record<string, unknown>>; cards: Array<Record<string, unknown>>; cardsWarning?: string };
+      const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      let degraded!: { targets: Array<Record<string, unknown>>; cards: Array<Record<string, unknown>> };
+      let errorCalls: unknown[][] = [];
+      try {
+        degraded = await toolByName('task_targets')!.handler({}, {
+          dir,
+          mebular: { ...noKeyApp, graph: brokenGraph } as never,
+        }) as typeof degraded;
+      } finally {
+        errorCalls = [...errorSpy.mock.calls];
+        errorSpy.mockRestore();
+      }
       expect(degraded.targets).toEqual(result.targets);
       expect(degraded.cards).toEqual([]);
-      expect(degraded.cardsWarning).toContain('CARDS_UNAVAILABLE');
+      expect(degraded).not.toHaveProperty('cardsWarning');
+      expect(errorCalls.some((args) => String(args[0]).includes('[fleet:cards]'))).toBe(true);
 
       const submit = await toolByName('task_submit')!.handler(
         { intent: 'old-explicit-to', to: { device: 'device-B', agent: 'worker' } },

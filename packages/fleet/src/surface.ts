@@ -489,7 +489,6 @@ export const TASK_TOOLS: TaskTool[] = [
         const entries = await agentDirectoryStore(session.mebular, 'agents').all();
         const targets = expandTargets(entries, subscribed);
         let cards: ReturnType<typeof summarizeCapabilityCards> = [];
-        let cardsWarning: string | undefined;
         try {
           const cardEntries = await listCapabilityCards(session.mebular, 'agents');
           const states = await statesOf(session.store);
@@ -510,7 +509,9 @@ export const TASK_TOOLS: TaskTool[] = [
           }).filter((card) => targetKeys.has(`${card.device}\u0000${card.agent}`));
         } catch (error) {
           cards = [];
-          cardsWarning = `CARDS_UNAVAILABLE: ${(error as Error).message}`;
+          // MCP surface freeze：只允许 task_targets.cards 这个 optional 输出；
+          // 卡片读取失败只在本地可观测，不把额外字段写进工具输出。
+          console.error(`[fleet:cards] task_targets card read failed: ${(error as Error).message}`);
         }
         return {
           ok: true,
@@ -518,7 +519,6 @@ export const TASK_TOOLS: TaskTool[] = [
           subscribed,
           targets,
           cards,
-          ...(cardsWarning !== undefined ? { cardsWarning } : {}),
         };
       } finally {
         await session.close();

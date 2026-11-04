@@ -169,12 +169,18 @@ export class RuntimeLocalStore {
     await this.cleanup();
   }
 
-  /** 显式清理（sidecar 启动时 + 每日一次）。 */
-  async cleanup(now = this.now()): Promise<RuntimeLocalCleanupResult> {
+  /**
+   * 显式清理（sidecar 启动时 + 每日一次）。
+   * keepIds 为仍在 replay lease/活动依赖中的 staging 证据；这些项即使过期也必须保留。
+   */
+  async cleanup(
+    now = this.now(),
+    keepIds: Iterable<string> = [],
+  ): Promise<RuntimeLocalCleanupResult> {
     return this.exclusive(async () => {
       await this.ensureStagingLoaded();
       await this.ensureTracesLoaded();
-      return this.prune(now);
+      return this.prune(now, keepIds);
     });
   }
 
@@ -217,7 +223,11 @@ export class RuntimeLocalStore {
    * 同键同文本返回已有记录 `duplicate=true`；同键不同文本拒绝 `content_hash_mismatch`。
    * staging 不是权威；超过总字节上限时淘汰最旧 chunk。
    */
-  async putStagingChunk(cloudId: string, chunk: RawChunk): Promise<RawChunkWriteResult> {
+  async putStagingChunk(
+    cloudId: string,
+    chunk: RawChunk,
+    { keepIds = [] }: { keepIds?: Iterable<string> } = {},
+  ): Promise<RawChunkWriteResult> {
     if (typeof cloudId !== 'string' || cloudId.length === 0) {
       throw new RuntimeLocalStoreError('cloudId 不能为空', 'invalid_raw_chunk');
     }
@@ -226,7 +236,7 @@ export class RuntimeLocalStore {
     return this.exclusive(async () => {
       await this.ensureStagingLoaded();
       const now = this.now();
-      const expiredDirty = this.pruneStaging(now);
+      const expiredDirty = this.pruneStaging(now, keepIds);
       const key = rawKey(cloudId, chunk);
 
       const existing = this.staging.find((entry) => rawKey(entry.cloudId, entry.chunk) === key);
@@ -243,7 +253,7 @@ export class RuntimeLocalStore {
 
       const record: StoredRawChunk = { cloudId, chunk };
       this.staging.push(record);
-      const quotaDirty = this.enforceStagingQuota();
+      const quotaDirty = this.enforceStagingQuota(keepIds);
       if (expiredDirty || quotaDirty) await this.writeStagingAtomic();
       else await this.appendLine(this.stagingPath, record);
       return { chunk, duplicate: false };
@@ -446,27 +456,29 @@ export class RuntimeLocalStore {
     return trace.at >= now - this.traceRetentionDays * DAY_MS;
   }
 
-  private pruneStaging(now: number): boolean {
+  private pruneStaging(now: number, keepIds: Iterable<string> = []): boolean {
+    const keep = new Set(keepIds);
     const before = this.staging.length;
-    this.staging = this.staging.filter((entry) => this.stagingAlive(entry.chunk, now));
+    this.staging = this.staging.filter((entry) => keep.has(entry.chunk.id)
+      || this.stagingAlive(entry.chunk, now));
     return this.staging.length !== before;
   }
 
   /**
    * staging 总字节上限（默认 256 MiB）。只淘汰最旧 chunk，不淘汰 trace；
-   * staging 不是权威，超限宁可丢本地副本。
+   * staging 不是权威，超限宁可丢本地副本。keepIds 是活动 replay 依赖，不得淘汰。
    */
-  private enforceStagingQuota(): boolean {
+  private enforceStagingQuota(keepIds: Iterable<string> = []): boolean {
     let total = this.staging.reduce((sum, entry) => sum + Buffer.byteLength(entry.chunk.text, 'utf8'), 0);
     if (total <= this.stagingMaxBytes) return false;
+    const keep = new Set(keepIds);
     const sorted = [...this.staging].sort((a, b) => a.chunk.at - b.chunk.at || a.chunk.id.localeCompare(b.chunk.id));
-    const keep = new Set<StoredRawChunk>(this.staging);
     for (const entry of sorted) {
       if (total <= this.stagingMaxBytes) break;
-      keep.delete(entry);
+      if (keep.has(entry.chunk.id)) continue;
+      this.staging = this.staging.filter((candidate) => candidate !== entry);
       total -= Buffer.byteLength(entry.chunk.text, 'utf8');
     }
-    this.staging = this.staging.filter((entry) => keep.has(entry));
     return true;
   }
 
@@ -480,8 +492,8 @@ export class RuntimeLocalStore {
     return this.traces.length !== before;
   }
 
-  private async prune(now: number): Promise<RuntimeLocalCleanupResult> {
-    const stagingDirty = this.pruneStaging(now);
+  private async prune(now: number, keepIds: Iterable<string> = []): Promise<RuntimeLocalCleanupResult> {
+    const stagingDirty = this.pruneStaging(now, keepIds);
     const traceDirty = this.pruneTraces(now);
     if (stagingDirty) await this.writeStagingAtomic();
     if (traceDirty) await this.writeTracesAtomic();

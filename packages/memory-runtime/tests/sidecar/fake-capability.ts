@@ -1011,7 +1011,18 @@ export async function startFakeCapability(options: FakeCapabilityOptions = {}): 
               && detail.contentHash === contentHash
               && (detail.chunkIndex ?? -1) === (item.chunkIndex ?? -1));
             if (existing) {
-              existing.recordIds = [...new Set([...existing.recordIds, ...recordIds])];
+              const mergedRecordIds = [...new Set([...existing.recordIds, ...recordIds])];
+              if (mergedRecordIds.length > 200) {
+                return {
+                  clientItemId: item.clientItemId,
+                  status: 'failed',
+                  domain: item.domain,
+                  detailKind: item.detailKind ?? 'raw_chunk',
+                  code: 'validation_failed',
+                  retryable: false,
+                };
+              }
+              existing.recordIds = mergedRecordIds;
               return {
                 clientItemId: item.clientItemId,
                 status: 'duplicate',

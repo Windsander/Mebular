@@ -61,6 +61,11 @@ export interface OutboxItem {
   /** 有界重放租约；仅用于 cleanup/in-flight 协调，不延长操作 deadline。 */
   replayLeaseUntil?: number;
   /**
+   * 已由 capability 确认提交、但本地后续对账未完成的记录/详情。
+   * 用于 partial/dead 时如实披露，绝不因本地 staging 缺失而隐去已提交对象。
+   */
+  committed?: OutboxCommitted;
+  /**
    * 本地重放元数据（不发给 capability）：
    * 成功后清理对应 staging chunk / detail cache。
    */
@@ -69,9 +74,25 @@ export interface OutboxItem {
     stagingChunkIds?: string[];
     detailIds?: string[];
     domain?: string;
+    /** 该 outbox 操作所属的抽取任务；重放成功清理时不得把它当作他人 pending 证据。 */
+    extractionIds?: string[];
     /** record clientItemId → 实际支撑它的 staging/message 证据。 */
     evidence?: Record<string, { stagingChunkIds: string[]; messageIds: string[] }>;
   };
+}
+
+export interface OutboxCommittedObject {
+  id: string;
+  clientItemId?: string;
+  status?: string;
+  domain?: string;
+  kind?: string;
+}
+
+export interface OutboxCommitted {
+  records?: OutboxCommittedObject[];
+  details?: OutboxCommittedObject[];
+  objects?: OutboxCommittedObject[];
 }
 
 export interface OutboxEnqueueInput {
@@ -217,6 +238,31 @@ function minimizeOutboxValue(value: unknown, key?: string): unknown {
     if (entryValue !== undefined) out[entryKey] = minimizeOutboxValue(entryValue, entryKey);
   }
   return out;
+}
+
+function mergeCommitted(
+  existing: OutboxCommitted | undefined,
+  update: OutboxCommitted | undefined,
+): OutboxCommitted | undefined {
+  if (!update) return existing;
+  const mergeList = (
+    current: OutboxCommittedObject[] | undefined,
+    next: OutboxCommittedObject[] | undefined,
+  ): OutboxCommittedObject[] | undefined => {
+    if (!next || next.length === 0) return current;
+    const merged = new Map<string, OutboxCommittedObject>();
+    for (const entry of current ?? []) merged.set(`${entry.kind ?? ''}\u0000${entry.id}`, { ...entry });
+    for (const entry of next) {
+      const key = `${entry.kind ?? ''}\u0000${entry.id}`;
+      merged.set(key, { ...merged.get(key), ...entry });
+    }
+    return [...merged.values()];
+  };
+  return {
+    ...(existing?.records || update.records ? { records: mergeList(existing?.records, update.records) } : {}),
+    ...(existing?.details || update.details ? { details: mergeList(existing?.details, update.details) } : {}),
+    ...(existing?.objects || update.objects ? { objects: mergeList(existing?.objects, update.objects) } : {}),
+  };
 }
 
 function isOutboxItem(value: unknown): value is OutboxItem {
@@ -395,6 +441,122 @@ export class BoundedOutbox {
     });
   }
 
+  /**
+   * 持久化已确认提交对象。若清理已把活动项移入 dead，则合并写入 dead，
+   * 保证 partial/dead 仍能披露已提交 ID/对象；绝不复活活动项。
+   */
+  async markCommitted(id: string, committed: OutboxCommitted): Promise<boolean> {
+    if (!committed || Object.keys(committed).length === 0) return false;
+    return this.exclusive(async () => {
+      const activePath = this.pathFor(id);
+      const active = await readJsonFile<OutboxItem>(activePath);
+      if (isOutboxItem(active)) {
+        const updated: OutboxItem = {
+          ...active,
+          committed: mergeCommitted(active.committed, committed),
+        };
+        await writeJsonAtomic(activePath, updated);
+        return true;
+      }
+      const deadPath = this.deadPathFor(id);
+      const dead = await readJsonFile<OutboxItem>(deadPath);
+      if (!isOutboxItem(dead)) return false;
+      const updated: OutboxItem = {
+        ...dead,
+        committed: mergeCommitted(dead.committed, committed),
+      };
+      await writeJsonAtomic(deadPath, updated);
+      return true;
+    });
+  }
+
+  /** 把活动 outbox 项关联到所属 extraction；重放清理时用其排除自身 pending 证据。 */
+  async linkExtraction(id: string, extractionId: string): Promise<boolean> {
+    return this.exclusive(async () => {
+      const path = this.pathFor(id);
+      const item = await readJsonFile<OutboxItem>(path);
+      if (!isOutboxItem(item)) return false;
+      const extractionIds = [...new Set([...(item.meta?.extractionIds ?? []), extractionId])];
+      const updated: OutboxItem = {
+        ...item,
+        meta: { ...(item.meta ?? {}), extractionIds },
+      };
+      await writeJsonAtomic(path, updated);
+      return true;
+    });
+  }
+
+
+  /** 续租当前 replay；只延长租约，不允许过期或无活动项时复活。 */
+  async renewReplayLease(
+    id: string,
+    { now = this.now(), leaseMs = OUTBOX_REPLAY_LEASE_MS }: { now?: number; leaseMs?: number } = {},
+  ): Promise<boolean> {
+    return this.exclusive(async () => {
+      const path = this.pathFor(id);
+      const item = await readJsonFile<OutboxItem>(path);
+      if (!isOutboxItem(item)) return false;
+      const until = now + Math.max(1, Math.floor(leaseMs));
+      const updated: OutboxItem = {
+        ...item,
+        replayLeaseUntil: Math.max(until, typeof item.replayLeaseUntil === 'number' ? item.replayLeaseUntil : 0),
+      };
+      await writeJsonAtomic(path, updated);
+      return true;
+    });
+  }
+
+  /**
+   * 在 outbox 锁内计算仍被 in-flight lease 持有的 staging，并执行调用方的
+   * staging 物理清理。lease 获取与清理因此线性化：要么清理先看到 lease，
+   * 要么清理完成后才允许新的 replay 取得 lease。
+   */
+  async withLeasedStagingProtected<T>(
+    now: number,
+    operation: (protectedStagingIds: ReadonlySet<string>) => Promise<T> | T,
+  ): Promise<T> {
+    return this.exclusive(async () => {
+      await this.init();
+      const protectedStagingIds = new Set<string>();
+      for (const item of await this.readItems()) {
+        if (typeof item.replayLeaseUntil !== 'number' || item.replayLeaseUntil <= now) continue;
+        for (const id of item.meta?.stagingChunkIds ?? []) protectedStagingIds.add(id);
+      }
+      return operation(protectedStagingIds);
+    });
+  }
+
+  /**
+   * 在 outbox 锁内使过期/依赖已删除的证据对应活动项显式 dead（跳过 leased/in-flight），
+   * 并返回受 lease 保护的 staging；调用方随后在同一锁内执行 staging 清理。
+   */
+  async cleanupDependencies<T>(
+    now: number,
+    expiredStagingIds: readonly string[],
+    operation: (protectedStagingIds: ReadonlySet<string>) => Promise<T> | T,
+  ): Promise<{ expired: number; result: T }> {
+    return this.exclusive(async () => {
+      await this.init();
+      const expiredEvidence = new Set(expiredStagingIds);
+      let expired = 0;
+      const protectedStagingIds = new Set<string>();
+      for (const item of await this.readItems()) {
+        if (typeof item.replayLeaseUntil === 'number' && item.replayLeaseUntil > now) {
+          for (const id of item.meta?.stagingChunkIds ?? []) protectedStagingIds.add(id);
+          continue;
+        }
+        const needsExpiredEvidence = (item.meta?.stagingChunkIds ?? [])
+          .some((id) => expiredEvidence.has(id));
+        if ((needsExpiredEvidence || this.deadlineOf(item) <= now)
+          && await this.deadLetterUnlocked(item, 'retention_expired')) {
+          expired += 1;
+        }
+      }
+      const result = await operation(protectedStagingIds);
+      return { expired, result };
+    });
+  }
+
   private async deadLetterUnlocked(item: OutboxItem, errorCode: string): Promise<boolean> {
     const path = this.pathFor(item.id);
     const dead: OutboxItem & { deadAt: number; error: string } = {
@@ -479,9 +641,19 @@ export class BoundedOutbox {
   ): Promise<OutboxReplayCompletion> {
     return this.exclusive(async () => {
       const item = await readJsonFile<OutboxItem>(this.pathFor(id));
-      if (!isOutboxItem(item)) return outcome;
+      if (!isOutboxItem(item)) {
+        // 清理可能已把同一逻辑操作移入 dead；成功确认仍必须消除该过期 dead，
+        // 避免 committed + dead 双态。partial/retry 不得复活已 dead 的项。
+        if (outcome === 'settled') {
+          await rm(this.deadPathFor(id), { force: true });
+          return 'settled';
+        }
+        const dead = await readJsonFile<OutboxItem>(this.deadPathFor(id));
+        return isOutboxItem(dead) ? 'dead' : outcome;
+      }
       if (outcome === 'settled') {
         await rm(this.pathFor(id), { force: true });
+        await rm(this.deadPathFor(id), { force: true });
         return 'settled';
       }
       if (outcome === 'dead' || this.deadlineOf(item) <= now) {
@@ -903,7 +1075,13 @@ export class SidecarLocalLayer {
   /** staging 写入后核对容量/TTL 淘汰，依赖已消失证据的重放必须显式 dead。 */
   async putStagingChunk(cloudId: string, chunk: RawChunk) {
     const before = await this.store.listStagingChunks({ includeExpired: true });
-    const result = await this.store.putStagingChunk(cloudId, chunk);
+    // 配额淘汰同样不得删除 in-flight replay 依赖；与 lease 获取共用 outbox 锁。
+    const result = await this.outbox.withLeasedStagingProtected(
+      this.now(),
+      (protectedStagingIds) => this.store.putStagingChunk(cloudId, chunk, {
+        keepIds: protectedStagingIds,
+      }),
+    );
     const after = new Set((await this.store.listStagingChunks({ includeExpired: true }))
       .map((entry) => entry.id));
     const removed = before.map((entry) => entry.id).filter((id) => !after.has(id));
@@ -932,8 +1110,13 @@ export class SidecarLocalLayer {
 
   async cleanup(now = this.now()): Promise<RuntimeLocalCleanupResult> {
     const staged = await this.store.listStagingChunks({ includeExpired: true });
-    await this.failStagingDependents(this.expiredStagingIds(staged, now));
-    const result = await this.store.cleanup(now);
+    const expiredIds = this.expiredStagingIds(staged, now);
+    await this.stagingDependencyHandler?.(expiredIds);
+    const { result } = await this.outbox.cleanupDependencies(
+      now,
+      expiredIds,
+      (protectedStagingIds) => this.store.cleanup(now, protectedStagingIds),
+    );
     this.lastCleanupAt = now;
     return result;
   }
@@ -957,8 +1140,12 @@ export class SidecarLocalLayer {
         const expiredIds = this.expiredStagingIds(staged, at);
         const notify = options.beforeStagingCleanup ?? this.maintenanceDependencyHandler;
         await notify?.(expiredIds);
-        await this.failStagingDependents(expiredIds);
-        const storeResult = await this.store.cleanup(at);
+        const dependencyResult = await this.outbox.cleanupDependencies(
+          at,
+          expiredIds,
+          (protectedStagingIds) => this.store.cleanup(at, protectedStagingIds),
+        );
+        const storeResult = dependencyResult.result;
         this.lastCleanupAt = at;
         const [cacheRemoved, detailCacheRemoved, outboxResult] = await Promise.all([
           this.cache.cleanup(at),
@@ -982,7 +1169,7 @@ export class SidecarLocalLayer {
           traces: storeResult.traces,
           cacheRemoved,
           detailCacheRemoved,
-          outboxExpired: outboxResult.expired,
+          outboxExpired: dependencyResult.expired + outboxResult.expired,
           deadRemoved: outboxResult.deadRemoved,
           bytes,
           oldestAgeMs: oldestAt === null ? null : Math.max(0, at - oldestAt),

@@ -10,6 +10,11 @@ import { IdentityManager, Mebular, MemoryService } from '@mebular/core';
 import { startHttpServer } from '../../packages/mcp/src/serve.mjs';
 import { readCapabilityToken } from '../../packages/mcp/src/memory-runtime-token.mjs';
 import { TOOL_NAMES, TOOL_SPECS } from '../../packages/mcp/src/tools.mjs';
+import { CapabilityClient } from '../../packages/memory-runtime/src/sidecar/capability-client.js';
+import { defaultSidecarConfig } from '../../packages/memory-runtime/src/sidecar/config.js';
+import { defaultSidecarPolicy } from '../../packages/memory-runtime/src/sidecar/domains.js';
+import { IngestService } from '../../packages/memory-runtime/src/sidecar/ingest.js';
+import { SidecarLocalLayer } from '../../packages/memory-runtime/src/sidecar/local-layer.js';
 
 let home;
 let cloudRoot;
@@ -423,6 +428,62 @@ describe('版本与详情写入', () => {
       expect(spy).toHaveBeenCalledTimes(2);
     } finally {
       spy.mockRestore();
+    }
+  });
+
+  it('malformed 成功响应（缺/空 id、缺 domain、缺 detailKind）不进入幂等账本', async () => {
+    const cases = [
+      {
+        label: 'missing-id',
+        mutate: (result) => { delete result.id; },
+      },
+      {
+        label: 'empty-id',
+        mutate: (result) => { result.id = ''; },
+      },
+      {
+        label: 'missing-domain',
+        mutate: (result) => { delete result.domain; },
+      },
+      {
+        label: 'missing-detail-kind',
+        mutate: (result) => { result.status = 'duplicate'; delete result.detailKind; },
+      },
+    ];
+    for (const testCase of cases) {
+      const marker = unique(`detail-malformed-${testCase.label}`);
+      const recordId = await createRecord('agent:opencode', marker);
+      const item = detailItem('agent:opencode', [recordId], marker, {
+        clientItemId: unique(`detail-malformed-${testCase.label}-item`),
+      });
+      const malformed = {
+        clientItemId: item.clientItemId,
+        status: 'created',
+        id: `malformed-${testCase.label}`,
+        domain: item.domain,
+        detailKind: item.detailKind,
+        contentHash: item.contentHash,
+      };
+      testCase.mutate(malformed);
+      const spy = jest.spyOn(service, 'writeDetails');
+      spy.mockResolvedValueOnce({
+        results: [malformed],
+        created: 1,
+        duplicates: 0,
+        failed: 0,
+        partial: false,
+        evicted: [],
+      });
+      try {
+        const key = unique(`detail-malformed-${testCase.label}-key`);
+        const first = await writeDetail([item], { headers: { 'idempotency-key': key } });
+        expect(first.status).toBe(200);
+        const retry = await writeDetail([item], { headers: { 'idempotency-key': key } });
+        expect(retry.body.data.replayed).toBe(false);
+        expect(spy).toHaveBeenCalledTimes(2);
+      } finally {
+        spy.mockRestore();
+      }
     }
   });
 
@@ -886,6 +947,47 @@ describe('保留、过期与配额', () => {
     })]);
     expect(wrongRole.status).toBe(422);
     expect(wrongRole.body.error.details.field).toBe('role');
+  });
+
+  it('sidecar→capability HTTP 负例：user role + tool_output 在写任何记录前被拒绝', async () => {
+    const marker = unique('sidecar-role-kind-mismatch');
+    const sidecarRoot = join(home, `sidecar-e2e-${unique('root')}`);
+    const local = new SidecarLocalLayer({ root: sidecarRoot });
+    await local.init();
+    const client = new CapabilityClient({
+      baseUrl: `${base}/internal/memory/v1`,
+      token,
+      retries: 0,
+      retryDelayMs: 0,
+    });
+    const sidecar = new IngestService({
+      config: defaultSidecarConfig(),
+      local,
+      client,
+      identity: { cloudId: 'cl_sidecar_e2e', profileId: 'default', hostId: 'h_sidecar_e2e' },
+      policy: defaultSidecarPolicy(),
+    });
+    await sidecar.init();
+    const before = await app.graph.listNodes();
+
+    await expect(sidecar.ingest({
+      requestId: unique('sidecar-role-kind-mismatch-request'),
+      agentId: 'opencode',
+      threadId: 'th_sidecar_role_kind',
+      extractor: 'host',
+      chunks: [{ role: 'user', detailKind: 'tool_output', text: marker, messageId: 'm_sidecar_role_kind' }],
+      candidates: [{
+        kind: 'observation',
+        content: { content: marker },
+        sourceMessageIds: ['m_sidecar_role_kind'],
+      }],
+    })).rejects.toMatchObject({ status: 400, code: 'invalid_request' });
+
+    const after = await app.graph.listNodes();
+    expect(after).toHaveLength(before.length);
+    expect(after.some((node) => JSON.stringify(node.content ?? {}).includes(marker))).toBe(false);
+    expect(await local.store.countStagingChunks()).toBe(0);
+    expect(await local.outbox.stats()).toMatchObject({ items: 0 });
   });
 
   it('过期详情：get 410、list 默认排除；user includeExpired 可见，agent 不可治理读取', async () => {

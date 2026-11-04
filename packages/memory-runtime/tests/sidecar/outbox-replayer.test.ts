@@ -124,6 +124,77 @@ describe('OutboxReplayer deadline 与 replay lease', () => {
     expect(await outbox.deadStats()).toMatchObject({ items: 1 });
   });
 
+  it('负例：成功响应晚于 lease/cleanup 时只保留 committed，不留 dead 双态', async () => {
+    let clock = 12_000;
+    const { outbox } = await setup(() => clock);
+    await outbox.enqueue({
+      id: 'ob_late_success_cleanup',
+      requestId: 'req_late_success_cleanup',
+      endpoint: '/write',
+      body: { items: [] },
+      createdAt: clock,
+      expiresAt: clock + 1_000,
+    });
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const client = {
+      post: jest.fn(async () => {
+        markStarted();
+        await gate;
+        return { data: { created: 1, results: [] } };
+      }),
+    } as any;
+    const replay = new OutboxReplayer({ outbox, client, now: () => clock }).replayOnce();
+    await started;
+
+    clock += 61_000;
+    expect(await outbox.cleanup(clock)).toEqual({ expired: 1, deadRemoved: 0 });
+    expect(await outbox.deadStats()).toMatchObject({ items: 1 });
+
+    release();
+    expect(await replay).toMatchObject({ settled: 1, dead: 0, remaining: 0 });
+    expect(await outbox.stats()).toMatchObject({ items: 0 });
+    expect(await outbox.deadStats()).toMatchObject({ items: 0 });
+  });
+
+  it('负例：capability timeout 超过 60s 时 replay lease 覆盖整个请求，cleanup 不得提前 dead', async () => {
+    let clock = 17_000;
+    const { outbox } = await setup(() => clock);
+    await outbox.enqueue({
+      id: 'ob_timeout_over_lease',
+      requestId: 'req_timeout_over_lease',
+      endpoint: '/write',
+      body: { items: [] },
+      createdAt: clock,
+      expiresAt: clock + 1_000,
+    });
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const client = {
+      timeoutMs: 120_000,
+      post: jest.fn(async () => {
+        markStarted();
+        await gate;
+        return { data: { created: 1, results: [] } };
+      }),
+    } as any;
+    const replay = new OutboxReplayer({ outbox, client, now: () => clock }).replayOnce();
+    await started;
+
+    clock += 61_000;
+    expect(await outbox.cleanup(clock)).toEqual({ expired: 0, deadRemoved: 0 });
+    expect(await outbox.stats()).toMatchObject({ items: 1 });
+    expect(await outbox.deadStats()).toMatchObject({ items: 0 });
+
+    release();
+    expect(await replay).toMatchObject({ settled: 1, dead: 0, remaining: 0 });
+    expect(await outbox.deadStats()).toMatchObject({ items: 0 });
+  });
+
   it('负例：崩溃遗留 lease 到期后可用同一幂等键恢复，不永久卡住', async () => {
     let clock = 20_000;
     const { outbox } = await setup(() => clock);

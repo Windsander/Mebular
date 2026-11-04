@@ -60,6 +60,8 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
 export const MAX_INGEST_CHUNKS = 100;
 export const MAX_DETAIL_ITEMS_PER_WRITE = 100;
+/** 与 core `MAX_DETAIL_RECORD_IDS` 一致；超限显式失败，绝不截断。 */
+export const MAX_DETAIL_RECORD_IDS = 200;
 export const IDEMPOTENCY_TTL_MS = DAY_MS;
 export const EXTRACTION_TTL_MS = DAY_MS;
 const IDEMPOTENCY_KEY_RE = /^[A-Za-z0-9._:-]{1,200}$/;
@@ -932,6 +934,7 @@ export class IngestService {
       stagingChunkIds,
       messageIds: this.messageIdsOf(chunks),
     });
+    await this.linkExtractionToOutbox(stagingChunkIds, extraction.id);
 
     const resultDegraded = degraded || outcome.degraded || detailOutcome.queued > 0
       || detailOutcome.failed > 0 || this.degraded;
@@ -1051,13 +1054,18 @@ export class IngestService {
           evidenceByClientItemId,
         },
         warnings,
+        extractionIds: [extraction.id],
       });
       if (outcome.records.length > 0 && !outcome.queued && outcome.failed === 0
         && detailOutcome.queued === 0 && detailOutcome.failed === 0 && extraction.stagingChunkIds.length > 0) {
-        await this.clearStaging(extraction.stagingChunkIds, warnings);
+        await this.clearStaging(extraction.stagingChunkIds, warnings, {
+          excludeExtractionIds: [extraction.id],
+        });
       } else if (outcome.records.length === 0 && !outcome.queued
         && detailOutcome.queued === 0 && extraction.stagingChunkIds.length > 0) {
-        await this.clearStaging(extraction.stagingChunkIds, warnings);
+        await this.clearStaging(extraction.stagingChunkIds, warnings, {
+          excludeExtractionIds: [extraction.id],
+        });
       }
       const queued = outcome.queued || detailOutcome.queued > 0;
       const updated = await this.saveExtraction({
@@ -1070,6 +1078,7 @@ export class IngestService {
         warnings,
         degraded: outcome.degraded || detailOutcome.queued > 0 || detailOutcome.failed > 0,
       });
+      await this.linkExtractionToOutbox(extraction.stagingChunkIds, updated.id);
       return {
         extraction: this.extractionView(updated),
         queued,
@@ -1109,25 +1118,64 @@ export class IngestService {
       ...(typeof bodyActor.displayName === 'string' ? { displayName: bodyActor.displayName } : {}),
     };
     const payload: Record<string, unknown> = isObject(data) ? data : {};
-    if (typeof payload.failed === 'number' && payload.failed > 0) return false;
+    const declaredFailed = typeof payload.failed === 'number' && payload.failed > 0;
     const results = Array.isArray(payload.results) ? payload.results : [];
     const resultByClientItemId = new Map<string, Record<string, unknown>>();
     for (const result of results) {
       if (!isObject(result) || typeof result.clientItemId !== 'string') continue;
       resultByClientItemId.set(result.clientItemId, result);
     }
-    for (const detailItem of items) {
-      const result = resultByClientItemId.get(detailItem.clientItemId);
-      if (!result) return false;
-      const status = typeof result.status === 'string' ? result.status : 'failed';
-      const id = typeof result.id === 'string' ? result.id : '';
-      if ((status !== 'created' && status !== 'duplicate') || id.length === 0) return false;
-      const authoritative = await this.confirmDetail(id, detailItem, actor);
-      if (status === 'created') await this.cacheDetail(id, result, items, authoritative);
+    let allOk = !declaredFailed;
+    const committedDetails: Array<{
+      id: string;
+      clientItemId?: string;
+      status?: string;
+      domain?: string;
+      kind?: string;
+    }> = [];
+    try {
+      for (const detailItem of items) {
+        const result = resultByClientItemId.get(detailItem.clientItemId);
+        if (!result) {
+          allOk = false;
+          continue;
+        }
+        const status = typeof result.status === 'string' ? result.status : 'failed';
+        const id = typeof result.id === 'string' ? result.id : '';
+        if ((status !== 'created' && status !== 'duplicate') || id.length === 0) {
+          allOk = false;
+          continue;
+        }
+        await this.local.outbox.renewReplayLease(item.id, { now: this.now() }).catch(() => false);
+        const authoritative = await this.confirmDetail(id, detailItem, actor);
+        committedDetails.push({
+          id,
+          clientItemId: detailItem.clientItemId,
+          status,
+          ...(authoritative.domain ? { domain: authoritative.domain } : {}),
+          ...(authoritative.detailKind ?? detailItem.detailKind
+            ? { kind: authoritative.detailKind ?? detailItem.detailKind }
+            : {}),
+        });
+        // created/duplicate 都用权威回读更新本地 cache（duplicate 已合并 recordIds）。
+        await this.cacheDetail(id, result, items, authoritative);
+      }
+    } catch (error) {
+      if (committedDetails.length > 0) {
+        await this.local.outbox.markCommitted(item.id, { details: committedDetails }).catch(() => false);
+      }
+      throw error;
     }
+    if (committedDetails.length > 0) {
+      await this.local.outbox.markCommitted(item.id, { details: committedDetails }).catch(() => false);
+    }
+    if (!allOk) return false;
+    await this.finalizeReplayedExtractions(item);
     if (item.meta?.stagingChunkIds && item.meta.stagingChunkIds.length > 0) {
       try {
-        await this.clearStagingAfterReplay(item.meta.stagingChunkIds, item.id);
+        await this.clearStagingAfterReplay(item.meta.stagingChunkIds, item.id, {
+          excludeExtractionIds: item.meta.extractionIds ?? [],
+        });
       } catch {
         // 清理失败只保留 staging 到 TTL，不影响已沉降详情。
       }
@@ -1137,7 +1185,7 @@ export class IngestService {
 
   private async applyReplayedRecord(item: OutboxItem, data: unknown): Promise<boolean> {
     const payload: Record<string, unknown> = isObject(data) ? data : {};
-    if (typeof payload.failed === 'number' && payload.failed > 0) return false;
+    const declaredFailed = typeof payload.failed === 'number' && payload.failed > 0;
     const results = Array.isArray(payload.results) ? payload.results : [];
     const bodyItems = isObject(item.body) && Array.isArray(item.body.items) ? item.body.items : [];
     const expectedRecords = bodyItems.length;
@@ -1169,6 +1217,17 @@ export class IngestService {
       });
     }
     if (records.length === 0) return false;
+    // capability 已成功确认的记录先持久化披露；即使后续 staging/detail 对账失败，
+    // dead/partial 也不会丢掉已提交的 record IDs/对象。
+    await this.local.outbox.markCommitted(item.id, {
+      records: records.map((record) => ({
+        id: record.id,
+        ...(record.clientItemId ? { clientItemId: record.clientItemId } : {}),
+        ...(record.status ? { status: record.status } : {}),
+        ...(record.domain ? { domain: record.domain } : {}),
+        ...(record.kind ? { kind: record.kind } : {}),
+      })),
+    }).catch(() => false);
     const confirmedClientItemIds = new Set(records.map((record) => record.clientItemId));
     const allRecordsConfirmed = expectedClientItemIds.size > 0
       && [...expectedClientItemIds].every((id) => confirmedClientItemIds.has(id));
@@ -1216,11 +1275,18 @@ export class IngestService {
         evidenceByClientItemId,
       },
       warnings,
+      extractionIds: item.meta?.extractionIds ?? [],
+      touchLease: () => this.local.outbox.renewReplayLease(item.id, { now: this.now() }).then(() => undefined),
     });
-    if (allRecordsConfirmed && detailOutcome.queued === 0 && detailOutcome.failed === 0) {
-      await this.clearStagingAfterReplay(stagingChunkIds, item.id).catch(() => 0);
+    const settled = allRecordsConfirmed && !declaredFailed
+      && detailOutcome.queued === 0 && detailOutcome.failed === 0;
+    if (settled) {
+      await this.finalizeReplayedExtractions(item);
+      await this.clearStagingAfterReplay(stagingChunkIds, item.id, {
+        excludeExtractionIds: item.meta?.extractionIds ?? [],
+      }).catch(() => 0);
     }
-    return allRecordsConfirmed && detailOutcome.queued === 0 && detailOutcome.failed === 0;
+    return settled;
   }
 
   /**
@@ -1553,6 +1619,13 @@ export class IngestService {
           field: `chunks[${index}].detailKind`,
         });
       }
+      // 与 capability/core 的 role↔detailKind 校验保持一致：在写任何记录前拒绝矛盾组合，
+      // 避免先提交 MemoryRecord 后才永久 422。
+      if (requestedKind === 'tool_output' && role !== 'tool') {
+        invalid(`chunks[${index}] 的 tool_output 只能用于 tool role`, {
+          field: `chunks[${index}].detailKind`,
+        });
+      }
       const detailKind: RuntimeDetailKind = role === 'tool' ? 'tool_output' : requestedKind;
       const retentionClass: DetailRetentionClass = detailKind === 'tool_output'
         ? 'tool_output'
@@ -1709,22 +1782,108 @@ export class IngestService {
     return chunks.sort((a, b) => a.at - b.at || (a.chunkIndex ?? 0) - (b.chunkIndex ?? 0));
   }
 
-  private async clearStaging(ids: readonly string[], warnings: string[]): Promise<void> {
+  /** 重放成功后把已无其他活动 outbox 依赖的 extraction 收口，避免永久 pending 证据保护。 */
+  private async finalizeReplayedExtractions(item: OutboxItem): Promise<void> {
+    const extractionIds = item.meta?.extractionIds ?? [];
+    if (extractionIds.length === 0) return;
     try {
-      await this.local.clearStaging(ids);
+      const active = await this.local.outbox.list();
+      const stillReferenced = new Set(active
+        .filter((entry) => entry.id !== item.id)
+        .flatMap((entry) => entry.meta?.extractionIds ?? []));
+      for (const extractionId of extractionIds) {
+        if (stillReferenced.has(extractionId)) continue;
+        const key = this.extractionCacheKey(extractionId);
+        const stored = await this.local.cache.get<StoredExtraction>(key);
+        if (!stored || stored.status !== 'pending') continue;
+        const ttlMs = stored.expiresAt - this.now();
+        if (ttlMs <= 0) {
+          await this.local.cache.delete(key);
+          continue;
+        }
+        await this.local.cache.set(key, {
+          ...stored,
+          status: 'completed',
+          degraded: false,
+        }, { ttlMs });
+      }
+    } catch {
+      // extraction 状态收口失败只会延后 staging 清理到 TTL，不影响已提交对象。
+    }
+  }
+
+  /** 把本次沉降入队的 outbox 项关联到 extraction，重放成功时可排除自身 pending 证据。 */
+  private async linkExtractionToOutbox(
+    stagingChunkIds: readonly string[],
+    extractionId: string,
+  ): Promise<void> {
+    if (stagingChunkIds.length === 0) return;
+    const wanted = new Set(stagingChunkIds);
+    try {
+      for (const item of await this.local.outbox.list()) {
+        if (!item.meta?.stagingChunkIds?.some((id) => wanted.has(id))) continue;
+        await this.local.outbox.linkExtraction(item.id, extractionId);
+      }
+    } catch {
+      // 关联失败只影响后续清理时机，不影响已持久化工作。
+    }
+  }
+
+  /** 仍在活动 outbox/pending extraction 依赖中的 staging 证据。 */
+  private async stagingIdsInUse({
+    excludeOutboxId,
+    excludeExtractionIds = [],
+  }: {
+    excludeOutboxId?: string;
+    excludeExtractionIds?: readonly string[];
+  } = {}): Promise<Set<string>> {
+    const inUse = new Set<string>();
+    for (const entry of await this.local.outbox.list()) {
+      if (entry.id === excludeOutboxId) continue;
+      for (const id of entry.meta?.stagingChunkIds ?? []) inUse.add(id);
+    }
+    const excluded = new Set(excludeExtractionIds);
+    const extractions = await this.local.cache.list<StoredExtraction>('extraction:v1:');
+    for (const { value } of extractions) {
+      if (!value || value.status !== 'pending' || excluded.has(value.id)) continue;
+      for (const id of value.stagingChunkIds ?? []) inUse.add(id);
+    }
+    return inUse;
+  }
+
+  private async clearStaging(
+    ids: readonly string[],
+    warnings: string[],
+    options: { excludeExtractionIds?: readonly string[] } = {},
+  ): Promise<void> {
+    try {
+      const inUse = await this.stagingIdsInUse({
+        ...(options.excludeExtractionIds ? { excludeExtractionIds: options.excludeExtractionIds } : {}),
+      });
+      const removable = [...new Set(ids.filter((id) => !inUse.has(id)))];
+      if (removable.length === 0) return;
+      await this.local.clearStaging(removable);
     } catch {
       appendWarnings(warnings, ['staging_cleanup_failed']);
     }
   }
 
-  /** record/detail 共享证据只有在所有活动 outbox 依赖结束后才能清理。 */
-  private async clearStagingAfterReplay(ids: readonly string[], excludeItemId: string): Promise<void> {
-    const active = await this.local.outbox.list();
-    const stillUsed = new Set(active
-      .filter((entry) => entry.id !== excludeItemId)
-      .flatMap((entry) => entry.meta?.stagingChunkIds ?? []));
-    const removable = [...new Set(ids.filter((id) => !stillUsed.has(id)))];
-    if (removable.length > 0) await this.local.clearStaging(removable);
+  /** record/detail 共享证据只有在所有活动 outbox/extraction 依赖结束后才能清理。 */
+  private async clearStagingAfterReplay(
+    ids: readonly string[],
+    excludeItemId: string,
+    options: { excludeExtractionIds?: readonly string[]; warnings?: string[] } = {},
+  ): Promise<void> {
+    try {
+      const inUse = await this.stagingIdsInUse({
+        excludeOutboxId: excludeItemId,
+        ...(options.excludeExtractionIds ? { excludeExtractionIds: options.excludeExtractionIds } : {}),
+      });
+      const removable = [...new Set(ids.filter((id) => !inUse.has(id)))];
+      if (removable.length > 0) await this.local.clearStaging(removable);
+    } catch {
+      if (options.warnings) appendWarnings(options.warnings, ['staging_cleanup_failed']);
+    }
   }
 
   private async confirmDetail(
@@ -1781,12 +1940,16 @@ export class IngestService {
     threadId,
     context,
     warnings,
+    extractionIds = [],
+    touchLease,
   }: {
     chunks: RawChunk[];
     records: IngestRecordView[];
     threadId: string;
     context: CandidateContext;
     warnings: string[];
+    extractionIds?: readonly string[];
+    touchLease?: () => Promise<void>;
   }): Promise<DetailSettlementOutcome> {
     const linked = records.filter((record) => typeof record.id === 'string' && record.id.length > 0);
     if (chunks.length === 0 || linked.length === 0) {
@@ -1825,8 +1988,15 @@ export class IngestService {
 
     const items: CapabilityDetailWriteItem[] = [];
     const detailChunkIds = new Map<string, string>();
+    let oversized = 0;
     for (const [domain, domainChunks] of byDomain) {
       for (const { chunk, recordIds } of domainChunks.values()) {
+        if (recordIds.length > MAX_DETAIL_RECORD_IDS) {
+          // core/capability 的上限是 200；超限必须显式失败，不能静默截断关联。
+          oversized += 1;
+          appendWarnings(warnings, ['detail_record_ids_exceeded']);
+          continue;
+        }
         const redacted = redactText(chunk.text);
         const rules = [...chunk.redaction.rules];
         if (redacted.redacted && !rules.includes('builtin_secret')) rules.push('builtin_secret');
@@ -1844,7 +2014,7 @@ export class IngestService {
           domain,
           detailKind,
           ...(threadId ? { threadId } : {}),
-          recordIds: recordIds.slice(0, 32),
+          recordIds: [...recordIds],
           role: chunk.role,
           text: redacted.text,
           mime: chunk.mime,
@@ -1876,7 +2046,7 @@ export class IngestService {
       written: 0,
       duplicates: 0,
       queued: 0,
-      failed: 0,
+      failed: oversized,
       warnings: [],
       queuedRequestIds: [],
     };
@@ -1893,10 +2063,11 @@ export class IngestService {
         .filter((id): id is string => typeof id === 'string'))];
       const requestId = this.detailRequestId(batch);
       if (!this.client) {
-        await this.enqueueDetail(requestId, actor, batch, batchStagingIds, outcome);
+        await this.enqueueDetail(requestId, actor, batch, batchStagingIds, outcome, batch.length, extractionIds);
         continue;
       }
       try {
+        await touchLease?.();
         const response = await this.client.detailWrite(
           { requestId, actor, items: batch },
           { idempotencyKey: requestId },
@@ -1937,14 +2108,16 @@ export class IngestService {
           const id = typeof result.id === 'string' ? result.id : '';
           if ((status === 'created' || status === 'duplicate') && id.length > 0) {
             try {
+              await touchLease?.();
               const authoritative = await this.confirmDetail(id, item, actor);
               if (!outcome.ids.includes(id)) outcome.ids.push(id);
               if (status === 'created') {
                 outcome.written += 1;
-                await this.cacheDetail(id, result, batch, authoritative);
               } else {
                 outcome.duplicates += 1;
               }
+              // created/duplicate 都使用权威回读更新 cache；duplicate 的 recordIds 已合并。
+              await this.cacheDetail(id, result, batch, authoritative);
             } catch (error) {
               const code = error instanceof CapabilityClientError ? error.code : 'detail_confirmation_failed';
               appendWarnings(outcome.warnings, [`detail_write_failed:${code}`]);
@@ -1969,13 +2142,15 @@ export class IngestService {
         }
         if (failedItems.length > 0) {
           // 重放必须复用原完整批次与 requestId；成功项由 capability 去重。
-          await this.enqueueDetail(requestId, actor, batch, batchStagingIds, outcome, failedItems.length);
+          await this.enqueueDetail(
+            requestId, actor, batch, batchStagingIds, outcome, failedItems.length, extractionIds,
+          );
         }
       } catch (error) {
         const code = error instanceof CapabilityClientError ? error.code : 'internal';
         appendWarnings(outcome.warnings, [`detail_write_failed:${code}`]);
         if (retryableCapabilityError(error) || code === 'detail_quota_exceeded') {
-          await this.enqueueDetail(requestId, actor, batch, batchStagingIds, outcome);
+          await this.enqueueDetail(requestId, actor, batch, batchStagingIds, outcome, batch.length, extractionIds);
         } else {
           outcome.failed += batch.length;
         }
@@ -2004,21 +2179,21 @@ export class IngestService {
         id,
         type: 'detail_record',
         kind: 'detail_record',
-        detailKind: item.detailKind,
-        domain: item.domain,
-        role: item.role ?? null,
+        detailKind: authoritative.detailKind ?? item.detailKind,
+        domain: authoritative.domain ?? item.domain,
+        role: authoritative.role ?? item.role ?? null,
         text: item.text,
         recordIds: [...(authoritative.recordIds ?? item.recordIds)],
-        threadId: item.threadId ?? null,
-        messageId: item.messageId ?? null,
-        chunkIndex: item.chunkIndex ?? 0,
-        turn: item.turn ?? null,
+        threadId: authoritative.threadId ?? item.threadId ?? null,
+        messageId: authoritative.messageId ?? item.messageId ?? null,
+        chunkIndex: authoritative.chunkIndex ?? item.chunkIndex ?? 0,
+        turn: authoritative.turn ?? item.turn ?? null,
         retentionClass,
         contentHash: authoritative.contentHash ?? item.contentHash ?? `sha256:${sha256Hex(item.text)}`,
-        redacted: item.redaction?.applied === true,
+        redacted: authoritative.redacted ?? item.redaction?.applied === true,
         expiresAt,
         availability: ['available'],
-        provenance: item.provenance ?? {},
+        provenance: authoritative.provenance ?? item.provenance ?? {},
       },
     }, this.config.detail.cacheDays * DAY_MS);
   }
@@ -2030,6 +2205,7 @@ export class IngestService {
     stagingChunkIds: string[],
     outcome: DetailSettlementOutcome,
     queuedCount = items.length,
+    extractionIds: readonly string[] = [],
   ): Promise<void> {
     const body = { requestId, actor, op: 'write', items };
     const id = `ob_${sha256Hex(`${requestId}\u0000detail`).slice(0, 40)}`;
@@ -2050,6 +2226,7 @@ export class IngestService {
           kind: 'detail',
           ...(items[0]?.domain ? { domain: items[0].domain } : {}),
           stagingChunkIds: [...stagingChunkIds],
+          ...(extractionIds.length > 0 ? { extractionIds: [...new Set(extractionIds)] } : {}),
         },
       });
       outcome.queued += queuedCount;

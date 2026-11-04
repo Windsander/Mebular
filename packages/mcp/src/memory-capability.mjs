@@ -2273,13 +2273,24 @@ export function createMemoryCapabilityHandler({
         const hasMissing = allHaveClientItemIds && expectedIds.some((id) => !actualIds.includes(id));
         const hasFailedResult = Array.isArray(results) && results.some((entry) =>
           entry?.status !== 'created' && entry?.status !== 'duplicate');
+        // 成功状态也必须带可重放的权威字段；malformed 成功响应不得进入永久账本。
+        const hasMalformedSuccess = Array.isArray(results) && results.some((entry) => {
+          if (!isObject(entry) || (entry.status !== 'created' && entry.status !== 'duplicate')) return false;
+          if (typeof entry.id !== 'string' || entry.id.trim().length === 0) return true;
+          if ((route === 'write' || route === 'detail:write')
+            && (typeof entry.domain !== 'string' || entry.domain.trim().length === 0)) return true;
+          if (route === 'detail:write'
+            && (typeof entry.detailKind !== 'string' || entry.detailKind.trim().length === 0)) return true;
+          return false;
+        });
         if (result?.data?.partial === true
           || (typeof result?.data?.failed === 'number' && result.data.failed > 0)
           || !Array.isArray(results)
           || results.length !== payload.items.length
           || hasUnexpected
           || hasMissing
-          || hasFailedResult) {
+          || hasFailedResult
+          || hasMalformedSuccess) {
           return result;
         }
       }

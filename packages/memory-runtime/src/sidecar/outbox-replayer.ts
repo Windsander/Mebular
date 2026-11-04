@@ -9,10 +9,11 @@
 
 import { CapabilityClient, CapabilityClientError } from './capability-client.js';
 import type { IngestErrorView, OutboxReplaySummary } from './ingest.js';
-import type { BoundedOutbox, OutboxItem } from './local-layer.js';
+import { OUTBOX_REPLAY_LEASE_MS, type BoundedOutbox, type OutboxItem } from './local-layer.js';
 
 const RETRY_BASE_MS = 1000;
 const RETRY_MAX_MS = 60_000;
+const REPLAY_LEASE_MARGIN_MS = 5_000;
 
 export interface OutboxReplayerOptions {
   outbox: BoundedOutbox;
@@ -161,8 +162,16 @@ export class OutboxReplayer {
     return summary;
   }
 
+  private leaseMs(): number {
+    const timeoutMs = typeof (this.client as { timeoutMs?: unknown } | null)?.timeoutMs === 'number'
+      ? (this.client as unknown as { timeoutMs: number }).timeoutMs
+      : 0;
+    return Math.max(OUTBOX_REPLAY_LEASE_MS, Math.max(0, timeoutMs) + REPLAY_LEASE_MARGIN_MS);
+  }
+
   private async replayItem(item: OutboxItem): Promise<ItemOutcome> {
-    const lease = await this.outbox.acquireReplayLease(item.id, { now: this.now() });
+    const leaseMs = this.leaseMs();
+    const lease = await this.outbox.acquireReplayLease(item.id, { now: this.now(), leaseMs });
     if (lease.state === 'leased') return { outcome: 'skipped' };
     if (lease.state === 'expired') {
       return {
@@ -175,6 +184,8 @@ export class OutboxReplayer {
         idempotencyKey: item.requestId,
         retries: 0,
       });
+      // 响应已确认：把 lease 续到覆盖本地回读/详情写入阶段。
+      await this.outbox.renewReplayLease(item.id, { now: this.now(), leaseMs });
       // 权威回读/必需项确认失败不能吞掉；交由同一 retry/dead/deadline 路径处理。
       const keepForRetry = (await this.onSettled?.(item, envelope.data)) === false;
       if (keepForRetry) {

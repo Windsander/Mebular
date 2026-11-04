@@ -1,7 +1,7 @@
 // sidecar 沉降：ingest 幂等、staging、detail 写入/去重/跨域、outbox、无候选。
 
 import { describe, it, expect, afterEach, jest } from '@jest/globals';
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CapabilityClient, CapabilityClientError } from '../../src/sidecar/capability-client.js';
@@ -864,30 +864,286 @@ describe('IngestService settlements', () => {
     expect(await local.store.countStagingChunks()).toBe(0);
   });
 
-  it('duplicate Detail 不用当前请求的 expiry/recordIds 覆盖权威缓存', async () => {
-    const { service, fake, local } = await setup();
-    const first = await service.ingest({ requestId: 'req_duplicate_cache_1', ...preferenceRequest() });
-    const detailId = first.data.detailIds[0]!;
-    const authoritativeExpiresAt = Date.now() + 60_000;
-    await local.putCachedDetail(detailId, {
-      detail: {
-        id: detailId,
-        text: 'authoritative cached text',
-        recordIds: ['authoritative-record-id'],
-        expiresAt: authoritativeExpiresAt,
-        availability: ['available'],
-      },
+  it('33 条同域记录全部反向关联到同一 Detail，不按 32 截断', async () => {
+    const { service, client, fake } = await setup();
+    const recordIds: string[] = [];
+    const result = await service.ingest({
+      requestId: 'req_detail_record_ids_33',
+      agentId: 'opencode',
+      threadId: 'th_detail_record_ids_33',
+      extractor: 'host',
+      chunks: [{ role: 'user', text: '33 条共享证据', messageId: 'm_detail_record_ids_33', chunkIndex: 0 }],
+      candidates: Array.from({ length: 33 }, (_, index) => ({
+        kind: 'observation',
+        content: { content: `33 条共享证据记录 ${index}` },
+        sourceMessageIds: ['m_detail_record_ids_33'],
+      })),
+    });
+    recordIds.push(...result.data.records.map((record) => record.id));
+    expect(recordIds).toHaveLength(33);
+    expect(fake.details).toHaveLength(1);
+    expect(fake.details[0]!.recordIds).toHaveLength(33);
+    for (const recordId of recordIds) {
+      const listed = await client.detailList({
+        actor: { type: 'agent', agentId: 'opencode' },
+        domains: ['agent:opencode'],
+        recordIds: [recordId],
+      });
+      expect(listed.data.details.map((detail) => detail.id)).toContain(fake.details[0]!.id);
+    }
+  });
+
+  it('200 条同域记录全部反向关联，达到 core 上限仍不截断', async () => {
+    const { service, client, fake } = await setup();
+    const chunk = { role: 'user' as const, text: '200 条共享证据', messageId: 'm_detail_record_ids_200', chunkIndex: 0 };
+    const recordIds: string[] = [];
+    for (let batch = 0; batch < 2; batch += 1) {
+      const result = await service.ingest({
+        requestId: `req_detail_record_ids_200_${batch}`,
+        agentId: 'opencode',
+        threadId: 'th_detail_record_ids_200',
+        extractor: 'host',
+        chunks: [chunk],
+        candidates: Array.from({ length: 100 }, (_, index) => ({
+          kind: 'observation',
+          content: { content: `200 条共享证据记录 ${batch}_${index}` },
+          sourceMessageIds: ['m_detail_record_ids_200'],
+        })),
+      });
+      recordIds.push(...result.data.records.map((record) => record.id));
+    }
+    expect(recordIds).toHaveLength(200);
+    expect(fake.details).toHaveLength(1);
+    expect(new Set(fake.details[0]!.recordIds)).toEqual(new Set(recordIds));
+    for (const recordId of recordIds) {
+      const listed = await client.detailList({
+        actor: { type: 'agent', agentId: 'opencode' },
+        domains: ['agent:opencode'],
+        recordIds: [recordId],
+      });
+      expect(listed.data.details.map((detail) => detail.id)).toContain(fake.details[0]!.id);
+    }
+  });
+
+  it('201 条同域记录显式失败，不发送超限 Detail、不截断已有关联', async () => {
+    const { service, fake } = await setup();
+    const chunk = { role: 'user' as const, text: '201 条共享证据', messageId: 'm_detail_record_ids_201', chunkIndex: 0 };
+    for (let batch = 0; batch < 2; batch += 1) {
+      await service.ingest({
+        requestId: `req_detail_record_ids_201_${batch}`,
+        agentId: 'opencode',
+        threadId: 'th_detail_record_ids_201',
+        extractor: 'host',
+        chunks: [chunk],
+        candidates: Array.from({ length: 100 }, (_, index) => ({
+          kind: 'observation',
+          content: { content: `201 条共享证据记录 ${batch}_${index}` },
+          sourceMessageIds: ['m_detail_record_ids_201'],
+        })),
+      });
+    }
+    const detailRequestsBefore = fake.detailRequests.length;
+    const overflow = await service.ingest({
+      requestId: 'req_detail_record_ids_201_overflow',
+      agentId: 'opencode',
+      threadId: 'th_detail_record_ids_201',
+      extractor: 'host',
+      chunks: [chunk],
+      candidates: [{
+        kind: 'observation',
+        content: { content: '201 条共享证据记录 overflow' },
+        sourceMessageIds: ['m_detail_record_ids_201'],
+      }],
     });
 
-    const duplicate = await service.ingest({ requestId: 'req_duplicate_cache_2', ...preferenceRequest() });
+    expect(overflow.status).toBe(200);
+    expect(overflow.data.records).toHaveLength(1);
+    expect(overflow.data.detail).toMatchObject({ queued: 0, failed: 1 });
+    expect(overflow.data.warnings).toEqual(expect.arrayContaining([
+      expect.stringMatching(/^detail_write_failed:/),
+    ]));
+    expect(overflow.data.extraction.status).toBe('failed');
+    expect(fake.detailRequests).toHaveLength(detailRequestsBefore + 1);
+    expect(fake.details).toHaveLength(1);
+    expect(fake.details[0]!.recordIds).toHaveLength(200);
+    expect(fake.details[0]!.recordIds).not.toContain(overflow.data.records[0]!.id);
+  });
+
+  it('新 ingest 成功不得删除 pending host extraction 仍依赖的共享 staging', async () => {
+    const { service, fake, local } = await setup();
+    const chunk = { role: 'user' as const, text: '共享 pending 证据', messageId: 'm_shared_pending', chunkIndex: 0 };
+    const pending = await service.ingest({
+      requestId: 'req_shared_pending_extraction',
+      agentId: 'opencode',
+      threadId: 'th_shared_pending',
+      extractor: 'host',
+      chunks: [chunk],
+    });
+    expect(pending.status).toBe(202);
+    const stagingId = pending.data.stagingChunkIds[0]!;
+
+    const completed = await service.ingest({
+      requestId: 'req_shared_pending_new_ingest',
+      agentId: 'opencode',
+      threadId: 'th_shared_pending',
+      extractor: 'host',
+      chunks: [chunk],
+      candidates: [{
+        kind: 'observation',
+        content: { content: '共享 pending 证据记录' },
+        sourceMessageIds: ['m_shared_pending'],
+      }],
+    });
+    expect(completed.data.records).toHaveLength(1);
+    expect(completed.data.stagingChunkIds).toContain(stagingId);
+    expect(await local.store.countStagingChunks()).toBe(1);
+    expect((await service.getExtraction(pending.data.extraction.id))?.status).toBe('pending');
+
+    const resumed = await service.completeExtraction(pending.data.extraction.id, [{
+      kind: 'observation',
+      content: { content: '共享 pending 证据迟到记录' },
+    }]);
+    expect(resumed.extraction.status).toBe('completed');
+    expect(fake.details).toHaveLength(1);
+    expect(fake.details[0]!.recordIds).toHaveLength(2);
+    expect(await local.store.countStagingChunks()).toBe(0);
+  });
+
+  it('replay 成功不得删除 pending host extraction 仍依赖的共享 staging', async () => {
+    const { service, fake, local } = await setup();
+    const chunk = { role: 'user' as const, text: '共享 pending 重放证据', messageId: 'm_shared_pending_replay', chunkIndex: 0 };
+    const pending = await service.ingest({
+      requestId: 'req_shared_pending_replay_extraction',
+      agentId: 'opencode',
+      threadId: 'th_shared_pending_replay',
+      extractor: 'host',
+      chunks: [chunk],
+    });
+    expect(pending.status).toBe(202);
+
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    await service.ingest({
+      requestId: 'req_shared_pending_replay_ingest',
+      agentId: 'opencode',
+      threadId: 'th_shared_pending_replay',
+      extractor: 'host',
+      chunks: [chunk],
+      candidates: [{
+        kind: 'observation',
+        content: { content: '共享 pending 重放记录' },
+        sourceMessageIds: ['m_shared_pending_replay'],
+      }],
+    });
+    fake.setFailure(null);
+
+    const replayed = await new OutboxReplayer({
+      outbox: local.outbox,
+      client: (service as any).client,
+      onSettled: (item, data) => service.applyReplayedOutbox(item, data),
+    }).replayOnce();
+    expect(replayed).toMatchObject({ settled: 1, remaining: 0 });
+    expect(await local.store.countStagingChunks()).toBe(1);
+
+    const resumed = await service.completeExtraction(pending.data.extraction.id, [{
+      kind: 'observation',
+      content: { content: '共享 pending 重放迟到记录' },
+    }]);
+    expect(resumed.extraction.status).toBe('completed');
+    expect(await local.store.countStagingChunks()).toBe(0);
+  });
+
+  it('duplicate Detail 按权威回读更新 cache，保留合并后的全部 recordIds 与原 expiresAt', async () => {
+    const { service, fake, local } = await setup();
+    const chunk = { role: 'user' as const, text: '共享缓存证据 A B', messageId: 'm_shared_cache', chunkIndex: 0 };
+    const first = await service.ingest({
+      requestId: 'req_duplicate_cache_1',
+      agentId: 'opencode',
+      threadId: 'th_duplicate_cache',
+      extractor: 'host',
+      chunks: [chunk],
+      candidates: [{
+        kind: 'observation',
+        content: { content: '共享缓存证据 A' },
+        sourceMessageIds: ['m_shared_cache'],
+      }],
+    });
+    const detailId = first.data.detailIds[0]!;
+    const firstRecordId = first.data.records[0]!.id;
+    const firstExpiresAt = fake.details[0]!.expiresAt;
+    const cachedFirst = await local.getCachedDetail<any>(detailId);
+    expect(cachedFirst.detail.recordIds).toEqual([firstRecordId]);
+
+    const duplicate = await service.ingest({
+      requestId: 'req_duplicate_cache_2',
+      agentId: 'opencode',
+      threadId: 'th_duplicate_cache',
+      extractor: 'host',
+      chunks: [chunk],
+      candidates: [{
+        kind: 'observation',
+        content: { content: '共享缓存证据 B' },
+        sourceMessageIds: ['m_shared_cache'],
+      }],
+    });
     expect(duplicate.data.detailIds).toEqual([detailId]);
+    const secondRecordId = duplicate.data.records[0]!.id;
+    expect(secondRecordId).not.toBe(firstRecordId);
+    expect(fake.details).toHaveLength(1);
+    expect(fake.details[0]!.recordIds).toEqual(expect.arrayContaining([firstRecordId, secondRecordId]));
+    const cached = await local.getCachedDetail<any>(detailId);
+    expect(cached.detail.recordIds).toEqual(expect.arrayContaining([firstRecordId, secondRecordId]));
+    expect(cached.detail.recordIds).toHaveLength(2);
+    expect(cached.detail.expiresAt).toBe(firstExpiresAt);
+  });
+
+  it('replay duplicate Detail 也按权威回读更新 cache 的合并 recordIds', async () => {
+    const { service, fake, local } = await setup();
+    const chunk = { role: 'user' as const, text: '重放缓存证据 A B', messageId: 'm_replay_cache', chunkIndex: 0 };
+    const first = await service.ingest({
+      requestId: 'req_replay_cache_first',
+      agentId: 'opencode',
+      threadId: 'th_replay_cache',
+      extractor: 'host',
+      chunks: [chunk],
+      candidates: [{
+        kind: 'observation',
+        content: { content: '重放缓存证据 A' },
+        sourceMessageIds: ['m_replay_cache'],
+      }],
+    });
+    const detailId = first.data.detailIds[0]!;
+    const firstRecordId = first.data.records[0]!.id;
+
+    fake.setDetailFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const queued = await service.ingest({
+      requestId: 'req_replay_cache_second',
+      agentId: 'opencode',
+      threadId: 'th_replay_cache',
+      extractor: 'host',
+      chunks: [chunk],
+      candidates: [{
+        kind: 'observation',
+        content: { content: '重放缓存证据 B' },
+        sourceMessageIds: ['m_replay_cache'],
+      }],
+    });
+    expect(queued.status).toBe(202);
+    expect(queued.data.detail.queued).toBe(1);
+    const secondRecordId = queued.data.records[0]!.id;
+    const beforeReplay = await local.getCachedDetail<any>(detailId);
+    expect(beforeReplay.detail.recordIds).toEqual([firstRecordId]);
+
+    fake.setDetailFailure(null);
+    const summary = await new OutboxReplayer({
+      outbox: local.outbox,
+      client: (service as any).client,
+      onSettled: (item, data) => service.applyReplayedOutbox(item, data),
+    }).replayOnce();
+    expect(summary).toMatchObject({ settled: 1, remaining: 0 });
     expect(fake.details).toHaveLength(1);
     const cached = await local.getCachedDetail<any>(detailId);
-    expect(cached.detail).toMatchObject({
-      text: 'authoritative cached text',
-      recordIds: ['authoritative-record-id'],
-      expiresAt: authoritativeExpiresAt,
-    });
+    expect(cached.detail.recordIds).toEqual(expect.arrayContaining([firstRecordId, secondRecordId]));
+    expect(cached.detail.recordIds).toHaveLength(2);
   });
 
   it('第 100 个 message 的显式证据不被 64 条 provenance 上限截断', async () => {
@@ -1341,8 +1597,8 @@ describe('IngestService settlements', () => {
     expect(await local.store.countStagingChunks()).toBe(0);
   });
 
-  it('replay lease 内缺失 staging 必须进入 dead 而非永久 retry', async () => {
-    const { service, client, fake, local } = await setup();
+  it('staging 缺失但 record 已提交时必须 dead 并披露已提交 IDs/对象', async () => {
+    const { service, client, fake, local, home } = await setup();
     fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
     await service.ingest({ requestId: 'req_missing_staging_dead', ...preferenceRequest() });
     const ids = (await local.store.listStagingChunks()).map((chunk) => chunk.id);
@@ -1355,6 +1611,23 @@ describe('IngestService settlements', () => {
     }).replayOnce();
     expect(summary).toMatchObject({ settled: 0, dead: 1, remaining: 0 });
     expect(await local.outbox.deadCount()).toBe(1);
+    expect(fake.nodes).toHaveLength(1);
+    const committedRecord = fake.nodes[0]!;
+
+    const deadFiles = await readdir(join(home, 'memory-runtime', 'outbox', 'dead'));
+    expect(deadFiles).toHaveLength(1);
+    const dead = JSON.parse(await readFile(
+      join(home, 'memory-runtime', 'outbox', 'dead', deadFiles[0]!),
+      'utf8',
+    ));
+    expect(dead.error).toBe('retention_expired');
+    expect(dead.committed.records).toEqual([
+      expect.objectContaining({
+        id: committedRecord.id,
+        domain: committedRecord.domain,
+        kind: committedRecord.kind,
+      }),
+    ]);
   });
 
   it('Detail 永久部分失败显式 failed，披露已提交 ID 且保留全部仍需证据', async () => {

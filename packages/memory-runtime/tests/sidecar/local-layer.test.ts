@@ -357,7 +357,7 @@ describe('SidecarLocalLayer', () => {
     expect(layer.maintenanceStatus().lastResult).toMatchObject({
       cacheRemoved: 1,
       detailCacheRemoved: 1,
-      outboxExpired: 0,
+      outboxExpired: 1,
       deadRemoved: 0,
     });
     expect(layer.maintenanceStatus().lastResult?.bytes).toBeGreaterThan(0);
@@ -368,6 +368,95 @@ describe('SidecarLocalLayer', () => {
     expect((await layer.stats()).deadLetter).toBe(0);
     expect(layer.maintenanceStatus().lastResult?.deadRemoved).toBe(1);
     layer.stopMaintenance();
+  });
+
+  it('in-flight replay lease 保护的 staging 不被 cleanup 物理删除，lease 到期后才 dead/清理', async () => {
+    const layer = new SidecarLocalLayer({ root, stagingHours: 24, now: () => now });
+    await layer.init();
+    const text = 'in-flight replay staging';
+    const chunk = {
+      schema: 1 as const,
+      id: 'rc_inflight_replay',
+      threadId: 'th_inflight_replay',
+      agentId: 'opencode',
+      hostId: 'h_test',
+      role: 'user' as const,
+      text,
+      mime: 'text/plain' as const,
+      at: now,
+      contentHash: sha256Hex(text),
+      redaction: { applied: false, rules: [] },
+      expiresAt: now + 500,
+    };
+    await layer.putStagingChunk('cl_test', chunk);
+    await layer.outbox.enqueue({
+      id: 'ob_inflight_replay',
+      requestId: 'req_inflight_replay',
+      endpoint: '/write',
+      body: { items: [] },
+      createdAt: now,
+      expiresAt: now + 1_000,
+      meta: { kind: 'record', stagingChunkIds: [chunk.id] },
+    });
+    const leaseMs = 125_000;
+    expect(await layer.outbox.acquireReplayLease('ob_inflight_replay', { now, leaseMs }))
+      .toMatchObject({ state: 'acquired' });
+
+    now += 1_000;
+    await layer.cleanup(now);
+    expect((await layer.store.listStagingChunks({ includeExpired: true }))
+      .map((entry) => entry.id)).toContain(chunk.id);
+    expect(await layer.outbox.stats()).toMatchObject({ items: 1 });
+    expect(await layer.outbox.deadStats()).toMatchObject({ items: 0 });
+
+    now += leaseMs + 1;
+    await layer.cleanup(now);
+    expect(await layer.store.listStagingChunks({ includeExpired: true })).toHaveLength(0);
+    expect(await layer.outbox.stats()).toMatchObject({ items: 0 });
+    expect(await layer.outbox.deadStats()).toMatchObject({ items: 1 });
+  });
+
+  it('staging 配额淘汰不得删除 in-flight replay 依赖', async () => {
+    const layer = new SidecarLocalLayer({ root, stagingBytes: 4, now: () => now });
+    await layer.init();
+    const firstText = 'AAAA';
+    const firstChunk = {
+      schema: 1 as const,
+      id: 'rc_quota_keep_replay',
+      threadId: 'th_quota_keep_replay',
+      agentId: 'opencode',
+      hostId: 'h_test',
+      role: 'user' as const,
+      text: firstText,
+      mime: 'text/plain' as const,
+      at: now,
+      contentHash: sha256Hex(firstText),
+      redaction: { applied: false, rules: [] },
+      expiresAt: now + 60_000,
+    };
+    await layer.putStagingChunk('cl_test', firstChunk);
+    await layer.outbox.enqueue({
+      id: 'ob_quota_keep_replay',
+      requestId: 'req_quota_keep_replay',
+      endpoint: '/write',
+      body: { items: [] },
+      createdAt: now,
+      meta: { kind: 'record', stagingChunkIds: [firstChunk.id] },
+    });
+    await layer.outbox.acquireReplayLease('ob_quota_keep_replay', { now, leaseMs: 125_000 });
+
+    const secondText = 'BBBB';
+    await layer.putStagingChunk('cl_test', {
+      ...firstChunk,
+      id: 'rc_quota_new_chunk',
+      text: secondText,
+      contentHash: sha256Hex(secondText),
+      at: now + 1,
+    });
+    const remaining = await layer.store.listStagingChunks({ includeExpired: true });
+    expect(remaining.map((chunk) => chunk.id)).toContain(firstChunk.id);
+    expect(await layer.outbox.stats()).toMatchObject({ items: 1 });
+    expect(await layer.outbox.deadStats()).toMatchObject({ items: 0 });
   });
 
   it('D2：active 最长 30 天或更早 deadline，dead 再保留 30 天', async () => {

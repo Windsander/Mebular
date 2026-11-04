@@ -796,7 +796,7 @@ describe('MemoryRuntimeSupervisor：生命周期', () => {
     await waitFor(() => existsSync(join(home, 'memory-runtime.json')));
     const supervisor = new MemoryRuntimeSupervisor({
       home,
-      config: enabledConfig(),
+      config: enabledConfig({ startTimeoutMs: 500 }),
       env: envFor(home),
       profileId: () => 'default',
     });
@@ -808,8 +808,10 @@ describe('MemoryRuntimeSupervisor：生命周期', () => {
 
     // token B：旧 dormantLock 失效，不得被当前新 token 覆盖成 stopped。
     await writeCapabilityToken(home, 'token-b');
-    const rotated = await supervisor.start();
-    expect(rotated).not.toMatchObject({ state: 'stopped', reason: 'disabled' });
+    const first = await supervisor.start();
+    expect(first).not.toMatchObject({ state: 'stopped', reason: 'disabled' });
+    const second = await supervisor.start();
+    expect(second).not.toMatchObject({ state: 'stopped', reason: 'disabled' });
   }, 15000);
 
   for (const variant of [

@@ -5,11 +5,12 @@
 
 import { describe, it, expect, afterEach } from '@jest/globals';
 import { existsSync } from 'node:fs';
-import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startHttpServer } from '../../packages/mcp/src/serve.mjs';
+import { restoreBackup } from '../../packages/mcp/src/config-apply.mjs';
 import { pidAlive } from '../../packages/mcp/src/memory-runtime-supervisor.mjs';
 
 const FAKE = fileURLToPath(new URL('./fixtures/memory-runtime-fake-sidecar.mjs', import.meta.url));
@@ -209,7 +210,7 @@ describe('serve + Memory Runtime supervisor', () => {
     try {
       const { home, base } = await start({ enabled: false });
       const lockPath = join(home, 'config.json.write-lock');
-      await writeFile(lockPath, JSON.stringify({ pid: process.pid, at: Date.now(), owner: 'other-owner' }), 'utf-8');
+      await writeFile(lockPath, JSON.stringify({ pid: process.pid, at: Date.now() - 3_600_000, owner: 'other-owner' }), 'utf-8');
       const consoleResponse = await fetch(`${base}/console/`);
       const csrf = consoleResponse.headers.get('x-mebular-csrf');
       const cookie = consoleResponse.headers.get('set-cookie')?.split(';')[0];
@@ -223,6 +224,35 @@ describe('serve + Memory Runtime supervisor', () => {
       const raw = await readFile(join(home, 'config.json'), 'utf-8').catch(() => null);
       expect(raw).toBeNull();
       await rm(lockPath, { force: true });
+    } finally {
+      if (previousTimeout === undefined) delete process.env.MEBULAR_CONFIG_LOCK_TIMEOUT_MS;
+      else process.env.MEBULAR_CONFIG_LOCK_TIMEOUT_MS = previousTimeout;
+    }
+  }, 15000);
+
+  it('config 锁：空/半截锁在新鲜期内不接管，过期后接管', async () => {
+    const previousTimeout = process.env.MEBULAR_CONFIG_LOCK_TIMEOUT_MS;
+    process.env.MEBULAR_CONFIG_LOCK_TIMEOUT_MS = '100';
+    try {
+      const { home, base } = await start({ enabled: false });
+      const lockPath = join(home, 'config.json.write-lock');
+      const consoleResponse = await fetch(`${base}/console/`);
+      const csrf = consoleResponse.headers.get('x-mebular-csrf');
+      const cookie = consoleResponse.headers.get('set-cookie')?.split(';')[0];
+      const patch = () => fetch(`${base}/admin/api/config`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-mebular-csrf': csrf, cookie },
+        body: JSON.stringify({ patch: { 'memoryRuntime.enabled': true } }),
+      });
+      await writeFile(lockPath, '{"pid":', 'utf-8');
+      const fresh = await patch();
+      expect(fresh.status).toBe(409);
+      expect(await fresh.json()).toMatchObject({ ok: false, error: 'config_busy' });
+      const old = new Date(Date.now() - 60_000);
+      await utimes(lockPath, old, old);
+      const taken = await patch();
+      expect(taken.status).toBe(200);
+      await waitFor(() => !existsSync(lockPath));
     } finally {
       if (previousTimeout === undefined) delete process.env.MEBULAR_CONFIG_LOCK_TIMEOUT_MS;
       else process.env.MEBULAR_CONFIG_LOCK_TIMEOUT_MS = previousTimeout;
@@ -275,6 +305,46 @@ describe('serve + Memory Runtime supervisor', () => {
     const recovered = await patch();
     expect(recovered.status).toBe(200);
     await waitFor(() => !existsSync(join(home, 'config.json.write-lock')));
+  }, 15000);
+
+  it('restoreBackup 与 PATCH 并发时持锁等待/失败，不会覆盖', async () => {
+    let release = () => {};
+    let entered = false;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const previousTimeout = process.env.MEBULAR_CONFIG_LOCK_TIMEOUT_MS;
+    process.env.MEBULAR_CONFIG_LOCK_TIMEOUT_MS = '100';
+    try {
+      const { home, base } = await start({
+        enabled: false,
+        beforeConfigWrite: async () => {
+          if (entered) return;
+          entered = true;
+          await gate;
+        },
+      });
+      const configFile = join(home, 'config.json');
+      const backupFile = join(home, 'restore-source.json');
+      await writeFile(configFile, JSON.stringify({ memoryRuntime: { enabled: false } }, null, 2), 'utf-8');
+      await writeFile(backupFile, JSON.stringify({ restored: true }, null, 2), 'utf-8');
+      const consoleResponse = await fetch(`${base}/console/`);
+      const csrf = consoleResponse.headers.get('x-mebular-csrf');
+      const cookie = consoleResponse.headers.get('set-cookie')?.split(';')[0];
+      const patch = fetch(`${base}/admin/api/config`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-mebular-csrf': csrf, cookie },
+        body: JSON.stringify({ patch: { 'memoryRuntime.enabled': true } }),
+      });
+      await waitFor(() => entered, { timeoutMs: 5000 });
+      await expect(restoreBackup({ configFile, backupFile })).rejects.toMatchObject({ code: 'CONFIG_BUSY' });
+      release();
+      expect((await patch).status).toBe(200);
+      await waitFor(() => existsSync(`${configFile}.write-lock`) === false);
+      expect(await restoreBackup({ configFile, backupFile })).toBe(true);
+      expect(JSON.parse(await readFile(configFile, 'utf-8'))).toEqual({ restored: true });
+    } finally {
+      if (previousTimeout === undefined) delete process.env.MEBULAR_CONFIG_LOCK_TIMEOUT_MS;
+      else process.env.MEBULAR_CONFIG_LOCK_TIMEOUT_MS = previousTimeout;
+    }
   }, 15000);
 
   it('enabled：异步启动 sidecar，overview 只读展示且不泄漏 token；关闭时停止', async () => {

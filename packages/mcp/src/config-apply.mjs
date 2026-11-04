@@ -16,6 +16,7 @@ import { existsSync } from 'node:fs';
 import { copyFile, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { CONFIG_SCHEMA_BY_PATH } from './config-schema.mjs';
+import { acquireConfigFileLock } from './config-lock.mjs';
 
 export const APPLY_RESULT_FILE = 'config-apply.result.json';
 export const APPLY_PENDING_FILE = 'config-apply.pending.json';
@@ -162,9 +163,19 @@ export const readJoinError = (home) => readJson(joinErrorPath(home));
 
 /** 还原备份（config.json ← config.json.bak）。返回是否真的还原了。 */
 export async function restoreBackup({ configFile, backupFile = `${configFile}.bak`, copyFileImpl = copyFile }) {
-  if (!existsSync(backupFile)) return false;
-  await copyFileImpl(backupFile, configFile);
-  return true;
+  const releaseConfigLock = await acquireConfigFileLock(configFile);
+  if (!releaseConfigLock) {
+    const error = new Error(`配置文件正在被其他进程写入：${configFile}`);
+    error.code = 'CONFIG_BUSY';
+    throw error;
+  }
+  try {
+    if (!existsSync(backupFile)) return false;
+    await copyFileImpl(backupFile, configFile);
+    return true;
+  } finally {
+    await releaseConfigLock();
+  }
 }
 
 /**

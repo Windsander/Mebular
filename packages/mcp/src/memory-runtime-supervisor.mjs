@@ -961,6 +961,8 @@ export class MemoryRuntimeSupervisor {
     }
     if (health.ok) {
       this.readySeen = true;
+      this.dormantLock = null;
+      this.dormantLockInvalidated = false;
       const degraded = discovery.degraded === true || health.degraded === true;
       this.#setState({
         state: degraded ? 'degraded' : 'ready',
@@ -2127,8 +2129,8 @@ export class MemoryRuntimeSupervisor {
         const observed = await this.#readSidecarMode(dormantCandidate);
         if (observed?.mode === 'mcp' && observed.state === 'stopped') {
           if (this.dormantLockInvalidated) {
-            // 旧 dormantLock 已因 token 换代失效：进入正常 starting/等待恢复路径。
-            this.dormantLockInvalidated = false;
+            // 旧 dormantLock 已因 token 换代失效：保持失效，直到成功发现新实例；
+            // 首次 start 超时后第二次 start 也不得回退 stopped。
           } else {
             const credential = await this.#capabilityFingerprint();
             if (this.dormantLock && this.dormantLock.credential !== credential) {

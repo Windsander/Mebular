@@ -152,7 +152,10 @@ async function main() {
   const suffix = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
   const query = `hermes-prefetch-${suffix}`;
   const turnUser = `以后默认用 hermes-turn-${suffix} 主题`;
-  const compressUser = `hermes-compress-${suffix} 这段对话在压缩前归档`;
+  // Explicit user evidence: heuristic extraction must turn this into a record,
+  // and WP1/C03 then requires the supporting user chunk in Detail.
+  const compressUser = `记住：hermes-compress-${suffix} 这段对话在压缩前归档`;
+  const compressAssistant = '压缩前的助手回复。';
   // Use a different preference type from `turnUser`: two "default use X"
   // statements are the same fact key, so the second would legitimately
   // supersede the first (C6c). This fixture asserts both sync_turn records stay
@@ -199,7 +202,7 @@ async function main() {
       turn_user: turnUser,
       turn_assistant: '已经记住这个偏好。',
       compress_user: compressUser,
-      compress_assistant: '压缩前的助手回复。',
+      compress_assistant: compressAssistant,
       secret_system_prompt: secretSystemPrompt,
       next_session_id: 'hermes-s2',
       next_turn_user: nextTurnUser,
@@ -268,8 +271,26 @@ async function main() {
     check('capability 已沉降 Hermes 详情（域内共享）', Boolean(details)
       && detailText.includes(turnUser), `details=${details?.length ?? 0}`);
     const stagingText = (await runtime.sidecarStagingChunks()).join('\n');
-    check('压缩前归档进入详情或 staging（无记录时只留 staging）',
-      detailText.includes(compressUser) || stagingText.includes(compressUser));
+    // C03/WP1: only chunks that actually support a record become Detail.
+    // This fixture makes the user chunk explicit evidence ("记住：..."), so the
+    // user content must be in Detail and carry a record association.  Unrelated
+    // assistant text is not required to be copied, and no-record staging is not
+    // required.
+    const compressEvidence = (details ?? []).filter((entry) => (
+      String(entry.text ?? '').includes(compressUser)
+    ));
+    check('压缩前归档的用户证据进入 Detail（C03 证据关联）',
+      compressEvidence.length > 0
+      && compressEvidence.some((entry) => (
+        Array.isArray(entry.recordIds) && entry.recordIds.length > 0
+      )),
+      JSON.stringify({
+        details: details?.length ?? 0,
+        evidence: compressEvidence.map((entry) => ({
+          text: String(entry.text ?? '').slice(0, 80),
+          recordIds: entry.recordIds,
+        })),
+      }));
     check('详情与 staging 不含 host system prompt',
       !detailText.includes(secretSystemPrompt) && !stagingText.includes(secretSystemPrompt));
     check('capability 详情含 s2 内容', detailText.includes(nextTurnUser));

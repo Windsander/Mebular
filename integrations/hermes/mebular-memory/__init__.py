@@ -36,6 +36,7 @@ it, so ingest always uses ``source=host`` plus a configured extractor
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
@@ -43,7 +44,9 @@ import os
 import re
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib import error as urlerror
@@ -115,22 +118,248 @@ _PREFETCH_CACHE_LIMIT = 64
 _RECALL_FAILURE_COOLDOWN = 30.0
 _DUPLICATE_SYNC_WINDOW = 5.0
 
-# Server errors that will not become true by retrying the same request.
-# Auth/mode/version failures are not retryable in a tight loop, but the queued
-# evidence must stay in the spool so a token rotation or mode fix can replay it.
-_PAUSE_CODES = frozenset(
+# D2: the host spool may retain pending work for at most 30 days, or until an
+# earlier operation deadline.  Dead items follow the same 30-day bound.
+_SPOOL_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
+_SPOOL_MAX_BYTES = 16 * 1024 * 1024
+_SPOOL_DEAD_LIMIT = 500
+_DEAD_PENDING_LIMIT = 100
+_DEAD_PENDING_MAX_BYTES = 8 * 1024 * 1024
+_ORPHAN_LIMIT = 100
+_ORPHAN_MAX_BYTES = 8 * 1024 * 1024
+_MAX_RETRY_DELAY = 30.0
+_MAX_RETRY_AFTER = 300.0
+_MODE_PROBE_SECONDS = 30.0
+_DEAD_WRITE_MAX_ATTEMPTS = 5
+_WORKER_STALE_SECONDS = 60.0
+_WORKER_START_TIMEOUT = 10.0
+
+# These failures can be repaired by an operator (token rotation or mode
+# re-enable).  They stay queued, but the worker still applies the configured
+# ``sync_max_attempts`` terminal bound.
+_AUTH_CODES = frozenset(
     {
         "unauthorized",
         "runtime_unauthorized",
         "forbidden_scope",
         "agent_scope_forbidden",
         "domain_write_forbidden",
-        "mode_mismatch",
-        "cloud_mismatch",
-        "version_incompatible",
-        "runtime_api_unsupported",
     }
 )
+_MODE_CODES = frozenset({"mode_mismatch", "cloud_mismatch"})
+
+# Secret shapes mirrored from the sidecar's text redaction plus common
+# assignment forms.  Spool persistence uses these before writing any payload.
+_SECRET_PATTERNS: Tuple[Tuple["re.Pattern[str]", str, str], ...] = (
+    (
+        re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"),
+        "[redacted]",
+        "private_key",
+    ),
+    (
+        # Replace the whole header, including Basic/Digest credentials.
+        re.compile(r"(?im)\b(?:proxy-)?authorization\s*:\s*[^\r\n]*"),
+        "Authorization: [redacted]",
+        "authorization_header",
+    ),
+    (
+        re.compile(r"(?im)^\s*(?:set-)?cookie\s*:\s*[^\r\n]*"),
+        "Cookie: [redacted]",
+        "cookie_header",
+    ),
+    (
+        re.compile(
+            r"(?im)\b(?:proxy[_-]?)?authorization\s*[:=]\s*(?:basic|digest|bearer)\b[^\r\n]*"
+        ),
+        "authorization=[redacted]",
+        "authorization_header",
+    ),
+    (
+        re.compile(r"\bBearer\s+[A-Za-z0-9._~+/-]{8,}=*", re.IGNORECASE),
+        "Bearer [redacted]",
+        "bearer",
+    ),
+    (
+        re.compile(r"(?i)\b(https?://)([^/\s:@]{1,128}):([^/\s@]{1,256})@"),
+        r"\1[redacted]@",
+        "url_userinfo",
+    ),
+    (re.compile(r"\bsk[-_][A-Za-z0-9_-]{8,}\b"), "[redacted]", "api_key"),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{16,}\b"), "[redacted]", "github_token"),
+    (
+        re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
+        "[redacted]",
+        "github_token",
+    ),
+    (re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}\b"), "[redacted]", "gitlab_token"),
+    (re.compile(r"\bhf_[A-Za-z0-9]{20,}\b"), "[redacted]", "huggingface_token"),
+    (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"), "[redacted]", "slack_token"),
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "[redacted]", "aws_key"),
+    (re.compile(r"\bASIA[0-9A-Z]{16}\b"), "[redacted]", "aws_key"),
+    (re.compile(r"\bAIza[0-9A-Za-z_-]{20,}\b"), "[redacted]", "google_key"),
+    (
+        re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"),
+        "[redacted]",
+        "jwt",
+    ),
+)
+
+_ASSIGNMENT_KEYS = (
+    r"openai_api_key|aws_secret_access_key|aws_access_key_id|aws_session_token|"
+    r"anthropic_api_key|huggingface_token|hf_token|github_token|gitlab_token|"
+    r"session_token|security_token|secret[_-]?key|api[_-]?key|apikey|api[_-]?token|"
+    r"access[_-]?token|refresh[_-]?token|client[_-]?secret|clientsecret|"
+    r"private[_-]?key|set[_-]?cookie|cookie|proxy[_-]?authorization|authorization|"
+    r"token|secret|password|passwd|pwd"
+)
+_ASSIGNMENT_KEY_PATTERN = rf"(?:[A-Za-z0-9]+[_-])*(?:my)?(?:{_ASSIGNMENT_KEYS})"
+_QUOTED_ASSIGNMENT_RE = re.compile(
+    rf"\b(?P<key>{_ASSIGNMENT_KEY_PATTERN})\b"
+    r"(?P<sep>\s*[:=]\s*)(?P<quote>[\"'])(?P<value>[^\"']{1,512})(?P=quote)",
+    re.IGNORECASE,
+)
+_UNQUOTED_ASSIGNMENT_RE = re.compile(
+    rf"\b(?P<key>{_ASSIGNMENT_KEY_PATTERN})\b"
+    r"(?P<sep>\s*[:=]\s*)(?P<quote>)(?P<value>[^\s\"',;]+)",
+    re.IGNORECASE,
+)
+_CJK_ASSIGNMENT_RE = re.compile(
+    r"(?P<key>密码|口令|密钥|令牌)(?P<sep>\s*[:：=]\s*)"
+    r"(?P<quote>[\"']?)(?P<value>[^\s，,;；\"']+)(?P=quote)"
+)
+_HIGH_RISK_KEYS = frozenset(
+    {
+        "password",
+        "passwd",
+        "pwd",
+        "secret",
+        "secret_key",
+        "api_key",
+        "apikey",
+        "client_secret",
+        "access_token",
+        "refresh_token",
+        "session_token",
+        "aws_session_token",
+        "aws_secret_access_key",
+        "security_token",
+        "cookie",
+        "set_cookie",
+        "authorization",
+        "proxy_authorization",
+        "private_key",
+    }
+)
+_COMMON_SECRET_WORDS = frozenset(
+    {
+        "authenticator",
+        "authentication",
+        "authorization",
+        "required",
+        "optional",
+        "discussion",
+        "rotation",
+        "configured",
+        "unavailable",
+        "unknown",
+        "none",
+        "null",
+        "true",
+        "false",
+        "wellknown",
+        "well-known",
+    }
+)
+
+
+def _normalise_key(value: str) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", text)
+    return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
+
+
+def _is_high_risk_key(key: str) -> bool:
+    variants = {key}
+    if key.startswith("my_"):
+        variants.add(key[3:])
+    elif key.startswith("my") and len(key) > 2:
+        variants.add(key[2:])
+    if any(variant in _HIGH_RISK_KEYS or variant == "token" for variant in variants):
+        return True
+    return any(
+        variant.endswith(
+            (
+                "_api_key",
+                "_apikey",
+                "_secret",
+                "_secret_key",
+                "_token",
+                "_password",
+                "_passwd",
+                "_pwd",
+            )
+        )
+        or variant in {
+            "apitoken",
+            "accesstoken",
+            "refreshtoken",
+            "sessiontoken",
+            "clientsecret",
+        }
+        for variant in variants
+    )
+
+
+def _looks_ambiguous_secret(value: str) -> bool:
+    """Shape check for words like ``token`` where normal prose is common."""
+    candidate = str(value or "").strip().strip("\"'")
+    if not candidate or candidate == "[redacted]":
+        return False
+    if candidate.lower() in _COMMON_SECRET_WORDS:
+        return False
+    if candidate.startswith(
+        ("sk-", "sk_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_",
+         "glpat-", "hf_", "AKIA", "ASIA", "AIza", "eyJ")
+    ):
+        return True
+    if re.match(r"^xox[baprs]-", candidate):
+        return True
+    if len(candidate) < 8:
+        return False
+    # 8–23 character lowercase/hyphen token values are common enough to be
+    # secrets; normal words are filtered by _COMMON_SECRET_WORDS above.
+    return True
+
+
+def _redact_assignments(text: str) -> Tuple[str, bool]:
+    redacted = False
+
+    def replace(match: "re.Match[str]") -> str:
+        nonlocal redacted
+        raw_key = match.group("key")
+        key = _normalise_key(raw_key)
+        value = match.group("value")
+        normal = str(value or "").strip().strip("\"'").lower()
+        if normal in _COMMON_SECRET_WORDS:
+            return match.group(0)
+        cjk_high_risk = raw_key in {"密码", "口令", "密钥", "令牌"}
+        high_risk = cjk_high_risk or _is_high_risk_key(key)
+        if not high_risk and not _looks_ambiguous_secret(value):
+            return match.group(0)
+        redacted = True
+        quote = match.group("quote")
+        return (
+            f"{match.group('key')}{match.group('sep')}"
+            f"{quote}[redacted]{quote}"
+        )
+
+    for pattern in (
+        _QUOTED_ASSIGNMENT_RE,
+        _UNQUOTED_ASSIGNMENT_RE,
+        _CJK_ASSIGNMENT_RE,
+    ):
+        text = pattern.sub(replace, text)
+    return text, redacted
 
 _NON_RETRYABLE_CODES = frozenset(
     {
@@ -182,15 +411,37 @@ class _RuntimeError(RuntimeError):
     """A non-2xx or transport failure from the Runtime API (content-free)."""
 
     def __init__(self, code: str, message: str = "", *, status: Optional[int] = None,
-                 retryable: bool = True) -> None:
+                 retryable: bool = True, retry_after: Optional[float] = None) -> None:
         super().__init__(message or code)
         self.code = str(code or "runtime_error")
         self.status = status
         self.retryable = retryable
+        self.retry_after = retry_after
 
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _parse_retry_after(value: Any) -> Optional[float]:
+    """Parse ``Retry-After`` seconds or HTTP-date into a bounded delay."""
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    seconds: Optional[float] = None
+    try:
+        seconds = float(raw)
+    except ValueError:
+        try:
+            parsed = parsedate_to_datetime(raw)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            seconds = parsed.timestamp() - time.time()
+        except Exception:
+            return None
+    if seconds is None:
+        return None
+    return max(0.0, min(_MAX_RETRY_AFTER, float(seconds)))
 
 
 def _sha256_text(value: str) -> str:
@@ -209,6 +460,249 @@ def _clean_text(value: Any, limit: int = _MAX_CHUNK_CHARS) -> str:
             text = str(value)
     text = text.replace("\x00", "")
     return text[:limit]
+
+
+def _redact_text(value: Any) -> Tuple[str, List[str]]:
+    """Replace common secret shapes; return the text and applied rule names."""
+    text = str(value or "")
+    rules: List[str] = []
+    for pattern, replacement, rule in _SECRET_PATTERNS:
+        if not pattern.search(text):
+            continue
+        text = pattern.sub(replacement, text)
+        if rule not in rules:
+            rules.append(rule)
+    text, assignment_redacted = _redact_assignments(text)
+    if assignment_redacted and "secret_assignment" not in rules:
+        rules.append("secret_assignment")
+    return text, rules
+
+
+def _redact_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _redact_text(value)[0]
+    if isinstance(value, list):
+        return [_redact_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _redact_value(item) for key, item in value.items()}
+    return value
+
+
+_INGEST_PAYLOAD_KEYS = frozenset(
+    {
+        "requestId",
+        "agentId",
+        "actor",
+        "threadId",
+        "source",
+        "allowRemote",
+        "extractor",
+        "domain",
+        "chunks",
+        "candidates",
+        "provenance",
+    }
+)
+_CHECKPOINT_PAYLOAD_KEYS = frozenset(
+    {
+        "requestId",
+        "agentId",
+        "actor",
+        "threadId",
+        "domain",
+        "summary",
+        "warning",
+        "state",
+        "recordIds",
+        "detailIds",
+        "provenance",
+        "expectedRevision",
+    }
+)
+_CHUNK_KEYS = frozenset(
+    {
+        "role",
+        "text",
+        "at",
+        "messageId",
+        "contentHash",
+        "chunkIndex",
+        "turn",
+        "mime",
+        "expiresAt",
+        "redaction",
+        "id",
+    }
+)
+
+
+def _minimise_chunk(chunk: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(chunk, dict):
+        return None
+    text = chunk.get("text")
+    if not isinstance(text, str) or not text:
+        return None
+    out = {key: chunk[key] for key in _CHUNK_KEYS if key in chunk}
+    return out
+
+
+def _minimise_payload(kind: str, payload: Any) -> Dict[str, Any]:
+    """Keep only fields needed for idempotent replay and diagnostics."""
+    if not isinstance(payload, dict):
+        return {}
+    allowed = _CHECKPOINT_PAYLOAD_KEYS if kind == "checkpoint" else _INGEST_PAYLOAD_KEYS
+    out = {key: payload[key] for key in allowed if key in payload}
+    chunks = payload.get("chunks")
+    if kind != "checkpoint" and isinstance(chunks, list):
+        out["chunks"] = [
+            item for item in (_minimise_chunk(chunk) for chunk in chunks) if item is not None
+        ]
+    return out
+
+
+def _sanitise_payload(kind: str, payload: Any) -> Dict[str, Any]:
+    """Minimise and redact a spool payload before it is written or sent."""
+    clean_kind = "checkpoint" if kind == "checkpoint" else "ingest"
+    minimised = _minimise_payload(clean_kind, payload)
+
+    if clean_kind == "ingest":
+        chunks = minimised.get("chunks")
+        if isinstance(chunks, list):
+            for chunk in chunks:
+                text = chunk.get("text")
+                if not isinstance(text, str):
+                    continue
+                redacted, rules = _redact_text(text)
+                chunk["text"] = redacted
+                if rules:
+                    chunk["redaction"] = {"applied": True, "rules": rules}
+                chunk["contentHash"] = f"sha256:{_sha256_text(redacted)}"
+
+    sanitised = _redact_value(minimised)
+
+    # The recursive pass can change text again; keep the content hash honest.
+    if clean_kind == "ingest":
+        chunks = sanitised.get("chunks")
+        if isinstance(chunks, list):
+            for chunk in chunks:
+                text = chunk.get("text")
+                if isinstance(text, str):
+                    chunk["contentHash"] = f"sha256:{_sha256_text(text)}"
+    return sanitised
+
+
+def _count_value(value: Any) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return max(0, int(value))
+    if isinstance(value, list):
+        return len(value)
+    try:
+        return max(0, int(value))
+    except Exception:
+        return 0
+
+
+def _ingest_result_outcome(result: Dict[str, Any]) -> Tuple[str, str, bool]:
+    """Classify an HTTP-200/202 ingest body.
+
+    Returns ``(outcome, reason, degraded)`` where outcome is one of
+    ``committed``, ``handoff``, ``failed`` or ``pending``.  A transport-level
+    2xx alone is never treated as committed.
+    """
+    extraction = result.get("extraction") if isinstance(result.get("extraction"), dict) else {}
+    status = str(extraction.get("status") or "").strip().lower()
+    detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
+    warnings = result.get("warnings")
+    warning_list = [str(item) for item in warnings] if isinstance(warnings, list) else []
+    queued = result.get("queued") is True or extraction.get("queued") is True
+    detail_queued = _count_value(detail.get("queued"))
+    detail_failed = _count_value(detail.get("failed"))
+    degraded = result.get("degraded") is True or extraction.get("degraded") is True
+    duplicate = result.get("duplicate") is True or status == "duplicate"
+    detail_warning_failure = any(
+        item.startswith("detail_write_failed:")
+        or item.startswith("detail_outbox_failed:")
+        for item in warning_list
+    )
+
+    if queued or detail_queued > 0 or "queued_outbox" in warning_list:
+        return "handoff", "ingest_queued_outbox", degraded
+    if status in {"failed", "partial"} or detail_failed > 0 or detail_warning_failure:
+        reason = "ingest_failed"
+        for item in warning_list:
+            if item.startswith("detail_write_failed:"):
+                reason = item
+                break
+        return "failed", reason[:120], degraded
+    if duplicate or status == "duplicate":
+        return "committed", "duplicate", degraded
+    if status == "completed":
+        return "committed", "completed", degraded
+    # Missing/unknown/pending extraction is not committed.  A pending response
+    # without a queued handoff stays in the host spool under the retry bound.
+    return "pending", f"ingest_status_{status or 'missing'}"[:120], degraded
+
+
+def _checkpoint_result_committed(result: Dict[str, Any]) -> bool:
+    if result.get("duplicate") is True:
+        return True
+    checkpoint = result.get("checkpoint") if isinstance(result.get("checkpoint"), dict) else {}
+    revision = checkpoint.get("revision")
+    if revision is None:
+        revision = result.get("revision")
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+        return False
+    return checkpoint.get("pending") is not True
+
+
+def _spool_expiry_ms(payload: Dict[str, Any], now: int) -> int:
+    """D2 bound: 30 days, or an earlier explicit operation deadline."""
+    expires = now + _SPOOL_RETENTION_MS
+    values: List[Any] = [
+        payload.get("expiresAt"),
+        payload.get("deadline"),
+        payload.get("deadlineAt"),
+        payload.get("expires_at"),
+    ]
+    state = payload.get("state")
+    if isinstance(state, dict):
+        values.append(state.get("expiresAt"))
+    for value in values:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        number = int(value)
+        if number <= 0:
+            continue
+        millis = number * 1000 if number < 10_000_000_000 else number
+        expires = min(expires, millis)
+    return expires
+
+
+def _record_id(kind: str, request_id: str) -> str:
+    # The id is persisted and therefore stable across restarts.  The random
+    # suffix keeps two distinct enqueues of the same logical request (for
+    # example an explicit duplicate-turn probe) as separate spool rows; the
+    # requestId remains the idempotency key sent to the sidecar.
+    seed = f"{kind}\x00{request_id}\x00{uuid.uuid4().hex}"
+    return f"{kind[:4]}:{_sha256_text(seed)[:32]}"
+
+
+class _SpoolError(RuntimeError):
+    """Base class for a spool that cannot accept new work."""
+
+
+class _SpoolFull(_SpoolError):
+    """The bounded queue is full; the caller must report a failed/pending exit."""
+
+
+class _SpoolExpired(_SpoolError):
+    """The operation was already past its deadline when appended."""
+
+
+class _SpoolUnavailable(_SpoolError):
+    """The spool could not be persisted to disk."""
 
 
 _CHECKPOINT_HEADINGS = {
@@ -996,6 +1490,7 @@ def _discovery_error(code: str, source: str = "") -> Dict[str, Any]:
         "token_source": "",
         "mode": "",
         "capabilities": {},
+        "updated_at": 0,
     }
 
 
@@ -1046,6 +1541,7 @@ def _discover_runtime(hermes_home: Optional[Path] = None) -> Dict[str, Any]:
             "token_source": "discovery",
             "mode": "",
             "capabilities": {},
+            "updated_at": 0,
         }
 
     env_url = os.environ.get("MEBULAR_MEMORY_RUNTIME_URL", "").strip()
@@ -1061,6 +1557,7 @@ def _discover_runtime(hermes_home: Optional[Path] = None) -> Dict[str, Any]:
             "token_source": "discovery",
             "mode": "",
             "capabilities": {},
+            "updated_at": 0,
         }
 
     last_reason = "runtime_not_discovered"
@@ -1115,6 +1612,7 @@ def _discover_runtime(hermes_home: Optional[Path] = None) -> Dict[str, Any]:
             "token_source": "discovery",
             "mode": mode,
             "capabilities": dict(capabilities),
+            "updated_at": int(updated_at) if isinstance(updated_at, (int, float)) else 0,
         }
 
     return _discovery_error(last_reason)
@@ -1182,7 +1680,16 @@ class _RuntimeClient:
             retryable = error.code >= 500 or error.code in {408, 425, 429}
             if code in _NON_RETRYABLE_CODES:
                 retryable = False
-            raise _RuntimeError(code, message, status=error.code, retryable=retryable) from None
+            retry_after = _parse_retry_after(
+                error.headers.get("Retry-After") if error.headers is not None else None
+            )
+            raise _RuntimeError(
+                code,
+                message,
+                status=error.code,
+                retryable=retryable,
+                retry_after=retry_after,
+            ) from None
         except (TimeoutError, urlerror.URLError, OSError, ValueError) as error:
             reason = getattr(error, "reason", None) or error
             timed_out = isinstance(reason, TimeoutError) or isinstance(error, TimeoutError)
@@ -1232,60 +1739,432 @@ class _RuntimeClient:
 
 
 class _Spool:
-    """Small durable FIFO for failed/queued ingest requests.
+    """Bounded, single-writer durable FIFO for ingest and checkpoint work.
 
-    The file lives under the profile's Hermes home and contains only the
-    already-built Runtime request bodies.  Writes are atomic; no token or host
-    credential is ever written.
+    Every record is minimised and redacted before it reaches disk.  The
+    persisted item ID is stable across restarts, while the payload requestId
+    remains the idempotency key used for replay.  Pending work expires after
+    30 days (D2) or an earlier operation deadline and moves to the dead file,
+    which is retained for the same bound but never retried.
     """
 
-    def __init__(self, path: Path, limit: int) -> None:
+    def __init__(self, path: Path, limit: int, *, max_bytes: int = _SPOOL_MAX_BYTES) -> None:
         self._path = path
+        self._dead_path = path.with_name("dead.jsonl")
+        self._dead_pending_path = path.with_name("dead-pending.jsonl")
+        self._orphan_path = path.with_name("orphan-dead-pending.jsonl")
+        self._quarantine_path = path.with_name("quarantine.jsonl")
         self._limit = max(1, int(limit))
+        self._max_bytes = max(1, int(max_bytes))
         self._lock = threading.RLock()
         self._items: List[Dict[str, Any]] = []
-        self._next_id = 1
+        self._dead: List[Dict[str, Any]] = []
+        self._dead_pending: List[Dict[str, Any]] = []
+        self._orphan_dead_pending: List[Dict[str, Any]] = []
+        self._quarantine: List[Dict[str, Any]] = []
+        self._dead_write_failures = 0
+        self._dead_write_abandoned = 0
+        self._dead_write_abandoned_cleaned = 0
+        self._quarantine_memory_only = False
+        self._dead_pending_dropped = 0
+        self._dead_pending_overflow = 0
+        self._orphan_dropped = 0
+        self._orphan_overflow = 0
+        self._live_quota_evicted = 0
+        self._worker_owner: Any = None
+        self._worker_heartbeat = time.monotonic()
+        self._worker_starting = False
+        self._worker_starting_at = 0.0
+        self._metrics: Dict[str, int] = {}
+        self._last_ingest_shared: Optional[Dict[str, Any]] = None
+        self.writer_pid = os.getpid()
         self._load()
 
-    def _load(self) -> None:
+    @staticmethod
+    def _normalise_record(record: Any, *, now: int) -> Optional[Dict[str, Any]]:
         try:
-            lines = self._path.read_text(encoding="utf-8").splitlines()
+            if not isinstance(record, dict) or not isinstance(record.get("payload"), dict):
+                return None
+            payload = record["payload"]
+            kind = str(record.get("kind") or "")
+            if kind not in {"ingest", "checkpoint"}:
+                kind = "checkpoint" if "state" in payload and "chunks" not in payload else "ingest"
+            request_id = str(payload.get("requestId") or "")
+            item_id = str(record.get("id") or "") or _record_id(kind, request_id)
+            created_at = record.get("createdAt")
+            if isinstance(created_at, bool) or not isinstance(created_at, (int, float)):
+                created_at = now
+            computed_expiry = _spool_expiry_ms(payload, int(created_at))
+            expires_at = record.get("expiresAt")
+            if isinstance(expires_at, bool) or not isinstance(expires_at, (int, float)):
+                expires_at = computed_expiry
+            else:
+                # Never let a hand-edited/legacy record exceed the D2 bound.
+                expires_at = min(int(expires_at), computed_expiry)
+            try:
+                attempts = max(0, int(record.get("attempts") or 0))
+            except Exception:
+                attempts = 0
+            item: Dict[str, Any] = {
+                "id": item_id,
+                "kind": kind,
+                "payload": _sanitise_payload(kind, payload),
+                "attempts": attempts,
+                "createdAt": int(created_at),
+                "expiresAt": int(expires_at),
+            }
+            last_error = record.get("lastError")
+            if isinstance(last_error, dict):
+                try:
+                    error_at = int(last_error.get("at") or now)
+                except Exception:
+                    error_at = now
+                item["lastError"] = {
+                    "code": str(last_error.get("code") or "")[:120],
+                    "at": error_at,
+                }
+            dead_pending = record.get("deadPending")
+            if isinstance(dead_pending, dict):
+                try:
+                    pending_attempts = max(0, int(dead_pending.get("attempts") or 0))
+                except Exception:
+                    pending_attempts = 0
+                try:
+                    pending_at = int(dead_pending.get("at") or now)
+                except Exception:
+                    pending_at = now
+                item["deadPending"] = {
+                    "reason": str(dead_pending.get("reason") or "dead_write_failed")[:120],
+                    "attempts": pending_attempts,
+                    "at": pending_at,
+                }
+                for flag in ("abandoned", "overflow", "orphaned", "quarantined", "memoryOnly"):
+                    if dead_pending.get(flag) is True:
+                        item["deadPending"][flag] = True
+            return item
+        except Exception:
+            # A single corrupt row must not make initialize/worker crash.
+            return None
+
+    @staticmethod
+    def _secure_file(path: Path) -> None:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            os.chmod(path.parent, 0o700)
+            if path.exists():
+                os.chmod(path, 0o600)
+        except OSError:
+            pass
+
+    def _load_dead(self, now: int) -> bool:
+        self._secure_file(self._dead_path)
+        changed = False
+        try:
+            lines = self._dead_path.read_text(encoding="utf-8").splitlines()
         except FileNotFoundError:
-            return
+            return False
         except Exception as error:
-            logger.warning("Mebular spool unreadable (%s); starting empty", type(error).__name__)
-            return
+            logger.warning("Mebular dead spool unreadable (%s); starting empty", type(error).__name__)
+            return False
         for line in lines:
             if not line.strip():
                 continue
             try:
                 record = json.loads(line)
             except Exception:
+                changed = True
                 continue
-            if not isinstance(record, dict) or not isinstance(record.get("payload"), dict):
+            item = self._normalise_record(record, now=now)
+            if item is None:
+                changed = True
                 continue
-            record["id"] = self._next_id
-            try:
-                record["attempts"] = int(record.get("attempts") or 0)
-            except Exception:
-                record["attempts"] = 0
-            self._next_id += 1
-            self._items.append(record)
-        if len(self._items) > self._limit:
-            self._items = self._items[-self._limit:]
+            dead_at = record.get("deadAt")
+            if isinstance(dead_at, bool) or not isinstance(dead_at, (int, float)):
+                dead_at = now
+                changed = True
+            item["deadAt"] = int(dead_at)
+            item["reason"] = str(record.get("reason") or "unknown")[:120]
+            if item["deadAt"] + _SPOOL_RETENTION_MS <= now:
+                changed = True
+                continue
+            self._dead.append(item)
+        if len(self._dead) > _SPOOL_DEAD_LIMIT:
+            self._dead = self._dead[-_SPOOL_DEAD_LIMIT:]
+            changed = True
+        return changed
 
-    def _persist_locked(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+    def _load_dead_pending(self, now: int) -> bool:
+        self._secure_file(self._dead_pending_path)
+        changed = False
         try:
-            os.chmod(self._path.parent, 0o700)
+            lines = self._dead_pending_path.read_text(encoding="utf-8").splitlines()
+        except FileNotFoundError:
+            return False
+        except Exception as error:
+            logger.warning("Mebular dead-pending spool unreadable (%s)", type(error).__name__)
+            return False
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                raw = json.loads(line)
+            except Exception:
+                changed = True
+                continue
+            item = self._normalise_record(raw, now=now)
+            if item is None:
+                changed = True
+                continue
+            item["deadPending"] = dict(item.get("deadPending") or {
+                "reason": str(raw.get("reason") or "dead_write_failed")[:120],
+                "attempts": 0,
+                "at": now,
+            })
+            if item["deadPending"].get("abandoned") is not True:
+                # A restart gets one immediate retry for non-abandoned work.
+                item["deadPending"]["attempts"] = 0
+                item["deadPending"]["at"] = 0
+            self._dead_pending.append(item)
+        before = len(self._dead_pending)
+        self._dead_pending = self._trim_dead_pending_locked(self._dead_pending, now=now)
+        if len(self._dead_pending) != before:
+            changed = True
+        return changed
+
+    def _load_orphan(self, now: int) -> bool:
+        self._secure_file(self._orphan_path)
+        changed = False
+        try:
+            lines = self._orphan_path.read_text(encoding="utf-8").splitlines()
+        except FileNotFoundError:
+            return False
+        except Exception as error:
+            logger.warning("Mebular orphan spool unreadable (%s)", type(error).__name__)
+            return False
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                raw = json.loads(line)
+            except Exception:
+                changed = True
+                continue
+            item = self._normalise_record(raw, now=now)
+            if item is None:
+                changed = True
+                continue
+            pending = item.get("deadPending")
+            if not isinstance(pending, dict):
+                pending = {"reason": "dead_write_failed", "attempts": 0, "at": now}
+            pending["orphaned"] = True
+            item["deadPending"] = pending
+            self._orphan_dead_pending.append(item)
+        before = len(self._orphan_dead_pending)
+        self._orphan_dead_pending = self._trim_orphan_locked(
+            self._orphan_dead_pending, now=now
+        )
+        if len(self._orphan_dead_pending) != before:
+            changed = True
+        return changed
+
+    def _load_quarantine(self, now: int) -> bool:
+        self._secure_file(self._quarantine_path)
+        changed = False
+        try:
+            lines = self._quarantine_path.read_text(encoding="utf-8").splitlines()
+        except FileNotFoundError:
+            return False
+        except Exception as error:
+            logger.warning("Mebular quarantine spool unreadable (%s)", type(error).__name__)
+            return False
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                raw = json.loads(line)
+            except Exception:
+                changed = True
+                continue
+            item = self._normalise_record(raw, now=now)
+            if item is None:
+                changed = True
+                continue
+            pending = item.get("deadPending")
+            if not isinstance(pending, dict):
+                pending = {"reason": "dead_write_failed", "attempts": 0, "at": now}
+            pending["quarantined"] = True
+            item["deadPending"] = pending
+            self._quarantine.append(item)
+        before = len(self._quarantine)
+        self._quarantine = self._trim_orphan_locked(self._quarantine, now=now)
+        if len(self._quarantine) != before:
+            changed = True
+        return changed
+
+    def _load(self) -> None:
+        now = _now_ms()
+        self._secure_file(self._path)
+        try:
+            lines = self._path.read_text(encoding="utf-8").splitlines()
+        except FileNotFoundError:
+            lines = []
+        except Exception as error:
+            logger.warning("Mebular spool unreadable (%s); starting empty", type(error).__name__)
+            lines = []
+        changed = False
+        seen: set[str] = set()
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                raw = json.loads(line)
+            except Exception:
+                changed = True
+                continue
+            item = self._normalise_record(raw, now=now)
+            if item is None:
+                changed = True
+                continue
+            if item["id"] in seen:
+                changed = True
+                continue
+            if (
+                str(raw.get("id") or "") != item["id"]
+                or raw.get("kind") != item["kind"]
+                or raw.get("payload") != item["payload"]
+            ):
+                changed = True
+            seen.add(item["id"])
+            self._items.append(item)
+        if self._load_dead(now):
+            changed = True
+        if self._load_dead_pending(now):
+            changed = True
+        if self._load_orphan(now):
+            changed = True
+        if self._load_quarantine(now):
+            changed = True
+        dead_before_trim = len(self._dead)
+        self._dead = self._dead_records_bounded_locked(
+            self._dead,
+            now=now,
+            live_bytes=self._bytes_locked() + self._bytes_locked(self._dead_pending),
+        )
+        if len(self._dead) != dead_before_trim:
+            changed = True
+        # Crash-safe idempotence: a move that wrote the target before removing
+        # the source must not replay the same logical item twice.
+        dead_ids = {str(item.get("id") or "") for item in self._dead}
+        all_pending_ids = {
+            str(item.get("id") or "") for item in self._dead_pending
+        }
+        deduped_pending: List[Dict[str, Any]] = []
+        pending_ids: set[str] = set()
+        for item in self._dead_pending:
+            item_id = str(item.get("id") or "")
+            if not item_id or item_id in dead_ids or item_id in pending_ids:
+                changed = True
+                continue
+            pending_ids.add(item_id)
+            deduped_pending.append(item)
+        if len(deduped_pending) != len(self._dead_pending):
+            self._dead_pending = deduped_pending
+            changed = True
+        orphan_ids: set[str] = set()
+        deduped_orphan: List[Dict[str, Any]] = []
+        for item in self._orphan_dead_pending:
+            item_id = str(item.get("id") or "")
+            if (
+                not item_id
+                or item_id in dead_ids
+                or item_id in pending_ids
+                or item_id in orphan_ids
+            ):
+                changed = True
+                continue
+            orphan_ids.add(item_id)
+            deduped_orphan.append(item)
+        if len(deduped_orphan) != len(self._orphan_dead_pending):
+            self._orphan_dead_pending = deduped_orphan
+            changed = True
+        quarantine_ids: set[str] = set()
+        deduped_quarantine: List[Dict[str, Any]] = []
+        for item in self._quarantine:
+            item_id = str(item.get("id") or "")
+            if (
+                not item_id
+                or item_id in dead_ids
+                or item_id in pending_ids
+                or item_id in orphan_ids
+                or item_id in quarantine_ids
+            ):
+                changed = True
+                continue
+            quarantine_ids.add(item_id)
+            deduped_quarantine.append(item)
+        if len(deduped_quarantine) != len(self._quarantine):
+            self._quarantine = deduped_quarantine
+            changed = True
+        terminal_ids = dead_ids | all_pending_ids | orphan_ids | quarantine_ids
+        before_live = len(self._items)
+        self._items = [
+            item for item in self._items if str(item.get("id") or "") not in terminal_ids
+        ]
+        if len(self._items) != before_live:
+            changed = True
+        if self._enforce_live_budget_locked(now):
+            changed = True
+        # Expired pending work reaches an explicit terminal state, not an
+        # invisible retry loop.
+        expired = [
+            item for item in self._items if int(item.get("expiresAt") or 0) <= now
+        ]
+        for item in expired:
+            if self._dead_item_locked(item, "retention_expired", now):
+                changed = True
+        if len(self._items) > self._limit:
+            overflow = len(self._items) - self._limit
+            for item in self._items[:overflow]:
+                if self._dead_item_locked(item, "queue_evicted", now):
+                    changed = True
+        if changed:
+            try:
+                self._persist_locked()
+                self._persist_dead_locked()
+                self._persist_dead_pending_locked()
+                self._persist_orphan_locked()
+                self._persist_quarantine_locked()
+            except _SpoolUnavailable:
+                logger.warning("Mebular spool could not be normalised on load")
+
+    def _serialise(self, record: Dict[str, Any]) -> str:
+        serialisable = {
+            "id": record.get("id"),
+            "kind": record.get("kind"),
+            "payload": record.get("payload"),
+            "attempts": int(record.get("attempts") or 0),
+            "createdAt": int(record.get("createdAt") or 0),
+            "expiresAt": int(record.get("expiresAt") or 0),
+        }
+        if isinstance(record.get("lastError"), dict):
+            serialisable["lastError"] = record["lastError"]
+        if isinstance(record.get("deadPending"), dict):
+            serialisable["deadPending"] = record["deadPending"]
+        if record.get("deadAt") is not None:
+            serialisable["deadAt"] = int(record.get("deadAt") or 0)
+            serialisable["reason"] = record.get("reason")
+        return json.dumps(serialisable, ensure_ascii=False, separators=(",", ":"))
+
+    def _write_atomic(self, path: Path, records: List[Dict[str, Any]]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(path.parent, 0o700)
         except OSError:
             pass
-        temporary = self._path.with_name(f"{self._path.name}.tmp-{os.getpid()}")
-        lines = []
-        for record in self._items:
-            serialisable = {key: value for key, value in record.items() if key != "id"}
-            lines.append(json.dumps(serialisable, ensure_ascii=False))
-        data = "\n".join(lines)
+        temporary = path.with_name(
+            f"{path.name}.tmp-{os.getpid()}-{threading.get_ident()}"
+        )
+        data = "\n".join(self._serialise(record) for record in records)
         if data:
             data += "\n"
         try:
@@ -1294,61 +2173,1180 @@ class _Spool:
                 os.chmod(temporary, 0o600)
             except OSError:
                 pass
-            os.replace(temporary, self._path)
+            os.replace(temporary, path)
             try:
-                os.chmod(self._path, 0o600)
+                os.chmod(path, 0o600)
             except OSError:
                 pass
         except Exception as error:
-            logger.warning("Mebular spool write failed: %s", type(error).__name__)
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+            raise _SpoolUnavailable(type(error).__name__) from error
 
-    def append(self, payload: Dict[str, Any]) -> int:
+    def _persist_locked(self) -> None:
+        self._write_atomic(self._path, self._items)
+
+    def _persist_dead_locked(self) -> None:
+        self._write_atomic(self._dead_path, self._dead)
+
+    def _persist_dead_pending_locked(self) -> None:
+        self._write_atomic(self._dead_pending_path, self._dead_pending)
+
+    def _persist_orphan_locked(self) -> None:
+        self._write_atomic(self._orphan_path, self._orphan_dead_pending)
+
+    def _persist_quarantine_locked(self) -> None:
+        self._write_atomic(self._quarantine_path, self._quarantine)
+
+    def _dead_records_bounded_locked(
+        self,
+        records: List[Dict[str, Any]],
+        *,
+        now: int,
+        live_bytes: int,
+    ) -> List[Dict[str, Any]]:
+        cutoff = now - _SPOOL_RETENTION_MS
+        values = [
+            item for item in records
+            if int(item.get("deadAt") or 0) > cutoff
+        ]
+        if len(values) > _SPOOL_DEAD_LIMIT:
+            values = values[-_SPOOL_DEAD_LIMIT:]
+        budget = max(0, self._max_bytes - max(0, live_bytes))
+        while values and self._bytes_locked(values) > budget:
+            values.pop(0)
+        return values
+
+    def _trim_dead_pending_locked(
+        self,
+        records: List[Dict[str, Any]],
+        *,
+        now: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        current = int(now if now is not None else _now_ms())
+        values: List[Dict[str, Any]] = []
+        for item in records:
+            pending = item.get("deadPending") if isinstance(item.get("deadPending"), dict) else {}
+            if pending.get("abandoned") is True:
+                abandoned_at = int(pending.get("at") or 0)
+                if abandoned_at + _SPOOL_RETENTION_MS <= current:
+                    self._dead_write_abandoned_cleaned += 1
+                    continue
+            values.append(item)
+        overflow = max(0, len(values) - _DEAD_PENDING_LIMIT)
+        for item in values[:overflow]:
+            pending = item.setdefault("deadPending", {})
+            if pending.get("abandoned") is not True:
+                pending["abandoned"] = True
+                pending["overflow"] = True
+                pending["reason"] = "deadPendingOverflow"
+                pending["at"] = current
+                self._dead_pending_overflow += 1
+        live_bytes = (
+            self._bytes_locked()
+            + self._bytes_locked(self._dead)
+        )
+        budget = min(_DEAD_PENDING_MAX_BYTES, max(0, self._max_bytes - live_bytes))
+        if self._bytes_locked(values) > budget:
+            for item in values:
+                pending = item.setdefault("deadPending", {})
+                if pending.get("abandoned") is not True:
+                    pending["abandoned"] = True
+                    pending["overflow"] = True
+                    pending["reason"] = "deadPendingOverflow"
+                    pending["at"] = current
+                    self._dead_pending_overflow += 1
+                    break
+        return values
+
+    def _trim_orphan_locked(
+        self,
+        records: List[Dict[str, Any]],
+        *,
+        now: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        current = int(now if now is not None else _now_ms())
+        values: List[Dict[str, Any]] = []
+        for item in records:
+            pending = item.get("deadPending") if isinstance(item.get("deadPending"), dict) else {}
+            if pending.get("abandoned") is True:
+                abandoned_at = int(pending.get("at") or 0)
+                if abandoned_at + _SPOOL_RETENTION_MS <= current:
+                    self._dead_write_abandoned_cleaned += 1
+                    continue
+            values.append(item)
+        overflow = max(0, len(values) - _ORPHAN_LIMIT)
+        for item in values[:overflow]:
+            pending = item.setdefault("deadPending", {})
+            if pending.get("abandoned") is not True:
+                pending["abandoned"] = True
+                pending["overflow"] = True
+                pending["reason"] = "orphanOverflow"
+                pending["at"] = current
+                self._orphan_overflow += 1
+        if self._bytes_locked(values) > _ORPHAN_MAX_BYTES:
+            for item in values:
+                pending = item.setdefault("deadPending", {})
+                if pending.get("abandoned") is not True:
+                    pending["abandoned"] = True
+                    pending["overflow"] = True
+                    pending["reason"] = "orphanOverflow"
+                    pending["at"] = current
+                    self._orphan_overflow += 1
+                    break
+        return values
+
+    def _prune_dead_locked(self, now: int) -> None:
+        live_bytes = self._bytes_locked() + self._bytes_locked(self._dead_pending)
+        self._dead = self._dead_records_bounded_locked(
+            self._dead, now=now, live_bytes=live_bytes
+        )
+
+    def _dead_item_locked(self, item: Dict[str, Any], reason: str, now: int) -> bool:
+        record = copy.deepcopy(item)
+        record["deadAt"] = now
+        record["reason"] = str(reason or "unknown")[:120]
+        item_bytes = self._bytes_locked([item])
+        in_live = any(
+            existing.get("id") == item.get("id") for existing in self._items
+        )
+        live_after = max(0, self._bytes_locked() - (item_bytes if in_live else 0))
+        pending_bytes = self._bytes_locked(self._dead_pending)
+        candidate = self._dead_records_bounded_locked(
+            [*self._dead, record], now=now, live_bytes=live_after + pending_bytes
+        )
+        if not any(entry.get("id") == record.get("id") for entry in candidate):
+            # The dead copy itself could not fit the shared byte budget.
+            self._dead_write_failures += 1
+            return False
+        try:
+            self._write_atomic(self._dead_path, candidate)
+        except _SpoolUnavailable as error:
+            self._dead_write_failures += 1
+            logger.warning("Mebular dead spool write failed; live item retained: %s", error)
+            return False
+        self._dead = candidate
+        try:
+            self._items.remove(item)
+        except ValueError:
+            pass
+        return True
+
+    def _enforce_live_budget_locked(self, now: int) -> bool:
+        changed = False
+        while self._items and self._bytes_locked() > self._max_bytes:
+            item = next(
+                (entry for entry in self._items if not self._live_quarantined(entry)),
+                None,
+            )
+            if item is None:
+                break
+            if self._dead_item_locked(item, "live_quota_evicted", now):
+                self._live_quota_evicted += 1
+                changed = True
+                continue
+            attempts = self.mark_dead_pending(
+                str(item.get("id") or ""), "live_quota_evicted"
+            )
+            if attempts and self._items and self._items[0] is item:
+                # Neither file could be persisted; move it to the in-memory
+                # orphan queue so later live items are not blocked.
+                if not self.orphan_dead_pending_live(
+                    str(item.get("id") or ""), "live_quota_evicted"
+                ):
+                    logger.warning("Mebular live spool over budget but cannot persist eviction")
+                    break
+            if attempts:
+                self._live_quota_evicted += 1
+                changed = True
+        return changed
+
+    def _bytes_locked(self, records: Optional[List[Dict[str, Any]]] = None) -> int:
+        values = self._items if records is None else records
+        return sum(len(self._serialise(record).encode("utf-8")) + 1 for record in values)
+
+    def _expire_locked(self, now: int) -> bool:
+        changed = False
+        pending_before = len(self._dead_pending)
+        self._dead_pending = self._trim_dead_pending_locked(
+            self._dead_pending, now=now
+        )
+        if len(self._dead_pending) != pending_before:
+            try:
+                self._persist_dead_pending_locked()
+            except _SpoolUnavailable:
+                pass
+            changed = True
+        orphan_before = len(self._orphan_dead_pending)
+        self._orphan_dead_pending = self._trim_orphan_locked(
+            self._orphan_dead_pending, now=now
+        )
+        if len(self._orphan_dead_pending) != orphan_before:
+            try:
+                self._persist_orphan_locked()
+            except _SpoolUnavailable:
+                pass
+            changed = True
+        quarantine_before = len(self._quarantine)
+        self._quarantine = self._trim_orphan_locked(self._quarantine, now=now)
+        if len(self._quarantine) != quarantine_before:
+            try:
+                self._persist_quarantine_locked()
+            except _SpoolUnavailable:
+                pass
+            changed = True
+        dead_before = len(self._dead)
+        self._prune_dead_locked(now)
+        if len(self._dead) != dead_before:
+            try:
+                self._persist_dead_locked()
+            except _SpoolUnavailable as error:
+                logger.warning("Mebular dead spool prune write failed: %s", error)
+        expired = [
+            item for item in self._items if int(item.get("expiresAt") or 0) <= now
+        ]
+        for item in expired:
+            if self._dead_item_locked(item, "retention_expired", now):
+                changed = True
+        if changed:
+            try:
+                self._persist_locked()
+            except _SpoolUnavailable as error:
+                logger.warning("Mebular spool expiry write failed: %s", error)
+        return changed
+
+    def append(self, kind: str, payload: Dict[str, Any]) -> str:
+        clean_kind = "checkpoint" if kind == "checkpoint" else "ingest"
+        sanitised = _sanitise_payload(clean_kind, payload)
+        request_id = str(sanitised.get("requestId") or "")
+        item_id = _record_id(clean_kind, request_id)
         with self._lock:
+            now = _now_ms()
+            expiry = _spool_expiry_ms(payload, now)
+            self._expire_locked(now)
+            if clean_kind == "checkpoint" and request_id:
+                for existing in self._items:
+                    existing_payload = existing.get("payload")
+                    if (
+                        existing.get("kind") == "checkpoint"
+                        and isinstance(existing_payload, dict)
+                        and str(existing_payload.get("requestId") or "") == request_id
+                    ):
+                        return str(existing.get("id") or item_id)
             record = {
-                "id": self._next_id,
-                "payload": payload,
+                "id": item_id,
+                "kind": clean_kind,
+                "payload": sanitised,
                 "attempts": 0,
-                "createdAt": _now_ms(),
+                "createdAt": now,
+                "expiresAt": expiry,
             }
-            self._next_id += 1
+            if expiry <= now:
+                # An already-expired operation must not be sent later; record
+                # the explicit terminal state and report failure to the caller.
+                if not self._dead_item_locked(record, "retention_expired", now):
+                    raise _SpoolExpired("dead_write_failed")
+                raise _SpoolExpired("retention_expired")
+            if len(self._items) >= self._limit:
+                raise _SpoolFull("queue_limit")
+            record_bytes = self._bytes_locked([record])
+            live_after = self._bytes_locked() + record_bytes
+            if live_after > self._max_bytes:
+                # Refuse before touching diagnostic dead evidence.
+                raise _SpoolFull("queue_bytes")
+            dead_candidate = self._dead_records_bounded_locked(
+                self._dead,
+                now=now,
+                live_bytes=live_after + self._bytes_locked(self._dead_pending),
+            )
+            if dead_candidate != self._dead:
+                try:
+                    self._write_atomic(self._dead_path, dead_candidate)
+                except _SpoolUnavailable:
+                    raise
+                self._dead = dead_candidate
+            total_after = live_after + self._bytes_locked(dead_candidate) + self._bytes_locked(self._dead_pending)
+            overflow_indexes: List[int] = []
+            if total_after > self._max_bytes:
+                excess = total_after - self._max_bytes
+                for index, item in enumerate(self._dead_pending):
+                    if excess <= 0:
+                        break
+                    overflow_indexes.append(index)
+                    excess -= self._bytes_locked([item])
             self._items.append(record)
-            if len(self._items) > self._limit:
-                dropped = len(self._items) - self._limit
-                del self._items[:dropped]
-                logger.warning("Mebular spool full; dropped %d oldest request(s)", dropped)
-            self._persist_locked()
-            return record["id"]
+            try:
+                self._persist_locked()
+            except _SpoolUnavailable:
+                self._items.pop()
+                raise
+            if overflow_indexes:
+                for index in overflow_indexes:
+                    pending = self._dead_pending[index].setdefault("deadPending", {})
+                    if pending.get("abandoned") is not True:
+                        pending["abandoned"] = True
+                        pending["overflow"] = True
+                        pending["reason"] = "deadPendingAppendBudget"
+                        pending["at"] = now
+                        self._dead_pending_overflow += 1
+                try:
+                    self._write_atomic(self._dead_pending_path, self._dead_pending)
+                except _SpoolUnavailable:
+                    logger.warning("Mebular dead-pending overflow write failed after append")
+            return item_id
+
+    @staticmethod
+    def _live_quarantined(item: Dict[str, Any]) -> bool:
+        pending = item.get("deadPending")
+        return isinstance(pending, dict) and pending.get("quarantined") is True
 
     def first(self) -> Optional[Dict[str, Any]]:
         with self._lock:
-            return dict(self._items[0]) if self._items else None
+            for item in self._items:
+                if self._live_quarantined(item):
+                    continue
+                return copy.deepcopy(item)
+            return None
 
-    def remove(self, item_id: int) -> None:
+    def quarantined_live_items(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            return [
+                copy.deepcopy(item) for item in self._items
+                if self._live_quarantined(item)
+            ]
+
+    def quarantine_live_count(self) -> int:
+        with self._lock:
+            return sum(1 for item in self._items if self._live_quarantined(item))
+
+    def quarantine_memory_only(self) -> bool:
+        with self._lock:
+            return self._quarantine_memory_only
+
+    def remove(self, item_id: str) -> None:
         with self._lock:
             before = len(self._items)
             self._items = [item for item in self._items if item.get("id") != item_id]
             if len(self._items) != before:
-                self._persist_locked()
+                try:
+                    self._persist_locked()
+                except _SpoolUnavailable as error:
+                    logger.warning("Mebular spool removal write failed: %s", error)
 
-    def fail(self, item_id: int) -> int:
+    def remove_request(self, kind: str, request_id: str) -> None:
+        """Drop a pending host copy after a direct confirmation/handoff."""
+        if not request_id:
+            return
+        with self._lock:
+            before = len(self._items)
+            kept: List[Dict[str, Any]] = []
+            for item in self._items:
+                payload = item.get("payload")
+                if (
+                    item.get("kind") == kind
+                    and isinstance(payload, dict)
+                    and str(payload.get("requestId") or "") == request_id
+                ):
+                    continue
+                kept.append(item)
+            self._items = kept
+            if len(self._items) != before:
+                try:
+                    self._persist_locked()
+                except _SpoolUnavailable as error:
+                    logger.warning("Mebular spool logical removal write failed: %s", error)
+
+    def fail(self, item_id: str, code: str = "") -> int:
         with self._lock:
             attempts = 0
             for item in self._items:
                 if item.get("id") == item_id:
                     item["attempts"] = int(item.get("attempts") or 0) + 1
-                    attempts = item["attempts"]
+                    item["lastError"] = {"code": str(code or "error")[:120], "at": _now_ms()}
+                    attempts = int(item["attempts"])
                     break
-            self._persist_locked()
+            try:
+                self._persist_locked()
+            except _SpoolUnavailable as error:
+                logger.warning("Mebular spool failure write failed: %s", error)
             return attempts
 
-    def depth(self) -> int:
+    def dead(self, item_id: str, reason: str) -> bool:
         with self._lock:
-            return len(self._items)
+            now = _now_ms()
+            for item in list(self._items):
+                if item.get("id") != item_id:
+                    continue
+                if not self._dead_item_locked(item, reason, now):
+                    return False
+                try:
+                    self._persist_locked()
+                except _SpoolUnavailable as error:
+                    logger.warning("Mebular spool dead transition write failed: %s", error)
+                return True
+            return False
+
+    def claim_worker(self, owner: Any) -> bool:
+        with self._lock:
+            current = self._worker_owner
+            if current is owner:
+                return True
+            starting_expired = False
+            if current is not None and self._worker_starting:
+                if time.monotonic() - self._worker_starting_at < _WORKER_START_TIMEOUT:
+                    return False
+                starting_expired = True
+            if current is not None and not starting_expired:
+                try:
+                    if not getattr(current, "_shutdown", False):
+                        worker = getattr(current, "_worker", None)
+                        heartbeat = self._worker_heartbeat
+                        if (
+                            worker is not None
+                            and worker.is_alive()
+                            and heartbeat > 0
+                            and time.monotonic() - heartbeat < _WORKER_STALE_SECONDS
+                        ):
+                            return False
+                except Exception:
+                    pass
+            self._worker_owner = owner
+            self._worker_starting = True
+            self._worker_starting_at = time.monotonic()
+            self._worker_heartbeat = time.monotonic()
+            return True
+
+    def confirm_worker(self, owner: Any) -> None:
+        with self._lock:
+            if self._worker_owner is owner:
+                self._worker_starting = False
+                self._worker_starting_at = 0.0
+                self._worker_heartbeat = time.monotonic()
+
+    def note_worker_progress(self, owner: Any) -> None:
+        with self._lock:
+            if self._worker_owner is owner:
+                self._worker_heartbeat = time.monotonic()
+
+    def release_worker(self, owner: Any) -> None:
+        with self._lock:
+            if self._worker_owner is owner:
+                self._worker_owner = None
+                self._worker_starting = False
+                self._worker_starting_at = 0.0
+
+    def worker_owner(self) -> Any:
+        with self._lock:
+            return self._worker_owner
+
+    def bump_metric(self, name: str, amount: int = 1) -> None:
+        with self._lock:
+            self._metrics[name] = int(self._metrics.get(name, 0)) + int(amount)
+
+    def metric(self, name: str, default: int = 0) -> int:
+        with self._lock:
+            return int(self._metrics.get(name, default))
+
+    def set_last_ingest(self, value: Dict[str, Any]) -> None:
+        with self._lock:
+            self._last_ingest_shared = copy.deepcopy(value)
+
+    def last_ingest(self) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            return copy.deepcopy(self._last_ingest_shared)
+
+    def mark_dead_pending(self, item_id: str, reason: str) -> int:
+        """Move a live item to the independent dead-pending list.
+
+        The pending copy is persisted before removing the live FIFO entry so a
+        later item can proceed.  If that write fails, the item stays live with
+        an in-memory ``deadPending`` marker so the worker still skips resend.
+        """
+        with self._lock:
+            now = _now_ms()
+            for index, item in enumerate(self._items):
+                if item.get("id") != item_id:
+                    continue
+                previous = item.get("deadPending")
+                prior = int(previous.get("attempts") or 0) if isinstance(previous, dict) else 0
+                attempts = prior + 1
+                pending_item = copy.deepcopy(item)
+                pending_item["deadPending"] = {
+                    "reason": str(reason or "dead_write_failed")[:120],
+                    "attempts": attempts,
+                    "at": now,
+                }
+                candidate = self._trim_dead_pending_locked(
+                    [*self._dead_pending, pending_item]
+                )
+                if not any(entry.get("id") == pending_item.get("id") for entry in candidate):
+                    item["deadPending"] = dict(pending_item["deadPending"])
+                    self.orphan_dead_pending_live(item_id, reason)
+                    return attempts
+                try:
+                    self._write_atomic(self._dead_pending_path, candidate)
+                except _SpoolUnavailable as error:
+                    item["deadPending"] = dict(pending_item["deadPending"])
+                    try:
+                        self._persist_locked()
+                    except _SpoolUnavailable:
+                        pass
+                    logger.warning("Mebular dead-pending write failed: %s", error)
+                    return attempts
+                self._dead_pending = candidate
+                self._items.pop(index)
+                try:
+                    self._persist_locked()
+                except _SpoolUnavailable as error:
+                    logger.warning("Mebular live removal after dead-pending failed: %s", error)
+                return attempts
+            return 0
+
+    def dead_pending(self, item_id: str, reason: str) -> bool:
+        """Retry writing one dead-pending item to the dead file."""
+        with self._lock:
+            now = _now_ms()
+            for index, item in enumerate(self._dead_pending):
+                if item.get("id") != item_id:
+                    continue
+                record = copy.deepcopy(item)
+                record["deadAt"] = now
+                record["reason"] = str(reason or "dead_write_failed")[:120]
+                pending_after = [
+                    entry for entry in self._dead_pending if entry.get("id") != item_id
+                ]
+                candidate = self._dead_records_bounded_locked(
+                    [*self._dead, record],
+                    now=now,
+                    live_bytes=self._bytes_locked() + self._bytes_locked(pending_after),
+                )
+                if not any(entry.get("id") == record.get("id") for entry in candidate):
+                    return False
+                try:
+                    self._write_atomic(self._dead_path, candidate)
+                except _SpoolUnavailable as error:
+                    self._dead_write_failures += 1
+                    logger.warning("Mebular dead-pending dead write failed: %s", error)
+                    return False
+                self._dead = candidate
+                self._dead_pending.pop(index)
+                try:
+                    self._persist_dead_pending_locked()
+                except _SpoolUnavailable:
+                    pass
+                return True
+            return False
+
+    def fail_dead_pending(self, item_id: str, reason: str) -> int:
+        with self._lock:
+            attempts = 0
+            for item in self._dead_pending:
+                if item.get("id") != item_id:
+                    continue
+                pending = item.setdefault("deadPending", {})
+                attempts = int(pending.get("attempts") or 0) + 1
+                pending["attempts"] = attempts
+                pending["reason"] = str(reason or "dead_write_failed")[:120]
+                pending["at"] = _now_ms()
+                break
+            try:
+                self._persist_dead_pending_locked()
+            except _SpoolUnavailable:
+                pass
+            return attempts
+
+    def orphan_dead_pending_live(self, item_id: str, reason: str) -> int:
+        """Persist an unpublishable dead-pending item before leaving live."""
+        with self._lock:
+            for index, item in enumerate(self._items):
+                if item.get("id") != item_id:
+                    continue
+                record = copy.deepcopy(item)
+                pending = record.get("deadPending")
+                attempts = int(pending.get("attempts") or 0) if isinstance(pending, dict) else 0
+                record["deadPending"] = {
+                    "reason": str(reason or "dead_write_failed")[:120],
+                    "attempts": attempts + 1,
+                    "at": _now_ms(),
+                    "orphaned": True,
+                }
+                candidate = self._trim_orphan_locked(
+                    [*self._orphan_dead_pending, record]
+                )
+                if not any(entry.get("id") == record.get("id") for entry in candidate):
+                    # Never leave a head item live because its orphan record is
+                    # larger than the byte cap; keep it traceable in memory.
+                    candidate = [*self._orphan_dead_pending, record]
+                    self._orphan_dropped += 1
+                try:
+                    self._write_atomic(self._orphan_path, candidate)
+                except _SpoolUnavailable as error:
+                    record["deadPending"]["quarantined"] = True
+                    quarantine_candidate = self._trim_orphan_locked(
+                        [*self._quarantine, record]
+                    )
+                    if not any(
+                        entry.get("id") == record.get("id")
+                        for entry in quarantine_candidate
+                    ):
+                        quarantine_candidate = [*self._quarantine, record]
+                    try:
+                        self._write_atomic(
+                            self._quarantine_path, quarantine_candidate
+                        )
+                    except _SpoolUnavailable:
+                        # Keep the only copy in the live queue (which is
+                        # writable) with a visible quarantined marker.  The
+                        # worker skips it and retries migration later.
+                        self._mark_live_quarantined_locked(item, reason)
+                        return attempts + 1
+                    else:
+                        self._quarantine = quarantine_candidate
+                        self._items.pop(index)
+                        try:
+                            self._persist_locked()
+                        except _SpoolUnavailable:
+                            pass
+                        return attempts + 1
+                self._orphan_dead_pending = candidate
+                self._items.pop(index)
+                try:
+                    self._persist_locked()
+                except _SpoolUnavailable:
+                    pass
+                return attempts + 1
+            return 0
+
+    def _remove_live_locked(self, item: Dict[str, Any]) -> None:
+        try:
+            self._items.remove(item)
+        except ValueError:
+            pass
+        try:
+            self._persist_locked()
+            self._quarantine_memory_only = False
+        except _SpoolUnavailable:
+            self._quarantine_memory_only = True
+
+    def _mark_live_quarantined_locked(self, item: Dict[str, Any], reason: str) -> int:
+        pending = item.get("deadPending")
+        attempts = int(pending.get("attempts") or 0) if isinstance(pending, dict) else 0
+        item["deadPending"] = {
+            "reason": str(reason or "dead_write_failed")[:120],
+            "attempts": attempts + 1,
+            "at": _now_ms(),
+            "quarantined": True,
+            "memoryOnly": True,
+        }
+        try:
+            self._persist_locked()
+            self._quarantine_memory_only = False
+        except _SpoolUnavailable:
+            self._quarantine_memory_only = True
+        return attempts + 1
+
+    def migrate_live_quarantine(self, item_id: str, reason: str) -> bool:
+        """Move a quarantined live item to any writable spill file."""
+        with self._lock:
+            for item in list(self._items):
+                if item.get("id") != item_id or not self._live_quarantined(item):
+                    continue
+                now = _now_ms()
+                record = copy.deepcopy(item)
+                record["deadAt"] = now
+                record["reason"] = str(reason or "dead_write_failed")[:120]
+                candidate = self._dead_records_bounded_locked(
+                    [*self._dead, record],
+                    now=now,
+                    live_bytes=self._bytes_locked()
+                    + self._bytes_locked(self._dead_pending)
+                    + self._bytes_locked(self._quarantine)
+                    + self._bytes_locked([record]),
+                )
+                if any(entry.get("id") == record.get("id") for entry in candidate):
+                    try:
+                        self._write_atomic(self._dead_path, candidate)
+                    except _SpoolUnavailable:
+                        pass
+                    else:
+                        self._dead = candidate
+                        self._remove_live_locked(item)
+                        return True
+                pending_record = copy.deepcopy(item)
+                pending_record["deadPending"] = dict(
+                    pending_record.get("deadPending") or {}
+                )
+                pending_record["deadPending"].update({
+                    "reason": str(reason or "dead_write_failed")[:120],
+                    "at": now,
+                })
+                pending_candidate = self._trim_dead_pending_locked(
+                    [*self._dead_pending, pending_record]
+                )
+                if any(
+                    entry.get("id") == pending_record.get("id")
+                    for entry in pending_candidate
+                ):
+                    try:
+                        self._write_atomic(
+                            self._dead_pending_path, pending_candidate
+                        )
+                    except _SpoolUnavailable:
+                        pass
+                    else:
+                        self._dead_pending = pending_candidate
+                        self._remove_live_locked(item)
+                        return True
+                orphan_record = copy.deepcopy(item)
+                orphan_record["deadPending"] = dict(
+                    orphan_record.get("deadPending") or {}
+                )
+                orphan_record["deadPending"].update({
+                    "reason": str(reason or "dead_write_failed")[:120],
+                    "at": now,
+                    "orphaned": True,
+                })
+                orphan_candidate = self._trim_orphan_locked(
+                    [*self._orphan_dead_pending, orphan_record]
+                )
+                if any(
+                    entry.get("id") == orphan_record.get("id")
+                    for entry in orphan_candidate
+                ):
+                    try:
+                        self._write_atomic(self._orphan_path, orphan_candidate)
+                    except _SpoolUnavailable:
+                        pass
+                    else:
+                        self._orphan_dead_pending = orphan_candidate
+                        self._remove_live_locked(item)
+                        return True
+                quarantine_candidate = self._trim_orphan_locked(
+                    [*self._quarantine, orphan_record]
+                )
+                if any(
+                    entry.get("id") == orphan_record.get("id")
+                    for entry in quarantine_candidate
+                ):
+                    try:
+                        self._write_atomic(
+                            self._quarantine_path, quarantine_candidate
+                        )
+                    except _SpoolUnavailable:
+                        pass
+                    else:
+                        self._quarantine = quarantine_candidate
+                        self._remove_live_locked(item)
+                        return True
+                return False
+            return False
+
+    def fail_live_quarantine(self, item_id: str, reason: str) -> int:
+        with self._lock:
+            attempts = 0
+            for item in self._items:
+                if item.get("id") != item_id or not self._live_quarantined(item):
+                    continue
+                pending = item.setdefault("deadPending", {})
+                attempts = int(pending.get("attempts") or 0) + 1
+                pending["attempts"] = attempts
+                pending["reason"] = str(reason or "dead_write_failed")[:120]
+                pending["at"] = _now_ms()
+                try:
+                    self._persist_locked()
+                    self._quarantine_memory_only = False
+                except _SpoolUnavailable:
+                    self._quarantine_memory_only = True
+                break
+            return attempts
+
+    def abandon_live_quarantine(self, item_id: str, reason: str) -> bool:
+        with self._lock:
+            for item in self._items:
+                if item.get("id") != item_id or not self._live_quarantined(item):
+                    continue
+                pending = item.setdefault("deadPending", {})
+                pending["abandoned"] = True
+                pending["reason"] = str(reason or "deadWriteAbandoned")[:120]
+                pending["at"] = _now_ms()
+                self._dead_write_abandoned += 1
+                try:
+                    self._persist_locked()
+                    self._quarantine_memory_only = False
+                except _SpoolUnavailable:
+                    self._quarantine_memory_only = True
+                return True
+            return False
+
+    def orphan_dead_pending_items(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            return copy.deepcopy(self._orphan_dead_pending)
+
+    def orphan_dead_pending_count(self) -> int:
+        with self._lock:
+            return len(self._orphan_dead_pending)
+
+    def try_orphan_dead(self, item_id: str, reason: str) -> bool:
+        with self._lock:
+            for index, item in enumerate(self._orphan_dead_pending):
+                if item.get("id") != item_id:
+                    continue
+                now = _now_ms()
+                record = copy.deepcopy(item)
+                record["deadAt"] = now
+                record["reason"] = str(reason or "dead_write_failed")[:120]
+                candidate = self._dead_records_bounded_locked(
+                    [*self._dead, record],
+                    now=now,
+                    live_bytes=self._bytes_locked()
+                    + self._bytes_locked(self._dead_pending)
+                    + self._bytes_locked([record]),
+                )
+                if not any(entry.get("id") == record.get("id") for entry in candidate):
+                    return False
+                try:
+                    self._write_atomic(self._dead_path, candidate)
+                except _SpoolUnavailable:
+                    self._dead_write_failures += 1
+                    return False
+                self._dead = candidate
+                self._orphan_dead_pending.pop(index)
+                try:
+                    self._persist_orphan_locked()
+                except _SpoolUnavailable:
+                    pass
+                return True
+            return False
+
+    def try_orphan_pending(self, item_id: str, reason: str) -> bool:
+        with self._lock:
+            for index, item in enumerate(self._orphan_dead_pending):
+                if item.get("id") != item_id:
+                    continue
+                record = copy.deepcopy(item)
+                record["deadPending"] = dict(record.get("deadPending") or {})
+                record["deadPending"]["reason"] = str(reason or "dead_write_failed")[:120]
+                record["deadPending"]["at"] = _now_ms()
+                candidate = self._trim_dead_pending_locked(
+                    [*self._dead_pending, record]
+                )
+                if not any(entry.get("id") == record.get("id") for entry in candidate):
+                    return False
+                try:
+                    self._write_atomic(self._dead_pending_path, candidate)
+                except _SpoolUnavailable:
+                    return False
+                self._dead_pending = candidate
+                self._orphan_dead_pending.pop(index)
+                try:
+                    self._persist_orphan_locked()
+                except _SpoolUnavailable:
+                    pass
+                return True
+            return False
+
+    def fail_orphan(self, item_id: str, reason: str) -> int:
+        with self._lock:
+            attempts = 0
+            for item in self._orphan_dead_pending:
+                if item.get("id") != item_id:
+                    continue
+                pending = item.setdefault("deadPending", {})
+                attempts = int(pending.get("attempts") or 0) + 1
+                pending["attempts"] = attempts
+                pending["reason"] = str(reason or "dead_write_failed")[:120]
+                pending["at"] = _now_ms()
+                break
+            try:
+                self._persist_orphan_locked()
+            except _SpoolUnavailable:
+                pass
+            return attempts
+
+    def abandon_orphan(self, item_id: str, reason: str) -> bool:
+        with self._lock:
+            for item in self._orphan_dead_pending:
+                if item.get("id") != item_id:
+                    continue
+                pending = item.setdefault("deadPending", {})
+                pending["abandoned"] = True
+                pending["reason"] = str(reason or "deadWriteAbandoned")[:120]
+                pending["at"] = _now_ms()
+                self._dead_write_abandoned += 1
+                try:
+                    self._persist_orphan_locked()
+                except _SpoolUnavailable:
+                    pass
+                return True
+            return False
+
+    def quarantine_items(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            return copy.deepcopy(self._quarantine)
+
+    def quarantine_count(self) -> int:
+        with self._lock:
+            return len(self._quarantine)
+
+    def try_quarantine_dead(self, item_id: str, reason: str) -> bool:
+        with self._lock:
+            for index, item in enumerate(self._quarantine):
+                if item.get("id") != item_id:
+                    continue
+                now = _now_ms()
+                record = copy.deepcopy(item)
+                record["deadAt"] = now
+                record["reason"] = str(reason or "dead_write_failed")[:120]
+                candidate = self._dead_records_bounded_locked(
+                    [*self._dead, record],
+                    now=now,
+                    live_bytes=self._bytes_locked()
+                    + self._bytes_locked(self._dead_pending)
+                    + self._bytes_locked([record]),
+                )
+                if not any(entry.get("id") == record.get("id") for entry in candidate):
+                    return False
+                try:
+                    self._write_atomic(self._dead_path, candidate)
+                except _SpoolUnavailable:
+                    self._dead_write_failures += 1
+                    return False
+                self._dead = candidate
+                self._quarantine.pop(index)
+                try:
+                    self._persist_quarantine_locked()
+                except _SpoolUnavailable:
+                    pass
+                return True
+            return False
+
+    def try_quarantine_pending(self, item_id: str, reason: str) -> bool:
+        with self._lock:
+            for index, item in enumerate(self._quarantine):
+                if item.get("id") != item_id:
+                    continue
+                record = copy.deepcopy(item)
+                record["deadPending"] = dict(record.get("deadPending") or {})
+                record["deadPending"]["reason"] = str(reason or "dead_write_failed")[:120]
+                record["deadPending"]["at"] = _now_ms()
+                candidate = self._trim_dead_pending_locked(
+                    [*self._dead_pending, record]
+                )
+                if not any(entry.get("id") == record.get("id") for entry in candidate):
+                    return False
+                try:
+                    self._write_atomic(self._dead_pending_path, candidate)
+                except _SpoolUnavailable:
+                    return False
+                self._dead_pending = candidate
+                self._quarantine.pop(index)
+                try:
+                    self._persist_quarantine_locked()
+                except _SpoolUnavailable:
+                    pass
+                return True
+            return False
+
+    def try_quarantine_orphan(self, item_id: str, reason: str) -> bool:
+        with self._lock:
+            for index, item in enumerate(self._quarantine):
+                if item.get("id") != item_id:
+                    continue
+                record = copy.deepcopy(item)
+                record["deadPending"] = dict(record.get("deadPending") or {})
+                record["deadPending"]["reason"] = str(reason or "dead_write_failed")[:120]
+                record["deadPending"]["at"] = _now_ms()
+                record["deadPending"]["orphaned"] = True
+                candidate = self._trim_orphan_locked(
+                    [*self._orphan_dead_pending, record]
+                )
+                if not any(entry.get("id") == record.get("id") for entry in candidate):
+                    return False
+                try:
+                    self._write_atomic(self._orphan_path, candidate)
+                except _SpoolUnavailable:
+                    return False
+                self._orphan_dead_pending = candidate
+                self._quarantine.pop(index)
+                try:
+                    self._persist_quarantine_locked()
+                except _SpoolUnavailable:
+                    pass
+                return True
+            return False
+
+    def fail_quarantine(self, item_id: str, reason: str) -> int:
+        with self._lock:
+            attempts = 0
+            for item in self._quarantine:
+                if item.get("id") != item_id:
+                    continue
+                pending = item.setdefault("deadPending", {})
+                attempts = int(pending.get("attempts") or 0) + 1
+                pending["attempts"] = attempts
+                pending["reason"] = str(reason or "dead_write_failed")[:120]
+                pending["at"] = _now_ms()
+                break
+            try:
+                self._persist_quarantine_locked()
+            except _SpoolUnavailable:
+                pass
+            return attempts
+
+    def abandon_quarantine(self, item_id: str, reason: str) -> bool:
+        with self._lock:
+            for item in self._quarantine:
+                if item.get("id") != item_id:
+                    continue
+                pending = item.setdefault("deadPending", {})
+                pending["abandoned"] = True
+                pending["reason"] = str(reason or "deadWriteAbandoned")[:120]
+                pending["at"] = _now_ms()
+                self._dead_write_abandoned += 1
+                try:
+                    self._persist_quarantine_locked()
+                except _SpoolUnavailable:
+                    pass
+                return True
+            return False
+
+    def dead_pending_count(self) -> int:
+        with self._lock:
+            return len(self._dead_pending)
+
+    def dead_pending_items(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            return copy.deepcopy(self._dead_pending)
+
+    def abandon_dead_pending(self, item_id: str, reason: str) -> bool:
+        with self._lock:
+            for item in self._dead_pending:
+                if item.get("id") != item_id:
+                    continue
+                pending = item.setdefault("deadPending", {})
+                pending["abandoned"] = True
+                pending["reason"] = str(reason or "deadWriteAbandoned")[:120]
+                pending["at"] = _now_ms()
+                self._dead_write_abandoned += 1
+                try:
+                    self._persist_dead_pending_locked()
+                except _SpoolUnavailable:
+                    pass
+                return True
+            return False
+
+    def count(self, kind: Optional[str] = None) -> int:
+        with self._lock:
+            if kind is None:
+                return len(self._items)
+            return sum(1 for item in self._items if item.get("kind") == kind)
+
+    def depth(self) -> int:
+        return self.count()
+
+    def dead_count(self) -> int:
+        with self._lock:
+            return len(self._dead)
+
+    def last_dead_reason(self) -> str:
+        with self._lock:
+            return str(self._dead[-1].get("reason") or "") if self._dead else ""
+
+    def bytes(self) -> int:
+        with self._lock:
+            return self._bytes_locked()
+
+    def dead_bytes(self) -> int:
+        with self._lock:
+            return self._bytes_locked(self._dead)
+
+    def total_bytes(self) -> int:
+        with self._lock:
+            return (
+                self._bytes_locked()
+                + self._bytes_locked(self._dead)
+                + self._bytes_locked(self._dead_pending)
+                + self._bytes_locked(self._orphan_dead_pending)
+            )
+
+    def dead_write_failures(self) -> int:
+        with self._lock:
+            return self._dead_write_failures
+
+    def dead_write_abandoned(self) -> int:
+        with self._lock:
+            return self._dead_write_abandoned
+
+    def dead_write_abandoned_cleaned(self) -> int:
+        with self._lock:
+            return self._dead_write_abandoned_cleaned
+
+    def dead_pending_dropped(self) -> int:
+        with self._lock:
+            return self._dead_pending_dropped
+
+    def dead_pending_overflow(self) -> int:
+        with self._lock:
+            return self._dead_pending_overflow
+
+    def orphan_dropped(self) -> int:
+        with self._lock:
+            return self._orphan_dropped
+
+    def orphan_overflow(self) -> int:
+        with self._lock:
+            return self._orphan_overflow
+
+    def live_quota_evicted(self) -> int:
+        with self._lock:
+            return self._live_quota_evicted
+
+    def oldest_age_ms(self) -> int:
+        with self._lock:
+            if not self._items:
+                return 0
+            oldest = min(int(item.get("createdAt") or 0) for item in self._items)
+            return max(0, _now_ms() - oldest)
+
+    def expire(self) -> bool:
+        """Apply the D2 deadline without requiring a new append/restart."""
+        with self._lock:
+            return self._expire_locked(_now_ms())
 
     def clear(self) -> None:
         with self._lock:
             self._items = []
-            self._persist_locked()
+            try:
+                self._persist_locked()
+            except _SpoolUnavailable as error:
+                logger.warning("Mebular spool clear failed: %s", error)
+
+
+_SPOOL_REGISTRY_LOCK = threading.Lock()
+_SPOOL_REGISTRY: Dict[str, _Spool] = {}
+
+
+def _shared_spool(path: Path, limit: int) -> _Spool:
+    """Share one spool within this process for the same HERMES_HOME.
+
+    This keeps the in-process single-writer RLock effective when two provider
+    instances point at the same profile.  It is deliberately not a cross-
+    process lock, and status reports that limitation explicitly.
+    """
+    try:
+        key = str(path.expanduser().absolute())
+    except Exception:
+        key = str(path)
+    with _SPOOL_REGISTRY_LOCK:
+        spool = _SPOOL_REGISTRY.get(key)
+        if spool is None:
+            spool = _Spool(path, limit)
+            _SPOOL_REGISTRY[key] = spool
+        else:
+            spool._limit = max(1, int(limit))
+        return spool
 
 
 def _spawn_worker(target: Any, *, name: str, args: Tuple[Any, ...] = ()) -> threading.Thread:
@@ -1397,6 +3395,11 @@ class MebularMemoryProvider(MemoryProvider):
         self._mode = ""
         self._capabilities: Dict[str, Any] = {}
         self._discovery_checked_at = 0.0
+        self._mode_blocked_reason = ""
+        self._mode_blocked_at_ms = 0
+        self._mode_next_probe_at = 0.0
+        self._mode_probe_attempts = 0
+        self._mode_probe_result = ""
 
         self._lock = threading.RLock()
         self._send_lock = threading.Lock()
@@ -1412,8 +3415,23 @@ class MebularMemoryProvider(MemoryProvider):
         self._last_recall_count: Optional[int] = None
         self._recall_block_until = 0.0
 
-        self._pending_checkpoints: List[Dict[str, Any]] = []
         self._checkpoint_failures = 0
+        self._checkpoint_handoffs = 0
+        self._checkpoint_committed = 0
+        self._checkpoint_pending_responses = 0
+        self._checkpoint_unconfirmed = 0
+        self._ingest_committed = 0
+        self._ingest_failed = 0
+        self._ingest_handoffs = 0
+        self._ingest_pending_responses = 0
+        self._ingest_partial = 0
+        self._ingest_committed_records = 0
+        self._ingest_degraded = 0
+        self._last_ingest: Optional[Dict[str, Any]] = None
+        self._failed_items: set[str] = set()
+        self._checkpoint_unconfirmed_items: set[str] = set()
+        self._spool_rejected = 0
+        self._spool_write_failures = 0
         self._last_warning: Optional[Dict[str, Any]] = None
 
         self._turn_seq: Dict[str, int] = {}
@@ -1486,7 +3504,7 @@ class MebularMemoryProvider(MemoryProvider):
         self._client = _RuntimeClient(self._base_url, self._token) if self._base_url else None
 
         if self._spool is None or self._spool_home != self._hermes_home:
-            self._spool = _Spool(
+            self._spool = _shared_spool(
                 self._hermes_home / "mebular-memory" / "queue.jsonl", self._queue_limit
             )
             self._spool_home = self._hermes_home
@@ -1496,8 +3514,28 @@ class MebularMemoryProvider(MemoryProvider):
             self._prefetch_inflight.clear()
             self._last_recall_count = None
             self._recall_block_until = 0.0
-            self._pending_checkpoints.clear()
+            self._mode_blocked_reason = ""
+            self._mode_blocked_at_ms = 0
+            self._mode_next_probe_at = 0.0
+            self._mode_probe_attempts = 0
+            self._mode_probe_result = ""
             self._checkpoint_failures = 0
+            self._checkpoint_handoffs = 0
+            self._checkpoint_committed = 0
+            self._checkpoint_pending_responses = 0
+            self._checkpoint_unconfirmed = 0
+            self._ingest_committed = 0
+            self._ingest_failed = 0
+            self._ingest_handoffs = 0
+            self._ingest_pending_responses = 0
+            self._ingest_partial = 0
+            self._ingest_committed_records = 0
+            self._ingest_degraded = 0
+            self._last_ingest = None
+            self._failed_items.clear()
+            self._checkpoint_unconfirmed_items.clear()
+            self._spool_rejected = 0
+            self._spool_write_failures = 0
             self._last_warning = None
             self._turn_seq.clear()
             self._last_sync_signature = ""
@@ -1555,7 +3593,8 @@ class MebularMemoryProvider(MemoryProvider):
     # ------------------------------------------------------------------
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
-        if (not self._ready() or not self._capability_enabled("context")
+        if (not self._ready() or not self._mode_allows_work()
+                or not self._capability_enabled("context")
                 or not isinstance(query, str) or not query.strip()):
             return ""
         try:
@@ -1585,7 +3624,8 @@ class MebularMemoryProvider(MemoryProvider):
             return ""
 
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
-        if (not self._ready() or not self._capability_enabled("context")
+        if (not self._ready() or not self._mode_allows_work()
+                or not self._capability_enabled("context")
                 or not isinstance(query, str) or not query.strip()):
             return
         try:
@@ -1617,7 +3657,7 @@ class MebularMemoryProvider(MemoryProvider):
     def _prefetch_worker(self, query: str, sid: str, key: Tuple[str, str]) -> None:
         text: Optional[str] = None
         try:
-            if not self._recall_blocked():
+            if not self._recall_blocked() and self._mode_allows_work():
                 text = self._recall(query, sid)
         except Exception as error:
             self._note_recall_failure(error)
@@ -1638,6 +3678,13 @@ class MebularMemoryProvider(MemoryProvider):
         """Call the sidecar context endpoint; return a ready-to-inject block."""
         if self._client is None:
             raise _RuntimeError("runtime_unavailable", "sidecar URL is not configured")
+        if not self._mode_allows_work():
+            raise _RuntimeError(
+                self._mode_blocked_reason or "mode_mismatch",
+                "immersive mode is paused",
+                status=409,
+                retryable=False,
+            )
         self._refresh_token_if_due()
         thread_id = self._thread_id(sid)
         payload: Dict[str, Any] = {
@@ -1765,18 +3812,58 @@ class MebularMemoryProvider(MemoryProvider):
         return time.monotonic() < self._recall_block_until
 
     def _note_recall_failure(self, error: BaseException) -> None:
-        self._recall_block_until = time.monotonic() + _RECALL_FAILURE_COOLDOWN
+        cooldown = _RECALL_FAILURE_COOLDOWN
         if isinstance(error, _RuntimeError):
+            if error.code in _MODE_CODES:
+                self._note_mode_blocked(error.code)
+            if error.retry_after is not None:
+                cooldown = max(cooldown, min(_MAX_RETRY_AFTER, error.retry_after))
             self._record_warning(error.code)
             logger.debug("Mebular recall failed: %s (status=%s)", error.code, error.status)
         else:
             logger.debug("Mebular recall failed: %s", type(error).__name__)
+        self._recall_block_until = time.monotonic() + cooldown
 
     def _note_recall_success(self) -> None:
+        # Recall success must not clear a mode block: the immersive mode can be
+        # off while a read-only context route still answers.
         self._recall_block_until = 0.0
+
+    def _note_mode_blocked(self, code: str) -> None:
+        self._mode_blocked_reason = str(code or "mode_mismatch")
+        self._mode_blocked_at_ms = _now_ms()
+        self._mode_next_probe_at = time.monotonic() + _MODE_PROBE_SECONDS
+        self._mode_probe_result = self._mode_blocked_reason
+
+    def _note_runtime_success(self) -> None:
+        self._mode_blocked_reason = ""
+        self._mode_blocked_at_ms = 0
+        self._mode_next_probe_at = 0.0
+        self._mode_probe_attempts = 0
+        self._mode_probe_result = ""
+
+    def _mode_probe_due(self) -> bool:
+        return bool(self._mode_blocked_reason) and time.monotonic() >= self._mode_next_probe_at
+
+    def _mode_allows_work(self) -> bool:
+        if self._mode and self._mode.lower() not in _DISCOVERY_ACTIVE_MODES:
+            return False
+        # A mode mismatch is not cleared by a successful read-only status call.
+        # Only fresh discovery, new authorization evidence, or a successful
+        # replay of the same pending operation restores write admission.
+        return not self._mode_blocked_reason
 
     def _record_warning(self, code: str) -> None:
         self._last_warning = {"code": str(code or "runtime_error"), "at": _now_ms()}
+
+    def _bump_metric(self, name: str, amount: int = 1) -> None:
+        if self._spool is not None:
+            self._spool.bump_metric(name, amount)
+
+    def _metric(self, name: str, fallback: int) -> int:
+        if self._spool is not None:
+            return self._spool.metric(name, fallback)
+        return int(fallback)
 
     @staticmethod
     def _escape_injection(text: str) -> str:
@@ -1937,7 +4024,8 @@ class MebularMemoryProvider(MemoryProvider):
         fragment = str(fragment_id or "").strip()
         if not recall or not fragment:
             return {"ok": False, "code": "invalid_request", "detail": None}
-        if not self._ready() or not self._capability_enabled("context"):
+        if (not self._ready() or not self._mode_allows_work()
+                or not self._capability_enabled("context")):
             return {"ok": False, "code": "runtime_unavailable", "detail": None}
         payload: Dict[str, Any] = {
             "agentId": self._agent_id,
@@ -1978,6 +4066,7 @@ class MebularMemoryProvider(MemoryProvider):
         turn_author: Optional[Dict[str, Any]] = None,
     ) -> None:
         if (not self._ready() or not self._writes_enabled
+                or not self._mode_allows_work()
                 or not self._capability_enabled("ingest")):
             return
         try:
@@ -2059,6 +4148,7 @@ class MebularMemoryProvider(MemoryProvider):
             if self._spool is not None and self._client is not None:
                 self.flush(timeout=self._archive_flush_timeout)
             if (self._ready() and self._writes_enabled
+                    and self._mode_allows_work()
                     and self._capability_enabled("checkpoint")):
                 summary = kwargs.get("summary") or kwargs.get("compaction_summary")
                 self._submit_checkpoint(messages, kind="pre_compress", summary=summary)
@@ -2135,6 +4225,9 @@ class MebularMemoryProvider(MemoryProvider):
             if self._shutdown:
                 return
             self._shutdown = True
+        owns_spool_worker = (
+            self._spool is not None and self._spool.worker_owner() is self
+        )
         self._stop.set()
         self._wake.set()
         deadline = time.monotonic() + 3.0
@@ -2144,17 +4237,19 @@ class MebularMemoryProvider(MemoryProvider):
                 worker.join(timeout=1.5)
             except Exception:
                 pass
-        try:
-            self._drain_blocking(deadline)
-            self._flush_pending_checkpoints(deadline)
-        except Exception as error:
-            logger.debug("Mebular shutdown flush skipped: %s", type(error).__name__)
+        if owns_spool_worker:
+            try:
+                self._drain_blocking(deadline)
+            except Exception as error:
+                logger.debug("Mebular shutdown flush skipped: %s", type(error).__name__)
         for thread in list(self._prefetch_threads):
             remaining = max(0.0, deadline - time.monotonic())
             if remaining <= 0:
                 break
             if thread.is_alive():
                 thread.join(timeout=min(0.2, remaining))
+        if self._spool is not None:
+            self._spool.release_worker(self)
         self._worker = None
         logger.debug("Mebular provider shut down (pending=%s)", self.pending())
 
@@ -2226,78 +4321,173 @@ class MebularMemoryProvider(MemoryProvider):
         return f"/checkpoints/{quoted}?agentId={agent}"
 
     def _submit_checkpoint(self, messages: Any, *, kind: str, summary: Any = None) -> None:
-        payload = self._checkpoint_payload(messages, kind=kind, summary=summary)
+        payload = _sanitise_payload(
+            "checkpoint", self._checkpoint_payload(messages, kind=kind, summary=summary)
+        )
         try:
-            self._send_checkpoint(payload)
+            result = self._send_checkpoint(payload)
+            if self._accept_checkpoint_result(payload, result):
+                return
+            self._queue_pending_checkpoint(payload, "checkpoint_unconfirmed")
             return
         except _RuntimeError as error:
+            if error.code in _MODE_CODES:
+                # A disabled/mismatched mode is not a transient failure: never
+                # create a new host spool entry for it.
+                self._note_mode_blocked(error.code)
+                self._checkpoint_failed(error.code)
+                return
             if error.code in {"revision_mismatch", "checkpoint_conflict"} or (
                 error.status == 409 and error.code != "checkpoint_lease_held"
             ):
+                retry = dict(payload)
+                revision: Optional[int] = None
                 try:
                     current = self._client.get(  # type: ignore[union-attr]
-                        self._checkpoint_path(payload["threadId"], query_agent=True),
+                        self._checkpoint_path(str(payload["threadId"]), query_agent=True),
                         timeout=self._checkpoint_timeout,
                     )
                     checkpoint = current.get("checkpoint")
-                    revision = checkpoint.get("revision") if isinstance(checkpoint, dict) else None
-                    if revision is None and isinstance(current.get("revision"), int):
-                        revision = current.get("revision")
-                    if isinstance(revision, int) and revision >= 0:
-                        retry = dict(payload)
-                        retry["expectedRevision"] = revision
-                        self._send_checkpoint(retry)
-                        return
+                    candidate = checkpoint.get("revision") if isinstance(checkpoint, dict) else None
+                    if candidate is None and isinstance(current.get("revision"), int):
+                        candidate = current.get("revision")
+                    if isinstance(candidate, int) and candidate >= 0:
+                        revision = candidate
                 except Exception as retry_error:
                     logger.debug(
-                        "Mebular checkpoint revision retry failed: %s",
+                        "Mebular checkpoint revision read failed: %s",
                         type(retry_error).__name__,
                     )
-            self._queue_pending_checkpoint(payload, error.code)
+                if revision is not None:
+                    try:
+                        retry["expectedRevision"] = revision
+                        result = self._send_checkpoint(retry)
+                        if self._accept_checkpoint_result(retry, result):
+                            return
+                        self._queue_pending_checkpoint(retry, "checkpoint_unconfirmed")
+                        return
+                    except _RuntimeError as retry_error:
+                        self._checkpoint_retry_failed(retry, retry_error)
+                        return
+                    except Exception as retry_error:
+                        self._queue_pending_checkpoint(retry, type(retry_error).__name__)
+                        return
+                self._checkpoint_failed(error.code)
+                return
+            self._checkpoint_retry_failed(payload, error)
         except Exception as error:
             self._queue_pending_checkpoint(payload, type(error).__name__)
 
-    def _send_checkpoint(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _accept_checkpoint_result(
+        self, payload: Dict[str, Any], result: Dict[str, Any]
+    ) -> bool:
+        if self._checkpoint_queued(result):
+            self._note_checkpoint_handoff()
+        elif _checkpoint_result_committed(result):
+            with self._lock:
+                self._checkpoint_committed += 1
+                self._bump_metric("checkpoint_committed")
+        else:
+            return False
+        if self._spool is not None:
+            self._spool.remove_request(
+                "checkpoint", str(payload.get("requestId") or "")
+            )
+        return True
+
+    def _checkpoint_retry_failed(self, payload: Dict[str, Any], error: _RuntimeError) -> None:
+        if error.code in _MODE_CODES:
+            self._note_mode_blocked(error.code)
+            self._checkpoint_failed(error.code)
+            return
+        if error.code in _AUTH_CODES:
+            # A rotated token or re-enabled capability may make this replayable.
+            self._queue_pending_checkpoint(payload, error.code)
+            return
+        if error.code in _NON_RETRYABLE_CODES or not error.retryable:
+            # Includes queued-replay revision/lease conflicts: never silently
+            # rebase or retry forever.
+            self._checkpoint_failed(error.code)
+            return
+        self._queue_pending_checkpoint(payload, error.code)
+
+    def _checkpoint_failed(self, code: str) -> None:
+        self._checkpoint_failures += 1
+        self._bump_metric("checkpoint_failures")
+        self._record_warning(code or "checkpoint_failed")
+        logger.debug("Mebular checkpoint failed (%s)", code)
+
+    def _send_checkpoint(
+        self, payload: Dict[str, Any], *, allow_mode_probe: bool = False
+    ) -> Dict[str, Any]:
         client = self._client
         if client is None:
             raise _RuntimeError("runtime_unavailable", "sidecar URL is not configured")
+        if not allow_mode_probe and not self._mode_allows_work():
+            raise _RuntimeError(
+                self._mode_blocked_reason or "mode_mismatch",
+                "immersive mode is paused",
+                status=409,
+                retryable=False,
+            )
+        sanitised = _sanitise_payload("checkpoint", payload)
         result = self._put_with_auth_retry(
-            self._checkpoint_path(str(payload.get("threadId") or "")),
-            payload,
+            self._checkpoint_path(str(sanitised.get("threadId") or "")),
+            sanitised,
             timeout=self._checkpoint_timeout,
-            idempotency_key=str(payload.get("requestId") or ""),
+            idempotency_key=str(sanitised.get("requestId") or ""),
         )
-        checkpoint = result.get("checkpoint")
-        if isinstance(checkpoint, dict) and checkpoint.get("pending") is True:
-            raise _RuntimeError("checkpoint_pending", "checkpoint queued in sidecar outbox", retryable=True)
+        self._note_runtime_success()
         return result
 
-    def _queue_pending_checkpoint(self, payload: Dict[str, Any], code: str) -> None:
-        key = str(payload.get("requestId") or "")
-        with self._lock:
-            if not any(str(item.get("requestId") or "") == key for item in self._pending_checkpoints):
-                self._pending_checkpoints.append(payload)
-                if len(self._pending_checkpoints) > 8:
-                    del self._pending_checkpoints[:-8]
-        self._checkpoint_failures += 1
-        self._record_warning(code or "checkpoint_pending")
-        logger.debug("Mebular checkpoint pending (%s)", code)
+    @staticmethod
+    def _checkpoint_queued(result: Dict[str, Any]) -> bool:
+        checkpoint = result.get("checkpoint")
+        if result.get("pending") is True:
+            return True
+        return isinstance(checkpoint, dict) and checkpoint.get("pending") is True
 
-    def _flush_pending_checkpoints(self, deadline: float) -> None:
-        while time.monotonic() < deadline:
+    def _note_checkpoint_handoff(self) -> None:
+        with self._lock:
+            self._checkpoint_handoffs += 1
+            self._bump_metric("checkpoint_handoffs")
+        # 202 transfers replay ownership to the sidecar outbox.  The host copy
+        # is removed, but this is explicitly not a committed revision.
+        self._record_warning("checkpoint_queued_outbox")
+        logger.debug("Mebular checkpoint handed off to sidecar outbox (not committed)")
+
+    def _queue_pending_checkpoint(self, payload: Dict[str, Any], code: str) -> None:
+        spool = self._spool
+        if spool is None:
+            self._checkpoint_failed("checkpoint_spool_unavailable")
+            return
+        try:
+            item_id = spool.append("checkpoint", payload)
+        except _SpoolExpired:
             with self._lock:
-                if not self._pending_checkpoints:
-                    return
-                payload = self._pending_checkpoints[0]
-            try:
-                self._send_checkpoint(payload)
-            except Exception:
-                return
+                self._spool_rejected += 1
+            self._checkpoint_failed("checkpoint_expired")
+            return
+        except _SpoolFull:
             with self._lock:
-                if self._pending_checkpoints and self._pending_checkpoints[0] is payload:
-                    self._pending_checkpoints.pop(0)
-                elif payload in self._pending_checkpoints:
-                    self._pending_checkpoints.remove(payload)
+                self._spool_rejected += 1
+            self._checkpoint_failed("checkpoint_spool_full")
+            return
+        except Exception as error:
+            with self._lock:
+                self._spool_write_failures += 1
+            logger.warning("Mebular checkpoint spool write failed: %s", type(error).__name__)
+            self._checkpoint_failed("checkpoint_persist_failed")
+            return
+        if code == "checkpoint_unconfirmed":
+            self._count_checkpoint_unconfirmed(item_id)
+        else:
+            with self._lock:
+                self._checkpoint_pending_responses += 1
+                self._bump_metric("checkpoint_pending_responses")
+        self._record_warning(code or "checkpoint_pending")
+        self._wake.set()
+        logger.debug("Mebular checkpoint pending persisted to spool (%s)", code)
 
     # ------------------------------------------------------------------
     # Archive / ingest helpers
@@ -2305,6 +4495,7 @@ class MebularMemoryProvider(MemoryProvider):
 
     def _archive(self, messages: Any, *, label: str) -> None:
         if (not self._ready() or not self._writes_enabled
+                or not self._mode_allows_work()
                 or not self._capability_enabled("ingest")):
             return
         if not isinstance(messages, (list, tuple)) or not messages:
@@ -2365,9 +4556,34 @@ class MebularMemoryProvider(MemoryProvider):
 
     def _enqueue(self, payload: Dict[str, Any]) -> None:
         spool = self._spool
-        if spool is None:
+        if spool is None or not self._mode_allows_work():
             return
-        spool.append(payload)
+        try:
+            spool.append("ingest", payload)
+        except _SpoolExpired:
+            with self._lock:
+                self._spool_rejected += 1
+            self._record_warning("spool_expired")
+            logger.warning(
+                "Mebular spool expired before append (%s)",
+                payload.get("requestId"),
+            )
+            return
+        except _SpoolFull:
+            with self._lock:
+                self._spool_rejected += 1
+            self._record_warning("spool_full")
+            logger.warning(
+                "Mebular spool full; refused a new ingest request (%s)",
+                payload.get("requestId"),
+            )
+            return
+        except Exception as error:
+            with self._lock:
+                self._spool_write_failures += 1
+            self._record_warning("spool_write_failed")
+            logger.warning("Mebular spool write failed: %s", type(error).__name__)
+            return
         self._wake.set()
         if self._client is not None:
             try:
@@ -2389,106 +4605,522 @@ class MebularMemoryProvider(MemoryProvider):
         with self._lock:
             if self._client is None or self._shutdown:
                 return
+            spool = self._spool
+            if spool is not None and not spool.claim_worker(self):
+                owner = spool.worker_owner()
+                wake = getattr(owner, "_wake", None)
+                if wake is not None:
+                    wake.set()
+                return
             if self._worker is not None and self._worker.is_alive():
                 self._wake.set()
                 return
             self._stop.clear()
             self._wake.clear()
             self._worker = _spawn_worker(self._worker_loop, name="mebular-memory-sync")
-            self._worker.start()
+            try:
+                self._worker.start()
+                if spool is not None:
+                    spool.confirm_worker(self)
+            except BaseException:
+                if spool is not None:
+                    spool.release_worker(self)
+                raise
+
+    @staticmethod
+    def _retry_delay(attempts: int, error: Optional[_RuntimeError] = None) -> float:
+        exponent = max(0, min(6, int(attempts) - 1))
+        delay = min(_MAX_RETRY_DELAY, 0.5 * (2 ** exponent))
+        if error is not None and error.retry_after is not None:
+            delay = max(delay, min(_MAX_RETRY_AFTER, float(error.retry_after)))
+        return delay
+
+    def _wait_retry(self, delay: float) -> None:
+        retry_at = time.monotonic() + max(0.0, delay)
+        while not self._stop.is_set():
+            remaining = retry_at - time.monotonic()
+            if remaining <= 0:
+                return
+            self._wake.wait(timeout=min(0.5, remaining))
+            self._wake.clear()
+
+    def _send_spool_item(
+        self, item: Dict[str, Any], *, allow_mode_probe: bool = False
+    ) -> Dict[str, Any]:
+        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+        if item.get("kind") == "checkpoint":
+            return self._send_checkpoint(payload, allow_mode_probe=allow_mode_probe)
+        return self._send_ingest(payload, allow_mode_probe=allow_mode_probe)
+
+    def _dead_spool_item(self, spool: _Spool, item_id: str, reason: str) -> bool:
+        if spool.dead(item_id, reason):
+            return True
+        spool.mark_dead_pending(item_id, reason)
+        self._record_warning("dead_write_failed")
+        logger.warning("Mebular spool dead write failed; moved to dead-pending (%s)", reason)
+        return False
+
+    def _retry_one_dead_pending(self, spool: _Spool) -> bool:
+        pending = spool.dead_pending_items()
+        if not pending:
+            return False
+        item = pending[0]
+        item_id = str(item.get("id") or "")
+        dead_pending = item.get("deadPending") if isinstance(item.get("deadPending"), dict) else {}
+        if dead_pending.get("abandoned") is True:
+            return False
+        now = _now_ms()
+        expired = int(item.get("expiresAt") or 0) <= now
+        reason = "retention_expired" if expired else str(
+            dead_pending.get("reason") or "dead_write_failed"
+        )
+        attempts = int(dead_pending.get("attempts") or 0)
+        last_at = int(dead_pending.get("at") or 0)
+        if attempts >= _DEAD_WRITE_MAX_ATTEMPTS and now - last_at < _MAX_RETRY_AFTER * 1000:
+            return False
+        if spool.dead_pending(item_id, reason):
+            return True
+        attempts = spool.fail_dead_pending(item_id, reason)
+        if expired and attempts >= _DEAD_WRITE_MAX_ATTEMPTS:
+            spool.abandon_dead_pending(item_id, "deadWriteAbandoned")
+            self._record_warning("deadWriteAbandoned")
+        return True
+
+    def _retry_one_orphan(self, spool: _Spool) -> bool:
+        orphans = spool.orphan_dead_pending_items()
+        if not orphans:
+            return False
+        now = _now_ms()
+        for item in orphans:
+            pending = item.get("deadPending") if isinstance(item.get("deadPending"), dict) else {}
+            if pending.get("abandoned") is True:
+                continue
+            attempts = int(pending.get("attempts") or 0)
+            last_at = int(pending.get("at") or 0)
+            if (
+                attempts >= _DEAD_WRITE_MAX_ATTEMPTS
+                and now - last_at < _MAX_RETRY_AFTER * 1000
+            ):
+                continue
+            item_id = str(item.get("id") or "")
+            expired = int(item.get("expiresAt") or 0) <= now
+            reason = "retention_expired" if expired else str(
+                pending.get("reason") or "dead_write_failed"
+            )
+            if spool.try_orphan_dead(item_id, reason):
+                return True
+            if spool.try_orphan_pending(item_id, reason):
+                return True
+            attempts = spool.fail_orphan(item_id, reason)
+            if expired and attempts >= _DEAD_WRITE_MAX_ATTEMPTS:
+                spool.abandon_orphan(item_id, "deadWriteAbandoned")
+                self._record_warning("deadWriteAbandoned")
+            return True
+        return False
+
+    def _retry_one_quarantine(self, spool: _Spool) -> bool:
+        items = spool.quarantine_items()
+        if not items:
+            return False
+        now = _now_ms()
+        for item in items:
+            pending = item.get("deadPending") if isinstance(item.get("deadPending"), dict) else {}
+            if pending.get("abandoned") is True:
+                continue
+            attempts = int(pending.get("attempts") or 0)
+            last_at = int(pending.get("at") or 0)
+            if (
+                attempts >= _DEAD_WRITE_MAX_ATTEMPTS
+                and now - last_at < _MAX_RETRY_AFTER * 1000
+            ):
+                continue
+            item_id = str(item.get("id") or "")
+            expired = int(item.get("expiresAt") or 0) <= now
+            reason = "retention_expired" if expired else str(
+                pending.get("reason") or "dead_write_failed"
+            )
+            if spool.try_quarantine_dead(item_id, reason):
+                return True
+            if spool.try_quarantine_pending(item_id, reason):
+                return True
+            if spool.try_quarantine_orphan(item_id, reason):
+                return True
+            attempts = spool.fail_quarantine(item_id, reason)
+            if expired and attempts >= _DEAD_WRITE_MAX_ATTEMPTS:
+                spool.abandon_quarantine(item_id, "deadWriteAbandoned")
+                self._record_warning("deadWriteAbandoned")
+            return True
+        return False
+
+    def _retry_one_live_quarantine(self, spool: _Spool) -> bool:
+        items = spool.quarantined_live_items()
+        if not items:
+            return False
+        now = _now_ms()
+        for item in items:
+            pending = item.get("deadPending") if isinstance(item.get("deadPending"), dict) else {}
+            if pending.get("abandoned") is True:
+                continue
+            attempts = int(pending.get("attempts") or 0)
+            last_at = int(pending.get("at") or 0)
+            if (
+                attempts >= _DEAD_WRITE_MAX_ATTEMPTS
+                and now - last_at < _MAX_RETRY_AFTER * 1000
+            ):
+                continue
+            item_id = str(item.get("id") or "")
+            expired = int(item.get("expiresAt") or 0) <= now
+            reason = "retention_expired" if expired else str(
+                pending.get("reason") or "dead_write_failed"
+            )
+            if spool.migrate_live_quarantine(item_id, reason):
+                return True
+            attempts = spool.fail_live_quarantine(item_id, reason)
+            if expired and attempts >= _DEAD_WRITE_MAX_ATTEMPTS:
+                spool.abandon_live_quarantine(item_id, "deadWriteAbandoned")
+                self._record_warning("deadWriteAbandoned")
+            return True
+        return False
+
+    def _count_checkpoint_unconfirmed(self, item_id: str) -> None:
+        if not item_id:
+            return
+        with self._lock:
+            if item_id in self._checkpoint_unconfirmed_items:
+                return
+            self._checkpoint_unconfirmed_items.add(item_id)
+            self._checkpoint_unconfirmed += 1
+            self._bump_metric("checkpoint_unconfirmed")
+
+    def _count_ingest_failure(self, item_id: str) -> None:
+        with self._lock:
+            if item_id in self._failed_items:
+                return
+            self._failed_items.add(item_id)
+            self._ingest_failed += 1
+            self._bump_metric("ingest_failed")
+
+    def _record_ingest_response(
+        self, spool: _Spool, item_id: str, result: Dict[str, Any]
+    ) -> Optional[float]:
+        outcome, reason, degraded = _ingest_result_outcome(result)
+        records = result.get("records") if isinstance(result.get("records"), list) else []
+        if not records:
+            extraction = result.get("extraction")
+            if isinstance(extraction, dict) and isinstance(extraction.get("records"), list):
+                records = extraction["records"]
+        detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
+        detail_ids = result.get("detailIds")
+        if not isinstance(detail_ids, list):
+            detail_ids = detail.get("ids") if isinstance(detail.get("ids"), list) else []
+        detail_failed = _count_value(detail.get("failed"))
+        with self._lock:
+            if degraded:
+                self._ingest_degraded += 1
+                self._bump_metric("ingest_degraded")
+            self._last_ingest = {
+                "outcome": outcome,
+                "reason": reason,
+                "degraded": degraded,
+                "records": len(records),
+                "detailIds": [str(item) for item in detail_ids[:20]],
+                "detailFailed": detail_failed,
+                "at": _now_ms(),
+            }
+            if self._spool is not None:
+                self._spool.set_last_ingest(self._last_ingest)
+        if outcome == "committed":
+            with self._lock:
+                self._ingest_committed += 1
+                self._bump_metric("ingest_committed")
+                self._ingest_committed_records += len(records)
+                self._bump_metric("ingest_committed_records", len(records))
+            if degraded:
+                self._record_warning("ingest_degraded")
+            spool.remove(item_id)
+            return None
+        if outcome == "handoff":
+            with self._lock:
+                self._ingest_handoffs += 1
+                self._bump_metric("ingest_handoffs")
+            self._record_warning("ingest_queued_outbox")
+            spool.remove(item_id)
+            return None
+        if outcome == "failed":
+            self._count_ingest_failure(item_id)
+            with self._lock:
+                if records or detail_failed:
+                    self._ingest_partial += 1
+                    self._bump_metric("ingest_partial")
+            self._record_warning(reason)
+            if self._dead_spool_item(spool, item_id, reason):
+                return None
+            return self._retry_delay(1)
+        with self._lock:
+            self._ingest_pending_responses += 1
+            self._bump_metric("ingest_pending_responses")
+        self._record_warning(reason)
+        attempts = spool.fail(item_id, reason)
+        if attempts >= self._sync_max_attempts:
+            self._count_ingest_failure(item_id)
+            if self._dead_spool_item(spool, item_id, f"{reason}:max_attempts"):
+                return None
+            return self._retry_delay(1)
+        return self._retry_delay(attempts)
+
+    def _record_checkpoint_response(
+        self, spool: _Spool, item_id: str, result: Dict[str, Any]
+    ) -> Optional[float]:
+        if self._checkpoint_queued(result):
+            self._note_checkpoint_handoff()
+            spool.remove(item_id)
+            return None
+        if _checkpoint_result_committed(result):
+            with self._lock:
+                self._checkpoint_committed += 1
+                self._bump_metric("checkpoint_committed")
+            spool.remove(item_id)
+            return None
+        attempts = spool.fail(item_id, "checkpoint_unconfirmed")
+        self._count_checkpoint_unconfirmed(item_id)
+        self._record_warning("checkpoint_unconfirmed")
+        if attempts >= self._sync_max_attempts:
+            with self._lock:
+                self._checkpoint_failures += 1
+                self._bump_metric("checkpoint_failures")
+            if self._dead_spool_item(spool, item_id, "checkpoint_unconfirmed:max_attempts"):
+                return None
+        return self._retry_delay(attempts)
 
     def _worker_loop(self) -> None:
+        spool = self._spool
+        try:
+            self._worker_loop_inner()
+        finally:
+            if spool is not None:
+                spool.release_worker(self)
+
+    def _worker_loop_inner(self) -> None:
         while not self._stop.is_set():
+            self._ensure_runtime()
             spool = self._spool
             if spool is None or self._client is None:
                 return
+            if spool.worker_owner() is not self:
+                return
+            spool.note_worker_progress(self)
+            probe = False
+            if not self._mode_allows_work():
+                if not self._mode_probe_due():
+                    spool.expire()
+                    self._wake.wait(timeout=0.5)
+                    self._wake.clear()
+                    continue
+                probe = True
+                self._mode_probe_attempts += 1
+                self._mode_next_probe_at = time.monotonic() + _MODE_PROBE_SECONDS
             item = spool.first()
             if item is None:
+                spool.expire()
+                if self._retry_one_dead_pending(spool):
+                    self._wait_retry(0.5)
+                    continue
+                if self._retry_one_orphan(spool):
+                    self._wait_retry(0.5)
+                    continue
+                if self._retry_one_quarantine(spool):
+                    self._wait_retry(0.5)
+                    continue
+                if self._retry_one_live_quarantine(spool):
+                    self._wait_retry(0.5)
+                    continue
                 self._wake.wait(timeout=0.5)
                 self._wake.clear()
                 continue
-            item_id = int(item.get("id") or 0)
-            payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+            item_id = str(item.get("id") or "")
+            dead_pending = item.get("deadPending")
+            if isinstance(dead_pending, dict):
+                attempts = int(dead_pending.get("attempts") or 0)
+                if attempts >= _DEAD_WRITE_MAX_ATTEMPTS:
+                    spool.orphan_dead_pending_live(
+                        item_id, str(dead_pending.get("reason") or "dead_write_failed")
+                    )
+                    continue
+                reason = str(dead_pending.get("reason") or "dead_write_failed")
+                if spool.dead(item_id, reason):
+                    continue
+                spool.mark_dead_pending(item_id, reason)
+                self._wait_retry(self._retry_delay(attempts + 1))
+                continue
+            if int(item.get("expiresAt") or 0) <= _now_ms():
+                if item.get("kind") != "checkpoint":
+                    self._count_ingest_failure(item_id)
+                if self._dead_spool_item(spool, item_id, "retention_expired"):
+                    continue
+                self._wait_retry(0.5)
+                continue
             try:
-                self._send_ingest(payload)
+                result = self._send_spool_item(item, allow_mode_probe=probe)
             except _RuntimeError as error:
-                if error.code in _PAUSE_CODES:
-                    attempts = spool.fail(item_id)
+                if error.code in _MODE_CODES:
+                    # Mode mismatch is a dormant state, not a transient retry.
+                    # Keep the already-persisted pending item (D2 will expire it
+                    # if the mode never returns) and stop adding new work.
+                    self._note_mode_blocked(error.code)
                     self._record_warning(error.code)
                     logger.warning(
-                        "Mebular ingest paused; keeping queued request (%s, status=%s)",
+                        "Mebular spool paused by mode mismatch; pending item kept (%s)",
+                        error.code,
+                    )
+                    continue
+                if error.code in _AUTH_CODES:
+                    attempts = spool.fail(item_id, error.code)
+                    self._record_warning(error.code)
+                    if attempts >= self._sync_max_attempts:
+                        if item.get("kind") != "checkpoint":
+                            self._count_ingest_failure(item_id)
+                        if self._dead_spool_item(
+                            spool, item_id, f"{error.code}:max_attempts"
+                        ):
+                            logger.warning(
+                                "Mebular spool auth failure reached sync_max_attempts=%d (%s); moved to dead",
+                                self._sync_max_attempts,
+                                error.code,
+                            )
+                            continue
+                        self._wait_retry(self._retry_delay(attempts, error))
+                        continue
+                    logger.warning(
+                        "Mebular spool auth failure (%s, status=%s); bounded retry %d/%d",
                         error.code,
                         error.status,
+                        attempts,
+                        self._sync_max_attempts,
                     )
-                    delay = min(30.0, 0.5 * (2 ** min(attempts, 6)))
-                    self._wake.wait(timeout=delay)
-                    self._wake.clear()
+                    self._wait_retry(self._retry_delay(attempts, error))
                     continue
                 if not error.retryable or error.code in _NON_RETRYABLE_CODES:
-                    spool.remove(item_id)
-                    logger.warning(
-                        "Mebular ingest dropped a non-retryable request (%s, status=%s)",
-                        error.code,
-                        error.status,
-                    )
+                    if item.get("kind") != "checkpoint":
+                        self._count_ingest_failure(item_id)
+                    if self._dead_spool_item(spool, item_id, error.code):
+                        self._record_warning(error.code)
+                        logger.warning(
+                            "Mebular spool item moved to dead (%s, status=%s)",
+                            error.code,
+                            error.status,
+                        )
+                        continue
+                    attempts = spool.fail(item_id, "dead_write_failed")
+                    self._wait_retry(self._retry_delay(attempts, error))
                     continue
-                attempts = spool.fail(item_id)
-                if attempts == self._sync_max_attempts:
-                    logger.warning(
-                        "Mebular ingest still failing after %d attempts (%s); keeping in spool",
-                        attempts,
-                        error.code,
-                    )
-                delay = min(30.0, 0.5 * (2 ** min(attempts, 6)))
-                self._wake.wait(timeout=delay)
-                self._wake.clear()
+                attempts = spool.fail(item_id, error.code)
+                if attempts >= self._sync_max_attempts:
+                    if item.get("kind") != "checkpoint":
+                        self._count_ingest_failure(item_id)
+                    if self._dead_spool_item(
+                        spool, item_id, f"{error.code}:max_attempts"
+                    ):
+                        self._record_warning(error.code)
+                        logger.warning(
+                            "Mebular spool item reached sync_max_attempts=%d (%s); moved to dead",
+                            self._sync_max_attempts,
+                            error.code,
+                        )
+                        continue
+                    self._wait_retry(self._retry_delay(attempts, error))
+                    continue
+                self._wait_retry(self._retry_delay(attempts, error))
                 continue
             except Exception as error:
-                attempts = spool.fail(item_id)
-                logger.debug("Mebular ingest worker error: %s", type(error).__name__)
-                self._wake.wait(timeout=min(30.0, 0.5 * (2 ** min(attempts, 6))))
-                self._wake.clear()
+                attempts = spool.fail(item_id, type(error).__name__)
+                logger.debug("Mebular spool worker error: %s", type(error).__name__)
+                if attempts >= self._sync_max_attempts:
+                    if item.get("kind") != "checkpoint":
+                        self._count_ingest_failure(item_id)
+                    if self._dead_spool_item(
+                        spool, item_id, f"{type(error).__name__}:max_attempts"
+                    ):
+                        continue
+                self._wait_retry(self._retry_delay(attempts))
                 continue
-            spool.remove(item_id)
+            if item.get("kind") == "checkpoint":
+                delay = self._record_checkpoint_response(spool, item_id, result)
+            else:
+                delay = self._record_ingest_response(spool, item_id, result)
+            if delay is not None:
+                self._wait_retry(delay)
 
-    def _send_ingest(self, payload: Dict[str, Any]) -> None:
+    def _send_ingest(
+        self, payload: Dict[str, Any], *, allow_mode_probe: bool = False
+    ) -> Dict[str, Any]:
         if self._client is None:
             raise _RuntimeError("runtime_unavailable", "sidecar URL is not configured")
+        if not allow_mode_probe and not self._mode_allows_work():
+            raise _RuntimeError(
+                self._mode_blocked_reason or "mode_mismatch",
+                "immersive mode is paused",
+                status=409,
+                retryable=False,
+            )
+        sanitised = _sanitise_payload("ingest", payload)
         self._refresh_token_if_due()
         with self._send_lock:
-            self._post_with_auth_retry(
+            result = self._post_with_auth_retry(
                 "/ingest",
-                payload,
+                sanitised,
                 timeout=self._ingest_timeout,
-                idempotency_key=str(payload.get("requestId") or ""),
+                idempotency_key=str(sanitised.get("requestId") or ""),
             )
+        self._note_runtime_success()
+        return result
 
     def _drain_blocking(self, deadline: float) -> None:
         spool = self._spool
         client = self._client
         if spool is None or client is None:
             return
+        owner = spool.worker_owner()
+        if owner is not None and owner is not self:
+            return
         while time.monotonic() < deadline:
+            if not self._mode_allows_work():
+                return
             item = spool.first()
             if item is None:
                 return
-            item_id = int(item.get("id") or 0)
+            item_id = str(item.get("id") or "")
             payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
-            try:
-                self._send_ingest_until(payload, deadline)
-            except _RuntimeError as error:
-                if error.code in _PAUSE_CODES:
-                    self._record_warning(error.code)
-                    return
-                if not error.retryable or error.code in _NON_RETRYABLE_CODES:
-                    spool.remove(item_id)
+            if int(item.get("expiresAt") or 0) <= _now_ms():
+                if self._dead_spool_item(spool, item_id, "retention_expired"):
                     continue
                 return
+            try:
+                if item.get("kind") == "checkpoint":
+                    result = self._send_checkpoint(payload)
+                else:
+                    result = self._send_ingest_until(payload, deadline)
+            except _RuntimeError as error:
+                if error.code in _MODE_CODES:
+                    self._note_mode_blocked(error.code)
+                    self._record_warning(error.code)
+                    return
+                if error.code in _AUTH_CODES or error.retryable:
+                    self._record_warning(error.code)
+                    return
+                if not self._dead_spool_item(spool, item_id, error.code):
+                    return
+                self._record_warning(error.code)
+                continue
             except Exception:
                 return
-            spool.remove(item_id)
+            if item.get("kind") == "checkpoint":
+                delay = self._record_checkpoint_response(spool, item_id, result)
+            else:
+                delay = self._record_ingest_response(spool, item_id, result)
+            if delay is not None:
+                return
 
-    def _send_ingest_until(self, payload: Dict[str, Any], deadline: float) -> None:
+    def _send_ingest_until(self, payload: Dict[str, Any], deadline: float) -> Dict[str, Any]:
         """Synchronous drain bounded by an absolute deadline (shutdown)."""
         client = self._client
         if client is None:
@@ -2502,13 +5134,16 @@ class MebularMemoryProvider(MemoryProvider):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise _RuntimeError("shutdown_deadline", "shutdown deadline elapsed")
+            sanitised = _sanitise_payload("ingest", payload)
             self._refresh_token_if_due()
-            client.post(
+            result = client.post(
                 "/ingest",
-                payload,
+                sanitised,
                 timeout=max(0.1, min(self._ingest_timeout, remaining)),
-                idempotency_key=str(payload.get("requestId") or ""),
+                idempotency_key=str(sanitised.get("requestId") or ""),
             )
+            self._note_runtime_success()
+            return result
         finally:
             self._send_lock.release()
 
@@ -2522,22 +5157,18 @@ class MebularMemoryProvider(MemoryProvider):
         next_wake = time.monotonic() + 0.25
         while time.monotonic() < deadline:
             if spool.depth() == 0:
-                self._flush_pending_checkpoints(deadline)
                 return True
             if time.monotonic() >= next_wake:
                 self._wake.set()
                 next_wake = time.monotonic() + 0.25
             time.sleep(0.02)
-        if spool.depth() == 0:
-            self._flush_pending_checkpoints(deadline)
         return spool.depth() == 0
 
     def pending(self) -> int:
         return self._spool.depth() if self._spool is not None else 0
 
     def checkpoint_pending(self) -> int:
-        with self._lock:
-            return len(self._pending_checkpoints)
+        return self._spool.count("checkpoint") if self._spool is not None else 0
 
     def _capability_enabled(self, name: str) -> bool:
         value = self._capabilities.get(name)
@@ -2570,6 +5201,11 @@ class MebularMemoryProvider(MemoryProvider):
         self._base_url_source = str(discovery.get("source") or "")
         self._mode = str(discovery.get("mode") or "")
         self._capabilities = dict(discovery.get("capabilities") or {})
+        if self._mode_blocked_reason:
+            refreshed_at = int(discovery.get("updated_at") or 0)
+            active = not self._mode or self._mode.lower() in _DISCOVERY_ACTIVE_MODES
+            if active and refreshed_at > self._mode_blocked_at_ms:
+                self._note_runtime_success()
         token_file = str(discovery.get("token_file") or "")
         if token_file:
             self._token_file = Path(token_file)
@@ -2658,7 +5294,8 @@ class MebularMemoryProvider(MemoryProvider):
             "discovery": source_label,
             "agent_id": self._agent_id,
             "domain": self._domain or "default",
-            "mode": self._mode or "immersive",
+            "mode": self._mode or "unknown",
+            "modeSource": "discovery" if self._mode else "not_discovered",
             "capabilities": dict(self._capabilities),
             "extractor": self._extractor,
             "tokenConfigured": token_configured,
@@ -2671,14 +5308,96 @@ class MebularMemoryProvider(MemoryProvider):
             },
             "counts": {
                 "recallHits": self._last_recall_count or 0,
-                "ingestPending": self.pending(),
+                "ingestPending": self._spool.count("ingest") if self._spool else 0,
                 "checkpointPending": self.checkpoint_pending(),
-                "checkpointFailures": self._checkpoint_failures,
+                "checkpointFailures": self._metric("checkpoint_failures", self._checkpoint_failures),
+                "checkpointHandoffs": self._metric("checkpoint_handoffs", self._checkpoint_handoffs),
+                "checkpointCommitted": self._metric("checkpoint_committed", self._checkpoint_committed),
+                "checkpointPendingResponses": self._metric("checkpoint_pending_responses", self._checkpoint_pending_responses),
+                "checkpointUnconfirmed": self._metric("checkpoint_unconfirmed", self._checkpoint_unconfirmed),
+                "ingestCommitted": self._metric("ingest_committed", self._ingest_committed),
+                "ingestFailed": self._metric("ingest_failed", self._ingest_failed),
+                "ingestHandoffs": self._metric("ingest_handoffs", self._ingest_handoffs),
+                "ingestPendingResponses": self._metric("ingest_pending_responses", self._ingest_pending_responses),
+                "ingestPartial": self._metric("ingest_partial", self._ingest_partial),
+                "ingestCommittedRecords": self._metric("ingest_committed_records", self._ingest_committed_records),
+                "ingestDegraded": self._metric("ingest_degraded", self._ingest_degraded),
+                "spoolPending": self.pending(),
+                "spoolDead": self._spool.dead_count() if self._spool else 0,
+                "spoolDeadPending": self._spool.dead_pending_count() if self._spool else 0,
+                "spoolOrphanDeadPending": self._spool.orphan_dead_pending_count() if self._spool else 0,
+                "spoolRejected": self._spool_rejected,
+                "spoolWriteFailures": self._spool_write_failures,
+                "spoolBytes": self._spool.bytes() if self._spool else 0,
+                "spoolTotalBytes": self._spool.total_bytes() if self._spool else 0,
+                "spoolOldestAgeMs": self._spool.oldest_age_ms() if self._spool else 0,
+            },
+            "spool": {
+                "retentionDays": _SPOOL_RETENTION_MS // (24 * 60 * 60 * 1000),
+                "limit": self._queue_limit,
+                "maxBytes": _SPOOL_MAX_BYTES,
+                "syncMaxAttempts": self._sync_max_attempts,
+                "pending": self.pending(),
+                "ingest": self._spool.count("ingest") if self._spool else 0,
+                "checkpoint": self.checkpoint_pending(),
+                "dead": self._spool.dead_count() if self._spool else 0,
+                "deadCopy": True,
+                "deadBytes": self._spool.dead_bytes() if self._spool else 0,
+                "totalBytes": self._spool.total_bytes() if self._spool else 0,
+                "lastDeadReason": self._spool.last_dead_reason() if self._spool else "",
+                "bytes": self._spool.bytes() if self._spool else 0,
+                "oldestAgeMs": self._spool.oldest_age_ms() if self._spool else 0,
+                "rejected": self._spool_rejected,
+                "writeFailures": self._spool_write_failures,
+                "deadWriteFailures": self._spool.dead_write_failures() if self._spool else 0,
+                "deadPending": self._spool.dead_pending_count() if self._spool else 0,
+                "deadPendingLimit": _DEAD_PENDING_LIMIT,
+                "deadPendingDropped": self._spool.dead_pending_dropped() if self._spool else 0,
+                "deadPendingOverflow": self._spool.dead_pending_overflow() if self._spool else 0,
+                "orphanLimit": _ORPHAN_LIMIT,
+                "orphanDropped": self._spool.orphan_dropped() if self._spool else 0,
+                "orphanOverflow": self._spool.orphan_overflow() if self._spool else 0,
+                "deadWriteAbandoned": self._spool.dead_write_abandoned() if self._spool else 0,
+                "deadWriteAbandonedCleaned": self._spool.dead_write_abandoned_cleaned() if self._spool else 0,
+                "orphanDeadPending": self._spool.orphan_dead_pending_count() if self._spool else 0,
+                "quarantine": self._spool.quarantine_count() if self._spool else 0,
+                "quarantineLive": self._spool.quarantine_live_count() if self._spool else 0,
+                "quarantineMemoryOnly": (
+                    self._spool.quarantine_memory_only() if self._spool else False
+                ),
+                "quarantineRecovery": [
+                    "live_queue_marker",
+                    "quarantine_file",
+                    "orphan_file",
+                    "dead_pending_file",
+                    "dead_file",
+                ],
+                "liveQuotaEvicted": self._spool.live_quota_evicted() if self._spool else 0,
+                "writerPid": self._spool.writer_pid if self._spool else os.getpid(),
+                "writerScope": "process",
+                "crossProcessLock": False,
             },
             "pending_ingest": self.pending(),
         }
+        last_ingest = self._spool.last_ingest() if self._spool is not None else None
+        if last_ingest or self._last_ingest:
+            status["lastIngest"] = dict(last_ingest or self._last_ingest or {})
         if self._last_warning:
             status["lastWarning"] = dict(self._last_warning)
+        if self._mode_blocked_reason:
+            status["modeBlocked"] = {
+                "reason": self._mode_blocked_reason,
+                "since": self._mode_blocked_at_ms,
+                "probeAttempts": self._mode_probe_attempts,
+                "nextProbeInMs": max(
+                    0, int((self._mode_next_probe_at - time.monotonic()) * 1000)
+                ) if self._mode_next_probe_at else 0,
+                "lastProbeResult": self._mode_probe_result,
+                "recovery": [
+                    "fresh_active_discovery",
+                    "same_pending_operation_success",
+                ],
+            }
         if not self._writes_enabled:
             status["writes"] = "disabled (non-primary agent context)"
         return status

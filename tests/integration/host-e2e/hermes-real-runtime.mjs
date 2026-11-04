@@ -26,6 +26,7 @@ import { startRealRuntime } from './lib/real-runtime.mjs';
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..', '..', '..');
 const pythonScript = join(here, 'hermes-real-runtime.py');
+const faultPythonScript = join(here, 'hermes-real-runtime-faults.py');
 
 let passed = 0;
 let failed = 0;
@@ -36,9 +37,9 @@ function check(name, ok, detail = '') {
   return ok;
 }
 
-function runPython(env, cwd) {
+function runPython(env, cwd, script = pythonScript) {
   return new Promise((resolvePromise) => {
-    const child = spawn('python3', [pythonScript], {
+    const child = spawn('python3', [script], {
       cwd,
       env: { ...process.env, ...env },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -51,11 +52,11 @@ function runPython(env, cwd) {
   });
 }
 
-function parseMarker(stdout) {
-  const line = stdout.split('\n').find((entry) => entry.startsWith('HERMES_E2E_RESULT '));
+function parseMarker(stdout, marker = 'HERMES_E2E_RESULT ') {
+  const line = stdout.split('\n').find((entry) => entry.startsWith(marker));
   if (!line) return null;
   try {
-    return JSON.parse(line.slice('HERMES_E2E_RESULT '.length));
+    return JSON.parse(line.slice(marker.length));
   } catch {
     return null;
   }
@@ -97,7 +98,8 @@ async function scanForToken(dir, token) {
       } else if (entry.isFile() && (entry.name.endsWith('.json')
         || entry.name.endsWith('.jsonl')
         || entry.name.endsWith('.log')
-        || entry.name.endsWith('.txt'))) {
+        || entry.name.endsWith('.txt')
+        || entry.name.endsWith('.md'))) {
         const text = await readFile(path, 'utf8').catch(() => '');
         if (text.includes(token)) hits.push(path);
       }
@@ -299,6 +301,96 @@ async function main() {
     JSON.stringify(checkpoint?.state));
     check('checkpoint state-only 元数据', checkpoint?.state?.kind === 'pre_compress'
       && checkpoint?.state?.messageCount >= 2, JSON.stringify(checkpoint?.state));
+
+    // Fault phase: real provider + real sidecar/graph through a response shim.
+    const faultHome = join(runRoot, 'hermes-fault-home');
+    await mkdir(faultHome, { recursive: true });
+    const sentinel = `SENTINEL_FAULT_${suffix}`;
+    const faultPython = await runPython({
+      HERMES_HOME: faultHome,
+      MEBULAR_MEMORY_RUNTIME_HOME: runtime.home,
+      MEBULAR_HOME: runtime.home,
+      MEBULAR_MEMORY_RUNTIME_URL: '',
+      MEBULAR_MEMORY_RUNTIME_TOKEN: '',
+      MEBULAR_RUNTIME_URL: '',
+      MEBULAR_RUNTIME_TOKEN: '',
+      HERMES_E2E_CONFIG: JSON.stringify({
+        sidecar_url: discovery.url,
+        sidecar_token_file: discovery.tokenFile,
+        suffix,
+        sentinel,
+      }),
+      PYTHONDONTWRITEBYTECODE: '1',
+    }, repoRoot, faultPythonScript);
+    const fault = parseMarker(faultPython.stdout, 'HERMES_FAULT_RESULT ')
+      ?? parseMarker(faultPython.stderr, 'HERMES_FAULT_RESULT ');
+    check('故障阶段 Python 进程退出 0', faultPython.code === 0, `code=${faultPython.code}`);
+    check('故障阶段结果可解析', fault !== null && fault.error === undefined,
+      fault?.error ?? faultPython.stderr.slice(-500));
+    if (fault !== null && fault.error === undefined) {
+      const faultCounts = fault.status?.counts ?? {};
+      check('[boundary] 故障阶段 real/shim 标签完整',
+        fault.boundary?.step === 'real-provider+real-sidecar+real-graph'
+        && Array.isArray(fault.boundary?.responseShimCases)
+        && Array.isArray(fault.boundary?.notGraphCommitClaims),
+        JSON.stringify(fault.boundary));
+      check('[shim] 200 failed 不伪装 committed/dead 可见',
+        fault.failedFlushed === true && (faultCounts.ingestFailed ?? 0) >= 1,
+        JSON.stringify(faultCounts));
+      check('[shim] 200 detail.failed/partial 不伪装 committed',
+        fault.partialFlushed === true && (faultCounts.ingestFailed ?? 0) >= 2,
+        JSON.stringify(faultCounts));
+      check('[shim] 202 queued 记为 handoff 而非 committed',
+        fault.queuedFlushed === true && (faultCounts.ingestHandoffs ?? 0) >= 1,
+        JSON.stringify(faultCounts));
+      check('[real] 离线一次后恢复并提交',
+        fault.offlineFlushed === true && (faultCounts.ingestCommitted ?? 0) >= 2,
+        JSON.stringify(faultCounts));
+      check('[shim] 401/429 有界进入 dead',
+        fault.authFlushed === true && fault.rateFlushed === true
+        && (fault.deadRecords ?? 0) >= 4,
+        JSON.stringify({ dead: fault.deadRecords, counts: faultCounts }));
+      check('[shim] mode mismatch 立即休眠且不增长请求',
+        fault.modeBlocked === true && fault.modeRequestsStable === true,
+        JSON.stringify({ blocked: fault.modeBlocked, stable: fault.modeRequestsStable }));
+      check('[negative] /status 200/immersive 不清 mode block',
+        fault.modeStatusDoesNotClear === true,
+        JSON.stringify({ statusCleared: fault.modeStatusDoesNotClear }));
+      check('[real] mode mismatch 同一操作重放后可继续写入',
+        fault.modeRecovered === true && fault.modeRecoveryFlushed === true,
+        JSON.stringify({ recovered: fault.modeRecovered, flushed: fault.modeRecoveryFlushed }));
+      check('[shim] checkpoint 202 只交接宿主副本', fault.checkpointHandoffFlushed === true
+        && fault.checkpointHandoffPending === 0
+        && (faultCounts.checkpointHandoffs ?? 0) >= 1,
+      JSON.stringify(faultCounts));
+      check('[shim] checkpoint 200 无 revision 不提交',
+        (fault.checkpointUnconfirmedPending ?? 0) >= 1,
+        JSON.stringify({ pending: fault.checkpointUnconfirmedPending }));
+      check('[real] checkpoint 合法 revision 后提交',
+        fault.checkpointSentinelFlushed === true
+        && (faultCounts.checkpointCommitted ?? 0) >= 2,
+        JSON.stringify(faultCounts));
+      check('无 discovery 的 config 模式标 unknown',
+        fault.status?.mode === 'unknown' && fault.status?.modeSource === 'not_discovered',
+        JSON.stringify({ mode: fault.status?.mode, source: fault.status?.modeSource }));
+      check('dead/queue 不含脱敏前哨兵',
+        !String(fault.queueText ?? '').includes(sentinel)
+        && !String(fault.deadText ?? '').includes(sentinel));
+      const faultLeaks = await scanForToken(faultHome, sentinel);
+      check('故障 profile 不落盘脱敏前哨兵', faultLeaks.length === 0, JSON.stringify(faultLeaks));
+      const faultHostTokenLeaks = await scanForToken(faultHome, statusResult.token);
+      check('故障 profile 不落盘 host token（含 .md）',
+        faultHostTokenLeaks.length === 0, JSON.stringify(faultHostTokenLeaks));
+      const faultRuntimeTokenLeaks = await scanForToken(faultHome, runtime.token);
+      check('故障 profile 不落盘 Runtime bearer（含 .md）',
+        faultRuntimeTokenLeaks.length === 0, JSON.stringify(faultRuntimeTokenLeaks));
+      const faultCheckpoint = await sidecarCheckpoint(
+        discovery, statusResult.token, 'hermes-fault',
+      );
+      check('真实 checkpoint/state 不含脱敏前哨兵',
+        !JSON.stringify(faultCheckpoint.data ?? {}).includes(sentinel),
+        JSON.stringify(faultCheckpoint.data));
+    }
 
     const leaked = await scanForToken(hermesHome, statusResult.token);
     check('Hermes profile 不持久化 sidecar host token', leaked.length === 0, JSON.stringify(leaked));

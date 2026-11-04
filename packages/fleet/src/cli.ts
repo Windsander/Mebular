@@ -25,6 +25,8 @@ import { FileTaskEventStore } from './store/file-store.js';
 import { MebularTaskEventStore } from './store/mebular-store.js';
 import { DaemonTaskEventStore } from './store/daemon-store.js';
 import { DaemonAgentBackend } from './store/daemon-agent-backend.js';
+import { DaemonTaskPlanStore, MebularTaskPlanStore, type TaskPlanStore } from './store/plan-store.js';
+import { PlanMaterializer } from './runtime/materializer.js';
 import type { TaskEventStore } from './store/file-store.js';
 import { NullTransport } from './transport/null.js';
 import { SpoolTransport } from './transport/spool.js';
@@ -497,6 +499,32 @@ async function openTaskStore(config: FleetConfig, args: Args): Promise<{ store: 
   return { store: new MebularTaskEventStore(mebular), mebular };
 }
 
+/** P2：plan 节点与任务事件同源（embedded 本地图 / daemon `/app/plans`）。 */
+function openPlanStore(config: FleetConfig, args: Args, mebular: Mebular | null): TaskPlanStore {
+  if (storeMode(config, args) === 'daemon') {
+    if (config.daemon?.endpoint === undefined) {
+      throw new Error('daemon 模式需要 config.daemon.endpoint（plan 节点读取）');
+    }
+    return new DaemonTaskPlanStore({
+      endpoint: config.daemon.endpoint,
+      namespace: config.namespace,
+      ...(config.daemon.token !== undefined ? { token: config.daemon.token } : {}),
+      ...(config.daemon.tokenFile !== undefined ? { tokenFile: config.daemon.tokenFile } : {}),
+    });
+  }
+  if (mebular === null) throw new Error('embedded 模式缺少本地 Mebular（plan 节点读取）');
+  return new MebularTaskPlanStore(mebular, { namespace: config.namespace });
+}
+
+/** P2：materializer tick 失败不得阻断普通任务执行（例如对端守护暂不可用）。 */
+async function tickPlanMaterializer(materializer: PlanMaterializer): Promise<void> {
+  try {
+    await materializer.tick();
+  } catch (error) {
+    console.error(`[fleet:plan] tick failed: ${(error as Error).message}`);
+  }
+}
+
 /** CR-002：embedded 用本地 Mebular，daemon 用 `/app/capability-cards` + `/app/nodes`。 */
 function createCardPublisher(
   config: FleetConfig,
@@ -559,6 +587,12 @@ async function runFleetNode(args: Args): Promise<number> {
     console.log(JSON.stringify({ role: 'node', event: 'join-service', endpoint: `http://${bind}:${joinService.port}`, port: joinService.port }));
   }
   const node = new FleetNode({ device: config.device, store, transport: new NullTransport(), quota: new LocalQuota({ limitPerDevice: config.quotaLimitPerDevice ?? 1_000_000 }) });
+  const materializer = new PlanMaterializer({
+    device: config.device,
+    agent: str(args.agent, 'board'),
+    plans: openPlanStore(config, args, mebular),
+    store,
+  });
   const cardPublisher = createCardPublisher(config, mebular);
   if (cardPublisher !== null) await cardPublisher.publish();
   else console.error('[fleet:caps] skipped: no embedded Mebular and no daemon endpoint');
@@ -602,6 +636,7 @@ async function runFleetNode(args: Args): Promise<number> {
     code = ok && done.length === ids.length && resultsMatch ? 0 : 1;
     if (runForever) {
       while (!shutdown.isStopping()) {
+        await tickPlanMaterializer(materializer);
         await cardPublisher?.tick();
         await sleep(200); // 常驻：保持在线供对端同步
       }
@@ -611,6 +646,7 @@ async function runFleetNode(args: Args): Promise<number> {
     }
   } else if (runForever) {
     while (!shutdown.isStopping()) {
+      await tickPlanMaterializer(materializer);
       await cardPublisher?.tick();
       await sleep(200);
     }
@@ -659,9 +695,16 @@ async function runFleetWorker(args: Args): Promise<number> {
   if (cardPublisher !== null) await cardPublisher.publish();
   else console.error('[fleet:caps] skipped: no embedded Mebular and no daemon endpoint');
   const worker = new FleetWorker({ device: config.device, agent: str(args.agent, 'worker'), store, transport: new NullTransport(), registry, log });
+  const materializer = new PlanMaterializer({
+    device: config.device,
+    agent: str(args.agent, 'worker'),
+    plans: openPlanStore(config, args, mebular),
+    store,
+  });
   await worker.reconcile();
   const deadline = Date.now() + num(args['timeout-ms'], 60_000);
   while (runForever ? !shutdown.isStopping() : Date.now() < deadline) {
+    await tickPlanMaterializer(materializer);
     await worker.pollOnce();
     await cardPublisher?.tick();
     await sleep(num(args['interval-ms'], 10));

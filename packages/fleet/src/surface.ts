@@ -10,13 +10,16 @@ import {
 } from './config.js';
 import { declareNamespace, offlineMebularOptions, subscribeNamespace } from './onboard.js';
 import { MebularTaskEventStore } from './store/mebular-store.js';
+import { MebularTaskPlanStore } from './store/plan-store.js';
 import { negotiationMessageStore, type NegotiationMessage } from './collab/negotiation.js';
 import { chatterMessageStore, FleetChatter } from './collab/chatter.js';
 import { FleetNode } from './runtime/node.js';
+import { submitTaskPlan } from './runtime/plan-submit.js';
 import { NullTransport } from './transport/null.js';
 import { LocalQuota } from './quota.js';
 import { deriveEdges } from './collab/dag.js';
 import { reduceTaskEvents, type TaskState } from './model.js';
+import { derivePlanProgress, parsePlanTaskId } from './plan.js';
 import { agentDirectoryStore, expandTargets } from './agentdir.js';
 import {
   listCapabilityCards,
@@ -125,6 +128,27 @@ async function statesOf(store: MebularTaskEventStore): Promise<TaskState[]> {
   return [...byTask.keys()].sort().map((id) => reduceTaskEvents(byTask.get(id)!)).filter((s): s is TaskState => s !== null);
 }
 
+function planStoreOf(session: Session): MebularTaskPlanStore {
+  return new MebularTaskPlanStore(session.mebular, { namespace: session.namespace });
+}
+
+/**
+ * `task_status.plan`：仅当 taskId 严格匹配 plan root/step/MR 且 plan 节点存在时返回。
+ * 进度是派生值；plan 节点不被改写。
+ */
+async function planProgressOf(
+  session: Session,
+  taskId: string,
+): Promise<ReturnType<typeof derivePlanProgress> | null> {
+  const parsed = parsePlanTaskId(taskId);
+  if (parsed === null) return null;
+  const plans = planStoreOf(session);
+  const plan = await plans.get(parsed.planId, parsed.version);
+  if (plan === null) return null;
+  if (!parsed.root && !plan.steps.some((step) => step.stepId === parsed.stepId)) return null;
+  return derivePlanProgress(plan, await statesOf(session.store), await plans.list());
+}
+
 function summarizeState(s: TaskState): Record<string, unknown> {
   return {
     taskId: s.taskId,
@@ -169,7 +193,7 @@ export const TASK_TOOLS: TaskTool[] = [
     name: 'task_submit',
     cli: 'task_submit',
     scope: 'task.write',
-    description: when('要把任务派给其他设备/Agent 时；先 task_targets 确认可派对象，再提交。', '提交任务（root 或 child）；root 可带预算与派发策略。**非幂等**：重试 = 新任务（需要关联请用 causedBy/chain）'),
+    description: when('要把任务派给其他设备/Agent 时；先 task_targets 确认可派对象，再提交。', '提交任务（root 或 child）；root 可带预算与派发策略。**非幂等**：重试 = 新任务（需要关联请用 causedBy/chain）。可选 plan 提交完整 plan 定义（Fleet 内部校验并创建 plan 节点 + root task）'),
     inputSchema: {
       type: 'object',
       required: ['intent', 'to'],
@@ -182,11 +206,22 @@ export const TASK_TOOLS: TaskTool[] = [
         chain: { type: 'array', items: { type: 'string' } },
         budget: { type: 'object' },
         dispatch: { type: 'string', enum: ['children-ok', 'root-only'] },
+        plan: { type: 'object', description: '完整 task_plan 定义（不是 ref）；提交时 to 必须为 __plan__ sentinel' },
       },
     },
     handler: async (input, ctx) => {
       const session = await openSession(ctx);
       try {
+        if (input.plan !== undefined) {
+          return await submitTaskPlan({
+            plan: input.plan,
+            intent: requiredString(input, 'intent'),
+            to: input.to,
+            caller: { device: session.device, agent: session.agent },
+            plans: planStoreOf(session),
+            store: session.store,
+          });
+        }
         const to = (input.to ?? {}) as { device?: string; agent?: string };
         const causedBy = strInput(input, 'causedBy');
         const chain = Array.isArray(input.chain) ? (input.chain as string[]) : [];
@@ -266,6 +301,21 @@ export const TASK_TOOLS: TaskTool[] = [
       const session = await openSession(ctx);
       try {
         const taskId = requiredString(input, 'taskId');
+        const parsed = parsePlanTaskId(taskId);
+        if (parsed !== null) {
+          const plan = await planStoreOf(session).get(parsed.planId, parsed.version);
+          const owned = plan !== null && (parsed.root || plan.steps.some((step) => step.stepId === parsed.stepId));
+          if (owned) {
+            return {
+              ok: false,
+              taskId,
+              error: 'PLAN_RETRY_REQUIRED',
+              planId: parsed.planId,
+              version: parsed.version,
+              ...(!parsed.root && parsed.stepId !== null ? { stepId: parsed.stepId } : {}),
+            };
+          }
+        }
         const state = reduceTaskEvents(await session.store.byTask(taskId));
         if (state === null) throw new Error(`任务不存在：${taskId}`);
         const result = await session.node.submit({
@@ -291,7 +341,9 @@ export const TASK_TOOLS: TaskTool[] = [
       try {
         const taskId = requiredString(input, 'taskId');
         const state = reduceTaskEvents(await session.store.byTask(taskId));
-        return state === null ? { ok: false, taskId, state: null } : { ok: true, taskId, state: summarizeState(state) };
+        if (state === null) return { ok: false, taskId, state: null };
+        const plan = await planProgressOf(session, taskId);
+        return { ok: true, taskId, state: summarizeState(state), ...(plan !== null ? { plan } : {}) };
       } finally {
         await session.close();
       }

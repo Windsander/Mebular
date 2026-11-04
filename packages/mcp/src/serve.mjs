@@ -692,6 +692,16 @@ export function loadFleetCards() {
   return fleetCardsPromise;
 }
 
+let fleetPlansPromise = null;
+
+/** P2：延迟加载 fleet plan 节点 schema/幂等逻辑（唯一实现仍在 fleet）。 */
+export function loadFleetPlans() {
+  if (fleetPlansPromise === null) {
+    fleetPlansPromise = import('../../fleet/dist/index.js').catch(() => null);
+  }
+  return fleetPlansPromise;
+}
+
 /**
  * 写端点门禁：medium 要动态码；high 要会签批准/恢复码；low 放行。
  * 导出供 S2-3 单测直接断言（HTTP 层同样走这里）。
@@ -4220,6 +4230,81 @@ export async function startHttpServer({
               createdBy: n.createdBy,
               content: n.content,
               ...(n.metadata !== undefined ? { metadata: n.metadata } : {}),
+            })),
+          });
+        }
+        // P2：plan 节点专用内部端点（loopback + memory.write/read）。
+        // 唯一写入路径仍是 fleet materializer/plan store；这里只做 schema/幂等与 internal metadata，
+        // 不开放 task_plan 到 /app/nodes，也不新增公共 MCP 方法/UI。
+        if (path === '/app/plans' && req.method === 'POST') {
+          if (!app) return sendJson(res, 503, { ok: false, error: 'plans_unavailable', message: '图存储尚未初始化' });
+          let payload;
+          try {
+            payload = JSON.parse(body.toString('utf-8') || '{}');
+          } catch {
+            return sendJson(res, 400, { ok: false, error: 'invalid json' });
+          }
+          if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+            return sendJson(res, 400, { ok: false, error: 'plan body 必须为对象' });
+          }
+          const lib = await loadFleetPlans();
+          if (!lib || typeof lib.appendTaskPlanNode !== 'function') {
+            return sendJson(res, 503, { ok: false, error: 'plans_unavailable', message: 'plan 模块不可用' });
+          }
+          const namespace = typeof payload.namespace === 'string' && payload.namespace.length > 0
+            ? payload.namespace
+            : 'tasks';
+          const planInput = payload.plan !== undefined ? payload.plan : payload.content;
+          try {
+            const result = await lib.appendTaskPlanNode(app, planInput, { namespace });
+            return sendJson(res, 200, {
+              ok: true,
+              plan: result.plan,
+              nodeId: result.nodeId,
+              replayed: result.replayed === true,
+            });
+          } catch (error) {
+            const code = typeof error?.code === 'string' ? error.code : null;
+            const status = code === 'PLAN_CONFLICT' ? 409
+              : code === 'PLAN_VERSION' ? 409
+                : code === 'PLAN_SCHEMA' || code === 'PLAN_BUDGET' || code === 'PLAN_POLICY'
+                  || code === 'PLAN_JOIN' || code === 'PLAN_MR' || code === 'PLAN_ACCEPTANCE'
+                  || code === 'PLAN_REUSE' || code === 'PLAN_DUP_STEP' || code === 'PLAN_MISSING_DEP'
+                  || code === 'PLAN_CYCLE'
+                  ? 422
+                  : 500;
+            return sendJson(res, status, {
+              ok: false,
+              ...(code !== null ? { error: code } : { error: 'plan_write_failed' }),
+              errors: Array.isArray(error?.errors) ? error.errors : [String(error?.message ?? error)],
+            });
+          }
+        }
+        if (path === '/app/plans' && req.method === 'GET') {
+          if (!app) return sendJson(res, 503, { ok: false, error: 'plans_unavailable', message: '图存储尚未初始化' });
+          const lib = await loadFleetPlans();
+          if (!lib || typeof lib.listTaskPlanNodes !== 'function') {
+            return sendJson(res, 503, { ok: false, error: 'plans_unavailable', message: 'plan 模块不可用' });
+          }
+          const namespace = url.searchParams.get('namespace') || 'tasks';
+          const planId = url.searchParams.get('planId');
+          const version = Number(url.searchParams.get('version') ?? '0');
+          let nodes = await lib.listTaskPlanNodes(app, { namespace });
+          if (planId) nodes = nodes.filter((entry) => entry.plan.planId === planId);
+          if (Number.isInteger(version) && version > 0) nodes = nodes.filter((entry) => entry.plan.version === version);
+          return sendJson(res, 200, {
+            ok: true,
+            count: nodes.length,
+            plans: nodes.map((entry) => entry.plan),
+            nodes: nodes.map((entry) => ({
+              id: entry.nodeId,
+              type: 'task_plan',
+              namespace,
+              content: entry.plan,
+              metadata: {
+                internal: true,
+                internalObject: { kind: 'task_plan' },
+              },
             })),
           });
         }

@@ -40,6 +40,9 @@ import { CommandAgent, ExecutorRegistry, HermesAgent } from './runtime/agent.js'
 import { AGENT_NAMESPACE } from './agentdir.js';
 import { HttpOpenChamberSeam } from './runtime/openchamber-http.js';
 import { OpenChamberAgent } from './runtime/openchamber.js';
+import { DshHeadlessAgent } from './runtime/dsh.js';
+import { OpenCodeAgent } from './runtime/opencode.js';
+import { ClaudeCodeAgent } from './runtime/claude-code.js';
 import { EchoExecutor, type TaskExecutor } from './runtime/executor.js';
 
 async function exists(path: string): Promise<boolean> {
@@ -78,6 +81,36 @@ export const DEFAULT_EXECUTOR_FACTORIES: Readonly<Record<FleetAgentKind, Executo
     }),
   openchamber: (a) =>
     new OpenChamberAgent(new HttpOpenChamberSeam({ ...(a.timeoutMs !== undefined ? { timeoutMs: a.timeoutMs } : {}) }), {
+      ...(a.cwd !== undefined ? { cwd: a.cwd } : {}),
+      ...(a.timeoutMs !== undefined ? { timeoutMs: a.timeoutMs } : {}),
+      ...(a.maxOutputBytes !== undefined ? { maxOutputBytes: a.maxOutputBytes } : {}),
+      ...(a.concurrency !== undefined ? { concurrency: a.concurrency } : {}),
+    }),
+  dsh: (a) =>
+    new DshHeadlessAgent({
+      ...(typeof a.command === 'string' && a.command.length > 0 ? { dshPath: a.command } : {}),
+      ...(a.baseArgs !== undefined ? { baseArgs: a.baseArgs } : {}),
+      ...(a.promptMode !== undefined ? { promptMode: a.promptMode } : {}),
+      ...(a.cwd !== undefined ? { cwd: a.cwd } : {}),
+      ...(a.timeoutMs !== undefined ? { timeoutMs: a.timeoutMs } : {}),
+      ...(a.maxOutputBytes !== undefined ? { maxOutputBytes: a.maxOutputBytes } : {}),
+      ...(a.concurrency !== undefined ? { concurrency: a.concurrency } : {}),
+    }),
+  opencode: (a) =>
+    new OpenCodeAgent({
+      ...(typeof a.command === 'string' && a.command.length > 0 ? { opencodePath: a.command } : {}),
+      ...(a.baseArgs !== undefined ? { baseArgs: a.baseArgs } : {}),
+      ...(a.promptMode !== undefined ? { promptMode: a.promptMode } : {}),
+      ...(a.cwd !== undefined ? { cwd: a.cwd } : {}),
+      ...(a.timeoutMs !== undefined ? { timeoutMs: a.timeoutMs } : {}),
+      ...(a.maxOutputBytes !== undefined ? { maxOutputBytes: a.maxOutputBytes } : {}),
+      ...(a.concurrency !== undefined ? { concurrency: a.concurrency } : {}),
+    }),
+  'claude-code': (a) =>
+    new ClaudeCodeAgent({
+      ...(typeof a.command === 'string' && a.command.length > 0 ? { claudePath: a.command } : {}),
+      ...(a.baseArgs !== undefined ? { baseArgs: a.baseArgs } : {}),
+      ...(a.promptMode !== undefined ? { promptMode: a.promptMode } : {}),
       ...(a.cwd !== undefined ? { cwd: a.cwd } : {}),
       ...(a.timeoutMs !== undefined ? { timeoutMs: a.timeoutMs } : {}),
       ...(a.maxOutputBytes !== undefined ? { maxOutputBytes: a.maxOutputBytes } : {}),

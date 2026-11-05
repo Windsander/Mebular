@@ -183,9 +183,12 @@ describe('doctor：peer/同步/身份链 与注册表/选项', () => {
       { name: 'c', kind: 'command', command: process.execPath },
       { name: 'h', kind: 'hermes' },
       { name: 'o', kind: 'openchamber' },
+      { name: 'd', kind: 'dsh' },
+      { name: 'oc', kind: 'opencode' },
+      { name: 'cc', kind: 'claude-code' },
     ]);
-    for (const n of ['e', 'c', 'h', 'o']) expect(reg.resolve(n)).not.toBeNull();
-    expect(reg.names()).toEqual(['c', 'e', 'h', 'o']);
+    for (const n of ['e', 'c', 'h', 'o', 'd', 'oc', 'cc']) expect(reg.resolve(n)).not.toBeNull();
+    expect(reg.names()).toEqual(['c', 'cc', 'd', 'e', 'h', 'o', 'oc']);
 
     await onboardDevice({ dir, device: 'device-A', peerDevice: 'device-B', agents: [{ name: 'echo', kind: 'echo' }] });
     const cfg = await loadFleetConfig(fleetConfigPath(dir));

@@ -85,13 +85,21 @@ export async function fileMode(path: string): Promise<number> {
   return (await stat(path)).mode & 0o777;
 }
 
-export type FleetAgentKind = 'echo' | 'command' | 'hermes' | 'openchamber';
+export type FleetAgentKind = 'echo' | 'command' | 'hermes' | 'openchamber' | 'dsh' | 'opencode' | 'claude-code';
 
 /** 平台无关的 prompt 传递方式（CLI adapter 使用；HTTP adapter 忽略）。 */
 export type FleetAgentPromptMode = 'arg' | 'stdin';
 
 /** 已注册的执行器 kind（新增 kind 必须同时登记 factory 与校验）。 */
-export const FLEET_AGENT_KINDS: readonly FleetAgentKind[] = ['echo', 'command', 'hermes', 'openchamber'];
+export const FLEET_AGENT_KINDS: readonly FleetAgentKind[] = [
+  'echo',
+  'command',
+  'hermes',
+  'openchamber',
+  'dsh',
+  'opencode',
+  'claude-code',
+];
 
 export interface FleetAgentConfig {
   name: string;

@@ -110,6 +110,7 @@ export const ENV_ALLOWLIST: readonly string[] = [
   'TEMP',
   'TMP',
   'HERMES_HOME', // Hermes profile 解析（非密）
+  'DSH_HOME', // DSH profile/配置目录（非密路径；不含 API key）
   // Windows 运行所需（存在才带）
   'SystemRoot',
   'PATHEXT',

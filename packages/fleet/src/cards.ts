@@ -229,15 +229,20 @@ function registryHashOf(config: Pick<FleetConfig, 'agents'>, registry?: { names(
   return sha256({ agents: names });
 }
 
+/** 长跑平台 Agent 的默认超时（能力卡只暴露数值，不含命令/环境/凭据）。 */
+const LONG_RUNNING_AGENT_KINDS = new Set<FleetAgentConfig['kind']>(['hermes', 'dsh', 'opencode', 'claude-code']);
+
+function defaultTimeoutForKind(kind: FleetAgentConfig['kind']): number {
+  return LONG_RUNNING_AGENT_KINDS.has(kind) ? 600_000 : 60_000;
+}
+
 function limitsForAgent(agent: FleetAgentConfig): CapabilityCardLimits {
   const concurrency = Number.isInteger(agent.concurrency) && (agent.concurrency as number) >= 1
     ? (agent.concurrency as number)
     : 1;
   const timeoutMs = typeof agent.timeoutMs === 'number' && Number.isFinite(agent.timeoutMs) && agent.timeoutMs > 0
     ? Math.trunc(agent.timeoutMs)
-    : agent.kind === 'hermes'
-      ? 600_000
-      : 60_000;
+    : defaultTimeoutForKind(agent.kind);
   return {
     maxConcurrency: concurrency,
     maxPayloadBytes: 262_144,

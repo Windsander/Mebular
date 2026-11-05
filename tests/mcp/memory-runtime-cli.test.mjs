@@ -6,7 +6,7 @@
 import { describe, it, expect, afterEach } from '@jest/globals';
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -441,5 +441,162 @@ describe('mebular memory-runtime CLI', () => {
     expect(purged.status).toBe(0);
     expect(parse(purged)).toMatchObject({ ok: true, removed: 1 });
     expect(existsSync(join(dataDir, 'outbox', 'ob_manual.json'))).toBe(false);
+  });
+
+  it('rebuild 清理 finalize/reconcile 并保留更早 expiresAt', async () => {
+    const home = await tempDir();
+    await writeConfig(home, { enabled: false });
+    const dataDir = join(home, 'memory-runtime');
+    const deadline = Date.now() + 60_000;
+    await mkdir(join(dataDir, 'outbox', 'dead'), { recursive: true, mode: 0o700 });
+    await mkdir(join(dataDir, 'outbox', 'reconcile'), { recursive: true, mode: 0o700 });
+    await writeFile(join(dataDir, 'outbox', 'dead', 'ob_finalize.json'), JSON.stringify({
+      version: 1,
+      id: 'ob_finalize',
+      requestId: 'req_finalize',
+      endpoint: '/detail',
+      method: 'POST',
+      body: { items: [] },
+      createdAt: Date.now() - 1_000,
+      expiresAt: deadline,
+      attempts: 1,
+      lastAttemptAt: Date.now() - 500,
+      lastError: 'validation_failed',
+      error: 'validation_failed',
+      deadAt: Date.now() - 500,
+      meta: { kind: 'detail', needsFinalize: true, finalizeOutcome: 'dead', extractionIds: ['ex_1'] },
+    }), { mode: 0o600 });
+    await writeFile(join(dataDir, 'outbox', 'reconcile', 'ob_finalize.json'), JSON.stringify({
+      version: 1,
+      id: 'ob_finalize',
+      outcome: 'dead',
+      attempts: 1,
+      at: Date.now() - 500,
+      item: { version: 1, id: 'ob_finalize' },
+    }), { mode: 0o600 });
+
+    const rebuilt = runCli(envFor(home), 'outbox', 'rebuild', 'ob_finalize');
+    expect(rebuilt.status).toBe(0);
+    const active = JSON.parse(await readFile(join(dataDir, 'outbox', 'ob_finalize.json'), 'utf-8'));
+    expect(active.expiresAt).toBe(deadline);
+    expect(active.meta).toMatchObject({ manualRebuild: true });
+    expect(active.meta.needsFinalize).toBeUndefined();
+    expect(active.meta.finalizeOutcome).toBeUndefined();
+    expect(existsSync(join(dataDir, 'outbox', 'reconcile', 'ob_finalize.json'))).toBe(false);
+    expect(existsSync(join(dataDir, 'outbox', 'dead', 'ob_finalize.json'))).toBe(false);
+  });
+
+  it('rebuild 严格拒绝裸/NaN expected-revision，合法整数才覆盖', async () => {
+    const home = await tempDir();
+    await writeConfig(home, { enabled: false });
+    const dataDir = join(home, 'memory-runtime');
+    await mkdir(join(dataDir, 'outbox', 'dead'), { recursive: true, mode: 0o700 });
+    const dead = {
+      version: 1,
+      id: 'ob_strict_revision',
+      requestId: 'req_strict_revision',
+      endpoint: '/internal-object',
+      method: 'POST',
+      body: { kind: 'context_checkpoint', expectedRevision: 2 },
+      createdAt: Date.now() - 1_000,
+      expiresAt: Date.now() + 60_000,
+      attempts: 1,
+      lastAttemptAt: Date.now() - 500,
+      lastError: 'revision_mismatch',
+      error: 'revision_mismatch',
+      deadAt: Date.now() - 500,
+    };
+    await writeFile(join(dataDir, 'outbox', 'dead', 'ob_strict_revision.json'), JSON.stringify(dead), { mode: 0o600 });
+
+    for (const args of [
+      ['outbox', 'rebuild', 'ob_strict_revision', '--expected-revision'],
+      ['outbox', 'rebuild', 'ob_strict_revision', '--expected-revision=NaN'],
+      ['outbox', 'rebuild', 'ob_strict_revision', '--expected-revision=1.5'],
+    ]) {
+      const result = runCli(envFor(home), ...args);
+      expect(result.status).toBe(2);
+      expect(parse(result)).toMatchObject({ ok: false, error: { code: 'usage' } });
+      expect(existsSync(join(dataDir, 'outbox', 'ob_strict_revision.json'))).toBe(false);
+      const unchanged = JSON.parse(await readFile(join(dataDir, 'outbox', 'dead', 'ob_strict_revision.json'), 'utf-8'));
+      expect(unchanged.body.expectedRevision).toBe(2);
+    }
+
+    const valid = runCli(envFor(home), 'outbox', 'rebuild', 'ob_strict_revision', '--expected-revision', '4');
+    expect(valid.status).toBe(0);
+    const active = JSON.parse(await readFile(join(dataDir, 'outbox', 'ob_strict_revision.json'), 'utf-8'));
+    expect(active.body.expectedRevision).toBe(4);
+  });
+
+  it('outbox 拒绝 MCP runtime 安装根、活跃 start.lock 与 in-flight lease', async () => {
+    const home = await tempDir();
+    await writeConfig(home, { enabled: false });
+    const forbidden = join(home, 'runtime');
+    await mkdir(join(forbidden, 'outbox', 'dead'), { recursive: true, mode: 0o700 });
+    await writeFile(join(forbidden, 'outbox', 'dead', 'ob_forbidden.json'), JSON.stringify({
+      version: 1, id: 'ob_forbidden', requestId: 'req_forbidden', endpoint: '/write',
+      method: 'POST', body: {}, createdAt: Date.now(), attempts: 1, lastAttemptAt: null, lastError: null,
+    }), { mode: 0o600 });
+    const forbiddenEnv = envFor(home, { MEBULAR_MEMORY_RUNTIME_HOME: forbidden });
+    const forbiddenResult = runCli(forbiddenEnv, 'outbox', 'rebuild', 'ob_forbidden');
+    expect(forbiddenResult.status).toBe(1);
+    expect(parse(forbiddenResult)).toMatchObject({ ok: false, error: { code: 'data_dir_forbidden' } });
+    expect(existsSync(join(forbidden, 'outbox', 'ob_forbidden.json'))).toBe(false);
+
+    const dataDir = join(home, 'memory-runtime');
+    await mkdir(join(dataDir, 'outbox', 'dead'), { recursive: true, mode: 0o700 });
+    const dead = {
+      version: 1, id: 'ob_locked', requestId: 'req_locked', endpoint: '/write',
+      method: 'POST', body: {}, createdAt: Date.now() - 100, attempts: 1,
+      lastAttemptAt: null, lastError: null, error: 'validation_failed', deadAt: Date.now(),
+    };
+    await writeFile(join(dataDir, 'outbox', 'dead', 'ob_locked.json'), JSON.stringify(dead), { mode: 0o600 });
+    await writeFile(join(dataDir, 'start.lock'), JSON.stringify({ pid: process.pid, command: 'serve' }), { mode: 0o600 });
+    const locked = runCli(envFor(home), 'outbox', 'rebuild', 'ob_locked');
+    expect(locked.status).toBe(1);
+    expect(parse(locked)).toMatchObject({ ok: false, error: { code: 'sidecar_running' } });
+    expect(existsSync(join(dataDir, 'outbox', 'ob_locked.json'))).toBe(false);
+
+    await rm(join(dataDir, 'start.lock'), { force: true });
+    await writeFile(join(dataDir, 'outbox', 'ob_locked.json'), JSON.stringify({
+      ...dead,
+      replayLeaseUntil: Date.now() + 60_000,
+      replayLeaseOwner: 'owner-live',
+    }), { mode: 0o600 });
+    await rm(join(dataDir, 'outbox', 'dead', 'ob_locked.json'), { force: true });
+    const inFlight = runCli(envFor(home), 'outbox', 'purge', 'ob_locked');
+    expect(inFlight.status).toBe(1);
+    expect(parse(inFlight)).toMatchObject({ ok: false, error: { code: 'outbox_in_flight' } });
+    expect(existsSync(join(dataDir, 'outbox', 'ob_locked.json'))).toBe(true);
+  });
+
+  it('logs 读取 legacy 原始行时二次脱敏 /opt、/root 与 Windows 路径', async () => {
+    const home = await tempDir();
+    await writeConfig(home, { enabled: false });
+    const logsDir = join(home, 'memory-runtime', 'logs');
+    await mkdir(logsDir, { recursive: true, mode: 0o700 });
+    const secret = 'sk-legacy-CLI_SECRET_1234567890';
+    await appendFile(join(logsDir, 'runtime.jsonl'), `${JSON.stringify({
+      ts: Date.now(),
+      level: 'error',
+      event: 'legacy_leak',
+      token: secret,
+      home: '/opt/legacy/private',
+      root: '/root/.mebular',
+      win: 'C:\\Users\\legacy\\AppData',
+      message: 'RAW_LEGACY_BODY',
+    })}\n`);
+
+    const result = runCli(envFor(home), 'logs', '--tail', '20');
+    expect(result.status).toBe(0);
+    const json = parse(result);
+    expect(json).toMatchObject({ ok: true, action: 'logs', count: 1 });
+    expect(result.stdout).not.toContain(secret);
+    expect(result.stdout).not.toContain('/opt/legacy');
+    expect(result.stdout).not.toContain('/root/.mebular');
+    expect(result.stdout).not.toContain('C:\\\\Users');
+    expect(result.stdout).not.toContain('RAW_LEGACY_BODY');
+    expect(result.stdout).toContain('[path]');
+    expect(result.stdout).toContain('[redacted]');
+    expect(json.entries[0]).toMatchObject({ event: 'legacy_leak' });
   });
 });

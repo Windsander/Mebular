@@ -264,10 +264,12 @@ mebular memory-runtime restart
 (no token, loopback) tells you whether the process is ready, and `GET /status`
 (host token) adds capability, model, counts, outbox and degraded reasons.
 
-**Logs in 0.3.0:** the sidecar writes its startup result to stdout and does not yet create
-a persistent `logs/sidecar.jsonl` or expose `mebular memory-runtime logs`. Treat
-`status --json`, `/health`, `/status` and the MCP/Console sidecar status as the supported
-diagnostics. Do not look for a log command that this release does not provide.
+**Logs:** the sidecar writes sanitized JSONL to `<dataDir>/logs/runtime.jsonl`
+(rotated, bounded), and exposes `mebular memory-runtime logs` / `mebular-memory-runtime logs`
+(`--limit` or `--tail`). `mebular memory-runtime doctor` adds recent errors, restart reason,
+capability/model state, staging/cache/outbox/dead counts/ages and disk use. Diagnostics never
+contain tokens, message bodies or the real home path. `status --json`, `/health`, `/status` and
+the MCP/Console sidecar status remain the primary live views.
 
 Common failures and what they mean:
 

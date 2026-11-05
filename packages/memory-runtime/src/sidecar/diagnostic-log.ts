@@ -19,7 +19,7 @@ const MAX_STRING = 512;
 const MAX_DEPTH = 4;
 const SENSITIVE_KEY_RE = /^(?:authorization|api[-_]?key|access[-_]?token|refresh[-_]?token|token|secret|password|passwd|credential|private[-_]?key|keyref|cookie)$/i;
 const BODY_KEY_RE = /^(?:body|content|contents|text|prompt|prompts|response|responses|messages|message|chunks?|items?|payload|raw|detailtext)$/i;
-const PATH_RE = /(?:\/Users\/|\/home\/|\/private\/|\/var\/folders\/|\/tmp\/|[A-Za-z]:\\Users\\)[^\s"'\\]*/g;
+const PATH_RE = /(?:\b[A-Za-z]:[\\/](?:[^\\/\s"'<>|]+[\\/])*[^\\/\s"'<>|]*|\\\\[^\\/\s"'<>|]+\\[^\s"'<>|]*|\/(?:[A-Za-z0-9._-]+\/)+[A-Za-z0-9._-]*|\/(?:opt|root)(?=$|[\s"',;:]))/g;
 
 export type DiagnosticLogLevel = 'info' | 'warn' | 'error';
 
@@ -196,7 +196,7 @@ export class DiagnosticLog {
         try {
           const parsed = JSON.parse(line) as unknown;
           if (isObject(parsed) && typeof parsed.event === 'string') {
-            events.push(parsed as DiagnosticLogEvent);
+            events.push(sanitizeEvent(parsed as DiagnosticLogEvent));
           }
         } catch {
           // 损坏行不进入诊断输出，也不回写日志。

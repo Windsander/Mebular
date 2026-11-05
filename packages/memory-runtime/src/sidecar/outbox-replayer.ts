@@ -8,10 +8,12 @@
 // 本模块不 import @mebular/core，不打开图/事件日志。
 
 import { CapabilityClient, CapabilityClientError } from './capability-client.js';
+import { SidecarSettlementError } from './errors.js';
 import type { IngestErrorView, OutboxReplaySummary } from './ingest.js';
 import type { LifecycleGate } from './lifecycle-gate.js';
 import { redactText } from './text.js';
 import {
+  LocalLayerError,
   OUTBOX_REPLAY_LEASE_MS,
   type BoundedOutbox,
   type OutboxFailureView,
@@ -91,24 +93,26 @@ function diagnosticDetails(value: unknown): Record<string, string | number | boo
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
-function errorCodeOf(error: unknown): string {
-  if (error instanceof CapabilityClientError) return error.code;
-  return typeof (error as { code?: unknown })?.code === 'string'
-    ? (error as { code: string }).code
-    : 'internal';
-}
-
 function dispositionOf(code: string, status: number, retryableValue: boolean): ReplayErrorView['disposition'] {
   if (code === 'revision_mismatch' || code === 'checkpoint_lease_held'
     || code === 'idempotency_conflict' || code === 'mode_mismatch') return 'conflict';
   if (code === 'timeout' || code === 'network_error' || code === 'partial_failure') return 'ambiguous';
+  if (code === 'retention_expired' || code === 'validation_failed' || code === 'invalid_request'
+    || code === 'content_hash_mismatch' || code === 'domain_mismatch'
+    || code === 'domain_write_forbidden' || code === 'forbidden_scope'
+    || code === 'invalid_outbox_item' || code === 'invalid_cache_key') return 'permanent';
   if (retryableValue || status === 0 || status === 401 || status === 408 || status === 429 || status >= 500) {
     return 'retryable';
   }
   return 'permanent';
 }
 
-function errorView(error: unknown, at: number, stage = 'replay'): ReplayErrorView {
+function errorView(
+  error: unknown,
+  at: number,
+  stage = 'replay',
+  { afterResponse = false }: { afterResponse?: boolean } = {},
+): ReplayErrorView {
   if (error instanceof CapabilityClientError) {
     const details = diagnosticDetails(error.details);
     return {
@@ -120,26 +124,47 @@ function errorView(error: unknown, at: number, stage = 'replay'): ReplayErrorVie
       disposition: dispositionOf(error.code, error.status, error.retryable),
       stage,
       ...(details ? { details } : {}),
-      ...(error.code === 'timeout' || error.code === 'network_error'
+      ...(error.code === 'timeout' || error.code === 'network_error' || afterResponse
         ? { possibleCommit: true }
         : {}),
     };
   }
-  const code = errorCodeOf(error);
-  const status = typeof (error as { status?: unknown })?.status === 'number'
-    ? (error as { status: number }).status
-    : 0;
-  const retryableValue = (error as { retryable?: unknown })?.retryable === true;
-  const details = diagnosticDetails((error as { details?: unknown })?.details);
+  if (error instanceof SidecarSettlementError) {
+    const details = diagnosticDetails(error.details);
+    return {
+      code: error.code,
+      message: redactText(error.message).text.slice(0, 512),
+      at,
+      status: error.status,
+      retryable: error.retryable,
+      disposition: dispositionOf(error.code, error.status, error.retryable),
+      stage,
+      ...(details ? { details } : {}),
+      ...(afterResponse ? { possibleCommit: true } : {}),
+    };
+  }
+  if (error instanceof LocalLayerError) {
+    const retryableValue = error.code !== 'invalid_outbox_item' && error.code !== 'invalid_cache_key';
+    return {
+      code: error.code,
+      message: redactText(error.message).text.slice(0, 512),
+      at,
+      retryable: retryableValue,
+      disposition: retryableValue ? 'retryable' : 'permanent',
+      stage,
+      ...(afterResponse ? { possibleCommit: true } : {}),
+    };
+  }
+  // 普通本地 settle/回读错误没有结构化永久语义：保持有界重试，
+  // 不能因为一次本地异常就把可能已提交的写操作推进 dead。
   return {
-    code,
+    code: 'internal',
     message: redactText((error as Error)?.message ?? 'outbox 重放失败').text.slice(0, 512),
     at,
-    ...(status > 0 ? { status } : {}),
-    retryable: retryableValue,
-    disposition: dispositionOf(code, status, retryableValue),
+    retryable: true,
+    disposition: 'retryable',
     stage,
-    ...(details ? { details } : {}),
+    ...(afterResponse ? { possibleCommit: true } : {}),
   };
 }
 
@@ -155,20 +180,6 @@ function failureOf(view: ReplayErrorView): OutboxFailureView {
     ...(view.details ? { details: view.details } : {}),
     ...(view.possibleCommit ? { possibleCommit: true } : {}),
   };
-}
-
-function retryable(error: unknown): boolean {
-  if (error instanceof CapabilityClientError) {
-    // queued replay 的 revision 冲突绝不自动 rebase 到新 revision；必须显式 dead。
-    if (error.code === 'revision_mismatch' || error.code === 'idempotency_conflict') return false;
-    // 租约冲突允许协作重试，但由 replayItem 的有限次数约束收口。
-    if (error.code === 'checkpoint_lease_held') return true;
-    if (error.retryable) return true;
-    // token 轮换后可能恢复；保留在 outbox 等待下一次重放。
-    if (error.status === 401 || error.status === 0) return true;
-    return error.status === 429 || error.status >= 500;
-  }
-  return true;
 }
 
 function leaseConflictExhausted(view: ReplayErrorView, attempts: number, now: number): boolean {
@@ -332,6 +343,7 @@ export class OutboxReplayer {
     }
     const leased = lease.item;
     const owner = leased.replayLeaseOwner;
+    let phase: 'replay' | 'settle' = 'replay';
     try {
       const envelope = await this.client!.post(leased.endpoint, leased.body, {
         idempotencyKey: leased.requestId,
@@ -343,6 +355,7 @@ export class OutboxReplayer {
         this.lifecycle.noteAmbiguousSuccess('replay_late_success');
         return { outcome: 'skipped' };
       }
+      phase = 'settle';
       // 响应已确认：把 lease 续到覆盖本地回读/详情写入阶段；owner 不符/已过期则拒绝。
       await this.outbox.renewReplayLease(leased.id, {
         owner,
@@ -391,13 +404,11 @@ export class OutboxReplayer {
         // drain 后晚到的失败/超时同样只能 skipped：不 recordAttempt、不写 dead。
         return { outcome: 'skipped' };
       }
-      const view = errorView(error, this.now(), 'replay');
+      const view = errorView(error, this.now(), phase, { afterResponse: phase === 'settle' });
       const conflictExhausted = leaseConflictExhausted(view, leased.attempts, this.now());
       const canRetry = !conflictExhausted
         && view.disposition !== 'permanent'
-        && (error instanceof CapabilityClientError
-          ? retryable(error)
-          : view.retryable !== false && view.disposition !== 'conflict');
+        && (view.disposition !== 'conflict' || view.code === 'checkpoint_lease_held');
       const until = typeof view.details?.until === 'number' ? view.details.until : null;
       const leaseWait = view.code === 'checkpoint_lease_held' && until !== null
         ? Math.max(0, until - this.now() + 100)
@@ -418,7 +429,7 @@ export class OutboxReplayer {
       if (completion === 'retry') {
         return {
           outcome: 'retry',
-          error: { ...view, code: view.code === 'internal' ? 'capability_unavailable' : view.code },
+          error: view,
         };
       }
       if (completion === 'skipped') return { outcome: 'skipped' };

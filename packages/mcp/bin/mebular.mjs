@@ -1832,7 +1832,7 @@ function printMemoryRuntime(value, exitCode = 0) {
 }
 
 async function runMemoryRuntime(action, args, flags) {
-  const usage = '用法：mebular memory-runtime <status|start|stop|restart|logs|doctor|outbox> [--json] [--home DIR] [--timeout MS]';
+  const usage = '用法：mebular memory-runtime <status|start|stop|restart|logs|doctor|outbox> [--json] [--home DIR] [--timeout MS] [logs --limit N|--tail N]';
   try {
     const actions = ['status', 'start', 'stop', 'restart', 'logs', 'doctor', 'outbox'];
     if (!actions.includes(action)) {
@@ -1850,6 +1850,7 @@ async function runMemoryRuntime(action, args, flags) {
       resolveMemoryRuntimePaths,
     } = await import('../src/memory-runtime-supervisor.mjs');
     const {
+      assertSafeMemoryRuntimeDataDir,
       inspectMemoryRuntimeOutbox,
       inspectMemoryRuntimeLocalCounts,
       memoryRuntimeDiskUsage,
@@ -1857,16 +1858,22 @@ async function runMemoryRuntime(action, args, flags) {
       readMemoryRuntimeLogs,
       rebuildMemoryRuntimeOutboxItem,
       purgeMemoryRuntimeOutboxItem,
+      sanitizeMemoryRuntimeEvent,
     } = await import('../src/memory-runtime-diagnostics.mjs');
-    const dataDir = resolveMemoryRuntimePaths({ home, env: process.env }).dataDir;
+    const dataDir = assertSafeMemoryRuntimeDataDir(
+      resolveMemoryRuntimePaths({ home, env: process.env }).dataDir,
+      home,
+    );
 
     if (action === 'logs') {
-      const limitRaw = flags.limit === undefined ? 50 : Number(flags.limit);
+      const limitFlag = flags.limit === undefined ? flags.tail : flags.limit;
+      const limitRaw = limitFlag === undefined ? 50 : Number(limitFlag);
       const limit = Number.isInteger(limitRaw) && limitRaw > 0 && limitRaw <= 500 ? limitRaw : 50;
-      const [entries, status] = await Promise.all([
+      const [parsedEntries, status] = await Promise.all([
         readMemoryRuntimeLogs(dataDir, { limit }),
         memoryRuntimeLogStatus(dataDir),
       ]);
+      const entries = parsedEntries.map((entry) => sanitizeMemoryRuntimeEvent(entry));
       printMemoryRuntime({
         ok: true,
         kind: 'memory-runtime',
@@ -1993,9 +2000,21 @@ async function runMemoryRuntime(action, args, flags) {
         return;
       }
       if (sub === 'rebuild') {
-        const expectedRevision = flags['expected-revision'] === undefined
-          ? undefined
-          : Number(flags['expected-revision']);
+        let expectedRevision;
+        const revisionFlag = flags['expected-revision'];
+        if (revisionFlag !== undefined) {
+          if (typeof revisionFlag !== 'string' || !/^(?:0|[1-9]\d*)$/.test(revisionFlag)) {
+            const error = new Error('--expected-revision 必须显式提供非负整数');
+            error.code = 'usage';
+            throw error;
+          }
+          expectedRevision = Number(revisionFlag);
+          if (!Number.isSafeInteger(expectedRevision)) {
+            const error = new Error('--expected-revision 超出安全整数范围');
+            error.code = 'usage';
+            throw error;
+          }
+        }
         const item = await rebuildMemoryRuntimeOutboxItem(dataDir, id, {
           ...(expectedRevision !== undefined ? { expectedRevision } : {}),
           now: Date.now(),
@@ -2277,7 +2296,7 @@ async function main() {
           '  runtime current show|set|clear [--version V --runtime-path P --cli C --provider shared --owner O --installed-at ISO]  current 指针（非敏感）',
           '  runtime service install|uninstall|restart|status [--json]  共享 mebular-serve 所有权/生命周期',
           '  runtime provider list|add|remove [--kind app|cli|shared --path P --version V --capabilities a,b --id ID]  runtime provider 注册表',
-          '  memory-runtime status|start|stop|restart|logs|doctor|outbox [--json] [--home DIR]   记忆运行时 sidecar（独立于 MCP daemon runtime）',
+          '  memory-runtime status|start|stop|restart|logs|doctor|outbox [--json] [--home DIR] [logs --limit|--tail N]   记忆运行时 sidecar（独立于 MCP daemon runtime）',
           '  models list|status|install|download|select|remove|start|stop [--json] [--pack P] [--force]  sidecar 模型（需 serve；不同步）',
           '  token grant|list|revoke [--scope a,b] [--id x] [--tokens-file p]   bearer 令牌管理',
           '  token client add|list|remove [--redirect uri] [--scope a,b] [--id x]   OAuth 客户端预注册',

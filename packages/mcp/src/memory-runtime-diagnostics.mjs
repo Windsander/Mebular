@@ -6,7 +6,7 @@
 
 import { chmod, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { appendFileSync, chmodSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve, basename, sep } from 'node:path';
 
 const DEFAULT_MAX_BYTES = 512 * 1024;
 const DEFAULT_MAX_FILES = 3;
@@ -17,7 +17,7 @@ const OUTBOX_ITEM_RE = /^[A-Za-z0-9._:-]{1,128}$/;
 const OUTBOX_MAX_QUEUE_MS = 30 * 24 * 60 * 60 * 1000;
 const SENSITIVE_KEY_RE = /^(?:authorization|api[-_]?key|access[-_]?token|refresh[-_]?token|token|secret|password|passwd|credential|private[-_]?key|keyref|cookie)$/i;
 const BODY_KEY_RE = /^(?:body|content|contents|text|prompt|prompts|response|responses|messages|message|chunks?|items?|payload|raw|detailtext)$/i;
-const PATH_RE = /(?:\/Users\/|\/home\/|\/private\/|\/var\/folders\/|\/tmp\/|[A-Za-z]:\\Users\\)[^\s"'\\]*/g;
+const PATH_RE = /(?:\b[A-Za-z]:[\\/](?:[^\\/\s"'<>|]+[\\/])*[^\\/\s"'<>|]*|\\\\[^\\/\s"'<>|]+\\[^\s"'<>|]*|\/(?:[A-Za-z0-9._-]+\/)+[A-Za-z0-9._-]*|\/(?:opt|root)(?=$|[\s"',;:]))/g;
 const SECRET_SHAPE_RE = /\b(?:sk-[A-Za-z0-9_-]{12,}|Bearer\s+[A-Za-z0-9._~+/=-]{12,}|meb_[A-Za-z0-9]{16,})\b/g;
 
 function isObject(value) {
@@ -484,39 +484,96 @@ export async function inspectMemoryRuntimeOutbox(dataDir, { now = Date.now(), in
   };
 }
 
+function diagnosticError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+/** 与 sidecar `assertSafeDataDir` 同一规则：不得写 MCP daemon 的 runtime 安装根。 */
+export function assertSafeMemoryRuntimeDataDir(dataDir, home) {
+  const resolvedHome = resolve(home ?? process.env.MEBULAR_HOME ?? process.cwd());
+  const resolvedData = resolve(dataDir);
+  const homeRuntime = join(resolvedHome, 'runtime');
+  const underHomeRuntime = resolvedData === homeRuntime || resolvedData.startsWith(`${homeRuntime}${sep}`);
+  const normalized = resolvedData.split(sep).join('/');
+  const underCloudRuntime = /\/runtime\/\d+\.\d+\.\d+(?:[-+][^/]*)?(?:\/|$)/.test(normalized);
+  const isRuntimeDir = basename(resolvedData) === 'runtime';
+  if (underHomeRuntime || underCloudRuntime || isRuntimeDir) {
+    throw diagnosticError('data_dir_forbidden', 'sidecar 数据目录不能指向 MCP daemon 的 runtime 安装根');
+  }
+  return resolvedData;
+}
+
+function pidAliveDefault(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === 'EPERM';
+  }
+}
+
+async function assertOutboxMutable(dataDir, id, {
+  now = Date.now(),
+  pidAlive = pidAliveDefault,
+} = {}) {
+  const lock = await readJson(join(dataDir, 'start.lock'));
+  if (isObject(lock) && Number.isInteger(lock.pid) && pidAlive(lock.pid)) {
+    throw diagnosticError('sidecar_running', 'sidecar 正在运行：拒绝修改 outbox');
+  }
+  const active = await readJson(join(dataDir, 'outbox', `${id}.json`));
+  if (isObject(active)
+    && typeof active.replayLeaseUntil === 'number'
+    && active.replayLeaseUntil > now) {
+    throw diagnosticError('outbox_in_flight', 'outbox 项正在重放：拒绝重建或清理');
+  }
+}
+
 export async function rebuildMemoryRuntimeOutboxItem(dataDir, id, {
   expectedRevision,
   now = Date.now(),
+  pidAlive = pidAliveDefault,
 } = {}) {
   if (typeof id !== 'string' || !OUTBOX_ITEM_RE.test(id)) {
-    const error = new Error('outbox id 格式非法');
-    error.code = 'invalid_outbox_item';
-    throw error;
+    throw diagnosticError('invalid_outbox_item', 'outbox id 格式非法');
   }
+  await assertOutboxMutable(dataDir, id, { now, pidAlive });
   const activePath = join(dataDir, 'outbox', `${id}.json`);
   const deadPath = join(dataDir, 'outbox', 'dead', `${id}.json`);
+  const reconcilePath = join(dataDir, 'outbox', 'reconcile', `${id}.json`);
   const active = await readJson(activePath);
   const dead = await readJson(deadPath);
   const source = isObject(active) && active.version === 1 ? active : (isObject(dead) && dead.version === 1 ? dead : null);
   if (!source) {
-    const error = new Error('outbox 项不存在');
-    error.code = 'outbox_not_found';
-    throw error;
+    throw diagnosticError('outbox_not_found', 'outbox 项不存在');
   }
   const body = isObject(source.body) ? JSON.parse(JSON.stringify(source.body)) : {};
   if (expectedRevision !== undefined) {
-    if (!Number.isInteger(expectedRevision) || expectedRevision < 0) {
-      const error = new Error('--expected-revision 必须是非负整数');
-      error.code = 'usage';
-      throw error;
+    if (typeof expectedRevision !== 'number'
+      || !Number.isSafeInteger(expectedRevision)
+      || expectedRevision < 0) {
+      throw diagnosticError('usage', '--expected-revision 必须是非负安全整数');
     }
     body.expectedRevision = expectedRevision;
   }
+  const originalExpiresAt = typeof source.expiresAt === 'number'
+    && Number.isFinite(source.expiresAt)
+    && source.expiresAt > 0
+    ? source.expiresAt
+    : null;
+  const rebuiltExpiresAt = originalExpiresAt === null
+    ? now + OUTBOX_MAX_QUEUE_MS
+    : Math.min(now + OUTBOX_MAX_QUEUE_MS, originalExpiresAt);
+  const meta = { ...(isObject(source.meta) ? source.meta : {}) };
+  delete meta.needsFinalize;
+  delete meta.finalizeOutcome;
   const rebuilt = {
     ...source,
     body,
     createdAt: now,
-    expiresAt: now + OUTBOX_MAX_QUEUE_MS,
+    expiresAt: rebuiltExpiresAt,
     attempts: 0,
     lastAttemptAt: null,
     lastError: null,
@@ -526,7 +583,7 @@ export async function rebuildMemoryRuntimeOutboxItem(dataDir, id, {
     replayLeaseMs: undefined,
     replayLeaseGeneration: undefined,
     meta: {
-      ...(isObject(source.meta) ? source.meta : {}),
+      ...meta,
       manualRebuild: true,
       rebuiltAt: now,
       ...(expectedRevision !== undefined ? { manualExpectedRevision: expectedRevision } : {}),
@@ -539,15 +596,18 @@ export async function rebuildMemoryRuntimeOutboxItem(dataDir, id, {
   await mkdir(join(dataDir, 'outbox'), { recursive: true, mode: 0o700 });
   await writeJsonAtomic(activePath, rebuilt);
   await rm(deadPath, { force: true });
+  await rm(reconcilePath, { force: true });
   return outboxMetadata(rebuilt);
 }
 
-export async function purgeMemoryRuntimeOutboxItem(dataDir, id) {
+export async function purgeMemoryRuntimeOutboxItem(dataDir, id, {
+  now = Date.now(),
+  pidAlive = pidAliveDefault,
+} = {}) {
   if (typeof id !== 'string' || !OUTBOX_ITEM_RE.test(id)) {
-    const error = new Error('outbox id 格式非法');
-    error.code = 'invalid_outbox_item';
-    throw error;
+    throw diagnosticError('invalid_outbox_item', 'outbox id 格式非法');
   }
+  await assertOutboxMutable(dataDir, id, { now, pidAlive });
   const paths = [
     join(dataDir, 'outbox', `${id}.json`),
     join(dataDir, 'outbox', 'dead', `${id}.json`),

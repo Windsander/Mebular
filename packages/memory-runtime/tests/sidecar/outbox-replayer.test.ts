@@ -633,6 +633,67 @@ describe('outbox conflict diagnostics', () => {
     expect(diagnostics.ambiguous[0]).not.toHaveProperty('committed');
   });
 
+  it('post 已成功但 onSettled 普通 Error：有界重试而非 dead，恢复后正常 finalize', async () => {
+    let clock = 65_000;
+    const { outbox } = await setup(() => clock);
+    await outbox.enqueue({
+      id: 'ob_settle_plain_error',
+      requestId: 'req_settle_plain_error',
+      endpoint: '/write',
+      body: { items: [{ clientItemId: 'rec_1' }] },
+      createdAt: clock,
+      expiresAt: clock + 600_000,
+      meta: { kind: 'record' },
+    });
+    let settledAttempts = 0;
+    const onSettled = jest.fn(async () => {
+      settledAttempts += 1;
+      if (settledAttempts === 1) throw new Error('local cache readback failed');
+      return true;
+    });
+    const onComplete = jest.fn(async (_item: any, _outcome: any) => undefined);
+    const client = {
+      post: jest.fn(async () => ({ data: { created: 1, results: [{ status: 'created', id: 'rec_1' }] } })),
+    } as any;
+    const replayer = new OutboxReplayer({
+      outbox,
+      client,
+      now: () => clock,
+      onSettled,
+      onComplete,
+    });
+
+    const first = await replayer.replayOnce();
+    expect(first).toMatchObject({ settled: 0, retried: 1, dead: 0, remaining: 1 });
+    expect(first.errors[0]).toMatchObject({
+      code: 'internal',
+      disposition: 'retryable',
+      stage: 'settle',
+      possibleCommit: true,
+    });
+    const retried = await outbox.get('ob_settle_plain_error');
+    expect(retried).toMatchObject({
+      requestId: 'req_settle_plain_error',
+      attempts: 1,
+      lastFailure: {
+        code: 'internal',
+        disposition: 'retryable',
+        stage: 'settle',
+        possibleCommit: true,
+      },
+    });
+    expect(await outbox.deadStats()).toMatchObject({ items: 0 });
+    expect(onComplete).toHaveBeenCalledWith(expect.objectContaining({ id: 'ob_settle_plain_error' }), 'retry');
+    expect(onComplete).not.toHaveBeenCalledWith(expect.anything(), 'dead');
+
+    clock = Math.max(clock + 1, retried?.nextAttemptAt ?? clock + 1);
+    const second = await replayer.replayOnce();
+    expect(second).toMatchObject({ settled: 1, retried: 0, dead: 0, remaining: 0 });
+    expect(onSettled).toHaveBeenCalledTimes(2);
+    expect(await outbox.get('ob_settle_plain_error')).toBeNull();
+    expect(await outbox.deadStats()).toMatchObject({ items: 0 });
+  });
+
   it('dead 按操作/endpoint 聚合且暴露最老年龄与原因', async () => {
     let clock = 70_000;
     const { outbox } = await setup(() => clock);

@@ -1254,7 +1254,7 @@ export function getSidecarVersion(): SidecarVersionResult {
 const USAGE = `用法：
   mebular-memory-runtime serve [--home DIR] [--data-dir DIR] [--port N] [--host HOST] [--parent-pid PID]
   mebular-memory-runtime status [--home DIR] [--data-dir DIR]
-  mebular-memory-runtime logs [--home DIR] [--data-dir DIR] [--limit N]
+  mebular-memory-runtime logs [--home DIR] [--data-dir DIR] [--limit N|--tail N]
   mebular-memory-runtime version
 
 说明：serve 启动 Memory Runtime sidecar（/memory-runtime/v1）。轻量 MCP 模式不应启动它。`;
@@ -1355,7 +1355,7 @@ function parseLogArgs(args: string[]): { home?: string; dataDir?: string; limit:
     const equals = arg.indexOf('=');
     const name = equals >= 0 ? arg.slice(0, equals) : arg;
     const inline = equals >= 0 ? arg.slice(equals + 1) : undefined;
-    if (name === '--home' || name === '--data-dir' || name === '--limit') {
+    if (name === '--home' || name === '--data-dir' || name === '--limit' || name === '--tail') {
       const { value, next } = cliValue(args, index, inline, name);
       if (name === '--home') home = value;
       else if (name === '--data-dir') dataDir = value;

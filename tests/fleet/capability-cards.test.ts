@@ -128,6 +128,41 @@ describe('P1 能力卡 schema / 生成 / 隐私', () => {
     }).ok).toBe(false);
   });
 
+  it('executable/executionMode/health additive：进入 validation 与 fingerprint，旧卡缺字段仍合法', () => {
+    const capability = cardFromFixture('capability') as Record<string, unknown>;
+    expect(validateAgentCapabilityCard(capability)).toEqual({ ok: true, errors: [] });
+    expect(validateAgentCapabilityCard({ ...capability, executable: 'yes' }).ok).toBe(false);
+    expect(validateAgentCapabilityCard({ ...capability, executionMode: 'shell' }).ok).toBe(false);
+    expect(validateAgentCapabilityCard({ ...capability, health: { status: 'sick' } }).ok).toBe(false);
+    expect(validateAgentCapabilityCard({
+      ...capability,
+      executable: false,
+      executionMode: 'in-process',
+      health: { status: 'degraded', checkedAt: 1, latencyMs: 2, detail: 'no probe' },
+    })).toEqual({ ok: true, errors: [] });
+
+    const base = {
+      v: 1 as const,
+      kind: 'agent_capability_card' as const,
+      device: 'device-A',
+      agent: 'worker',
+      version: 1,
+      capabilities: ['fleet.task'],
+      tools: ['task_submit'],
+      limits: {},
+      permissions: { taskNamespaces: ['tasks'] },
+      runtime: { os: 'test', arch: 'test', runtime: 'node', runtimeVersion: '22' },
+      provenance: { source: 'test', configHash: 'cfg', registryHash: 'reg', publishedAt: 1 },
+    };
+    expect(capabilityCardFingerprint(base)).not.toBe(capabilityCardFingerprint({ ...base, executable: false }));
+    expect(capabilityCardFingerprint({ ...base, executable: true })).not.toBe(
+      capabilityCardFingerprint({ ...base, executable: true, health: { status: 'unavailable' } }),
+    );
+    expect(capabilityCardFingerprint({ ...base, executionMode: 'cli' })).not.toBe(
+      capabilityCardFingerprint({ ...base, executionMode: 'http' }),
+    );
+  });
+
   it('从 config + registry + 运行环境编译：字段齐全、无 command/env、tools 对齐 16 方法', () => {
     const config = fleetConfig('device-A', [
       { name: 'worker', kind: 'command', command: '/secret/bin/agent', baseArgs: ['--token', 'shh'], capabilities: ['code.write', 'review', 'code.write'] },
@@ -141,6 +176,9 @@ describe('P1 能力卡 schema / 生成 / 隐私', () => {
     const worker = drafts.find((card) => card.agent === 'worker')!;
     expect(worker.kind).toBe(CAPABILITY_CARD_KIND);
     expect(worker.device).toBe('device-A');
+    expect(worker.executable).toBe(true);
+    expect(worker.executionMode).toBe('cli');
+    expect(drafts.find((card) => card.agent === 'echo')).toMatchObject({ executable: false, executionMode: 'in-process' });
     expect(worker.capabilities).toEqual(['code.write', 'fleet.task', 'review']);
     expect(worker.tools).toEqual([...AGENT_TASK_TOOL_NAMES]);
     expect(worker.permissions.taskNamespaces).toEqual(['tasks']);
@@ -175,6 +213,8 @@ describe('P1 签名 / 发布 / 版本 / tombstone', () => {
       expect(first.published).toBe(1);
       let cards = await listCapabilityCards(mebular);
       expect(cards).toHaveLength(1);
+      // 发布路径（compileCapabilityCards）带上 executable/executionMode；echo 是 demo。
+      expect(cards[0]).toMatchObject({ executable: false, executionMode: 'in-process' });
       const identity = mebular.identity.getDeviceKey('device-A')!;
       expect(await verifyAgentCapabilityCardSignature(cards[0]!, identity.publicKey)).toBe(true);
       expect(cards[0]!.signature.keyId).toBe('device-A');
@@ -401,14 +441,21 @@ describe('P1 task_targets.cards additive + 旧调用 + __plan__ worker', () => {
       await agentDirectoryStore(mebular, AGENT_NAMESPACE).append({
         v: 1,
         device: 'device-B',
-        agents: [{ name: 'echo', kind: 'echo' }, { name: 'worker', kind: 'echo', capabilities: ['code.write'] }],
+        agents: [
+          { name: 'echo', kind: 'echo' },
+          { name: 'worker', kind: 'echo', capabilities: ['code.write'] },
+          { name: 'hermes', kind: 'hermes', executable: true, executionMode: 'cli' },
+        ],
         updatedAt: 1,
         version: 1,
       });
-      const unsigned = compileCapabilityCards({
-        config: fleetConfig('device-B', [{ name: 'echo', kind: 'echo', capabilities: ['code.write'] }]),
-        now: 1,
-      })[0]!;
+      const unsigned = {
+        ...compileCapabilityCards({
+          config: fleetConfig('device-B', [{ name: 'echo', kind: 'echo', capabilities: ['code.write'] }]),
+          now: 1,
+        })[0]!,
+        health: { status: 'unavailable' as const, detail: 'no bridge' },
+      };
       const signed = await signAgentCapabilityCard(bMebular, unsigned);
       const bPublicKey = bMebular.identity.getDeviceKey('device-B')!.publicKey;
       const nodeId = await appendCapabilityCard(mebular, signed);
@@ -435,7 +482,16 @@ describe('P1 task_targets.cards additive + 旧调用 + __plan__ worker', () => {
       };
       expect(result.ok).toBe(true);
       expect(result.targets).toEqual([
-        { device: 'device-B', agent: 'echo', kind: 'echo' },
+        {
+          device: 'device-B',
+          agent: 'echo',
+          kind: 'echo',
+          executable: false,
+          executionMode: 'in-process',
+          health: { status: 'unavailable', detail: 'no bridge' },
+          reason: 'adapter-unavailable',
+        },
+        { device: 'device-B', agent: 'hermes', kind: 'hermes', executable: true, executionMode: 'cli' },
         { device: 'device-B', agent: 'worker', kind: 'echo' },
       ]);
       expect(result.cards).toEqual([
@@ -458,7 +514,12 @@ describe('P1 task_targets.cards additive + 旧调用 + __plan__ worker', () => {
         targets: Array<Record<string, unknown>>;
         cards: Array<Record<string, unknown>>;
       };
-      expect(noKey.targets).toEqual(result.targets);
+      // 卡片不可读时只保留目录（additive 字段来自目录；不伪造卡片 health/executable）。
+      expect(noKey.targets).toEqual([
+        { device: 'device-B', agent: 'echo', kind: 'echo' },
+        { device: 'device-B', agent: 'hermes', kind: 'hermes', executable: true, executionMode: 'cli' },
+        { device: 'device-B', agent: 'worker', kind: 'echo' },
+      ]);
       expect(noKey.cards).toEqual([]);
 
       const brokenGraph = {
@@ -479,7 +540,7 @@ describe('P1 task_targets.cards additive + 旧调用 + __plan__ worker', () => {
         errorCalls = [...errorSpy.mock.calls];
         errorSpy.mockRestore();
       }
-      expect(degraded.targets).toEqual(result.targets);
+      expect(degraded.targets).toEqual(noKey.targets);
       expect(degraded.cards).toEqual([]);
       expect(degraded).not.toHaveProperty('cardsWarning');
       expect(errorCalls.some((args) => String(args[0]).includes('[fleet:cards]'))).toBe(true);

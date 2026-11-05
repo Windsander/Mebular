@@ -53,6 +53,7 @@ export type RouteRejectionCode =
   | 'POLICY_DENIED'
   | 'PAYLOAD_UNREACHABLE'
   | 'AT_CAPACITY'
+  | 'ADAPTER_UNAVAILABLE'
   | 'NO_CANDIDATES';
 
 export interface RouteAuthorization {
@@ -221,7 +222,8 @@ export function rendezvousScore(key: string, device: string, agent: string): str
 }
 
 function hardFiltersFor(input: RouteInput): string[] {
-  const filters = ['authorized', 'policy', 'capability'];
+  // `executable`/`health` 是 0.3.2 新增硬门槛：显式不可执行或显式 unavailable 直接拒绝。
+  const filters = ['authorized', 'policy', 'executable', 'health', 'capability'];
   if (input.namespace !== undefined || input.payloadRef !== undefined) filters.push('payload');
   filters.push('online', 'capacity');
   return filters;
@@ -436,6 +438,16 @@ export function resolveRoute(input: RouteInput): RouteDecision {
     const card = cardFor(input, target);
     if (card === undefined) {
       rejected.push(rejection(target, 'MISSING_CAPABILITY', 'card'));
+      return;
+    }
+    // 旧卡缺 executable/health 字段 = 兼容（不当作 false 或 unavailable）。
+    if (card.executable === false) {
+      rejected.push(rejection(target, 'ADAPTER_UNAVAILABLE', 'executable=false'));
+      return;
+    }
+    // 只有显式 unavailable 才硬拒绝；degraded/未知不拒绝（advisory）。
+    if (card.health?.status === 'unavailable') {
+      rejected.push(rejection(target, 'ADAPTER_UNAVAILABLE', 'health=unavailable'));
       return;
     }
     const policyMissing = missingCapabilities(policy?.requireCapabilities, card);

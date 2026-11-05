@@ -1,12 +1,13 @@
 // W1 每设备 Agent 目录（普通记忆域，默认 `agents`）。
 //
 // 每设备一条**签名**记录（作者=设备；随已有记忆同步，证书链由 core 校验）：
-//   { device, agents:[{name,kind,capabilities?,concurrency,capacity?}], updatedAt, version }
+//   { device, agents:[{name,kind,capabilities?,concurrency,capacity?,executable?,executionMode?}], updatedAt, version }
 // `task_targets` = **我 L1 授权过的对端** ∩ 其目录里的 `(device, agent)`。
 // `capacity`/`load` 为**建议性**（不参与授权与一致性判定）。
 
 import type { Mebular } from '@mebular/core';
 import type { FleetAgentConfig, FleetConfig } from './config.js';
+import { EXECUTOR_EXECUTION_MODES, type ExecutorExecutionMode } from './runtime/executor.js';
 import { MebularMessageStore } from './store/message-store.js';
 
 export const AGENT_DIRECTORY_MESSAGE_TYPE = 'agent_directory';
@@ -21,6 +22,67 @@ export interface AgentDirectoryAgent {
   concurrency?: number;
   /** 建议性容量提示（**不参与授权/一致性**） */
   capacity?: number;
+  /**
+   * 该 agent 是否具备真实执行能力（由 config/adapter 静态推导）。
+   *
+   * 旧目录没有该字段时视为**未知**而不是 `false`（兼容旧 peer）；显式 `false`
+   * 表示 demo/占位/缺命令，路由不得选中。
+   */
+  executable?: boolean;
+  /** 执行通道；与 `ExecutorExecutionMode` 对齐。旧目录缺省 = 未知。 */
+  executionMode?: ExecutorExecutionMode;
+}
+
+/** 健康状态（advisory；不参与授权/一致性）。 */
+export type AgentExecutionHealthStatus = 'ok' | 'degraded' | 'unavailable';
+
+/** agent 健康快照（advisory；不得包含 env/token/端点凭据）。 */
+export interface AgentExecutionHealth {
+  status: AgentExecutionHealthStatus;
+  checkedAt?: number;
+  latencyMs?: number;
+  detail?: string;
+}
+
+/** 非执行原因（用于 task_targets 解释，不进入授权判定）。 */
+export type AgentExecutionReason = 'demo' | 'missing-command' | 'unsupported-kind';
+
+export interface DerivedAgentExecution {
+  executable: boolean;
+  executionMode: ExecutorExecutionMode;
+  reason?: AgentExecutionReason;
+}
+
+/**
+ * 由本机 config **静态**推导可执行性与执行通道（不探测、不读 command 内容）。
+ *
+ * - `echo` / `board`：demo/看板，不可执行（`in-process`）；
+ * - `command`：有 `command` 才可执行，否则 `missing-command`；
+ * - `hermes` / `dsh` / `opencode` / `claude-code`：CLI 执行；
+ * - `openchamber`：HTTP 执行；
+ * - 未知 kind：fail-closed 为不可执行（配置校验通常已拦截）。
+ */
+export function deriveAgentExecution(
+  agent: { name: string; kind: string; command?: string },
+): DerivedAgentExecution {
+  if (agent.name === 'board' || agent.name === 'echo' || agent.kind === 'echo') {
+    return { executable: false, executionMode: 'in-process', reason: 'demo' };
+  }
+  switch (agent.kind) {
+    case 'command':
+      return typeof agent.command === 'string' && agent.command.length > 0
+        ? { executable: true, executionMode: 'cli' }
+        : { executable: false, executionMode: 'cli', reason: 'missing-command' };
+    case 'hermes':
+    case 'dsh':
+    case 'opencode':
+    case 'claude-code':
+      return { executable: true, executionMode: 'cli' };
+    case 'openchamber':
+      return { executable: true, executionMode: 'http' };
+    default:
+      return { executable: false, executionMode: 'in-process', reason: 'unsupported-kind' };
+  }
 }
 
 export interface AgentDirectoryEntry {
@@ -64,6 +126,13 @@ export function validateAgentDirectory(input: unknown): AgentDirectoryValidation
       }
       if (a?.capacity !== undefined && (typeof a.capacity !== 'number' || !Number.isFinite(a.capacity) || a.capacity < 0)) {
         errors.push('agent.capacity 若存在须为非负数字（advisory）');
+      }
+      if (a?.executable !== undefined && typeof a.executable !== 'boolean') {
+        errors.push('agent.executable 若存在须为布尔');
+      }
+      if (a?.executionMode !== undefined
+        && !EXECUTOR_EXECUTION_MODES.includes(a.executionMode as ExecutorExecutionMode)) {
+        errors.push('agent.executionMode 若存在须为 cli|http|json-rpc|in-process');
       }
     }
   }
@@ -112,6 +181,14 @@ export interface TaskTarget {
   kind: string;
   concurrency?: number;
   capacity?: number;
+  /** 可执行性（additive；旧目录缺字段时不伪造）。 */
+  executable?: boolean;
+  /** 执行通道（additive；旧目录缺字段时不伪造）。 */
+  executionMode?: ExecutorExecutionMode;
+  /** 健康快照（additive；来自能力卡，advisory）。 */
+  health?: AgentExecutionHealth;
+  /** 不可执行/不健康时的可解释原因（additive）。 */
+  reason?: string;
 }
 
 /**
@@ -134,6 +211,12 @@ export function expandTargets(
         kind: agent.kind,
         ...(agent.concurrency !== undefined ? { concurrency: agent.concurrency } : {}),
         ...(agent.capacity !== undefined ? { capacity: agent.capacity } : {}),
+        // additive：旧目录缺字段时保持“未知”，不当作 false。
+        ...(agent.executable !== undefined ? { executable: agent.executable } : {}),
+        ...(agent.executionMode !== undefined ? { executionMode: agent.executionMode } : {}),
+        ...(agent.executable === false
+          ? { reason: deriveAgentExecution({ name: agent.name, kind: agent.kind }).reason ?? 'not-executable' }
+          : {}),
       });
     }
   }
@@ -149,7 +232,7 @@ function normalizeCapabilities(values: readonly string[] | undefined): string[] 
   return [...new Set(values.map((value) => value.trim()).filter((value) => value.length > 0))].sort();
 }
 
-/** 由 fleet config 编译本机目录条目（只含标签/并发，不含 command/env）。 */
+/** 由 fleet config 编译本机目录条目（只含标签/并发/执行元数据，不含 command/env）。 */
 export function compileAgentDirectory(
   config: Pick<FleetConfig, 'device' | 'agents'>,
   options: { version?: number; updatedAt?: number } = {},
@@ -157,14 +240,19 @@ export function compileAgentDirectory(
   const agents: AgentDirectoryAgent[] = [...config.agents]
     .filter((agent) => agent.name !== '')
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
-    .map((agent: FleetAgentConfig) => ({
-      name: agent.name,
-      kind: agent.kind,
-      ...(agent.capabilities !== undefined && agent.capabilities.length > 0
-        ? { capabilities: normalizeCapabilities(agent.capabilities) }
-        : {}),
-      ...(agent.concurrency !== undefined ? { concurrency: agent.concurrency } : {}),
-    }));
+    .map((agent: FleetAgentConfig) => {
+      const execution = deriveAgentExecution(agent);
+      return {
+        name: agent.name,
+        kind: agent.kind,
+        ...(agent.capabilities !== undefined && agent.capabilities.length > 0
+          ? { capabilities: normalizeCapabilities(agent.capabilities) }
+          : {}),
+        ...(agent.concurrency !== undefined ? { concurrency: agent.concurrency } : {}),
+        executable: execution.executable,
+        executionMode: execution.executionMode,
+      };
+    });
   return {
     v: 1,
     device: config.device,
@@ -185,6 +273,8 @@ export function agentDirectoryFingerprint(entry: AgentDirectoryEntry): string {
       capabilities: agent.capabilities ?? [],
       ...(agent.concurrency !== undefined ? { concurrency: agent.concurrency } : {}),
       ...(agent.capacity !== undefined ? { capacity: agent.capacity } : {}),
+      ...(agent.executable !== undefined ? { executable: agent.executable } : {}),
+      ...(agent.executionMode !== undefined ? { executionMode: agent.executionMode } : {}),
     })),
   });
 }

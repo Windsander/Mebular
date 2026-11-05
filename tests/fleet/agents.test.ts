@@ -163,6 +163,13 @@ describe('HermesAgent：hermes argv 构造与结果', () => {
     expect(outcome.ok).toBe(false);
     expect(outcome.reason).toMatch(/TIMEOUT/);
   });
+
+  it('health：hermes 命令缺失 → unavailable（不伪造 ok，也不误判为可用）', async () => {
+    const agent = new HermesAgent({ hermesPath: join(dir, 'missing-hermes-binary') });
+    const health = await agent.health(500);
+    expect(health.status).toBe('unavailable');
+    expect(health.detail).toContain('not found');
+  });
 });
 
 describe('FleetWorker：注册表 + 未知 agent 显式失败', () => {

@@ -26,6 +26,7 @@ export interface TaskExecutor {
 
 /** 可选执行/取消语义；为后续 DSH/OpenCode/Claude adapter 预留，不在公共层解释。 */
 export type ExecutorExecutionMode = 'cli' | 'http' | 'json-rpc' | 'in-process';
+export const EXECUTOR_EXECUTION_MODES: readonly ExecutorExecutionMode[] = ['cli', 'http', 'json-rpc', 'in-process'];
 export type ExecutorPromptMode = 'arg' | 'stdin';
 
 /** Adapter 的稳定元数据（非敏感，可安全展示/写入能力卡）。 */
@@ -224,7 +225,8 @@ export class BaseExecutor implements TaskExecutor {
   async health(timeoutMs = 5_000): Promise<ExecutorHealth> {
     const startedAt = Date.now();
     if (this.adapter.health === undefined) {
-      return { status: 'ok', checkedAt: startedAt, detail: 'adapter has no health probe' };
+      // 没有 probe 不等于可用：标为 degraded（advisory），避免 doctor/task_targets 误判。
+      return { status: 'degraded', checkedAt: startedAt, detail: 'adapter has no health probe' };
     }
     let timer: NodeJS.Timeout | undefined;
     try {

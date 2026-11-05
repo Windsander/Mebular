@@ -75,6 +75,13 @@ describe('BaseExecutor：公共层超时 / 归一化 / 健康', () => {
     expect(await executor.execute(task('boom'))).toEqual({ ok: false, reason: 'EXECUTOR_ERROR: adapter boom' });
   });
 
+  it('无 health probe：degraded（不是 ok/unavailable），detail 固定', async () => {
+    const executor = new BaseExecutor({ descriptor, invoke: async () => ({ ok: true }) });
+    const health = await executor.health(1_000);
+    expect(health).toMatchObject({ status: 'degraded', detail: 'adapter has no health probe' });
+    expect(health.checkedAt).toEqual(expect.any(Number));
+  });
+
   it('健康探测：degraded 结果透传并补 latency', async () => {
     const executor = new BaseExecutor({
       descriptor,

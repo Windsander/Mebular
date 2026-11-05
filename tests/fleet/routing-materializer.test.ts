@@ -166,7 +166,7 @@ describe('P3 materializer route', () => {
       chosen: B,
       why: expect.objectContaining({
         code: 'ASSIGNED',
-        hardFilters: ['authorized', 'policy', 'capability', 'payload', 'online', 'capacity'],
+        hardFilters: ['authorized', 'policy', 'executable', 'health', 'capability', 'payload', 'online', 'capacity'],
         tieBreak: 'rendezvous-sha256',
         roleCard: 'disabled',
       }),
@@ -489,7 +489,7 @@ describe('P3 task_status.plan why', () => {
     await b.initialize();
     try {
       const draft = compileCapabilityCards({
-        config: { device: B.device, namespace: 'tasks', agents: [{ name: 'worker', kind: 'echo', capabilities: ['api'] }] },
+        config: { device: B.device, namespace: 'tasks', agents: [{ name: 'worker', kind: 'dsh', capabilities: ['api'] }] },
         now: 1,
       })[0]!;
       const signed = await signAgentCapabilityCard(b, draft);
@@ -557,7 +557,7 @@ describe('P3 task_status.plan why', () => {
         blockedBy: ['MISSING_CAPABILITY'],
         why: {
           code: 'NO_TARGET',
-          hardFilters: ['authorized', 'policy', 'capability', 'payload', 'online', 'capacity'],
+          hardFilters: ['authorized', 'policy', 'executable', 'health', 'capability', 'payload', 'online', 'capacity'],
           tieBreak: 'rendezvous-sha256',
           roleCard: 'disabled',
         },

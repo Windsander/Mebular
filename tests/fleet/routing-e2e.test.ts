@@ -40,7 +40,7 @@ const C = { device: 'device-C', agent: 'worker' };
 const SENTINEL = { device: '__plan__', agent: '__plan__' };
 
 function fleetConfig(dir: string, device: string, capabilities: string[], peers: string[] = []): FleetConfig {
-  const agents: FleetAgentConfig[] = [{ name: 'worker', kind: 'echo', capabilities }];
+  const agents: FleetAgentConfig[] = [{ name: 'worker', kind: 'dsh', capabilities }];
   return {
     v: 1,
     device,

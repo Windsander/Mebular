@@ -16,6 +16,53 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 The GitHub Release body is extracted from this file: everything between the release's
 `## [vX.Y.Z]` heading and the next `## [` heading. Keep that section self-contained.
 
+## [v0.3.2] - 2026-11-05
+
+Memory Runtime stability release. It makes lifecycle, local data, detail evidence,
+checkpoint revisions, host failure states and diagnostics match the documented contract.
+The public MCP surface stays at 29 tools, the graph/event/sync formats are unchanged, and
+there is no new host, model source or public `runtime_*` tool.
+
+### Added
+
+- **Explicit dormant lifecycle** — managed, attached and manual sidecars now have separate ownership and disable semantics. Managed disable stops only the MCP-owned child; attached/manual disable revokes capability and detaches without killing or replacing the operator's process. Disable never flushes queued writes. A clean disable publishes `mode=mcp` / `state=stopped` and rejects new work with `409 mode_mismatch`; if dormancy cannot be confirmed, status is visibly `degraded` / `disable_incomplete`.
+- **Detail lifecycle and evidence association** — settled details use `raw_chunk`, `message`, `tool_output` or `document_slice`, with role/detail-kind retention (`conversation` 30 d, `tool_output` 7 d, `document_slice` 90 d, explicit `pinned`). Multi-domain extraction links only the supporting evidence, and checkpoint graph references are validated for existence, expected type, live state and same domain. Bounded idle maintenance now covers staging, traces, cache, outbox and dead entries; cleanup is dependency-aware.
+- **Checkpoint high-water and honest views** — checkpoint revisions remain monotonic after delete/expiry, GET exposes `highWater`/`latestRevision`, and pending vs last-committed views stay separate. A 202 checkpoint is `pending` with no committed revision; only graph confirmation can mark it committed. `includeSelf=true` consumes the current same-agent SelfRecord in `self → checkpoint → compact/fragment` order, with explicit degraded reasons for read/staleness failures and no fabricated empty success.
+- **Host reliability alignment** — DSH now separates accepted/pending/queued/committed/partial states, honours 429 `Retry-After`, applies recall/write cooldown, orders checkpoint revisions and never treats 202 as committed. Hermes persists checkpoint pending in its existing durable spool, replays it after restart, treats `sync_max_attempts` as a real terminal bound, preserves mode-mismatch pending work, and keeps bounded `dead-pending`/orphan/quarantine diagnostics. OpenCode re-subscribes after event-stream disconnect with bounded deduplicated replay, distinguishes pending/queued/partial/committed, and keeps request-only injection and no durable host spool.
+- **Operations surface** — sanitized JSONL logs under `<dataDir>/logs/runtime.jsonl`, `mebular memory-runtime logs`, `doctor` (recent errors, restart reason, capability/model state, staging/cache/outbox/dead counts and ages, disk use, conflicts and ambiguous operations) and `outbox list|show|rebuild|purge`. Diagnostics never contain tokens, message bodies or the real home path.
+- **v0.3.2 verification artifacts** — a real graph/capability/sidecar 1k scale harness with failure/interruption injection, and a concise [v0.3.2 verification matrix](docs/quality/0.3.2-verification.md) recording test counts, host boundaries, upgrade/rollback evidence and pending items.
+
+### Changed
+
+- **Transport success no longer implies settlement** — `accepted`, `pending`, `queued`, `committed`, `failed`, `dead` and `degraded` have separate meanings. HTTP 202 means only pending/queued; `queued:true` requires a durable record; HTTP 200 with `extraction.status:'failed'` is failed; partial record/detail writes are reported as partial. Retry acceptance and capability health never create committed state.
+- **Disable and restart semantics** — disabling immersive stops admission, replay and model work without flushing; external attached/manual processes remain operator-owned. Re-enable requires fresh authorization/discovery and resumes idempotent replay only then. MCP restart no longer leaves a stale enabled snapshot or unlinks discovery from read-only status paths.
+- **Checkpoint and detail boundaries** — `expiresAt=0` means no authoritative checkpoint expiry; `retention.checkpointDays` applies only to local cache. Checkpoint/detail deletion is online-only and does not cascade to related records. Deleting a graph object still is not physical erasure: event history, tombstoned nodes, peer snapshots, host copies and the idempotency ledger remain disclosed copies.
+- **Host documentation and status vocabulary** — DSH/OpenCode no longer describe a 202 or a queued handoff as committed; Hermes no longer says auth/mode errors drop spool items. Lightweight mode is described as zero immersive side effects, not zero listeners or timers.
+
+### Fixed
+
+- **False committed states** — DSH, Hermes and OpenCode no longer turn a 202/pending/queued response into a committed record or checkpoint. Pending and last-committed checkpoint views no longer overwrite each other.
+- **Offline recovery** — queued work keeps its stable idempotency key across restart; ambiguous timeouts remain outcome-unknown and require authoritative readback; staging expiry first fails dependent work instead of silently losing details. Offline Compact no longer commits a title-only placeholder; it fails or replays with a real body and source hashes.
+- **Lifecycle leaks** — a sidecar can no longer keep accepting ingest/recall after capability or discovery revocation, create new outbox/staging work while draining, or be woken by a cached credential from the previous generation.
+- **Detail association** — recall now queries all canonical detail kinds, so `tool_output` and `document_slice` details are expandable instead of incorrectly reporting `detail_pending_sync`; this fixes the P1 gap observed by the historical 1k benchmark.
+- **Host cleanup and bounds** — Hermes spool replay and dead/quarantine recovery are bounded and restart-safe; DSH and OpenCode drop interrupted non-durable work visibly; OpenCode event disconnect resumes with bounded backoff; outbox/dead cleanup and disk diagnostics run while alive and idle.
+
+### Verification
+
+- **Recorded integration test line (2026-11-05; docs-only changes follow)** — 286 suites / 3,127 tests passed. WP1 lifecycle/privacy: 177 tests. WP3A object/context: 147 tests. Host suites: DSH 330 unit/adapter + 115 host E2E checks; Hermes 94 Python behavior + 57 host E2E checks; OpenCode 106 plugin + 32 host E2E checks. These counts are not copied from the historical 0.3.0 report. The verification matrix also records a transient temp-log cleanup flake seen in an independent docs-worktree rerun; the affected suite passes alone.
+- **Scale** — the 1k smoke completed twice on a real graph/capability/sidecar with build-bound artifacts, and 6/6 failure/interruption injection scenarios passed. The 10k full run did **not** complete and has no JSON result; it is not a pass and its latency/resource envelope is not claimed. See [the scale report](docs/quality/0.3.2-scale-benchmark.md).
+- **Upgrade/rollback** — a sequential single-home v0.3.0 → v0.3.2 → v0.3.0 drill passed (11/11 seed, 30/30 upgrade, 25/27 rollback, 0 non-informational failures); old records, details, Compacts, checkpoints and self records remained readable and the graph/event log were not rewritten. This does not cover mixed versions or a 0.2.4 direct path. See the [verification matrix](docs/quality/0.3.2-verification.md).
+- **Docs** — `npm run check:docs`, `npm run check:i18n` and `git diff --check` pass after this documentation change.
+- **Not run / still pending** — a real-model canary for 0.3.2 and a completed 10k benchmark. The historical Qwen3-4B smoke remains single-pack, single-platform and old-SHA evidence. The verification matrix records the exact pending status; do not describe these as passed.
+
+### Notes
+
+- **No migration / same-version boundary** — 0.3.0 and 0.2 nodes, events, namespaces, tags and IDs keep their values and are not rewritten. Run the same version on every device; there is no compatibility layer or mixed-version window. The v0.3.2 drill covers only the sequential v0.3.0 → v0.3.2 → v0.3.0 path, not mixed-version concurrency or a direct 0.2.4 upgrade/rollback.
+- **Stop before changing packages** — run `mebular memory-runtime stop` explicitly. Unsettled staging/outbox entries are device-local, are not migrated or guaranteed to settle, and are discarded with `<home>/memory-runtime/`. Settled details remain graph objects and synced peer copies remain subject to normal retention/deletion.
+- **Erasure and host copies** — graph deletion is not physical content erasure. DSH's durable `session.v4.jsonl`, Hermes' `queue.jsonl`, model-provider logs and offline peer snapshots are outside Mebular's physical-erasure guarantee. Mebular only synchronizes cooperative tombstones.
+- **Logical identity and strict evidence** — `agentId`, actor and task participation are assertions, not authentication. Checkpoint evidence must exist, have the expected type, be live and be in the same domain; cross-domain or dangling references fail rather than commit.
+- **Scale/model honesty** — the 10k benchmark and the v0.3.2 real-model canary remain pending. The 1k result is a smoke, not a 10k substitute; the historical 0.3.0 model smoke is not a 0.3.2 canary.
+
 ## [v0.3.0] - 2026-10-30
 
 Memory Runtime release. Mebular can now run recall, extraction, compaction and task

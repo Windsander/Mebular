@@ -24,8 +24,10 @@ import { useHeavyTimeout } from '../helpers/timeouts.js';
 useHeavyTimeout();
 
 const FIXTURE = join(process.cwd(), 'tests/fleet/fixtures/fake-agent.mjs');
+/** fake-agent 仍按 hermes 风格读取 `-z`；CommandAgent 本身不再默认加 `-z`。 */
+const legacyPrompt = (task: { intent: string }): string[] => ['-z', task.intent];
 const node = (args: string[]): CommandAgent =>
-  new CommandAgent({ command: process.execPath, baseArgs: [FIXTURE, ...args] });
+  new CommandAgent({ command: process.execPath, baseArgs: [FIXTURE, ...args], promptArgs: legacyPrompt });
 
 let dir: string;
 beforeEach(async () => {
@@ -61,7 +63,7 @@ describe('CommandAgent：参数数组 / 超时 / 非零退出 / 输出截断', (
   });
 
   it('超时：failed 带 TIMEOUT 原因', async () => {
-    const agent = new CommandAgent({ command: process.execPath, baseArgs: [FIXTURE, '--mode', 'sleep', '--sleep', '5000'], timeoutMs: 200 });
+    const agent = new CommandAgent({ command: process.execPath, baseArgs: [FIXTURE, '--mode', 'sleep', '--sleep', '5000'], promptArgs: legacyPrompt, timeoutMs: 200 });
     const outcome = await agent.execute(task('slow'));
     expect(outcome.ok).toBe(false);
     expect(outcome.reason).toMatch(/^TIMEOUT after \d+ms$/);
@@ -99,7 +101,7 @@ describe('CommandAgent：参数数组 / 超时 / 非零退出 / 输出截断', (
 
   it('并发上限可配：concurrency=1 串行、=2 并行', async () => {
     const sleepMs = 300;
-    const mk = (concurrency: number) => new CommandAgent({ command: process.execPath, baseArgs: [FIXTURE, '--mode', 'sleep', '--sleep', String(sleepMs)], concurrency });
+    const mk = (concurrency: number) => new CommandAgent({ command: process.execPath, baseArgs: [FIXTURE, '--mode', 'sleep', '--sleep', String(sleepMs)], promptArgs: legacyPrompt, concurrency });
     const serialAgent = mk(1); // 同一实例：并发闸生效
     const t0 = Date.now();
     await Promise.all([serialAgent.execute(task('a')), serialAgent.execute(task('b'))]);

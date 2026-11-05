@@ -135,11 +135,12 @@ try {
   check('前置：A/B 初始同步完成', await synced);
 
   const registry = new ExecutorRegistry();
+  const legacyPrompt = (task) => ['-z', task.intent];
   registry.register('echo', new EchoExecutor());
-  registry.register('fake', new CommandAgent({ command: process.execPath, baseArgs: [FIXTURE] }));
-  registry.register('slow', new CommandAgent({ command: process.execPath, baseArgs: [FIXTURE, '--mode', 'sleep', '--sleep', '5000'], timeoutMs: 400 }));
-  registry.register('fail', new CommandAgent({ command: process.execPath, baseArgs: [FIXTURE, '--mode', 'fail', '--exit', '3', '--stderr', 'agent-down'] }));
-  registry.register('big', new CommandAgent({ command: process.execPath, baseArgs: [FIXTURE, '--mode', 'large', '--bytes', '100000'], maxOutputBytes: 1000 }));
+  registry.register('fake', new CommandAgent({ command: process.execPath, baseArgs: [FIXTURE], promptArgs: legacyPrompt }));
+  registry.register('slow', new CommandAgent({ command: process.execPath, baseArgs: [FIXTURE, '--mode', 'sleep', '--sleep', '5000'], promptArgs: legacyPrompt, timeoutMs: 400 }));
+  registry.register('fail', new CommandAgent({ command: process.execPath, baseArgs: [FIXTURE, '--mode', 'fail', '--exit', '3', '--stderr', 'agent-down'], promptArgs: legacyPrompt }));
+  registry.register('big', new CommandAgent({ command: process.execPath, baseArgs: [FIXTURE, '--mode', 'large', '--bytes', '100000'], promptArgs: legacyPrompt, maxOutputBytes: 1000 }));
   let hermesAgent = null;
   if (WITH_HERMES) {
     hermesAgent = new HermesAgent({ timeoutMs: 180000, maxOutputBytes: 2000 });

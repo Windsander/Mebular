@@ -1,18 +1,34 @@
-// Fleet Agent 适配器（M4）：按 `to.agent` 名字路由到可插拔执行器。
+// Fleet Agent 适配器（M4 / 0.3.2 WS1）：按 `to.agent` 名字路由到统一执行层。
+//
+// 分层：
+// - `ExecutorRegistry`：名字 → `TaskExecutor`（未知名字返回 null，由 worker 显式失败）；
+// - `CliExecutorAdapter` / `HermesExecutorAdapter`：只做**平台参数翻译**；
+// - `BaseExecutor`（见 `executor.ts`）：并发、timeout、AbortSignal、env 白名单、截断、归一化。
 //
 // 安全与工程约束：
 // - **参数数组传参**（绝不 shell 拼接，防注入）；
-// - 超时 / 非零退出 / 输出超限 各自语义明确（超时与非零 → 任务 `failed` 带原因）；
-// - **不继承 daemon 的全量 env**：只透传 `ENV_ALLOWLIST`（PATH/HOME/… 运行所需）+ 调用方显式
-//   给出的 `options.env`；凭据/令牌不外流。同时不打印/不落盘任何 env 值；
-// - 工作目录与并发上限可配。
+// - **不继承 daemon 的全量 env**：只透传 `ENV_ALLOWLIST` + 调用方显式给出的 env；
+// - 平台参数（`-z`/`--usage-file`）只出现在 Hermes adapter 内，不是通用默认。
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { TaskState } from '../model.js';
-import type { ExecutionOutcome, TaskExecutor } from './executor.js';
+import {
+  BaseExecutor,
+  buildChildEnv,
+  type ExecutorAdapter,
+  type ExecutorDescriptor,
+  type ExecutorHealth,
+  type ExecutorPromptMode,
+  type ExecutorRequest,
+  type ExecutorResult,
+  type TaskExecutor,
+} from './executor.js';
+
+// 兼容旧子路径导入：这些公共语义已迁到 `executor.ts`，此处保持同名 re-export。
+export { ENV_ALLOWLIST, buildChildEnv, truncateOutput } from './executor.js';
 
 /** 按 agent 名字选择执行器；**未知 agent 返回 null**（调用方须显式失败，不得静默回退）。 */
 export class ExecutorRegistry {
@@ -52,33 +68,20 @@ export class ExecutorRegistry {
   names(): string[] {
     return [...this.exact.keys()].sort();
   }
-}
 
-/** UTF-8 安全截断（按字节），附截断标记。 */
-export function truncateOutput(text: string, maxBytes: number): { text: string; truncated: boolean; totalBytes: number } {
-  const buf = Buffer.from(text, 'utf-8');
-  if (buf.byteLength <= maxBytes) return { text, truncated: false, totalBytes: buf.byteLength };
-  const head = buf.subarray(0, maxBytes).toString('utf-8');
-  return { text: `${head}\n…[truncated ${buf.byteLength - maxBytes} bytes]`, truncated: true, totalBytes: buf.byteLength };
-}
-
-/** 简单并发闸（确定性：FIFO）。 */
-class Semaphore {
-  private active = 0;
-  private readonly waiters: Array<() => void> = [];
-  constructor(private readonly limit: number) {}
-  async acquire(): Promise<void> {
-    if (this.active < this.limit) {
-      this.active += 1;
-      return;
-    }
-    await new Promise<void>((resolve) => this.waiters.push(resolve));
-    this.active += 1;
+  /** 执行器（若实现统一执行层）的 descriptor；未知/非 BaseExecutor 返回 undefined。 */
+  descriptorOf(agent: string): ExecutorDescriptor | undefined {
+    const executor = this.resolve(agent);
+    return executor instanceof BaseExecutor ? executor.descriptor : undefined;
   }
-  release(): void {
-    this.active -= 1;
-    const next = this.waiters.shift();
-    if (next) next();
+
+  /** 执行器健康探测；未知/非 BaseExecutor 返回 unavailable（advisory）。 */
+  async healthOf(agent: string, timeoutMs = 5_000): Promise<ExecutorHealth> {
+    const executor = this.resolve(agent);
+    if (!(executor instanceof BaseExecutor)) {
+      return { status: 'unavailable', checkedAt: Date.now(), detail: `no health probe for agent ${agent}` };
+    }
+    return executor.health(timeoutMs);
   }
 }
 
@@ -90,51 +93,14 @@ export interface SpawnResult {
   stdoutBytes: number;
   stderrTail: string;
   timedOut: boolean;
+  /** 调用方 AbortSignal 触发（与 timeout 区分，公共层会归一为 TIMEOUT/ABORTED）。 */
+  aborted?: boolean;
 }
 
 /**
- * 允许透传给被派发 Agent 的环境变量**白名单**（非私密运行所需）。
- * 其余（尤其凭据/令牌）**一律不继承**——daemon 的 env 不外流。
+ * 以参数数组执行命令；捕获 stdout/stderr（stderr 保留尾部）；超时/AbortSignal kill。
+ * 环境仍按白名单过滤（即使调用方传入的 env 已过滤，也不会额外继承 daemon 变量）。
  */
-export const ENV_ALLOWLIST: readonly string[] = [
-  'PATH',
-  'HOME',
-  'LANG',
-  'LC_ALL',
-  'LC_CTYPE',
-  'TZ',
-  'SHELL',
-  'USER',
-  'LOGNAME',
-  'TMPDIR',
-  'TEMP',
-  'TMP',
-  'HERMES_HOME', // Hermes profile 解析（非密）
-  // Windows 运行所需（存在才带）
-  'SystemRoot',
-  'PATHEXT',
-  'COMSPEC',
-  'USERPROFILE',
-  'APPDATA',
-  'LOCALAPPDATA',
-  'ProgramData',
-];
-
-/** 按白名单构建子进程 env；`extra`（调用方显式给出）覆盖白名单同名项。 */
-export function buildChildEnv(
-  extra?: Readonly<Record<string, string>>,
-  source: NodeJS.ProcessEnv = process.env,
-): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const key of ENV_ALLOWLIST) {
-    const value = source[key];
-    if (value !== undefined) env[key] = value;
-  }
-  for (const [key, value] of Object.entries(extra ?? {})) env[key] = value;
-  return env;
-}
-
-/** 以参数数组执行命令；捕获 stdout/stderr（stderr 保留尾部）；超时 kill。 */
 export async function runOnce(options: {
   command: string;
   args: readonly string[];
@@ -142,6 +108,9 @@ export async function runOnce(options: {
   env?: Readonly<Record<string, string>>;
   timeoutMs: number;
   maxOutputBytes: number;
+  /** 写入子进程 stdin（`promptMode: 'stdin'`）；不给则 stdin = ignore */
+  stdin?: string;
+  signal?: AbortSignal;
 }): Promise<SpawnResult> {
   const limit = options.maxOutputBytes;
   return new Promise<SpawnResult>((resolve) => {
@@ -151,10 +120,17 @@ export async function runOnce(options: {
         ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
         // 只继承白名单 + 显式 env；不把 daemon 的全量环境（含凭据）传给被派发 Agent。
         env: buildChildEnv(options.env),
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: [options.stdin !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe'],
       });
     } catch (error) {
-      resolve({ code: null, stdout: '', stdoutBytes: 0, stderrTail: (error as Error).message, timedOut: false });
+      resolve({
+        code: null,
+        stdout: '',
+        stdoutBytes: 0,
+        stderrTail: (error as Error).message,
+        timedOut: false,
+        aborted: false,
+      });
       return;
     }
     const outChunks: Buffer[] = [];
@@ -162,10 +138,20 @@ export async function runOnce(options: {
     let outBytes = 0;
     let totalOutBytes = 0;
     let timedOut = false;
+    let aborted = false;
+    let settled = false;
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill('SIGKILL');
     }, Math.max(1, options.timeoutMs));
+    const onAbort = (): void => {
+      aborted = true;
+      child.kill('SIGKILL');
+    };
+    if (options.signal !== undefined) {
+      if (options.signal.aborted) onAbort();
+      else options.signal.addEventListener('abort', onAbort, { once: true });
+    }
 
     child.stdout?.on('data', (chunk: Buffer) => {
       totalOutBytes += chunk.length;
@@ -181,11 +167,18 @@ export async function runOnce(options: {
       errChunks.push(chunk);
       while (errChunks.length > 0 && Buffer.concat(errChunks).length > 8192) errChunks.shift();
     });
+    if (options.stdin !== undefined) {
+      child.stdin?.on('error', () => undefined); // EPIPE 等不改变执行结果
+      child.stdin?.end(options.stdin);
+    }
     const finish = (code: number | null): void => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
+      options.signal?.removeEventListener('abort', onAbort);
       const stdout = Buffer.concat(outChunks).toString('utf-8');
       const stderrTail = Buffer.concat(errChunks).toString('utf-8').trim().slice(-800);
-      resolve({ code, stdout, stdoutBytes: totalOutBytes, stderrTail, timedOut });
+      resolve({ code, stdout, stdoutBytes: totalOutBytes, stderrTail, timedOut, aborted });
     };
     child.on('error', () => finish(null));
     child.on('close', (code) => finish(code));
@@ -195,10 +188,16 @@ export async function runOnce(options: {
 export interface CommandAgentOptions {
   /** 可执行文件（不经 shell） */
   command: string;
-  /** 命令后、prompt 参数前的固定参数 */
+  /** 命令后、prompt 相关参数前的固定参数 */
   baseArgs?: readonly string[];
-  /** 由任务生成 prompt 相关参数（默认 `['-z', task.intent]`） */
-  promptArgs?: (task: TaskState) => string[];
+  /**
+   * prompt 参数：
+   * - 函数：返回**完整** prompt 参数（含 prompt 本身；旧用法，优先生效）；
+   * - 字符串数组：插在 prompt 之前的固定参数（配合 `promptMode`）。
+   */
+  promptArgs?: readonly string[] | ((task: TaskState) => readonly string[]);
+  /** `'arg'`（默认：prompt 作为最后一个参数）或 `'stdin'`（写入 stdin） */
+  promptMode?: ExecutorPromptMode;
   cwd?: string;
   /** 额外环境变量（值不会被打印/落盘） */
   env?: Readonly<Record<string, string>>;
@@ -212,41 +211,70 @@ export interface CommandAgentOptions {
   resultRef?: (stdout: string, task: TaskState) => string;
 }
 
-/** 通用「命令行 Agent」执行器。 */
-export class CommandAgent implements TaskExecutor {
-  private readonly sem: Semaphore;
+/** 通用命令行 adapter：只负责 argv/stdin 翻译与退出码归一化。 */
+export class CliExecutorAdapter implements ExecutorAdapter {
+  readonly descriptor: ExecutorDescriptor;
+
   constructor(private readonly options: CommandAgentOptions) {
-    this.sem = new Semaphore(Math.max(1, options.concurrency ?? 1));
+    this.descriptor = {
+      kind: 'command',
+      executionMode: 'cli',
+      supportsCancel: true,
+      promptMode: options.promptMode ?? 'arg',
+    };
   }
 
-  async execute(task: TaskState): Promise<ExecutionOutcome> {
-    await this.sem.acquire();
-    try {
-      const args = [
-        ...(this.options.baseArgs ?? []),
-        ...(this.options.promptArgs ? this.options.promptArgs(task) : ['-z', task.intent]),
-      ];
-      const timeoutMs = this.options.timeoutMs ?? 60_000;
-      const maxOutputBytes = this.options.maxOutputBytes ?? 65_536;
-      const result = await runOnce({
-        command: this.options.command,
-        args,
-        ...(this.options.cwd !== undefined ? { cwd: this.options.cwd } : {}),
-        ...(this.options.env !== undefined ? { env: this.options.env } : {}),
-        timeoutMs,
-        maxOutputBytes,
-      });
-      if (result.timedOut) return { ok: false, reason: `TIMEOUT after ${timeoutMs}ms` };
-      if (result.code !== 0) {
-        return { ok: false, reason: `EXIT_${result.code}${result.stderrTail ? `: ${result.stderrTail}` : ''}` };
-      }
-      const stored = result.stdout.trim();
-      const text = result.stdoutBytes > maxOutputBytes ? `${stored}\n…[truncated ${result.stdoutBytes - maxOutputBytes} bytes]` : stored;
-      const resultRef = this.options.resultRef ? this.options.resultRef(text, task) : text;
-      return { ok: true, resultRef };
-    } finally {
-      this.sem.release();
+  private argv(request: ExecutorRequest): { args: string[]; stdin?: string } {
+    const base = [...(this.options.baseArgs ?? [])];
+    const promptArgs = this.options.promptArgs;
+    if (typeof promptArgs === 'function') {
+      return { args: [...base, ...promptArgs(request.task)] };
     }
+    const fixed = [...(promptArgs ?? [])];
+    if ((this.options.promptMode ?? 'arg') === 'stdin') {
+      return { args: [...base, ...fixed], stdin: request.prompt };
+    }
+    return { args: [...base, ...fixed, request.prompt] };
+  }
+
+  async invoke(request: ExecutorRequest, signal: AbortSignal): Promise<ExecutorResult> {
+    const { args, stdin } = this.argv(request);
+    const result = await runOnce({
+      command: this.options.command,
+      args,
+      ...(request.cwd !== undefined ? { cwd: request.cwd } : {}),
+      env: request.env,
+      timeoutMs: request.timeoutMs,
+      maxOutputBytes: request.maxOutputBytes,
+      ...(stdin !== undefined ? { stdin } : {}),
+      signal,
+    });
+    if (result.timedOut || result.aborted) {
+      return { ok: false, reason: `TIMEOUT after ${request.timeoutMs}ms` };
+    }
+    if (result.code !== 0) {
+      return { ok: false, reason: `EXIT_${result.code}${result.stderrTail ? `: ${result.stderrTail}` : ''}` };
+    }
+    const stdout = result.stdout.trim();
+    const resultRef = this.options.resultRef?.(stdout, request.task);
+    return {
+      ok: true,
+      resultRef: resultRef ?? result.stdout,
+      ...(resultRef === undefined ? { outputBytes: result.stdoutBytes } : {}),
+    };
+  }
+}
+
+/** 通用「命令行 Agent」执行器（公共层包装 CLI adapter）。 */
+export class CommandAgent extends BaseExecutor {
+  constructor(options: CommandAgentOptions) {
+    super(new CliExecutorAdapter(options), {
+      ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+      ...(options.maxOutputBytes !== undefined ? { maxOutputBytes: options.maxOutputBytes } : {}),
+      ...(options.concurrency !== undefined ? { concurrency: options.concurrency } : {}),
+      ...(options.env !== undefined ? { env: options.env } : {}),
+      ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
+    });
   }
 }
 
@@ -271,14 +299,18 @@ export interface HermesAgentOptions {
 }
 
 /**
- * Hermes 一次性非交互适配器：`hermes [-p P] [-t T] [-m M] [--in DIR] -z <prompt> --usage-file <tmp>`。
- * 成功 → 结果 = stdout（截断）；超时/非零退出 → `failed` 带原因与 stderr 尾巴。
+ * Hermes 专用 adapter：`hermes [-p P] [-t T] [-m M] [--in DIR] -z <prompt> --usage-file <tmp>`。
+ * `-z`/`--usage-file` 是 Hermes 平台细节，**只出现在这里**。
  */
-export class HermesAgent implements TaskExecutor {
-  private readonly sem: Semaphore;
-  constructor(private readonly options: HermesAgentOptions = {}) {
-    this.sem = new Semaphore(Math.max(1, options.concurrency ?? 2));
-  }
+export class HermesExecutorAdapter implements ExecutorAdapter {
+  readonly descriptor: ExecutorDescriptor = {
+    kind: 'hermes',
+    executionMode: 'cli',
+    supportsCancel: true,
+    promptMode: 'arg',
+  };
+
+  constructor(private readonly options: HermesAgentOptions = {}) {}
 
   private argv(prompt: string, usagePath: string): string[] {
     const args: string[] = [...(this.options.commandArgs ?? [])];
@@ -290,26 +322,25 @@ export class HermesAgent implements TaskExecutor {
     return args;
   }
 
-  async execute(task: TaskState): Promise<ExecutionOutcome> {
-    await this.sem.acquire();
+  async invoke(request: ExecutorRequest, signal: AbortSignal): Promise<ExecutorResult> {
     const dir = await mkdtemp(join(this.options.usageDir ?? tmpdir(), 'fleet-hermes-'));
     const usagePath = join(dir, 'usage.json');
     try {
-      const timeoutMs = this.options.timeoutMs ?? 600_000;
-      const maxOutputBytes = this.options.maxOutputBytes ?? 65_536;
       const result = await runOnce({
         command: this.options.hermesPath ?? 'hermes',
-        args: this.argv(task.intent, usagePath),
+        args: this.argv(request.prompt, usagePath),
         ...(this.options.cwd !== undefined ? { cwd: this.options.cwd } : {}),
-        timeoutMs,
-        maxOutputBytes,
+        env: request.env,
+        timeoutMs: request.timeoutMs,
+        maxOutputBytes: request.maxOutputBytes,
+        signal,
       });
-      if (result.timedOut) return { ok: false, reason: `TIMEOUT after ${timeoutMs}ms` };
+      if (result.timedOut || result.aborted) {
+        return { ok: false, reason: `TIMEOUT after ${request.timeoutMs}ms` };
+      }
       if (result.code !== 0) {
         return { ok: false, reason: `EXIT_${result.code}${result.stderrTail ? `: ${result.stderrTail}` : ''}` };
       }
-      const stored = result.stdout.trim();
-      const text = result.stdoutBytes > maxOutputBytes ? `${stored}\n…[truncated ${result.stdoutBytes - maxOutputBytes} bytes]` : stored;
       // usage 仅用于观测 sessionId；解析失败不影响结果。
       let sessionId: string | undefined;
       try {
@@ -318,10 +349,28 @@ export class HermesAgent implements TaskExecutor {
       } catch {
         sessionId = undefined;
       }
-      return { ok: true, ...(sessionId !== undefined ? { reason: `session:${sessionId}` } : {}), resultRef: text };
+      return {
+        ok: true,
+        ...(sessionId !== undefined ? { reason: `session:${sessionId}` } : {}),
+        resultRef: result.stdout,
+        outputBytes: result.stdoutBytes,
+      };
     } finally {
       await rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 20 });
-      this.sem.release();
     }
+  }
+}
+
+/**
+ * Hermes 一次性非交互执行器（公共层包装 Hermes adapter）。
+ * 成功 → 结果 = stdout（截断）；超时/非零退出 → `failed` 带原因与 stderr 尾巴。
+ */
+export class HermesAgent extends BaseExecutor {
+  constructor(options: HermesAgentOptions = {}) {
+    super(new HermesExecutorAdapter(options), {
+      timeoutMs: options.timeoutMs ?? 600_000,
+      ...(options.maxOutputBytes !== undefined ? { maxOutputBytes: options.maxOutputBytes } : {}),
+      concurrency: options.concurrency ?? 2,
+    });
   }
 }

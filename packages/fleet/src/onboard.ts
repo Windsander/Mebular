@@ -30,6 +30,7 @@ import {
   validateFleetConfig,
   writeMasterKeyFile,
   type FleetAgentConfig,
+  type FleetAgentKind,
   type FleetConfig,
   type FleetEncryption,
   type OnboardInput,
@@ -39,7 +40,7 @@ import { CommandAgent, ExecutorRegistry, HermesAgent } from './runtime/agent.js'
 import { AGENT_NAMESPACE } from './agentdir.js';
 import { HttpOpenChamberSeam } from './runtime/openchamber-http.js';
 import { OpenChamberAgent } from './runtime/openchamber.js';
-import { EchoExecutor } from './runtime/executor.js';
+import { EchoExecutor, type TaskExecutor } from './runtime/executor.js';
 
 async function exists(path: string): Promise<boolean> {
   try {
@@ -50,29 +51,53 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
-/** 由 agent 配置构建执行器注册表（未知 kind 已在校验期拒绝）。 */
-export function buildRegistry(agents: readonly FleetAgentConfig[]): ExecutorRegistry {
+/** 由 agent 配置构造 `TaskExecutor`；新增 kind 只需登记到 factory 表（并扩展配置校验）。 */
+export type ExecutorFactory = (agent: FleetAgentConfig) => TaskExecutor;
+
+/** 已注册 kind → factory。**没有 else 兜底**：未知 kind 必须显式失败。 */
+export const DEFAULT_EXECUTOR_FACTORIES: Readonly<Record<FleetAgentKind, ExecutorFactory>> = {
+  echo: () => new EchoExecutor(),
+  command: (a) =>
+    new CommandAgent({
+      command: a.command ?? '',
+      ...(a.baseArgs !== undefined ? { baseArgs: a.baseArgs } : {}),
+      ...(a.promptArgs !== undefined ? { promptArgs: a.promptArgs } : {}),
+      ...(a.promptMode !== undefined ? { promptMode: a.promptMode } : {}),
+      ...(a.cwd !== undefined ? { cwd: a.cwd } : {}),
+      ...(a.timeoutMs !== undefined ? { timeoutMs: a.timeoutMs } : {}),
+      ...(a.maxOutputBytes !== undefined ? { maxOutputBytes: a.maxOutputBytes } : {}),
+      ...(a.concurrency !== undefined ? { concurrency: a.concurrency } : {}),
+    }),
+  hermes: (a) =>
+    new HermesAgent({
+      ...(a.baseArgs !== undefined ? { commandArgs: a.baseArgs } : {}),
+      ...(a.cwd !== undefined ? { cwd: a.cwd } : {}),
+      ...(a.timeoutMs !== undefined ? { timeoutMs: a.timeoutMs } : {}),
+      ...(a.maxOutputBytes !== undefined ? { maxOutputBytes: a.maxOutputBytes } : {}),
+      ...(a.concurrency !== undefined ? { concurrency: a.concurrency } : {}),
+    }),
+  openchamber: (a) =>
+    new OpenChamberAgent(new HttpOpenChamberSeam({ ...(a.timeoutMs !== undefined ? { timeoutMs: a.timeoutMs } : {}) }), {
+      ...(a.cwd !== undefined ? { cwd: a.cwd } : {}),
+      ...(a.timeoutMs !== undefined ? { timeoutMs: a.timeoutMs } : {}),
+      ...(a.maxOutputBytes !== undefined ? { maxOutputBytes: a.maxOutputBytes } : {}),
+      ...(a.concurrency !== undefined ? { concurrency: a.concurrency } : {}),
+    }),
+};
+
+/**
+ * 由 agent 配置构建执行器注册表（未知 kind 已在校验期拒绝；此处再显式失败，杜绝旧版
+ * `else -> OpenChamber` 的静默回退）。`factories` 可覆盖/扩展，供后续 adapter 会话使用。
+ */
+export function buildRegistry(
+  agents: readonly FleetAgentConfig[],
+  factories: Readonly<Record<string, ExecutorFactory>> = DEFAULT_EXECUTOR_FACTORIES,
+): ExecutorRegistry {
   const registry = new ExecutorRegistry();
   for (const a of agents) {
-    if (a.kind === 'echo') registry.register(a.name, new EchoExecutor());
-    else if (a.kind === 'command') {
-      registry.register(
-        a.name,
-        new CommandAgent({
-          command: a.command ?? '',
-          ...(a.baseArgs !== undefined ? { baseArgs: a.baseArgs } : {}),
-          ...(a.timeoutMs !== undefined ? { timeoutMs: a.timeoutMs } : {}),
-          ...(a.concurrency !== undefined ? { concurrency: a.concurrency } : {}),
-        }),
-      );
-    } else if (a.kind === 'hermes') {
-      registry.register(a.name, new HermesAgent({ ...(a.timeoutMs !== undefined ? { timeoutMs: a.timeoutMs } : {}) }));
-    } else {
-      registry.register(
-        a.name,
-        new OpenChamberAgent(new HttpOpenChamberSeam({ ...(a.timeoutMs !== undefined ? { timeoutMs: a.timeoutMs } : {}) })),
-      );
-    }
+    const factory = factories[a.kind];
+    if (factory === undefined) throw new Error(`UNKNOWN_AGENT_KIND: ${a.kind}`);
+    registry.register(a.name, factory(a));
   }
   return registry;
 }

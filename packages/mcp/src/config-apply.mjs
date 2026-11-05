@@ -178,6 +178,65 @@ export async function restoreBackup({ configFile, backupFile = `${configFile}.ba
   }
 }
 
+/** 生产启动/下次 apply：有界重试 rollingBack 的 restore；成功清理 pending，失败保留可重试状态。 */
+export async function recoverPendingRollback({
+  home,
+  configFile = join(home, 'config.json'),
+  backupFile = `${configFile}.bak`,
+  log = () => {},
+} = {}) {
+  const pending = await readApplyPending(home);
+  if (!pending || pending.rollingBack !== true) return { status: 'not_pending' };
+  try {
+    const restored = await restoreBackup({ configFile, backupFile });
+    if (!restored) {
+      const error = new Error('回滚备份不存在');
+      error.code = 'BACKUP_MISSING';
+      throw error;
+    }
+    const record = {
+      status: 'rolled-back',
+      attempt: pending.attempt ?? null,
+      at: new Date().toISOString(),
+      fields: Array.isArray(pending.fields) ? pending.fields : [],
+      reason: pending.reason ?? null,
+      restored: true,
+      backup: backupFile,
+      recovered: true,
+      retries: Number(pending.attempts ?? 1),
+    };
+    await writeApplyResult(home, record);
+    // 恢复期间可能已有新的 apply 写入 pending：只清理本次处理的那一条。
+    const current = await readApplyPending(home);
+    if (current
+      && current.rollingBack === true
+      && (pending.attempt == null || current.attempt === pending.attempt)) {
+      await clearApplyPending(home);
+    }
+    log('apply: rollingBack pending 已自动恢复');
+    return record;
+  } catch (error) {
+    const record = {
+      status: 'rollback-failed',
+      attempt: pending.attempt ?? null,
+      at: new Date().toISOString(),
+      fields: Array.isArray(pending.fields) ? pending.fields : [],
+      reason: pending.reason ?? null,
+      restored: false,
+      backup: backupFile,
+      restoreError: {
+        code: error?.code ?? 'RESTORE_FAILED',
+        message: String(error?.message ?? error),
+      },
+      recovered: false,
+      retries: Number(pending.attempts ?? 1),
+    };
+    await writeApplyResult(home, record);
+    // 保留 pending，允许下一次启动/apply 或人工重试。
+    return record;
+  }
+}
+
 /**
  * supervisor：等新实例健康；不健康 → 还原 .bak + 再重启 + 记录。
  * 可注入 health/restart/now 以便测试。
@@ -199,6 +258,9 @@ export async function runApplySupervisor({
 } = {}) {
   const now = () => Date.now();
   const pending = (await readApplyPending(home)) ?? { fields, at: new Date(since).toISOString(), attempts: 1 };
+  if (pending.rollingBack === true && configFile) {
+    return recoverPendingRollback({ home, configFile, backupFile, log });
+  }
   const attempts = Number(pending.attempts ?? 1);
   log(`apply: 等待新实例健康（fields=${fields.join(',')} timeout=${timeoutMs}ms）`);
   const outcome = await health({ home, port, oldPid, since, timeoutMs, now });

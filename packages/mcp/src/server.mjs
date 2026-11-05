@@ -7,12 +7,12 @@ import { existsSync } from 'node:fs';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { MemoryService } from '@mebular/core';
-import { createMebular, homeDir, loadConfigFile } from './config.mjs';
+import { createMebular, configPath, homeDir, loadConfigFile } from './config.mjs';
 import { registerTools } from './tools.mjs';
 import { startHttpServer, acquireLock, pidAlive } from './serve.mjs';
 import { APP_VERSION } from './version.mjs';
 import { createJoinServer } from './jointoken.mjs';
-import { clearApplyPending, readApplyPending, writeApplyResult, writeServeReady } from './config-apply.mjs';
+import { clearApplyPending, readApplyPending, recoverPendingRollback, writeApplyResult, writeServeReady } from './config-apply.mjs';
 import { buildSettings } from './admin.mjs';
 import { isProvisionHome } from './provision.mjs';
 import { acquireActiveLock, profileIdForHome, resolveCloudRoot } from './profiles.mjs';
@@ -143,6 +143,15 @@ function runtimeMcpPort(config, options = {}) {
  */
 export async function startServeServer(options = {}) {
   const home = homeDir();
+  // 上次回滚失败留下的 pending：读 config 之前先尝试恢复 .bak，避免带着未回滚配置启动。
+  // 单次尝试有界（restoreBackup 自己受 config lock/超时约束），失败写 rollback-failed 供 admin 展示。
+  await recoverPendingRollback({
+    home,
+    configFile: configPath(home),
+    log: (message) => console.error(message),
+  }).catch((error) => {
+    console.error(`CONFIG_ROLLBACK_RECOVERY_FAILED ${error?.code ?? 'ERROR'}`);
+  });
   const provisionStart = isProvisionHome(home, { storagePath: process.env.MEBULAR_STORAGE_PATH });
   // F-NET-1（C）：**先取单实例锁，再初始化网络**——第二写者应在绑定监听端口前就得到
   // 可读的 MCP_STORAGE_LOCKED（此前 createMebular 先启网络 → 抢 4001 → 裸 EADDRINUSE）。

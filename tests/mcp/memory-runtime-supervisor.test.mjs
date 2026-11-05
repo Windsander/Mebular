@@ -693,6 +693,9 @@ describe('MemoryRuntimeSupervisor：生命周期', () => {
     expect(restarted.error?.code).not.toBe('sidecar_starting');
     expect(restarted).toMatchObject({ state: 'stopped', reason: 'disabled' });
     expect(await supervisor.status()).toMatchObject({ state: 'stopped', reason: 'disabled' });
+    // 热禁用时 capability 已撤销（baseline=null）；重新启用签发新 token 后不得再报告 stopped。
+    await writeCapabilityToken(home, 'capability-b');
+    expect(await supervisor.start()).toMatchObject({ state: 'starting' });
   }, 15000);
 
   it('starting/degraded 健康态不得被 acceptDormant 放行停止', async () => {
@@ -812,6 +815,48 @@ describe('MemoryRuntimeSupervisor：生命周期', () => {
     expect(first).not.toMatchObject({ state: 'stopped', reason: 'disabled' });
     const second = await supervisor.start();
     expect(second).not.toMatchObject({ state: 'stopped', reason: 'disabled' });
+  }, 15000);
+
+  it('stop(false) 记录旧 credential baseline；新 supervisor 用 token B 不得返回 stopped', async () => {
+    const home = await tempDir();
+    await writeCapabilityToken(home, 'baseline-token-a');
+    const external = spawn(process.execPath, [FAKE, 'serve'], {
+      env: { ...process.env, ...envFor(home, { FAKE_SIDECAR_HEARTBEAT_MS: '50' }) },
+      stdio: 'ignore',
+    });
+    cleanups.push(async () => {
+      if (pidAlive(external.pid)) process.kill(external.pid, 'SIGTERM');
+    });
+    await waitFor(() => existsSync(join(home, 'memory-runtime.json')));
+    const first = new MemoryRuntimeSupervisor({
+      home,
+      config: enabledConfig({ startTimeoutMs: 500 }),
+      env: envFor(home),
+      profileId: () => 'default',
+    });
+    expect(await first.start()).toMatchObject({ state: 'ready', attached: true });
+    await first.stop({ includeAttached: false, timeoutMs: 500 });
+    expect(existsSync(join(home, 'memory-runtime', 'dormant.json'))).toBe(true);
+
+    await writeCapabilityToken(home, 'baseline-token-b');
+    const second = new MemoryRuntimeSupervisor({
+      home,
+      config: enabledConfig({ startTimeoutMs: 500 }),
+      env: envFor(home),
+      profileId: () => 'default',
+    });
+    const restarted = await second.start();
+    expect(restarted).toMatchObject({ state: 'starting' });
+    expect(await second.status()).toMatchObject({ state: 'starting' });
+    // 旧 baseline 必须保留：同一 token B 下再次启动的 supervisor 也不得回退 stopped。
+    expect(existsSync(join(home, 'memory-runtime', 'dormant.json'))).toBe(true);
+    const third = new MemoryRuntimeSupervisor({
+      home,
+      config: enabledConfig({ startTimeoutMs: 500 }),
+      env: envFor(home),
+      profileId: () => 'default',
+    });
+    expect(await third.start()).toMatchObject({ state: 'starting' });
   }, 15000);
 
   for (const variant of [

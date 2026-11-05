@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import {
   applyPendingPath,
   readApplyPending,
+  readApplyResult,
   runApplySupervisor,
 } from '../../packages/mcp/src/config-apply.mjs';
 import { acquireConfigFileLock } from '../../packages/mcp/src/config-lock.mjs';
@@ -67,7 +68,8 @@ describe('config-apply restoreBackup lock', () => {
       health: async () => ({ healthy: false, waitedMs: 1 }),
       restart: async () => undefined,
     });
-    expect(recovered).toMatchObject({ status: 'rollback-failed', restored: true });
+    expect(recovered).toMatchObject({ status: 'rolled-back', restored: true, recovered: true });
+    expect(await readApplyResult(home)).toMatchObject({ status: 'rolled-back', restored: true });
     expect(JSON.parse(await readFile(configFile, 'utf-8'))).toEqual({ restored: true });
     expect(await readApplyPending(home)).toBeNull();
     await expect(readFile(applyPendingPath(home), 'utf-8')).rejects.toMatchObject({ code: 'ENOENT' });

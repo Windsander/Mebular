@@ -10,7 +10,7 @@ import { randomBytes } from 'node:crypto';
 import { link, open, readFile, stat, unlink, utimes, writeFile } from 'node:fs/promises';
 
 export const CONFIG_LOCK_STALE_MS = 30_000;
-const LINK_UNSUPPORTED = new Set(['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'EXDEV', 'ENOSYS']);
+const LINK_UNSUPPORTED = new Set(['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'EXDEV', 'ENOSYS', 'EACCES', 'EINVAL', 'EMLINK']);
 
 function pidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -81,7 +81,7 @@ export async function acquireConfigFileLock(configFile, {
   };
 
   const startHeartbeat = () => {
-    const period = Math.max(250, Math.floor(staleMs / 3));
+    const period = Math.max(1, Math.min(Math.max(10, Math.floor(staleMs / 3)), Math.max(1, staleMs - 1)));
     const timer = setInterval(() => {
       void (async () => {
         const current = await snapshot();

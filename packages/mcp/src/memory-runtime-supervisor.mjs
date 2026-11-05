@@ -15,7 +15,7 @@
 import { spawn as defaultSpawn } from 'node:child_process';
 import { randomBytes, createHash } from 'node:crypto';
 import { statSync } from 'node:fs';
-import { readFile, stat, unlink } from 'node:fs/promises';
+import { readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -736,6 +736,38 @@ export class MemoryRuntimeSupervisor {
     }
   }
 
+  get #dormantStatePath() {
+    return join(this.paths.dataDir, 'dormant.json');
+  }
+
+  async #readDormantState() {
+    try {
+      const value = JSON.parse(await readFile(this.#dormantStatePath, 'utf-8'));
+      if (!Number.isInteger(value?.pid) || typeof value?.startedAt !== 'number') return null;
+      return {
+        pid: value.pid,
+        startedAt: value.startedAt,
+        credential: typeof value.credential === 'string' ? value.credential : null,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  async #writeDormantState(state) {
+    try {
+      const tmp = `${this.#dormantStatePath}.tmp-${process.pid}`;
+      await writeFile(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
+      await rename(tmp, this.#dormantStatePath);
+    } catch {
+      // 状态持久化失败不改变内存判定；下次 start 仍可用 lock/凭据重新判定。
+    }
+  }
+
+  async #clearDormantState() {
+    await unlink(this.#dormantStatePath).catch(() => undefined);
+  }
+
   /**
    * 读取 discovery/health 并更新快照。
    * @returns {Promise<boolean>} 是否可接流量（ready 或 degraded）。
@@ -760,6 +792,7 @@ export class MemoryRuntimeSupervisor {
           || credential !== this.dormantLock.credential) {
           this.dormantLockInvalidated = true;
           this.dormantLock = null;
+          // 保留持久化 baseline：跨进程启动仍能识别 credential 已换代。
         } else {
           this.#setState({
             state: 'stopped',
@@ -963,6 +996,7 @@ export class MemoryRuntimeSupervisor {
       this.readySeen = true;
       this.dormantLock = null;
       this.dormantLockInvalidated = false;
+      await this.#clearDormantState();
       const degraded = discovery.degraded === true || health.degraded === true;
       this.#setState({
         state: degraded ? 'degraded' : 'ready',
@@ -2128,44 +2162,65 @@ export class MemoryRuntimeSupervisor {
       if (dormantCandidate && await this.#verifyLiveInstance(dormantCandidate, { requireDiscovery: false })) {
         const observed = await this.#readSidecarMode(dormantCandidate);
         if (observed?.mode === 'mcp' && observed.state === 'stopped') {
+          const persisted = await this.#readDormantState();
+          const persistedMatches = persisted
+            && persisted.pid === lock.pid
+            && persisted.startedAt === lock.startedAt
+            ? persisted
+            : null;
+          if (persisted && !persistedMatches) await this.#clearDormantState();
+          const inMemoryBaseline = this.dormantLock
+            && this.dormantLock.pid === lock.pid
+            && this.dormantLock.startedAt === lock.startedAt
+            ? this.dormantLock.credential
+            : undefined;
+          const baseline = inMemoryBaseline !== undefined
+            ? inMemoryBaseline
+            : (persistedMatches ? persistedMatches.credential : undefined);
+          const credential = await this.#capabilityFingerprint();
           if (this.dormantLockInvalidated) {
-            // 旧 dormantLock 已因 token 换代失效：保持失效，直到成功发现新实例；
-            // 首次 start 超时后第二次 start 也不得回退 stopped。
-          } else {
-            const credential = await this.#capabilityFingerprint();
-            if (this.dormantLock && this.dormantLock.credential !== credential) {
-              this.dormantLock = null;
-            } else {
-              const resumeDeadline = this.now() + Math.min(500, this.configuredStartTimeout());
-              while (this.now() < resumeDeadline) {
-                const discovery = await readDiscovery(this.paths.discoveryPath);
-                if (discovery) {
-                  const ready = await this.#refreshDiscovery({ fetchHealth: true });
-                  if (ready) return this.snapshot();
-                  break;
-                }
-                await sleep(50);
-              }
-              this.#setState({
-                state: 'stopped',
-                available: false,
-                degraded: false,
-                managed: false,
-                attached: false,
-                pid: lock.pid,
-                url: null,
-                healthUrl: null,
-                reason: 'disabled',
-                error: null,
-                lock: this.lockView,
-              });
-              this.dormantLock = {
-                pid: lock.pid,
-                startedAt: lock.startedAt,
-                credential,
-              };
-              return this.snapshot();
+            // 旧 dormantLock 已因 token 换代失效：继续走正常等待，
+            // 外部实例可能凭新凭据恢复；超时后保持 starting，不回退 stopped。
+          } else if (baseline !== undefined && baseline !== credential) {
+            // 保留旧 baseline：同一进程重启后仍据此判定凭据已换代，不得回退 stopped。
+            this.dormantLock = null;
+            this.dormantLockInvalidated = true;
+          }
+          const resumeDeadline = this.now() + Math.min(500, this.configuredStartTimeout());
+          while (this.now() < resumeDeadline) {
+            const discovery = await readDiscovery(this.paths.discoveryPath);
+            if (discovery) {
+              const ready = await this.#refreshDiscovery({ fetchHealth: true });
+              if (ready) return this.snapshot();
+              break;
             }
+            await sleep(50);
+          }
+          if (!this.dormantLockInvalidated) {
+            this.#setState({
+              state: 'stopped',
+              available: false,
+              degraded: false,
+              managed: false,
+              attached: false,
+              pid: lock.pid,
+              url: null,
+              healthUrl: null,
+              reason: 'disabled',
+              error: null,
+              lock: this.lockView,
+            });
+            this.dormantLock = {
+              pid: lock.pid,
+              startedAt: lock.startedAt,
+              credential,
+            };
+            await this.#writeDormantState({
+              pid: lock.pid,
+              startedAt: lock.startedAt,
+              credential,
+            });
+            return this.snapshot();
           }
         }
       }
@@ -2177,6 +2232,26 @@ export class MemoryRuntimeSupervisor {
       }
       if (this.stopping || this.disposed) return this.snapshot();
       if (this.statusState.error && ['profile_mismatch', 'home_mismatch', 'version_incompatible'].includes(this.statusState.error.code)) {
+        return this.snapshot();
+      }
+      if (this.dormantLockInvalidated
+        && this.lockView
+        && Number.isInteger(this.lockView.pid)
+        && pidAlive(this.lockView.pid)) {
+        this.#setState({
+          state: 'starting',
+          available: false,
+          degraded: false,
+          managed: false,
+          attached: false,
+          pid: this.lockView.pid,
+          url: null,
+          healthUrl: null,
+          discoveryMode: 'mcp',
+          reason: null,
+          error: null,
+          lock: this.lockView,
+        });
         return this.snapshot();
       }
       this.#setState({
@@ -2232,6 +2307,7 @@ export class MemoryRuntimeSupervisor {
 
   async stop({ includeAttached = false, timeoutMs = 5000 } = {}) {
     this.stopping = true;
+    let dormantBaseline = null;
     this.#clearRestartTimer();
     this.#clearCooldownTimer();
     this.#stopWatchdog();
@@ -2417,6 +2493,15 @@ export class MemoryRuntimeSupervisor {
         ? capabilityAfter !== null
         : capabilityAfter === capabilityBefore;
       if (credentialUnchanged) clean = false;
+      // 外部进程仍存活：记录停止时的 credential baseline（可能是 null=已撤销）。
+      // 下一次 start 只有在当前凭据仍等于 baseline 时才允许报告 stopped。
+      if (pidAlive(attachedDiscovery.pid)) {
+        dormantBaseline = {
+          pid: attachedDiscovery.pid,
+          startedAt: attachedDiscovery.startedAt,
+          credential: capabilityBefore,
+        };
+      }
     } else {
       // discovery 缺失时仍可能存活 manual/attached 实例：从 start.lock 验证 identity/token/status。
       const lock = await this.#readLockView();
@@ -2437,6 +2522,13 @@ export class MemoryRuntimeSupervisor {
             // 仍然 immersive/starting/degraded：没有确认 dormant，不能 clean。
             clean = false;
           } else {
+            if (lock.pid !== this.child?.pid && lock.pid !== this.managedInstance?.pid) {
+              dormantBaseline = {
+                pid: lock.pid,
+                startedAt: lock.startedAt,
+                credential: capabilityBefore,
+              };
+            }
             const capabilityAfter = await this.#capabilityFingerprint();
             const credentialUnchanged = capabilityBefore === null
               ? capabilityAfter !== null
@@ -2447,8 +2539,13 @@ export class MemoryRuntimeSupervisor {
       }
     }
 
+    if (dormantBaseline) await this.#writeDormantState(dormantBaseline);
+    else await this.#clearDormantState();
+
     if (clean) {
       this.managedInstance = null;
+      this.dormantLock = null;
+      this.dormantLockInvalidated = false;
       this.#setState({
         state: 'stopped', available: false, degraded: false, managed: false, attached: false,
         pid: null, url: null, healthUrl: null, error: null,

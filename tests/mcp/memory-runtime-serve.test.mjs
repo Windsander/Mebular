@@ -366,6 +366,21 @@ describe('serve + Memory Runtime supervisor', () => {
     await rm(home, { recursive: true, force: true });
   }, 10000);
 
+  it('config 锁：staleMs=50 时 heartbeat 必须严格快于 stale，不提前接管', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'config-lock-heartbeat-'));
+    const configFile = join(home, 'config.json');
+    const release = await acquireConfigFileLock(configFile, { timeoutMs: 500, staleMs: 50 });
+    expect(release).not.toBeNull();
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 220));
+      const contender = await acquireConfigFileLock(configFile, { timeoutMs: 50, staleMs: 50 });
+      expect(contender).toBeNull();
+    } finally {
+      await release();
+      await rm(home, { recursive: true, force: true });
+    }
+  }, 10000);
+
   it('config 锁：读锁 EACCES 时按 busy 处理且不删除锁', async () => {
     if (process.platform === 'win32') return;
     const home = await mkdtemp(join(tmpdir(), 'config-lock-eacces-'));
@@ -387,22 +402,27 @@ describe('serve + Memory Runtime supervisor', () => {
     }
   }, 10000);
 
-  it('config 锁：硬链接不受支持时回退 open(wx)', async () => {
+  it('config 锁：硬链接不受支持的平台错误回退 open(wx)', async () => {
     const home = await mkdtemp(join(tmpdir(), 'config-lock-link-fallback-'));
     const configFile = join(home, 'config.json');
-    const release = await acquireConfigFileLock(configFile, {
-      timeoutMs: 500,
-      linkImpl: async () => {
-        const error = new Error('hard links unsupported');
-        error.code = 'EPERM';
-        throw error;
-      },
-    });
-    expect(release).not.toBeNull();
-    expect(existsSync(`${configFile}.write-lock`)).toBe(true);
-    await release();
-    expect(existsSync(`${configFile}.write-lock`)).toBe(false);
-    await rm(home, { recursive: true, force: true });
+    try {
+      for (const code of ['EPERM', 'EACCES', 'EINVAL', 'EMLINK']) {
+        const release = await acquireConfigFileLock(configFile, {
+          timeoutMs: 500,
+          linkImpl: async () => {
+            const error = new Error(`hard links unsupported: ${code}`);
+            error.code = code;
+            throw error;
+          },
+        });
+        expect(release).not.toBeNull();
+        expect(existsSync(`${configFile}.write-lock`)).toBe(true);
+        await release();
+        expect(existsSync(`${configFile}.write-lock`)).toBe(false);
+      }
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
   }, 10000);
 
   it('enabled：异步启动 sidecar，overview 只读展示且不泄漏 token；关闭时停止', async () => {

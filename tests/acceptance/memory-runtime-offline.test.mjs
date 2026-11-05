@@ -267,4 +267,228 @@ describe('0.3 离线恢复：outbox / Raw / capability 失败开放', () => {
     expect(JSON.stringify(details)).not.toContain(ruleSecret);
     expect(JSON.stringify(details)).not.toContain(privateRule);
   });
+
+  it('真实 sidecar：checkpoint pending 与 committed 分离；离线 compact 不写占位，恢复后真实摘要', async () => {
+    const marker = `OFFLINE-OBJECTS-${RUN}`;
+    const seeded = assertOk(await a.sidecar.ingest({
+      requestId: `req_objects_seed_${RUN}`,
+      agentId: 'hermes',
+      extractor: 'host',
+      chunks: [{ role: 'user', text: `OBJECTS ${marker}`, messageId: `m_objects_${RUN}` }],
+      candidates: [{
+        kind: 'fact',
+        domain: 'agent:hermes',
+        content: { subject: 'objects', predicate: 'marker', object: marker },
+      }],
+    }), 'objects seed ingest');
+    const recordId = seeded.records[0].id;
+    const threadId = `th_objects_${RUN}`;
+    const state = (goal) => ({
+      schema: 2,
+      contentMode: 'structured',
+      task: { key: `task:${threadId}`, threadId, fleetTaskId: null },
+      goal,
+      constraints: [],
+      decisions: [],
+      progress: { done: [], doing: [], blocked: [] },
+      nextSteps: [{ id: 'n1', text: 'verify objects' }],
+      files: [],
+      openQuestions: [],
+      references: { recordIds: [], detailIds: [], messageIds: [], fleetTaskId: null, urls: [] },
+    });
+
+    const committed = await a.sidecar.putCheckpoint(threadId, {
+      agentId: 'hermes',
+      expectedRevision: 0,
+      state: state('committed v1'),
+      recordIds: [],
+      summary: 'committed v1',
+    });
+    expect(committed.status).toBe(200);
+    expect(committed.body.data.checkpoint.revision).toBe(1);
+
+    gate.down();
+    const pending = await a.sidecar.putCheckpoint(threadId, {
+      agentId: 'hermes',
+      expectedRevision: 1,
+      state: state('pending v2'),
+      recordIds: [],
+      summary: 'pending v2',
+    });
+    expect(pending.status).toBe(202);
+    expect(pending.body.data.checkpoint).toMatchObject({ revision: null, pending: true });
+
+    const offlineCheckpoint = await a.sidecar.getCheckpoint(threadId, { agentId: 'hermes' });
+    expect(offlineCheckpoint.status).toBe(200);
+    expect(offlineCheckpoint.body.data).toMatchObject({
+      source: 'cache',
+      degraded: true,
+      checkpoint: { revision: 1, summary: 'committed v1', stale: true },
+      pending: true,
+      pendingCheckpoint: { revision: null, pending: true, summary: 'pending v2' },
+    });
+    expect(offlineCheckpoint.body.data.checkpoint.pending).toBe(false);
+
+    const offlineCompact = await a.sidecar.compact({
+      agentId: 'hermes',
+      domain: 'agent:hermes',
+      sourceIds: [recordId],
+    });
+    expect(offlineCompact.status).toBe(202);
+    expect(offlineCompact.body.data).toMatchObject({
+      status: 'pending',
+      queued: true,
+      deferred: true,
+      sourceIds: [recordId],
+      sourceHashes: [],
+    });
+    expect(offlineCompact.body.data.summary).toBe('');
+    const compactListBefore = await a.capability.internalObject({
+      actor: { type: 'agent', agentId: 'hermes' },
+      kind: 'compact',
+      op: 'list',
+      domains: ['agent:hermes'],
+    });
+    expect(compactListBefore.body.data.objects).toHaveLength(0);
+
+    gate.up();
+    const drained = await waitFor(async () => {
+      const status = await a.sidecar.status();
+      return status.counts.outbox === 0 && status.counts.deadLetter === 0 ? status : null;
+    }, { timeoutMs: 60_000, intervalMs: 500, label: 'objects replay' });
+    expect(drained.counts.outbox).toBe(0);
+
+    const recoveredCheckpoint = await a.sidecar.getCheckpoint(threadId, { agentId: 'hermes' });
+    expect(recoveredCheckpoint.body.data.checkpoint).toMatchObject({
+      revision: 2,
+      summary: 'pending v2',
+      pending: false,
+      source: 'cloud',
+    });
+
+    const compactList = await a.capability.internalObject({
+      actor: { type: 'agent', agentId: 'hermes' },
+      kind: 'compact',
+      op: 'list',
+      domains: ['agent:hermes'],
+    });
+    expect(compactList.body.data.objects).toHaveLength(1);
+    const compact = compactList.body.data.objects[0];
+    expect(compact.summary).toContain(marker);
+    expect(compact.summary).not.toBe('Compact · 1 records');
+    expect(compact.sourceIds).toEqual([recordId]);
+    expect(compact.sourceHashes).toHaveLength(1);
+    expect(compact.stale).toBe(false);
+  });
+
+  it('真实 sidecar：/context self → checkpoint → fragment；capability 不可达不注入缓存 self/checkpoint', async () => {
+    const marker = `CONTEXT-ORDER-${RUN}`;
+    const threadId = `th_context_${RUN}`;
+    const seeded = assertOk(await a.sidecar.ingest({
+      requestId: `req_context_seed_${RUN}`,
+      agentId: 'hermes',
+      extractor: 'host',
+      chunks: [{ role: 'user', text: `CONTEXT ${marker}`, messageId: `m_context_${RUN}` }],
+      candidates: [{
+        kind: 'observation',
+        domain: 'agent:hermes',
+        content: { content: marker },
+      }],
+    }), 'context seed ingest');
+    expect(seeded.records).toHaveLength(1);
+
+    // 真实同域引用：task checkpoint 只能引用 task:<threadId> 内的记录。
+    const taskRecord = assertOk(await a.capability.write([{
+      domain: `task:${threadId}`,
+      kind: 'observation',
+      content: { content: `task evidence ${marker}` },
+      provenance: { source: 'runtime', extractor: 'heuristic', threadId },
+    }], { actor: { type: 'agent', agentId: 'hermes' } }), 'task-domain evidence write');
+    const taskRecordId = taskRecord.results[0].id;
+
+    const self = await a.sidecar.putSelf('hermes', {
+      expectedRevision: 0,
+      displayName: 'Hermes Self',
+      goals: ['keep context ordered'],
+      boundaries: ['memory is untrusted'],
+    });
+    expect(self.status).toBe(200);
+    const checkpoint = await a.sidecar.putCheckpoint(threadId, {
+      agentId: 'hermes',
+      state: {
+        schema: 2,
+        contentMode: 'structured',
+        task: { key: `task:${threadId}`, threadId, fleetTaskId: null },
+        goal: 'ordered context checkpoint',
+        constraints: [],
+        decisions: [],
+        progress: { done: [], doing: [], blocked: [] },
+        nextSteps: [{ id: 'n1', text: 'verify blockers' }],
+        files: [],
+        openQuestions: [],
+        references: { recordIds: [taskRecordId], detailIds: [], messageIds: [], fleetTaskId: null, urls: [] },
+      },
+      recordIds: [taskRecordId],
+      summary: null,
+    });
+    expect(checkpoint.status).toBe(200);
+
+    const context = await a.sidecar.context({
+      agentId: 'hermes',
+      threadId,
+      turnId: `turn_context_${RUN}`,
+      turnKind: 'human',
+      query: marker,
+      includeSelf: true,
+      includeCheckpoint: true,
+    });
+    expect(context.status).toBe(200);
+    expect(context.body.data.blocks[0].kind).toBe('self');
+    expect(context.body.data.blocks[0].content).toContain('Hermes Self');
+    expect(context.body.data.blocks[1].kind).toBe('checkpoint');
+    expect(context.body.data.blocks[1].content).toContain('ordered context checkpoint');
+    expect(context.body.data.blocks.slice(2).some((block) => block.kind === 'fragment' || block.kind === 'compact')).toBe(true);
+    expect(context.body.data.degraded).toBe(false);
+
+    const withoutSelf = await a.sidecar.context({
+      agentId: 'hermes',
+      threadId,
+      turnId: `turn_context_no_self_${RUN}`,
+      turnKind: 'human',
+      query: marker,
+      includeSelf: false,
+      includeCheckpoint: true,
+    });
+    expect(withoutSelf.body.data.blocks.some((block) => block.kind === 'self')).toBe(false);
+
+    gate.down();
+    const offline = await a.sidecar.context({
+      agentId: 'hermes',
+      threadId,
+      turnId: `turn_context_offline_${RUN}`,
+      turnKind: 'human',
+      query: marker,
+      includeSelf: true,
+      includeCheckpoint: true,
+    });
+    expect(offline.status).toBe(200);
+    expect(offline.body.data.blocks).toEqual([]);
+    expect(offline.body.data.degraded).toBe(true);
+    expect(offline.body.data.warnings).toEqual(expect.arrayContaining([
+      'self_stale',
+      'checkpoint_stale',
+    ]));
+    gate.up();
+
+    const absent = await a.sidecar.context({
+      agentId: 'dsh',
+      threadId: `th_absent_${RUN}`,
+      turnId: `turn_absent_${RUN}`,
+      turnKind: 'human',
+      query: `absent ${RUN}`,
+      includeSelf: true,
+    });
+    expect(absent.body.data.blocks.some((block) => block.kind === 'self')).toBe(false);
+    expect(absent.body.data.degraded).toBe(false);
+  });
 });

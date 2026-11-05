@@ -213,6 +213,11 @@ export class SettlementRuntime {
       ...(this.inference ? { inference: this.inference } : {}),
       ...(options.now ? { now: options.now } : {}),
     });
+    // 非 replayer 的 dead-letter 路径（Ttl/启动清理/配额等）也必须清理对象 pending。
+    this.local.setDeadLetterHandler(async (item) => {
+      await this.objects.applyReplayComplete(item, 'dead');
+      await this.ingest.finalizeReplayedOutbox(item, 'dead');
+    });
     this.replayer = new OutboxReplayer({
       outbox: options.local.outbox,
       client: options.client,
@@ -225,7 +230,10 @@ export class SettlementRuntime {
       onSettled: (item, data) => (item.endpoint === '/detail' || item.meta?.kind === 'record'
         ? this.ingest.applyReplayedOutbox(item, data)
         : this.objects.applyReplayedItem(item, data)),
-      onComplete: (item, outcome) => this.ingest.finalizeReplayedOutbox(item, outcome),
+      onComplete: async (item, outcome) => {
+        await this.objects.applyReplayComplete(item, outcome);
+        await this.ingest.finalizeReplayedOutbox(item, outcome);
+      },
     });
     if (options.autoStartReplayer !== false) {
       this.replayer.start();

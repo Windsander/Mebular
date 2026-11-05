@@ -539,8 +539,8 @@ async function main() {
       () => controller.getStatus().counts.checkpoints.sent >= sentBeforeRevision + 3,
     )));
     const recreated = await runtime.sidecarCheckpoint(revThread, 'opencode');
-    check('删除后重建为 revision 1',
-      recreated?.revision === 1 && recreated?.state?.compactionId === 'cmp_real_rev_3',
+    check('删除后重建不复用 revision（high-water 前进）',
+      recreated?.revision === 3 && recreated?.state?.compactionId === 'cmp_real_rev_3',
       JSON.stringify({ revision: recreated?.revision, compactionId: recreated?.state?.compactionId }));
 
     // M2: a same-logical-id replay with new summary/refs must update, not
@@ -655,10 +655,21 @@ async function main() {
       }));
     check('能力下线时不把 202 当 committed',
       controller.getStatus().counts.checkpoints.sent === sentBeforeOutbox);
-    const pendingView = await runtime.sidecarCheckpoint(outboxThread, 'opencode');
-    check('sidecar GET 呈现 pending 而非 committed revision',
-      pendingView?.pending === true && pendingView?.revision === null,
-      JSON.stringify({ pending: pendingView?.pending, revision: pendingView?.revision }));
+    const pendingResponse = await requestSidecar(
+      discovery,
+      `/checkpoints/${encodeURIComponent(outboxThread)}?agentId=opencode`,
+    );
+    const pendingData = pendingResponse.data ?? {};
+    check('sidecar GET 分离 pending，不把 pending 当 committed',
+      pendingData.checkpoint === null
+        && pendingData.pending === true
+        && pendingData.pendingCheckpoint?.pending === true
+        && pendingData.pendingCheckpoint?.revision === null,
+      JSON.stringify({
+        checkpoint: pendingData.checkpoint,
+        pending: pendingData.pending,
+        pendingRevision: pendingData.pendingCheckpoint?.revision,
+      }));
 
     proxy.resume();
     check('能力恢复后 outbox 重放并由权威 GET 确认为 committed', Boolean(await waitFor(

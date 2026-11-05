@@ -425,6 +425,7 @@ export async function startFakeCapability(options: FakeCapabilityOptions = {}): 
     state: checkpoint.state,
     summary: checkpoint.summary,
     recordIds: checkpoint.recordIds,
+    detailIds: Array.isArray((checkpoint as any).detailIds) ? (checkpoint as any).detailIds : [],
     lease: checkpoint.lease,
     expiresAt: checkpoint.expiresAt,
     provenance: checkpoint.provenance ?? {},
@@ -739,6 +740,32 @@ export async function startFakeCapability(options: FakeCapabilityOptions = {}): 
             return;
           }
           const strategy = body.strategy === 'dedupe' ? 'dedupe' : 'summary';
+          let summary: string;
+          if (body.deferredSummary === true) {
+            const sorted = [...sources].sort((a, b) => a.id.localeCompare(b.id));
+            const lines: string[] = [];
+            for (const source of sorted) {
+              const content: any = isObjectLike(source.content) ? source.content : {};
+              const text = typeof content.object === 'string'
+                ? `${content.subject ?? ''} ${content.predicate ?? ''} ${content.object}`.trim()
+                : typeof content.content === 'string'
+                  ? content.content
+                  : typeof source.text === 'string' ? source.text : '';
+              if (text.trim().length > 0) lines.push(`- [${source.kind ?? source.type}] ${text.trim().slice(0, 240)}`);
+            }
+            const header = `Compact · ${sorted.length} records`;
+            summary = (lines.length > 0 ? `${header}\n${lines.join('\n')}` : header).slice(0, 64 * 1024);
+          } else {
+            summary = String(body.summary ?? '');
+            if (summary.trim().length === 0) {
+              fail(400, 'invalid_request', 'summary 不能为空');
+              return;
+            }
+            if (/^Compact · \d+ records(?: · [^\n]*)?$/.test(summary.trim())) {
+              fail(422, 'compact_summary_placeholder', 'compact 摘要不能是占位标题');
+              return;
+            }
+          }
           const identityKey = sha256({
             domain: body.domain,
             strategy,
@@ -757,11 +784,11 @@ export async function startFakeCapability(options: FakeCapabilityOptions = {}): 
             type: 'compact',
             kind: 'compact',
             domain: body.domain,
-            summary: String(body.summary ?? ''),
+            summary,
             sourceIds,
             sourceHashes,
             strategy,
-            tokenCount: typeof body.tokenCount === 'number' ? body.tokenCount : null,
+            tokenCount: typeof body.tokenCount === 'number' ? body.tokenCount : summary.length > 0 ? Math.max(1, Math.ceil([...summary].length / 4)) : null,
             provenance: isObjectLike(body.provenance) ? body.provenance : {},
             createdAt,
             updatedAt: createdAt,

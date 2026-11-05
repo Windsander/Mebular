@@ -405,8 +405,9 @@ sidecar 故障绝不能阻塞 MCP 启动、工具、同步或鉴权。
 - 不做破坏性压缩，不自动合并冲突事实。
 - 不做跨忆云联邦。
 - 删除是协作式的，离线对端可能延迟；见上面的擦除边界。
-- **规模证据是部分的。** 1k smoke 在真实图/capability/sidecar 上完成两次，6/6 失败注入
-  场景通过。10k 全量未完成，因此本版本不声称 10k 通过，也不把 1k 延迟外推到 10k。见
+- **规模证据覆盖 1k/2k 审计和 10k 全量。** 最终 10k 在真实图/capability/sidecar 上通过：
+  10,000 records + 10,000 details、0 条非种子 extras、200/200 读取，cleanup 无残留；
+  6/6 失败注入场景也通过。延迟来自单台非空闲宿主，不是 SLA。见
   [规模基准报告](../quality/0.3.2-scale-benchmark.md)。
 - **真实模型证据是部分的。** 0.3.2 没有运行真实模型 canary。历史 Qwen3-4B/llama.cpp
   smoke 只对那一个包/平台/SHA 有效。
@@ -415,9 +416,9 @@ sidecar 故障绝不能阻塞 MCP 启动、工具、同步或鉴权。
 
 - [v0.3.2 验收矩阵](../quality/0.3.2-verification.md) — 测试计数、宿主边界、规模状态、
   升级/回滚证据和明确待补项。
-- [v0.3.2 规模基准报告](../quality/0.3.2-scale-benchmark.md) — 1k smoke（两次）、
-  6/6 失败注入和未完成的 10k 状态。报告中的 detail-kind P1 观察是历史结果；召回关联修复
-  及其回归测试在此后落地。
+- [v0.3.2 规模基准报告](../quality/0.3.2-scale-benchmark.md) — 1k/2k 计数审计、最终
+  10k 通过、6/6 失败注入和保留的 10k 失败/根因证据。报告中的 detail-kind P1 观察是历史
+  结果；召回关联修复及其回归测试在此后落地。
 - [0.3.0 Memory Runtime 验收报告](../quality/0.3.0-memory-runtime-acceptance.md)：
   `c71e811` 的历史结果，真实 sidecar + fake capability；只用 heuristic，不启动模型，
   不访问外部网络，也不运行真实 MCP/core、宿主或跨设备同步。

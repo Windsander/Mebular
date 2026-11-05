@@ -469,10 +469,11 @@ startup, tools, sync or authentication.
 - No destructive compaction and no automatic merge of conflicting facts.
 - No cross-cloud federation.
 - Deletion is cooperative and can lag on offline peers; see the erasure boundary above.
-- **Scale evidence is partial.** The 1k smoke benchmark completed twice with a real
-  graph/capability/sidecar and 6/6 failure-injection scenarios. The 10k full run did not
-  complete, so this release does not claim a 10k pass or extrapolate 1k latency to 10k.
-  See the [scale benchmark report](../quality/0.3.2-scale-benchmark.md).
+- **Scale evidence covers 1k/2k audits and a 10k full run.** The final 10k passed on a real
+  graph/capability/sidecar: 10,000 records + 10,000 details, 0 non-seed extras and 200/200
+  reads, with clean cleanup; 6/6 failure-injection scenarios also passed. Timings are from
+  one non-idle host, so they are not an SLA. See the
+  [scale benchmark report](../quality/0.3.2-scale-benchmark.md).
 - **Real-model evidence is partial.** A real-model canary was not run for 0.3.2. The
   historical Qwen3-4B/llama.cpp smoke is evidence for that one pack/platform/SHA only.
 
@@ -480,10 +481,10 @@ startup, tools, sync or authentication.
 
 - [v0.3.2 verification matrix](../quality/0.3.2-verification.md) — test counts, host
   boundaries, scale status, upgrade/rollback evidence and the explicit pending items.
-- [v0.3.2 scale benchmark report](../quality/0.3.2-scale-benchmark.md) — 1k smoke (two
-  runs), 6/6 failure injection and the unfinished 10k status. The report's detail-kind
-  P1 observation is historical; the recall association fix and its regression test landed
-  afterwards.
+- [v0.3.2 scale benchmark report](../quality/0.3.2-scale-benchmark.md) — 1k/2k count
+  audits, the final 10k pass, 6/6 failure injection and the preserved 10k
+  failure/root-cause evidence. The report's detail-kind P1 observation is historical; the
+  recall association fix and its regression test landed afterwards.
 - [0.3.0 Memory Runtime acceptance report](../quality/0.3.0-memory-runtime-acceptance.md) —
   a historical `c71e811` run with a real sidecar and fake capability; heuristic only, no
   model or external network, and no real MCP/core, host or cross-device sync.

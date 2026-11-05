@@ -43,12 +43,13 @@ dangling evidence. External message IDs remain host references and are not graph
 This strictness is intentional; do not weaken it to make an offline replay appear
 committed.
 
-## v0.3.2 scale and model evidence are partial
+## v0.3.2 scale and model evidence
 
-- The 1k smoke benchmark completed twice on a real graph/capability/sidecar, and 6/6
-  failure-injection scenarios passed. The 10k full run did not complete and has no
-  machine-readable result. Do not claim a 10k pass, a 10k resource envelope or
-  extrapolate 1k latency to 10k.
+- The 10k full benchmark passed on merged SHA `c37e74b` (includes `ca2193e`): 10,000
+  records + 10,000 details, 0 non-seed extras, 200/200 reads and clean cleanup. The 1k/2k
+  count audits also passed with 0 extras, and 6/6 failure-injection scenarios passed.
+  Timings are from one non-idle host and are not an SLA. The original 10,023/10,000
+  failure remains in the scale report as historical evidence.
 - No real-model canary was run for v0.3.2. The historical Qwen3-4B/llama.cpp smoke covers
   one pack, one platform and one old SHA; it is not a general model-quality or
   model-support claim.

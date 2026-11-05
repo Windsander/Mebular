@@ -60,7 +60,9 @@
 | 并发上限 | 可配；同一执行器实例内 FIFO 串行 | `并发上限可配：concurrency=1 串行、=2 并行` |
 | Hermes argv | `[-p P][-t T][-m M][--in DIR] -z <prompt> --usage-file <tmp>`；成功解析 `usage.session_id` | `拼出 hermes 参数（-p/-t/-m/--in/-z/--usage-file）` · `成功解析 usage.session_id` |
 | 参数传参 | `spawn(command, args)` 传参，无 shell（防注入） | `参数数组传参…`（断言无 shell 求值） |
-| **env 不外流** | 子进程只继承 `ENV_ALLOWLIST`（PATH/HOME/… + `HERMES_HOME`）+ 显式 `options.env`；**不继承 daemon 全量 env**（凭据不外流）；不打印/不落盘 env 值 | `env 白名单：不继承 daemon 的任意环境变量（判别锚点）` |
+| **env 不外流** | 子进程只继承 `ENV_ALLOWLIST`（PATH/HOME/… + `HERMES_HOME`/`DSH_HOME`）；**不继承 daemon 全量 env**（凭据不外流）；不打印/不落盘 env 值；config 没有 `env` 字段 | `env 白名单：不继承 daemon 的任意环境变量（判别锚点）` |
+| **executable / health 硬过滤** | 目录/能力卡可带 `executable`(boolean)/`executionMode`/`health`；显式 `executable=false` 或 `health.status="unavailable"` → `ADAPTER_UNAVAILABLE`；`degraded`/旧卡缺字段不拒绝 | `executable=false：echo/board/占位不被选中…` · `health 显式 unavailable 硬拒绝；degraded/缺失不拒绝` · `旧卡缺 executable/executionMode/health：视为兼容放行` · `compileAgentDirectory：静态推导 executable/executionMode…` |
+| **DSH/OpenCode/Claude CLI adapter** | 固定平台前缀；默认 promptMode（DSH `stdin`，OpenCode/Claude `arg`）；`--version` health；非 0/超时/截断与公共层一致 | `tests/fleet/platform-adapters.test.ts`（fake CLI，不是真实宿主 E2E） |
 
 | OpenChamber（中立 client） | `HttpOpenChamberSeam`：POST `endpoint` + token（内联/文件+`tokenJsonPath`）+ 可配 `authHeader` + timeout；成功→`{text,sessionId}`；错误/超时→清晰错误；**错误不夹带 token** | `成功：返回 text/sessionId…` · `token 从文件读取…` · `可配 authHeader` · `负例：错误/未授权/超时/非 JSON…` · `负例：缺 endpoint / 缺 token` · `OpenChamberAgent 归一…` |
 | OpenChamber（provider #1） | 桥 daemon `POST /agent/run-once`（可替换：替换只改 provider 侧，不改 fleet 代码；契约见 `OPENCHAMBER-SEAM.md`） | verify `--with-openchamber`（E2E + 直连 session + 负例） |
@@ -74,19 +76,23 @@
 
 | Agent / 宿主 | 执行能力 | 口径 |
 |---|---|---|
-| Hermes | 可执行 | 内置 `HermesAgent`（`kind=hermes`） |
-| OpenChamber | 条件可执行 | 仅经 oc-hermes-bridge（`POST /agent/run-once`）可执行；无桥 dispatch-only |
-| DSH v1 | 计划中（宿主 CLI；adapter 待实现） | 官方 `dsh --profile headless "<job>"` 是 0.3.2 目标执行入口；`dsh --profile sdk` 是 v2；`@mebular/dsh-plugin` 是 Web/记忆桥，不是 Fleet executor |
-| OpenCode | 计划中 | `opencode run`，待 adapter |
-| Claude Code | 计划中 | `claude -p`，待 adapter |
-| Cursor | 条件可执行 | 仅当执行设备有 `cursor-agent`；否则 dispatch-only |
+| Hermes | 已实现 | 内置 `HermesAgent`（`kind=hermes`）；`health()` 探测 `hermes --version` |
+| OpenChamber | 条件可执行 | 仅经 oc-hermes-bridge（`POST /agent/run-once`）可执行；无桥 dispatch-only；无 `health()`（`degraded`），`supportsCancel=false` |
+| DSH v1 | 已实现 | `DshHeadlessAgent`：`dsh --profile headless`，默认 `promptMode: stdin`；`dsh --profile sdk` 是 v2（未实现）；本机未装 dsh，真实任务 smoke 待补，fake CLI 测试已过；`@mebular/dsh-plugin` 是 Web/记忆桥，不是 Fleet executor |
+| OpenCode | 已实现 | `OpenCodeAgent`：`opencode run`，默认 `promptMode: arg`；本机 v2.0.29 health 已验证；真实 `run` 任务 smoke 待补 |
+| Claude Code | 已实现 | `ClaudeCodeAgent`：`claude -p`，默认 `promptMode: arg`；本机未装 claude，只有 fake CLI 测试；真实任务 smoke 待补 |
+| Cursor | 不可执行 | 0.3.2 没有 `cursor` kind/adapter，保持 dispatch-only |
 | Claude Desktop | 不可执行 | 只能 dispatch-only |
 | `echo` / `board` | 仅 demo/测试 | `echo` 是确定性 fake executor，`board` 是任务板占位；不作为生产 plan owner/MR |
 
 - **派发方**（任何能连 MCP/CLI 的 Console 客户端或 Agent）只提交/查询/控制；**执行方**必须有执行设备本地的 adapter。不要声称所有 Console 客户端都能执行。
-- plan owner 必须是真实可执行 Agent；`echo`/`board` 只用于 demo/测试。`planAgent` 不属于 `config.agents[].name` 时 fail closed（`PLAN_OWNER_UNEXECUTABLE`）。
-- 远端 Agent：adapter 在执行设备本地；目录只发布 `kind + capabilities + executable + executionMode`（0.3.2 目标口径）；command/env/token 永不过网。
+- **自动探测**：`fleet quickstart` / `fleet join` 按 PATH `hermes → dsh → opencode → claude` 顺序声明 agent（claude 的 kind 是 `claude-code`），OpenChamber 只看 `MEBULAR_FLEET_OPENCHAMBER_*` env，都没有才回退 `echo`；Cursor/Claude Desktop 不在探测内。
+- **plan owner readiness**：`planAgent` 必须在本机 `config.agents[].name` 中，且 `isPlanOwnerExecutableAgent` 为 true；`echo`/`board`/无 `command` 的 `command` 被显式拒绝，返回 `PLAN_POLICY` + `PLAN_OWNER_UNEXECUTABLE`，不创建 plan/root。`fleet doctor` 会 WARN（只有占位）或 FAIL（`defaultAgent` 不可执行）。
+- **executable/health**：`executable` 是目录/能力卡上的布尔静态推导（不是 config 字段）；`health` 是能力卡可选 advisory 快照。route 只在显式 `executable=false` 或 `health.status="unavailable"` 时硬拒绝；`fleet doctor` 不逐 agent 跑 `--version`，也不会自动撤销卡片。
+- **远端 Agent**：adapter 在执行设备本地；目录只发布 `kind + capabilities + executable(boolean) + executionMode`；command/env/token 永不过网；`health` 不作为目录字段，只可随能力卡传播并由 `task_targets` 合并。
 - Console 不加 Fleet UI；入口为 `task_submit.plan`、`task_status.plan`、`fleet doctor` 与文档。
+
+**真实/fake 边界**：`verify:fleet:agents` 的 9/9 使用真实 libp2p loopback + 确定性 fake agent；`tests/fleet/platform-adapters.test.ts` 使用 fake CLI 覆盖 DSH/OpenCode/Claude Code 的 argv/stdin/health。DSH 与 Claude Code 本机未安装，OpenCode 只验证 `--version` health；本报告不声称三者真实任务 E2E。
 
 ## 5. M4：三种协作形态（目标二）
 

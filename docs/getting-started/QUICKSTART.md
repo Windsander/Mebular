@@ -115,11 +115,14 @@ client can instead point at `http://127.0.0.1:7331/mcp`. The HTTP `/mcp` form is
 when it auto-connects your assistants, so the same path keeps working after setup.
 
 Connecting an MCP client makes it a **dispatcher** (it can submit, query and cancel tasks), not automatically an
-**executor**. Fleet execution needs a real adapter on the execution device: Hermes is executable; OpenChamber only
-through `oc-hermes-bridge`; DSH v1 uses the official `dsh --profile headless "<job>"` host. OpenCode (`opencode run`)
-and Claude Code (`claude -p`) adapters are planned; Cursor is executable only when `cursor-agent` is available;
-Claude Desktop is dispatch-only. `@mebular/dsh-plugin` is a Web/memory bridge, not a Fleet executor. See
-[Fleet design §2.5.3](../../packages/fleet/DESIGN.md).
+**executor**. Fleet execution needs a real adapter on the execution device: Hermes, DSH v1 (`dsh --profile headless`),
+OpenCode (`opencode run`) and Claude Code (`claude -p`) adapters are implemented; OpenChamber works only through
+`oc-hermes-bridge`. Real-task smoke is still pending for DSH and Claude Code, and OpenCode currently has only its
+`--version` health verified. Cursor and Claude Desktop are dispatch-only. `@mebular/dsh-plugin` is a Web/memory bridge,
+not a Fleet executor. See [Fleet design §2.5.3](../../packages/fleet/DESIGN.md).
+
+`fleet quickstart` / `fleet join` auto-detect Hermes, DSH, OpenCode and Claude Code on `PATH` (and OpenChamber from
+`MEBULAR_FLEET_OPENCHAMBER_*`); Cursor and Claude Desktop are never auto-detected and can only dispatch.
 
 Optionally install the behavior skill (memory policy and workflow) into your agent's skill directory:
 

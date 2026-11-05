@@ -7,7 +7,7 @@ import { Mebular, MemoryService } from '@mebular/core';
 import { startHttpServer, hashToken } from '../../packages/mcp/src/serve.mjs';
 import { ensureFleetSyncNamespaces } from '../../packages/mcp/src/config.mjs';
 
-const fleet = await import('../../packages/fleet/dist/index.js');
+const fleet = await import('../../packages/fleet/src/index.ts');
 const { InMemoryHub } = await import('../../dist/index.js');
 
 let home;

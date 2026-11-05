@@ -11,7 +11,7 @@ import { Mebular, MemoryService } from '@mebular/core';
 import { startHttpServer, hashToken } from '../../packages/mcp/src/serve.mjs';
 import { fleetEventFromEvent } from '../../packages/mcp/src/fleet-events.mjs';
 
-const fleet = await import('../../packages/fleet/dist/index.js');
+const fleet = await import('../../packages/fleet/src/index.ts');
 const execFileAsync = promisify(execFile);
 
 let home;

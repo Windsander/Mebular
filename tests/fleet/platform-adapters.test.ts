@@ -6,7 +6,8 @@
 // - config 接受新 kind（不要求 command）且继续拒绝未知 kind；
 // - registry 映射到正确 executor/descriptor，能力卡只暴露安全数值。
 
-import { describe, it, expect } from '@jest/globals';
+import { describe, it, expect, afterEach } from '@jest/globals';
+import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -21,6 +22,7 @@ import {
 } from '../../packages/fleet/src/index.js';
 import { mkEvent } from './helpers.js';
 import { useHeavyTimeout } from '../helpers/timeouts.js';
+import { PlatformCliAdapter, probeCliVersion } from '../../packages/fleet/src/runtime/platform-cli.js';
 
 useHeavyTimeout();
 
@@ -151,6 +153,63 @@ describe('Claude Code adapter', () => {
     }).execute(task(prompt));
     expect(outcome.ok).toBe(true);
     expect(JSON.parse(outcome.resultRef!)).toEqual(['--mode', 'args', '-p', prompt]);
+  });
+});
+
+const probeDirs: string[] = [];
+afterEach(async () => {
+  await Promise.all(probeDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+});
+
+async function writeProbeScript(body: string): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), 'fleet-probe-'));
+  probeDirs.push(dir);
+  const file = join(dir, 'probe');
+  await writeFile(file, `#!/bin/sh\n${body}\n`, 'utf-8');
+  await chmod(file, 0o755);
+  return file;
+}
+
+const itPosix = process.platform === 'win32' ? it.skip : it;
+
+describe('PlatformCliAdapter / probeCliVersion', () => {
+  it('无 optional baseArgs/fixedArgs 时默认 arg，且 descriptor 只暴露安全元数据', () => {
+    const adapter = new PlatformCliAdapter({ kind: 'probe', command: process.execPath });
+    expect(adapter.descriptor).toMatchObject({
+      kind: 'probe',
+      executionMode: 'cli',
+      supportsCancel: true,
+      promptMode: 'arg',
+    });
+  });
+
+  itPosix('health：成功版本输出取首行', async () => {
+    const command = await writeProbeScript("printf 'fake-probe 1.2.3\\n'");
+    const health = await probeCliVersion(command, 2_000);
+    expect(health.status).toBe('ok');
+    expect(health.detail).toContain('fake-probe 1.2.3');
+  });
+
+  itPosix('health：空输出仍为 ok，使用固定兜底文案', async () => {
+    const command = await writeProbeScript('exit 0');
+    const health = await probeCliVersion(command, 2_000);
+    expect(health.status).toBe('ok');
+    expect(health.detail).toContain('--version ok');
+  });
+
+  itPosix('health：非 0 退出 → unavailable，且不泄露 stderr', async () => {
+    const command = await writeProbeScript("printf 'secret-like-stderr\\n' >&2; exit 7");
+    const health = await probeCliVersion(command, 2_000);
+    expect(health.status).toBe('unavailable');
+    expect(health.detail).toContain('exited 7');
+    expect(health.detail).not.toContain('secret-like-stderr');
+  });
+
+  itPosix('health：超时 → unavailable', async () => {
+    const command = await writeProbeScript('sleep 5');
+    const health = await probeCliVersion(command, 80);
+    expect(health.status).toBe('unavailable');
+    expect(health.detail).toContain('timed out');
   });
 });
 

@@ -774,21 +774,29 @@ async function main() {
       },
     });
     const instanceBCheckpoint = await runtimeB.sidecarCheckpoint(switchThread, 'opencode');
-    const instanceAAfterResponse = await requestSidecar(
+    // The old sidecar intentionally goes dormant after its discovery document is
+    // replaced. Its authoritative graph must still be unchanged, so read A through
+    // its real MCP capability rather than the now-dormant sidecar endpoint.
+    const instanceAAfter = await runtime.checkpoint(switchThread, 'opencode');
+    const instanceAAfterSidecar = await requestSidecar(
       discovery,
       `/checkpoints/${encodeURIComponent(switchThread)}?agentId=opencode`,
     );
-    const instanceAAfter = instanceAAfterResponse.data?.checkpoint;
-    check('真实实例切换后在新实例 revision 前进且旧实例不变',
+    check('真实实例切换后在新实例 revision 前进且旧实例图数据不变',
       instanceACheckpoint?.revision === 1
       && instanceAAfter?.revision === 1
       && instanceBCheckpoint?.revision === 2
-      && instanceBCheckpoint?.state?.compactionId === 'cmp_instance_switch_b',
+      && instanceBCheckpoint?.state?.compactionId === 'cmp_instance_switch_b'
+      && instanceAAfterSidecar.status === 409
+      && instanceAAfterSidecar.body?.error?.code === 'mode_mismatch',
       JSON.stringify({
         aBefore: instanceACheckpoint?.revision,
         aAfter: instanceAAfter?.revision,
+        aAfterSidecarStatus: instanceAAfterSidecar.status,
+        aAfterSidecarCode: instanceAAfterSidecar.body?.error?.code,
         b: instanceBCheckpoint?.revision,
         runtimeUrl: controller.getStatus().runtime.url,
+        discoveryA: discovery.url,
         discoveryB: discoveryB.url,
       }));
 

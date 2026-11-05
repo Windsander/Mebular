@@ -9,6 +9,9 @@ Hermes 可以通过两层接入 Mebular，两层可以同时使用：
 | **MCP** | 官方 Mebular MCP server：显式的 `memory_*` 与 `task_*` 工具 | 配置后可用 |
 | **Memory Runtime**（`MemoryProvider`） | 每轮自动召回、轮次/压缩 ingest、state-only 检查点、会话边界归档 | 自动跟随 sidecar discovery 模式；无逐宿主 enable/采集开关 |
 
+v0.3.2 收紧了 provider 的持久 spool、checkpoint 重放和失败出口。宿主 spool 条目是 pending
+宿主工作，不是已提交图对象；所有 committed 状态仍来自权威 sidecar/图 revision。
+
 Provider 位于 [`integrations/hermes/mebular-memory`](../../integrations/hermes/mebular-memory/)；
 可选 companion 位于
 [`integrations/hermes/mebular-companion`](../../integrations/hermes/mebular-companion/)。
@@ -90,13 +93,13 @@ Provider 需要 0.3 Memory Runtime sidecar 正在运行。只有 MCP 设置
    sidecar 就绪时存在 `<home>/memory-runtime.json`，其中包含 sidecar URL 和
    `tokenFile`（通常是 `<home>/memory-runtime/host-token`）。
 
-3. 从 Release 资产安装（**0.3.0 发布后**可用；发布前用下面的源码命令）。安装目录必须叫
+3. 从 Release 资产安装（**0.3.2 发布后**可用；发布前用下面的源码命令）。安装目录必须叫
    `plugins/mebular`，因为 Hermes 用目录名作为 `memory.provider` 的值：
 
    ```bash
-   gh release download v0.3.0 -p 'mebular-hermes-plugins-*.tar.gz'
+   gh release download v0.3.2 -p 'mebular-hermes-plugins-*.tar.gz'
    mkdir -p mebular-hermes-plugins
-   tar -xzf mebular-hermes-plugins-0.3.0.tar.gz -C mebular-hermes-plugins
+   tar -xzf mebular-hermes-plugins-0.3.2.tar.gz -C mebular-hermes-plugins
    cd mebular-hermes-plugins
 
    HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}" ./install.sh
@@ -154,7 +157,9 @@ URL 优先级从高到低：
 
 `<home>` 依次取 `MEBULAR_MEMORY_RUNTIME_HOME`、`MEBULAR_HOME`、当前 Mebular profile
 （缺省 `~/.mebular`）。Provider 不做网络扫描、不猜端口，也不读 MCP daemon 的
-`runtime.json`。
+`runtime.json`。发现必须新鲜（15 秒 stale / 30 秒 dead）且兼容；`mode=mcp` /
+`state=stopped` 表示 dormant，会禁用召回、ingest 和 checkpoint，直到显式重新启用并发布
+新的 discovery。
 
 Token 优先级：
 
@@ -183,6 +188,7 @@ Provider 的普通配置优先读环境变量，再读 `$HERMES_HOME/mebular-mem
 | `archive_flush_timeout` | `1.5` | 压缩前尝试 flush 归档的最长等待（秒） |
 | `checkpoint_timeout` | `2.5` | checkpoint PUT/GET 超时（秒） |
 | `queue_limit` | `100` | 有界持久 spool 上限 |
+| `sync_max_attempts` | `12` | 单条重试终态界限；达到后进入 dead，而不是永久 warning |
 
 环境变量：`MEBULAR_MEMORY_RUNTIME_URL`、`MEBULAR_MEMORY_RUNTIME_TOKEN`、
 `MEBULAR_MEMORY_RUNTIME_HOME`、`MEBULAR_HOME`、`MEBULAR_MEMORY_AGENT_ID`、
@@ -224,19 +230,41 @@ Provider 的普通配置优先读环境变量，再读 `$HERMES_HOME/mebular-mem
 ```
 
 Hermes 的 `MemoryProvider` API v1 不提供压缩摘要。Provider 因此发送 `summary:null` 和
-state-only 元数据，绝不把归档文本或模型猜测当 summary。失败或中断的检查点会留在内存
-pending，在 provider 存活期间重试；它不会被报告为已提交，也不会阻断 Hermes 压缩。
+state-only 元数据，绝不把归档文本或模型猜测当 summary。尚未提交的 checkpoint 在 provider
+确认 pending 之前持久化到现有 `queue.jsonl`；如果持久化失败，provider 报告失败，而不是
+接受仅存在于内存的 pending。重启后重新打开单写者 spool，并用稳定 ID 重放 checkpoint 条目。
+202/queued 交接只移除宿主副本，不声称图已沉淀。只有返回权威 revision 后才报告为
+committed。最终未确认的 checkpoint 在配置的重试界限进入 dead，不会静默永久 pending，
+也不会阻断 Hermes 压缩。服务端要求 checkpoint 证据引用存在、类型正确、存活且同域。
 
 ## 失败行为
 
-- 召回失败返回空字符串，当前轮次继续。连续失败会进入短暂冷却，避免每轮都等超时。
-- 写入失败留在 `$HERMES_HOME/mebular-memory/queue.jsonl`（`0600`，受 `queue_limit`
-  限制），由后台 worker 重试。不可重试错误（例如 `mode_mismatch`、`unauthorized`、
-  `invalid_request`、`payload_too_large`）记录 warning 后从队列移除，避免无限堆积。
-- 检查点失败保持 pending 并重试；sidecar 也可能把写入放进自己的 outbox。在 sidecar 返回
-  已提交 revision 之前，不会报告为 committed。
-- 队列是单进程文件 spool；不要在同一个 `HERMES_HOME` 运行两个 Hermes 写者。
+- 召回失败返回空字符串，当前轮次继续。连续失败会进入 30 秒冷却，避免每轮都等超时。
+- ingest 结果在移除 spool 条目前分类：`committed` 要求抽取完成且 record/detail 写入确认；
+  `handoff` 表示 202/queued 把重放所有权交给 sidecar outbox；`failed`（包括 detail 部分
+  失败）保留宿主副本直到有界 dead 出口；pending 抽取留在 spool。传输 2xx 本身绝不等于
+  committed。
+- 失败或 pending 写入留在 `$HERMES_HOME/mebular-memory/queue.jsonl`（`0600`，默认 100 条 /
+  16 MiB，最长 30 天或更早操作截止时间），由后台 worker 按有界退避和 `Retry-After`
+  重试。spool 是单进程文件；不要在同一个 `HERMES_HOME` 运行两个 Hermes 写者。
+- `sync_max_attempts`（默认 12）是终态界限。达到后条目以可见原因进入 dead，而不是只发
+  warning。不可重试的 `invalid_request`/`payload_too_large` 类错误直接进入 dead。
+- `mode_mismatch`/`cloud_mismatch` 是 dormant 状态，不是暂时性故障：worker 停止新增工作，
+  保留已持久化的 pending 条目，按有界间隔探测模式，并让 D2 过期把长期离线的条目移入 dead。
+  它不会删除或冲刷 spool。
+- 认证失败在 `sync_max_attempts` 内重试；持续 401/403 变为 dead/可见，而不是无限循环。
+  模式或认证失败绝不会让 spool 无限增长。
+- checkpoint 失败从同一 spool 重放。只有 sidecar 返回权威 revision 后才报告 committed；
+  202 只是 pending/queued。
+- 如果 dead 文件无法写入，provider 会保留有界 `dead-pending`、orphan-dead-pending 或
+  `quarantine.jsonl` 记录（或可见的 live-queue 标记），而不是静默丢失诊断。状态会报告
+  `spool.dead`、`spool.deadPending`、`spool.orphanDeadPending`、`spool.quarantine`
+  以及字节/年龄字段。状态还会区分 `ingestDegraded`、committed 和 failed。
 - sidecar 不可用时，召回为空、写入留在队列、检查点 pending；Hermes 主流程不受影响。
+  删除 provider 或原生 `MEMORY.md`/`USER.md` 与 Mebular 图是分开的。
+- 通过 `agent.memory_provider` 运行 provider 只是适配器证据，不等于真实 Hermes 进程。
+  real/fake 边界和 v0.3.2 新计数见
+  [验收矩阵](../quality/0.3.2-verification.md)。
 
 ## 从 0.2 升级 / 从旧原型迁移
 
@@ -254,7 +282,8 @@ pending，在 provider 存活期间重试；它不会被报告为已提交，也
 - Provider 仍接受配置文件里的 `namespace` 和 `MEBULAR_RUNTIME_NAMESPACE` 作为只读兼容
   别名，但新配置应使用 `domain` / `MEBULAR_MEMORY_DOMAIN`；请求只发送 `domain`。
 - 要关闭 sidecar，设置 `memoryRuntime.enabled=false`（或显式运行
-  `mebular memory-runtime stop`）。sidecar 停止，29 个 MCP 工具和已沉降记忆保留。
+  `mebular memory-runtime stop`）。managed 模式停止拥有的进程；attached/manual 模式可以
+  保留外部进程但使其 dormant。29 个 MCP 工具和已沉降记忆保留。
   `<home>/memory-runtime/` 可保留或删除；删除它不会删除已通过 MCP 沉降的记忆。只禁用或
   移除 Hermes provider 不会停止 sidecar。
 - **版本与降级边界。** 所有设备必须运行相同的 Mebular 版本，没有混版窗口。更改包版本前

@@ -4,8 +4,12 @@
 
 | Version | Status |
 | --- | --- |
-| `0.1.x` | Current, maintained |
-| Earlier than `0.1` | Not guaranteed to receive fixes |
+| `0.3.x` | Current, maintained; includes Memory Runtime and host adapters |
+| Earlier than `0.3` | Not guaranteed to receive fixes |
+
+Security fixes are made on the current `0.3.x` line. The supported component surface
+includes the Mebular daemon, MCP server and capability API, Memory Runtime sidecar,
+DSH/Hermes/OpenCode host adapters, Console and the Electron desktop app.
 
 ## Reporting a vulnerability
 
@@ -20,7 +24,9 @@ This opens a private advisory visible only to you and the maintainers.
 ### What to include
 
 - Affected version(s)
-- Component: daemon, MCP, Console, or Electron desktop
+- Component: daemon, MCP/capability API, Memory Runtime sidecar, DSH/Hermes/OpenCode
+  adapter, Console, or Electron desktop
+- Runtime mode when relevant: `managed`, `attached` or `manual`
 - Steps to reproduce
 - Impact
 - Proof of concept, if available
@@ -40,18 +46,26 @@ We publish details after a fix or mitigation is available. Please give the maint
 In scope:
 
 - Mebular daemon
-- MCP server
+- MCP server and internal capability API
+- Memory Runtime sidecar: lifecycle (`managed`/`attached`/`manual`), discovery,
+  host/capability tokens, staging, cache, outbox/dead and model-source boundaries
+- Host adapters: DSH, Hermes and OpenCode/OpenChamber
 - Console
 - Electron desktop app
 - Sync protocol
 - Authentication and authorization
 - Cryptography and key handling
+- Redaction and data minimization before staging, outbox, host spool, logs or remote
+  model calls
 
 Out of scope:
 
 - Dependency upgrades with no demonstrated security impact
 - Ordinary bugs with no security impact
 - Local issues that require physical access and have no additional impact
+- Physical erasure of host-owned copies (for example DSH `session.v4.jsonl`), provider
+  logs or already-synced offline peers, where Mebular only promises cooperative
+  tombstone propagation
 
 Out-of-scope reports are welcome as regular GitHub issues.
 

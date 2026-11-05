@@ -25,10 +25,19 @@ import { LocalQuota } from './quota.js';
 import { deriveEdges } from './collab/dag.js';
 import { reduceTaskEvents, type TaskState } from './model.js';
 import { derivePlanProgress, derivePlanSteps, parsePlanTaskId, type PlanStepRouteHint, type TaskPlan } from './plan.js';
-import { AGENT_NAMESPACE, agentDirectoryStore, expandTargets } from './agentdir.js';
 import {
+  AGENT_NAMESPACE,
+  agentDirectoryStore,
+  deriveAgentExecution,
+  expandTargets,
+  type TaskTarget,
+} from './agentdir.js';
+import {
+  activeCapabilityCards,
+  latestCapabilityCards,
   listCapabilityCards,
   summarizeCapabilityCards,
+  type AgentCapabilityCard,
 } from './cards.js';
 import type { TaskEvent, TaskEventType } from './protocol/events.js';
 import { EVENT_TO_STATUS } from './protocol/events.js';
@@ -780,10 +789,14 @@ export const TASK_TOOLS: TaskTool[] = [
           if (namespaces.includes(session.namespace)) subscribed.push(peer.device);
         }
         const entries = await agentDirectoryStore(mebular, 'agents').all();
-        const targets = expandTargets(entries, subscribed);
+        const targetKeys = new Set<string>();
+        let targets: TaskTarget[] = expandTargets(entries, subscribed);
         let cards: ReturnType<typeof summarizeCapabilityCards> = [];
         try {
           const cardEntries = await listCapabilityCards(mebular, 'agents');
+          const activeCards = activeCapabilityCards(latestCapabilityCards(cardEntries));
+          const cardByTarget = new Map<string, AgentCapabilityCard>();
+          for (const card of activeCards) cardByTarget.set(`${card.device}\u0000${card.agent}`, card);
           const states = await statesOf(session.store);
           const inflight = new Map<string, number>();
           for (const state of states) {
@@ -791,7 +804,30 @@ export const TASK_TOOLS: TaskTool[] = [
             const key = `${state.to.device}\u0000${state.to.agent}`;
             inflight.set(key, (inflight.get(key) ?? 0) + 1);
           }
-          const targetKeys = new Set(targets.map((target) => `${target.device}\u0000${target.agent}`));
+          for (const target of targets) targetKeys.add(`${target.device}\u0000${target.agent}`);
+          // additive：把卡片上的显式 executable/executionMode/health 合并进 targets。
+          // 目录缺字段时以卡片为准（旧目录兼容）；两边都缺则保持未知。
+          targets = targets.map((target) => {
+            const card = cardByTarget.get(`${target.device}\u0000${target.agent}`);
+            if (card === undefined) return target;
+            const executable = card.executable === false
+              ? false
+              : (target.executable ?? card.executable);
+            const executionMode = target.executionMode ?? card.executionMode;
+            const unavailableReason = card.health?.status === 'unavailable' ? 'adapter-unavailable' : undefined;
+            const reason = target.reason
+              ?? unavailableReason
+              ?? (executable === false
+                ? (deriveAgentExecution({ name: target.agent, kind: target.kind }).reason ?? 'not-executable')
+                : undefined);
+            return {
+              ...target,
+              ...(executable !== undefined ? { executable } : {}),
+              ...(executionMode !== undefined ? { executionMode } : {}),
+              ...(card.health !== undefined ? { health: card.health } : {}),
+              ...(reason !== undefined ? { reason } : {}),
+            };
+          });
           cards = summarizeCapabilityCards(cardEntries, {
             devices: subscribed,
             online: (device) => {

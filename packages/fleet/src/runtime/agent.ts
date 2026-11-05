@@ -298,6 +298,67 @@ export interface HermesAgentOptions {
   usageDir?: string;
 }
 
+const HEALTH_MAX_OUTPUT_BYTES = 4_096;
+const HEALTH_DETAIL_MAX_CHARS = 120;
+
+/**
+ * `hermes --version` 探测（advisory）。
+ *
+ * - 命令缺失/非 0/超时 → `unavailable`；成功 → `ok`（detail 只保留首行版本）；
+ * - 不继承 daemon 全量 env，不返回 stderr/凭据；不影响执行超时与并发。
+ */
+async function probeHermesVersion(command: string, timeoutMs = 5_000): Promise<ExecutorHealth> {
+  const startedAt = Date.now();
+  try {
+    const result = await runOnce({
+      command,
+      args: ['--version'],
+      env: buildChildEnv(),
+      timeoutMs,
+      maxOutputBytes: HEALTH_MAX_OUTPUT_BYTES,
+    });
+    const latencyMs = Date.now() - startedAt;
+    if (result.timedOut || result.aborted) {
+      return {
+        status: 'unavailable',
+        checkedAt: Date.now(),
+        latencyMs,
+        detail: `${command} --version timed out after ${Math.max(1, timeoutMs)}ms`,
+      };
+    }
+    if (result.code === null) {
+      return { status: 'unavailable', checkedAt: Date.now(), latencyMs, detail: `${command} not found` };
+    }
+    if (result.code !== 0) {
+      return {
+        status: 'unavailable',
+        checkedAt: Date.now(),
+        latencyMs,
+        detail: `${command} --version exited ${result.code}`,
+      };
+    }
+    const firstLine = result.stdout
+      .split('\n')
+      .map((line) => line.trim())
+      .find((line) => line.length > 0);
+    return {
+      status: 'ok',
+      checkedAt: Date.now(),
+      latencyMs,
+      detail: firstLine !== undefined
+        ? `${command}: ${firstLine.slice(0, HEALTH_DETAIL_MAX_CHARS)}`
+        : `${command} --version ok`,
+    };
+  } catch {
+    return {
+      status: 'unavailable',
+      checkedAt: Date.now(),
+      latencyMs: Date.now() - startedAt,
+      detail: `${command} --version failed`,
+    };
+  }
+}
+
 /**
  * Hermes 专用 adapter：`hermes [-p P] [-t T] [-m M] [--in DIR] -z <prompt> --usage-file <tmp>`。
  * `-z`/`--usage-file` 是 Hermes 平台细节，**只出现在这里**。
@@ -311,6 +372,11 @@ export class HermesExecutorAdapter implements ExecutorAdapter {
   };
 
   constructor(private readonly options: HermesAgentOptions = {}) {}
+
+  /** 只探测 `hermes --version`；缺失/异常 → unavailable（不伪造 ok）。 */
+  health(): Promise<ExecutorHealth> {
+    return probeHermesVersion(this.options.hermesPath ?? 'hermes');
+  }
 
   private argv(prompt: string, usagePath: string): string[] {
     const args: string[] = [...(this.options.commandArgs ?? [])];

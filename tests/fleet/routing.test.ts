@@ -78,7 +78,7 @@ describe('P3 route resolver', () => {
       chosen: B,
       why: {
         code: 'ASSIGNED',
-        hardFilters: ['authorized', 'policy', 'capability', 'payload', 'online', 'capacity'],
+        hardFilters: ['authorized', 'policy', 'executable', 'health', 'capability', 'payload', 'online', 'capacity'],
         tieBreak: 'rendezvous-sha256',
         roleCard: 'disabled',
       },
@@ -489,5 +489,62 @@ describe('P3 route resolver', () => {
     expect(decision.rejected).toEqual([
       { device: B.device, agent: B.agent, code: 'MISSING_CAPABILITY', detail: 'api' },
     ]);
+  });
+
+  it('executable=false：echo/board/占位不被选中，且有可解释拒绝', () => {
+    const echo = card(B.device, 'echo', ['api'], { executable: false, executionMode: 'in-process' });
+    const real = card(C.device, C.agent, ['api'], { executable: true, executionMode: 'cli' });
+    const decision = resolveRoute(input({
+      cards: [echo, real],
+      authorization: { devices: [B.device, C.device] },
+      status: [view(B.device, 'echo'), view(C.device, C.agent)],
+      route: { require: ['api'], prefer: [], strategy: 'deterministic' },
+    }));
+    expect(decision).toMatchObject({ decision: 'assigned', chosen: C });
+    expect(decision.rejected).toContainEqual({ device: B.device, agent: 'echo', code: 'ADAPTER_UNAVAILABLE', detail: 'executable=false' });
+
+    const onlyEcho = resolveRoute(input({
+      cards: [echo],
+      authorization: { devices: [B.device] },
+      status: [view(B.device, 'echo')],
+      route: { require: ['api'], prefer: [], strategy: 'deterministic' },
+    }));
+    expect(onlyEcho).toMatchObject({ decision: 'NO_TARGET', chosen: null, blockedBy: ['ADAPTER_UNAVAILABLE'] });
+
+    const explicit = resolveRoute(input({
+      cards: [echo],
+      to: { device: B.device, agent: 'echo' },
+      authorization: { devices: [B.device] },
+      status: [view(B.device, 'echo')],
+    }));
+    expect(explicit).toMatchObject({ decision: 'NO_TARGET', chosen: null, blockedBy: ['ADAPTER_UNAVAILABLE'] });
+  });
+
+  it('health 显式 unavailable 硬拒绝；degraded/缺失不拒绝', () => {
+    const unavailable = card(B.device, B.agent, ['api'], {
+      health: { status: 'unavailable', detail: 'probe failed' },
+    });
+    const rejected = resolveRoute(input({
+      cards: [unavailable],
+      route: { require: ['api'], prefer: [], strategy: 'deterministic' },
+    }));
+    expect(rejected).toMatchObject({ decision: 'NO_TARGET', chosen: null, blockedBy: ['ADAPTER_UNAVAILABLE'] });
+    expect(rejected.rejected).toContainEqual({ device: B.device, agent: B.agent, code: 'ADAPTER_UNAVAILABLE', detail: 'health=unavailable' });
+
+    const degraded = card(B.device, B.agent, ['api'], { health: { status: 'degraded', detail: 'no probe' } });
+    expect(resolveRoute(input({
+      cards: [degraded],
+      route: { require: ['api'], prefer: [], strategy: 'deterministic' },
+    }))).toMatchObject({ decision: 'assigned', chosen: B });
+  });
+
+  it('旧卡缺 executable/executionMode/health：视为兼容放行', () => {
+    const legacy = card(B.device, B.agent, ['api']);
+    expect(legacy).not.toHaveProperty('executable');
+    const decision = resolveRoute(input({
+      cards: [legacy],
+      route: { require: ['api'], prefer: [], strategy: 'deterministic' },
+    }));
+    expect(decision).toMatchObject({ decision: 'assigned', chosen: B });
   });
 });

@@ -11,12 +11,16 @@ import { createHash } from 'node:crypto';
 import type { Mebular } from '@mebular/core';
 import {
   AGENT_NAMESPACE,
+  deriveAgentExecution,
   embeddedAgentDirectoryBackend,
   publishAgentDirectoryWithBackend,
   type AgentDirectoryBackend,
   type AgentDirectoryPublishResult,
+  type AgentExecutionHealth,
 } from './agentdir.js';
 import type { FleetAgentConfig, FleetConfig } from './config.js';
+import type { ExecutorDescriptor, ExecutorExecutionMode } from './runtime/executor.js';
+import { EXECUTOR_EXECUTION_MODES } from './runtime/executor.js';
 import { PLAN_SENTINEL } from './protocol/envelope.js';
 
 export const CAPABILITY_CARD_KIND = 'agent_capability_card';
@@ -111,6 +115,15 @@ export interface AgentCapabilityCard {
   provenance: CapabilityCardProvenance;
   signature: CapabilityCardSignature;
   tombstone?: boolean;
+  /**
+   * 该 agent 是否可真实执行（由 config/adapter 推导）。
+   * 旧卡缺字段视为兼容（路由按“未知”放行），显式 `false` 不得被路由选中。
+   */
+  executable?: boolean;
+  /** 执行通道（additive；旧卡缺省 = 未知）。 */
+  executionMode?: ExecutorExecutionMode;
+  /** 健康快照（additive/advisory；不得包含 env/token/端点凭据）。 */
+  health?: AgentExecutionHealth;
 }
 
 /** 签名前的卡片（version 已定、signature 未生成）。 */
@@ -148,10 +161,19 @@ export interface CapabilityCardReadOptions {
 
 type CapabilityCardReader = Pick<Mebular, 'graph'> & Partial<Pick<Mebular, 'identity' | 'sync'>>;
 
+/** 能力卡编译需要的只读注册表投影（不暴露 adapter 内部/命令）。 */
+export interface CapabilityCardRegistry {
+  names(): string[];
+  descriptorOf?(agent: string): ExecutorDescriptor | undefined;
+}
+
 export interface CapabilityCardCompileInput {
   config: Pick<FleetConfig, 'device' | 'namespace' | 'agents'>;
-  /** 运行中执行器注册表；其 names 只用于 provenance/注册变化检测，不暴露 command。 */
-  registry?: { names(): string[] };
+  /**
+   * 运行中执行器注册表；其 names 用于 provenance/注册变化检测，descriptor 只提供
+   * 非敏感执行元数据（executionMode），不暴露 command。
+   */
+  registry?: CapabilityCardRegistry;
   runtime?: CapabilityCardRuntime;
   now?: number;
 }
@@ -213,18 +235,23 @@ function defaultRuntime(): CapabilityCardRuntime {
 /** 配置哈希只覆盖非敏感投影；command/baseArgs/env 永不进入。 */
 function configHashOf(config: Pick<FleetConfig, 'namespace' | 'agents'>): string {
   const agents = [...config.agents]
-    .map((agent) => ({
-      name: agent.name,
-      kind: agent.kind,
-      capabilities: normalizeTags(agent.capabilities),
-      ...(agent.concurrency !== undefined ? { concurrency: agent.concurrency } : {}),
-      ...(agent.timeoutMs !== undefined ? { timeoutMs: agent.timeoutMs } : {}),
-    }))
+    .map((agent) => {
+      const execution = deriveAgentExecution(agent);
+      return {
+        name: agent.name,
+        kind: agent.kind,
+        capabilities: normalizeTags(agent.capabilities),
+        executable: execution.executable,
+        executionMode: execution.executionMode,
+        ...(agent.concurrency !== undefined ? { concurrency: agent.concurrency } : {}),
+        ...(agent.timeoutMs !== undefined ? { timeoutMs: agent.timeoutMs } : {}),
+      };
+    })
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   return sha256({ namespace: config.namespace, agents });
 }
 
-function registryHashOf(config: Pick<FleetConfig, 'agents'>, registry?: { names(): string[] }): string {
+function registryHashOf(config: Pick<FleetConfig, 'agents'>, registry?: CapabilityCardRegistry): string {
   const names = [...new Set((registry?.names() ?? config.agents.map((agent) => agent.name)).filter(nonEmptyString))].sort();
   return sha256({ agents: names });
 }
@@ -271,25 +298,32 @@ export function compileCapabilityCards(input: CapabilityCardCompileInput): Capab
 
   return [...agents.values()]
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
-    .map((agent) => ({
-      v: CAPABILITY_CARD_SCHEMA_VERSION,
-      kind: CAPABILITY_CARD_KIND,
-      device: input.config.device,
-      agent: agent.name,
-      version: 1,
-      capabilities: normalizeTags(['fleet.task', ...(agent.capabilities ?? [])]),
-      tools: [...AGENT_TASK_TOOL_NAMES],
-      limits: limitsForAgent(agent),
-      permissions: { taskNamespaces: normalizeTags([input.config.namespace]) },
-      runtime,
-      provenance: {
-        source: 'config+executor-registry+runtime',
-        configHash,
-        registryHash,
-        publishedAt: now,
-      },
-      tombstone: false,
-    }));
+    .map((agent) => {
+      const execution = deriveAgentExecution(agent);
+      // registry descriptor 只补充非敏感执行元数据；可执行性仍以 config 静态推导为准。
+      const executionMode = input.registry?.descriptorOf?.(agent.name)?.executionMode ?? execution.executionMode;
+      return {
+        v: CAPABILITY_CARD_SCHEMA_VERSION,
+        kind: CAPABILITY_CARD_KIND,
+        device: input.config.device,
+        agent: agent.name,
+        version: 1,
+        capabilities: normalizeTags(['fleet.task', ...(agent.capabilities ?? [])]),
+        tools: [...AGENT_TASK_TOOL_NAMES],
+        limits: limitsForAgent(agent),
+        permissions: { taskNamespaces: normalizeTags([input.config.namespace]) },
+        runtime,
+        provenance: {
+          source: 'config+executor-registry+runtime',
+          configHash,
+          registryHash,
+          publishedAt: now,
+        },
+        executable: execution.executable,
+        executionMode,
+        tombstone: false,
+      };
+    });
 }
 
 /** 卡片内容指纹：忽略 version/signature/publishedAt；同内容不重复发版。 */
@@ -313,6 +347,9 @@ export function capabilityCardFingerprint(card: AgentCapabilityCard | Capability
       configHash: provenance.configHash,
       registryHash: provenance.registryHash,
     },
+    ...(card.executable !== undefined ? { executable: card.executable } : {}),
+    ...(card.executionMode !== undefined ? { executionMode: card.executionMode } : {}),
+    ...(card.health !== undefined ? { health: card.health } : {}),
     tombstone: card.tombstone === true,
   });
 }
@@ -467,6 +504,33 @@ function validateCardFields(input: unknown, requireSignature: boolean): Capabili
     errors.push('draft 不得包含 signature');
   }
   if (card.tombstone !== undefined && typeof card.tombstone !== 'boolean') errors.push('tombstone 若存在须为布尔');
+  // additive：旧卡缺字段仍合法；一旦出现就必须是稳定形状。
+  if (card.executable !== undefined && typeof card.executable !== 'boolean') {
+    errors.push('executable 若存在须为布尔');
+  }
+  if (card.executionMode !== undefined
+    && !EXECUTOR_EXECUTION_MODES.includes(card.executionMode as ExecutorExecutionMode)) {
+    errors.push('executionMode 若存在须为 cli|http|json-rpc|in-process');
+  }
+  if (card.health !== undefined) {
+    if (!isRecord(card.health)) {
+      errors.push('health 若存在须为对象');
+    } else {
+      const health = card.health as Record<string, unknown>;
+      if (health.status !== 'ok' && health.status !== 'degraded' && health.status !== 'unavailable') {
+        errors.push('health.status 须为 ok|degraded|unavailable');
+      }
+      if (health.checkedAt !== undefined && (typeof health.checkedAt !== 'number' || !Number.isFinite(health.checkedAt))) {
+        errors.push('health.checkedAt 若存在须为有限数字');
+      }
+      if (health.latencyMs !== undefined && (typeof health.latencyMs !== 'number' || !Number.isFinite(health.latencyMs))) {
+        errors.push('health.latencyMs 若存在须为有限数字');
+      }
+      if (health.detail !== undefined && typeof health.detail !== 'string') {
+        errors.push('health.detail 若存在须为字符串');
+      }
+    }
+  }
   scanSensitiveKeys(card, 'card', errors);
   return { ok: errors.length === 0, errors };
 }
@@ -569,7 +633,7 @@ export function embeddedCapabilityCardBackend(
 export async function publishCapabilityCardsWithBackend(options: {
   backend: CapabilityCardBackend;
   config: Pick<FleetConfig, 'device' | 'namespace' | 'agents'>;
-  registry?: { names(): string[] };
+  registry?: CapabilityCardRegistry;
   runtime?: CapabilityCardRuntime;
   now?: number;
 }): Promise<CapabilityCardPublishResult> {
@@ -650,7 +714,7 @@ export async function publishCapabilityCardsWithBackend(options: {
 export async function publishCapabilityCards(options: {
   mebular: Pick<Mebular, 'graph' | 'identity'>;
   config: Pick<FleetConfig, 'device' | 'namespace' | 'agents'>;
-  registry?: { names(): string[] };
+  registry?: CapabilityCardRegistry;
   namespace?: string;
   runtime?: CapabilityCardRuntime;
   now?: number;
@@ -668,7 +732,7 @@ export async function publishCapabilityCards(options: {
 export async function publishFleetCardsWithBackend(options: {
   backend: FleetAgentBackend;
   config: Pick<FleetConfig, 'device' | 'namespace' | 'agents'>;
-  registry?: { names(): string[] };
+  registry?: CapabilityCardRegistry;
   runtime?: CapabilityCardRuntime;
   now?: number;
 }): Promise<FleetCardsPublishResult> {
@@ -690,7 +754,7 @@ export async function publishFleetCardsWithBackend(options: {
 export async function publishFleetCards(options: {
   mebular: Pick<Mebular, 'graph' | 'identity'>;
   config: Pick<FleetConfig, 'device' | 'namespace' | 'agents'>;
-  registry?: { names(): string[] };
+  registry?: CapabilityCardRegistry;
   namespace?: string;
   runtime?: CapabilityCardRuntime;
   now?: number;

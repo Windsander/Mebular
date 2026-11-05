@@ -231,12 +231,18 @@ try {
   ]) {
     const published = await publishFleetCards({
       mebular: node,
-      config: fleetConfig(dir, endpoint.device, [{ name: 'worker', kind: 'echo', capabilities }], [A.device]),
+      // P6 编排工装用 EchoExecutor 提速，但目录/卡片必须声明真实可执行 kind，
+      // 否则会被 0.3.2 的 executable/plan-owner 硬过滤正确拒绝。
+      config: fleetConfig(dir, endpoint.device, [
+        { name: 'worker', kind: 'command', command: process.execPath, capabilities },
+      ], [A.device]),
       now: 1,
     });
     if (published.errors.length > 0) throw new Error(`publish cards ${endpoint.device}: ${published.errors.join('; ')}`);
   }
-  const configA = fleetConfig(dir, A.device, [{ name: 'planner', kind: 'echo' }], [B.device, C.device, D.device, J.device]);
+  const configA = fleetConfig(dir, A.device, [
+    { name: 'planner', kind: 'command', command: process.execPath },
+  ], [B.device, C.device, D.device, J.device]);
   await writeFile(join(dir, 'fleet.config.json'), JSON.stringify(configA), { mode: 0o600 });
 
   const syncAll = async () => {
@@ -578,11 +584,15 @@ try {
   });
   const backendB = new DaemonAgentBackend({ endpoint: baseB, namespace: AGENT_NAMESPACE });
   const draftA = compileCapabilityCards({
-    config: fleetConfig(homeA, 'device-A', [{ name: 'planner', kind: 'echo' }]),
+    config: fleetConfig(homeA, 'device-A', [
+      { name: 'planner', kind: 'command', command: process.execPath },
+    ]),
     now: 1,
   })[0];
   const draftB = compileCapabilityCards({
-    config: fleetConfig(homeB, 'device-B', [{ name: 'worker', kind: 'echo', capabilities: ['code.write'] }]),
+    config: fleetConfig(homeB, 'device-B', [
+      { name: 'worker', kind: 'command', command: process.execPath, capabilities: ['code.write'] },
+    ]),
     now: 1,
   })[0];
   await backendA.signAndAppendCard(draftA);
@@ -625,7 +635,7 @@ try {
     namespace: 'tasks',
     listen: '/ip4/127.0.0.1/tcp/0',
     peers: [{ device: 'device-B' }],
-    agents: [{ name: 'planner', kind: 'echo' }],
+    agents: [{ name: 'planner', kind: 'command', command: process.execPath }],
     store: 'daemon',
     daemon: { endpoint: baseA },
   }), { mode: 0o600 });

@@ -59,7 +59,7 @@ function fleetConfig(device: string, agents: FleetAgentConfig[], options: { name
   };
 }
 
-async function openMebular(dir: string, device: string): Promise<Mebular> {
+async function openMebular(dir: string): Promise<Mebular> {
   const config = await loadFleetConfig(fleetConfigPath(dir));
   const encryption = await readMasterKeyFile(config.masterKeyFile);
   const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
@@ -167,7 +167,7 @@ describe('P1 签名 / 发布 / 版本 / tombstone', () => {
     const dir = await tempDir('fleet-cards-publish-');
     const agents: FleetAgentConfig[] = [{ name: 'worker', kind: 'echo', capabilities: ['code.write'] }];
     await onboardDevice({ dir, device: 'device-A', agents });
-    const mebular = await openMebular(dir, 'device-A');
+    const mebular = await openMebular(dir);
     try {
       const config = await loadFleetConfig(fleetConfigPath(dir));
       const first = await publishCapabilityCards({ mebular, config, now: 100 });
@@ -218,7 +218,7 @@ describe('P1 签名 / 发布 / 版本 / tombstone', () => {
   it('真实 fleet.config.json 空 agents：可加载，最后一张本机卡发 tombstone', async () => {
     const dir = await tempDir('fleet-cards-empty-agents-');
     await onboardDevice({ dir, device: 'device-A', agents: [{ name: 'worker', kind: 'echo' }] });
-    const mebular = await openMebular(dir, 'device-A');
+    const mebular = await openMebular(dir);
     try {
       const path = fleetConfigPath(dir);
       const initial = await loadFleetConfig(path);
@@ -242,7 +242,7 @@ describe('P1 签名 / 发布 / 版本 / tombstone', () => {
     const dir = await tempDir('fleet-cards-nosigner-');
     const agents: FleetAgentConfig[] = [{ name: 'worker', kind: 'echo' }];
     await onboardDevice({ dir, device: 'device-A', agents });
-    const mebular = await openMebular(dir, 'device-A');
+    const mebular = await openMebular(dir);
     try {
       const config = await loadFleetConfig(fleetConfigPath(dir));
       const unsigned = compileCapabilityCards({ config, now: 1 })[0]!;
@@ -267,7 +267,7 @@ describe('P1 签名 / 发布 / 版本 / tombstone', () => {
     const dir = await tempDir('fleet-cards-dir-');
     const agents: FleetAgentConfig[] = [{ name: 'worker', kind: 'echo', capabilities: ['code.write'] }];
     await onboardDevice({ dir, device: 'device-A', agents });
-    const mebular = await openMebular(dir, 'device-A');
+    const mebular = await openMebular(dir);
     try {
       const config = await loadFleetConfig(fleetConfigPath(dir));
       const first = await publishAgentDirectory(mebular, config, { now: 100 });
@@ -303,7 +303,7 @@ describe('P1 自动发布：配置变更 + agent 注册变化', () => {
       { name: 'reviewer', kind: 'echo' },
     ];
     await onboardDevice({ dir, device: 'device-A', agents });
-    const mebular = await openMebular(dir, 'device-A');
+    const mebular = await openMebular(dir);
     try {
       const config = await loadFleetConfig(fleetConfigPath(dir));
       const registry = new ExecutorRegistry();
@@ -352,7 +352,7 @@ describe('P1 internal 可见性：记忆列表/搜索/域计数', () => {
     const dir = await tempDir('fleet-cards-internal-');
     const agents: FleetAgentConfig[] = [{ name: 'worker', kind: 'echo' }];
     await onboardDevice({ dir, device: 'device-A', agents });
-    const mebular = await openMebular(dir, 'device-A');
+    const mebular = await openMebular(dir);
     try {
       const config = await loadFleetConfig(fleetConfigPath(dir));
       await publishCapabilityCards({ mebular, config, now: 100 });
@@ -387,7 +387,7 @@ describe('P1 task_targets.cards additive + 旧调用 + __plan__ worker', () => {
       agents: [{ name: 'worker', kind: 'echo' }],
       peerDevice: 'device-B',
     });
-    const mebular = await openMebular(dir, 'device-A');
+    const mebular = await openMebular(dir);
     const bDir = await tempDir('fleet-cards-targets-b-');
     const masterB = await Mebular.generateUserMasterKey();
     const bMebular = new Mebular({
@@ -507,7 +507,7 @@ describe('P1 task_targets.cards additive + 旧调用 + __plan__ worker', () => {
     const mebular = await openMebular(await (async () => {
       await onboardDevice({ dir, device: 'device-B', agents: [{ name: 'echo', kind: 'echo' }] });
       return dir;
-    })(), 'device-B');
+    })());
     try {
       const store = new MebularTaskEventStore(mebular, { namespace: 'tasks' });
       const root = mkEvent('created', 'plan-demo#1#root', {
@@ -534,7 +534,7 @@ describe('P1 能力卡读取工具', () => {
   it('读取信任：author 绑定 + 真签名；无公钥/伪造/篡改/作者不符均不返回', async () => {
     const dir = await tempDir('fleet-cards-trust-');
     await onboardDevice({ dir, device: 'device-A', agents: [{ name: 'worker', kind: 'echo' }] });
-    const a = await openMebular(dir, 'device-A');
+    const a = await openMebular(dir);
     const bDir = await tempDir('fleet-cards-trust-b-');
     const masterB = await Mebular.generateUserMasterKey();
     const b = new Mebular({

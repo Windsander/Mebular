@@ -26,6 +26,7 @@ import {
   type SidecarPolicy,
 } from './domains.js';
 import { SidecarSettlementError } from './errors.js';
+import type { LifecycleGate } from './lifecycle-gate.js';
 import { LocalLayerError, type OutboxItem, type OutboxReplayCompletion, type SidecarLocalLayer } from './local-layer.js';
 import type { SidecarInferenceProvider } from './inference-provider.js';
 
@@ -167,6 +168,7 @@ export interface MemoryObjectServiceOptions {
   };
   policy?: SidecarPolicy | null;
   inference?: SidecarInferenceProvider | null;
+  lifecycle?: LifecycleGate | null;
   now?: () => number;
 }
 
@@ -556,6 +558,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
 
   private readonly client: CapabilityClient | null;
   private readonly models: SidecarInferenceProvider | null;
+  private readonly lifecycle: LifecycleGate | null;
   private readonly now: () => number;
   private readonly serial = new KeyedSerial();
   private policy: SidecarPolicy;
@@ -568,6 +571,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
     this.local = options.local;
     this.client = options.client;
     this.models = options.inference ?? null;
+    this.lifecycle = options.lifecycle ?? null;
     this.identity = options.identity;
     this.policy = options.policy ?? { schema: 1, agents: {} };
     this.now = options.now ?? Date.now;
@@ -645,6 +649,8 @@ export class MemoryObjectService implements SidecarObjectsApi {
   async applyReplayComplete(item: OutboxItem, outcome: OutboxReplayCompletion): Promise<void> {
     // skipped 不是终态：条目仍在活动 outbox，不得清 pending。
     if (outcome !== 'dead') return;
+    // drain 后 dead 收口不得删除 pending marker；保持可恢复。
+    if (this.lifecycle && !this.lifecycle.acceptsWork()) return;
     if (item.endpoint !== '/internal-object') return;
     const body = isObject(item.body) ? item.body : null;
     if (!body) return;
@@ -674,6 +680,8 @@ export class MemoryObjectService implements SidecarObjectsApi {
    * 这里只接受 capability 返回的对象视图，不改变任何权威 revision。
    */
   async applyReplayedItem(item: OutboxItem, data: unknown): Promise<void> {
+    // drain 后晚到的对象成功只丢弃本地回填，不删除 pending。
+    if (this.lifecycle && !this.lifecycle.acceptsWork()) return;
     if (item.endpoint !== '/internal-object' || !isObject(data) || !isObject(data.object)) return;
     const body = isObject(item.body) ? item.body : null;
     const kind = body?.kind;
@@ -721,6 +729,8 @@ export class MemoryObjectService implements SidecarObjectsApi {
   }
 
   private async cacheSet(key: string, value: unknown): Promise<void> {
+    // drain 后晚到的结果只丢弃缓存副作用，不把已完成的图写入伪装成失败。
+    if (this.lifecycle && !this.lifecycle.acceptsWork()) return;
     try {
       await this.local.cache.set(key, value, { ttlMs: this.cacheTtlMs() });
     } catch {
@@ -729,6 +739,8 @@ export class MemoryObjectService implements SidecarObjectsApi {
   }
 
   private async cacheDelete(key: string): Promise<void> {
+    // drain 后晚到的成功不得删除 pending marker；恢复后仍可从 outbox 重新回填。
+    if (this.lifecycle && !this.lifecycle.acceptsWork()) return;
     try {
       await this.local.cache.delete(key);
     } catch {
@@ -777,6 +789,17 @@ export class MemoryObjectService implements SidecarObjectsApi {
     this.lastError = errorView(error, this.now());
   }
 
+  /** 晚到的对象写入成功同样是含糊成功：不提交缓存/计数，且本次禁用不得 clean。 */
+  private assertLifecycleAfterSuccess(operation: string): void {
+    if (!this.lifecycle || this.lifecycle.acceptsWork()) return;
+    this.lifecycle.noteAmbiguousSuccess(operation);
+    throw new SidecarSettlementError(
+      'mode_mismatch',
+      'Memory Runtime 已休眠：晚到的对象成功不再提交',
+      { status: 409, retryable: false, details: { operation, phase: this.lifecycle.currentPhase } },
+    );
+  }
+
   private async markHealthyIfOutboxEmpty(): Promise<void> {
     try {
       const stats = await this.local.outbox.stats();
@@ -791,6 +814,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
   }
 
   private async enqueueObject(requestId: string, body: Record<string, unknown>): Promise<void> {
+    this.lifecycle?.assertAccepting('object.outbox');
     const id = outboxItemId(requestId);
     try {
       await this.local.outbox.enqueue({
@@ -806,6 +830,13 @@ export class MemoryObjectService implements SidecarObjectsApi {
       });
     } catch (error) {
       if (error instanceof LocalLayerError) {
+        if (error.code === 'lifecycle_blocked') {
+          throw new SidecarSettlementError(
+            'mode_mismatch',
+            'Memory Runtime 已休眠：对象未入队',
+            { status: 409, retryable: false },
+          );
+        }
         throw new SidecarSettlementError(
           error.code === 'outbox_full' ? 'outbox_full' : 'storage_full',
           error.message,
@@ -1194,6 +1225,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
 
         // compact 摘要可选模型；失败保留确定性摘要，不丢源记录、不回退到第三方。
         if (strategy === 'summary' && this.models) {
+          this.lifecycle?.assertAccepting('object.compact.model');
           const selection = await this.models.selectOptionalSource(allowRemote);
           for (const warning of selection.warnings) {
             if (!warnings.includes(warning)) warnings.push(warning);
@@ -1251,6 +1283,8 @@ export class MemoryObjectService implements SidecarObjectsApi {
         );
       }
 
+      // 模型摘要晚到：drain 后不得再用该结果构造/提交 compact 或写缓存。
+      this.lifecycle?.assertAccepting('object.compact.commit');
       const base = {
         compactId: null as string | null,
         status: dryRun ? 'dry_run' : 'pending',
@@ -1345,6 +1379,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
           capabilityBody,
           { idempotencyKey: requestId },
         );
+        this.assertLifecycleAfterSuccess('object.compact.write');
         const object = isObject(response.data.object) ? response.data.object as unknown as CompactView : null;
         if (!object) {
           throw new SidecarSettlementError('capability_unavailable', 'compact 写入后未返回对象', {
@@ -1598,6 +1633,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
           capabilityBody,
           { idempotencyKey: requestId },
         );
+        this.assertLifecycleAfterSuccess('object.checkpoint.write');
         const object = isObject(response.data.object) ? response.data.object : null;
         if (!object) {
           throw new SidecarSettlementError('capability_unavailable', 'checkpoint 写入后未返回对象', {
@@ -2020,6 +2056,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
           capabilityBody,
           { idempotencyKey: requestId },
         );
+        this.assertLifecycleAfterSuccess('object.self.write');
         const object = isObject(response.data.object) ? response.data.object : null;
         if (!object) {
           throw new SidecarSettlementError('capability_unavailable', 'SelfRecord 写入后未返回对象', {

@@ -16,6 +16,7 @@ import {
 } from '../runtime/local-store.js';
 import { ensurePrivateDir, readJsonFile, writeJsonAtomic } from './atomic-json.js';
 import type { SidecarPaths } from './config.js';
+import type { LifecycleGate } from './lifecycle-gate.js';
 import { redactText } from './text.js';
 import type { RawChunk } from '../runtime/types.js';
 
@@ -30,6 +31,7 @@ const SENSITIVE_FIELD_RE = /^(?:authorization|api[-_]?key|access[-_]?token|refre
 export type LocalLayerErrorCode =
   | 'outbox_full'
   | 'storage_full'
+  | 'lifecycle_blocked'
   | 'invalid_outbox_item'
   | 'invalid_cache_key';
 
@@ -64,6 +66,8 @@ export interface OutboxItem {
   replayLeaseOwner?: string;
   /** 取得租约时使用的时长；后续续租不得退回到更短的默认值。 */
   replayLeaseMs?: number;
+  /** 取得租约时的 lifecycle generation；跨 drain/resume 的旧 attempt 不得落盘。 */
+  replayLeaseGeneration?: number;
   /**
    * 已由 capability 确认提交、但本地后续对账未完成的记录/详情。
    * 用于 partial/dead 时如实披露，绝不因本地 staging 缺失而隐去已提交对象。
@@ -147,7 +151,7 @@ export interface OutboxCleanupResult {
 
 export type OutboxReplayLeaseResult =
   | { state: 'acquired'; item: OutboxItem }
-  | { state: 'leased' | 'expired' };
+  | { state: 'leased' | 'expired' | 'blocked' };
 
 export type OutboxReplayCompletion = 'settled' | 'retry' | 'dead' | 'skipped';
 
@@ -202,6 +206,8 @@ export interface SidecarLocalLayerOptions {
   detailCacheBytes?: number;
   /** 详情只读缓存条目上限（默认 5000）。 */
   detailCacheMaxEntries?: number;
+  /** 跨 WP 生命周期门闩；缺省表示不启用（独立本地层测试）。 */
+  lifecycle?: LifecycleGate | null;
   now?: () => number;
 }
 
@@ -328,6 +334,7 @@ export class BoundedOutbox {
   readonly maxBytes: number;
 
   private readonly now: () => number;
+  private readonly lifecycle: LifecycleGate | null;
   private tail: Promise<void> = Promise.resolve();
 
   constructor({
@@ -336,12 +343,14 @@ export class BoundedOutbox {
     maxItems = 1000,
     maxBytes = 16_777_216,
     now = Date.now,
+    lifecycle = null,
   }: {
     root: string;
     deadRoot: string;
     maxItems?: number;
     maxBytes?: number;
     now?: () => number;
+    lifecycle?: LifecycleGate | null;
   }) {
     this.root = root;
     this.deadRoot = deadRoot;
@@ -349,6 +358,22 @@ export class BoundedOutbox {
     this.maxItems = Math.max(1, Math.floor(maxItems));
     this.maxBytes = Math.max(1, Math.floor(maxBytes));
     this.now = now;
+    this.lifecycle = lifecycle;
+  }
+
+  /** drain/dormant 期间任何会改写出站队列的动作都必须停止。 */
+  private lifecycleWorkOpen(): boolean {
+    return !this.lifecycle || this.lifecycle.acceptsWork();
+  }
+
+  /** 同一 lease generation 才能写 dead/删除/修改 attempts；跨 drain/resume 的旧 attempt 只能 skipped。 */
+  private lifecycleAllows(item?: OutboxItem): boolean {
+    const gate = this.lifecycle;
+    if (!gate) return true;
+    if (!gate.acceptsWork()) return false;
+    if (item && typeof item.replayLeaseGeneration === 'number'
+      && item.replayLeaseGeneration !== gate.generation()) return false;
+    return true;
   }
 
   async init(): Promise<void> {
@@ -409,6 +434,10 @@ export class BoundedOutbox {
 
   async enqueue(input: OutboxEnqueueInput): Promise<OutboxEnqueueResult> {
     return this.exclusive(async () => {
+      // mode_mismatch/drain 后绝不新增 outbox 项。
+      if (!this.lifecycleWorkOpen()) {
+        throw new LocalLayerError('lifecycle_blocked', 'Memory Runtime 已休眠：拒绝新增 outbox');
+      }
       await this.init();
       const id = input.id ?? input.requestId ?? `ob_${randomUUID()}`;
       if (!OUTBOX_ITEM_RE.test(id)) {
@@ -521,10 +550,13 @@ export class BoundedOutbox {
     { owner }: { owner?: string } = {},
   ): Promise<boolean> {
     if (!committed || Object.keys(committed).length === 0) return false;
+    if (!this.lifecycleWorkOpen()) return false;
     return this.exclusive(async () => {
+      if (!this.lifecycleWorkOpen()) return false;
       const activePath = this.pathFor(id);
       const active = await readJsonFile<OutboxItem>(activePath);
       if (isOutboxItem(active)) {
+        if (!this.lifecycleAllows(active)) return false;
         if (owner !== undefined && active.replayLeaseOwner !== owner) return false;
         const updated: OutboxItem = {
           ...active,
@@ -536,6 +568,7 @@ export class BoundedOutbox {
       const deadPath = this.deadPathFor(id);
       const dead = await readJsonFile<OutboxItem>(deadPath);
       if (!isOutboxItem(dead)) return false;
+      if (!this.lifecycleAllows(dead)) return false;
       if (owner !== undefined && dead.replayLeaseOwner !== owner) return false;
       const updated: OutboxItem = {
         ...dead,
@@ -615,7 +648,10 @@ export class BoundedOutbox {
     id: string,
     { owner }: { owner?: string } = {},
   ): Promise<boolean> {
+    // drain/stop 后保留可恢复 marker；只有恢复准入后才允许删除。
+    if (!this.lifecycleWorkOpen()) return false;
     return this.exclusive(async () => {
+      if (!this.lifecycleWorkOpen()) return false;
       try {
         await rm(this.finalizePathFor(id), { force: true });
       } catch {
@@ -722,6 +758,7 @@ export class BoundedOutbox {
       const path = this.pathFor(id);
       const item = await readJsonFile<OutboxItem>(path);
       if (!isOutboxItem(item)) return false;
+      if (!this.lifecycleAllows(item)) return false;
       if (!owner || item.replayLeaseOwner !== owner) return false;
       if (typeof item.replayLeaseUntil !== 'number' || item.replayLeaseUntil <= now) return false;
       const effectiveLeaseMs = Math.max(
@@ -797,6 +834,8 @@ export class BoundedOutbox {
   }
 
   private async deadLetterUnlocked(item: OutboxItem, errorCode: string): Promise<boolean> {
+    // mode_mismatch/drain 后不得新增 dead 副本；保留活动项等待恢复。
+    if (!this.lifecycleWorkOpen()) return false;
     const path = this.pathFor(item.id);
     await this.ensureFinalizeMarkerUnlocked(item, 'dead');
     const dead: OutboxItem & { deadAt: number; error: string } = {
@@ -812,8 +851,10 @@ export class BoundedOutbox {
 
   /** 永久失败（400/403/422）移入 dead/，保留审计但不无限重试。 */
   async deadLetter(id: string, errorCode: string): Promise<boolean> {
+    if (!this.lifecycleWorkOpen()) return false;
     return this.exclusive(async () => {
       await this.init();
+      if (!this.lifecycleWorkOpen()) return false;
       const item = await readJsonFile<OutboxItem>(this.pathFor(id));
       if (!isOutboxItem(item)) return false;
       if (typeof item.replayLeaseUntil === 'number' && item.replayLeaseUntil > this.now()) return false;
@@ -823,7 +864,9 @@ export class BoundedOutbox {
 
   /** 记录一次失败尝试；retryDelayMs 为 0 时立即允许下一次重放。 */
   async recordAttempt(id: string, { error, retryDelayMs = 0 }: { error: string; retryDelayMs?: number }): Promise<OutboxItem | null> {
+    if (!this.lifecycleWorkOpen()) return null;
     return this.exclusive(async () => {
+      if (!this.lifecycleWorkOpen()) return null;
       const path = this.pathFor(id);
       const item = await readJsonFile<OutboxItem>(path);
       if (!isOutboxItem(item)) return null;
@@ -846,6 +889,8 @@ export class BoundedOutbox {
     { now = this.now(), leaseMs = OUTBOX_REPLAY_LEASE_MS }: { now?: number; leaseMs?: number } = {},
   ): Promise<OutboxReplayLeaseResult> {
     return this.exclusive(async () => {
+      // drain/dormant：不取得新 lease、不把过期项写 dead，保持 pending 原样。
+      if (!this.lifecycleWorkOpen()) return { state: 'blocked' };
       const item = await readJsonFile<OutboxItem>(this.pathFor(id));
       if (!isOutboxItem(item)) return { state: 'expired' };
       if (this.deadlineOf(item) <= now) {
@@ -856,11 +901,13 @@ export class BoundedOutbox {
         return { state: 'leased' };
       }
       const effectiveLeaseMs = Math.max(1, Math.floor(leaseMs));
+      const generation = this.lifecycle?.generation();
       const updated: OutboxItem = {
         ...item,
         replayLeaseUntil: now + effectiveLeaseMs,
         replayLeaseOwner: randomUUID(),
         replayLeaseMs: effectiveLeaseMs,
+        ...(generation !== undefined ? { replayLeaseGeneration: generation } : {}),
       };
       await writeJsonAtomic(this.pathFor(id), updated);
       return { state: 'acquired', item: updated };
@@ -890,6 +937,8 @@ export class BoundedOutbox {
         // 清理可能已把同一逻辑操作移入 dead；成功确认仍必须消除该过期 dead，
         // 避免 committed + dead 双态。partial/retry 不得复活已 dead 的项。
         const dead = await readJsonFile<OutboxItem>(this.deadPathFor(id));
+        // 跨 drain/resume 的晚到结果：不删除 dead、不改写任何终态。
+        if (!this.lifecycleAllows(isOutboxItem(dead) ? dead : undefined)) return 'skipped';
         if (owner !== undefined && dead?.replayLeaseOwner !== undefined
           && dead.replayLeaseOwner !== owner) {
           return 'skipped';
@@ -900,6 +949,8 @@ export class BoundedOutbox {
         }
         return isOutboxItem(dead) ? 'dead' : outcome;
       }
+      // 所有终态（settled/dead/retry）落盘前校验同一 lifecycle generation。
+      if (!this.lifecycleAllows(item)) return 'skipped';
       if (owner !== undefined) {
         if (item.replayLeaseOwner !== owner) return 'skipped';
         if (outcome !== 'settled'
@@ -924,6 +975,7 @@ export class BoundedOutbox {
         nextAttemptAt: now + Math.max(0, Math.floor(retryDelayMs)),
         replayLeaseUntil: 0,
         replayLeaseOwner: undefined,
+        replayLeaseGeneration: undefined,
       };
       await writeJsonAtomic(this.pathFor(id), updated);
       return 'retry';
@@ -1257,6 +1309,7 @@ export class SidecarLocalLayer {
       deadRoot: join(options.root, 'outbox', 'dead'),
       maxItems: options.maxOutboxItems,
       maxBytes: options.maxOutboxBytes,
+      ...(options.lifecycle ? { lifecycle: options.lifecycle } : {}),
       now: options.now,
     });
     this.cache = new JsonCache({

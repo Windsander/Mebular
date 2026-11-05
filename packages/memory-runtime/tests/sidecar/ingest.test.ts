@@ -8,6 +8,7 @@ import { CapabilityClient, CapabilityClientError } from '../../src/sidecar/capab
 import { defaultSidecarConfig } from '../../src/sidecar/config.js';
 import { defaultSidecarPolicy } from '../../src/sidecar/domains.js';
 import { IngestService } from '../../src/sidecar/ingest.js';
+import { LifecycleGate } from '../../src/sidecar/lifecycle-gate.js';
 import { SidecarLocalLayer } from '../../src/sidecar/local-layer.js';
 import { OutboxReplayer } from '../../src/sidecar/outbox-replayer.js';
 import { SettlementRuntime } from '../../src/sidecar/settlement.js';
@@ -31,6 +32,7 @@ async function setup(
     stagingBytes?: number;
     now?: () => number;
     extractionTtlMs?: number;
+    lifecycle?: LifecycleGate | null;
   } = {},
 ): Promise<Harness> {
   const home = await mkdtemp(join(tmpdir(), 'mebular-memory-runtime-ingest-'));
@@ -38,6 +40,7 @@ async function setup(
     root: join(home, 'memory-runtime'),
     ...(options.maxOutboxItems !== undefined ? { maxOutboxItems: options.maxOutboxItems } : {}),
     ...(options.stagingBytes !== undefined ? { stagingBytes: options.stagingBytes } : {}),
+    ...(options.lifecycle ? { lifecycle: options.lifecycle } : {}),
     ...(options.now ? { now: options.now } : {}),
   });
   await local.init();
@@ -54,6 +57,7 @@ async function setup(
     client,
     identity: { cloudId: 'cl_test', profileId: 'default', hostId: 'h_test' },
     policy,
+    ...(options.lifecycle ? { lifecycle: options.lifecycle } : {}),
     ...(options.now ? { now: options.now } : {}),
     ...(options.extractionTtlMs ? { extractionTtlMs: options.extractionTtlMs } : {}),
   });
@@ -3279,5 +3283,176 @@ describe('IngestService settlements', () => {
       .rejects.toMatchObject({ code: 'outbox_full', status: 503 });
     expect(fake.writeRequests).toHaveLength(1);
     expect((await local.outbox.stats()).items).toBe(1);
+  });
+
+  it('drain 后晚到 write 成功：409、不写 Detail/outbox，staging 保留', async () => {
+    const gate = new LifecycleGate();
+    const { service, client, local } = await setup(defaultSidecarPolicy(), { lifecycle: gate });
+    let release!: () => void;
+    const hold = new Promise<void>((resolve) => { release = resolve; });
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    jest.spyOn(client, 'write').mockImplementation((async (payload: any) => {
+      markStarted();
+      await hold;
+      const items = Array.isArray(payload?.items) ? payload.items : [];
+      return {
+        data: {
+          results: items.map((item: any) => ({
+            clientItemId: item.clientItemId,
+            status: 'created',
+            id: `mem_${item.clientItemId}`,
+            kind: item.kind,
+            domain: item.domain,
+          })),
+          created: items.length,
+        },
+        warnings: [],
+        degraded: false,
+      };
+    }) as any);
+    const detailWrite = jest.spyOn(client, 'detailWrite');
+
+    const pending = service.ingest({
+      requestId: 'req_late_write_success',
+      ...preferenceRequest(),
+    });
+    await started;
+    gate.beginDrain('test');
+    gate.finishDrain();
+    release();
+
+    await expect(pending).rejects.toMatchObject({ code: 'mode_mismatch', status: 409 });
+    expect(detailWrite).not.toHaveBeenCalled();
+    expect((await local.outbox.stats()).items).toBe(0);
+    expect(await local.store.countStagingChunks()).toBe(1);
+    const extractions = await local.cache.list<any>('extraction:v1:');
+    expect(extractions.filter((entry) => entry.value?.status === 'completed')).toHaveLength(0);
+    jest.restoreAllMocks();
+  });
+
+  it('drain 发生在 finalize cache 写入前：不写缓存，保留 marker，恢复后收口', async () => {
+    const gate = new LifecycleGate();
+    const { service, fake, local } = await setup(defaultSidecarPolicy(), { lifecycle: gate });
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const queued = await service.ingest({
+      requestId: 'req_drain_finalize',
+      agentId: 'opencode',
+      threadId: 'th_drain_finalize',
+      extractor: 'host',
+      chunks: [],
+      candidates: [{ kind: 'observation', content: { content: 'drain finalize' } }],
+    });
+    const extractionId = queued.data.extraction.id;
+    const item = (await local.outbox.list())[0]!;
+    const originalGet = local.cache.get.bind(local.cache);
+    let markReading!: () => void;
+    const reading = new Promise<void>((resolve) => { markReading = resolve; });
+    let release!: () => void;
+    const hold = new Promise<void>((resolve) => { release = resolve; });
+    jest.spyOn(local.cache, 'get').mockImplementationOnce(async (...args: any[]) => {
+      markReading();
+      await hold;
+      return (originalGet as any)(...args);
+    });
+
+    const finalize = service.finalizeReplayedOutbox(item, 'dead');
+    await reading;
+    gate.beginDrain('test');
+    gate.finishDrain();
+    release();
+    await finalize;
+
+    expect(await local.outbox.listNeedsFinalize()).toHaveLength(1);
+    expect((await service.getExtraction(extractionId))?.status).toBe('pending');
+    jest.restoreAllMocks();
+
+    gate.resume();
+    await service.reconcileReplayFinalizations();
+    expect((await service.getExtraction(extractionId))?.status).toBe('failed');
+    expect(await local.outbox.listNeedsFinalize()).toHaveLength(0);
+  });
+
+  it('staging 先过期时依赖 Detail 显式 dead，不静默确认', async () => {
+    const gate = new LifecycleGate();
+    const { service, client, local } = await setup(defaultSidecarPolicy(), { lifecycle: gate });
+    const now = Date.now();
+    await local.cache.set('extraction:v1:ext_expired_detail', {
+      version: 1,
+      id: 'ext_expired_detail',
+      status: 'pending',
+      extractor: 'host',
+      records: [],
+      detailIds: [],
+      warnings: [],
+      degraded: false,
+      expiresAt: now + 86_400_000,
+      createdAt: now,
+      agentId: 'opencode',
+      stagingChunkIds: ['chunk_missing'],
+      rawChunkIds: ['chunk_missing'],
+      messageIds: [],
+      outboxIds: [],
+    }, { ttlMs: 86_400_000 });
+    await local.outbox.enqueue({
+      id: 'ob_detail_expired',
+      requestId: 'req_detail_expired',
+      endpoint: '/detail',
+      body: {
+        requestId: 'req_detail_expired',
+        actor: { type: 'agent', agentId: 'opencode' },
+        op: 'write',
+        items: [{
+          clientItemId: 'det_expired',
+          domain: 'agent:opencode',
+          detailKind: 'raw_chunk',
+          threadId: 'th_1',
+          recordIds: ['mem_1'],
+          role: 'user',
+          text: 'expired detail',
+          mime: 'text/plain',
+          contentHash: 'sha256:abc',
+          redaction: { applied: false, rules: [] },
+          retentionClass: 'conversation',
+          expiresAt: now + 86_400_000,
+          provenance: {
+            source: 'runtime',
+            extractor: 'host',
+            agentId: 'opencode',
+            messageIds: [],
+            confirmation: 'none',
+          },
+        }],
+      },
+      meta: {
+        kind: 'detail',
+        stagingChunkIds: ['chunk_missing'],
+        extractionIds: ['ext_expired_detail'],
+      },
+    });
+    const post = jest.fn(async () => ({
+      data: {
+        results: [{ clientItemId: 'det_expired', status: 'created', id: 'detail_expired' }],
+        created: 1,
+      },
+    }));
+    const detailGet = jest.spyOn(client, 'detailGet');
+    const replayer = new OutboxReplayer({
+      outbox: local.outbox,
+      client: { post } as any,
+      lifecycle: gate,
+      now: Date.now,
+      onSettled: (item, data) => service.applyReplayedOutbox(item, data),
+      onComplete: (item, outcome) => service.finalizeReplayedOutbox(item, outcome),
+    });
+
+    expect(await replayer.replayOnce()).toMatchObject({ settled: 0, dead: 1, remaining: 0 });
+    expect(detailGet).not.toHaveBeenCalled();
+    const dead = await local.outbox.listDead();
+    expect(dead).toHaveLength(1);
+    expect(dead[0]).toMatchObject({ id: 'ob_detail_expired', error: 'retention_expired' });
+    expect((await service.getExtraction('ext_expired_detail'))?.status).toBe('failed');
+    expect(await local.outbox.listNeedsFinalize()).toHaveLength(0);
+    jest.restoreAllMocks();
   });
 });

@@ -6,6 +6,7 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { acquireConfigFileLock } from '../src/config-lock.mjs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homeDir } from '../src/home.mjs';
@@ -211,6 +212,9 @@ async function runInit(flags) {
   const keyFile = join(home, 'user-master-key.json');
   await mkdir(home, { recursive: true });
 
+  const releaseConfigLock = await acquireConfigFileLock(configFile);
+  if (!releaseConfigLock) throw initError('配置文件正在被其他进程写入，请稍后重试', 'CONFIG_BUSY');
+  try {
   const config = existsSync(configFile)
     ? await readInitJson(configFile, { label: 'config.json', code: 'CONFIG_INVALID' })
     : null;
@@ -288,7 +292,7 @@ async function runInit(flags) {
   }
 
   if (config !== null) {
-    const migrated = await cleanLegacyConfig({ configPath: configFile, identity });
+    const migrated = await cleanLegacyConfig({ configPath: configFile, identity, lock: false });
     console.log(`配置已存在，未覆盖：${configFile}`);
     if (migrated.migrated) {
       console.log(`已备份旧 config 身份字段：${migrated.backupPath}，并以身份 ${identity.deviceId} 为准`);
@@ -307,6 +311,9 @@ async function runInit(flags) {
     };
     await writeFile(configFile, JSON.stringify(nextConfig, null, 2), 'utf-8');
     console.log(`已写入配置：${configFile}（deviceId=${identity.deviceId}，由身份文件提供）`);
+  }
+  } finally {
+    await releaseConfigLock();
   }
   // Skill 是部署产物：初始化成功后对已检测到的助手自动 ensure；失败只告警，不阻断 init。
   try {

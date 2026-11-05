@@ -2,8 +2,9 @@ import { afterEach, describe, expect, it, jest } from '@jest/globals';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { BoundedOutbox } from '../../src/sidecar/local-layer.js';
+import { BoundedOutbox, SidecarLocalLayer } from '../../src/sidecar/local-layer.js';
 import { CapabilityClientError } from '../../src/sidecar/capability-client.js';
+import { LifecycleGate } from '../../src/sidecar/lifecycle-gate.js';
 import { OutboxReplayer } from '../../src/sidecar/outbox-replayer.js';
 
 const homes: string[] = [];
@@ -309,5 +310,162 @@ describe('OutboxReplayer deadline 与 replay lease', () => {
       releaseB();
       expect(await bReplay).toMatchObject({ settled: 1, remaining: 0 });
     }
+  });
+});
+
+describe('WP1 x WP2 lifecycle gates', () => {
+  async function setupLayer(now: () => number, gate: LifecycleGate) {
+    const home = await mkdtemp(join(tmpdir(), 'mebular-outbox-lifecycle-'));
+    homes.push(home);
+    const layer = new SidecarLocalLayer({
+      root: join(home, 'memory-runtime'),
+      lifecycle: gate,
+      now,
+    });
+    await layer.init();
+    return { home, layer };
+  }
+
+  it('drain 后 completeReplay 三种终态均 skipped，不写 dead/attempts/lease/staging', async () => {
+    const clock = 20_000;
+    const gate = new LifecycleGate();
+    const { layer } = await setupLayer(() => clock, gate);
+    await layer.outbox.enqueue({
+      id: 'ob_drain_terminal',
+      requestId: 'req_drain_terminal',
+      endpoint: '/write',
+      body: { items: [] },
+      createdAt: clock,
+    });
+    const lease = await layer.outbox.acquireReplayLease('ob_drain_terminal', {
+      now: clock,
+      leaseMs: 60_000,
+    });
+    expect(lease.state).toBe('acquired');
+    const owner = lease.state === 'acquired' ? lease.item.replayLeaseOwner : undefined;
+    const before = JSON.stringify(await layer.outbox.get('ob_drain_terminal'));
+    const stagingBefore = (await layer.store.stats()).stagingChunks;
+
+    gate.beginDrain('test');
+    gate.finishDrain();
+
+    for (const outcome of ['settled', 'retry', 'dead'] as const) {
+      expect(await layer.outbox.completeReplay('ob_drain_terminal', {
+        outcome,
+        owner,
+        now: clock,
+        error: 'drained',
+        retryDelayMs: 1,
+      })).toBe('skipped');
+      expect(JSON.stringify(await layer.outbox.get('ob_drain_terminal'))).toBe(before);
+      expect(await layer.outbox.deadCount()).toBe(0);
+      expect((await layer.store.stats()).stagingChunks).toBe(stagingBefore);
+    }
+
+    // mode_mismatch/drain 后所有出站写入口都拒绝。
+    expect(await layer.outbox.recordAttempt('ob_drain_terminal', { error: 'x' })).toBeNull();
+    expect(await layer.outbox.deadLetter('ob_drain_terminal', 'x')).toBe(false);
+    await expect(layer.outbox.enqueue({
+      id: 'ob_after_drain',
+      requestId: 'req_after_drain',
+      endpoint: '/write',
+      body: {},
+    })).rejects.toMatchObject({ code: 'lifecycle_blocked' });
+  });
+
+  it('mode_mismatch/replay 竞态：不 recordAttempt、不 deadLetter、不新增 outbox', async () => {
+    const clock = 25_000;
+    const gate = new LifecycleGate();
+    const { layer } = await setupLayer(() => clock, gate);
+    await layer.outbox.enqueue({
+      id: 'ob_mode_mismatch',
+      requestId: 'req_mode_mismatch',
+      endpoint: '/write',
+      body: { items: [] },
+      createdAt: clock,
+    });
+    const recordAttempt = jest.spyOn(layer.outbox, 'recordAttempt');
+    const deadLetter = jest.spyOn(layer.outbox, 'deadLetter');
+    const client = {
+      post: jest.fn(async () => {
+        throw new CapabilityClientError('mode_mismatch', 'revoked', {
+          status: 409,
+          retryable: false,
+        });
+      }),
+    } as any;
+
+    const summary = await new OutboxReplayer({ outbox: layer.outbox, client, now: () => clock }).replayOnce();
+
+    expect(summary).toMatchObject({ settled: 0, retried: 0, dead: 0, remaining: 1 });
+    expect(recordAttempt).not.toHaveBeenCalled();
+    expect(deadLetter).not.toHaveBeenCalled();
+    expect(await layer.outbox.get('ob_mode_mismatch')).toMatchObject({
+      attempts: 0,
+      lastAttemptAt: null,
+      lastError: null,
+    });
+    expect(await layer.outbox.deadCount()).toBe(0);
+    expect(await layer.outbox.stats()).toMatchObject({ items: 1 });
+  });
+
+  it('恢复后同一 requestId 只结算一次，提交后 lease 随 active 删除', async () => {
+    let clock = 30_000;
+    const gate = new LifecycleGate();
+    const { layer } = await setupLayer(() => clock, gate);
+    await layer.outbox.enqueue({
+      id: 'ob_resume_once',
+      requestId: 'req_resume_once',
+      endpoint: '/write',
+      body: { items: [] },
+      createdAt: clock,
+    });
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    let calls = 0;
+    const keys: Array<string | undefined> = [];
+    const client = {
+      post: jest.fn(async (_endpoint: string, _body: unknown, options?: { idempotencyKey?: string }) => {
+        calls += 1;
+        keys.push(options?.idempotencyKey);
+        if (calls === 1) {
+          markStarted();
+          await firstGate;
+        }
+        return { data: { created: 1, results: [] } };
+      }),
+    } as any;
+    const onSettled = jest.fn(async () => true);
+    const replayer = new OutboxReplayer({
+      outbox: layer.outbox,
+      client,
+      now: () => clock,
+      lifecycle: gate,
+      onSettled,
+    });
+
+    const first = replayer.replayOnce();
+    await started;
+    gate.beginDrain('test');
+    gate.finishDrain();
+    releaseFirst();
+    expect(await first).toMatchObject({ settled: 0, retried: 0, dead: 0, remaining: 1 });
+    expect(await layer.outbox.get('ob_resume_once')).toMatchObject({
+      attempts: 0,
+      lastAttemptAt: null,
+      lastError: null,
+    });
+    expect(onSettled).not.toHaveBeenCalled();
+
+    gate.resume();
+    clock += 61_000;
+    expect(await replayer.replayOnce()).toMatchObject({ settled: 1, retried: 0, dead: 0, remaining: 0 });
+    expect(onSettled).toHaveBeenCalledTimes(1);
+    expect(client.post).toHaveBeenCalledTimes(2);
+    expect(keys).toEqual(['req_resume_once', 'req_resume_once']);
+    expect(await layer.outbox.get('ob_resume_once')).toBeNull();
+    expect(await layer.outbox.deadCount()).toBe(0);
   });
 });

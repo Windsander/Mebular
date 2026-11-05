@@ -1965,14 +1965,89 @@ export function createMemoryCapabilityHandler({
     lastError: null,
     lastResult: null,
   };
+  let revoked = false;
+  let tokenGeneration = 0;
+  let activeRequests = 0;
+  const activeWaiters = new Set();
+  let draining = false;
+  let closePromise = null;
   const hostId = hostIdForHome(home);
 
+  function finishActiveRequest() {
+    activeRequests = Math.max(0, activeRequests - 1);
+    if (activeRequests === 0) {
+      for (const resolve of [...activeWaiters]) resolve();
+    }
+  }
+
+  /** 有界等待已认证的在途请求退出；false 表示仍有请求未结算（调用方必须报告 incomplete）。 */
+  async function drain({ timeoutMs = 2000 } = {}) {
+    if (activeRequests === 0) return true;
+    await new Promise((resolve) => {
+      const finish = () => {
+        clearTimeout(timer);
+        activeWaiters.delete(finish);
+        resolve();
+      };
+      const timer = setTimeout(finish, Math.max(1, timeoutMs));
+      timer.unref?.();
+      activeWaiters.add(finish);
+    });
+    return activeRequests === 0;
+  }
+
+  /**
+   * 关闭能力面：先进入不可准入 draining，等待已认证请求（含真实图写）完成，
+   * 再撤销 token。drain 超时则报告 incomplete 且不撤销 token，调用方不得声明 clean。
+   */
+  async function close({ timeoutMs = 5000 } = {}) {
+    if (closePromise) return closePromise;
+    draining = true;
+    closePromise = (async () => {
+      const clean = await drain({ timeoutMs });
+      if (clean) await revoke();
+      return { clean, active: activeRequests };
+    })();
+    return closePromise;
+  }
+
+  /** drain 失败时放弃新请求，但不撤销 token / 不声明已撤销。 */
+  function abandon() {
+    draining = true;
+    disposed = true;
+  }
+
+  function beginDrain() {
+    draining = true;
+  }
+
+  function assertRequestGeneration(generation, operation = 'write') {
+    if (disposed || revoked || draining || generation !== tokenGeneration) {
+      throw new CapabilityError(409, 'mode_mismatch', '能力接口已撤销/关闭，写入未提交', {
+        operation,
+      }, false);
+    }
+  }
+
+  function isLifecycleError(error) {
+    return error instanceof CapabilityError
+      && error.status === 409
+      && error.code === 'mode_mismatch';
+  }
+
   async function ensureToken() {
+    if (disposed) {
+      throw new CapabilityError(503, 'capability_unavailable', '能力接口已关闭', undefined, true);
+    }
+    if (revoked) {
+      throw new CapabilityError(401, 'capability_token_invalid', 'capability token 已撤销');
+    }
     const current = tokenRecord;
     if (current && !(typeof current.expiresAt === 'number' && current.expiresAt > 0 && now() >= current.expiresAt)) {
       return current;
     }
     if (!tokenPromise) {
+      const generation = tokenGeneration;
       tokenPromise = ensureCapabilityToken({
         home,
         env,
@@ -1980,7 +2055,12 @@ export function createMemoryCapabilityHandler({
         mcpPid: process.pid,
         ...(ttlMs !== undefined ? { ttlMs } : {}),
       })
-        .then((record) => {
+        .then(async (record) => {
+          if (disposed || revoked || generation !== tokenGeneration) {
+            // 撤销与生成竞态：晚到的生成不得复活 token 文件。
+            await removeCapabilityToken({ home }).catch(() => undefined);
+            throw new CapabilityError(401, 'capability_token_invalid', 'capability token 已撤销');
+          }
           tokenRecord = record;
           tokenError = null;
           return record;
@@ -1997,10 +2077,19 @@ export function createMemoryCapabilityHandler({
     return tokenPromise;
   }
 
-  /** daemon 启动时调用（仅 enabled）：提前生成 token 文件，sidecar 才能发现。 */
+  /** daemon 启动时/显式恢复时调用（仅 enabled）：准备 token 文件，sidecar 才能发现。 */
   async function prepare() {
+    if (disposed) return { enabled: false, tokenId: null };
     if (!isMemoryRuntimeEnabled(getConfig())) return { enabled: false, tokenId: null };
     startIdempotencyMaintenance();
+    // 先让上一代 token 生成收敛，再解除 revoke/draining 门闩；只有显式 prepare 能换发。
+    const pending = tokenPromise;
+    if (pending) await pending.catch(() => undefined);
+    revoked = false;
+    draining = false;
+    closePromise = null;
+    tokenError = null;
+    tokenGeneration += 1;
     try {
       const record = await ensureToken();
       return { enabled: true, tokenId: record.tokenId };
@@ -2011,8 +2100,13 @@ export function createMemoryCapabilityHandler({
 
   /** 停用/关闭：撤销进程内 token 并删除 token 文件（旧 sidecar 下一次请求 401）。 */
   async function revoke() {
+    revoked = true;
+    draining = true;
+    tokenGeneration += 1;
     tokenRecord = null;
     tokenError = null;
+    const pending = tokenPromise;
+    if (pending) await pending.catch(() => undefined);
     await removeCapabilityToken({ home });
   }
 
@@ -2023,6 +2117,7 @@ export function createMemoryCapabilityHandler({
     await idempotencyMaintenanceRun?.catch(() => undefined);
     await checkpointMaintenanceRun?.catch(() => undefined);
     await revoke();
+    await drain({ timeoutMs: 2000 });
   }
 
   function identitySnapshot() {
@@ -2686,7 +2781,8 @@ export function createMemoryCapabilityHandler({
       };
     }
 
-    async function performWriteItem(appValue, item) {
+    async function performWriteItem(appValue, item, generation) {
+      assertRequestGeneration(generation, 'write');
       if (!appValue?.graph?.getNode) {
         throw new CapabilityError(503, 'capability_unavailable', '图存储不可用', undefined, true);
       }
@@ -2728,10 +2824,11 @@ export function createMemoryCapabilityHandler({
       return { node: stored.node, warnings };
     }
 
-    async function applyWriteSupersedes(item, newNode) {
+    async function applyWriteSupersedes(item, newNode, generation) {
       if (!Array.isArray(item.supersedes) || item.supersedes.length === 0) {
         return { superseded: [], skipped: [] };
       }
+      assertRequestGeneration(generation, 'write.supersede');
       const currentService = service();
       if (typeof currentService.supersedeRecords !== 'function') {
         throw new CapabilityError(503, 'capability_unavailable', '记忆服务不支持记录替代', undefined, true);
@@ -2743,7 +2840,7 @@ export function createMemoryCapabilityHandler({
       });
     }
 
-    async function handleWrite(payload, actor) {
+    async function handleWrite(payload, actor, generation) {
       const items = payload.items;
       if (!Array.isArray(items) || items.length === 0) {
         throw new CapabilityError(400, 'invalid_request', 'items 必须是非空数组');
@@ -2778,7 +2875,7 @@ export function createMemoryCapabilityHandler({
           ?? dedupe.hash.get(dedupeKey('hash', item.domain, item.contentHash));
         if (existing) {
           try {
-            const replaced = await applyWriteSupersedes(item, existing);
+            const replaced = await applyWriteSupersedes(item, existing, generation);
             duplicates += 1;
             results.push(recordWriteResult('duplicate', existing, item, item.owner, replaced.superseded));
             for (const id of replaced.skipped) {
@@ -2789,6 +2886,7 @@ export function createMemoryCapabilityHandler({
               });
             }
           } catch (error) {
+            if (isLifecycleError(error)) throw error;
             failed += 1;
             results.push({
               ...(item.clientItemId !== undefined ? { clientItemId: item.clientItemId } : {}),
@@ -2803,10 +2901,10 @@ export function createMemoryCapabilityHandler({
           continue;
         }
         try {
-          const written = await performWriteItem(appValue, item);
+          const written = await performWriteItem(appValue, item, generation);
           warnings.push(...written.warnings);
           const node = written.node;
-          const replaced = await applyWriteSupersedes(item, node);
+          const replaced = await applyWriteSupersedes(item, node, generation);
           for (const id of replaced.skipped) {
             warnings.push({
               code: 'supersedes_skipped',
@@ -2821,6 +2919,7 @@ export function createMemoryCapabilityHandler({
           }
           dedupe.hash.set(dedupeKey('hash', item.domain, item.contentHash), node);
         } catch (error) {
+          if (isLifecycleError(error)) throw error;
           failed += 1;
           results.push({
             ...(item.clientItemId !== undefined ? { clientItemId: item.clientItemId } : {}),
@@ -2862,7 +2961,7 @@ export function createMemoryCapabilityHandler({
       return raw;
     }
 
-    async function handleUpdate(payload, actor) {
+    async function handleUpdate(payload, actor, generation) {
       const items = payload.items;
       if (!Array.isArray(items) || items.length === 0) {
         throw new CapabilityError(400, 'invalid_request', 'items 必须是非空数组');
@@ -3008,6 +3107,7 @@ export function createMemoryCapabilityHandler({
       let failed = 0;
       for (const plan of plans) {
         try {
+          assertRequestGeneration(generation, 'update');
           const currentService = service();
           if (typeof currentService.updateRecord !== 'function') {
             throw new CapabilityError(503, 'capability_unavailable', '记忆服务不支持统一更新', undefined, true);
@@ -3044,6 +3144,7 @@ export function createMemoryCapabilityHandler({
             validTo: normalizeValidTo(node.validTo),
           });
         } catch (error) {
+          if (isLifecycleError(error)) throw error;
           failed += 1;
           results.push({
             id: plan.id,
@@ -3108,12 +3209,14 @@ export function createMemoryCapabilityHandler({
       return { appValue, nodes, allowed, notFound, forbidden, internal };
     }
 
-    async function handleDelete(payload, actor) {
+    async function handleDelete(payload, actor, generation) {
       if (payload.sync !== undefined) {
         throw new CapabilityError(400, 'legacy_sync_unsupported', '不再支持 sync 字段');
       }
+      assertRequestGeneration(generation, 'delete');
       const ids = parseIdList(payload);
       const classified = await classifyGovernanceTargets(ids, actor);
+      assertRequestGeneration(generation, 'delete.commit');
       const deleted = [];
       let detailsDeleted = [];
       if (classified.allowed.length > 0) {
@@ -3140,16 +3243,18 @@ export function createMemoryCapabilityHandler({
       };
     }
 
-    async function handleArchive(payload, actor) {
+    async function handleArchive(payload, actor, generation) {
       if (payload.sync !== undefined) {
         throw new CapabilityError(400, 'legacy_sync_unsupported', '不再支持 sync 字段');
       }
+      assertRequestGeneration(generation, 'archive');
       if (payload.archived !== undefined && typeof payload.archived !== 'boolean') {
         throw new CapabilityError(400, 'invalid_request', 'archived 必须是布尔值');
       }
       const archived = payload.archived !== false;
       const ids = parseIdList(payload);
       const classified = await classifyGovernanceTargets(ids, actor);
+      assertRequestGeneration(generation, 'archive.commit');
       const skipped = [];
       const allowed = [];
       for (const id of classified.allowed) {
@@ -3942,10 +4047,11 @@ export function createMemoryCapabilityHandler({
 
 
     // [/internal-object-write]
-    async function handleInternalObject(payload, actor) {
+    async function handleInternalObject(payload, actor, generation) {
       if (payload.sync !== undefined || payload['self.sync'] !== undefined || payload['checkpoint.sync'] !== undefined) {
         throw new CapabilityError(400, 'legacy_sync_unsupported', '不再支持 sync/self.sync/checkpoint.sync 字段');
       }
+      assertRequestGeneration(generation, 'internal-object');
       const kind = payload.kind;
       if (!INTERNAL_OBJECT_KINDS.includes(kind)) {
         throw new CapabilityError(400, 'internal_kind_invalid', 'kind 必须是 compact | self_record | context_checkpoint');
@@ -4239,7 +4345,8 @@ export function createMemoryCapabilityHandler({
       };
     }
 
-    async function handleDetailWrite(payload, actor) {
+    async function handleDetailWrite(payload, actor, generation) {
+      assertRequestGeneration(generation, 'detail.write');
       const items = payload.items;
       if (!Array.isArray(items) || items.length === 0) {
         throw new CapabilityError(400, 'invalid_request', 'items 必须是非空数组');
@@ -4256,6 +4363,7 @@ export function createMemoryCapabilityHandler({
       if (typeof currentService.writeDetails !== 'function') {
         throw new CapabilityError(503, 'capability_unavailable', '记忆服务不支持详情写入', undefined, true);
       }
+      assertRequestGeneration(generation, 'detail.write.commit');
       let result;
       try {
         result = await currentService.writeDetails(validated, {
@@ -4414,7 +4522,8 @@ export function createMemoryCapabilityHandler({
       return { data: result, warnings: resolved.warnings, degraded: false };
     }
 
-    async function handleDetailDelete(payload, actor) {
+    async function handleDetailDelete(payload, actor, generation) {
+      assertRequestGeneration(generation, 'detail.delete');
       const ids = parseIdList(payload);
       const reason = payload.reason === undefined ? 'user_requested' : payload.reason;
       if (!isDetailDeleteReason(reason)) {
@@ -4467,7 +4576,7 @@ export function createMemoryCapabilityHandler({
       return defaults.includes(domain);
     }
 
-    async function handleDetail(payload, actor) {
+    async function handleDetail(payload, actor, generation) {
       const op = payload.op;
       if (!['write', 'get', 'list', 'delete'].includes(op)) {
         throw new CapabilityError(400, 'invalid_request', 'detail op 必须是 write/get/list/delete');
@@ -4475,10 +4584,10 @@ export function createMemoryCapabilityHandler({
       if (payload.sync !== undefined || payload['self.sync'] !== undefined || payload['checkpoint.sync'] !== undefined) {
         throw new CapabilityError(400, 'legacy_sync_unsupported', '不再支持 sync/self.sync/checkpoint.sync 字段');
       }
-      if (op === 'write') return handleDetailWrite(payload, actor);
+      if (op === 'write') return handleDetailWrite(payload, actor, generation);
       if (op === 'get') return handleDetailGet(payload, actor);
       if (op === 'list') return handleDetailList(payload, actor);
-      return handleDetailDelete(payload, actor);
+      return handleDetailDelete(payload, actor, generation);
     }
 
     // ---------- /sync ----------
@@ -4561,8 +4670,13 @@ export function createMemoryCapabilityHandler({
       };
     }
 
+    activeRequests += 1;
     try {
       if (disposed) throw new CapabilityError(503, 'capability_unavailable', '能力接口已关闭', undefined, true);
+      if (draining && !revoked) {
+        throw new CapabilityError(409, 'mode_mismatch', '能力接口正在关闭，拒绝新的请求', undefined, false);
+      }
+      const requestGeneration = tokenGeneration;
 
       // 1) 挂载开关：轻量模式不创建目录/token/进程，直接 404。
       if (!isMemoryRuntimeEnabled(getConfig())) {
@@ -4589,8 +4703,13 @@ export function createMemoryCapabilityHandler({
       }
 
       // 4) Bearer capability token。
+      if (revoked) {
+        res.setHeader('www-authenticate', 'Bearer');
+        throw new CapabilityError(401, 'capability_token_invalid', 'capability token 已撤销');
+      }
       if (tokenError) throw new CapabilityError(503, 'capability_unavailable', '能力令牌不可用', undefined, true);
-      const record = await ensureToken().catch(() => {
+      const record = await ensureToken().catch((error) => {
+        if (error instanceof CapabilityError) throw error;
         throw new CapabilityError(503, 'capability_unavailable', '能力令牌不可用', undefined, true);
       });
       const authorization = req?.headers?.authorization;
@@ -4620,6 +4739,7 @@ export function createMemoryCapabilityHandler({
         }
         if (!isPost) throw new CapabilityError(405, 'method_not_allowed', 'sync 仅接受 GET/POST');
         const payload = requireObjectBody();
+        assertRequestGeneration(requestGeneration, 'sync');
         const result = await withIdempotency('sync', payload, record.tokenId, () => handleSyncPost(payload));
         return sendOk(result.data, result.warnings, 200, result.degraded);
       }
@@ -4629,7 +4749,8 @@ export function createMemoryCapabilityHandler({
         const payload = requireObjectBody();
         const actor = parseActor(payload.actor);
         const op = payload.op;
-        const execute = () => handleDetail(payload, actor);
+        const execute = () => handleDetail(payload, actor, requestGeneration);
+        if (op === 'write' || op === 'delete') assertRequestGeneration(requestGeneration, `detail.${String(op)}`);
         const result = (op === 'write' || op === 'delete')
           ? await withIdempotency(`detail:${op}`, payload, record.tokenId, execute)
           : await execute();
@@ -4641,12 +4762,13 @@ export function createMemoryCapabilityHandler({
         const payload = requireObjectBody();
         const actor = parseActor(payload.actor);
         let execute;
-        if (route === 'write') execute = () => handleWrite(payload, actor);
-        else if (route === 'update') execute = () => handleUpdate(payload, actor);
-        else if (route === 'delete') execute = () => handleDelete(payload, actor);
-        else if (route === 'archive') execute = () => handleArchive(payload, actor);
-        else if (route === 'internal-object') execute = () => handleInternalObject(payload, actor);
+        if (route === 'write') execute = () => handleWrite(payload, actor, requestGeneration);
+        else if (route === 'update') execute = () => handleUpdate(payload, actor, requestGeneration);
+        else if (route === 'delete') execute = () => handleDelete(payload, actor, requestGeneration);
+        else if (route === 'archive') execute = () => handleArchive(payload, actor, requestGeneration);
+        else if (route === 'internal-object') execute = () => handleInternalObject(payload, actor, requestGeneration);
         else throw new CapabilityError(404, 'not_found', '未知能力端点', { path: relative });
+        assertRequestGeneration(requestGeneration, route);
         const result = await withIdempotency(route, payload, record.tokenId, execute);
         return sendOk(result.data, result.warnings, 200, result.degraded);
       }
@@ -5201,6 +5323,8 @@ export function createMemoryCapabilityHandler({
       }
       // 不把内部错误细节（含路径/内容）回给调用方；不记录 token。
       return sendError(500, 'internal', '能力接口内部错误', undefined, true);
+    } finally {
+      finishActiveRequest();
     }
   };
 
@@ -5208,6 +5332,11 @@ export function createMemoryCapabilityHandler({
     prepare,
     revoke,
     dispose,
+    close,
+    abandon,
+    beginDrain,
+    drain,
+    isDraining: () => draining,
     isEnabled: () => isMemoryRuntimeEnabled(getConfig()),
     tokenId: () => tokenRecord?.tokenId ?? null,
     runIdempotencyMaintenance,

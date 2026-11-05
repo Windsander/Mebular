@@ -139,6 +139,26 @@ describe('mebular init identity contract', () => {
     expect(identity.deviceName).toBe('fresh-device');
   });
 
+  it('config 写锁被外部持有时 init 返回 CONFIG_BUSY，解锁后可重建', async () => {
+    const home = await makeHome();
+    const lockPath = join(home, 'config.json.write-lock');
+    await writeFile(lockPath, JSON.stringify({
+      pid: process.pid,
+      at: Date.now(),
+      owner: 'external-writer',
+    }), 'utf-8');
+    const env = { MEBULAR_CONFIG_LOCK_TIMEOUT_MS: '100' };
+    const blocked = invokeInit(home, [], env);
+    expect(blocked.status).not.toBe(0);
+    expect(`${blocked.stdout}${blocked.stderr}`).toContain('CONFIG_BUSY');
+    expect(existsSync(join(home, 'config.json'))).toBe(false);
+    await rm(lockPath, { force: true });
+    const recovered = invokeInit(home, [], env);
+    expect(recovered.status).toBe(0);
+    expect(existsSync(join(home, 'config.json'))).toBe(true);
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
   it('explicit --device-id bootstraps that id on a fresh home', async () => {
     const home = await makeHome();
 

@@ -9,6 +9,7 @@
 
 import { CapabilityClient, CapabilityClientError } from './capability-client.js';
 import type { IngestErrorView, OutboxReplaySummary } from './ingest.js';
+import type { LifecycleGate } from './lifecycle-gate.js';
 import {
   OUTBOX_REPLAY_LEASE_MS,
   type BoundedOutbox,
@@ -31,6 +32,8 @@ export interface OutboxReplayerOptions {
   onSettled?: (item: OutboxItem, data: unknown) => void | boolean | Promise<void | boolean>;
   /** 一次 replay 尝试最终以 retry/dead 结束时通知；成功由 onSettled 自行收口。 */
   onComplete?: (item: OutboxItem, outcome: OutboxReplayCompletion) => void | Promise<void>;
+  /** 跨 WP 门闩：drain 后晚到的响应只能 skipped，不得写 outbox/staging/cache。 */
+  lifecycle?: LifecycleGate | null;
 }
 
 interface ItemOutcome {
@@ -60,6 +63,11 @@ function retryable(error: unknown): boolean {
   return true;
 }
 
+function revoked(error: unknown): boolean {
+  return error instanceof CapabilityClientError
+    && (error.code === 'capability_disabled' || error.code === 'mode_mismatch');
+}
+
 function settledCount(data: unknown): number {
   if (!isObject(data)) return 0;
   const results = Array.isArray(data.results) ? data.results : [];
@@ -82,6 +90,7 @@ export class OutboxReplayer {
   private readonly onSummary?: (summary: OutboxReplaySummary) => void;
   private readonly onSettled?: (item: OutboxItem, data: unknown) => void | boolean | Promise<void | boolean>;
   private readonly onComplete?: (item: OutboxItem, outcome: OutboxReplayCompletion) => void | Promise<void>;
+  private readonly lifecycle: LifecycleGate | null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private inFlight: Promise<OutboxReplaySummary> | null = null;
 
@@ -94,6 +103,7 @@ export class OutboxReplayer {
     this.onSummary = options.onSummary;
     this.onSettled = options.onSettled;
     this.onComplete = options.onComplete;
+    this.lifecycle = options.lifecycle ?? null;
   }
 
   start(): void {
@@ -205,6 +215,12 @@ export class OutboxReplayer {
         idempotencyKey: leased.requestId,
         retries: 0,
       });
+      // 响应在 drain 后才到达：capability 可能已提交，但本地不得再当作新提交，
+      // 也不得续租/删除 pending；本次禁用必须保持 incomplete。
+      if (this.lifecycle && !this.lifecycle.acceptsWork()) {
+        this.lifecycle.noteAmbiguousSuccess('replay_late_success');
+        return { outcome: 'skipped' };
+      }
       // 响应已确认：把 lease 续到覆盖本地回读/详情写入阶段；owner 不符/已过期则拒绝。
       await this.outbox.renewReplayLease(leased.id, {
         owner,
@@ -236,6 +252,14 @@ export class OutboxReplayer {
       if (completion === 'skipped') return { outcome: 'skipped' };
       return { outcome: 'settled', count: settledCount(envelope.data) };
     } catch (error) {
+      if (revoked(error)) {
+        // 撤销后晚到的失败/晚到的成功都不得改写 pending：不重试、不死信、不删除。
+        return { outcome: 'skipped' };
+      }
+      if (this.lifecycle && !this.lifecycle.acceptsWork()) {
+        // drain 后晚到的失败/超时同样只能 skipped：不 recordAttempt、不写 dead。
+        return { outcome: 'skipped' };
+      }
       const view = errorView(error, this.now());
       const canRetry = retryable(error);
       const delay = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** Math.min(6, leased.attempts));

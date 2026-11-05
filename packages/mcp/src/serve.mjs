@@ -36,6 +36,7 @@ import {
   readMemoryRuntimeModelSource,
 } from './memory-runtime-config.mjs';
 import { APP_VERSION } from './version.mjs';
+import { acquireConfigFileLock } from './config-lock.mjs';
 import { resolveStaticAssetRoots } from './asset-roots.mjs';
 
 // 兼容既有导入方：APP_VERSION 的真源是 ./version.mjs。
@@ -882,6 +883,9 @@ export async function startHttpServer({
   writesEnabled: initialWritesEnabled = false,
   // C：一键重启执行器（可注入；verify:config 用 MEBULAR_RESTART_DRY_RUN 或注入替身）
   restartRunner = null,
+  // 测试注入：配置写盘前钩子，用于验证 close 与配置写入的线性化。
+  beforeConfigWrite = null,
+  afterConfigRename = null,
   // 引导态（空家目录）：只服务 /healthz + /console 引导页 + /app/provision/*；其余 409 provision_required
   provision: initialProvision = false,
   // P1：同一进程内热初始化。返回新的运行时上下文；成功后本 server 从 UNINITIALIZED → READY。
@@ -1019,6 +1023,20 @@ export async function startHttpServer({
       mcpUrl: () => origin,
     })
     : null;
+  let memoryRuntimeLifecycle = Promise.resolve();
+  let lifecycleClosing = false;
+  let capabilityDrain = null;
+  let configWriteQueue = Promise.resolve();
+  const enqueueMemoryRuntimeLifecycle = (operation) => {
+    if (lifecycleClosing) {
+      const error = new Error('MCP 正在关闭：拒绝新的 Memory Runtime 生命周期操作');
+      error.code = 'closing';
+      return Promise.reject(error);
+    }
+    const run = memoryRuntimeLifecycle.then(operation, operation);
+    memoryRuntimeLifecycle = run.catch(() => undefined);
+    return run;
+  };
 
   // ---------- 0.3 模型薄代理：模型目录/安装/引擎/来源全部由 sidecar 拥有 ----------
   // 浏览器只看到 sidecar 的脱敏视图；host token 只在服务端使用。
@@ -1055,11 +1073,23 @@ export async function startHttpServer({
     return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
   };
 
+  function modelErrorView(error) {
+    if (!error || typeof error !== 'object') return null;
+    return {
+      code: error.code ?? null,
+      message: error.message ?? null,
+      retryable: error.retryable === true,
+    };
+  }
+
   function modelDownloadView(install) {
     if (!install || typeof install !== 'object') return null;
     return {
+      schema: install.schema ?? null,
+      jobId: install.jobId ?? null,
       pack: install.packId ?? null,
       packId: install.packId ?? null,
+      modelId: install.modelId ?? null,
       state: install.state ?? null,
       phase: install.phase ?? null,
       progress: install.progress ?? 0,
@@ -1067,16 +1097,129 @@ export async function startHttpServer({
       totalBytes: install.totalBytes ?? 0,
       speedBytesPerSecond: install.speedBytesPerSecond ?? 0,
       etaMs: install.etaMs ?? null,
+      startedAt: install.startedAt ?? null,
       updatedAt: install.updatedAt ?? null,
-      ...(install.error ? { error: install.error } : {}),
+      completedAt: install.completedAt ?? null,
+      error: modelErrorView(install.error),
+      warnings: uniqueStrings(Array.isArray(install.warnings) ? install.warnings : []),
+    };
+  }
+
+  function modelEngineView(engine) {
+    if (!engine || typeof engine !== 'object') return null;
+    return {
+      state: engine.state ?? null,
+      health: engine.health ?? null,
+      packId: engine.packId ?? null,
+      modelId: engine.modelId ?? null,
+      startedAt: engine.startedAt ?? null,
+      crashCount: engine.crashCount ?? 0,
+      restartCount: engine.restartCount ?? 0,
+      lastError: modelErrorView(engine.lastError),
+      installed: engine.installed === true,
+      release: engine.release ?? null,
+      platform: engine.platform ?? null,
+      arch: engine.arch ?? null,
+      binaryReady: engine.binaryReady === true,
+      reason: engine.reason ?? null,
+      progress: engine.progress ?? null,
+      installedAt: engine.installedAt ?? null,
+      verifiedAt: engine.verifiedAt ?? null,
+      supported: typeof engine.supported === 'boolean' ? engine.supported : null,
+    };
+  }
+
+  function modelActiveView(active) {
+    const value = active ?? {};
+    return {
+      source: value.source ?? null,
+      packId: value.packId ?? null,
+      modelId: value.modelId ?? null,
+      engine: modelEngineView(value.engine),
+    };
+  }
+
+  function modelProviderView(provider) {
+    return {
+      id: provider?.id ?? null,
+      kind: provider?.kind ?? null,
+      configured: provider?.configured === true,
+      available: provider?.available === true,
+      active: provider?.active === true,
+      reason: provider?.reason ?? null,
+    };
+  }
+
+  function modelHardwareView(hardware) {
+    if (!hardware || typeof hardware !== 'object') return null;
+    const gpu = hardware.gpu ?? {};
+    return {
+      platform: hardware.platform ?? null,
+      arch: hardware.arch ?? null,
+      osVersion: hardware.osVersion ?? null,
+      cpuModel: hardware.cpuModel ?? null,
+      cpuCores: hardware.cpuCores ?? null,
+      totalMemoryBytes: hardware.totalMemoryBytes ?? null,
+      freeMemoryBytes: hardware.freeMemoryBytes ?? null,
+      diskAvailableBytes: hardware.diskAvailableBytes ?? null,
+      diskTotalBytes: hardware.diskTotalBytes ?? null,
+      gpu: {
+        vendor: gpu.vendor ?? null,
+        name: gpu.name ?? null,
+        vramBytes: gpu.vramBytes ?? null,
+        unifiedMemory: gpu.unifiedMemory === true,
+      },
+      detectedAt: hardware.detectedAt ?? null,
+      warnings: uniqueStrings(Array.isArray(hardware.warnings) ? hardware.warnings : []),
+    };
+  }
+
+  function modelRecommendationView(recommended) {
+    if (!recommended || typeof recommended !== 'object') return null;
+    return {
+      kind: recommended.kind ?? null,
+      packId: recommended.packId ?? null,
+      modelId: recommended.modelId ?? null,
+      tier: recommended.tier ?? null,
+      displayName: recommended.displayName ?? null,
+      sizeBytes: recommended.sizeBytes ?? null,
+      minMemoryBytes: recommended.minMemoryBytes ?? null,
+      reason: recommended.reason ?? null,
+      warnings: uniqueStrings(Array.isArray(recommended.warnings) ? recommended.warnings : []),
+      alternatives: uniqueStrings(Array.isArray(recommended.alternatives) ? recommended.alternatives : []).slice(0, 100),
     };
   }
 
   function modelPackView(pack) {
+    // 明确允许列表：attached producer 的额外 debug/keyRef/path 不得 spread 到浏览器。
     return {
-      ...pack,
+      packId: pack?.packId ?? null,
+      modelId: pack?.modelId ?? null,
+      tier: pack?.tier ?? null,
+      displayName: pack?.displayName ?? null,
+      description: pack?.description ?? null,
+      sizeBytes: pack?.sizeBytes ?? null,
+      quantization: pack?.quantization ?? null,
+      contextLength: pack?.contextLength ?? null,
+      estimatedDownloadBytes: pack?.estimatedDownloadBytes ?? null,
+      requirements: pack?.requirements ? {
+        platforms: Array.isArray(pack.requirements.platforms) ? pack.requirements.platforms : [],
+        architectures: pack.requirements.architectures ?? null,
+        minMemoryBytes: pack.requirements.minMemoryBytes ?? null,
+        minDiskBytes: pack.requirements.minDiskBytes ?? null,
+        recommendedMemoryBytes: pack.requirements.recommendedMemoryBytes ?? null,
+        gpu: pack.requirements.gpu ?? null,
+      } : null,
+      state: pack?.state ?? null,
+      installed: pack?.installed === true,
+      installedBytes: pack?.installedBytes ?? 0,
+      expectedBytes: pack?.expectedBytes ?? 0,
+      verifiedAt: pack?.verifiedAt ?? null,
+      supported: typeof pack?.supported === 'boolean' ? pack.supported : null,
+      active: pack?.active === true,
       selected: pack?.active === true,
       manifestAvailable: pack?.manifest?.available === true,
+      warnings: Array.isArray(pack?.warnings) ? pack.warnings : [],
       ...(pack?.install ? { download: modelDownloadView(pack.install) } : {}),
     };
   }
@@ -1096,12 +1239,12 @@ export async function startHttpServer({
         selectionSource: 'sidecar',
       },
       packs: Array.isArray(data.packs) ? data.packs.map(modelPackView) : [],
-      hardware: data.hardware ?? null,
-      recommended: data.recommended ?? null,
-      active,
-      providers: Array.isArray(data.providers) ? data.providers : [],
-      install: data.install ?? null,
-      engine: data.engine ?? null,
+      hardware: modelHardwareView(data.hardware),
+      recommended: modelRecommendationView(data.recommended),
+      active: modelActiveView(active),
+      providers: Array.isArray(data.providers) ? data.providers.map(modelProviderView) : [],
+      install: modelDownloadView(data.install),
+      engine: modelEngineView(data.engine),
       warnings: Array.isArray(data.warnings) ? data.warnings : [],
     };
   }
@@ -1126,11 +1269,11 @@ export async function startHttpServer({
         pack: active.packId ?? null,
         selectionSource: 'sidecar',
       },
-      engine: runtime.engine ?? data.engine ?? null,
-      hardware: data.hardware ?? null,
-      recommendation: recommended,
-      install: runtime.install ?? data.install ?? null,
-      active,
+      engine: modelEngineView(runtime.engine ?? data.engine),
+      hardware: modelHardwareView(data.hardware),
+      recommendation: modelRecommendationView(recommended),
+      install: modelDownloadView(runtime.install ?? data.install),
+      active: modelActiveView(active),
       installedPackIds: Array.isArray(runtime.installedPackIds)
         ? runtime.installedPackIds
         : (Array.isArray(data.packs) ? data.packs.filter((pack) => pack?.installed === true).map((pack) => pack.packId) : []),
@@ -1193,9 +1336,16 @@ export async function startHttpServer({
       status: Number.isInteger(result.status) && result.status >= 200 && result.status < 300 ? result.status : 200,
       body: {
         ok: true,
-        ...data,
+        ...modelDownloadView(data),
+        packId: data.packId ?? null,
+        started: data.started === true,
+        stopped: data.stopped === true,
+        removed: data.removed === true,
+        wasActive: data.wasActive === true,
+        reason: data.reason ?? null,
+        engine: modelEngineView(data.engine),
         ...extra,
-        warnings: Array.isArray(data.warnings) ? data.warnings : [],
+        warnings: uniqueStrings(Array.isArray(data.warnings) ? data.warnings : []),
       },
     };
   }
@@ -1253,7 +1403,7 @@ export async function startHttpServer({
         force: input?.force === true || input?.force === 'true' || input?.force === '1',
       });
       if (!result.ok) return proxyFailure(result, '模型安装失败');
-      const job = result.data ?? {};
+      const job = modelDownloadView(result.data ?? {});
       return {
         status: result.status === 202 ? 202 : 200,
         body: {
@@ -1262,7 +1412,7 @@ export async function startHttpServer({
           pack: job.packId ?? pack,
           job,
           ...job,
-          warnings: Array.isArray(job.warnings) ? job.warnings : [],
+          warnings: job.warnings,
         },
       };
     }
@@ -1334,8 +1484,8 @@ export async function startHttpServer({
           pack: pack ?? inference.data?.active?.packId ?? null,
           state: status?.data?.state ?? null,
           installed: status?.data?.installed ?? null,
-          engine: inference.data?.engine ?? null,
-          active: inference.data?.active ?? null,
+          engine: modelEngineView(inference.data?.engine),
+          active: modelActiveView(inference.data?.active),
           warnings: uniqueStrings([
             ...(Array.isArray(inference.warnings) ? inference.warnings : []),
             ...(Array.isArray(status?.warnings) ? status.warnings : []),
@@ -1778,11 +1928,14 @@ export async function startHttpServer({
         const detail = memoryRuntimeSupervisor
           ? await memoryRuntimeSupervisor.readStatus().catch(() => null)
           : null;
-        // 只合并模式/版本/模型状态；host token、endpoint、keyRef、模型路径永不出服务端。
+        // 进程、capability 与模型是独立观察；不得用进程存活伪造 capability ready。
         return sendJson(res, 200, {
           ...status,
-          mode: status.enabled ? 'immersive' : 'lightweight',
+          mode: status.enabled ? (detail?.mode ?? (status.available ? 'immersive' : null)) : 'lightweight',
           runtimeVersion: status.runtimeVersion ?? detail?.runtimeVersion ?? null,
+          degraded: status.degraded === true || detail?.degraded === true,
+          capability: detail?.capability ?? null,
+          capabilityError: detail?.error ?? null,
           model: detail?.model ?? null,
         });
       }
@@ -2418,6 +2571,7 @@ export async function startHttpServer({
     const attempt = applyAttempt;
     await writeApplyPending(home, {
       attempt,
+      applyId: randomUUID(),
       at: new Date().toISOString(),
       fields,
       attempts: 1,
@@ -3063,6 +3217,33 @@ export async function startHttpServer({
 
     // 控制台配置写入：curated 合并 + 原子写 + .bak 备份（全部需重启生效）
     if (path === '/admin/api/config') {
+      if (lifecycleClosing) {
+        return sendJson(res, 409, {
+          ok: false,
+          error: 'closing',
+          message: 'MCP 正在关闭：不再接受配置写入或新的生命周期操作',
+        });
+      }
+      const cfgFile = configPath(home);
+      const previousConfigWrite = configWriteQueue;
+      let releaseConfigWrite;
+      configWriteQueue = new Promise((resolveWrite) => { releaseConfigWrite = resolveWrite; });
+      await previousConfigWrite;
+      let releaseConfigFileLock = null;
+      try {
+      releaseConfigFileLock = await acquireConfigFileLock(cfgFile, {
+        timeoutMs: (() => {
+          const configured = Number(process.env.MEBULAR_CONFIG_LOCK_TIMEOUT_MS ?? '');
+          return Number.isFinite(configured) && configured >= 0 ? configured : 5000;
+        })(),
+      });
+      if (!releaseConfigFileLock) {
+        return sendJson(res, 409, {
+          ok: false,
+          error: 'config_busy',
+          message: '配置正在被其他进程写入，请稍后重试',
+        });
+      }
       const input = parseJsonBody(body);
       if (!input || typeof input.patch !== 'object') {
         return sendJson(res, 400, { error: 'bad_request', errorKey: 'config_patch_invalid', message: '需要 { patch: { ... } }' });
@@ -3071,10 +3252,11 @@ export async function startHttpServer({
       if (errors.length > 0) {
         return sendJson(res, 400, { error: 'bad_request', errorKey: 'config_patch_invalid', message: errors.join('；'), details: errors });
       }
-      const cfgFile = configPath(home);
       let current = {};
+      let originalRaw = null;
       try {
-        current = JSON.parse(await readFile(cfgFile, 'utf-8'));
+        originalRaw = await readFile(cfgFile, 'utf-8');
+        current = JSON.parse(originalRaw);
       } catch {
         current = {};
       }
@@ -3101,15 +3283,97 @@ export async function startHttpServer({
         });
       }
       const tmp = `${cfgFile}.tmp-${process.pid}`;
-      await writeFile(tmp, JSON.stringify(merged, null, 2), 'utf-8');
+      const writtenRaw = JSON.stringify(merged, null, 2);
+      const readConfigRaw = async () => {
+        try {
+          return await readFile(cfgFile, 'utf-8');
+        } catch {
+          return null;
+        }
+      };
+      const rollbackIfUnchanged = async () => {
+        if (await readConfigRaw() !== writtenRaw) return false;
+        if (originalRaw === null) {
+          await rm(cfgFile, { force: true }).catch(() => undefined);
+          return true;
+        }
+        const restoreTmp = `${cfgFile}.rollback-${process.pid}`;
+        await writeFile(restoreTmp, originalRaw, 'utf-8');
+        await rename(restoreTmp, cfgFile);
+        return true;
+      };
+      // 入口后 close 可能已开始：写盘前二次检查，避免“已写文件但返回 409”。
+      if (beforeConfigWrite) await beforeConfigWrite();
+      if (lifecycleClosing) {
+        return sendJson(res, 409, {
+          ok: false,
+          error: 'closing',
+          message: 'MCP 正在关闭：配置未写入',
+        });
+      }
+      // CAS：读-改-写窗口内若文件被其他写入方修改，不覆盖对方结果。
+      if (await readConfigRaw() !== originalRaw) {
+        return sendJson(res, 409, {
+          ok: false,
+          error: 'config_conflict',
+          message: '配置已被其他写入修改，请刷新后重试',
+        });
+      }
+      await writeFile(tmp, writtenRaw, 'utf-8');
+      if (lifecycleClosing) {
+        await rm(tmp, { force: true }).catch(() => undefined);
+        return sendJson(res, 409, {
+          ok: false,
+          error: 'closing',
+          message: 'MCP 正在关闭：配置未写入',
+        });
+      }
+      if (await readConfigRaw() !== originalRaw) {
+        await rm(tmp, { force: true }).catch(() => undefined);
+        return sendJson(res, 409, {
+          ok: false,
+          error: 'config_conflict',
+          message: '配置已被其他写入修改，请刷新后重试',
+        });
+      }
       if (existsSync(cfgFile)) await copyFile(cfgFile, `${cfgFile}.bak`);
       await rename(tmp, cfgFile);
+      if (afterConfigRename) await afterConfigRename();
+      if (lifecycleClosing) {
+        // rename 与 close 竞态：只有文件仍是本次写入内容时才原子回滚，避免覆盖并发修改。
+        if (!await rollbackIfUnchanged()) {
+          return sendJson(res, 409, {
+            ok: false,
+            error: 'config_conflict',
+            message: '配置在关闭回滚前已被修改，未覆盖并发写入',
+          });
+        }
+        return sendJson(res, 409, {
+          ok: false,
+          error: 'closing',
+          message: 'MCP 正在关闭：配置已回滚',
+        });
+      }
       const backup = existsSync(`${cfgFile}.bak`) ? `${cfgFile}.bak` : null;
       const base = { ok: true, applied: changedPaths, backup, path: cfgFile, config: merged };
 
       // memoryRuntime.enabled 是热开关：同步内存配置，立即生成/撤销 capability token，
       // 并启动/停止 sidecar（sidecar 失败不影响配置写入与 MCP 本身）。
       if (changedPaths.some((changed) => changed === 'memoryRuntime' || changed.startsWith('memoryRuntime.'))) {
+        if (lifecycleClosing) {
+          if (!await rollbackIfUnchanged()) {
+            return sendJson(res, 409, {
+              ok: false,
+              error: 'config_conflict',
+              message: '配置在关闭回滚前已被修改，未覆盖并发写入',
+            });
+          }
+          return sendJson(res, 409, {
+            ok: false,
+            error: 'closing',
+            message: 'MCP 正在关闭：配置已回滚',
+          });
+        }
         if (merged?.memoryRuntime === undefined) {
           const next = { ...(config ?? {}) };
           delete next.memoryRuntime;
@@ -3117,20 +3381,39 @@ export async function startHttpServer({
         } else {
           config = { ...(config ?? {}), memoryRuntime: merged.memoryRuntime };
         }
-        if (isMemoryRuntimeEnabled(config)) {
-          await memoryCapability.prepare();
-          if (memoryRuntimeSupervisor) {
-            const commandChanged = changedPaths.some((changed) => changed === 'memoryRuntime.command'
-              || changed === 'memoryRuntime.startTimeoutMs');
-            if (commandChanged) {
-              void memoryRuntimeSupervisor.restart({ includeAttached: true, force: false }).catch(() => undefined);
+        const targetEnabled = isMemoryRuntimeEnabled(config);
+        const commandChanged = changedPaths.some((changed) => changed === 'memoryRuntime.command'
+          || changed === 'memoryRuntime.startTimeoutMs');
+        try {
+          await enqueueMemoryRuntimeLifecycle(async () => {
+            // 较新的配置已改变目标时，旧操作不得撤销新 token 或停止新 child。
+            if (isMemoryRuntimeEnabled(config) !== targetEnabled) return;
+            if (targetEnabled) {
+              await memoryCapability.prepare();
+              if (memoryRuntimeSupervisor && isMemoryRuntimeEnabled(config)) {
+                if (commandChanged) {
+                  await memoryRuntimeSupervisor.restart({ includeAttached: false, force: false }).catch(() => undefined);
+                } else {
+                  await memoryRuntimeSupervisor.start().catch(() => undefined);
+                }
+              }
             } else {
-              void memoryRuntimeSupervisor.start().catch(() => undefined);
+              // 先进入 draining 并等待在途写，再撤销 capability；drain 不清时保留 token 并报告 incomplete。
+              const drain = await memoryCapability.close({ timeoutMs: 5000 })
+                .catch(() => ({ clean: false }));
+              if (!drain.clean) console.error('MEMORY_CAPABILITY_DRAIN_INCOMPLETE');
+              await memoryRuntimeSupervisor?.stop({ includeAttached: false }).catch(() => undefined);
             }
+          });
+        } catch (error) {
+          if (error?.code === 'closing') {
+            return sendJson(res, 409, {
+              ok: false,
+              error: 'closing',
+              message: 'MCP 正在关闭：Memory Runtime 生命周期操作未执行',
+            });
           }
-        } else {
-          await memoryRuntimeSupervisor?.stop({ includeAttached: false }).catch(() => undefined);
-          await memoryCapability.revoke();
+          throw error;
         }
       }
 
@@ -3174,6 +3457,10 @@ export async function startHttpServer({
           timeoutMs,
         },
       });
+      } finally {
+        if (releaseConfigFileLock) await releaseConfigFileLock();
+        releaseConfigWrite();
+      }
     }
 
     // G-ML-1：记忆生命周期（动作式，无开关）——归档/解除归档（可逆）+ 删除（墓碑）
@@ -4292,7 +4579,7 @@ export async function startHttpServer({
   });
   // MCP 已就绪后再异步拉起 sidecar：失败只影响沉浸式记忆，不阻塞 READY/29 工具。
   if (memoryRuntimeSupervisor && isMemoryRuntimeEnabled(config)) {
-    void memoryRuntimeSupervisor.start().catch((error) => {
+    void enqueueMemoryRuntimeLifecycle(() => memoryRuntimeSupervisor.start()).catch((error) => {
       console.error(`MEMORY_RUNTIME_START_FAILED ${error?.code ?? 'ERROR'}`);
     });
   }
@@ -4302,6 +4589,14 @@ export async function startHttpServer({
   const close = () => {
     if (closePromise) return closePromise;
     closePromise = (async () => {
+      lifecycleClosing = true;
+      // 先排空热生命周期，再在 listener 仍可达时撤销 capability。
+      // attached/manual 同时由 dispose 撤销匹配 discovery，覆盖网络已断开的场景。
+      await memoryRuntimeLifecycle.catch(() => undefined);
+      capabilityDrain = await memoryCapability.close({ timeoutMs: 5000 }).catch(() => ({ clean: false }));
+      if (!capabilityDrain.clean) {
+        console.error('MEMORY_CAPABILITY_DRAIN_INCOMPLETE');
+      }
       // 优雅停止的顺序很重要：MCP/SSE/keep-alive 连接不会自己断，
       // 先收 MCP sessions，再主动结束连接，最后才等 listener（带有限超时）。
       // 详情维护先停 timer；进行中的 prune 最多等一个 session 预算，不拖死关闭。
@@ -4346,9 +4641,13 @@ export async function startHttpServer({
         await clearRuntimeFile(home, { pid: process.pid }).catch(() => undefined);
         // 5) 本地模型进程由 sidecar 拥有；MCP 不持有推理引擎，无需本地清理。
         // 6) 保留最新 main 的生命周期收尾：root 单活锁 + 热初始化上下文（app/join/广播）。
-        //    先停止本进程启动的 sidecar（attach 的不动），再撤销 capability token。
+        //    capability 只有 drain clean 后才撤销；drain 失败时明确放弃，不声明已撤销。
         await memoryRuntimeSupervisor?.dispose().catch(() => undefined);
-        await memoryCapability.dispose().catch(() => undefined);
+        if (capabilityDrain?.clean) {
+          await memoryCapability.dispose().catch(() => undefined);
+        } else {
+          memoryCapability.abandon();
+        }
         await activeLock?.release?.().catch(() => undefined);
         await onClose?.().catch(() => undefined);
       }
@@ -4365,6 +4664,9 @@ export async function startHttpServer({
     getState: () => ({
       phase,
       hotInitialized,
+      closing: lifecycleClosing,
+      capabilityDrain,
+      capabilityDraining: memoryCapability.isDraining?.() === true,
       app,
       service,
       config,

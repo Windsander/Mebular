@@ -33,6 +33,7 @@ import {
   type SidecarPolicy,
 } from './domains.js';
 import { SidecarSettlementError } from './errors.js';
+import type { LifecycleGate } from './lifecycle-gate.js';
 import type { SidecarLocalLayer } from './local-layer.js';
 import type { SidecarInferenceProvider } from './inference-provider.js';
 import {
@@ -306,6 +307,7 @@ export interface RecallServiceOptions {
   policy?: SidecarPolicy | null;
   getPolicy?: () => SidecarPolicy | null;
   inference?: SidecarInferenceProvider | null;
+  lifecycle?: LifecycleGate | null;
   checkpointSource?: {
     getCheckpoint(threadId: string, options?: {
       agentId?: string | null;
@@ -1106,6 +1108,7 @@ export class RecallService {
 
   private readonly client: CapabilityClient | null;
   private readonly models: SidecarInferenceProvider | null;
+  private readonly lifecycle: LifecycleGate | null;
   private readonly checkpointSource: RecallServiceOptions['checkpointSource'];
   private readonly selfSource: RecallServiceOptions['checkpointSource'];
   private readonly getPolicy?: () => SidecarPolicy | null;
@@ -1127,6 +1130,7 @@ export class RecallService {
     this.local = options.local;
     this.client = options.client;
     this.models = options.inference ?? null;
+    this.lifecycle = options.lifecycle ?? null;
     this.checkpointSource = options.checkpointSource ?? null;
     this.selfSource = options.selfSource
       ?? (options.checkpointSource && typeof options.checkpointSource.getSelf === 'function'
@@ -1174,6 +1178,7 @@ export class RecallService {
   }
 
   async handleRecall(request: unknown): Promise<RecallHttpResult<RecallResponse>> {
+    this.lifecycle?.assertAccepting('recall');
     const normalized = this.normalizeRequest(request, false);
     this.recalls += 1;
     const response = await this.execute(normalized, 'recall');
@@ -1181,6 +1186,7 @@ export class RecallService {
   }
 
   async handleContext(request: unknown): Promise<RecallHttpResult<ContextResponse>> {
+    this.lifecycle?.assertAccepting('context');
     const normalized = this.normalizeRequest(request, true);
     this.contexts += 1;
     const base = await this.execute(normalized, 'context');
@@ -1995,6 +2001,7 @@ export class RecallService {
   }
 
   private async execute(request: NormalizedRequest, mode: 'recall' | 'context'): Promise<RecallResponse & { blocks?: ContextBlock[] }> {
+    this.lifecycle?.assertAccepting('recall.execute');
     const recallId = shortId('rr');
     const warnings: string[] = [];
     let degraded = false;
@@ -2004,6 +2011,7 @@ export class RecallService {
     // 可选模型 query plan：只影响检索词；失败保留原 query，不阻塞召回。
     if (this.config.recall.queryPlan === 'model' && this.models && !request.mute
       && request.turnKind === 'human' && request.query.trim().length > 0) {
+      this.lifecycle?.assertAccepting('recall.model');
       const selection = await this.models.selectOptionalSource(request.allowRemote);
       for (const warning of selection.warnings) pushWarning(warnings, warning);
       degraded = degraded || selection.degraded;
@@ -3355,6 +3363,8 @@ export class RecallService {
       this.markAnchor(run.request);
     }
 
+    // 模型/召回已完成的晚到结果：drain 后不得再写 trace 或返回可注入结果。
+    this.lifecycle?.assertAccepting('recall.commit');
     const trace = await this.writeTrace(run, mode, fragments, warnings, degraded, silenceReason, timing);
     if (trace.failed) {
       degraded = true;

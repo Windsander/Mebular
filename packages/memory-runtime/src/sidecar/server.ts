@@ -26,7 +26,7 @@ import {
   isLoopbackHost,
   type SidecarConfig,
 } from './config.js';
-import type { SidecarState } from './discovery.js';
+import type { SidecarMode, SidecarState } from './discovery.js';
 import type {
   IngestExtractionResult,
   IngestExtractionView,
@@ -181,7 +181,7 @@ export interface SidecarStatusError {
 }
 
 export interface SidecarStatusSnapshot {
-  mode: 'immersive';
+  mode: SidecarMode;
   identity: SidecarStatusIdentity;
   capability: SidecarStatusCapability;
   model: SidecarStatusModel;
@@ -200,6 +200,7 @@ export interface SidecarStatus extends SidecarStatusSnapshot {
   state: SidecarState;
   degraded: boolean;
   pid: number;
+  startedAt: number;
   uptimeMs: number;
 }
 
@@ -417,6 +418,7 @@ export class SidecarServer {
 
   state: SidecarState;
   degraded: boolean;
+  mode: SidecarMode = 'immersive';
 
   private readonly identity: SidecarStatusIdentity;
   private readonly getStatus?: () => SidecarStatusSnapshot | Promise<SidecarStatusSnapshot>;
@@ -432,6 +434,9 @@ export class SidecarServer {
   private host = '';
   private port = 0;
   private stopping = false;
+  private closePromise: Promise<void> | null = null;
+  private activeImmersiveRequests = 0;
+  private readonly immersiveIdleWaiters = new Set<() => void>();
 
   constructor(options: SidecarServerOptions) {
     this.config = options.config;
@@ -460,9 +465,9 @@ export class SidecarServer {
     this.maxMcpVersion = options.maxMcpVersion ?? SIDECAR_MAX_MCP_VERSION;
   }
 
-  /** 当前降级状态：显式标记或沉降/outbox 动态状态。 */
+  /** 当前降级状态：显式标记、休眠或沉降/outbox 动态状态。 */
   currentDegraded(): boolean {
-    return this.degraded || this.getDegraded?.() === true;
+    return this.mode !== 'immersive' || this.degraded || this.getDegraded?.() === true;
   }
 
   get isListening(): boolean {
@@ -555,19 +560,41 @@ export class SidecarServer {
     return { host: this.host, port: this.port, url: this.url, healthUrl: this.healthUrl };
   }
 
-  async close(): Promise<void> {
-    if (this.stopping) return;
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
     this.stopping = true;
     this.state = 'stopping';
-    const server = this.server;
-    this.server = null;
-    if (!server) return;
-    await new Promise<void>((resolve) => {
-      server.close(() => resolve());
-      // 不等待 keep-alive 连接自然过期；测试与父进程退出都要求快速关闭。
-      server.closeAllConnections?.();
-    });
-    this.state = 'stopped';
+    this.closePromise = (async () => {
+      const server = this.server;
+      this.server = null;
+      if (!server) {
+        this.state = 'stopped';
+        return;
+      }
+      await new Promise<void>((resolve) => {
+        let finished = false;
+        const finish = () => {
+          if (finished) return;
+          finished = true;
+          clearTimeout(timer);
+          resolve();
+        };
+        // 即使连接关闭回调异常/缺失，也不能让进程退出无限等待。
+        const timer = setTimeout(() => {
+          server.closeAllConnections?.();
+          finish();
+        }, 2000);
+        timer.unref?.();
+        try {
+          server.close(finish);
+          server.closeAllConnections?.();
+        } catch {
+          finish();
+        }
+      });
+      this.state = 'stopped';
+    })();
+    return this.closePromise;
   }
 
   setState(state: SidecarState): void {
@@ -576,6 +603,30 @@ export class SidecarServer {
 
   setDegraded(degraded: boolean): void {
     this.degraded = degraded;
+  }
+
+  /**
+   * 立即撤销沉浸式准入，并有界等待已接受请求退出。
+   * false 表示仍有工作未静默完成；调用方必须报告 incomplete/degraded。
+   */
+  async setMode(mode: SidecarMode, { timeoutMs = 2000 }: { timeoutMs?: number } = {}): Promise<boolean> {
+    this.mode = mode;
+    if (mode === 'immersive' || this.activeImmersiveRequests === 0) return true;
+    await new Promise<void>((resolve) => {
+      let finished = false;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        this.immersiveIdleWaiters.delete(finish);
+        resolve();
+      };
+      const timer = setTimeout(finish, Math.max(0, timeoutMs));
+      timer.unref?.();
+      this.immersiveIdleWaiters.add(finish);
+      if (this.activeImmersiveRequests === 0) finish();
+    });
+    return this.activeImmersiveRequests === 0;
   }
 
   private envelope(requestId: string, data: unknown, warnings: string[] = [], degraded = false) {
@@ -751,17 +802,46 @@ export class SidecarServer {
     }
     return {
       ...snapshot,
+      mode: this.mode,
       model: { ...fallback.model, ...(snapshot.model ?? {}) },
       counts: { ...fallback.counts, ...(snapshot.counts ?? {}) },
       details: { ...fallback.details, ...(snapshot.details ?? {}) },
       state: this.state,
       degraded: this.currentDegraded(),
       pid: process.pid,
+      startedAt: this.startedAt,
       uptimeMs: Math.max(0, this.now() - this.startedAt),
     };
   }
 
+  private diagnosticRequest(req: IncomingMessage): boolean {
+    const method = req.method ?? 'GET';
+    if (method !== 'GET' && method !== 'HEAD') return false;
+    const pathname = new URL(req.url ?? '/', 'http://127.0.0.1').pathname;
+    if (!pathname.startsWith(`${SIDECAR_API_PREFIX}/`)) return true;
+    const relative = pathname.slice(SIDECAR_API_PREFIX.length).replace(/^\/+/, '');
+    if (['health', 'version', 'status', 'inference', 'models', 'traces'].includes(relative)) return true;
+    if (relative.startsWith('traces/')) return true;
+    if (/^models\/[^/]+(?:\/(?:status|get))?$/.test(relative)) return true;
+    return /^installs\/[^/]+$/.test(relative);
+  }
+
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const diagnostic = this.diagnosticRequest(req);
+    if (!diagnostic) this.activeImmersiveRequests += 1;
+    try {
+      await this.handleRequest(req, res);
+    } finally {
+      if (!diagnostic) {
+        this.activeImmersiveRequests = Math.max(0, this.activeImmersiveRequests - 1);
+        if (this.activeImmersiveRequests === 0) {
+          for (const resolve of [...this.immersiveIdleWaiters]) resolve();
+        }
+      }
+    }
+  }
+
+  private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const requestId = requestIdOf(req);
     res.setHeader('x-request-id', requestId);
     try {
@@ -796,7 +876,8 @@ export class SidecarServer {
           requestId,
           apiVersion: this.apiVersion,
           state: this.state,
-          ready: this.state === 'ready' && !this.stopping,
+          mode: this.mode,
+          ready: this.state === 'ready' && this.mode === 'immersive' && !this.stopping,
           degraded: this.currentDegraded(),
           pid: process.pid,
           runtimeVersion: this.runtimeVersion,
@@ -842,28 +923,28 @@ export class SidecarServer {
           minMcpVersion: this.minMcpVersion,
           maxMcpVersion: this.maxMcpVersion,
           state: this.state,
-          mode: 'immersive',
+          mode: this.mode,
           degraded: this.currentDegraded(),
           pid: process.pid,
           startedAt: this.startedAt,
           model,
           capabilities: {
-            ingest: Boolean(this.ingest),
-            recall: Boolean(this.recall),
-            context: Boolean(this.recall),
-            feedback: Boolean(this.recall),
+            ingest: this.mode === 'immersive' && Boolean(this.ingest),
+            recall: this.mode === 'immersive' && Boolean(this.recall),
+            context: this.mode === 'immersive' && Boolean(this.recall),
+            feedback: this.mode === 'immersive' && Boolean(this.recall),
             traces: Boolean(this.recall),
-            details: Boolean(this.recall),
-            checkpoint: Boolean(this.objects),
-            compact: Boolean(this.objects),
-            self: Boolean(this.objects),
+            details: this.mode === 'immersive' && Boolean(this.recall),
+            checkpoint: this.mode === 'immersive' && Boolean(this.objects),
+            compact: this.mode === 'immersive' && Boolean(this.objects),
+            self: this.mode === 'immersive' && Boolean(this.objects),
             models: {
-              install: modelCapabilities.install,
-              activate: modelCapabilities.activate,
+              install: this.mode === 'immersive' && modelCapabilities.install,
+              activate: this.mode === 'immersive' && modelCapabilities.activate,
               catalog: modelCapabilities.catalog,
             },
             inference: {
-              engine: modelCapabilities.engine,
+              engine: this.mode === 'immersive' && modelCapabilities.engine,
               sources: model.sources ?? ['heuristic', 'host'],
             },
           },
@@ -891,6 +972,14 @@ export class SidecarServer {
           Array.isArray(status.warnings) ? status.warnings : [],
           status.degraded,
         ));
+        return;
+      }
+
+      // 休眠不是“进程健康但继续工作”：除脱敏诊断只读面外，旧 URL/token
+      // 也只能得到既有 mode_mismatch，不得触发 ingest/recall/object/model 工作。
+      if (this.mode !== 'immersive' && !this.diagnosticRequest(req)) {
+        req.resume();
+        this.sendError(res, 409, requestId, 'mode_mismatch', 'Memory Runtime 已休眠：沉浸式能力未启用', undefined, false);
         return;
       }
 

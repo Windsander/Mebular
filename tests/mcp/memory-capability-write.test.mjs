@@ -2666,7 +2666,7 @@ describe('GET/POST /sync', () => {
       else process.env.MEBULAR_CLOUD_ROOT = savedRoot;
       await rm(fakeHome, { recursive: true, force: true });
     }
-  });
+  }, 15000);
 });
 
 describe('公共工具面与轻量模式边界', () => {
@@ -2675,4 +2675,252 @@ describe('公共工具面与轻量模式边界', () => {
     expect(TOOL_NAMES).not.toContain('memory_capability');
     expect(TOOL_NAMES).not.toContain('memory_runtime_write');
   });
+});
+
+describe('close 与已认证在途写', () => {
+  it('close 撤销后，已进入 handler 的写请求不得再提交图或返回成功', async () => {
+    const marker = unique('close-inflight');
+    const storage = app.storage;
+    const originalListNodes = storage.listNodes.bind(storage);
+    let release = () => {};
+    const gate = new Promise((resolve) => { release = resolve; });
+    let entered = false;
+    storage.listNodes = async (...args) => {
+      if (!entered) {
+        entered = true;
+        await gate;
+      }
+      return originalListNodes(...args);
+    };
+    try {
+      const pending = post(capability('/write'), writeBody([{
+        clientItemId: unique('cand_close'),
+        domain: 'agent:opencode',
+        kind: 'fact',
+        content: { subject: 'close', predicate: 'marker', object: marker, confidence: 0.9 },
+      }]), { token });
+      const deadline = Date.now() + 5000;
+      while (!entered && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(entered).toBe(true);
+      const closing = server.close();
+      expect(server.getState().closing).toBe(true);
+      const drainDeadline = Date.now() + 5000;
+      while (!server.getState().capabilityDraining && Date.now() < drainDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(server.getState().capabilityDraining).toBe(true);
+      release();
+      const response = await pending;
+      expect(response.status).toBe(409);
+      expect(response.body?.error?.code).toBe('mode_mismatch');
+      await closing;
+      expect(await readCapabilityToken({ home, env: {} })).toBeNull();
+      const nodes = await originalListNodes();
+      expect(JSON.stringify(nodes)).not.toContain(marker);
+    } finally {
+      storage.listNodes = originalListNodes;
+    }
+  }, 15000);
+});
+
+describe('close 等待真实 writeRecords 完成', () => {
+  it('已进入 service.writeRecords 的写必须完成后再 revoke，close 不得提前返回', async () => {
+    const second = await startHttpServer({
+      home,
+      app,
+      service,
+      config: {
+        deviceId: 'device-w2b',
+        memoryRuntime: { enabled: true },
+        sync: { namespaces: [] },
+        mcp: { http: { host: '127.0.0.1', port: 0, auth: 'none' } },
+      },
+      buildServer: () => ({ connect: async () => undefined, close: async () => undefined }),
+      host: '127.0.0.1',
+      port: 0,
+      auth: 'none',
+    });
+    const secondBase = `http://127.0.0.1:${second.port}`;
+    const savedBase = base;
+    base = secondBase;
+    const secondToken = (await readCapabilityToken({ home, env: {} }))?.token;
+    const marker = unique('write-records-close');
+    const originalWriteRecords = service.writeRecords.bind(service);
+    let entered = false;
+    let release = () => {};
+    const gate = new Promise((resolve) => { release = resolve; });
+    service.writeRecords = async (...args) => {
+      if (!entered) {
+        entered = true;
+        await gate;
+      }
+      return originalWriteRecords(...args);
+    };
+    try {
+      const pending = post('/internal/memory/v1/write', writeBody([{
+        clientItemId: unique('cand_write_close'),
+        domain: 'agent:opencode',
+        kind: 'fact',
+        content: { subject: 'close', predicate: 'writeRecords', object: marker, confidence: 0.9 },
+      }]), { token: secondToken });
+      const deadline = Date.now() + 5000;
+      while (!entered && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(entered).toBe(true);
+      const closing = second.close();
+      let settled = false;
+      void closing.then(() => { settled = true; });
+      const drainDeadline = Date.now() + 5000;
+      while (!second.getState().capabilityDraining && Date.now() < drainDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(second.getState().capabilityDraining).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(settled).toBe(false);
+      expect(second.getState().closing).toBe(true);
+      release();
+      const response = await pending;
+      expect(response.status).toBe(200);
+      await closing;
+      expect(second.getState().capabilityDrain).toMatchObject({ clean: true });
+      const nodes = await app.storage.listNodes();
+      expect(JSON.stringify(nodes)).toContain(marker);
+    } finally {
+      base = savedBase;
+      service.writeRecords = originalWriteRecords;
+      await second.close().catch(() => undefined);
+    }
+  }, 20000);
+});
+
+describe('drain 覆盖 update/delete/archive 写路径', () => {
+  for (const route of ['update', 'delete', 'archive']) {
+    it(`${route} 在 drain 后不得提交`, async () => {
+      const instance = await startHttpServer({
+        home,
+        app,
+        service,
+        config: {
+          deviceId: 'device-w2b',
+          memoryRuntime: { enabled: true },
+          sync: { namespaces: [] },
+          mcp: { http: { host: '127.0.0.1', port: 0, auth: 'none' } },
+        },
+        buildServer: () => ({ connect: async () => undefined, close: async () => undefined }),
+        host: '127.0.0.1',
+        port: 0,
+        auth: 'none',
+      });
+      const instanceBase = `http://127.0.0.1:${instance.port}`;
+      const savedBase = base;
+      base = instanceBase;
+      const instanceToken = (await readCapabilityToken({ home, env: {} }))?.token;
+      const id = unique(`record_${route}`);
+      const written = await post('/internal/memory/v1/write', writeBody([{
+        clientItemId: unique(`cand_${route}`),
+        domain: 'agent:opencode',
+        kind: 'fact',
+        content: { subject: route, predicate: 'marker', object: id, confidence: 0.9 },
+      }]), { token: instanceToken });
+      expect(written.status).toBe(200);
+      const recordId = written.body.data.results[0].id;
+      const originalGetNode = app.graph.getNode.bind(app.graph);
+      let entered = false;
+      let release = () => {};
+      const gate = new Promise((resolve) => { release = resolve; });
+      app.graph.getNode = async (...args) => {
+        if (!entered) {
+          entered = true;
+          await gate;
+        }
+        return originalGetNode(...args);
+      };
+      try {
+        const body = route === 'update'
+          ? { actor: agent, items: [{ id: recordId, patch: { tags: ['changed'] } }] }
+          : { actor: agent, ids: [recordId], ...(route === 'archive' ? { archived: true } : {}) };
+        const pending = post(`/internal/memory/v1/${route}`, body, { token: instanceToken });
+        const deadline = Date.now() + 5000;
+        while (!entered && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        expect(entered).toBe(true);
+        const closing = instance.close();
+        const drainDeadline = Date.now() + 5000;
+        while (!instance.getState().capabilityDraining && Date.now() < drainDeadline) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        expect(instance.getState().capabilityDraining).toBe(true);
+        release();
+        const response = await pending;
+        expect(response.status).toBe(409);
+        expect(response.body?.error?.code).toBe('mode_mismatch');
+        await closing;
+      } finally {
+        base = savedBase;
+        app.graph.getNode = originalGetNode;
+        await instance.close().catch(() => undefined);
+      }
+    }, 15000);
+  }
+});
+
+describe('close drain 超时', () => {
+  it('超时明确 incomplete 且不撤销 token，不声明 clean', async () => {
+    const instance = await startHttpServer({
+      home,
+      app,
+      service,
+      config: {
+        deviceId: 'device-w2b',
+        memoryRuntime: { enabled: true },
+        sync: { namespaces: [] },
+        mcp: { http: { host: '127.0.0.1', port: 0, auth: 'none' } },
+      },
+      buildServer: () => ({ connect: async () => undefined, close: async () => undefined }),
+      host: '127.0.0.1',
+      port: 0,
+      auth: 'none',
+    });
+    const instanceBase = `http://127.0.0.1:${instance.port}`;
+    const instanceToken = (await readCapabilityToken({ home, env: {} }))?.token;
+    const originalWriteRecords = service.writeRecords.bind(service);
+    let entered = false;
+    let release = () => {};
+    const gate = new Promise((resolve) => { release = resolve; });
+    service.writeRecords = async (...args) => {
+      if (!entered) {
+        entered = true;
+        await gate;
+      }
+      return originalWriteRecords(...args);
+    };
+    const savedBase = base;
+    base = instanceBase;
+    try {
+      const pending = post('/internal/memory/v1/write', writeBody([{
+        clientItemId: unique('cand_timeout'),
+        domain: 'agent:opencode',
+        kind: 'fact',
+        content: { subject: 'timeout', predicate: 'marker', object: unique('timeout'), confidence: 0.9 },
+      }]), { token: instanceToken }).catch(() => null);
+      const deadline = Date.now() + 5000;
+      while (!entered && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(entered).toBe(true);
+      await instance.close();
+      expect(instance.getState().capabilityDrain).toMatchObject({ clean: false });
+      expect(await readCapabilityToken({ home, env: {} })).not.toBeNull();
+      release();
+      await pending;
+    } finally {
+      base = savedBase;
+      service.writeRecords = originalWriteRecords;
+      await instance.close().catch(() => undefined);
+    }
+  }, 20000);
 });

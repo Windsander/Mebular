@@ -43,6 +43,7 @@ import {
 } from './candidates.js';
 import { SidecarSettlementError } from './errors.js';
 import { heuristicCandidates } from './heuristic.js';
+import type { LifecycleGate } from './lifecycle-gate.js';
 import {
   LocalLayerError,
   type OutboxCommitted,
@@ -226,6 +227,7 @@ export interface IngestServiceOptions {
   };
   policy?: SidecarPolicy | null;
   inference?: SidecarInferenceProvider | null;
+  lifecycle?: LifecycleGate | null;
   now?: () => number;
   idempotencyTtlMs?: number;
   extractionTtlMs?: number;
@@ -508,6 +510,8 @@ function errorView(error: unknown, at: number): IngestErrorView {
 
 function retryableCapabilityError(error: unknown): boolean {
   if (error instanceof CapabilityClientError) {
+    // 撤销/模式不一致是生命周期信号：保留既有 queued 项，但绝不新建 outbox。
+    if (error.code === 'capability_disabled' || error.code === 'mode_mismatch') return false;
     if (error.retryable) return true;
     // token 轮换/网络可能在恢复后成功；保留在 outbox 中等待重放。
     if (error.status === 401 || error.status === 0) return true;
@@ -525,6 +529,7 @@ export class IngestService {
 
   private readonly client: CapabilityClient | null;
   private readonly models: SidecarInferenceProvider | null;
+  private readonly lifecycle: LifecycleGate | null;
   private policy: SidecarPolicy | null;
   private readonly now: () => number;
   private readonly idempotencyTtlMs: number;
@@ -548,6 +553,7 @@ export class IngestService {
     this.local = options.local;
     this.client = options.client;
     this.models = options.inference ?? null;
+    this.lifecycle = options.lifecycle ?? null;
     this.identity = options.identity;
     this.policy = options.policy ?? null;
     this.now = options.now ?? Date.now;
@@ -652,6 +658,20 @@ export class IngestService {
     this.lastError = errorView(error, this.now());
   }
 
+  /**
+   * capability 成功返回后再次校验生命周期：drain 期间晚到的 200 仍是“含糊成功”，
+   * 不得提交 Detail/记录/outbox，且本次禁用不得报告 clean。
+   */
+  private assertLifecycleAfterSuccess(operation: string): void {
+    if (!this.lifecycle || this.lifecycle.acceptsWork()) return;
+    this.lifecycle.noteAmbiguousSuccess(operation);
+    throw new SidecarSettlementError(
+      'mode_mismatch',
+      'Memory Runtime 已休眠：晚到的成功不再提交',
+      { status: 409, retryable: false, details: { operation, phase: this.lifecycle.currentPhase } },
+    );
+  }
+
   applyReplaySummary(summary: OutboxReplaySummary): void {
     this.settled += Math.max(0, summary.settled);
     if (summary.errors.length > 0) {
@@ -672,6 +692,7 @@ export class IngestService {
     request: unknown,
     options: { idempotencyKey?: string | null } = {},
   ): Promise<IngestHttpResult> {
+    this.lifecycle?.assertAccepting('ingest');
     return this.chain(() => this.ingestLocked(request, options));
   }
 
@@ -746,6 +767,7 @@ export class IngestService {
       || (extractor === 'auto' && this.config.model.source === 'host')
     );
     if (hostPending) {
+      this.lifecycle?.assertAccepting('ingest.staging');
       const stagingChunkIds = await this.stageChunks({
         agentId,
         threadId,
@@ -786,6 +808,7 @@ export class IngestService {
     }
 
     // 先写本地 staging，确保模型失败/超时不会丢原始材料；staging 不是权威。
+    this.lifecycle?.assertAccepting('ingest.staging');
     const stagingChunkIds = await this.stageChunks({
       agentId,
       threadId,
@@ -809,6 +832,7 @@ export class IngestService {
     if (routedHost.length > 0) {
       this.models?.noteHostCandidates();
     } else if (extractor !== 'heuristic') {
+      this.lifecycle?.assertAccepting('ingest.model');
       const selection = await this.selectExtractionSource(extractor, allowRemote);
       appendWarnings(warnings, selection.warnings);
       degraded = selection.degraded;
@@ -958,6 +982,7 @@ export class IngestService {
     warnings.push(...outcome.warnings);
 
     // 记录成功后才写详情：详情必须链接同域记录；没有记录只保留 staging 到 TTL。
+    this.lifecycle?.assertAccepting('ingest.detail');
     const detailOutcome = await this.settleDetails({
       chunks,
       records: outcome.records,
@@ -966,6 +991,8 @@ export class IngestService {
       warnings,
       extractionIds: [extractionId],
     });
+    // 记录/详情可能已在 drain 前提交；晚到成功只能 409，绝不再清理 staging 或写 completed。
+    this.assertLifecycleAfterSuccess('ingest.detail.settled');
     if (outcome.records.length > 0 && !outcome.queued && outcome.failed === 0
       && detailOutcome.queued === 0 && detailOutcome.failed === 0 && stagingChunkIds.length > 0) {
       await this.clearStaging(stagingChunkIds, warnings);
@@ -1040,6 +1067,7 @@ export class IngestService {
   }
 
   async completeExtraction(id: string, candidates: unknown): Promise<IngestExtractionResult> {
+    this.lifecycle?.assertAccepting('ingest.extraction');
     return this.chain(async () => {
       if (!EXTRACTION_ID_RE.test(id)) {
         throw new SidecarSettlementError('not_found', '抽取任务不存在或已过期', { status: 404 });
@@ -1124,6 +1152,7 @@ export class IngestService {
         warnings,
         extractionIds: [extraction.id],
       });
+      this.assertLifecycleAfterSuccess('ingest.extraction.detail.settled');
       if (outcome.records.length > 0 && !outcome.queued && outcome.failed === 0
         && detailOutcome.queued === 0 && detailOutcome.failed === 0 && extraction.stagingChunkIds.length > 0) {
         await this.clearStaging(extraction.stagingChunkIds, warnings, {
@@ -1169,6 +1198,11 @@ export class IngestService {
 
   /** outbox 重放成功后的本地清理/缓存回填。返回 false 表示仍需重试。 */
   async applyReplayedOutbox(item: OutboxItem, data: unknown): Promise<boolean> {
+    // drain/resume 竞态：晚到的 capability 成功不得提交 Detail/记录或删除 pending。
+    if (this.lifecycle && !this.lifecycle.acceptsWork()) {
+      this.lifecycle.noteAmbiguousSuccess('replay.apply_late_success');
+      return false;
+    }
     if (item.endpoint !== '/detail') {
       if (item.meta?.kind === 'record') {
         return this.applyReplayedRecord(item, data);
@@ -1176,6 +1210,17 @@ export class IngestService {
       return true;
     }
     if (!this.client) return false;
+    // 依赖 staging 的 Detail 重放在证据过期时必须显式 dead，不得静默确认。
+    const requiredStaging = item.meta?.stagingChunkIds ?? [];
+    if (requiredStaging.length > 0) {
+      const staged = await this.stagedChunksFor(requiredStaging);
+      if (staged.length !== new Set(requiredStaging).size) {
+        throw new CapabilityClientError('retention_expired', '重放所需 staging 已缺失', {
+          status: 410,
+          retryable: false,
+        });
+      }
+    }
     const body: Record<string, unknown> = isObject(item.body) ? item.body : {};
     const items = (Array.isArray(body.items) ? body.items.filter(isObject) : []) as unknown as CapabilityDetailWriteItem[];
     if (items.length === 0) return false;
@@ -1204,6 +1249,10 @@ export class IngestService {
     }> = [];
     try {
       for (const detailItem of items) {
+        if (this.lifecycle && !this.lifecycle.acceptsWork()) {
+          this.lifecycle.noteAmbiguousSuccess('replay.detail.commit_after_drain');
+          return false;
+        }
         const result = resultByClientItemId.get(detailItem.clientItemId);
         if (!result) {
           allOk = false;
@@ -1260,6 +1309,10 @@ export class IngestService {
   }
 
   private async applyReplayedRecord(item: OutboxItem, data: unknown): Promise<boolean> {
+    if (this.lifecycle && !this.lifecycle.acceptsWork()) {
+      this.lifecycle.noteAmbiguousSuccess('replay.record.late_success');
+      return false;
+    }
     const payload: Record<string, unknown> = isObject(data) ? data : {};
     const declaredFailed = typeof payload.failed === 'number' && payload.failed > 0;
     const results = Array.isArray(payload.results) ? payload.results : [];
@@ -1816,6 +1869,7 @@ export class IngestService {
 
     const ids: string[] = [];
     for (const source of chunks) {
+      this.lifecycle?.assertAccepting('ingest.staging.chunk');
       const chunk: RawChunk = { ...source, threadId };
       if (chunk.messageId) {
         const previous = byMessage.get(`${chunk.messageId}\u0000${chunk.chunkIndex ?? -1}`);
@@ -1826,9 +1880,15 @@ export class IngestService {
       }
       try {
         const stored = await this.local.putStagingChunk(cloudId, chunk);
+        if (this.lifecycle && !this.lifecycle.acceptsWork()) {
+          // 写盘期间 drain 开始：只撤销本次新建的 chunk；duplicate 指向既有 staging，必须保留。
+          if (!stored.duplicate) await this.local.clearStaging([stored.chunk.id]).catch(() => 0);
+          this.lifecycle.assertAccepting('ingest.staging.chunk.settled');
+        }
         ids.push(stored.chunk.id);
         if (stored.duplicate) appendWarnings(warnings, ['duplicate_staging_chunk']);
       } catch (error) {
+        if (error instanceof SidecarSettlementError) throw error;
         if ((error as { code?: string })?.code === 'content_hash_mismatch') {
           throw new SidecarSettlementError('content_hash_mismatch', '相同内容哈希对应了不同文本', {
             status: 400,
@@ -1897,7 +1957,7 @@ export class IngestService {
     outcome: OutboxReplayCompletion,
   ): Promise<void> {
     const generation = this.stopGeneration;
-    if (this.stopped) {
+    if (this.stopped || (this.lifecycle && !this.lifecycle.acceptsWork())) {
       const marker = await this.local.outbox.markNeedsFinalize(item.id, true, {
         outcome,
         owner: item.replayLeaseOwner,
@@ -1976,7 +2036,8 @@ export class IngestService {
 
   /** 重启/后台有界重试：读取持久化的 needsFinalize 项继续收口。 */
   async reconcileReplayFinalizations(): Promise<number> {
-    if (this.stopped) return 0;
+    // drain/dormant 期间不重试收口：marker 已持久化，恢复后再执行。
+    if (this.stopped || (this.lifecycle && !this.lifecycle.acceptsWork())) return 0;
     const pending = await this.local.outbox.listNeedsFinalize();
     this.finalizePending = pending.length;
     this.finalizeExhausted = pending.filter((entry) => entry.exhausted).length;
@@ -2124,7 +2185,9 @@ export class IngestService {
           warning !== 'replay_dependency_pending' && warning !== 'replay_dead_dependency');
 
         const ttlMs = stored.expiresAt - this.now();
-        if (this.stopped || generation !== this.stopGeneration) {
+        // stop/drain 后已执行中的 finalize 不得再写/删 cache；留下 marker 供恢复重试。
+        if (this.stopped || generation !== this.stopGeneration
+          || (this.lifecycle && !this.lifecycle.acceptsWork())) {
           throw new Error('finalize_interrupted_by_stop');
         }
         if (ttlMs <= 0) {
@@ -2417,11 +2480,13 @@ export class IngestService {
         continue;
       }
       try {
+        this.lifecycle?.assertAccepting('ingest.detail.request');
         await touchLease?.();
         const response = await this.client.detailWrite(
           { requestId, actor, items: batch },
           { idempotencyKey: requestId },
         );
+        this.assertLifecycleAfterSuccess('ingest.detail.write');
         const data: Record<string, unknown> = isObject(response.data) ? response.data : {};
         const evictedIds = new Set<string>();
         if (Array.isArray(data.evicted)) {
@@ -2480,6 +2545,13 @@ export class IngestService {
             continue;
           }
           const code = typeof result.code === 'string' ? result.code : 'detail_write_failed';
+          if (code === 'capability_disabled' || code === 'mode_mismatch') {
+            throw new SidecarSettlementError(
+              'mode_mismatch',
+              'capability 已撤销：详情写入未提交',
+              { status: 409, retryable: false, details: { reason: code } },
+            );
+          }
           const retryable = result.retryable === true || code === 'detail_quota_exceeded'
             || (status !== 'failed' && status !== 'rejected');
           appendWarnings(outcome.warnings, [`detail_write_failed:${code}`]);
@@ -2504,6 +2576,16 @@ export class IngestService {
         }
       } catch (error) {
         const code = error instanceof CapabilityClientError ? error.code : 'internal';
+        if ((error instanceof CapabilityClientError
+            && (error.code === 'capability_disabled' || error.code === 'mode_mismatch'))
+          || (this.lifecycle && !this.lifecycle.acceptsWork())) {
+          // 生命周期撤销不是详情部分失败：记录已提交也不能把禁用写成 200 partial。
+          throw new SidecarSettlementError(
+            'mode_mismatch',
+            'capability 已撤销：详情写入未提交',
+            { status: 409, retryable: false, details: { reason: code } },
+          );
+        }
         const retryable = retryableCapabilityError(error) || code === 'detail_quota_exceeded';
         appendWarnings(outcome.warnings, [`detail_write_failed:${code}`]);
         outcome.failures.push({ code, retryable });
@@ -2527,6 +2609,8 @@ export class IngestService {
     batch: CapabilityDetailWriteItem[],
     authoritative: CapabilityDetailRecord,
   ): Promise<void> {
+    // drain 后晚到的详情成功不得继续写本地 cache。
+    if (this.lifecycle && !this.lifecycle.acceptsWork()) return;
     const clientItemId = typeof result.clientItemId === 'string' ? result.clientItemId : null;
     const item = clientItemId ? batch.find((entry) => entry.clientItemId === clientItemId) : undefined;
     if (!item) return;
@@ -2565,6 +2649,7 @@ export class IngestService {
     queuedCount = items.length,
     extractionIds: readonly string[] = [],
   ): Promise<void> {
+    this.lifecycle?.assertAccepting('ingest.detail.outbox');
     const body = { requestId, actor, op: 'write', items };
     const id = `ob_${sha256Hex(`${requestId}\u0000detail`).slice(0, 40)}`;
     const detailDeadlines = items
@@ -2593,6 +2678,13 @@ export class IngestService {
       this.noteQueued({ code: 'detail_queued', message: '详情写入失败，已进入 outbox' });
     } catch (error) {
       if (error instanceof LocalLayerError) {
+        if (error.code === 'lifecycle_blocked') {
+          throw new SidecarSettlementError(
+            'mode_mismatch',
+            'Memory Runtime 已休眠：详情未入队',
+            { status: 409, retryable: false },
+          );
+        }
         this.noteSettlementError(error);
         throw new SidecarSettlementError(
           error.code === 'outbox_full' ? 'outbox_full' : 'storage_full',
@@ -2608,6 +2700,7 @@ export class IngestService {
     if (candidates.length === 0) {
       return { records: [], queued: false, failed: 0, degraded: false, warnings: [], status: 'completed' };
     }
+    this.lifecycle?.assertAccepting('ingest.write');
     const items = candidates.map((candidate) => toWriteItem(candidate, {
       agentId: context.agentId,
       threadId: context.threadId,
@@ -2647,10 +2740,12 @@ export class IngestService {
     }
 
     try {
+      this.lifecycle?.assertAccepting('ingest.write.request');
       const response = await this.client.write<Record<string, unknown>>(
         { requestId, actor, items },
         { idempotencyKey: requestId },
       );
+      this.assertLifecycleAfterSuccess('ingest.write');
       const data = isObject(response.data) ? response.data : {};
       const results = Array.isArray(data.results) ? data.results : [];
       const records: IngestRecordView[] = [];
@@ -2723,6 +2818,21 @@ export class IngestService {
         status: queued ? 'pending' : permanentFailures > 0 ? 'failed' : records.length > 0 ? 'completed' : 'failed',
       };
     } catch (error) {
+      if (this.lifecycle && !this.lifecycle.acceptsWork()) {
+        throw new SidecarSettlementError(
+          'mode_mismatch',
+          'Memory Runtime 已休眠：写入未结算',
+          { status: 409, retryable: false, details: { phase: this.lifecycle.currentPhase } },
+        );
+      }
+      if (error instanceof CapabilityClientError
+        && (error.code === 'capability_disabled' || error.code === 'mode_mismatch')) {
+        throw new SidecarSettlementError(
+          'mode_mismatch',
+          'capability 已撤销：写入不再入队',
+          { status: 409, retryable: false, details: { reason: error.code } },
+        );
+      }
       if (retryableCapabilityError(error)) {
         await this.enqueueWriteSafe(requestId, actor, items, context);
         this.noteQueued(error);
@@ -2764,6 +2874,7 @@ export class IngestService {
     items: CapabilityWriteItem[],
     context: CandidateContext,
   ): Promise<void> {
+    this.lifecycle?.assertAccepting('ingest.write.outbox');
     const id = `ob_${sha256Hex(requestId).slice(0, 40)}`;
     const evidence = context.evidenceByClientItemId
       ? Object.fromEntries([...context.evidenceByClientItemId.entries()].map(([key, value]) => [key, {
@@ -2799,6 +2910,13 @@ export class IngestService {
       await this.enqueueWrite(requestId, actor, items, context);
     } catch (error) {
       if (error instanceof LocalLayerError) {
+        if (error.code === 'lifecycle_blocked') {
+          throw new SidecarSettlementError(
+            'mode_mismatch',
+            'Memory Runtime 已休眠：写入未入队',
+            { status: 409, retryable: false },
+          );
+        }
         throw new SidecarSettlementError(
           error.code === 'outbox_full' ? 'outbox_full' : 'storage_full',
           error.message,
@@ -2843,6 +2961,8 @@ export class IngestService {
   }
 
   private async failExtraction(extraction: StoredExtraction, code: string): Promise<StoredExtraction> {
+    // drain 后不覆盖 cache；恢复后由 staging 缺失重新显式失败。
+    if (this.lifecycle && !this.lifecycle.acceptsWork()) return extraction;
     const warnings = [...extraction.warnings];
     appendWarnings(warnings, [code]);
     const failed: StoredExtraction = {
@@ -2899,6 +3019,8 @@ export class IngestService {
     outboxIds?: readonly string[];
     detailFailures?: ReadonlyArray<{ code: string; retryable: boolean }>;
   }): Promise<StoredExtraction> {
+    // drain 后晚到的 ingest/finalize 流程不得再写 extraction cache。
+    this.lifecycle?.assertAccepting('ingest.extraction.save');
     const now = this.now();
     const extraction: StoredExtraction = {
       version: 1,

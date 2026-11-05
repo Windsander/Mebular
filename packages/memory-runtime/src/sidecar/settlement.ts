@@ -27,6 +27,7 @@ import {
   type IngestStatsSnapshot,
 } from './ingest.js';
 import { MemoryObjectService } from './internal-objects.js';
+import type { LifecycleGate } from './lifecycle-gate.js';
 import type { SidecarLocalLayer } from './local-layer.js';
 import type { SidecarInferenceProvider } from './inference-provider.js';
 import { OutboxReplayer } from './outbox-replayer.js';
@@ -53,6 +54,7 @@ export interface SettlementRuntimeOptions {
   policy?: SidecarPolicy | null;
   inference?: SidecarInferenceProvider | null;
   policyPath?: string;
+  lifecycle?: LifecycleGate | null;
   now?: () => number;
   replayerIntervalMs?: number;
   autoStartReplayer?: boolean;
@@ -180,6 +182,7 @@ export class SettlementRuntime {
       },
       policy: this.policy,
       ...(this.inference ? { inference: this.inference } : {}),
+      ...(options.lifecycle ? { lifecycle: options.lifecycle } : {}),
       ...(options.now ? { now: options.now } : {}),
     };
     this.ingest = new IngestService(ingestOptions);
@@ -195,6 +198,7 @@ export class SettlementRuntime {
       },
       policy: this.policy,
       ...(this.inference ? { inference: this.inference } : {}),
+      ...(options.lifecycle ? { lifecycle: options.lifecycle } : {}),
       ...(options.now ? { now: options.now } : {}),
     });
     this.recall = new RecallService({
@@ -211,6 +215,7 @@ export class SettlementRuntime {
       getPolicy: () => this.policy,
       checkpointSource: this.objects,
       ...(this.inference ? { inference: this.inference } : {}),
+      ...(options.lifecycle ? { lifecycle: options.lifecycle } : {}),
       ...(options.now ? { now: options.now } : {}),
     });
     // 非 replayer 的 dead-letter 路径（Ttl/启动清理/配额等）也必须清理对象 pending。
@@ -221,6 +226,7 @@ export class SettlementRuntime {
     this.replayer = new OutboxReplayer({
       outbox: options.local.outbox,
       client: options.client,
+      ...(options.lifecycle ? { lifecycle: options.lifecycle } : {}),
       ...(options.now ? { now: options.now } : {}),
       ...(options.replayerIntervalMs !== undefined ? { intervalMs: options.replayerIntervalMs } : {}),
       onSummary: (summary) => {

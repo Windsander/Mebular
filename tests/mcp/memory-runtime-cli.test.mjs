@@ -10,7 +10,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { pidAlive } from '../../packages/mcp/src/memory-runtime-supervisor.mjs';
+import { MemoryRuntimeSupervisor, pidAlive } from '../../packages/mcp/src/memory-runtime-supervisor.mjs';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const CLI = join(ROOT, 'packages', 'mcp', 'bin', 'mebular.mjs');
@@ -171,6 +171,95 @@ describe('mebular memory-runtime CLI', () => {
     expect(existsSync(join(home, 'memory-runtime.json'))).toBe(false);
     expect((await readFile(spawnsOut, 'utf-8')).trim().split('\n')).toHaveLength(2);
   });
+
+  it('manual：热禁用/恢复与 MCP dispose 保留 PID，显式 restart/stop 轮换并停止', async () => {
+    const home = await tempDir();
+    await writeConfig(home, { enabled: true, command: FAKE, startTimeoutMs: 3000 });
+    await writeCapabilityToken(home, 'manual-capability-a');
+    const env = envFor(home, { FAKE_SIDECAR_RECOVER_ON_CAPABILITY_FILE: '1' });
+    const started = runCli(env, 'start');
+    expect(started.status).toBe(0);
+    const first = parse(started);
+    pids.push(first.pid);
+    const firstDiscovery = JSON.parse(await readFile(join(home, 'memory-runtime.json'), 'utf-8'));
+    const firstHostToken = JSON.parse(await readFile(firstDiscovery.tokenFile, 'utf-8')).token;
+    const config = { memoryRuntime: { enabled: true, command: FAKE, startTimeoutMs: 3000 } };
+    const supervisor = new MemoryRuntimeSupervisor({
+      home,
+      config,
+      env,
+      profileId: () => 'default',
+    });
+    expect(await supervisor.start()).toMatchObject({ state: 'ready', attached: true, managed: false });
+
+    config.memoryRuntime.enabled = false;
+    await rm(join(home, 'memory-runtime', 'capability-token'), { force: true });
+    expect(await supervisor.stop({ includeAttached: false })).toMatchObject({ state: 'stopped', error: null });
+    expect(pidAlive(first.pid)).toBe(true);
+    const dormant = await fetch(`${firstDiscovery.url}/status`, {
+      headers: { authorization: `Bearer ${firstHostToken}` },
+    });
+    expect((await dormant.json()).data).toMatchObject({ mode: 'mcp', state: 'stopped' });
+    expect(existsSync(join(home, 'memory-runtime.json'))).toBe(false);
+    const rejected = await fetch(`${firstDiscovery.url}/ingest`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${firstHostToken}`, 'content-type': 'application/json' },
+      body: '{}',
+    });
+    expect(rejected.status).toBe(409);
+    expect((await rejected.json()).error.code).toBe('mode_mismatch');
+
+    await writeCapabilityToken(home, 'manual-capability-b');
+    const restartedMcp = new MemoryRuntimeSupervisor({
+      home,
+      config: { memoryRuntime: { enabled: true, command: FAKE, startTimeoutMs: 3000 } },
+      env,
+      profileId: () => 'default',
+    });
+    expect(await restartedMcp.start()).toMatchObject({ state: 'ready', attached: true, pid: first.pid });
+    await restartedMcp.dispose();
+    expect(pidAlive(first.pid)).toBe(true);
+
+    const restarted = runCli(env, 'restart');
+    expect(restarted.status).toBe(0);
+    const second = parse(restarted);
+    pids.push(second.pid);
+    expect(second.pid).not.toBe(first.pid);
+    const secondDiscovery = JSON.parse(await readFile(join(home, 'memory-runtime.json'), 'utf-8'));
+    const secondHostToken = JSON.parse(await readFile(secondDiscovery.tokenFile, 'utf-8')).token;
+    expect(secondHostToken).not.toBe(firstHostToken);
+    expect(pidAlive(first.pid)).toBe(false);
+    expect(runCli(env, 'stop').status).toBe(0);
+    expect(pidAlive(second.pid)).toBe(false);
+  }, 45000);
+
+  it('discovery 刚删除且 sidecar 仍 immersive 时 CLI restart/stop 仍可通过 start.lock 停止', async () => {
+    const home = await tempDir();
+    await writeConfig(home, { enabled: true, command: FAKE, startTimeoutMs: 3000 });
+    await writeCapabilityToken(home);
+    const env = envFor(home, { FAKE_SIDECAR_HEARTBEAT_MS: '5000' });
+    const started = runCli(env, 'start');
+    expect(started.status).toBe(0);
+    const first = parse(started);
+    pids.push(first.pid);
+    await rm(join(home, 'memory-runtime.json'), { force: true });
+
+    const restarted = runCli(env, 'restart');
+    expect(restarted.status).toBe(0);
+    const second = parse(restarted);
+    pids.push(second.pid);
+    expect(second.pid).not.toBe(first.pid);
+    expect(pidAlive(first.pid)).toBe(false);
+    const secondDiscovery = JSON.parse(await readFile(join(home, 'memory-runtime.json'), 'utf-8'));
+    expect(secondDiscovery.pid).toBe(second.pid);
+
+    await rm(join(home, 'memory-runtime.json'), { force: true });
+    const stopped = runCli(env, 'stop');
+    expect(stopped.status).toBe(0);
+    expect(parse(stopped)).toMatchObject({ ok: true, action: 'stop', state: 'stopped' });
+    expect(pidAlive(second.pid)).toBe(false);
+    expect(existsSync(join(home, 'memory-runtime', 'start.lock'))).toBe(false);
+  }, 30000);
 
   it('start 未安装 sidecar：退出码 3', async () => {
     const home = await tempDir();

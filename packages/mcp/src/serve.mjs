@@ -4207,11 +4207,12 @@ export async function startHttpServer({
           // 角色卡/plan 也不能从这里的通用 metadata 写入口伪造。
           const protectedInternalTypes = new Set(['agent_capability_card', 'agent_role_card', 'task_plan']);
           const requestedInternalKind = payload.metadata?.internalObject?.kind;
-          if (protectedInternalTypes.has(type) || protectedInternalTypes.has(requestedInternalKind)) {
+          const declaresInternal = payload.metadata?.internal === true;
+          if (declaresInternal || protectedInternalTypes.has(type) || protectedInternalTypes.has(requestedInternalKind)) {
             return sendJson(res, 403, {
               ok: false,
               error: 'internal_object_write_forbidden',
-              message: '内部对象必须走各自专用写入端点（能力卡：/app/capability-cards；角色卡：/app/role-cards）',
+              message: '内部对象必须走各自专用写入端点（能力卡：/app/capability-cards；角色卡：/app/role-cards；plan：/app/plans）',
             });
           }
           const node = await app.graph.createNode(

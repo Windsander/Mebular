@@ -55,6 +55,37 @@ function resultText(result) {
     .join('\n');
 }
 
+/**
+ * DSH 0.2.2 changed `ctx.tools.execute()` from a single invocation to a raw
+ * call batch (`{ calls, signal }`). The probe must work on both the minimum
+ * matrix (0.2.1) and latest; try the batch shape first, then fall back to the
+ * legacy single-call shape.
+ *
+ * This is test-only compatibility: production Mebular plugins do not call
+ * `ctx.tools.execute()`.
+ */
+async function executeProbeTool(ctx, call) {
+  try {
+    const batch = await ctx.tools.execute({
+      calls: [{ callId: call.callId, name: call.name, arguments: call.arguments }],
+      signal: call.signal,
+    });
+    if (batch && Array.isArray(batch.results)) {
+      const hit = batch.results.find((entry) => entry?.callId === call.callId) ?? batch.results[0];
+      if (hit && hit.result !== undefined) {
+        const result = hit.result;
+        return {
+          ...result,
+          structuredContent: result?.structuredContent ?? result?.value,
+        };
+      }
+    }
+  } catch {
+    // 0.2.1 treats the batch object as an invalid single call; fall through.
+  }
+  return ctx.tools.execute(call);
+}
+
 function expectedMode() {
   const value = String(process.env.PROBE_EXPECT ?? 'up').trim().toLowerCase();
   return value === 'down' || value === 'recover' ? value : 'up';
@@ -302,7 +333,7 @@ export function apply(ctx, config = {}) {
     };
     state.invocation = invocation;
     try {
-      const result = await ctx.tools.execute({
+      const result = await executeProbeTool(ctx, {
         callId: `dsh-e2e-probe-${Date.now()}`,
         name: tool,
         arguments: argumentsValue,

@@ -79,7 +79,7 @@ CLI 通用形参：`--input '<json>'`（字段与 MCP `arguments` 一致）+ `--
 |---|---|---|
 | **Hermes** | 可执行 | 内置 `HermesAgent`（`kind=hermes`）：`hermes [-p P] [-t T] [-m M] [--in DIR] -z <prompt> --usage-file <tmp>` |
 | **OpenChamber** | 条件可执行 | 通过 **oc-hermes-bridge** 的 `POST /agent/run-once` 执行（`kind=openchamber` + `HttpOpenChamberSeam`）；**无桥不可执行**，只能 dispatch-only |
-| **DSH v1** | 可执行（宿主 CLI） | 官方 `dsh --profile headless "<job>"` 作为执行宿主；`dsh --profile sdk` 属于 DSH v2，不作为当前口径。现有 `@mebular/dsh-plugin` 是 **Web/记忆桥**，不是 Fleet executor，也不提供 fleet 执行器适配 |
+| **DSH v1** | 计划中（宿主 CLI；adapter 待实现） | 官方 `dsh --profile headless "<job>"` 作为 0.3.2 目标执行宿主；`dsh --profile sdk` 属于 DSH v2，不作为当前口径。现有 `@mebular/dsh-plugin` 是 **Web/记忆桥**，不是 Fleet executor，也不提供 fleet 执行器适配 |
 | **OpenCode** | 计划中 | 计划用 `opencode run`，**待 adapter 实现** |
 | **Claude Code** | 计划中 | 计划用 `claude -p`，**待 adapter 实现** |
 | **Cursor** | 条件可执行 | 仅当执行设备有 `cursor-agent` 时可按命令执行；否则 **dispatch-only** |

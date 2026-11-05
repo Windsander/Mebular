@@ -76,7 +76,7 @@
 |---|---|---|
 | Hermes | 可执行 | 内置 `HermesAgent`（`kind=hermes`） |
 | OpenChamber | 条件可执行 | 仅经 oc-hermes-bridge（`POST /agent/run-once`）可执行；无桥 dispatch-only |
-| DSH v1 | 可执行（宿主 CLI） | 官方 `dsh --profile headless "<job>"`；`dsh --profile sdk` 是 v2；`@mebular/dsh-plugin` 是 Web/记忆桥，不是 Fleet executor |
+| DSH v1 | 计划中（宿主 CLI；adapter 待实现） | 官方 `dsh --profile headless "<job>"` 是 0.3.2 目标执行入口；`dsh --profile sdk` 是 v2；`@mebular/dsh-plugin` 是 Web/记忆桥，不是 Fleet executor |
 | OpenCode | 计划中 | `opencode run`，待 adapter |
 | Claude Code | 计划中 | `claude -p`，待 adapter |
 | Cursor | 条件可执行 | 仅当执行设备有 `cursor-agent`；否则 dispatch-only |

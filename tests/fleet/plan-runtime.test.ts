@@ -1,7 +1,7 @@
 // P2 plan 提交 + materializer：幂等/冲突/root 补建、确定性 taskId、重复 tick、重启、
 // root sentinel、旧 worker 执行普通 step task、task_status.plan、PLAN_RETRY_REQUIRED。
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Mebular } from '@mebular/core';
@@ -44,7 +44,14 @@ let app: Mebular | null = null;
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'fleet-plan-runtime-'));
-  await onboardDevice({ dir, device: 'device-A', agents: [{ name: 'worker', kind: 'echo' }, { name: 'planner', kind: 'echo' }] });
+  await onboardDevice({
+    dir,
+    device: 'device-A',
+    agents: [
+      { name: 'worker', kind: 'command', command: process.execPath },
+      { name: 'planner', kind: 'command', command: process.execPath },
+    ],
+  });
 });
 
 afterEach(async () => {
@@ -778,5 +785,29 @@ describe('P2 task_submit.plan + materializer', () => {
     expect(result.rootsCreated).toBe(1);
     const root = reduceTaskEvents(await store.byTask(planRootTaskId(p.planId, 1)));
     expect(root).toMatchObject({ to: SENTINEL, status: 'running', trace: { chain: [] } });
+  });
+
+  it('echo kind plan owner：PLAN_OWNER_UNEXECUTABLE，不写 plan/root', async () => {
+    const configPath = join(dir, 'fleet.config.json');
+    const config = JSON.parse(await readFile(configPath, 'utf-8')) as Record<string, unknown>;
+    config.agents = [{ name: 'planner', kind: 'echo' }];
+    await writeFile(configPath, JSON.stringify(config, null, 2), { mode: 0o600 });
+
+    const live = await openApp();
+    const store = new MebularTaskEventStore(live);
+    const plans = new MebularTaskPlanStore(live);
+    const p = plan({ planId: 'plan-runtime-echo-owner-001' });
+    const result = await toolByName('task_submit')!.handler(
+      { intent: 'echo plan', to: SENTINEL, plan: p },
+      { dir, mebular: live, agent: 'planner' } as ToolContext,
+    ) as { ok: boolean; error: string; reason: string; errors: string[] };
+    expect(result).toMatchObject({
+      ok: false,
+      error: 'PLAN_POLICY',
+      reason: 'PLAN_OWNER_UNEXECUTABLE',
+    });
+    expect(result.errors.join(' ')).toContain('PLAN_OWNER_UNEXECUTABLE');
+    expect(await plans.list()).toEqual([]);
+    expect(await store.byTask(planRootTaskId(p.planId, 1))).toHaveLength(0);
   });
 });

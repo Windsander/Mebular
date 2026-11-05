@@ -4306,6 +4306,7 @@ export async function startHttpServer({
             });
           } catch (error) {
             const code = typeof error?.code === 'string' ? error.code : null;
+            const reason = typeof error?.reason === 'string' ? error.reason : null;
             const status = code === 'PLAN_CONFLICT' || code === 'PLAN_VERSION' || code === 'PLAN_STATE_INVALID'
               ? 409
               : code === 'PLAN_SCHEMA' || code === 'PLAN_BUDGET' || code === 'PLAN_POLICY'
@@ -4317,6 +4318,7 @@ export async function startHttpServer({
             return sendJson(res, status, {
               ok: false,
               ...(code !== null ? { error: code } : { error: 'plan_write_failed' }),
+              ...(reason !== null ? { reason } : {}),
               errors: Array.isArray(error?.errors) ? error.errors : [String(error?.message ?? error)],
             });
           }

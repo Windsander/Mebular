@@ -10,9 +10,11 @@ import { effectiveBudget } from '../collab/tree.js';
 import type { TaskPlan } from '../plan.js';
 import {
   PlanValidationError,
+  PLAN_OWNER_UNEXECUTABLE,
   TASK_PLAN_KIND,
   TASK_PLAN_NODE_TYPE,
   canonicalTaskPlan,
+  isReservedPlanOwnerAgent,
   planMrTaskRefs,
   planRootTaskId,
   planTaskId,
@@ -171,6 +173,17 @@ export async function appendTaskPlanNode(
       `plan.owner.device 必须是写入设备：${plan.owner.device} != ${mebular.deviceId}`,
     ]);
   }
+  // 所有 plan 节点写入（含 embedded store 直写）都拒绝 demo/看板 owner。
+  if (isReservedPlanOwnerAgent(plan.owner.agent)) {
+    throw new PlanValidationError(
+      'PLAN_POLICY',
+      [
+        `${PLAN_OWNER_UNEXECUTABLE}: plan owner/MR agent="${plan.owner.agent}" 必须是本机真实可执行 Agent；`
+        + 'echo/board 只用于 demo/看板，不能承担 plan owner 或 MR 执行',
+      ],
+      PLAN_OWNER_UNEXECUTABLE,
+    );
+  }
   return serializePlanWrite(mebular, async () => {
     const existing = await listTaskPlanNodes(mebular, options);
     const same = existing.find((entry) => planKey(entry.plan) === planKey(plan));
@@ -255,7 +268,7 @@ export async function appendValidatedTaskPlanNode(
     taskStates,
     caller: candidate.owner,
   });
-  if (!validation.ok) throw new PlanValidationError(validation.code, validation.errors);
+  if (!validation.ok) throw new PlanValidationError(validation.code, validation.errors, validation.reason);
   return appendTaskPlanNode(mebular, validation.plan, options);
 }
 
@@ -303,6 +316,7 @@ interface DaemonPlanNode {
 interface DaemonPlansReply {
   ok: boolean;
   error?: string;
+  reason?: string;
   errors?: string[];
   count?: number;
   plans?: TaskPlan[];
@@ -387,7 +401,8 @@ export class DaemonTaskPlanStore implements TaskPlanWriteStore {
       || code === 'PLAN_MR' || code === 'PLAN_ACCEPTANCE' || code === 'PLAN_REUSE'
       || code === 'PLAN_DUP_STEP' || code === 'PLAN_MISSING_DEP' || code === 'PLAN_CYCLE'
       || code === 'PLAN_STATE_INVALID') {
-      throw new PlanValidationError(code, json.errors ?? []);
+      const reason = json.reason === 'PLAN_OWNER_UNEXECUTABLE' ? json.reason : undefined;
+      throw new PlanValidationError(code, json.errors ?? [], reason);
     }
     throw new Error(`守护 appendPlan 失败（HTTP ${status}）：${code ?? '未知'}`);
   }

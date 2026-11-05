@@ -102,6 +102,32 @@ export interface FleetAgentConfig {
   capabilities?: string[];
 }
 
+/**
+ * plan owner/MR 必须是**本机真实可执行 Agent**。
+ *
+ * `echo` 只用于本地/CI demo，`board` 是看板占位；二者都不得承担 plan owner/MR。
+ * `command` 必须带本地命令才具备执行语义；`hermes` / `openchamber` 由内置 adapter 执行。
+ */
+export function isPlanOwnerExecutableAgent(
+  agent: Pick<FleetAgentConfig, 'name' | 'kind' | 'command'>,
+): boolean {
+  if (agent.name === 'board' || agent.name === 'echo') return false;
+  if (agent.kind === 'echo') return false;
+  if (agent.kind === 'command') {
+    return typeof agent.command === 'string' && agent.command.length > 0;
+  }
+  return true;
+}
+
+/** 本机不可作为 plan owner/MR 的 agent 名（kind=echo 或保留 demo/看板名）。 */
+export function unexecutablePlanOwnerNames(
+  config: Pick<FleetConfig, 'agents'>,
+): string[] {
+  return config.agents
+    .filter((agent) => !isPlanOwnerExecutableAgent(agent))
+    .map((agent) => agent.name);
+}
+
 export interface FleetPeerConfig {
   device: string;
   /** 可选 multiaddr（用于拨号；缺省则等待对端拨入） */

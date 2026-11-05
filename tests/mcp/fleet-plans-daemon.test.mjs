@@ -188,6 +188,31 @@ describe('P2 daemon /app/plans', () => {
     expect(forged.body.error).toBe('internal_object_write_forbidden');
   });
 
+  it('WS4b：/app/plans 拒绝 board/echo owner，并透传 PLAN_OWNER_UNEXECUTABLE', async () => {
+    const before = (await app.graph.listNodes({ type: 'task_plan' })).length;
+    for (const agent of ['board', 'echo']) {
+      const reply = await request('/app/plans', {
+        method: 'POST',
+        body: {
+          plan: plan({ planId: `plan-daemon-unexecutable-${agent}`, owner: { device: 'device-A', agent } }),
+          namespace: 'tasks',
+        },
+      });
+      expect(reply.status).toBe(422);
+      expect(reply.body).toMatchObject({
+        ok: false,
+        error: 'PLAN_POLICY',
+        reason: 'PLAN_OWNER_UNEXECUTABLE',
+      });
+      expect(reply.body.errors.join(' ')).toContain('PLAN_OWNER_UNEXECUTABLE');
+    }
+    expect((await app.graph.listNodes({ type: 'task_plan' })).length).toBe(before);
+
+    // 记录缺口：daemon home 没有 fleet.config.json 的 agent kind 信息，无法识别
+    // “非保留名的 echo kind”（如 {name:"worker",kind:"echo"}）；正常 fleet 客户端
+    // 在 MCP 提交阶段已被 surface guard 拒绝，因此这里只保证保留名 fail-closed。
+  });
+
   it('DaemonTaskPlanStore：同版本同内容幂等；内容不同 PLAN_CONFLICT；版本单调', async () => {
     const store = new fleet.DaemonTaskPlanStore({ endpoint: base, namespace: 'tasks' });
     const replay = await store.append(plan({ createdAt: 999 }));
@@ -405,7 +430,7 @@ describe('P2 daemon /app/plans', () => {
       namespace: 'tasks',
       listen: '/ip4/127.0.0.1/tcp/0',
       peers: [],
-      agents: [{ name: 'worker', kind: 'echo' }, { name: 'planner', kind: 'echo' }],
+      agents: [{ name: 'worker', kind: 'echo' }, { name: 'planner', kind: 'command', command: process.execPath }],
       store: 'daemon',
       daemon: { endpoint: base },
     }), { mode: 0o600 });
@@ -488,7 +513,7 @@ describe('P2 daemon /app/plans', () => {
       namespace: 'tasks',
       listen: '/ip4/127.0.0.1/tcp/0',
       peers: [],
-      agents: [{ name: 'worker', kind: 'echo' }, { name: 'planner', kind: 'echo' }],
+      agents: [{ name: 'worker', kind: 'echo' }, { name: 'planner', kind: 'command', command: process.execPath }],
       store: 'daemon',
       daemon: { endpoint: base },
     }), { mode: 0o600 });

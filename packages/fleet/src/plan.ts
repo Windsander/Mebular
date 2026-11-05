@@ -18,6 +18,10 @@ export const PLAN_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 export const PLAN_STEP_ID_PATTERN = /^[a-z][a-z0-9_-]{0,63}$/;
 export const PLAN_VERSION_PATTERN = /^[1-9][0-9]*$/;
 
+/** 稳定 policy 原因码（与 error=PLAN_POLICY 组合使用）。 */
+export const PLAN_OWNER_UNEXECUTABLE = 'PLAN_OWNER_UNEXECUTABLE' as const;
+export type PlanPolicyReason = typeof PLAN_OWNER_UNEXECUTABLE;
+
 export type PlanErrorCode =
   | 'PLAN_SCHEMA'
   | 'PLAN_VERSION'
@@ -111,24 +115,32 @@ export interface PlanValidationContext {
   parentTaskAccepted?: boolean;
   /** 提交者；plan.owner 必须同时等于调用 device 与 agent。 */
   caller?: FleetEndpoint;
+  /**
+   * 本机不可作为 plan owner/MR 的 agent 名（kind=echo / 保留 demo 名）。
+   * 未提供时仍按保留名 `board`/`echo` fail-closed（daemon 直接写入路径没有 fleet agent 配置）。
+   */
+  unexecutableOwnerAgents?: readonly string[];
   /** 任务权威状态（用于 reuse 的旧结果校验；undefined = 跳过运行时存在性检查）。 */
   taskStates?: readonly TaskState[];
 }
 
 export type PlanValidationResult =
   | { ok: true; plan: TaskPlan; deduped?: boolean }
-  | { ok: false; code: PlanErrorCode; errors: string[] };
+  | { ok: false; code: PlanErrorCode; errors: string[]; reason?: PlanPolicyReason };
 
 /** 结构化 plan 校验失败（供 store / daemon 端点转 HTTP）。 */
 export class PlanValidationError extends Error {
   readonly code: PlanErrorCode;
   readonly errors: string[];
+  /** 可选稳定 reason（目前仅 PLAN_OWNER_UNEXECUTABLE）；daemon 端点会透传。 */
+  readonly reason?: PlanPolicyReason;
 
-  constructor(code: PlanErrorCode, errors: string[] = []) {
+  constructor(code: PlanErrorCode, errors: string[] = [], reason?: PlanPolicyReason) {
     super(`${code}${errors.length > 0 ? `: ${errors.join('; ')}` : ''}`);
     this.name = 'PlanValidationError';
     this.code = code;
     this.errors = errors;
+    this.reason = reason;
   }
 }
 
@@ -147,6 +159,37 @@ function isEndpoint(value: unknown): value is FleetEndpoint {
 
 function failure(code: PlanErrorCode, message: string): { ok: false; code: PlanErrorCode; errors: string[] } {
   return { ok: false, code, errors: [message] };
+}
+
+/** 保留的 demo/看板 owner 名；永远不能承担 plan owner/MR。 */
+export function isReservedPlanOwnerAgent(agent: string): boolean {
+  return agent === 'board' || agent === 'echo';
+}
+
+/**
+ * plan owner/MR 可执行性：`board`/`echo` 是 demo/看板占位，永远不能承担；
+ * kind=echo 的本机 agent 名由调用方通过 `unexecutableOwnerAgents` 传入。
+ *
+ * 这是 plan 写入的唯一 choke point：MCP `task_submit.plan` 与 daemon `/app/plans`
+ * 都经过 `validatePlan`，因此不会只堵住其中一条路径。
+ */
+function validateOwnerExecutability(
+  plan: TaskPlan,
+  context: PlanValidationContext,
+): { ok: false; code: PlanErrorCode; errors: string[]; reason: PlanPolicyReason } | null {
+  const ownerAgent = plan.owner.agent;
+  const reserved = isReservedPlanOwnerAgent(ownerAgent);
+  const listed = context.unexecutableOwnerAgents?.includes(ownerAgent) === true;
+  if (!reserved && !listed) return null;
+  return {
+    ok: false,
+    code: 'PLAN_POLICY',
+    reason: PLAN_OWNER_UNEXECUTABLE,
+    errors: [
+      `${PLAN_OWNER_UNEXECUTABLE}: plan owner/MR agent="${ownerAgent}" 必须是本机真实可执行 Agent；`
+      + 'echo/board 只用于 demo/看板，不能承担 plan owner 或 MR 执行',
+    ],
+  };
 }
 
 function stringArray(value: unknown): string[] | null {
@@ -632,6 +675,10 @@ export function validatePlan(input: unknown, context: PlanValidationContext = {}
   const plan = shape.plan;
 
   // owner=提交者（device+agent）：必须先于幂等返回，避免别的设备/Agent 重放同一 plan。
+  // 可执行性优先于 caller 校验：保留 demo 名永远给出稳定的 PLAN_OWNER_UNEXECUTABLE。
+  const ownerExecutable = validateOwnerExecutability(plan, context);
+  if (ownerExecutable !== null) return ownerExecutable;
+
   if (context.caller !== undefined
     && (plan.owner.device !== context.caller.device || plan.owner.agent !== context.caller.agent)) {
     return failure('PLAN_POLICY', 'plan owner 必须同时等于提交设备与 Agent');

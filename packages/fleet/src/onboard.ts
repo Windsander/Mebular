@@ -41,8 +41,7 @@ import {
 } from './config.js';
 import { CommandAgent, ExecutorRegistry, HermesAgent } from './runtime/agent.js';
 import { AGENT_NAMESPACE } from './agentdir.js';
-import { HttpOpenChamberSeam } from './runtime/openchamber-http.js';
-import { OpenChamberAgent } from './runtime/openchamber.js';
+import { OpenChamberRunnerAgent } from './runtime/openchamber-runner.js';
 import { DshHeadlessAgent } from './runtime/dsh.js';
 import { OpenCodeAgent } from './runtime/opencode.js';
 import { ClaudeCodeAgent } from './runtime/claude-code.js';
@@ -83,8 +82,7 @@ export const DEFAULT_EXECUTOR_FACTORIES: Readonly<Record<FleetAgentKind, Executo
       ...(a.concurrency !== undefined ? { concurrency: a.concurrency } : {}),
     }),
   openchamber: (a) =>
-    new OpenChamberAgent(new HttpOpenChamberSeam({ ...(a.timeoutMs !== undefined ? { timeoutMs: a.timeoutMs } : {}) }), {
-      ...(a.cwd !== undefined ? { cwd: a.cwd } : {}),
+    new OpenChamberRunnerAgent({
       ...(a.timeoutMs !== undefined ? { timeoutMs: a.timeoutMs } : {}),
       ...(a.maxOutputBytes !== undefined ? { maxOutputBytes: a.maxOutputBytes } : {}),
       ...(a.concurrency !== undefined ? { concurrency: a.concurrency } : {}),

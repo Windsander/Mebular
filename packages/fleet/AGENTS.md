@@ -41,7 +41,7 @@ Fleet 有两个正交平面：**派发面**（task 工具/MCP）与**执行面**
 | 记号 | 含义 |
 |---|---|
 | `已实现` | adapter/executor 已交付；可被 `task_targets` 选中；真实任务 smoke 可能仍待补 |
-| `条件` | 仅在执行设备运行条件满足时可执行（如 OpenChamber bridge 在线） |
+| `条件` | 仅在执行设备运行条件满足时可执行（如 OpenChamber 公开 runner 已启用） |
 | `否` | 没有执行入口；只能派发或完全不参与 |
 | `demo` | 仅演示/看板，不承担真实工作 |
 | 自动建联 `是` | assistant descriptor 可探测并自动写入 MCP 配置（`mebular print-config --client <id>`） |
@@ -50,7 +50,7 @@ Fleet 有两个正交平面：**派发面**（task 工具/MCP）与**执行面**
 
 | 客户端 | 自动建联 | 可作为派发方 | 可作为 Fleet 执行方 | adapter / 入口 | 限制 |
 |---|---|---|---|---|---|
-| `openchamber` | 是（复用 OpenCode global 配置） | 是 | **条件可执行（已实现）**：bridge 在线 | `kind=openchamber`；`OpenChamberAgent` → `HttpOpenChamberSeam` → `POST /agent/run-once` | 必须有 `oc-hermes-bridge` daemon；**无桥即不可执行**；endpoint/token 只从本机 env/文件读取；请求 ≤256 KiB、prompt ≤64 KiB、timeout ≤600 s；每次新建 session；错误归一 `OPENCHAMBER_ERROR`；当前 adapter 无 `health()`，探测结果为 `degraded`（不硬拒绝） |
+| `openchamber` | 是（复用 OpenCode global 配置） | 是 | **已实现（runner 启用时）** | `kind=openchamber`；`OpenChamberRunnerAgent` → `OpenChamberRunnerClient` → `POST /v1/run-once` | 公开 runner **默认关闭**；须在宿主启用 `@mebular/opencode-plugin/fleet-runner` 并发布 `<MEBULAR_HOME>/openchamber-runner.json`；回环 + bearer token；请求 ≤256 KiB、prompt ≤64 KiB、timeout ≤600 s；每次新建 session；discovery 缺失/陈旧/pid 死亡 → `ADAPTER_UNAVAILABLE`；`health()` 探测 `/health` |
 | `hermes` | 是（`~/.hermes/config.yaml`，热生效） | 是 | **已实现** | `kind=hermes`；`HermesAgent`；`hermes [-p P] [-t T] [-m M] [--in DIR] -z <prompt> --usage-file <tmp>` | 需要 `hermes` CLI；one-shot；stdout 即结果；默认 600 s；超时/非零退出 → `failed`；只透传 env allowlist；大 prompt 受 argv 上限约束；`health()` 探测 `hermes --version` |
 | `opencode` | 是（`~/.config/opencode/opencode.json`，重载生效） | 是 | **已实现** | `kind=opencode`；`OpenCodeAgent`；`opencode [baseArgs] run [prompt|stdin]` | 默认 `promptMode: arg`；本机 `opencode v2.0.29` 的 `--version` health 已验证；**真实任务 `opencode run` smoke 待补**；接入 MCP 不等于执行，执行以本机 config + adapter 为准 |
 | `claude-code` | 是（`~/.claude.json`，重启生效） | 是 | **已实现** | `kind=claude-code`；`ClaudeCodeAgent`；`claude [baseArgs] -p [prompt|stdin]` | 默认 `promptMode: arg`；本机未安装 `claude`，adapter 仅有 fake CLI 测试；**真实任务 smoke 待补**；成功判定 exit 0 且 stdout 非空 |
@@ -93,11 +93,13 @@ Fleet 有两个正交平面：**派发面**（task 工具/MCP）与**执行面**
 
 ### 2.5 OpenChamber
 
-- 执行入口是 HTTP bridge（`oc-hermes-bridge`）的 `POST /agent/run-once`，不是 OpenChamber 的 GUI。
-- **没有桥就不可执行。** 桥不在线、token 缺失、端点不可达时，任务失败并归一为 `OPENCHAMBER_ERROR`，不得静默降级到其它 agent。
-- endpoint/token 只在执行设备本地：默认读 `MEBULAR_FLEET_OPENCHAMBER_ENDPOINT`、`MEBULAR_FLEET_OPENCHAMBER_TOKEN`/`..._TOKEN_FILE`、`..._AUTH_HEADER`；token 不上网、不进任务事件、不落日志、不出现在错误文本。
-- 当前 adapter **没有 `health()`**：`BaseExecutor.health()` 返回 `degraded`（`adapter has no health probe`），route 只在显式 `unavailable` 时硬拒绝，因此 `degraded` 不会阻止路由。`supportsCancel=false`，取消不会保证中断已建立的桥会话。
-- provider 可替换；fleet 侧只依赖 `OpenChamberSessionSeam` 契约，不假设 bridge 的私有字段。
+- 执行入口是**公开 OpenChamber runner**（`@mebular/opencode-plugin/fleet-runner`）的 `POST /v1/run-once`，不是 GUI，也不依赖任何私有 bridge/skill。
+- runner **默认关闭**；只有插件配置 `fleetRunner.enabled: true` 才启动，并在 `$MEBULAR_HOME/openchamber-runner.json` 发布 discovery（schema/kind/pid/port/host/token/updatedAt，`0600`）。
+- Fleet 侧 `OpenChamberRunnerAgent` 默认发现该文件；`kind=openchamber` 的 factory 不接收 command/baseArgs。discovery 缺失、schema/kind 不符、`updatedAt` 超过 15 s、pid 不存活 → `ADAPTER_UNAVAILABLE`（fail-closed），不得回退到其它 agent。
+- **一个 Fleet task = 一个全新 session**：请求不接受 `sessionId`；runner 内部先 `session.create` 再 prompt，客户端断开时尽力 abort。
+- 协议限制：请求体 ≤256 KiB、prompt ≤64 KiB、timeout ≤600 s；返回 `{ok:true,result:{sessionId,text,ms}}` 或稳定错误码。token 只在本机 discovery 文件与 `Authorization: Bearer` 头中，不上网、不进任务事件/日志/错误文本。
+- `health()` 探测 `GET /health`；可用为 `ok`，否则 `unavailable`。`supportsCancel=true`：abort 会销毁连接，runner 尽力中断 session。
+- 完整协议、discovery 字段与启用方式见 [`OPENCHAMBER-RUNNER.md`](OPENCHAMBER-RUNNER.md)。
 
 ### 2.6 Cursor
 
@@ -151,7 +153,7 @@ Fleet 有两个正交平面：**派发面**（task 工具/MCP）与**执行面**
 └───────────────────────┬────────────────────────────┘
                         │
         Hermes / DSH / OpenCode / Claude Code /
-        OpenChamber bridge / command / …
+        OpenChamber public runner / command / …
 ```
 
 术语：
@@ -165,8 +167,8 @@ Fleet 有两个正交平面：**派发面**（task 工具/MCP）与**执行面**
 > 以下是**当前实现**。`BaseExecutor` 统一承担并发、超时、AbortSignal、env 白名单、输出截断、结果归一、执行日志与可选 health；adapter 只做平台翻译。
 
 1. **并发**：每 agent 一个 FIFO semaphore。默认 `command=1`、`hermes=2`、`dsh=1`、`opencode=1`、`claude-code=1`；`openchamber` 默认不额外限制（可通过本机 `concurrency` 收窄）。上限来自本机 config，不来自远端；超额本地排队，不依赖全局账本。
-2. **超时**：`timeoutMs` 到点 abort 并返回 `failed` + `TIMEOUT after <n>ms`；CLI adapter 会终止子进程。默认值：CLI 类 600 s，`command` 60 s（能力卡按 kind 展示）。
-3. **取消**：公共层为**超时**创建 `AbortSignal`，CLI adapter 响应并杀子进程。`task_cancel` 目前写 `failed(CANCELLED)` 并清理未终态任务；**不保证中断已经在运行中的 adapter 调用**（`OpenChamber` 的 descriptor 还显式 `supportsCancel=false`）。
+2. **超时**：`timeoutMs` 到点 abort 并返回 `failed` + `TIMEOUT after <n>ms`；CLI adapter 会终止子进程。默认值：CLI 类与 `openchamber` runner 600 s，`command` 60 s（能力卡按 kind 展示）。
+3. **取消**：公共层为**超时**创建 `AbortSignal`，CLI adapter 响应并杀子进程；OpenChamber runner 客户端销毁 HTTP 连接并由 runner 尽力 abort session。`task_cancel` 目前写 `failed(CANCELLED)` 并清理未终态任务；**不保证中断已经在运行中的 adapter 调用**。
 4. **env 白名单**：只传 `ENV_ALLOWLIST`；**配置没有 `env` 字段**，adapter 不继承 daemon 全量 env；不打印、不落盘 env 值。
 5. **输出截断**：UTF-8 安全，默认 65,536 bytes；超出追加 `…[truncated N bytes]`；`resultRef` 默认取截断后的 stdout。
 6. **结果/错误归一化**：统一 `{ ok, resultRef?, reason? }`；reason 使用稳定码（见下表）；stderr 只保留尾部并脱敏。
@@ -180,19 +182,22 @@ Fleet 有两个正交平面：**派发面**（task 工具/MCP）与**执行面**
 | `TIMEOUT after <n>ms` | 超时 | 公共层 |
 | `EXIT_<code>: <stderr tail>` | 非零退出；spawn 失败时 `code=null` | 公共层 |
 | `EXECUTOR_ERROR: <err>` | adapter 抛异常/返回空失败 | 公共层 |
-| `OPENCHAMBER_ERROR: <err>` | bridge/provider 配置缺失、不可达或返回错误 | OpenChamber adapter |
+| `ADAPTER_UNAVAILABLE` | runner discovery 缺失/陈旧/pid 死亡，或 runner 返回 503 | OpenChamber runner adapter |
+| `AUTH_FAILED` | runner bearer token 不匹配 | OpenChamber runner adapter |
+| `PROTOCOL_ERROR` | runner 返回非 JSON、结构非法或响应过大 | OpenChamber runner adapter |
+| `TIMEOUT` | runner 返回 408/504 或客户端请求超时 | OpenChamber runner adapter |
 | `CANCELLED` | 任务/计划被取消（任务级状态） | surface / plan-control |
 | `ADAPTER_UNAVAILABLE` | route 显式拒绝（`executable=false` 或 `health=unavailable`） | route |
 | `UNKNOWN_AGENT: <name>` | worker 找不到本机 executor | worker |
 
-保留但当前未产生的错误码：`AUTH_FAILED`、`PROTOCOL_ERROR`、`PROMPT_TOO_LARGE`。不要把它们写成 0.3.2 的已实现行为。
+保留但当前未产生的错误码：`PROMPT_TOO_LARGE`。不要把它写成 0.3.2 的已实现行为。
 
 ### 3.3 Adapter 只做什么
 
 | executionMode | 输入 | 输出 | 典型 |
 |---|---|---|---|
 | `cli` | prompt（argv 或 stdin）+ 本地固定参数 | stdout + exit code | hermes、dsh、opencode、claude-code、command |
-| `http` | prompt + 本地 endpoint/token | JSON `{ ok, result, error }` | openchamber bridge |
+| `http` | prompt + 本地 discovery/token | JSON `{ ok, result, error }` | openchamber public runner |
 | `json-rpc` | JSON-RPC 请求/响应 + session | final text / 状态 | 预留；当前无 adapter |
 | `in-process` | 进程内调用 | 直接结果 | echo、demo/占位 |
 
@@ -297,7 +302,7 @@ interface ExecutorAdapter {
 - `promptMode`：`arg`（默认，prompt 作为最后一个 argv）或 `stdin`（prompt 写入 stdin）；只对 CLI adapter 生效。
 - `executable` / `executionMode`：不在 config；目录/能力卡发布时由 `deriveAgentExecution()` 静态推导。`executable` 是**布尔**（不是路径），目录不发布命令路径。
 - `health`：不在 config；能力卡可选快照，取自 `ExecutorRegistry.healthOf()`/adapter `health()`，advisory。
-- OpenChamber 的 endpoint/token/auth header 只从执行设备 env/文件读取（见 §2.5），不进入 config、目录或任务事件。
+- OpenChamber 的 discovery/token 只从本机 `$MEBULAR_HOME/openchamber-runner.json` 读取（见 §2.5），不进入 config、目录或任务事件；`kind=openchamber` 不接收 command/baseArgs。
 - 配置没有 `env` 字段；子进程只继承 `ENV_ALLOWLIST`，不打印、不落盘、不上网。
 
 ### 3.5 远端 Agent：发布什么、不发布什么
@@ -379,7 +384,7 @@ Console 只作为派发方，入口保持四个：
 
 1. **真实宿主 smoke**：本机没有 `dsh` 与 `claude`，二者只有 fake CLI 测试；OpenCode 仅 `--version` health 通过。需要真实任务 smoke 才能宣称宿主 E2E。
 2. **health 发布链路**：`health()` 已实现于 CLI adapter/registry，但 `fleet doctor` 不逐 agent 探测，能力卡也不会在探测失败时自动撤销；`health` 是 advisory，只有显式 `unavailable` 才被 route 拒绝。
-3. **OpenChamber**：无 `health()`（记 `degraded`），`supportsCancel=false`；无 bridge 时执行失败为 `OPENCHAMBER_ERROR`，不要写成“自动降级”。
+3. **OpenChamber**：公开 runner 默认关闭，启用后每次新 session；discovery 缺失/陈旧 → `ADAPTER_UNAVAILABLE`；`health()` 探测 `/health`；真实 OpenChamber 任务 E2E 待补。
 4. **Cursor**：没有 `cursor` kind/adapter，始终 dispatch-only；将来接入需先实机验证。
 5. **DSH v2**：`dsh --profile sdk` JSON-RPC 未实现；当前只有 v1 headless。
 6. **真实网络**：P6 五节点 plan E2E 使用进程内 `InMemoryHub`；真实 libp2p 证据仅 2 节点 `verify:fleet:tasks` 与双守护 `verify:daemon:cluster`。

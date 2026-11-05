@@ -81,7 +81,7 @@ CLI 通用形参：`--input '<json>'`（字段与 MCP `arguments` 一致）+ `--
 | Agent / 宿主 | 执行能力 | 接入方式与现状 |
 |---|---|---|
 | **Hermes** | 已实现 | 内置 `HermesAgent`（`kind=hermes`）：`hermes [-p P] [-t T] [-m M] [--in DIR] -z <prompt> --usage-file <tmp>`；`health()` 探测 `--version` |
-| **OpenChamber** | 条件可执行 | 通过 **oc-hermes-bridge** 的 `POST /agent/run-once` 执行（`kind=openchamber` + `HttpOpenChamberSeam`）；**无桥不可执行**；当前 adapter 无 `health()`（`degraded`），`supportsCancel=false` |
+| **OpenChamber** | 已实现（runner 启用时） | 通过**公开 runner**（`@mebular/opencode-plugin/fleet-runner`）的 `POST /v1/run-once` 执行（`kind=openchamber` + `OpenChamberRunnerAgent`）；runner **默认关闭**，需宿主显式启用并发布 `<MEBULAR_HOME>/openchamber-runner.json`；discovery 缺失/陈旧 → `ADAPTER_UNAVAILABLE`；`health()` 探测 `/health`；每次新 session |
 | **DSH v1** | 已实现 | `DshHeadlessAgent`（`kind=dsh`）：`dsh [baseArgs] --profile headless [prompt|stdin]`，默认 stdin；`health()` 探测 `dsh --version`；**本机未安装 dsh，真实任务 smoke 待补，fake CLI 测试已过**。`dsh --profile sdk` 属于 DSH v2，未实现。现有 `@mebular/dsh-plugin` 是 **Web/记忆桥**，不是 Fleet executor |
 | **OpenCode** | 已实现 | `OpenCodeAgent`（`kind=opencode`）：`opencode [baseArgs] run [prompt|stdin]`；本机 `opencode v2.0.29` health 已验证；**真实 `run` 任务 smoke 待补** |
 | **Claude Code** | 已实现 | `ClaudeCodeAgent`（`kind=claude-code`）：`claude [baseArgs] -p [prompt|stdin]`；本机未安装 `claude`，只有 fake CLI 测试；**真实任务 smoke 待补** |
@@ -92,7 +92,7 @@ CLI 通用形参：`--input '<json>'`（字段与 MCP `arguments` 一致）+ `--
 **自动探测（`fleet quickstart` / `fleet join`）**：
 
 1. PATH 顺序固定：`hermes` → `dsh` → `opencode` → `claude`（kind=`claude-code`）；存在即声明对应 agent。
-2. OpenChamber 不探 PATH，只认本机 `MEBULAR_FLEET_OPENCHAMBER_*` env（endpoint/token/token file）。
+2. OpenChamber 不探 PATH；仅当本机已有 `<MEBULAR_HOME>/openchamber-runner.json`（公开 runner 已启用并发布 discovery）时追加 `openchamber`，否则由用户显式配置。
 3. 都没有时回退 `echo`（demo）；Cursor/Claude Desktop 不在自动探测内，始终 dispatch-only。
 4. 探测只表示“本机声明存在该 CLI”，不代表 task E2E；`health()` 需要单独调用，`fleet doctor` 不逐 agent 跑 `--version`。
 
@@ -109,7 +109,7 @@ CLI 通用形参：`--input '<json>'`（字段与 MCP `arguments` 一致）+ `--
 
 - `executable` 由 config **静态推导**：`echo`/`board` 为 false，`command` 必须有 `command`，其余已实现 kind 为 true。它不代表 CLI 已安装。
 - 目录/能力卡把 `executable=false` 发布出去；route 见到显式 false 直接 `ADAPTER_UNAVAILABLE`。旧目录/旧卡缺字段按“未知”兼容。
-- `health` 是可选 advisory：CLI adapter 的 `health()` 用 `<command> --version`；OpenChamber 没有 probe，记 `degraded`。route 只在显式 `health.status="unavailable"` 时硬拒绝；`degraded`/未知不拒绝。
+- `health` 是可选 advisory：CLI adapter 的 `health()` 用 `<command> --version`；OpenChamber runner 用 `GET /health`。route 只在显式 `health.status="unavailable"` 时硬拒绝；`degraded`/未知不拒绝。
 - `fleet doctor` 不做逐 agent health 探测，也不会因 health 失败自动撤销卡片；不要把它写成“目录说能跑就一定跑得起来”。
 
 **入口**：`task_submit.plan` 提交、`task_status.plan` 查看进度与 `why/blockedBy`、`fleet doctor` 做设备/订阅/身份/readiness 自检。**Console 不加 Fleet UI**；没有新的导航、页面、设置项或任务面板。

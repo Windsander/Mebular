@@ -163,7 +163,7 @@ export interface FleetAgentConfig {
   promptArgs?: string[];
   /** `'arg'`（默认）或 `'stdin'`；仅 CLI 类 adapter 解释。 */
   promptMode?: FleetAgentPromptMode;
-  /** 工作目录（command 为 spawn cwd；hermes 同时作为 `--in`；openchamber 透传 seam）。 */
+  /** 工作目录（command 为 spawn cwd；hermes 同时作为 `--in`）。 */
   cwd?: string;
   timeoutMs?: number;
   concurrency?: number;

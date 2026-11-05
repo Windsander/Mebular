@@ -53,6 +53,30 @@ npm install @mebular/opencode-plugin
 （例如 `/absolute/path/to/mebular/packages/opencode-plugin`）。插件目录必须带
 `package.json` + `exports`（本包已提供）。
 
+## Fleet runner（`fleetRunner`，默认关闭）
+
+同一个包还导出公开的 Fleet 执行入口 `@mebular/opencode-plugin/fleet-runner`：在
+OpenChamber/OpenCode 进程内启动一个**只绑定回环地址**的 run-once HTTP 服务，供
+`@mebular/fleet` 的 `kind=openchamber` 使用。它与上面的 Memory Runtime 行为**互相独立**：
+
+- **默认关闭**；只有 `fleetRunner.enabled === true` 才监听端口，缺省不产生 discovery 文件。
+- 每次请求都 `session.create` **新 session**，拒绝客户端传入 `sessionId`；不续接/恢复旧会话。
+- 通过 `$MEBULAR_HOME/openchamber-runner.json` 发布 schema/pid/port/token（`0600`），
+  token 只用于 `Authorization: Bearer`，不进入日志、响应或记忆数据。
+- 请求体 ≤256 KiB、prompt ≤64 KiB、单次运行 ≤600 s；`GET /health` 供 Fleet 探测。
+
+在插件配置文件（默认 `$MEBULAR_HOME/opencode-plugin.json`）中启用：
+
+```json
+{
+  "fleetRunner": {
+    "enabled": true
+  }
+}
+```
+
+完整协议、限制与排障见 [`packages/fleet/OPENCHAMBER-RUNNER.md`](../fleet/OPENCHAMBER-RUNNER.md)。
+
 ## 配置
 
 URL 优先级：**插件 options `runtimeUrl` > `MEBULAR_MEMORY_RUNTIME_URL` >

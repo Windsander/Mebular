@@ -474,8 +474,12 @@ startup, tools, sync or authentication.
   reads, with clean cleanup; 6/6 failure-injection scenarios also passed. Timings are from
   one non-idle host, so they are not an SLA. See the
   [scale benchmark report](../quality/0.3.2-scale-benchmark.md).
-- **Real-model evidence is partial.** A real-model canary was not run for 0.3.2. The
-  historical Qwen3-4B/llama.cpp smoke is evidence for that one pack/platform/SHA only.
+- **Real-model evidence is partial.** The v0.3.2 canary passed for Qwen3-4B Q4_K_M on
+  macOS x64 with a test-only mirror base URL: real download of 2,497,280,256 bytes,
+  official SHA-256 verification, llama.cpp b12017 startup and non-degraded
+  extract/summarize/planQuery. It does not prove the default Hugging Face transport,
+  other packs/platforms, model quality or real-host + real-model injection. See the
+  [0.3.2 model smoke report](../quality/0.3.2-model-smoke.md).
 
 ## Verification
 
@@ -491,8 +495,10 @@ startup, tools, sync or authentication.
 - [Three-host E2E](../../tests/integration/host-e2e/README.md) — historical counts and
   explicit real/fake boundaries. Fresh v0.3.2 counts are recorded in the verification
   matrix, not copied from the 0.3.0 report.
-- [Real-model smoke](../quality/0.3.0-model-smoke.md) — historical evidence for Qwen3-4B
-  Q4_K_M plus llama.cpp b12017 on macOS arm64 only.
+- [0.3.2 real-model smoke](../quality/0.3.2-model-smoke.md) — Qwen3-4B Q4_K_M on macOS
+  x64 with a test-only mirror; records the first network failure and the mirror boundary.
+- [0.3.0 real-model smoke](../quality/0.3.0-model-smoke.md) — historical evidence for
+  Qwen3-4B Q4_K_M plus llama.cpp b12017 on macOS arm64 only.
 - The demo in [`examples/memory-runtime-demo`](../../examples/memory-runtime-demo/README.md)
   shows ingest → gist → detail → context budget → checkpoint with a real MCP daemon,
   capability API and sidecar.

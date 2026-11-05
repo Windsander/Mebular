@@ -409,8 +409,11 @@ sidecar 故障绝不能阻塞 MCP 启动、工具、同步或鉴权。
   10,000 records + 10,000 details、0 条非种子 extras、200/200 读取，cleanup 无残留；
   6/6 失败注入场景也通过。延迟来自单台非空闲宿主，不是 SLA。见
   [规模基准报告](../quality/0.3.2-scale-benchmark.md)。
-- **真实模型证据是部分的。** 0.3.2 没有运行真实模型 canary。历史 Qwen3-4B/llama.cpp
-  smoke 只对那一个包/平台/SHA 有效。
+- **真实模型证据是部分的。** v0.3.2 canary 已在 Qwen3-4B Q4_K_M / macOS x64 /
+  test-only mirror 上通过：真实下载 2,497,280,256 bytes、官方 SHA-256 校验、
+  llama.cpp b12017 启动，以及非 degraded 的 extract/summarize/planQuery。它不证明
+  默认 HF transport、其他 pack/平台、模型质量或真实宿主 + 真实模型注入。见
+  [0.3.2 真实模型 smoke 报告](../quality/0.3.2-model-smoke.md)。
 
 ## 验证
 
@@ -424,7 +427,9 @@ sidecar 故障绝不能阻塞 MCP 启动、工具、同步或鉴权。
   不访问外部网络，也不运行真实 MCP/core、宿主或跨设备同步。
 - [三宿主 E2E](../../tests/integration/host-e2e/README.md)：历史计数和明确的 real/fake
   边界。v0.3.2 的新计数记录在验收矩阵中，不照抄 0.3.0 报告。
-- [真实模型 smoke](../quality/0.3.0-model-smoke.md)：仅 Qwen3-4B Q4_K_M +
+- [0.3.2 真实模型 smoke](../quality/0.3.2-model-smoke.md)：Qwen3-4B Q4_K_M / macOS x64 /
+  test-only mirror；记录首次网络失败与 mirror 边界。
+- [0.3.0 真实模型 smoke](../quality/0.3.0-model-smoke.md)：仅 Qwen3-4B Q4_K_M +
   llama.cpp b12017 / macOS arm64 的历史证据。
 - [`examples/memory-runtime-demo`](../../examples/memory-runtime-demo/README_CN.md) 演示
   真实 MCP daemon + capability + sidecar 下的 ingest → gist → 详情 → 上下文预算 →

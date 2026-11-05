@@ -45,8 +45,11 @@ Checkpoint 的 `recordIds`、`detailIds` 和 `state.references` 图 ID 会验证
   details、0 条非种子 extras、200/200 读取，cleanup 无残留。1k/2k 计数审计同样以
   0 extras 通过，6/6 失败注入场景通过。延迟来自单台非空闲宿主，不是 SLA。原始
   10,023/10,000 失败仍保留在规模报告中作为历史证据。
-- v0.3.2 没有运行真实模型 canary。历史 Qwen3-4B/llama.cpp smoke 只覆盖一个包、一个平台和
-  一个旧 SHA，不是通用模型质量或模型支持声明。
+- v0.3.2 真实模型 canary 已在 Qwen3-4B Q4_K_M / macOS x64 / test-only mirror 上通过：
+  真实下载 2,497,280,256 bytes、官方 SHA-256 校验、llama.cpp b12017 启动，且
+  extract/summarize/planQuery 均非 degraded。它不验证默认 HF transport、其他 pack/平台、
+  模型质量或真实宿主 + 真实模型注入。见
+  [0.3.2 真实模型 smoke 报告](../quality/0.3.2-model-smoke.md)。
 - recall@k、遗漏率、误召回轮次率、多种子答案质量，以及真实宿主 + 真实模型的注入防护测试
   都不在 v0.3.2 证据集内。
 

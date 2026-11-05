@@ -50,9 +50,12 @@ committed.
   count audits also passed with 0 extras, and 6/6 failure-injection scenarios passed.
   Timings are from one non-idle host and are not an SLA. The original 10,023/10,000
   failure remains in the scale report as historical evidence.
-- No real-model canary was run for v0.3.2. The historical Qwen3-4B/llama.cpp smoke covers
-  one pack, one platform and one old SHA; it is not a general model-quality or
-  model-support claim.
+- The v0.3.2 real-model canary passed for Qwen3-4B Q4_K_M on macOS x64 with a test-only
+  mirror base URL: 2,497,280,256 bytes downloaded, official SHA-256 verified, llama.cpp
+  b12017 started, and extract/summarize/planQuery were non-degraded. It does not verify
+  the default Hugging Face transport, other packs/platforms, model quality or real-host +
+  real-model injection. See the
+  [0.3.2 model smoke report](../quality/0.3.2-model-smoke.md).
 - Recall quality metrics (recall@k, omission rate, false-recall turn rate, multi-seed
   answer quality) and a real-host + real-model prompt-injection test are not part of the
   v0.3.2 evidence set.

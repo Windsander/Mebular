@@ -1,0 +1,365 @@
+{
+  "schema": "mebular.scale-benchmark-failure-injection/1",
+  "status": "passed",
+  "startedAt": "2026-11-05T02:41:29.007Z",
+  "finishedAt": "2026-11-05T02:41:51.616Z",
+  "git": {
+    "sha": "1626dd5f82e9d9ee8027fa94b6bedd8aa3f29305",
+    "dirty": false,
+    "dirtyFileCount": 0
+  },
+  "realBoundary": [
+    "real MCP capability + GraphStore/MemoryService + managed sidecar",
+    "fault injection only triggers failure timing; product components remain real",
+    "no real host/model/sync"
+  ],
+  "cases": [
+    {
+      "name": "seed-failure",
+      "exitCode": 1,
+      "signal": null,
+      "jsonPresent": true,
+      "status": "failed",
+      "error": {
+        "name": "Error",
+        "code": "fault_injection",
+        "message": "fault_injection: seed stopped after 1 completed batches"
+      },
+      "seed": {
+        "status": "failed",
+        "writtenRecords": 5,
+        "batchesCompleted": 1,
+        "faultInjection": {
+          "type": "seed_fail_after_batches",
+          "atBatch": 1
+        }
+      },
+      "reads": {
+        "status": "failed",
+        "samplesCompleted": 0,
+        "faultInjection": null
+      },
+      "checkpoints": {
+        "count": 5,
+        "lastAt": "2026-11-05T02:41:30.720Z",
+        "lastReason": "failed",
+        "errors": []
+      },
+      "sidecarPids": [
+        68300
+      ],
+      "sidecarPidEvents": [
+        {
+          "pid": 68300,
+          "source": "cluster-start",
+          "at": "2026-11-05T02:41:30.085Z"
+        }
+      ],
+      "cleanup": {
+        "cleaned": true,
+        "tempHomeRemoved": true,
+        "residualPids": [],
+        "sidecarStop": [
+          {
+            "pid": 68300,
+            "stopped": true,
+            "escalation": "SIGTERM",
+            "skipped": false
+          }
+        ],
+        "errors": []
+      },
+      "ok": true
+    },
+    {
+      "name": "read-failure",
+      "exitCode": 1,
+      "signal": null,
+      "jsonPresent": true,
+      "status": "failed",
+      "error": {
+        "name": "Error",
+        "code": "fault_injection",
+        "message": "fault_injection: reads stopped after 1 samples"
+      },
+      "seed": {
+        "status": "completed",
+        "writtenRecords": 20,
+        "batchesCompleted": 4,
+        "faultInjection": null
+      },
+      "reads": {
+        "status": "failed",
+        "samplesCompleted": 1,
+        "faultInjection": {
+          "type": "reads_fail_after_samples",
+          "atSample": 1
+        }
+      },
+      "checkpoints": {
+        "count": 13,
+        "lastAt": "2026-11-05T02:41:34.008Z",
+        "lastReason": "failed",
+        "errors": []
+      },
+      "sidecarPids": [
+        68341
+      ],
+      "sidecarPidEvents": [
+        {
+          "pid": 68341,
+          "source": "cluster-start",
+          "at": "2026-11-05T02:41:32.112Z"
+        }
+      ],
+      "cleanup": {
+        "cleaned": true,
+        "tempHomeRemoved": true,
+        "residualPids": [],
+        "sidecarStop": [
+          {
+            "pid": 68341,
+            "stopped": true,
+            "escalation": "SIGTERM",
+            "skipped": false
+          }
+        ],
+        "errors": []
+      },
+      "ok": true
+    },
+    {
+      "name": "sigterm",
+      "exitCode": 143,
+      "signal": null,
+      "jsonPresent": true,
+      "status": "interrupted",
+      "error": {
+        "name": "AbortError",
+        "code": "SIGTERM",
+        "message": "运行被中止：SIGTERM"
+      },
+      "seed": {
+        "status": "interrupted",
+        "writtenRecords": 20,
+        "batchesCompleted": 2,
+        "faultInjection": null
+      },
+      "reads": {
+        "status": "interrupted",
+        "samplesCompleted": 0,
+        "faultInjection": null
+      },
+      "checkpoints": {
+        "count": 8,
+        "lastAt": "2026-11-05T02:41:36.963Z",
+        "lastReason": "interrupted",
+        "errors": []
+      },
+      "sidecarPids": [
+        68474
+      ],
+      "sidecarPidEvents": [
+        {
+          "pid": 68474,
+          "source": "cluster-start",
+          "at": "2026-11-05T02:41:35.510Z"
+        }
+      ],
+      "cleanup": {
+        "cleaned": true,
+        "tempHomeRemoved": true,
+        "residualPids": [],
+        "sidecarStop": [
+          {
+            "pid": 68474,
+            "stopped": true,
+            "escalation": "SIGTERM",
+            "skipped": false
+          }
+        ],
+        "errors": []
+      },
+      "ok": true
+    },
+    {
+      "name": "sigint",
+      "exitCode": 130,
+      "signal": null,
+      "jsonPresent": true,
+      "status": "interrupted",
+      "error": {
+        "name": "AbortError",
+        "code": "SIGINT",
+        "message": "运行被中止：SIGINT"
+      },
+      "seed": {
+        "status": "interrupted",
+        "writtenRecords": 20,
+        "batchesCompleted": 2,
+        "faultInjection": null
+      },
+      "reads": {
+        "status": "interrupted",
+        "samplesCompleted": 0,
+        "faultInjection": null
+      },
+      "checkpoints": {
+        "count": 8,
+        "lastAt": "2026-11-05T02:41:40.049Z",
+        "lastReason": "interrupted",
+        "errors": []
+      },
+      "sidecarPids": [
+        68531
+      ],
+      "sidecarPidEvents": [
+        {
+          "pid": 68531,
+          "source": "cluster-start",
+          "at": "2026-11-05T02:41:38.559Z"
+        }
+      ],
+      "cleanup": {
+        "cleaned": true,
+        "tempHomeRemoved": true,
+        "residualPids": [],
+        "sidecarStop": [
+          {
+            "pid": 68531,
+            "stopped": true,
+            "escalation": "SIGTERM",
+            "skipped": false
+          }
+        ],
+        "errors": []
+      },
+      "ok": true
+    },
+    {
+      "name": "sidecar-sigkill",
+      "exitCode": 0,
+      "signal": null,
+      "jsonPresent": true,
+      "status": "passed",
+      "error": null,
+      "seed": {
+        "status": "completed",
+        "writtenRecords": 20,
+        "batchesCompleted": 4,
+        "faultInjection": {
+          "type": "sidecar_sigkill",
+          "atBatch": 1,
+          "pid": 68648
+        }
+      },
+      "reads": {
+        "status": "completed",
+        "samplesCompleted": 2,
+        "faultInjection": null
+      },
+      "checkpoints": {
+        "count": 11,
+        "lastAt": "2026-11-05T02:41:44.190Z",
+        "lastReason": "after-reads",
+        "errors": []
+      },
+      "sidecarPids": [
+        68648,
+        68660
+      ],
+      "sidecarPidEvents": [
+        {
+          "pid": 68648,
+          "source": "cluster-start",
+          "at": "2026-11-05T02:41:41.406Z"
+        },
+        {
+          "pid": 68660,
+          "source": "checkpoint:seed-batch",
+          "at": "2026-11-05T02:41:43.101Z"
+        }
+      ],
+      "cleanup": {
+        "cleaned": true,
+        "tempHomeRemoved": true,
+        "residualPids": [],
+        "sidecarStop": [
+          {
+            "pid": 68648,
+            "stopped": true,
+            "escalation": null,
+            "skipped": true
+          },
+          {
+            "pid": 68660,
+            "stopped": true,
+            "escalation": "SIGTERM",
+            "skipped": false
+          }
+        ],
+        "errors": []
+      },
+      "ok": true
+    },
+    {
+      "name": "cleanup-sigkill-fallback",
+      "exitCode": 1,
+      "signal": null,
+      "jsonPresent": true,
+      "status": "failed",
+      "error": {
+        "name": "Error",
+        "code": "fault_injection",
+        "message": "fault_injection: sidecar frozen after 1 batches"
+      },
+      "seed": {
+        "status": "failed",
+        "writtenRecords": 5,
+        "batchesCompleted": 1,
+        "faultInjection": {
+          "type": "sidecar_sigstop",
+          "atBatch": 1,
+          "pid": 68719
+        }
+      },
+      "reads": {
+        "status": "failed",
+        "samplesCompleted": 0,
+        "faultInjection": null
+      },
+      "checkpoints": {
+        "count": 5,
+        "lastAt": "2026-11-05T02:41:46.288Z",
+        "lastReason": "failed",
+        "errors": []
+      },
+      "sidecarPids": [
+        68719
+      ],
+      "sidecarPidEvents": [
+        {
+          "pid": 68719,
+          "source": "cluster-start",
+          "at": "2026-11-05T02:41:45.829Z"
+        }
+      ],
+      "cleanup": {
+        "cleaned": true,
+        "tempHomeRemoved": true,
+        "residualPids": [],
+        "sidecarStop": [
+          {
+            "pid": 68719,
+            "stopped": true,
+            "escalation": "SIGKILL",
+            "skipped": false
+          }
+        ],
+        "errors": []
+      },
+      "ok": true
+    }
+  ],
+  "failures": []
+}

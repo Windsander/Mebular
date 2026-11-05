@@ -67,7 +67,8 @@ function resultText(result) {
 async function executeProbeTool(ctx, call) {
   try {
     const batch = await ctx.tools.execute({
-      calls: [{ callId: call.callId, name: call.name, arguments: call.arguments }],
+      // DSH ToolCallBlock uses `id`; the settled result maps it back to `callId`.
+      calls: [{ id: call.callId, name: call.name, arguments: call.arguments }],
       signal: call.signal,
     });
     if (batch && Array.isArray(batch.results)) {

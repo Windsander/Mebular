@@ -115,7 +115,7 @@ npm run verify:fleet:p6
 
 ### 7.3 已知限制（P6 记录，不伪造通过）
 
-- 五节点 P6 E2E 使用进程内 `InMemoryHub` + 确定性 event bridge（eventId 幂等复制）隔离 anti-entropy 调度抖动；真实 libp2p 多节点同步由 `verify:fleet:tasks`（2 节点）、sync 套件、`routing-e2e` 与 `verify:daemon:cluster` 覆盖，不声称 5 节点真实 WAN 性能。
+- 五节点 P6 E2E 使用进程内 `InMemoryHub` + 确定性 event bridge（eventId 幂等复制）隔离 anti-entropy 调度抖动；真实 libp2p 证据仅限 `verify:fleet:tasks`（2 节点）与 `verify:daemon:cluster`（双守护 2 节点）；`routing-e2e` 同样使用嵌入式 loopback，不作为真实 libp2p 证据。不声称真实 3+ 节点 plan E2E 或 5 节点真实 WAN 性能。
 - daemon 远端卡片验证依赖 `/app/peers` 中**当前在线**的已认证 peer 公钥；peer 离线时远端路由 fail-closed。旧守护无 `/app/peers` 时行为等同 P3 的“只信任本机公钥”。
 - `plan.example.json` 的 join/reduce 步骤必须带 `to` 或 `route`，否则运行时按 `NO_TARGET` 阻塞（协议合法不等于可执行）。
 - 旧 worker 只执行普通 task；`to.device/agent="__plan__"` 的 root task 必须跳过，不写 failed/UNKNOWN_AGENT。

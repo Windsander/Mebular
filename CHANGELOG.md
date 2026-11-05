@@ -49,7 +49,7 @@ stay inside Fleet; the human Console and the 16 task methods keep their existing
 
 ### Notes
 
-- **P6 real-network scope** — the five-node P6 E2E uses in-process `InMemoryHub` loopback plus a deterministic event bridge to isolate orchestration from anti-entropy scheduling. Real libp2p multi-node sync remains covered by `verify:fleet:tasks` (two nodes), the sync suites, `routing-e2e` and `verify:daemon:cluster`; this release does not claim five-node real-WAN performance.
+- **P6 real-network scope** — the five-node P6 E2E uses in-process `InMemoryHub` loopback plus a deterministic event bridge to isolate orchestration from anti-entropy scheduling. Real libp2p evidence remains limited to `verify:fleet:tasks` (two nodes) and `verify:daemon:cluster` (dual daemon, two nodes); `routing-e2e` also uses embedded loopback and is not counted as real-libp2p evidence. This release does not claim a real three-plus-node plan E2E or five-node real-WAN performance.
 
 ## [v0.3.0] - 2026-10-30
 

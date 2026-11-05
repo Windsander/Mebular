@@ -3,6 +3,9 @@
 > 本文件是 fleet 的设计与边界说明；**协议语义**以仓库根 [`SEALING_CN.md`](../../SEALING_CN.md) 为准，
 > 策略推导不变量以 [`src/sync/POLICY-INVARIANTS.md`](../../src/sync/POLICY-INVARIANTS.md) 为准。
 > fleet **不改 core 语义**，只消费 `@mebular/core` 的公共 API。
+>
+> **发布版本**：Fleet 任务编排计划随 Mebular **0.3.2** 发布；P0–P7 的验收证据在 0.3.0 周期采集，
+> 历史结果不因版本标签改写（见 [`docs/quality/0.3.0-fleet-orchestration-e2e.md`](../../docs/quality/0.3.0-fleet-orchestration-e2e.md)）。
 
 ## 0. 一句话
 
@@ -37,7 +40,7 @@
 
 ### 2.5.2 每设备 Agent 目录 + 工具面
 
-- **目录**（普通记忆域，默认 `agents`）：每设备一条**签名**记录 `{device, agents:[{name,kind,capabilities?,concurrency,capacity?}], updatedAt, version}`；`task_targets = 订阅任务域的对端 ∩ 其目录 (device,agent)`；`capacity/load` 为**建议性**，不参与授权/一致性。
+- **目录**（普通记忆域，默认 `agents`）：每设备一条**签名**记录 `{device, agents:[{name,kind,capabilities?,executable?,executionMode?,concurrency,capacity?}], updatedAt, version}`；`task_targets = 订阅任务域的对端 ∩ 其目录 (device,agent)`；`capacity/load` 为**建议性**，不参与授权/一致性。**远端 Agent 口径**：adapter 在执行设备本地；目录对外只发布执行能力投影 `kind + capabilities + executable + executionMode`（0.3.2 目标字段；`concurrency/capacity` 仅作建议性负载提示），**command/env/token 永不过网**。
 - **能力卡（P1）**（同 `agents` 域，internal 记忆节点）：`metadata.internal=true` + `internalObject.kind="agent_capability_card"`；由 config 的 optional `capabilities`、ExecutorRegistry、运行环境编译，设备签名、版本单调、agent 移除发 tombstone。卡片只含标签/限制/工具名，不含 command/env/凭据/原始对话。默认记忆列表、域计数、搜索、图遍历与 fleet SSE 都不返回能力卡；`task_targets` 只额外返回 `cards` 摘要，旧 `targets` 字段与顺序不变。
 - **CR-002（P1，已批准 / P6 硬化 / P7 CR-003）daemon 发布**：生产 `store:"daemon"` 下 fleet 无本地 Mebular 句柄。CR-003 批准的内部 app 端点白名单为 `/app/nodes`（optional metadata，拒绝 card/role/plan 通用写入）、`/app/capability-cards`、`/app/plans`、`/app/role-cards`、`/app/peers`；默认 loopback；非 loopback 仅 TLS+bearer/scope 且需显式部署；internal metadata，不新增公共 MCP/UI/TaskEvent。最小内部 app 扩展：`POST /app/nodes` 接受 optional `metadata`，`GET /app/nodes` 返回 optional `metadata`；新增内部 `POST /app/capability-cards`（draft 无 signature），由守护身份 `app.identity.getDeviceKey(deviceId)` 签名并写 `agents` 域 internal 节点，身份不可用返回 409，不伪造。签名/canonical/schema 仍只复用 fleet `cards.ts`；fleet 侧用 `DaemonAgentBackend` 走既有 app 面。**读取信任**：`node.createdBy === card.device` + 签名验证（本机 identity / 远端已认证公钥）。P6 新增内部 `GET /app/peers`：只返回 sync 握手登记的**在线** peer `{device, publicKeyHex}`（默认 loopback，memory.read；非 loopback 仅 TLS+bearer；不回退 `config.peers` 地址簿）；`DaemonAgentBackend` 用它验证远端卡片，旧守护无该端点或 peer 离线时远端候选 fail-closed。`/app/nodes` 是 raw debug 面，拒绝 card/role/plan 内部对象写入；能力卡只能走专用端点。旧 daemon 配置启动期幂等补齐 `agents` 同步域。embedded 路径仍用本地 Mebular。公开 MCP 方法、人类 UI、`TaskEvent` 线格式均不变。
 - **角色卡（P5）**：`agent_role_card` internal 节点（`agents` 域，`metadata.internal=true` + `internalObject.kind="agent_role_card"`；`(device, agent, kind)` 版本单调、tombstone、最新版本/author 绑定解析）。本机 runtime job 从任务历史聚合 intent/成败/样本量/最近性，可选只读 memory runtime internal compact/checkpoint 摘要（`RoleSummaryProvider`，只取 ID/意图，不复制原文）；confidence 由样本量/成功率/一致性/最近性计算，`<0.5` 低置信度。**隐私硬化**：`strengths/preferredIntents/avoid` 只允许固定安全标签白名单（如 code/test/docs/review），未知 intent/短 token/原文一律忽略；写路径（生成器、`appendAgentRoleCard`、daemon `/app/role-cards`）统一由服务端从 `agent + sampleSize + preferredIntents` 重建 `summary`，客户端 raw summary 一律丢弃；**P6 读路径（embedded、daemon、远端旧卡）同样重建 summary**，`agent` 与 `provenance.source/generator` 只接受安全 token。`evidenceRefs` 只允许 `task/summary/checkpoint/session_summary/compact`，task 只接受真实 fleet/plan ID（含 `~cN` 派生子任务），summary/checkpoint 只接受内容哈希/ULID/UUID，schema 与 daemon 端点同时拒绝任意文本。`graphRoleSummaryProvider` 要求摘要带 device/agent 并按目标过滤。默认 `shadow=true`：派发行为与无卡一致（`why.roleCard="shadow-ignored"`）。只有配置显式 `roleCards.enabled=true`、`shadow=false` 且 `confidence>=0.5` 时才作为 P3 软排序最后一项（`why.roleCard="used-soft"`），永不参与授权/硬过滤/容量。daemon 模式新增内部 `/app/role-cards` POST/GET（loopback + memory.write/read，author=本机，拒绝 `/app/nodes` 伪造/读取角色卡原文），不新增公共 MCP 方法或人类 UI；无原始对话/command/env/凭据落盘。
@@ -64,6 +67,34 @@
 | `board_create` | `fleet board_create` |
 
 CLI 通用形参：`--input '<json>'`（字段与 MCP `arguments` 一致）+ `--dir/--namespace/--agent`；输出为同一结构化 JSON。
+
+### 2.5.3 派发方 vs 执行方（Agent 支持口径）
+
+**先区分两个角色**：
+
+- **派发方（dispatcher）**：提交/查询/取消任务、持有 plan、看 `task_status` 的调用方。任何能连上 MCP/CLI 的 Console 客户端或 Agent 都可以是派发方；**派发方不等于能执行本机任务**。
+- **执行方（executor）**：执行设备上真正把 `intent` 跑出结果的 Agent/适配器。适配器只装在**执行设备本地**；远端目录只发布 `kind + capabilities + executable + executionMode`（0.3.2 目标字段），不发布 command/env/token。
+
+| Agent / 宿主 | 执行能力 | 接入方式与现状 |
+|---|---|---|
+| **Hermes** | 可执行 | 内置 `HermesAgent`（`kind=hermes`）：`hermes [-p P] [-t T] [-m M] [--in DIR] -z <prompt> --usage-file <tmp>` |
+| **OpenChamber** | 条件可执行 | 通过 **oc-hermes-bridge** 的 `POST /agent/run-once` 执行（`kind=openchamber` + `HttpOpenChamberSeam`）；**无桥不可执行**，只能 dispatch-only |
+| **DSH v1** | 可执行（宿主 CLI） | 官方 `dsh --profile headless "<job>"` 作为执行宿主；`dsh --profile sdk` 属于 DSH v2，不作为当前口径。现有 `@mebular/dsh-plugin` 是 **Web/记忆桥**，不是 Fleet executor，也不提供 fleet 执行器适配 |
+| **OpenCode** | 计划中 | 计划用 `opencode run`，**待 adapter 实现** |
+| **Claude Code** | 计划中 | 计划用 `claude -p`，**待 adapter 实现** |
+| **Cursor** | 条件可执行 | 仅当执行设备有 `cursor-agent` 时可按命令执行；否则 **dispatch-only** |
+| **Claude Desktop** | 不可执行 | **只能 dispatch-only**（没有本地命令执行接缝） |
+| **`echo` / `board`** | 仅 demo/测试 | `echo` 是确定性 fake executor；`board` 是任务板占位。二者**不作为生产 plan owner/MR**，也不代表真实执行能力 |
+
+**plan readiness（提交前检查）**：
+
+1. `plan.owner.device` 必须是提交者设备，`plan.owner.agent` 必须是提交者 Agent；跨设备代提交不在本期 scope。
+2. `planAgent`（`ctx.agent ?? config.defaultAgent ?? config.agents[0]?.name ?? "board"`）必须属于本机 `config.agents[].name`；否则返回 `PLAN_POLICY` + `PLAN_OWNER_UNEXECUTABLE`，**不创建 plan/root**（fail closed）。
+3. 生产 plan 的 owner 必须是**真实可执行 Agent**（上表“可执行/条件可执行”且条件满足）；`echo`/`board` 只用于 demo、测试与 CI，不作为生产 plan owner 或 MR 目标。测试可用 `echo` 作确定性 fake executor，但不得据此宣称生产可执行。
+4. root plan 的 MR 目标固定为 `plan.owner` 的 `{device,agent}`，`dispatch="root-only"`。
+5. 每个 ready step 仍须通过 route 硬过滤（L1 授权、policy、能力、在线、容量）；无候选 → `NO_TARGET`/blocked，不建 task。
+
+**入口**：`task_submit.plan` 提交、`task_status.plan` 查看进度与 `why/blockedBy`、`fleet doctor` 做设备/订阅/身份自检（**不替代** plan owner readiness）。**Console 不加 Fleet UI**；没有新的导航、页面、设置项或任务面板。
 
 ## 2.6 一机一节点（W2）：统一守护 + fleet 客户端化
 
@@ -95,7 +126,7 @@ CLI 通用形参：`--input '<json>'`（字段与 MCP `arguments` 一致）+ `--
 - **M1**：协议与模型（envelope / 状态机 / 配额语义）+ `PROTOCOL-INVARIANTS.md` 矩阵 + 随机化 harness（含 oracle-free 扰动检查）。
 - **M2**：单机双进程最小可用（A 派活 → B 执行 → 结果回传）+ `scripts/verify-fleet-local.mjs`。
 - **M3**：真跨设备（真实 libp2p 传输，loopback 先验证）+ 订阅负例 + 时延统计 + 双机 runbook。
-- **M4（不在本 goal 内）**：三种协作形态扩展 + 适配器（Hermes / OpenChamber 真实执行器）。
+- **M4（已交付）**：三种协作形态扩展 + 真实执行器适配（Hermes / OpenChamber）。其余 Agent（DSH/OpenCode/Claude Code/Cursor/Claude Desktop）的支持口径见 §2.5.3。
 
 ## 6. 夹具先行（fixture-first）
 

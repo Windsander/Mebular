@@ -1,6 +1,7 @@
 # Mebular Fleet 黑盒任务编排 · 边界与契约 v1
 
 **状态**：v1.1 / P0 冻结稿 + CR-003（内部 app 端点白名单），2026-11-05
+**发布版本**：Fleet 任务编排计划随 Mebular **0.3.2** 发布；本文 v1.1 是 0.3.0 周期冻结的边界契约，历史结论与日期不改写。
 **阶段**：P0（只冻结边界与契约；不写生产代码）
 **上位计划**：《Mebular Fleet · 黑盒任务编排（本期）》（Chief 持有；未经 CR 不修改 step、scope、Gate）
 **协议夹具**：[`plan.example.json`](../../packages/fleet/protocol/plan.example.json)、[`card.example.json`](../../packages/fleet/protocol/card.example.json)
@@ -24,6 +25,8 @@
 4. **一任务一执行者**：本期只做 assign；不做开放抢单、claim、lease 或竞价。
 5. **计划先于执行**：plan 不可变、版本化，DAG 在 plan 层整体校验；task 层只保留执行者派生树；执行中不改图，改图 = 新 plan 版本。
 6. **没有下一版**：本期必须完整交付；新需求只能 CR 纳入本期或明确拒绝，不存在“下一版再补”。
+
+**执行口径**：**派发方**（任何能连 MCP/CLI 的 Console 客户端或 Agent；只提交/查询/控制）与**执行方**（执行设备本地 adapter）分离，不声称所有 Console 客户端都能执行。plan owner 必须是真实可执行 Agent；`echo`/`board` 仅 demo/测试，不作为生产 plan owner/MR。完整矩阵见 [`DESIGN.md`](../../packages/fleet/DESIGN.md) §2.5.3。
 
 G0 要求 Chief + 独立 Reviewer 签字；P0 说不清就不进入 P1。
 
@@ -69,6 +72,7 @@ G0 要求 Chief + 独立 Reviewer 签字；P0 说不清就不进入 P1。
 | **capability card** | 能力卡；从 config + ExecutorRegistry + 运行环境编译；硬过滤边界。 |
 | **role card** | 角色卡；本机 runtime 从任务历史 + 会话摘要生成；shadow，软排序，不能授权。 |
 | **status view** | 状态视图；派发方实时计算，不落盘、不同步；只用于软排序。 |
+| **派发方 / 执行方** | 派发方提交/查询/控制任务（Console/MCP 客户端）；执行方是执行设备本地真实 adapter。派发能力不等于执行能力。 |
 | **route** | 候选解析与选择；返回 `chosen` + `why`；空候选 `NO_TARGET`。 |
 | **policy** | `allowedDevices` / `allowedAgents` / `requireCapabilities` / `maxParallel` / `allowSubcontract`；子 plan 只能收紧。 |
 | **acceptance** | 每个 step 的验收条件；step 完成必须同时满足 task 终态、子树终态、acceptance。 |
@@ -112,6 +116,7 @@ G0 要求 Chief + 独立 Reviewer 签字；P0 说不清就不进入 P1。
 | 内部数据 | plan/card 标 `internal`；记忆列表、域计数、搜索、图遍历默认隐藏 |
 | 事件流 | plan/card 不进 fleet SSE；星图只显示真实 task `created` 事件 |
 | 配置 | 新字段 optional；旧 `fleet.config.json` 仍有效 |
+| 执行方 | 派发方不因能连 MCP/CLI 就能执行；执行方必须有执行设备本地 adapter；plan owner 必须是真实可执行 Agent，`echo`/`board` 仅 demo/测试 |
 | 旧端 | 旧 worker 能执行普通 task；旧 peer 忽略 plan/card；旧 config 有效；coordinator 必须新版本 |
 | 隐私 | 角色卡只存摘要/标签/证据引用；不存原始对话；不存 command/env/凭据 |
 | 线格式 | `FLEET_PROTOCOL_VERSION=1` 与 `TaskEvent` 线格式不变；plan/card 是内部记忆记录，不是 task 事件 |
@@ -183,6 +188,7 @@ plan 提交的约束：
 - `task_submit` 的旧必填字段 `intent` / `to` 仍保留。plan 提交时：
   - 调用者设备必须是 `plan.owner.device`；跨设备代提交不在本期 scope。
   - **所有 plan 的 owner = 提交该 plan 的调用设备/Agent**：root plan owner=A；sub-plan 由执行 step 的设备 B/C 提交，owner=B/C。`parent` 只做 provenance/policy 校验，不改变 owner。
+  - **plan owner 必须是真实可执行 Agent**：`planAgent`（`ctx.agent ?? defaultAgent ?? agents[0]?.name ?? "board"`）必须属于本机 `config.agents[].name`，否则 `PLAN_POLICY` + `PLAN_OWNER_UNEXECUTABLE`，不创建 plan/root。`echo`/`board` 只是 demo/测试（确定性 fake executor / 任务板占位），不作为生产 plan owner 或 MR 目标。
   - `to` 必须是 `{ device: "__plan__", agent: "__plan__" }`（保留的设备/Agent sentinel；不是用户设备/执行器）。
   - `intent` 是 root task 的意图摘要；不得为空。
 - `__plan__` 是保留 device/agent sentinel；`fleet.config.json` 不得配置真实 device/agent 为 `__plan__`，否则配置校验失败。
@@ -277,6 +283,7 @@ plan 提交的约束：
 - 既有任务列表/星图继续显示**真实 task**；plan step task 是真实 task，可以出现。
 - plan step task 只按既有任务展示；不得展示 plan/card 内容、步骤列表、plan 导航或 plan 专属面板。`taskId` 只是标识，不是 UI 入口。
 - 既有管理/调试面在显式 `includeInternal` 时读取 internal 对象（现有能力，不新增入口）。
+- **Fleet 的入口不在 Console**：使用 `task_submit.plan`、`task_status.plan`、`fleet doctor` 与文档；不新增 Fleet UI，也不因派发方是 Console 客户端就声称它能执行任务。
 
 ### 4.2 internal 可见性
 
@@ -351,7 +358,7 @@ metadata.internalObject.kind =
 
 规则：
 
-- 不包含 command 路径、env、密钥、凭据、原始对话。
+- 不包含 command 路径、env、密钥、凭据、原始对话。远端 Agent 的 adapter 只在执行设备本地；Agent 目录只发布 `kind + capabilities + executable + executionMode`（0.3.2 目标字段；`concurrency/capacity` 仅建议性），**command/env/token 永不过网**。
 - `capabilities` 是硬过滤标签；不是授权本身，授权仍由 L1/peer/policy 决定。
 - 最新版本按 `(device, agent)` 解析；同版本平局取稳定序列化较大者（确定性）。
 - tombstone 是最后版本；不得在同一版本上原地修改；tombstone 后不得回退到更旧版本。
@@ -487,7 +494,7 @@ metadata.internalObject.kind =
 | `retryOfStepId` | 否 | 仅 `version>1`；必须存在于上一版本；不得指向 `mr` |
 | `parent` | 否 | 仅子 plan：`{planId, version, stepId}`；父 **plan policy** 必须 `allowSubcontract=true`；父 stepId 只用于 provenance/定位父 task；step schema 不新增 `allowSubcontract`；不是执行依赖 |
 | `reason` | 否 | 短审计文本；不得含原始对话/凭据 |
-| `owner` | 是 | `{device, agent}` 非空；必须等于提交该 plan 的调用设备/Agent（root=A，sub-plan=执行 step 的 B/C） |
+| `owner` | 是 | `{device, agent}` 非空；必须等于提交该 plan 的调用设备/Agent（root=A，sub-plan=执行 step 的 B/C）；`agent` 必须是本机注册的**真实可执行 Agent**（`echo`/`board` 仅 demo/测试） |
 | `goal` | 是 | 非空；描述目标，不写原始对话 |
 | `createdAt` | 是 | 有限数字；仅审计，不参与一致性判定 |
 | `budget` | 是 | `{maxSteps, maxAttemptsPerStep}` |
@@ -637,7 +644,7 @@ materializer 每轮只做以下事：
    queued → claimed → running 推进 root；不经过 MCP，不派发给 worker。
 1. 读取最新 plan version（按 planId 取最大 version），校验；无效则停止该 plan。
 2. 从 plan + task 事件派生 step 状态；不维护第二套持久状态机。
-3. 计算 ready set：dependsOn 全部 complete，且未被物化/未完成/未失败。
+3. 计算 ready set：dependsOn 全部 complete，且未被物化/未完成/未失败；route/executor readiness 不满足时该 step 保持 blocked（见 §6.10），不得用 `echo`/`board` 冒充生产执行方。
 4. 按 stepId 字典序处理 ready step，直到有效 maxParallel 用满：
    a. reuse：校验旧版本任务 terminal done + acceptance；通过则标记 done，不建新 task。
    b. join/reduce：join 条件满足才创建 task；不满足则等待或按 §8 失败。
@@ -687,7 +694,7 @@ materializer 每轮只做以下事：
 |---|---|
 | `planned` | plan 已创建、root task 已 created/queued；尚无 step task，且未失败/取消 |
 | `running` | root task claimed/running，或至少一个 step task 存在，且 plan 未完成 |
-| `blocked` | root task running，有 ready step 但 NO_TARGET/等待 join/等待卡片；无永久失败 |
+| `blocked` | root task running，有 ready step 但 NO_TARGET/等待 join/等待卡片/等待真实执行方 ready；无永久失败 |
 | `done` | root task terminal done；root plan 还要 MR task terminal done + `mr-once` 通过；sub-plan 还要唯一 sink step complete |
 | `failed` | 永久失败：依赖失败、acceptance 失败、预算/重试超限、root MR 失败、root task failed（reason != CANCELLED）；**单 step cancel/failure 默认归入 failed**（除非新 plan version 重试） |
 | `cancelled` | 仅 root task terminal failed 且 `reason=CANCELLED`（root plan 被显式 `task_cancel(rootTaskId)`）；单 step cancel 不把 plan 标为 cancelled |
@@ -1043,6 +1050,7 @@ E-<gate>-<n>
 
 | 对象 | 版本 | 规则 |
 |---|---|---|
+| 产品发布 | `0.3.2`（目标） | Fleet 任务编排随该版本发布；0.3.0 周期的证据文件保留原名与历史结论 |
 | 本契约 | `v1.1` | P0 冻结 + CR-003；修改走 CR + 新 minor；不改变 scope |
 | plan 记录 | `v=1` | 记录 schema 版本；不兼容变更走 CR |
 | plan 版本 | `version` | 同一 planId 单调；不可变；旧版本保留 |

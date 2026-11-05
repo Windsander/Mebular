@@ -42,4 +42,7 @@ provider 实现留在**外部**。当前 **provider #1 = Self-Skills 的 oc-herm
 ## 部署依赖与降级
 
 - fleet 的 OpenChamber 派活**需要桥 daemon 在线**（provider #1）。**无桥环境默认降级**：`--with-openchamber` 缺省关，测试/CI 用确定性 **fake provider**（本地 fake HTTP server），不依赖 OpenChamber。
+- **执行口径**：OpenChamber **只有桥在线时才是 Fleet 执行方**；无桥/桥离线时只能 **dispatch-only**（可继续提交、查询、取消，但不执行本机任务），不得声称“所有 Console 客户端都能执行”。
+- **适配器位置**：seam/provider 接线在执行设备本地；远端目录只发布 `kind + capabilities + executable + executionMode`（0.3.2 目标口径），token/endpoint/command 不进入目录、不过网。
+- `@mebular/dsh-plugin` 是 DSH 的 Web/记忆桥，不是 Fleet executor；与本文件的 OpenChamber provider 不是同一层能力。
 - 替换 provider：提供满足上表契约的 `endpoint`+`token` 即可；`OpenChamberAgent`/`HttpOpenChamberSeam` 不改。

@@ -69,9 +69,14 @@ main [`README.md`](../README.md); this index only describes document structure.
 ## Package docs
 
 - [MCP daemon](../packages/mcp) — `mebular serve`, MCP surface, console hosting
-- [Fleet](../packages/fleet) — task DAG, join tokens, security, CLI
+- [Fleet (0.3.2 target)](../packages/fleet) — task DAG, plans, routing, join tokens, security, CLI
   - [Runbook](../packages/fleet/RUNBOOK.md)
-  - [Design](../packages/fleet/DESIGN.md)
+  - [Design](../packages/fleet/DESIGN.md) — includes the dispatcher vs executor and agent support matrix
+  - [OpenChamber seam](../packages/fleet/OPENCHAMBER-SEAM.md)
+  - [Protocol invariants](../packages/fleet/PROTOCOL-INVARIANTS.md)
+  - [Orchestration contract](design/fleet-orchestration-contract.md)
+  - Historical evidence: [0.3.0 P6 E2E](quality/0.3.0-fleet-orchestration-e2e.md) ·
+    [0.3.0 P7 review](quality/0.3.0-fleet-p7-review.md)
 - [Console package](../packages/console) — console SPA and UI checks
 - [Skill](../packages/skill/SETUP.md) · [memory policy](../packages/skill/MEMORY_POLICY.md) ·
   [task playbook](../packages/skill/tasks/SKILL.md)

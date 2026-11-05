@@ -69,6 +69,8 @@ App 与 DSH Plugin 是同一套本机 runtime 的两个入口。插件默认 `at
 
 已有 Mebular App 或 CLI 时，插件会自动连接；没有 runtime 时，打开 Mebular 面板按提示安装共享 runtime。只有 CLI 方式需要手动 `mebular serve`。
 
+> **Fleet 执行口径**：`@mebular/dsh-plugin` 是 DSH 的 **Web/记忆桥**（Console 面板 + 官方 MCP 工具），**不是 Fleet executor**。下表的 `task_*` 是派发/查询/控制入口，不等于在本机执行任务。DSH v1 作为执行宿主时使用官方 `dsh --profile headless "<job>"`；`dsh --profile sdk` 属于 v2，不作为当前口径。Fleet 的派发方/执行方矩阵见 [Fleet 设计](../fleet/DESIGN.md) §2.5.3。
+
 ### 命令行
 
 ```bash

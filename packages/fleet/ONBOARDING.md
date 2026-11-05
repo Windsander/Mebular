@@ -62,6 +62,14 @@ fleet doctor --dir ~/.mebular --json
 | `移出状态` | 本机/对端是否被移出 |
 | `peer 可达` | 地址簿中的对端是否可达 |
 
+## 5.1 执行方准备（派发 ≠ 执行）
+
+- 上车只解决**信任、订阅与派发**；能否在本机执行任务取决于**执行设备本地**是否装了真实 Agent 适配器。
+- 可执行口径：**Hermes** 可执行；**OpenChamber** 仅在 oc-hermes-bridge 在线时可执行，无桥只能 dispatch-only；**DSH v1** 用官方 `dsh --profile headless "<job>"` 作为执行宿主（`dsh --profile sdk` 是 v2；`@mebular/dsh-plugin` 是 Web/记忆桥，不是 Fleet executor）；**OpenCode**（`opencode run`）与 **Claude Code**（`claude -p`）待 adapter；**Cursor** 仅在有 `cursor-agent` 时可执行，否则 dispatch-only；**Claude Desktop** 只能 dispatch-only。
+- `echo` / `board` 是 demo/测试用：`echo` 是确定性 fake executor，`board` 是任务板占位；生产 plan 的 **owner 与 MR 目标必须是真实可执行 Agent**。
+- plan 提交前自检：`planAgent` 必须在 `config.agents[].name` 中，否则 `PLAN_POLICY` + `PLAN_OWNER_UNEXECUTABLE`，不会创建 plan/root。完整矩阵与 readiness 见 [`DESIGN.md`](DESIGN.md) §2.5.3。
+- 远端 Agent 的 adapter 只在执行设备本地；目录只发布 `kind + capabilities + executable + executionMode`（0.3.2 目标口径），command/env/token 永不过网。
+
 ## 6. 命令边界
 
 - 没有 `fleet grant` / `fleet revoke`（域授权）/ `fleet declare-issuer` / `fleet pending` / `fleet approve`；

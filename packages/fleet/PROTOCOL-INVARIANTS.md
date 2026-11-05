@@ -70,6 +70,24 @@
 意图为确定性哨兵指令（只输出 `FLEET_HERMES_OK`），断言：E2E `done` 且结果包含哨兵，另**直连** `HermesAgent` 断言解析出 `session_id`；原始 `ms`/`session` 随脚本输出（11/11）。
 真实 OpenChamber 同模式：`node scripts/verify-fleet-agents.mjs --with-openchamber`（provider 接线在脚本侧；E2E `done` 含 `FLEET_OC_OK` + 直连 session + 负例；无桥环境缺省关、CI 用 fake provider）。
 
+### 4.1 执行方支持口径（派发 ≠ 执行）
+
+| Agent / 宿主 | 执行能力 | 口径 |
+|---|---|---|
+| Hermes | 可执行 | 内置 `HermesAgent`（`kind=hermes`） |
+| OpenChamber | 条件可执行 | 仅经 oc-hermes-bridge（`POST /agent/run-once`）可执行；无桥 dispatch-only |
+| DSH v1 | 可执行（宿主 CLI） | 官方 `dsh --profile headless "<job>"`；`dsh --profile sdk` 是 v2；`@mebular/dsh-plugin` 是 Web/记忆桥，不是 Fleet executor |
+| OpenCode | 计划中 | `opencode run`，待 adapter |
+| Claude Code | 计划中 | `claude -p`，待 adapter |
+| Cursor | 条件可执行 | 仅当执行设备有 `cursor-agent`；否则 dispatch-only |
+| Claude Desktop | 不可执行 | 只能 dispatch-only |
+| `echo` / `board` | 仅 demo/测试 | `echo` 是确定性 fake executor，`board` 是任务板占位；不作为生产 plan owner/MR |
+
+- **派发方**（任何能连 MCP/CLI 的 Console 客户端或 Agent）只提交/查询/控制；**执行方**必须有执行设备本地的 adapter。不要声称所有 Console 客户端都能执行。
+- plan owner 必须是真实可执行 Agent；`echo`/`board` 只用于 demo/测试。`planAgent` 不属于 `config.agents[].name` 时 fail closed（`PLAN_OWNER_UNEXECUTABLE`）。
+- 远端 Agent：adapter 在执行设备本地；目录只发布 `kind + capabilities + executable + executionMode`（0.3.2 目标口径）；command/env/token 永不过网。
+- Console 不加 Fleet UI；入口为 `task_submit.plan`、`task_status.plan`、`fleet doctor` 与文档。
+
 ## 5. M4：三种协作形态（目标二）
 
 | 形态 | 单元 | 期望 | 覆盖测试 |

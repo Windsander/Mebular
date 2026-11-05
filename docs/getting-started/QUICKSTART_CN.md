@@ -108,6 +108,12 @@ mebular print-config --client opencode   # 也可：claude、cursor、dsh、gene
 `http://127.0.0.1:7331/mcp`。桌面 App 的自动接入写的就是 HTTP `/mcp` 形态，所以初始化后同一条路径继续
 可用，不需要重写助手配置。
 
+接入 MCP 只代表该客户端是**派发方**（可提交、查询、取消任务），不代表它能在本机执行 Fleet 任务；执行需要
+执行设备上的真实 adapter。Hermes 可执行；OpenChamber 仅经 `oc-hermes-bridge` 可执行；DSH v1 用官方
+`dsh --profile headless "<job>"` 作为执行宿主。OpenCode（`opencode run`）与 Claude Code（`claude -p`）
+待 adapter；Cursor 仅在装有 `cursor-agent` 时可执行；Claude Desktop 只能 dispatch-only。`@mebular/dsh-plugin`
+是 Web/记忆桥，不是 Fleet executor。完整矩阵见 [Fleet 设计 §2.5.3](../../packages/fleet/DESIGN.md)。
+
 未初始化时，`/mcp` 已能完成 `initialize`、`tools/list` 与 `prompts/list`；`tools/call` 返回稳定的
 `NOT_INITIALIZED` 业务错误。这是预期行为，不是连接坏了。建新 / 加入忆云后，**同一个 MCP 会话**即可
 恢复工具调用——不需要重启守护，也不需要重写配置。

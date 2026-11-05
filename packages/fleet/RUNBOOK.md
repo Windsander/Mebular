@@ -30,6 +30,9 @@ fleet doctor      --dir ~/.mebular --json
 
 ## 2.1 Plan materializer（P2/P4）
 
+- **Plan readiness（提交前）**：`plan.owner` 必须是提交者设备/Agent；`planAgent` 必须属于本机 `config.agents[].name`，否则 `PLAN_POLICY` + `PLAN_OWNER_UNEXECUTABLE`，不创建 plan/root。`echo`/`board` 只是 demo/测试（确定性 fake executor / 任务板占位），**不作为生产 plan owner 或 MR 目标**；生产 owner 必须是真实可执行 Agent。MR 目标固定为 `plan.owner` 的 `{device,agent}`，`dispatch="root-only"`。入口只有 `task_submit.plan` / `task_status.plan` / `fleet doctor`（设备/订阅/身份自检，不替代 owner readiness）与文档；**Console 不加 Fleet UI**。
+- **Agent 执行口径**：Hermes 可执行；OpenChamber 仅经 oc-hermes-bridge 可执行（无桥 dispatch-only）；DSH v1 用 `dsh --profile headless "<job>"` 作为执行宿主（`dsh --profile sdk` 是 v2；`@mebular/dsh-plugin` 是 Web/记忆桥，不是 Fleet executor）；OpenCode（`opencode run`）与 Claude Code（`claude -p`）待 adapter；Cursor 仅在有 `cursor-agent` 时可执行，否则 dispatch-only；Claude Desktop 只能 dispatch-only。完整矩阵见 [`DESIGN.md`](DESIGN.md) §2.5.3。
+- **远端 Agent**：adapter 在执行设备本地；目录只发布 `kind + capabilities + executable + executionMode`（0.3.2 目标口径），command/env/token 永不过网。
 - plan 节点提交后，由 **plan owner 设备**上的 `fleet node --run-forever` 或 `fleet worker --run-forever` 周期性推进（两者都会 tick materializer）；daemon 模式经内部 `/app/plans` 读取 plan。
 - materializer 只创建依赖已满足、且 route/显式 `to` 通过硬过滤的 step task；join/reduce 在全部 `dependsOn` step complete 后才创建。
 - **MR 门禁**：root plan 恰好一个 `kind=mr` sink，target 固定为 plan.owner 的 `{device,agent}`，`dispatch="root-only"`；只有所有非 MR step complete 且直接 pre-MR gate（join/reduce all）complete 才创建。MR 按 root `planId` 跨版本唯一：非终态等待、done 才让 root plan done、failed 不重试。

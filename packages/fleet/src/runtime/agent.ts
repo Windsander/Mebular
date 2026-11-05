@@ -221,6 +221,8 @@ export class CliExecutorAdapter implements ExecutorAdapter {
       executionMode: 'cli',
       supportsCancel: true,
       promptMode: options.promptMode ?? 'arg',
+      // 通用 CLI 同样一次性执行：resume 参数由 config 层统一拒绝。
+      sessionMode: 'fresh',
     };
   }
 
@@ -369,6 +371,8 @@ export class HermesExecutorAdapter implements ExecutorAdapter {
     executionMode: 'cli',
     supportsCancel: true,
     promptMode: 'arg',
+    // Hermes one-shot：每次任务都由全新进程/会话来执行。
+    sessionMode: 'fresh',
   };
 
   constructor(private readonly options: HermesAgentOptions = {}) {}

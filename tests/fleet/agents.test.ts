@@ -15,6 +15,7 @@ import {
   NullTransport,
   EchoExecutor,
   ExecutionLog,
+  findResumeArg,
   reduceTaskEvents,
 } from '../../packages/fleet/src/index.js';
 import { mkEvent } from './helpers.js';
@@ -99,6 +100,19 @@ describe('CommandAgent：参数数组 / 超时 / 非零退出 / 输出截断', (
     expect(existsSync(marker)).toBe(false); // 未发生 shell 求值
   });
 
+  it('argv 不含 resume/continue/session 参数（一个任务 = 一个新 session）', async () => {
+    const agent = new CommandAgent({
+      command: process.execPath,
+      baseArgs: [FIXTURE, '--mode', 'args', '--non-interactive'],
+      promptArgs: legacyPrompt,
+    });
+    const outcome = await agent.execute(task('fresh'));
+    expect(outcome.ok).toBe(true);
+    const argv = JSON.parse(outcome.resultRef!) as string[];
+    expect(argv).toEqual(['--mode', 'args', '--non-interactive', '-z', 'fresh']);
+    expect(findResumeArg(argv)).toBeUndefined();
+  });
+
   it('并发上限可配：concurrency=1 串行、=2 并行', async () => {
     const sleepMs = 300;
     const mk = (concurrency: number) => new CommandAgent({ command: process.execPath, baseArgs: [FIXTURE, '--mode', 'sleep', '--sleep', String(sleepMs)], promptArgs: legacyPrompt, concurrency });
@@ -149,6 +163,7 @@ describe('HermesAgent：hermes argv 构造与结果', () => {
       expect.arrayContaining(['-p', 'work', '-t', 'memory', '-m', 'm1', '--in', dir, '-z', 'summarize']),
     );
     expect(argv).toContain('--usage-file');
+    expect(findResumeArg(argv)).toBeUndefined();
   });
 
   it('成功解析 usage.session_id（reason 里回带）', async () => {

@@ -16,6 +16,7 @@ import {
   OpenCodeAgent,
   buildRegistry,
   compileCapabilityCards,
+  findResumeArg,
   reduceTaskEvents,
   validateFleetConfig,
   type TaskState,
@@ -62,6 +63,7 @@ describe('DSH headless adapter', () => {
       executionMode: 'cli',
       supportsCancel: true,
       promptMode: 'stdin',
+      sessionMode: 'fresh',
     });
   });
 
@@ -82,7 +84,9 @@ describe('DSH headless adapter', () => {
       promptMode: 'arg',
     }).execute(task(prompt));
     expect(outcome.ok).toBe(true);
-    expect(JSON.parse(outcome.resultRef!)).toEqual(['--mode', 'args', '--profile', 'headless', prompt]);
+    const argv = JSON.parse(outcome.resultRef!) as string[];
+    expect(argv).toEqual(['--mode', 'args', '--profile', 'headless', prompt]);
+    expect(findResumeArg(argv)).toBeUndefined();
   });
 
   it('非 0 退出：EXIT_<code> + stderr 尾巴', async () => {
@@ -120,17 +124,20 @@ describe('OpenCode adapter', () => {
       executionMode: 'cli',
       supportsCancel: true,
       promptMode: 'arg',
+      sessionMode: 'fresh',
     });
   });
 
-  it('入口为 opencode run <prompt>', async () => {
+  it('入口为 opencode run <prompt>，且 argv 不含 resume 参数', async () => {
     const prompt = 'opencode prompt';
     const outcome = await new OpenCodeAgent({
       opencodePath: process.execPath,
       baseArgs: [FIXTURE, '--mode', 'args'],
     }).execute(task(prompt));
     expect(outcome.ok).toBe(true);
-    expect(JSON.parse(outcome.resultRef!)).toEqual(['--mode', 'args', 'run', prompt]);
+    const argv = JSON.parse(outcome.resultRef!) as string[];
+    expect(argv).toEqual(['--mode', 'args', 'run', prompt]);
+    expect(findResumeArg(argv)).toBeUndefined();
   });
 });
 
@@ -142,17 +149,20 @@ describe('Claude Code adapter', () => {
       executionMode: 'cli',
       supportsCancel: true,
       promptMode: 'arg',
+      sessionMode: 'fresh',
     });
   });
 
-  it('入口为 claude -p <prompt>', async () => {
+  it('入口为 claude -p <prompt>，且 argv 不含 resume 参数', async () => {
     const prompt = 'claude prompt';
     const outcome = await new ClaudeCodeAgent({
       claudePath: process.execPath,
       baseArgs: [FIXTURE, '--mode', 'args'],
     }).execute(task(prompt));
     expect(outcome.ok).toBe(true);
-    expect(JSON.parse(outcome.resultRef!)).toEqual(['--mode', 'args', '-p', prompt]);
+    const argv = JSON.parse(outcome.resultRef!) as string[];
+    expect(argv).toEqual(['--mode', 'args', '-p', prompt]);
+    expect(findResumeArg(argv)).toBeUndefined();
   });
 });
 
@@ -180,6 +190,7 @@ describe('PlatformCliAdapter / probeCliVersion', () => {
       executionMode: 'cli',
       supportsCancel: true,
       promptMode: 'arg',
+      sessionMode: 'fresh',
     });
   });
 
@@ -246,9 +257,9 @@ describe('config / registry / capability card：kind 扩展', () => {
     expect(registry.resolve('d')).toBeInstanceOf(DshHeadlessAgent);
     expect(registry.resolve('oc')).toBeInstanceOf(OpenCodeAgent);
     expect(registry.resolve('cc')).toBeInstanceOf(ClaudeCodeAgent);
-    expect(registry.descriptorOf('d')).toMatchObject({ kind: 'dsh', executionMode: 'cli', supportsCancel: true });
-    expect(registry.descriptorOf('oc')).toMatchObject({ kind: 'opencode', executionMode: 'cli', supportsCancel: true });
-    expect(registry.descriptorOf('cc')).toMatchObject({ kind: 'claude-code', executionMode: 'cli', supportsCancel: true });
+    expect(registry.descriptorOf('d')).toMatchObject({ kind: 'dsh', executionMode: 'cli', supportsCancel: true, sessionMode: 'fresh' });
+    expect(registry.descriptorOf('oc')).toMatchObject({ kind: 'opencode', executionMode: 'cli', supportsCancel: true, sessionMode: 'fresh' });
+    expect(registry.descriptorOf('cc')).toMatchObject({ kind: 'claude-code', executionMode: 'cli', supportsCancel: true, sessionMode: 'fresh' });
   });
 
   it('能力卡对长跑平台 kind 使用安全默认超时，不包含 command/env', () => {

@@ -19,11 +19,14 @@ import {
   onboardDevice,
   doctor,
   buildRegistry,
+  findResumeArg,
   mebularOptions,
   parseAgentSpecs,
   permissionsApplicable,
+  reduceTaskEvents,
 } from '../../packages/fleet/src/index.js';
 import { daemonConfigToFleet, loadToolConfig } from '../../packages/fleet/src/config.js';
+import { mkEvent } from './helpers.js';
 import { IdentityManager } from '@mebular/core';
 
 let dir: string;
@@ -195,6 +198,49 @@ describe('doctor：peer/同步/身份链 与注册表/选项', () => {
     const enc = await readMasterKeyFile(cfg.masterKeyFile);
     const opts = mebularOptions(cfg, enc) as { sync: { namespaces: string[] } };
     expect(opts.sync.namespaces).toEqual(['tasks', 'agents']);
+  });
+
+  it('buildRegistry 工厂层拒绝 resume 参数（绕过配置加载也 fail closed）', () => {
+    expect(() => buildRegistry([
+      { name: 'c', kind: 'command', command: process.execPath, baseArgs: ['--non-interactive', '--resume'] },
+    ])).toThrow(/配置非法.*新开 session/);
+  });
+
+  it('工厂构建的 command/dsh/opencode/claude-code argv 不含 resume 参数', async () => {
+    const fixture = join(process.cwd(), 'tests/fleet/fixtures/fake-platform-cli.mjs');
+    const registry = buildRegistry([
+      {
+        name: 'c',
+        kind: 'command',
+        command: process.execPath,
+        baseArgs: [join(process.cwd(), 'tests/fleet/fixtures/fake-agent.mjs'), '--mode', 'args'],
+        promptArgs: ['-z'],
+      },
+      { name: 'd', kind: 'dsh', command: process.execPath, baseArgs: [fixture, '--mode', 'args'], promptMode: 'arg' },
+      { name: 'oc', kind: 'opencode', command: process.execPath, baseArgs: [fixture, '--mode', 'args'] },
+      { name: 'cc', kind: 'claude-code', command: process.execPath, baseArgs: [fixture, '--mode', 'args'] },
+    ]);
+    const fixedPrefix: Record<string, string[]> = {
+      c: ['-z'],
+      d: ['--profile', 'headless'],
+      oc: ['run'],
+      cc: ['-p'],
+    };
+    for (const name of ['c', 'd', 'oc', 'cc']) {
+      const task = reduceTaskEvents([
+        mkEvent('created', `onboard-fresh-${name}`, {
+          to: { device: 'device-B', agent: name },
+          intent: `prompt-${name}`,
+          trace: { chain: [] },
+        }),
+      ])!;
+      const outcome = await registry.resolve(name)!.execute(task);
+      expect(outcome.ok).toBe(true);
+      const argv = JSON.parse(outcome.resultRef!) as string[];
+      expect(findResumeArg(argv)).toBeUndefined();
+      expect(argv).toEqual(expect.arrayContaining(fixedPrefix[name]!));
+      expect(argv.at(-1)).toBe(`prompt-${name}`);
+    }
   });
 
   it('peer 可达：对端监听 → PASS；不可达 → FAIL', async () => {

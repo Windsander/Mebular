@@ -7,13 +7,16 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  FLEET_RESUME_ARG_BLACKLIST,
   detectAgents,
   doctor,
+  findResumeArg,
   fleetConfigPath,
   loadFleetConfig,
   onboardDevice,
   planOwnerReadiness,
   saveFleetConfig,
+  validateFleetConfig,
 } from '../../packages/fleet/src/index.js';
 import { daemonConfigToFleet } from '../../packages/fleet/src/config.js';
 
@@ -158,6 +161,77 @@ describe('doctor：plan readiness', () => {
     report = await doctor(dir);
     expect(checkOf(report, 'plan materializer')?.status).toBe('PASS');
     expect(checkOf(report, 'plan materializer')?.detail).toContain('role=node');
+  });
+});
+
+function baseConfig() {
+  return {
+    v: 1,
+    device: 'device-A',
+    dir: '/tmp/fleet',
+    storagePath: '/tmp/fleet/store.jsonl',
+    masterKeyFile: '/tmp/fleet/master-key.json',
+    namespace: 'tasks',
+    listen: '/ip4/127.0.0.1/tcp/0',
+    peers: [],
+  };
+}
+
+describe('config：resume 参数黑名单（一个任务 = 一个新 session）', () => {
+  it('精确 token 与 --flag=value 形式都拒绝（baseArgs / promptArgs）', () => {
+    for (const token of FLEET_RESUME_ARG_BLACKLIST) {
+      const errors = validateFleetConfig({
+        ...baseConfig(),
+        agents: [{ name: 'c', kind: 'command', command: process.execPath, baseArgs: ['--non-interactive', token] }],
+      });
+      expect(errors.some((error) => error.includes('agent.baseArgs') && error.includes('新开 session'))).toBe(true);
+
+      const promptErrors = validateFleetConfig({
+        ...baseConfig(),
+        agents: [{ name: 'c', kind: 'command', command: process.execPath, promptArgs: [token] }],
+      });
+      expect(promptErrors.some((error) => error.includes('agent.promptArgs') && error.includes('新开 session'))).toBe(true);
+    }
+
+    for (const token of ['--resume=abc', '--session-id=s-1', '--continue=true', '--fork=main', '--session=s-2', '--resume-session=s-3', '-r=s-4']) {
+      const errors = validateFleetConfig({
+        ...baseConfig(),
+        agents: [{ name: 'c', kind: 'command', command: process.execPath, baseArgs: [token] }],
+      });
+      expect(errors.some((error) => error.includes('agent.baseArgs'))).toBe(true);
+    }
+  });
+
+  it('所有 first-class kind 一视同仁（command/hermes/openchamber/dsh/opencode/claude-code）', () => {
+    for (const kind of ['command', 'hermes', 'openchamber', 'dsh', 'opencode', 'claude-code']) {
+      const errors = validateFleetConfig({
+        ...baseConfig(),
+        agents: [{
+          name: `a-${kind}`,
+          kind,
+          ...(kind === 'command' ? { command: process.execPath } : {}),
+          baseArgs: ['--resume'],
+        }],
+      });
+      expect(errors.some((error) => error.includes('agent.baseArgs') && error.includes('--resume'))).toBe(true);
+    }
+  });
+
+  it('正常参数不误伤：--in / --model / --profile / run / -p / 前缀相似项', () => {
+    const normal = ['--in', '/tmp/work', '--model', 'm1', '--profile', 'headless', '--non-interactive', 'run', '-p', '--forked', '--session-name=ok', '--resume-after'];
+    expect(findResumeArg(normal)).toBeUndefined();
+    const errors = validateFleetConfig({
+      ...baseConfig(),
+      agents: [{
+        name: 'c',
+        kind: 'command',
+        command: process.execPath,
+        baseArgs: normal,
+        promptArgs: ['--prompt'],
+        promptMode: 'arg',
+      }],
+    });
+    expect(errors).toEqual([]);
   });
 });
 

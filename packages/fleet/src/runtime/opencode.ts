@@ -34,6 +34,8 @@ export class OpenCodeAdapter extends PlatformCliAdapter {
       ...(options.baseArgs !== undefined ? { baseArgs: options.baseArgs } : {}),
       fixedArgs: ['run'] as const,
       promptMode: options.promptMode ?? 'arg',
+      // `opencode run` 每次新建 session；不复用用户当前会话。
+      sessionMode: 'fresh',
     } satisfies PlatformCliAdapterOptions;
     super(descriptorOptions);
   }

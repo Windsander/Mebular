@@ -38,6 +38,8 @@ export class DshHeadlessAdapter extends PlatformCliAdapter {
       ...(options.baseArgs !== undefined ? { baseArgs: options.baseArgs } : {}),
       fixedArgs: ['--profile', 'headless'] as const,
       promptMode: options.promptMode ?? 'stdin',
+      // 一次性 headless session；不复用已有会话。
+      sessionMode: 'fresh',
     } satisfies PlatformCliAdapterOptions;
     super(descriptorOptions);
   }

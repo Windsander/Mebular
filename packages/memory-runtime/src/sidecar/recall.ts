@@ -131,6 +131,7 @@ export interface FragmentScore {
 export interface FragmentDetail {
   text: string;
   format: 'verbatim' | 'structured' | 'summary';
+  detailKind?: string | null;
   sourceIds: string[];
   contentHash?: string;
   truncated: boolean;
@@ -2867,6 +2868,7 @@ export class RecallService {
     let stale = false;
     let truncated = false;
     let detailIds: string[] = [];
+    let detailKind: string | null = null;
 
     if (kind === 'compact') {
       text = `以下为已沉降摘要，不是原文。\n${body}`;
@@ -2880,6 +2882,7 @@ export class RecallService {
       stale = fetched.stale;
       truncated = fetched.truncated;
       detailIds = fetched.detailIds;
+      detailKind = fetched.detailKind;
       if (fetched.text.length > 0) {
         if (quote) {
           text = fetched.text;
@@ -2942,6 +2945,7 @@ export class RecallService {
       source,
       stale,
       ...(detailIds.length > 0 ? { detailIds } : {}),
+      ...(detailKind ? { detailKind } : {}),
       tookMs: 0,
     };
   }
@@ -2963,10 +2967,12 @@ export class RecallService {
     source: 'capability' | 'cache' | 'record';
     stale: boolean;
     truncated: boolean;
+    detailKind: string | null;
   }> {
     interface FetchedDetail {
       id: string;
       role: string;
+      detailKind: string | null;
       text: string;
       truncated: boolean;
       redacted: boolean;
@@ -3016,6 +3022,7 @@ export class RecallService {
           collected.push({
             id,
             role: typeof record.role === 'string' ? record.role : '',
+            detailKind: typeof record.detailKind === 'string' ? record.detailKind : null,
             text: record.text,
             truncated: record.truncated === true,
             redacted: record.redacted === true,
@@ -3051,6 +3058,7 @@ export class RecallService {
         source: 'capability',
         stale: false,
         truncated: selected.some((item) => item.truncated),
+        detailKind: selected[0]?.detailKind ?? null,
       };
     }
 
@@ -3064,6 +3072,7 @@ export class RecallService {
           cachedItems.push({
             id,
             role: typeof detail.role === 'string' ? detail.role : '',
+            detailKind: typeof detail.detailKind === 'string' ? detail.detailKind : null,
             text: detail.text,
             truncated: detail.truncated === true,
             redacted: detail.redacted === true,
@@ -3080,6 +3089,7 @@ export class RecallService {
           source: 'cache',
           stale: true,
           truncated: selectedCached.some((item) => item.truncated),
+          detailKind: selectedCached[0]?.detailKind ?? null,
         };
       }
     }
@@ -3091,6 +3101,7 @@ export class RecallService {
       source: 'record',
       stale: false,
       truncated: false,
+      detailKind: null,
     };
   }
 
@@ -3482,7 +3493,7 @@ export class RecallService {
         status: candidate.detail ? 'ok' : 'gist',
         tookMs: candidate.detail?.tookMs ?? 0,
         bytes: candidate.detail ? byteLength(candidate.detail.text) : 0,
-        detailKind: candidate.detail ? 'raw_chunk' : null,
+        detailKind: candidate.detail?.detailKind ?? null,
         format: candidate.detail?.format ?? null,
         sourceDetailIds: candidate.detail?.detailIds ?? [],
       })),

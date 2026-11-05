@@ -2364,6 +2364,7 @@ describe('POST /internal-object', () => {
     const beforeMaintenance = await get();
     expect(beforeMaintenance.status).toBe(200);
     expect(beforeMaintenance.body.data.object).toBeNull();
+    expect(beforeMaintenance.body.data.highWater).toBe(2);
 
     const maintenance = createMemoryCapabilityHandler({
       home,
@@ -2379,6 +2380,7 @@ describe('POST /internal-object', () => {
 
     const afterMaintenance = await get();
     expect(afterMaintenance.body.data.object).toBeNull();
+    expect(afterMaintenance.body.data.highWater).toBe(2);
 
     const staleExpected = await upsert('must conflict', { expectedRevision: 1 });
     expect(staleExpected.status).toBe(409);
@@ -2390,6 +2392,90 @@ describe('POST /internal-object', () => {
     expect(r3.body.data.object.revision).toBe(3);
     const current = await get();
     expect(current.body.data.object).toMatchObject({ revision: 3, summary: null });
+  });
+
+  it('context_checkpoint：显式删除/全部过期后 expectedRevision=0 可重建，但 revision 不复用', async () => {
+    const assertRecreate = async (threadId, { expireFirst = false } = {}) => {
+      const domain = `task:${threadId}`;
+      const state = {
+        schema: 2,
+        contentMode: 'structured',
+        task: { key: domain, threadId, fleetTaskId: null },
+        goal: 'recreate',
+        constraints: [],
+        decisions: [],
+        progress: { done: [], doing: [], blocked: [] },
+        nextSteps: [{ id: 'n1', text: 'next' }],
+        files: [],
+        openQuestions: [],
+        references: { recordIds: [], detailIds: [], messageIds: [], fleetTaskId: null, urls: [] },
+      };
+      const first = await post(capability('/internal-object'), {
+        actor: agent,
+        kind: 'context_checkpoint',
+        op: 'upsert',
+        agentId: 'opencode',
+        threadId,
+        domain,
+        state,
+        expectedRevision: 0,
+        expiresAt: expireFirst ? Date.now() - 1000 : 0,
+      }, { token });
+      expect(first.status).toBe(200);
+      expect(first.body.data.object.revision).toBe(1);
+
+      if (expireFirst) {
+        const maintenance = createMemoryCapabilityHandler({
+          home,
+          getConfig: () => ({ memoryRuntime: { enabled: true } }),
+          getApp: () => app,
+          getService: () => service,
+          getIdentity: () => ({ cloudId: 'cl_test', userId: 'user' }),
+        });
+        await maintenance.runCheckpointMaintenance();
+      } else {
+        const deleted = await post(capability('/internal-object'), {
+          actor: { type: 'user' },
+          kind: 'context_checkpoint',
+          op: 'delete',
+          agentId: 'opencode',
+          threadId,
+          domain,
+        }, { token });
+        expect(deleted.status).toBe(200);
+        expect(deleted.body.data.deleted).toBe(true);
+      }
+
+      const empty = await post(capability('/internal-object'), {
+        actor: agent,
+        kind: 'context_checkpoint',
+        op: 'get',
+        agentId: 'opencode',
+        threadId,
+        domain,
+      }, { token });
+      expect(empty.status).toBe(200);
+      expect(empty.body.data.object).toBeNull();
+      expect(empty.body.data.highWater).toBe(1);
+
+      const recreated = await post(capability('/internal-object'), {
+        actor: agent,
+        kind: 'context_checkpoint',
+        op: 'upsert',
+        agentId: 'opencode',
+        threadId,
+        domain,
+        state,
+        expectedRevision: 0,
+        expiresAt: 0,
+      }, { token });
+      expect(recreated.status).toBe(200);
+      expect(recreated.body.data.object.revision).toBe(2);
+      expect(recreated.body.data.object.state.goal).toBe('recreate');
+    };
+
+    await assertRecreate('th_recreate_delete');
+    await assertRecreate('th_recreate_expired', { expireFirst: true });
   });
 
   it('context_checkpoint default：按 (agentId, threadId) revision 隔离，其他 Agent 不可读', async () => {

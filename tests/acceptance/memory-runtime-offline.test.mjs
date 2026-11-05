@@ -397,6 +397,15 @@ describe('0.3 离线恢复：outbox / Raw / capability 失败开放', () => {
     }), 'context seed ingest');
     expect(seeded.records).toHaveLength(1);
 
+    // 真实同域引用：task checkpoint 只能引用 task:<threadId> 内的记录。
+    const taskRecord = assertOk(await a.capability.write([{
+      domain: `task:${threadId}`,
+      kind: 'observation',
+      content: { content: `task evidence ${marker}` },
+      provenance: { source: 'runtime', extractor: 'heuristic', threadId },
+    }], { actor: { type: 'agent', agentId: 'hermes' } }), 'task-domain evidence write');
+    const taskRecordId = taskRecord.results[0].id;
+
     const self = await a.sidecar.putSelf('hermes', {
       expectedRevision: 0,
       displayName: 'Hermes Self',
@@ -417,9 +426,9 @@ describe('0.3 离线恢复：outbox / Raw / capability 失败开放', () => {
         nextSteps: [{ id: 'n1', text: 'verify blockers' }],
         files: [],
         openQuestions: [],
-        references: { recordIds: [], detailIds: [], messageIds: [], fleetTaskId: null, urls: [] },
+        references: { recordIds: [taskRecordId], detailIds: [], messageIds: [], fleetTaskId: null, urls: [] },
       },
-      recordIds: [],
+      recordIds: [taskRecordId],
       summary: null,
     });
     expect(checkpoint.status).toBe(200);

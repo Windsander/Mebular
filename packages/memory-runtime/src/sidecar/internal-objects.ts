@@ -95,6 +95,8 @@ export interface CheckpointView {
   expiresAt?: number;
   pending?: boolean;
   queuedAt?: number;
+  outboxId?: string;
+  requestId?: string;
   source?: 'cloud' | 'cache';
   stale?: boolean;
   provenance?: Record<string, unknown>;
@@ -118,6 +120,8 @@ export interface SelfRecordView {
   record?: Record<string, unknown>;
   pending?: boolean;
   queuedAt?: number;
+  outboxId?: string;
+  requestId?: string;
   source?: 'cloud' | 'cache';
   stale?: boolean;
   provenance?: Record<string, unknown>;
@@ -528,6 +532,10 @@ export function buildCompactSummary(
   return { summary, tokenCount: estimateTokens(summary), hashesById };
 }
 
+function outboxItemId(requestId: string): string {
+  return `ob_${sha256Hex(requestId).slice(0, 40)}`;
+}
+
 class KeyedSerial {
   private tails = new Map<string, Promise<unknown>>();
 
@@ -587,17 +595,43 @@ export class MemoryObjectService implements SidecarObjectsApi {
       this.degraded = false;
       this.counts.queued = 0;
       if (summary.settled > 0) this.lastError = null;
-      void this.clearPendingObjectCaches();
+      void this.reconcilePendingObjectCaches();
       return;
     }
     this.counts.queued = summary.remaining;
   }
 
-  private async clearPendingObjectCaches(): Promise<void> {
+  private async reconcilePendingObjectCaches(): Promise<void> {
     try {
-      const entries = await this.local.cache.list('object:v1:pending/');
+      // 先取 pending 快照，再取 outbox 活动/死信快照：任何快照后新建的 pending
+      // 都不会出现在第一份列表里，避免 stats 竞态误删。
+      const entries = await this.local.cache.list<{ outboxId?: string; requestId?: string; queuedAt?: number }>('object:v1:pending/');
+      const active = await this.local.outbox.list();
+      const dead = await this.local.outbox.listDead();
+      const activeIds = new Set(active.map((item) => item.id));
+      const deadIds = new Set(dead.map((item) => item.id));
       for (const entry of entries) {
-        await this.cacheDelete(entry.key);
+        const pending = entry.value ?? {};
+        const outboxId = typeof pending.outboxId === 'string' ? pending.outboxId : null;
+        const requestId = typeof pending.requestId === 'string' ? pending.requestId : null;
+        if (!outboxId && !requestId) continue;
+        // 仍在活动队列（包括 skipped/retry）时保留 pending。
+        if (outboxId && activeIds.has(outboxId)) continue;
+        if (requestId && active.some((item) => item.requestId === requestId)) continue;
+        // 只有确认在 dead 中，或已从活动队列消失且不是 skipped 的旧条目才清理。
+        if (outboxId && deadIds.has(outboxId)) {
+          await this.cacheDelete(entry.key);
+          continue;
+        }
+        if (requestId && dead.some((item) => item.requestId === requestId)) {
+          await this.cacheDelete(entry.key);
+          continue;
+        }
+        // 不在 active/dead：只可能是已 settled 或显式 purge；按 queuedAt 旧于
+        // 本次快照开始时间才清，避免误伤快照之后的新 pending。
+        if (typeof pending.queuedAt === 'number' && pending.queuedAt <= this.now()) {
+          await this.cacheDelete(entry.key);
+        }
       }
     } catch {
       // 清缓存失败不影响 outbox 终态；下一次重放/维护继续。
@@ -609,21 +643,29 @@ export class MemoryObjectService implements SidecarObjectsApi {
    * 避免离线 GET 永久显示一个已经不会再重放的 pending。
    */
   async applyReplayComplete(item: OutboxItem, outcome: OutboxReplayCompletion): Promise<void> {
-    if (outcome !== 'dead' && outcome !== 'skipped') return;
+    // skipped 不是终态：条目仍在活动 outbox，不得清 pending。
+    if (outcome !== 'dead') return;
     if (item.endpoint !== '/internal-object') return;
     const body = isObject(item.body) ? item.body : null;
     if (!body) return;
+    const matches = (pending: { outboxId?: string; requestId?: string } | null): boolean => Boolean(pending)
+      && ((typeof pending!.outboxId === 'string' && pending!.outboxId === item.id)
+        || (typeof pending!.requestId === 'string' && pending!.requestId === item.requestId));
     if (body.kind === 'context_checkpoint') {
       const agentId = typeof body.agentId === 'string' ? body.agentId : null;
       const threadId = typeof body.threadId === 'string' ? body.threadId : null;
       const domain = typeof body.domain === 'string' ? body.domain : null;
       if (agentId && threadId) {
-        await this.cacheDelete(this.checkpointPendingCacheKey(agentId, threadId, domain));
+        const key = this.checkpointPendingCacheKey(agentId, threadId, domain);
+        const pending = await this.cacheGet<CheckpointView>(key);
+        if (matches(pending)) await this.cacheDelete(key);
       }
       return;
     }
     if (body.kind === 'self_record' && typeof body.agentId === 'string') {
-      await this.cacheDelete(this.selfPendingCacheKey(body.agentId));
+      const key = this.selfPendingCacheKey(body.agentId);
+      const pending = await this.cacheGet<SelfRecordView>(key);
+      if (matches(pending)) await this.cacheDelete(key);
     }
   }
 
@@ -749,7 +791,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
   }
 
   private async enqueueObject(requestId: string, body: Record<string, unknown>): Promise<void> {
-    const id = `ob_${sha256Hex(requestId).slice(0, 40)}`;
+    const id = outboxItemId(requestId);
     try {
       await this.local.outbox.enqueue({
         id,
@@ -1549,7 +1591,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
       };
       if (!this.client) {
         await this.enqueueCheckpoint(requestId, capabilityBody);
-        return this.pendingCheckpoint(agentId, threadId, domain, expiresAt, state, summary, recordIds, detailIds, checkpointWarnings);
+        return this.pendingCheckpoint(agentId, threadId, domain, expiresAt, state, summary, recordIds, detailIds, checkpointWarnings, requestId);
       }
       try {
         const response = await this.client.internalObject<Record<string, unknown>>(
@@ -1578,7 +1620,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
         if (retryableCapabilityError(error)) {
           await this.enqueueCheckpoint(requestId, capabilityBody);
           return this.pendingCheckpoint(
-            agentId, threadId, domain, expiresAt, state, summary, recordIds, detailIds, checkpointWarnings, error,
+            agentId, threadId, domain, expiresAt, state, summary, recordIds, detailIds, checkpointWarnings, requestId, error,
           );
         }
         this.noteFailed(error);
@@ -1641,6 +1683,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
     recordIds: string[],
     detailIds: string[],
     checkpointWarnings: string[],
+    requestId: string,
     error?: unknown,
   ): Promise<ObjectHttpResult> {
     const queuedAt = this.now();
@@ -1669,6 +1712,8 @@ export class MemoryObjectService implements SidecarObjectsApi {
       expiresAt,
       pending: true,
       queuedAt,
+      outboxId: outboxItemId(requestId),
+      requestId,
       source: 'cache',
       stale: true,
     };
@@ -1705,6 +1750,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
       return this.cachedCheckpoint(agentId, threadId, keys, pendingKeys);
     }
     try {
+      let responseHighWater: number | null = null;
       for (const entry of domains) {
         const response = await this.client.internalObject<Record<string, unknown>>({
           actor: this.actorForAgent(agentId).actor,
@@ -1714,6 +1760,10 @@ export class MemoryObjectService implements SidecarObjectsApi {
           threadId,
           domain: entry,
         });
+        const responseWater = typeof response.data.highWater === 'number'
+          ? response.data.highWater
+          : typeof response.data.latestRevision === 'number' ? response.data.latestRevision : null;
+        if (responseWater !== null) responseHighWater = Math.max(responseHighWater ?? 0, responseWater);
         const object = isObject(response.data.object) ? response.data.object : null;
         if (!object) continue;
         const view = this.checkpointView(object, { source: 'cloud' });
@@ -1731,6 +1781,9 @@ export class MemoryObjectService implements SidecarObjectsApi {
           pending = null;
         }
         await this.markHealthyIfOutboxEmpty();
+        const highWater = typeof response.data.highWater === 'number'
+          ? response.data.highWater
+          : typeof response.data.latestRevision === 'number' ? response.data.latestRevision : null;
         return {
           status: 200,
           data: {
@@ -1738,6 +1791,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
             source: 'cloud',
             pending: pending !== null,
             pendingCheckpoint: pending,
+            ...(highWater !== null ? { highWater, latestRevision: highWater } : {}),
             degraded: response.degraded === true || pending !== null,
           },
           warnings: [...new Set([
@@ -1752,11 +1806,13 @@ export class MemoryObjectService implements SidecarObjectsApi {
       // capability 可达但没有已提交对象：pending 仍只作为 pending 元数据返回，
       // 绝不能因为 outbox 里有写入就伪造 committed。
       const pending = await this.firstPendingCheckpoint(agentId, threadId, pendingKeys);
+      const highWater = typeof responseHighWater === 'number' ? responseHighWater : null;
       return {
         status: 200,
         data: {
           checkpoint: null,
           source: 'cloud',
+          ...(highWater !== null ? { highWater, latestRevision: highWater } : {}),
           ...(pending
             ? { pending: true, pendingCheckpoint: pending }
             : { pending: false, pendingCheckpoint: null }),
@@ -2024,7 +2080,7 @@ export class MemoryObjectService implements SidecarObjectsApi {
     agentId: string,
     record: Record<string, unknown>,
     error: unknown,
-    _requestId: string,
+    requestId: string,
   ): Promise<ObjectHttpResult> {
     const queuedAt = this.now();
     const view: SelfRecordView = {
@@ -2038,6 +2094,8 @@ export class MemoryObjectService implements SidecarObjectsApi {
       record,
       pending: true,
       queuedAt,
+      outboxId: outboxItemId(requestId),
+      requestId,
       source: 'cache',
       stale: true,
     };
@@ -2072,24 +2130,53 @@ export class MemoryObjectService implements SidecarObjectsApi {
         agentId,
       });
       const object = isObject(response.data.object) ? response.data.object : null;
+      const pendingKey = this.selfPendingCacheKey(agentId);
+      let pending = await this.cacheGet<SelfRecordView>(pendingKey);
       if (!object) {
         await this.cacheDelete(key);
         await this.markHealthyIfOutboxEmpty();
         return {
           status: 200,
-          data: { selfRecord: null, self: null, source: 'cloud', degraded: response.degraded },
-          warnings: response.warnings,
-          degraded: response.degraded,
+          data: {
+            selfRecord: null,
+            self: null,
+            source: 'cloud',
+            pending: pending !== null,
+            pendingSelfRecord: pending,
+            degraded: response.degraded === true || pending !== null,
+          },
+          warnings: [...new Set([
+            ...response.warnings,
+            ...(pending ? ['self_pending'] : []),
+          ])],
+          degraded: response.degraded === true || pending !== null,
         };
       }
       const view = this.selfView(object, { source: 'cloud' });
+      if (pending
+        && typeof pending.queuedAt === 'number'
+        && typeof view.updatedAt === 'number'
+        && view.updatedAt > pending.queuedAt) {
+        await this.cacheDelete(pendingKey);
+        pending = null;
+      }
       await this.cacheSet(key, view);
       await this.markHealthyIfOutboxEmpty();
       return {
         status: 200,
-        data: { selfRecord: view, self: view, source: 'cloud', degraded: response.degraded },
-        warnings: response.warnings,
-        degraded: response.degraded,
+        data: {
+          selfRecord: view,
+          self: view,
+          source: 'cloud',
+          pending: pending !== null,
+          pendingSelfRecord: pending,
+          degraded: response.degraded === true || pending !== null,
+        },
+        warnings: [...new Set([
+          ...response.warnings,
+          ...(pending ? ['self_pending'] : []),
+        ])],
+        degraded: response.degraded === true || pending !== null,
       };
     } catch (error) {
       if (!retryableCapabilityError(error)) throw capabilityError(error);

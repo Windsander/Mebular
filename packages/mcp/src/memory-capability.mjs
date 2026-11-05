@@ -3668,9 +3668,19 @@ export function createMemoryCapabilityHandler({
         }
         const view = visible ? checkpointObjectView(visible, { userId: identity.userId }) : null;
         if (view) assertCheckpointRead(view.domain);
+        let highWater = 0;
+        for (const entry of candidates) {
+          highWater = Math.max(highWater, await highestCheckpointRevision(appValue, {
+            agentId,
+            threadId,
+            domain: entry,
+          }));
+        }
         return {
           data: {
             object: view,
+            highWater,
+            latestRevision: highWater,
             replayed: false,
           },
           warnings: checkpointWarnings(view),
@@ -3803,11 +3813,18 @@ export function createMemoryCapabilityHandler({
       }
       const current = await currentCheckpoint(appValue, { agentId, threadId, domain });
       const currentRevision = await highestCheckpointRevision(appValue, { agentId, threadId, domain });
+      const liveCurrent = current && !current.deletedAt && !checkpointExpired(current, now())
+        ? current
+        : null;
       if (hasValue(payload.expectedRevision)) {
         if (typeof payload.expectedRevision !== 'number' || !Number.isInteger(payload.expectedRevision) || payload.expectedRevision < 0) {
           throw new CapabilityError(400, 'invalid_request', 'expectedRevision 必须是非负整数');
         }
-        if (payload.expectedRevision !== currentRevision) {
+        // 兼容策略：没有 live checkpoint（显式删除或全部过期）时，宿主按
+        // existing create convention 发送 expectedRevision=0 仍允许重建；
+        // revision 仍从 high-water 前进，不复用旧 revision。
+        const createAfterNoLive = payload.expectedRevision === 0 && liveCurrent === null;
+        if (payload.expectedRevision !== currentRevision && !createAfterNoLive) {
           throw new CapabilityError(409, 'revision_mismatch', 'checkpoint revision 冲突', {
             agentId,
             threadId,
@@ -3817,7 +3834,7 @@ export function createMemoryCapabilityHandler({
           }, true);
         }
       }
-      const currentContent = isObject(current?.content) && !current.deletedAt ? current.content : {};
+      const currentContent = liveCurrent && isObject(liveCurrent.content) ? liveCurrent.content : {};
       const currentLease = isObject(currentContent.lease) ? currentContent.lease : null;
       if (currentLease && typeof currentLease.until === 'number' && currentLease.until > now()
         && currentLease.hostId !== hostId) {

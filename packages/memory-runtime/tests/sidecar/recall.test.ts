@@ -422,7 +422,7 @@ describe('RecallService', () => {
     const response = await service.handleRecall({
       agentId: 'opencode',
       threadId: 'th_recall',
-      query: '工具输出和文档片段',
+      query: '我当时原话怎么说的？工具输出和文档片段',
     });
     const fragment = response.data.fragments.find((entry) => entry.sourceIds.includes(recordId));
     expect(fragment).toBeDefined();
@@ -434,6 +434,9 @@ describe('RecallService', () => {
       'tool_output',
       'document_slice',
     ]));
+    const trace = await service.getTrace(response.data.traceId!);
+    const expansion = (trace?.expansions ?? []).find((entry) => entry.fragmentId === fragment!.id);
+    expect(expansion?.detailKind).toBe('tool_output');
   });
 
   it('详情过期/删除时诚实降级，不伪造原文', async () => {

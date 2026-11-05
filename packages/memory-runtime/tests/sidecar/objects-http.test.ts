@@ -582,6 +582,50 @@ describe('sidecar compact / self / checkpoint HTTP', () => {
     });
   });
 
+  it('checkpoint：pending sweep 只清确认 dead，保留 active/skipped；非 replayer dead 也清理', async () => {
+    const { server, fake, runtime } = await setup();
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const offlineA = await request(`${server.url}/checkpoints/th_sweep_a?agentId=opencode`, 'PUT', {
+      agentId: 'opencode',
+      state: checkpointState('th_sweep_a', 'sweep a', { cursor: 1 }),
+      summary: 'sweep a',
+      expiresAt: NOW + 1000,
+    });
+    const offlineB = await request(`${server.url}/checkpoints/th_sweep_b?agentId=opencode`, 'PUT', {
+      agentId: 'opencode',
+      state: checkpointState('th_sweep_b', 'sweep b', { cursor: 2 }),
+      summary: 'sweep b',
+    });
+    expect(offlineA.status).toBe(202);
+    expect(offlineB.status).toBe(202);
+    const items = await runtime.local.outbox.list();
+    const itemA = items.find((item) => String((item.body as any).threadId) === 'th_sweep_a');
+    const itemB = items.find((item) => String((item.body as any).threadId) === 'th_sweep_b');
+    expect(itemA).toBeDefined();
+    expect(itemB).toBeDefined();
+
+    await runtime.objects.applyReplayComplete(itemA!, 'skipped');
+    const afterSkipped = await request(`${server.url}/checkpoints/th_sweep_a?agentId=opencode`, 'GET');
+    expect(afterSkipped.body.data.pending).toBe(true);
+
+    // 非 replayer 路径：本地维护按 deadline 将 A 移入 dead，也必须清 pending。
+    await runtime.local.runMaintenance({ now: NOW + 2000 });
+    expect((await runtime.local.outbox.deadStats()).items).toBe(1);
+    const afterNonReplayerDead = await request(`${server.url}/checkpoints/th_sweep_a?agentId=opencode`, 'GET');
+    expect(afterNonReplayerDead.body.data).toMatchObject({
+      checkpoint: null,
+      pending: false,
+      pendingUnavailable: true,
+    });
+
+    // 仍有 active B 时，即使 stats 看到 remaining=0 也不能误清新 pending。
+    runtime.objects.applyReplaySummary({ settled: 0, remaining: 0 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const afterSweep = await request(`${server.url}/checkpoints/th_sweep_b?agentId=opencode`, 'GET');
+    expect(afterSweep.body.data.pending).toBe(true);
+    expect(afterSweep.body.data.pendingCheckpoint.summary).toBe('sweep b');
+  });
+
   it('checkpoint：更早 expiresAt 原样成为 outbox 操作 deadline', async () => {
     const { server, fake, runtime } = await setup();
     fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
@@ -742,6 +786,45 @@ describe('sidecar compact / self / checkpoint HTTP', () => {
       checkpoint: true,
       compact: true,
       self: true,
+    });
+  });
+
+  it('self：cloud committed 命中返回 pendingSelfRecord，重放后才清理', async () => {
+    const { server, fake, runtime } = await setup();
+    const url = `${server.url}/self/opencode`;
+    const first = await request(url, 'PUT', {
+      expectedRevision: 0,
+      displayName: 'OpenCode committed',
+    });
+    expect(first.status).toBe(200);
+    expect(first.body.data.selfRecord.revision).toBe(1);
+
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const pending = await request(url, 'PUT', {
+      expectedRevision: 1,
+      displayName: 'OpenCode pending',
+    });
+    expect(pending.status).toBe(202);
+
+    fake.setFailure(null);
+    const withPending = await request(url, 'GET');
+    expect(withPending.status).toBe(200);
+    expect(withPending.body.data).toMatchObject({
+      selfRecord: { revision: 1, content: { displayName: 'OpenCode committed' } },
+      pending: true,
+      pendingSelfRecord: { revision: null, pending: true, content: { displayName: 'OpenCode pending' } },
+      degraded: true,
+    });
+    expect(withPending.body.warnings).toContain('self_pending');
+
+    const replayed = await runtime.replayer.replayOnce();
+    expect(replayed.remaining).toBe(0);
+    const recovered = await request(url, 'GET');
+    expect(recovered.body.data).toMatchObject({
+      selfRecord: { revision: 2, content: { displayName: 'OpenCode pending' } },
+      pending: false,
+      pendingSelfRecord: null,
+      degraded: false,
     });
   });
 

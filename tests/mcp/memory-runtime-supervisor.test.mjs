@@ -33,7 +33,10 @@ afterEach(async () => {
     await cleanups.pop()().catch(() => undefined);
   }
   while (dirs.length > 0) {
-    await rm(dirs.pop(), { recursive: true, force: true });
+    // The fake sidecar may still finish an asynchronous diagnostics write while
+    // the test is tearing down its temp home. Retry transient ENOTEMPTY/EBUSY
+    // races without masking persistent cleanup failures.
+    await rm(dirs.pop(), { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
 });
 

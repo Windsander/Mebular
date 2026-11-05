@@ -23,6 +23,7 @@ import {
   saveFleetConfig,
   writeMasterKeyFile,
   type FleetAgentConfig,
+  type FleetAgentKind,
   type FleetConfig,
   type FleetEncryption,
 } from './config.js';
@@ -106,21 +107,46 @@ const OPENCHAMBER_ENV_KEYS = [
   'MEBULAR_FLEET_OPENCHAMBER_TOKEN_FILE',
 ];
 
-/** agent 自动探测：PATH 有 hermes → hermes；存在 `MEBULAR_FLEET_OPENCHAMBER_*` → openchamber；否则 echo。 */
+/**
+ * PATH 探测的 CLI agent（顺序即声明顺序，保证结果稳定）：
+ * `hermes` → `dsh` → `opencode` → `claude`（kind=`claude-code`）。
+ *
+ * 探测只表示「本机声明存在该 CLI」，**不代表可执行能力已通过健康探测**；
+ * readiness 由 `fleet doctor` 的 plan owner/心跳检查负责。`cursor` 当前没有
+ * kind/adapter，保持 dispatch-only，因此不在此自动声明。
+ */
+const PATH_AGENT_PROBES: ReadonlyArray<{ command: string; name: string; kind: FleetAgentKind; source: string }> = [
+  { command: 'hermes', name: 'hermes', kind: 'hermes', source: 'hermes:PATH' },
+  { command: 'dsh', name: 'dsh', kind: 'dsh', source: 'dsh:PATH' },
+  { command: 'opencode', name: 'opencode', kind: 'opencode', source: 'opencode:PATH' },
+  { command: 'claude', name: 'claude-code', kind: 'claude-code', source: 'claude-code:PATH' },
+];
+
+/**
+ * agent 自动探测：PATH 有 hermes/dsh/opencode/claude → 对应 adapter；
+ * 存在 `MEBULAR_FLEET_OPENCHAMBER_*` → openchamber；都没有才 fallback echo。
+ * 结果按固定顺序去重（同名/同 kind 只声明一次）。
+ */
 export function detectAgents(env: NodeJS.ProcessEnv = process.env, platform: string = process.platform): AgentProbe {
   const agents: FleetAgentConfig[] = [];
   const sources: string[] = [];
-  if (commandExists('hermes', env, platform)) {
-    agents.push({ name: 'hermes', kind: 'hermes' });
-    sources.push('hermes:PATH');
+  const seen = new Set<string>();
+  const push = (agent: FleetAgentConfig, source: string): void => {
+    if (seen.has(agent.name)) return;
+    seen.add(agent.name);
+    agents.push(agent);
+    sources.push(source);
+  };
+  for (const probe of PATH_AGENT_PROBES) {
+    if (commandExists(probe.command, env, platform)) {
+      push({ name: probe.name, kind: probe.kind }, probe.source);
+    }
   }
   if (OPENCHAMBER_ENV_KEYS.some((k) => (env[k] ?? '').length > 0)) {
-    agents.push({ name: 'openchamber', kind: 'openchamber' });
-    sources.push('openchamber:env');
+    push({ name: 'openchamber', kind: 'openchamber' }, 'openchamber:env');
   }
   if (agents.length === 0) {
-    agents.push({ name: 'echo', kind: 'echo' });
-    sources.push('echo:default');
+    push({ name: 'echo', kind: 'echo' }, 'echo:default');
   }
   return { agents, sources };
 }

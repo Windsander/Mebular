@@ -154,6 +154,38 @@ export function unexecutablePlanOwnerNames(
     .map((agent) => agent.name);
 }
 
+export interface PlanOwnerReadiness {
+  /** 可作为 plan owner/MR 的 agent 名（稳定顺序 = agents[] 顺序）。 */
+  executableAgents: string[];
+  /** 仅占位（echo/board/无 command 的 command）的 agent 名。 */
+  placeholderAgents: string[];
+  /** 无可用 plan owner 的原因；有可执行 agent 时为 undefined。 */
+  reason?: 'no-agents' | 'only-placeholders';
+}
+
+/**
+ * plan owner/MR readiness 的纯函数判定（doctor 与测试共用）。
+ *
+ * `daemonConfigToFleet` 仍保留 `board` 占位（旧配置/守护 home 兼容），
+ * 这里只负责**如实识别**占位集合，不伪造真实 agent；调用方据此给出修复指引。
+ */
+export function planOwnerReadiness(
+  config: Pick<FleetConfig, 'agents'>,
+): PlanOwnerReadiness {
+  const executableAgents = config.agents
+    .filter((agent) => isPlanOwnerExecutableAgent(agent))
+    .map((agent) => agent.name);
+  const placeholderAgents = config.agents
+    .filter((agent) => !isPlanOwnerExecutableAgent(agent))
+    .map((agent) => agent.name);
+  if (executableAgents.length > 0) return { executableAgents, placeholderAgents };
+  return {
+    executableAgents,
+    placeholderAgents,
+    reason: config.agents.length === 0 ? 'no-agents' : 'only-placeholders',
+  };
+}
+
 export interface FleetPeerConfig {
   device: string;
   /** 可选 multiaddr（用于拨号；缺省则等待对端拨入） */
@@ -460,7 +492,8 @@ export function daemonConfigToFleet(dir: string, cfg: Record<string, unknown>): 
     namespace: namespaces[0] ?? 'tasks',
     listen,
     peers,
-    // 守护侧只作任务板（board），不注册执行型 agent；占位满足校验（kind 属合法枚举）
+    // 守护侧只作任务板（board），不注册执行型 agent；占位满足校验（kind 属合法枚举）。
+    // 只有占位时 `planOwnerReadiness` 会返回 only-placeholders，由 doctor 给出明确指引（不伪造真实 agent）。
     agents: [{ name: 'board', kind: 'echo' }],
     ...(typeof cfg.defaultAgent === 'string' && cfg.defaultAgent.length > 0 ? { defaultAgent: cfg.defaultAgent } : {}),
     ...(typeof cfg.quotaLimitPerDevice === 'number' ? { quotaLimitPerDevice: cfg.quotaLimitPerDevice } : {}),

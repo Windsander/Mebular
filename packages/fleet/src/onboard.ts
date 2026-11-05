@@ -22,9 +22,11 @@ import {
   fleetStoragePath,
   generateMasterKey,
   identityDeviceIdForStorage,
+  isPlanOwnerExecutableAgent,
   loadFleetConfig,
   loadToolConfig,
   masterKeyFingerprint,
+  planOwnerReadiness,
   readMasterKeyFile,
   saveFleetConfig,
   validateFleetConfig,
@@ -621,6 +623,43 @@ export async function doctor(dir: string): Promise<DoctorReport> {
     add('agent 注册表', 'FAIL', (error as Error).message, '修正 agents 配置');
   }
 
+  // 6.1) plan owner/MR readiness：echo/board 占位或空 agents 都无法承担 plan。
+  // WARN（非 FAIL）用于提示「能上车、能同步，但派 plan 会失败」，同时保持既有 doctor 的 ok 语义。
+  const readiness = planOwnerReadiness(config);
+  if (readiness.executableAgents.length > 0) {
+    const placeholders = readiness.placeholderAgents.length > 0
+      ? `；占位 agent=[${readiness.placeholderAgents.join(', ')}]（不可作为 plan owner/MR）`
+      : '';
+    add('plan owner 就绪', 'PASS', `executable=[${readiness.executableAgents.join(', ')}]${placeholders}`);
+  } else {
+    const detail = readiness.reason === 'no-agents'
+      ? 'agents 为空：没有可执行 agent'
+      : `仅有占位 agent=[${readiness.placeholderAgents.join(', ')}]（echo/board 不可执行）`;
+    add(
+      'plan owner 就绪',
+      'WARN',
+      `${detail}；plan owner/MR 会因 PLAN_OWNER_UNEXECUTABLE 失败`,
+      '配置真实 agent（command/hermes/dsh/opencode/claude-code），或运行 `fleet quickstart` / `fleet join` 重新检测本机 CLI',
+    );
+  }
+
+  // 6.2) defaultAgent：存在时必须指向本机真实且可执行的 agent（ghost/占位 → FAIL）。
+  if (config.defaultAgent !== undefined) {
+    const named = config.agents.find((agent) => agent.name === config.defaultAgent);
+    if (named === undefined) {
+      add('defaultAgent', 'FAIL', `defaultAgent=${config.defaultAgent} 不在 agents[]`, '改为已注册的真实 agent，或删除 defaultAgent');
+    } else if (!isPlanOwnerExecutableAgent(named)) {
+      add(
+        'defaultAgent',
+        'FAIL',
+        `defaultAgent=${named.name} 不是可执行 agent（kind=${named.kind}${named.command === undefined ? '' : `, command=${named.command}`}）`,
+        'echo/board/无 command 的 command 不可作为默认执行 agent：改为真实 agent 或删除 defaultAgent',
+      );
+    } else {
+      add('defaultAgent', 'PASS', `defaultAgent=${named.name}（kind=${named.kind}）`);
+    }
+  }
+
   // 7) 同步已收敛（本地是否已见对端署名的任务事件）
   if (encryption === null) {
     add('同步已收敛', 'SKIP', '主密钥不可用，跳过');
@@ -681,6 +720,19 @@ export async function doctor(dir: string): Promise<DoctorReport> {
     add('心跳新鲜', 'PASS', `role=${heartbeat.role} pid=${heartbeat.pid} age=${Date.now() - heartbeat.ts}ms sha=${heartbeat.sha}`);
   } else {
     add('心跳新鲜', 'FAIL', `心跳陈旧 age=${Date.now() - heartbeat.ts}ms（role=${heartbeat.role} pid=${heartbeat.pid}）`, '服务可能已崩溃：`fleet service status` / `fleet service logs`');
+  }
+
+  // 9.1) plan materializer：由 `fleet node`（role=node，`--run-forever`/fleet-node 服务）驱动。
+  // 缺失/陈旧/角色不符 → WARN：plan 仍可提交，但不会自动物化，需要用户启动 node。
+  const materializerHint = 'plan materializer 可能未运行，需 `fleet node --run-forever` 或安装 fleet-node 服务';
+  if (heartbeat === null) {
+    add('plan materializer', 'WARN', '无 service.heartbeat（role=node）', materializerHint);
+  } else if (heartbeat.role !== 'node') {
+    add('plan materializer', 'WARN', `最近心跳 role=${heartbeat.role}，不是 fleet-node`, materializerHint);
+  } else if (!isHeartbeatFresh(dir)) {
+    add('plan materializer', 'WARN', `fleet-node 心跳陈旧 age=${Date.now() - heartbeat.ts}ms`, materializerHint);
+  } else {
+    add('plan materializer', 'PASS', `role=node pid=${heartbeat.pid} age=${Date.now() - heartbeat.ts}ms`);
   }
 
   const skipped = checks.filter((c) => c.status === 'SKIP').map((c) => c.name);

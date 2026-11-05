@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MemoryRuntimeSupervisor, pidAlive } from '../../packages/mcp/src/memory-runtime-supervisor.mjs';
+import { appendMemoryRuntimeLog } from '../../packages/mcp/src/memory-runtime-diagnostics.mjs';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const CLI = join(ROOT, 'packages', 'mcp', 'bin', 'mebular.mjs');
@@ -310,5 +311,135 @@ describe('mebular memory-runtime CLI', () => {
     const usage = runCli(envFor(home), 'bogus');
     expect(usage.status).toBe(2);
     expect(parse(usage)).toMatchObject({ ok: false, error: { code: 'usage' } });
+  });
+
+  it('logs/doctor 只输出脱敏诊断，不含 token、正文或真实 home', async () => {
+    const home = await tempDir();
+    await writeConfig(home, { enabled: false });
+    const dataDir = join(home, 'memory-runtime');
+    const secret = 'sk-cli-SECRET_SENTINEL_1234567890';
+    const bodySentinel = 'RAW_CLI_BODY_SENTINEL';
+    const homeSentinel = '/Users/real-user/very-private';
+    await appendMemoryRuntimeLog(dataDir, {
+      level: 'error',
+      event: 'outbox_replay_error',
+      code: 'timeout',
+      stage: 'replay',
+      possibleCommit: true,
+      token: secret,
+      authorization: `Bearer ${secret}`,
+      body: { text: bodySentinel },
+      message: `failed under ${homeSentinel}`,
+    });
+    await mkdir(join(dataDir, 'outbox', 'dead'), { recursive: true, mode: 0o700 });
+    await writeFile(join(dataDir, 'outbox', 'dead', 'ob_cli_dead.json'), JSON.stringify({
+      version: 1,
+      id: 'ob_cli_dead',
+      requestId: 'req_cli_dead',
+      endpoint: '/internal-object',
+      method: 'POST',
+      body: { kind: 'context_checkpoint', expectedRevision: 7, token: secret, text: bodySentinel },
+      createdAt: Date.now() - 10_000,
+      attempts: 2,
+      lastAttemptAt: Date.now() - 5_000,
+      lastError: 'revision_mismatch',
+      error: 'revision_mismatch',
+      deadAt: Date.now() - 5_000,
+      lastFailure: {
+        code: 'revision_mismatch',
+        at: Date.now() - 5_000,
+        disposition: 'conflict',
+        stage: 'replay',
+        details: { currentRevision: 8, expectedRevision: 7, hostId: 'h_other' },
+      },
+    }), { mode: 0o600 });
+
+    const logs = runCli(envFor(home), 'logs', '--limit', '20');
+    expect(logs.status).toBe(0);
+    const logsJson = parse(logs);
+    expect(logsJson).toMatchObject({ ok: true, action: 'logs', count: 1 });
+    expect(logs.stdout).not.toContain(secret);
+    expect(logs.stdout).not.toContain(bodySentinel);
+    expect(logs.stdout).not.toContain('/Users/real-user');
+    expect(logsJson.entries[0]).toMatchObject({ event: 'outbox_replay_error', code: 'timeout' });
+
+    const doctor = runCli(envFor(home), 'doctor');
+    expect(doctor.status).toBe(0);
+    const doctorJson = parse(doctor);
+    expect(doctorJson).toMatchObject({
+      ok: true,
+      action: 'doctor',
+      counts: { dead: 1 },
+      outbox: {
+        dead: 1,
+        lastConflict: {
+          code: 'revision_mismatch',
+          expectedRevision: 7,
+          currentRevision: 8,
+          hostId: 'h_other',
+        },
+      },
+    });
+    expect(doctorJson.logs.files).toBeGreaterThan(0);
+    expect(doctorJson.disk.totalBytes).toBeGreaterThan(0);
+    expect(doctor.stdout).not.toContain(secret);
+    expect(doctor.stdout).not.toContain(bodySentinel);
+    expect(doctor.stdout).not.toContain('/Users/real-user');
+    expect(doctor.stdout).not.toContain(home);
+  });
+
+  it('outbox list/show/rebuild/purge 是显式人工路径且保留原 revision', async () => {
+    const home = await tempDir();
+    await writeConfig(home, { enabled: false });
+    const dataDir = join(home, 'memory-runtime');
+    await mkdir(join(dataDir, 'outbox', 'dead'), { recursive: true, mode: 0o700 });
+    await writeFile(join(dataDir, 'outbox', 'dead', 'ob_manual.json'), JSON.stringify({
+      version: 1,
+      id: 'ob_manual',
+      requestId: 'req_manual_stable',
+      endpoint: '/internal-object',
+      method: 'POST',
+      body: { kind: 'context_checkpoint', expectedRevision: 2 },
+      createdAt: Date.now() - 1_000,
+      attempts: 1,
+      lastAttemptAt: Date.now() - 500,
+      lastError: 'revision_mismatch',
+      error: 'revision_mismatch',
+      deadAt: Date.now() - 500,
+    }), { mode: 0o600 });
+
+    const list = runCli(envFor(home), 'outbox', 'list');
+    expect(list.status).toBe(0);
+    const listJson = parse(list);
+    expect(listJson.items).toEqual([
+      expect.objectContaining({
+        id: 'ob_manual',
+        requestId: 'req_manual_stable',
+        operation: 'checkpoint',
+        revision: 2,
+        reason: 'revision_mismatch',
+      }),
+    ]);
+    expect(list.stdout).not.toContain('"body"');
+
+    const show = runCli(envFor(home), 'outbox', 'show', 'ob_manual');
+    expect(show.status).toBe(0);
+    expect(parse(show)).toMatchObject({ ok: true, item: { id: 'ob_manual', revision: 2 } });
+
+    const rebuilt = runCli(envFor(home), 'outbox', 'rebuild', 'ob_manual');
+    expect(rebuilt.status).toBe(0);
+    expect(parse(rebuilt)).toMatchObject({
+      ok: true,
+      item: { id: 'ob_manual', requestId: 'req_manual_stable', revision: 2 },
+    });
+    const active = JSON.parse(await readFile(join(dataDir, 'outbox', 'ob_manual.json'), 'utf-8'));
+    expect(active.body.expectedRevision).toBe(2);
+    expect(active.requestId).toBe('req_manual_stable');
+    expect(active.meta).toMatchObject({ manualRebuild: true });
+
+    const purged = runCli(envFor(home), 'outbox', 'purge', 'ob_manual');
+    expect(purged.status).toBe(0);
+    expect(parse(purged)).toMatchObject({ ok: true, removed: 1 });
+    expect(existsSync(join(dataDir, 'outbox', 'ob_manual.json'))).toBe(false);
   });
 });

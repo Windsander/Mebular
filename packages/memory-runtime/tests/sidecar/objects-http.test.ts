@@ -378,7 +378,7 @@ describe('sidecar compact / self / checkpoint HTTP', () => {
   });
 
   it('checkpoint：lease 冲突由 capability 裁定；capability 不可用进入 outbox 并返回 pending', async () => {
-    const { server, fake, runtime } = await setup();
+    const { server, fake, runtime, home } = await setup();
     const url = `${server.url}/checkpoints/th_lease?agentId=opencode`;
 
     const first = await request(url, 'PUT', {
@@ -422,8 +422,21 @@ describe('sidecar compact / self / checkpoint HTTP', () => {
     const status = await request(`${server.url}/status`, 'GET');
     expect(status.body.data.degraded).toBe(true);
     expect(status.body.data.counts).toMatchObject({ outbox: 1, objectWritesQueued: 1 });
+    expect(status.body.data.outbox).toMatchObject({
+      items: 1,
+      deadItems: 0,
+      byOperation: expect.arrayContaining([
+        expect.objectContaining({ operation: 'checkpoint', active: 1, dead: 0 }),
+      ]),
+    });
+    expect(status.body.data.details.diagnostics).toMatchObject({
+      logs: { files: 0, bytes: 0 },
+      disk: { totalBytes: expect.any(Number) },
+      outbox: { active: 1, dead: 0 },
+    });
     expect(JSON.stringify(status.body)).not.toContain('offline pending');
     expect(JSON.stringify(status.body)).not.toContain('cap-token');
+    expect(JSON.stringify(status.body)).not.toContain(home);
 
     fake.setFailure(null);
     const replayed = await runtime.replayer.replayOnce();
@@ -1046,5 +1059,77 @@ describe('sidecar compact / self / checkpoint HTTP', () => {
     expect(response.status).toBe(409);
     expect(response.body?.error?.code).toBe('mode_mismatch');
     expect(fake.compacts).toHaveLength(0);
+  });
+
+  it('status：409 replay 冲突暴露 revision/hostId/阶段/dead 聚合，不因本地错误清空诊断', async () => {
+    const { server, runtime } = await setup();
+    const url = `${server.url}/checkpoints/th_conflict_status?agentId=opencode`;
+    const first = await request(url, 'PUT', {
+      agentId: 'opencode',
+      expectedRevision: 0,
+      state: checkpointState('th_conflict_status', 'v1'),
+      summary: 'v1',
+    });
+    expect(first.status).toBe(200);
+    const second = await request(url, 'PUT', {
+      agentId: 'opencode',
+      expectedRevision: 1,
+      state: checkpointState('th_conflict_status', 'v2'),
+      summary: 'v2',
+    });
+    expect(second.status).toBe(200);
+    expect(second.body.data.checkpoint.revision).toBe(2);
+
+    await runtime.local.outbox.enqueue({
+      id: 'ob_status_conflict',
+      requestId: 'req_status_conflict',
+      endpoint: '/internal-object',
+      body: {
+        requestId: 'req_status_conflict',
+        actor: { type: 'agent', agentId: 'opencode' },
+        kind: 'context_checkpoint',
+        op: 'upsert',
+        agentId: 'opencode',
+        threadId: 'th_conflict_status',
+        domain: 'task:th_conflict_status',
+        state: {},
+        expectedRevision: 1,
+      },
+      createdAt: NOW,
+      expiresAt: NOW + 120_000,
+    });
+    const replay = await runtime.replayer.replayOnce();
+    expect(replay).toMatchObject({ dead: 1, remaining: 0 });
+
+    const status = await request(`${server.url}/status`, 'GET');
+    expect(status.body.data.lastError).toMatchObject({
+      code: 'revision_mismatch',
+      stage: 'replay',
+      disposition: 'conflict',
+      details: {
+        currentRevision: 2,
+        expectedRevision: 1,
+        threadId: 'th_conflict_status',
+      },
+    });
+    expect(status.body.data.outbox).toMatchObject({
+      items: 0,
+      deadItems: 1,
+      deadReasons: [{ reason: 'revision_mismatch', count: 1 }],
+      lastConflict: {
+        code: 'revision_mismatch',
+        operation: 'checkpoint',
+        requestId: 'req_status_conflict',
+        currentRevision: 2,
+        expectedRevision: 1,
+      },
+    });
+    expect(status.body.data.outbox.byOperation).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        operation: 'checkpoint',
+        dead: 1,
+        lastFailure: expect.objectContaining({ code: 'revision_mismatch', disposition: 'conflict' }),
+      }),
+    ]));
   });
 });

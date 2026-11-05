@@ -21,6 +21,7 @@ import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { APP_VERSION } from './version.mjs';
 import { readCapabilityToken } from './memory-runtime-token.mjs';
+import { appendMemoryRuntimeLogSync } from './memory-runtime-diagnostics.mjs';
 
 export const MEMORY_RUNTIME_DISCOVERY_FILE = 'memory-runtime.json';
 export const MEMORY_RUNTIME_DATA_DIR = 'memory-runtime';
@@ -1907,6 +1908,15 @@ export class MemoryRuntimeSupervisor {
       ),
       lock: this.lockView,
     });
+    appendMemoryRuntimeLogSync(this.paths.dataDir, {
+      level: 'error',
+      event: 'supervisor_restart',
+      reason: 'child_exit',
+      code: 'sidecar_crashed',
+      exitCode: typeof code === 'number' ? code : null,
+      signal: typeof signal === 'string' ? signal : null,
+      restarts: this.restarts,
+    }, { now: this.now });
     this.#scheduleRestart();
   }
 
@@ -2596,6 +2606,11 @@ export class MemoryRuntimeSupervisor {
         return this.start({ force: false, manual: false });
       }
     }
+    appendMemoryRuntimeLogSync(this.paths.dataDir, {
+      level: 'info',
+      event: 'supervisor_restart',
+      reason: manual ? 'operator_restart' : 'config_restart',
+    }, { now: this.now });
     await this.stop({ includeAttached, timeoutMs });
     this.crashTimes = [];
     this.restarts = 0;

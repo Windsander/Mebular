@@ -6,6 +6,7 @@ import { BoundedOutbox, SidecarLocalLayer } from '../../src/sidecar/local-layer.
 import { CapabilityClientError } from '../../src/sidecar/capability-client.js';
 import { LifecycleGate } from '../../src/sidecar/lifecycle-gate.js';
 import { OutboxReplayer } from '../../src/sidecar/outbox-replayer.js';
+import { aggregateOutboxDiagnostics } from '../../src/sidecar/settlement.js';
 
 const homes: string[] = [];
 
@@ -467,5 +468,211 @@ describe('WP1 x WP2 lifecycle gates', () => {
     expect(keys).toEqual(['req_resume_once', 'req_resume_once']);
     expect(await layer.outbox.get('ob_resume_once')).toBeNull();
     expect(await layer.outbox.deadCount()).toBe(0);
+  });
+});
+
+describe('outbox conflict diagnostics', () => {
+  it('queued revision_mismatch 保留 409 诊断并显式 dead，不 rebase 原 revision', async () => {
+    const clock = 40_000;
+    const { outbox } = await setup(() => clock);
+    await outbox.enqueue({
+      id: 'ob_revision_conflict',
+      requestId: 'req_stable_revision',
+      endpoint: '/internal-object',
+      body: { kind: 'context_checkpoint', expectedRevision: 3, threadId: 't1' },
+      createdAt: clock,
+      expiresAt: clock + 120_000,
+      meta: { kind: 'object' },
+    });
+    const client = {
+      post: jest.fn(async () => {
+        throw new CapabilityClientError('revision_mismatch', 'checkpoint revision 冲突', {
+          status: 409,
+          retryable: true,
+          details: {
+            agentId: 'opencode',
+            threadId: 't1',
+            currentRevision: 4,
+            expectedRevision: 3,
+          },
+        });
+      }),
+    } as any;
+
+    const summary = await new OutboxReplayer({ outbox, client, now: () => clock }).replayOnce();
+    expect(client.post).toHaveBeenCalledTimes(1);
+    expect(client.post).toHaveBeenCalledWith('/internal-object', expect.objectContaining({ expectedRevision: 3 }), {
+      idempotencyKey: 'req_stable_revision',
+      retries: 0,
+    });
+    expect(summary).toMatchObject({ settled: 0, retried: 0, dead: 1, remaining: 0 });
+    expect(summary.errors[0]).toMatchObject({
+      code: 'revision_mismatch',
+      status: 409,
+      disposition: 'conflict',
+      stage: 'replay',
+      details: {
+        currentRevision: 4,
+        expectedRevision: 3,
+        threadId: 't1',
+      },
+    });
+
+    const dead = await outbox.getDead('ob_revision_conflict');
+    expect(dead).toMatchObject({
+      requestId: 'req_stable_revision',
+      body: { expectedRevision: 3 },
+      error: 'revision_mismatch',
+      failureStage: 'replay',
+      lastFailure: {
+        code: 'revision_mismatch',
+        details: { currentRevision: 4, expectedRevision: 3 },
+      },
+    });
+    const diagnostics = aggregateOutboxDiagnostics([], [dead!], clock);
+    expect(diagnostics.lastConflict).toMatchObject({
+      code: 'revision_mismatch',
+      operation: 'checkpoint',
+      requestId: 'req_stable_revision',
+      currentRevision: 4,
+      expectedRevision: 3,
+    });
+    expect(diagnostics.deadReasons).toEqual([{ reason: 'revision_mismatch', count: 1 }]);
+  });
+
+  it('checkpoint_lease_held 只做有限协作重试，随后显式 dead', async () => {
+    let clock = 50_000;
+    const { outbox } = await setup(() => clock);
+    await outbox.enqueue({
+      id: 'ob_lease_conflict',
+      requestId: 'req_stable_lease',
+      endpoint: '/internal-object',
+      body: { kind: 'context_checkpoint', expectedRevision: 2 },
+      createdAt: clock,
+      expiresAt: clock + 600_000,
+    });
+    const client = {
+      post: jest.fn(async () => {
+        throw new CapabilityClientError('checkpoint_lease_held', 'checkpoint 租约被其他 host 持有', {
+          status: 409,
+          retryable: true,
+          details: { hostId: 'h_other', until: clock + 100 },
+        });
+      }),
+    } as any;
+    const replayer = new OutboxReplayer({ outbox, client, now: () => clock });
+
+    let calls = 0;
+    for (; calls < 10; calls += 1) {
+      const summary = await replayer.replayOnce();
+      if (summary.dead > 0) break;
+      const item = await outbox.get('ob_lease_conflict');
+      expect(item).not.toBeNull();
+      clock = Math.max(clock + 1, item?.nextAttemptAt ?? clock + 1);
+    }
+
+    expect(calls).toBeLessThan(10);
+    expect(client.post).toHaveBeenCalledTimes(calls + 1);
+    const dead = await outbox.getDead('ob_lease_conflict');
+    expect(dead).toMatchObject({
+      requestId: 'req_stable_lease',
+      error: 'checkpoint_lease_held',
+      lastFailure: {
+        code: 'checkpoint_lease_held',
+        disposition: 'conflict',
+        details: { hostId: 'h_other' },
+      },
+    });
+    const diagnostics = aggregateOutboxDiagnostics([], [dead!], clock);
+    expect(diagnostics.lastConflict).toMatchObject({
+      code: 'checkpoint_lease_held',
+      hostId: 'h_other',
+      expectedRevision: 2,
+    });
+  });
+
+  it('ambiguous partial 只提示可能已提交与对账，不伪造 committed', async () => {
+    const clock = 60_000;
+    const { outbox } = await setup(() => clock);
+    await outbox.enqueue({
+      id: 'ob_partial_ambiguous',
+      requestId: 'req_partial_ambiguous',
+      endpoint: '/detail',
+      body: { items: [{ clientItemId: 'det_1' }] },
+      createdAt: clock,
+      expiresAt: clock + 600_000,
+      meta: { kind: 'detail' },
+    });
+    const client = {
+      post: jest.fn(async () => ({ data: { results: [], failed: 1, partial: true } })),
+    } as any;
+    const summary = await new OutboxReplayer({
+      outbox,
+      client,
+      now: () => clock,
+      onSettled: () => false,
+    }).replayOnce();
+    expect(summary).toMatchObject({ settled: 0, retried: 1, dead: 0, remaining: 1 });
+    expect(summary.errors[0]).toMatchObject({
+      code: 'partial_failure',
+      disposition: 'ambiguous',
+      possibleCommit: true,
+      stage: 'settle',
+    });
+
+    const active = (await outbox.list())[0]!;
+    const diagnostics = aggregateOutboxDiagnostics([active], [], clock);
+    expect(diagnostics.ambiguous).toHaveLength(1);
+    expect(diagnostics.ambiguous[0]).toMatchObject({
+      requestId: 'req_partial_ambiguous',
+      operation: 'detail',
+      possiblyCommitted: true,
+      hint: 'may_have_been_committed',
+      reconciliation: 'read_authoritative_objects',
+    });
+    expect(diagnostics.ambiguous[0]).not.toHaveProperty('committed');
+  });
+
+  it('dead 按操作/endpoint 聚合且暴露最老年龄与原因', async () => {
+    let clock = 70_000;
+    const { outbox } = await setup(() => clock);
+    await outbox.enqueue({
+      id: 'ob_dead_detail',
+      requestId: 'req_dead_detail',
+      endpoint: '/detail',
+      body: { items: [] },
+      createdAt: clock - 10_000,
+      expiresAt: clock + 60_000,
+      meta: { kind: 'detail' },
+    });
+    expect(await outbox.deadLetter('ob_dead_detail', 'validation_failed')).toBe(true);
+    clock += 5_000;
+    await outbox.enqueue({
+      id: 'ob_dead_record',
+      requestId: 'req_dead_record',
+      endpoint: '/write',
+      body: { items: [] },
+      createdAt: clock - 2_000,
+      expiresAt: clock + 60_000,
+      meta: { kind: 'record' },
+    });
+    expect(await outbox.deadLetter('ob_dead_record', 'retention_expired')).toBe(true);
+
+    const dead = await outbox.listDead();
+    const diagnostics = aggregateOutboxDiagnostics([], dead, clock);
+    expect(diagnostics.dead).toBe(2);
+    expect(diagnostics.deadOldestAgeMs).toBe(5_000);
+    expect(diagnostics.deadReasons).toEqual([
+      { reason: 'retention_expired', count: 1 },
+      { reason: 'validation_failed', count: 1 },
+    ]);
+    expect(diagnostics.byOperation).toEqual(expect.arrayContaining([
+      expect.objectContaining({ operation: 'detail', endpoint: '/detail', dead: 1 }),
+      expect.objectContaining({ operation: 'record', endpoint: '/write', dead: 1 }),
+    ]));
+    expect(diagnostics.byEndpoint).toEqual(expect.arrayContaining([
+      expect.objectContaining({ operation: 'detail', endpoint: '/detail', dead: 1 }),
+      expect.objectContaining({ operation: 'record', endpoint: '/write', dead: 1 }),
+    ]));
   });
 });

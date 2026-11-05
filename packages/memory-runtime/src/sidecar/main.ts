@@ -62,6 +62,7 @@ import {
   InferenceService,
 } from './inference/index.js';
 import { SettlementRuntime } from './settlement.js';
+import { DiagnosticLog } from './diagnostic-log.js';
 import { LifecycleGate } from './lifecycle-gate.js';
 import {
   SidecarServer,
@@ -132,6 +133,8 @@ export interface StartSidecarOptions {
   parentCheckMs?: number;
   now?: () => number;
   startedAt?: number;
+  /** 诊断用启动原因；不包含路径/凭据。 */
+  restartReason?: string;
 }
 
 export interface SidecarHandle {
@@ -142,6 +145,7 @@ export interface SidecarHandle {
   model: SidecarInferenceProvider;
   inferenceService: InferenceService;
   settlement: SettlementRuntime;
+  diagnostics: DiagnosticLog;
   server: SidecarServer;
   discovery: SidecarDiscovery;
   capability: SidecarStatusCapability;
@@ -401,6 +405,14 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
     };
   }
 
+  const diagnostics = new DiagnosticLog({ dir: paths.logsDir, now });
+  await diagnostics.init().catch(() => undefined);
+  await diagnostics.append('info', 'runtime_start', {
+    reason: options.restartReason ?? 'startup',
+    state: 'starting',
+    runtimeVersion: SIDECAR_RUNTIME_VERSION,
+  }).catch(() => undefined);
+
   let config: SidecarConfig;
   const configWarnings: string[] = [];
   try {
@@ -523,6 +535,12 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
     capabilityIdentity = probe.identity;
     capabilityDetailQuota = probe.detailQuota;
     warnings = [...probe.warnings];
+    await diagnostics.append(capability.reachable ? 'info' : 'warn', 'capability_probe', {
+      reachable: capability.reachable,
+      version: capability.version,
+      error: capability.error,
+      warning: probe.warnings[0] ?? null,
+    }).catch(() => undefined);
   }
 
   const identity = mergeIdentity(paths.home, options.identity, capabilityIdentity);
@@ -615,6 +633,8 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
       policyPath: paths.policyPath,
       inference: model,
       lifecycle,
+      diagnostics,
+      ...(options.restartReason ? { restartReason: options.restartReason } : {}),
       now,
     });
     // main 拥有生命周期边界；不修改 replayer，也绝不为了等待而启动新 replay。
@@ -827,6 +847,10 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
       lifecycleMode = 'mcp';
       dormantReason = reason;
       dormantCredentialId = capabilityCredentialId;
+      void diagnostics.append('warn', 'runtime_dormant', {
+        reason,
+        phase: 'draining',
+      }).catch(() => undefined);
       // 同步撤销准入；后续 ingest/staging/model/capability 写与 outbox 入队立即 409。
       lifecycle.beginDrain(reason);
       // mcp+degraded 是 draining/incomplete；只有全部收尾后才发布 mcp+stopped。
@@ -869,6 +893,10 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
         dormantIncomplete = true;
       }
       server.setState(clean ? 'stopped' : 'degraded');
+      void diagnostics.append(clean ? 'info' : 'warn', 'runtime_dormant', {
+        reason,
+        phase: clean ? 'stopped' : 'incomplete',
+      }).catch(() => undefined);
       return clean;
     })().finally(() => {
       dormantPromise = null;
@@ -945,6 +973,10 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
             await server.setMode('immersive');
             server.setState(nextDegraded ? 'degraded' : 'ready');
             settlement.replayer.start();
+            void diagnostics.append('info', 'runtime_resume', {
+              reason: 'capability_recovered',
+              degraded: nextDegraded,
+            }).catch(() => undefined);
           } catch {
             dormantReason = 'discovery_write_failed';
             dormantIncomplete = true;
@@ -1013,6 +1045,10 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
         stopping = true;
         lifecycleMode = 'mcp';
         lifecycle.beginDrain('stopping');
+        void diagnostics.append('info', 'runtime_stop', {
+          reason: 'operator_stop',
+          state: 'stopping',
+        }).catch(() => undefined);
         void server.setMode('mcp', { timeoutMs: 0 });
         clearInterval(heartbeat);
         if (parentWatch !== null) clearInterval(parentWatch);
@@ -1053,6 +1089,7 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
     model,
     inferenceService,
     settlement,
+    diagnostics,
     server,
     discovery,
     capability,
@@ -1217,6 +1254,7 @@ export function getSidecarVersion(): SidecarVersionResult {
 const USAGE = `用法：
   mebular-memory-runtime serve [--home DIR] [--data-dir DIR] [--port N] [--host HOST] [--parent-pid PID]
   mebular-memory-runtime status [--home DIR] [--data-dir DIR]
+  mebular-memory-runtime logs [--home DIR] [--data-dir DIR] [--limit N]
   mebular-memory-runtime version
 
 说明：serve 启动 Memory Runtime sidecar（/memory-runtime/v1）。轻量 MCP 模式不应启动它。`;
@@ -1304,6 +1342,32 @@ function parseStatusArgs(args: string[]): { home?: string; dataDir?: string } {
   return { home: parsed.home, dataDir: parsed.dataDir };
 }
 
+function parseLogArgs(args: string[]): { home?: string; dataDir?: string; limit: number } {
+  let home: string | undefined;
+  let dataDir: string | undefined;
+  let limit = 50;
+  for (let index = 0; index < args.length;) {
+    const arg = args[index]!;
+    if (arg === '--json') {
+      index += 1;
+      continue;
+    }
+    const equals = arg.indexOf('=');
+    const name = equals >= 0 ? arg.slice(0, equals) : arg;
+    const inline = equals >= 0 ? arg.slice(equals + 1) : undefined;
+    if (name === '--home' || name === '--data-dir' || name === '--limit') {
+      const { value, next } = cliValue(args, index, inline, name);
+      if (name === '--home') home = value;
+      else if (name === '--data-dir') dataDir = value;
+      else limit = parseInteger(value, name, { min: 1, max: 500 });
+      index = next;
+      continue;
+    }
+    throw new SidecarStartupError('invalid_request', 1, `未知参数：${name}`);
+  }
+  return { home, dataDir, limit };
+}
+
 /**
  * CLI 主入口；返回进程退出码。
  * 不在这里 process.exit，便于测试与嵌入。
@@ -1340,6 +1404,25 @@ export async function main(argv: string[] = process.argv.slice(2), env: NodeJS.P
       const options = parseStatusArgs(argv.slice(1));
       const status = await getSidecarStatus({ ...options, env });
       process.stdout.write(`${JSON.stringify(status)}\n`);
+      return 0;
+    }
+
+    if (command === 'logs') {
+      const options = parseLogArgs(argv.slice(1));
+      const paths = resolveSidecarPaths({ home: options.home, dataDir: options.dataDir, env });
+      const diagnostics = new DiagnosticLog({ dir: paths.logsDir });
+      const [entries, stats] = await Promise.all([
+        diagnostics.readRecent(options.limit),
+        diagnostics.stats(),
+      ]);
+      process.stdout.write(`${JSON.stringify({
+        ok: true,
+        command: 'logs',
+        count: entries.length,
+        truncated: entries.length >= options.limit,
+        log: stats,
+        entries,
+      })}\n`);
       return 0;
     }
 

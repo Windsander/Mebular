@@ -10,9 +10,11 @@
 import { CapabilityClient, CapabilityClientError } from './capability-client.js';
 import type { IngestErrorView, OutboxReplaySummary } from './ingest.js';
 import type { LifecycleGate } from './lifecycle-gate.js';
+import { redactText } from './text.js';
 import {
   OUTBOX_REPLAY_LEASE_MS,
   type BoundedOutbox,
+  type OutboxFailureView,
   type OutboxItem,
   type OutboxReplayCompletion,
 } from './local-layer.js';
@@ -20,6 +22,20 @@ import {
 const RETRY_BASE_MS = 1000;
 const RETRY_MAX_MS = 60_000;
 const REPLAY_LEASE_MARGIN_MS = 5_000;
+/** 租约冲突只能协作重试有限次；超过后必须显式 dead，不能永久占位。 */
+const MAX_LEASE_CONFLICT_ATTEMPTS = 6;
+
+const DIAGNOSTIC_DETAIL_KEYS = [
+  'agentId',
+  'threadId',
+  'domain',
+  'hostId',
+  'until',
+  'currentRevision',
+  'expectedRevision',
+  'operation',
+  'phase',
+] as const;
 
 export interface OutboxReplayerOptions {
   outbox: BoundedOutbox;
@@ -39,28 +55,128 @@ export interface OutboxReplayerOptions {
 interface ItemOutcome {
   outcome: 'settled' | 'retry' | 'dead' | 'skipped';
   count?: number;
-  error?: IngestErrorView;
+  error?: ReplayErrorView;
+}
+
+/** 重放诊断在基础 IngestErrorView 上保留冲突字段；不写入正文。 */
+interface ReplayErrorView extends IngestErrorView {
+  status?: number;
+  retryable?: boolean;
+  disposition?: 'conflict' | 'retryable' | 'permanent' | 'ambiguous';
+  stage?: string;
+  details?: Record<string, string | number | boolean>;
+  possibleCommit?: boolean;
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
-function errorView(error: unknown, at: number): IngestErrorView {
-  if (error instanceof CapabilityClientError) {
-    return { code: error.code, message: error.message, at };
+function diagnosticDetails(value: unknown): Record<string, string | number | boolean> | undefined {
+  if (!isObject(value)) return undefined;
+  const out: Record<string, string | number | boolean> = {};
+  for (const key of DIAGNOSTIC_DETAIL_KEYS) {
+    const entry = value[key];
+    if (typeof entry === 'string') {
+      const redacted = redactText(entry).text
+        .replace(/[\u0000-\u001f\u007f]/g, '')
+        .slice(0, 128);
+      if (redacted.length > 0) out[key] = redacted;
+    } else if (typeof entry === 'number' && Number.isFinite(entry)) {
+      out[key] = entry;
+    } else if (typeof entry === 'boolean') {
+      out[key] = entry;
+    }
   }
-  return { code: 'internal', message: (error as Error)?.message ?? 'outbox 重放失败', at };
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function errorCodeOf(error: unknown): string {
+  if (error instanceof CapabilityClientError) return error.code;
+  return typeof (error as { code?: unknown })?.code === 'string'
+    ? (error as { code: string }).code
+    : 'internal';
+}
+
+function dispositionOf(code: string, status: number, retryableValue: boolean): ReplayErrorView['disposition'] {
+  if (code === 'revision_mismatch' || code === 'checkpoint_lease_held'
+    || code === 'idempotency_conflict' || code === 'mode_mismatch') return 'conflict';
+  if (code === 'timeout' || code === 'network_error' || code === 'partial_failure') return 'ambiguous';
+  if (retryableValue || status === 0 || status === 401 || status === 408 || status === 429 || status >= 500) {
+    return 'retryable';
+  }
+  return 'permanent';
+}
+
+function errorView(error: unknown, at: number, stage = 'replay'): ReplayErrorView {
+  if (error instanceof CapabilityClientError) {
+    const details = diagnosticDetails(error.details);
+    return {
+      code: error.code,
+      message: redactText(error.message).text.slice(0, 512),
+      at,
+      status: error.status,
+      retryable: error.retryable,
+      disposition: dispositionOf(error.code, error.status, error.retryable),
+      stage,
+      ...(details ? { details } : {}),
+      ...(error.code === 'timeout' || error.code === 'network_error'
+        ? { possibleCommit: true }
+        : {}),
+    };
+  }
+  const code = errorCodeOf(error);
+  const status = typeof (error as { status?: unknown })?.status === 'number'
+    ? (error as { status: number }).status
+    : 0;
+  const retryableValue = (error as { retryable?: unknown })?.retryable === true;
+  const details = diagnosticDetails((error as { details?: unknown })?.details);
+  return {
+    code,
+    message: redactText((error as Error)?.message ?? 'outbox 重放失败').text.slice(0, 512),
+    at,
+    ...(status > 0 ? { status } : {}),
+    retryable: retryableValue,
+    disposition: dispositionOf(code, status, retryableValue),
+    stage,
+    ...(details ? { details } : {}),
+  };
+}
+
+function failureOf(view: ReplayErrorView): OutboxFailureView {
+  return {
+    code: view.code,
+    message: view.message,
+    at: view.at,
+    ...(view.status !== undefined ? { status: view.status } : {}),
+    ...(view.retryable !== undefined ? { retryable: view.retryable } : {}),
+    ...(view.disposition ? { disposition: view.disposition } : {}),
+    ...(view.stage ? { stage: view.stage } : {}),
+    ...(view.details ? { details: view.details } : {}),
+    ...(view.possibleCommit ? { possibleCommit: true } : {}),
+  };
 }
 
 function retryable(error: unknown): boolean {
   if (error instanceof CapabilityClientError) {
+    // queued replay 的 revision 冲突绝不自动 rebase 到新 revision；必须显式 dead。
+    if (error.code === 'revision_mismatch' || error.code === 'idempotency_conflict') return false;
+    // 租约冲突允许协作重试，但由 replayItem 的有限次数约束收口。
+    if (error.code === 'checkpoint_lease_held') return true;
     if (error.retryable) return true;
     // token 轮换后可能恢复；保留在 outbox 等待下一次重放。
     if (error.status === 401 || error.status === 0) return true;
     return error.status === 429 || error.status >= 500;
   }
   return true;
+}
+
+function leaseConflictExhausted(view: ReplayErrorView, attempts: number, now: number): boolean {
+  if (view.code !== 'checkpoint_lease_held') return false;
+  if (attempts >= MAX_LEASE_CONFLICT_ATTEMPTS) return true;
+  const until = typeof view.details?.until === 'number' ? view.details.until : null;
+  // 租约已过期仍冲突，再给一次协作重试；之后不再无限等待。
+  return until !== null && until <= now && attempts >= 2;
 }
 
 function revoked(error: unknown): boolean {
@@ -141,7 +257,7 @@ export class OutboxReplayer {
   }
 
   private async replayUnlocked(): Promise<OutboxReplaySummary> {
-    const errors: IngestErrorView[] = [];
+    const errors: ReplayErrorView[] = [];
     let settled = 0;
     let retried = 0;
     let dead = 0;
@@ -203,7 +319,13 @@ export class OutboxReplayer {
         await this.notifyComplete(item.id, 'dead');
         return {
           outcome: 'dead',
-          error: { code: 'retention_expired', message: 'outbox 操作已超过截止时间', at: this.now() },
+          error: {
+            code: 'retention_expired',
+            message: 'outbox 操作已超过截止时间',
+            at: this.now(),
+            disposition: 'permanent',
+            stage: 'replay',
+          },
         };
       }
       return { outcome: 'skipped' };
@@ -231,15 +353,24 @@ export class OutboxReplayer {
       const keepForRetry = (await this.onSettled?.(leased, envelope.data)) === false;
       if (keepForRetry) {
         const delay = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** Math.min(6, leased.attempts));
+        const partialFailure: ReplayErrorView = {
+          code: 'partial_failure',
+          message: '部分写入未完成；可能已有对象提交，需要权威回读对账',
+          at: this.now(),
+          disposition: 'ambiguous',
+          stage: 'settle',
+          possibleCommit: true,
+        };
         const completion = await this.outbox.completeReplay(leased.id, {
           outcome: 'retry',
           owner,
           now: this.now(),
           error: 'partial_failure',
           retryDelayMs: delay,
+          failure: failureOf(partialFailure),
         });
         await this.notifyComplete(leased.id, completion);
-        return { outcome: completion === 'skipped' ? 'skipped' : completion };
+        return { outcome: completion === 'skipped' ? 'skipped' : completion, error: partialFailure };
       }
       // HTTP/capability 已确认且本地必需项对账完成；即使响应在 deadline 后到达，
       // 也只能按 committed 移除活动项，不能再由 cleanup 写成 dead。
@@ -260,15 +391,28 @@ export class OutboxReplayer {
         // drain 后晚到的失败/超时同样只能 skipped：不 recordAttempt、不写 dead。
         return { outcome: 'skipped' };
       }
-      const view = errorView(error, this.now());
-      const canRetry = retryable(error);
-      const delay = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** Math.min(6, leased.attempts));
+      const view = errorView(error, this.now(), 'replay');
+      const conflictExhausted = leaseConflictExhausted(view, leased.attempts, this.now());
+      const canRetry = !conflictExhausted
+        && view.disposition !== 'permanent'
+        && (error instanceof CapabilityClientError
+          ? retryable(error)
+          : view.retryable !== false && view.disposition !== 'conflict');
+      const until = typeof view.details?.until === 'number' ? view.details.until : null;
+      const leaseWait = view.code === 'checkpoint_lease_held' && until !== null
+        ? Math.max(0, until - this.now() + 100)
+        : 0;
+      const delay = Math.min(
+        RETRY_MAX_MS,
+        Math.max(leaseWait, RETRY_BASE_MS * 2 ** Math.min(6, leased.attempts)),
+      );
       const completion = await this.outbox.completeReplay(leased.id, {
         outcome: canRetry ? 'retry' : 'dead',
         owner,
         now: this.now(),
         error: view.code,
         retryDelayMs: delay,
+        failure: failureOf(view),
       });
       await this.notifyComplete(leased.id, completion);
       if (completion === 'retry') {

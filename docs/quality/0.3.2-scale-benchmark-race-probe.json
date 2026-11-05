@@ -1,13 +1,13 @@
 {
   "schema": "mebular.scale-benchmark-race-probe/1",
-  "status": "reproduced",
-  "startedAt": "2026-11-05T08:13:52.925Z",
-  "finishedAt": "2026-11-05T08:14:04.117Z",
-  "command": "node tests/integration/scale-bench/race-probe.mjs --out /private/var/folders/86/gpjtr2p94dg7mz24pbkrj8pw0000gn/T/opencode/scale-10k-diag2/race-probe-final.json",
+  "status": "not-reproduced",
+  "startedAt": "2026-11-05T08:48:08.890Z",
+  "finishedAt": "2026-11-05T08:48:19.262Z",
+  "command": "node tests/integration/scale-bench/race-probe.mjs --out docs/quality/0.3.2-scale-benchmark-race-probe.json",
   "git": {
-    "sha": "19cac09eb8ef7fc895b800339ba4dd9214c6db39",
-    "shortSha": "19cac09eb8ef",
-    "branch": "feat/0.3.2-scale-fix",
+    "sha": "ca2193e5fe9dc24a8c9804e417f76e225472ab21",
+    "shortSha": "ca2193e5fe9d",
+    "branch": "fix/0.3.2-idempotency-inflight",
     "dirty": false,
     "dirtyFileCount": 0
   },
@@ -19,10 +19,10 @@
     "cpuModel": "Intel(R) Core(TM) i7-8850H CPU @ 2.60GHz",
     "cpuCount": 12,
     "totalMemoryBytes": 34359738368,
-    "freeMemoryBytes": 2859102208
+    "freeMemoryBytes": 1276088320
   },
   "options": {
-    "out": "/private/var/folders/86/gpjtr2p94dg7mz24pbkrj8pw0000gn/T/opencode/scale-10k-diag2/race-probe-final.json",
+    "out": "/Users/sobertli/.local/share/opencode/worktree/a2c07e66cba5a7cc7cccad71ec68f3b1d72c6194/v032-idempotency/docs/quality/0.3.2-scale-benchmark-race-probe.json",
     "records": 100,
     "timeoutMs": 200,
     "waitMs": 3000
@@ -43,8 +43,8 @@
   "probes": [
     {
       "name": "concurrent-idempotency",
-      "startedAt": "2026-11-05T08:13:53.280Z",
-      "finishedAt": "2026-11-05T08:13:54.020Z",
+      "startedAt": "2026-11-05T08:48:09.033Z",
+      "finishedAt": "2026-11-05T08:48:09.333Z",
       "requestId": "req_race_probe_concurrent_0001",
       "logicalRecords": 100,
       "responses": [
@@ -56,9 +56,9 @@
           "failed": 0,
           "replayed": false,
           "resultIds": [
-            "01M6NCB0SYR42525JD0C3TV896",
-            "01M6NCB0TJ42XCJ1FVC4Q729CS",
-            "01M6NCB0TR6J73QHTXZM80XW63"
+            "01M6NE9RBGEQDWWP5DCFZ6Y33H",
+            "01M6NE9RBT0T5CEXJ5G017AS3S",
+            "01M6NE9RBXM7DEGRV2PB69YSGJ"
           ]
         },
         {
@@ -69,28 +69,28 @@
           "failed": 0,
           "replayed": false,
           "resultIds": [
-            "01M6NCB0T5Z5JD5W99JZYBZ636",
-            "01M6NCB0TKF9J1YQBPCRXXH21A",
-            "01M6NCB0TS3GNSEXXTY4FYVQ67"
+            "01M6NE9RBGEQDWWP5DCFZ6Y33H",
+            "01M6NE9RBT0T5CEXJ5G017AS3S",
+            "01M6NE9RBXM7DEGRV2PB69YSGJ"
           ]
         }
       ],
       "counts": {
-        "nodes": 200,
-        "memoryRecords": 200,
+        "nodes": 100,
+        "memoryRecords": 100,
         "compacts": 0,
         "checkpoints": 0,
         "selfRecords": 0,
         "details": 0,
         "detailBytes": 0
       },
-      "duplicated": 100,
-      "reproduced": true
+      "duplicated": 0,
+      "reproduced": false
     },
     {
       "name": "retry-timeout",
-      "startedAt": "2026-11-05T08:13:54.112Z",
-      "finishedAt": "2026-11-05T08:14:04.034Z",
+      "startedAt": "2026-11-05T08:48:09.683Z",
+      "finishedAt": "2026-11-05T08:48:19.176Z",
       "capabilityTimeoutMs": 200,
       "logicalRecords": 100,
       "ingestHttpStatus": 200,
@@ -99,8 +99,8 @@
       "detailsReturned": 100,
       "warnings": [],
       "countsBeforeWait": {
-        "nodes": 231,
-        "memoryRecords": 131,
+        "nodes": 200,
+        "memoryRecords": 100,
         "compacts": 0,
         "checkpoints": 0,
         "selfRecords": 0,
@@ -108,16 +108,16 @@
         "detailBytes": 3000
       },
       "countsAfterWait": {
-        "nodes": 231,
-        "memoryRecords": 131,
+        "nodes": 200,
+        "memoryRecords": 100,
         "compacts": 0,
         "checkpoints": 0,
         "selfRecords": 0,
         "details": 100,
         "detailBytes": 3000
       },
-      "duplicated": 31,
-      "sameSignatureAs10k": true
+      "duplicated": 0,
+      "sameSignatureAs10k": false
     }
   ],
   "cleanup": null,

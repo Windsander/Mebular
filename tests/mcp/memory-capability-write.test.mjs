@@ -3110,6 +3110,123 @@ describe('drain 覆盖 update/delete/archive 写路径', () => {
   }
 });
 
+describe('close 等待同键 join 的在途请求', () => {
+  it('A 被 gate、B 同 key join、close 同时发生：等待两者并 clean', async () => {
+    const instanceHome = await mkdtemp(join(tmpdir(), 'memory-capability-join-close-'));
+    const savedCloudRoot = process.env.MEBULAR_CLOUD_ROOT;
+    process.env.MEBULAR_CLOUD_ROOT = join(instanceHome, 'cloud');
+    let instance = null;
+    const marker = unique('join-close-marker');
+    const key = unique('join-close-key');
+    const body = writeBody([{
+      clientItemId: unique('cand_join_close'),
+      domain: 'agent:opencode',
+      kind: 'fact',
+      content: { subject: 'close', predicate: 'join', object: marker, confidence: 0.9 },
+    }]);
+    const originalWriteRecords = service.writeRecords.bind(service);
+    let entered = false;
+    let release = () => {};
+    const gate = new Promise((resolve) => { release = resolve; });
+    let calls = 0;
+    service.writeRecords = async (...args) => {
+      calls += 1;
+      if (!entered) {
+        entered = true;
+        await gate;
+      }
+      return originalWriteRecords(...args);
+    };
+    const savedBase = base;
+    try {
+      instance = await startHttpServer({
+        home: instanceHome,
+        app,
+        service,
+        config: {
+          deviceId: 'device-w2b',
+          memoryRuntime: { enabled: true },
+          sync: { namespaces: [] },
+          mcp: { http: { host: '127.0.0.1', port: 0, auth: 'none' } },
+        },
+        buildServer: () => ({ connect: async () => undefined, close: async () => undefined }),
+        host: '127.0.0.1',
+        port: 0,
+        auth: 'none',
+      });
+      const instanceBase = `http://127.0.0.1:${instance.port}`;
+      const instanceToken = (await readCapabilityToken({ home: instanceHome, env: {} }))?.token;
+      base = instanceBase;
+      const secondBodyRead = new Promise((resolve) => {
+        const onRequest = (req) => {
+          if (!String(req.url ?? '').includes('/internal/memory/v1/write')) return;
+          instance.server.off('request', onRequest);
+          if (req.readableEnded) resolve();
+          else req.once('end', resolve);
+        };
+        instance.server.on('request', onRequest);
+      });
+
+      const firstPending = post('/internal/memory/v1/write', body, {
+        token: instanceToken,
+        headers: { 'idempotency-key': key },
+      });
+      const deadline = Date.now() + 5000;
+      while (!entered && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(entered).toBe(true);
+
+      const secondPending = post('/internal/memory/v1/write', body, {
+        token: instanceToken,
+        headers: { 'idempotency-key': key },
+      });
+      // 等 B 的请求体读完并让 handler 进入 withIdempotency/join；A 仍在 gate 内。
+      await secondBodyRead;
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(calls).toBe(1);
+
+      const closing = instance.close();
+      expect(instance.getState().closing).toBe(true);
+      const drainDeadline = Date.now() + 5000;
+      while (!instance.getState().capabilityDraining && Date.now() < drainDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(instance.getState().capabilityDraining).toBe(true);
+      let settled = false;
+      void closing.then(() => { settled = true; });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(settled).toBe(false);
+
+      release();
+      const [first, second] = await Promise.all([firstPending, secondPending]);
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+      expect(first.body.data.created).toBe(1);
+      expect(second.body.data.created).toBe(1);
+      expect(first.body.data.results[0].id).toBe(second.body.data.results[0].id);
+      // B 在 close 前 join 同一在途执行，得到同一结果而不是 close 后的重放。
+      expect(second.body.data.replayed).toBe(false);
+      expect(calls).toBe(1);
+
+      await closing;
+      expect(instance.getState().capabilityDrain).toMatchObject({ clean: true, active: 0 });
+      expect(await readCapabilityToken({ home: instanceHome, env: {} })).toBeNull();
+      const records = (await app.storage.listNodes({ namespace: 'agent:opencode' }))
+        .filter((node) => node.content?.object === marker);
+      expect(records).toHaveLength(1);
+    } finally {
+      release();
+      base = savedBase;
+      service.writeRecords = originalWriteRecords;
+      await instance?.close().catch(() => undefined);
+      await rm(instanceHome, { recursive: true, force: true });
+      if (savedCloudRoot === undefined) delete process.env.MEBULAR_CLOUD_ROOT;
+      else process.env.MEBULAR_CLOUD_ROOT = savedCloudRoot;
+    }
+  }, 20000);
+});
+
 describe('close drain 超时', () => {
   it('超时明确 incomplete 且不撤销 token，不声明 clean', async () => {
     const instance = await startHttpServer({

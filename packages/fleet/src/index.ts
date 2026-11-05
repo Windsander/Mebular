@@ -44,6 +44,7 @@ export * from './runtime/card-publisher.js';
 export * from './runtime/role-card-job.js';
 export * from './runtime/openchamber.js';
 export * from './runtime/openchamber-http.js';
+export * from './runtime/openchamber-runner.js';
 export * from './runtime/dsh.js';
 export * from './runtime/opencode.js';
 export * from './runtime/claude-code.js';

@@ -367,7 +367,7 @@ try {
   const homeE = join(root, 'E');
   const portE = await freePort();
   const joinPortE = await freePort();
-  const joinRes = await runFleet(['join', '--token', invite2Json.token, '--dir', homeE, '--device', 'device-E', '--daemon', '--daemon-port', String(portE), '--join-port', String(joinPortE), '--no-service', '--agent', 'echo']);
+  const joinRes = await runFleet(['join', '--token', invite2Json.token, '--dir', homeE, '--device', 'device-E', '--daemon', '--listen', '/ip4/127.0.0.1/tcp/0', '--daemon-port', String(portE), '--join-port', String(joinPortE), '--no-service', '--agent', 'echo']);
   const joinOut = firstJson(joinRes.out) ?? {};
   const eDaemonCfg = JSON.parse(readFileSync(join(homeE, 'config.json'), 'utf-8'));
   const eFleetCfg = JSON.parse(readFileSync(join(homeE, 'fleet.config.json'), 'utf-8'));

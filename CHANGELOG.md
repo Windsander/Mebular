@@ -16,6 +16,58 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 The GitHub Release body is extracted from this file: everything between the release's
 `## [vX.Y.Z]` heading and the next `## [` heading. Keep that section self-contained.
 
+## [Unreleased]
+
+Fleet black-box task orchestration (P1–P6). Internal capability/role cards and immutable plans
+stay inside Fleet; the human Console and the 16 task methods keep their existing shape.
+
+### Added
+
+- **Capability cards** — device-signed `agent_capability_card` internal nodes compiled from fleet config, executor registry and runtime, with tombstone/version monotonicity and an internal daemon write/read path (`/app/capability-cards`, `/app/nodes`).
+- **Plan + materializer** — immutable, versioned `task_plan` internal nodes, deterministic root/step task IDs, DAG validation, idempotent materialization, restart recovery, and `task_status.plan` progress without new MCP methods or UI.
+- **Route + policy + why** — hard filters (authorization, policy, executable, health, capability, payload, online, capacity), deterministic rendezvous tie-break, `NO_TARGET`/`blockedBy`, assign-only behavior, and an additive assigned-step route audit in `task_status.plan`.
+- **Join + MR gate** — `join.mode="all"` only, subtree/acceptance completion, exactly one MR per root plan, v2 retry with explicit `reuse`, plan/step cancel cascades, and `PLAN_RETRY_REQUIRED` for plan-owned tasks.
+- **Role cards (shadow)** — rule-first `agent_role_card` internal nodes with safety-tag allowlists, confidence/evidence refs, default shadow mode, and optional enabled soft ordering that never authorizes or hard-filters.
+- **Daemon internal verified-card read path** — `GET /app/peers` exposes only sync-authenticated online peer public keys, so a daemon coordinator can verify remote capability-card signatures; old daemons keep the previous fail-closed behavior.
+- **P6 acceptance script** — `npm run verify:fleet:p6` runs a five-node embedded loopback plan E2E (branches → join → pre-MR → MR → root) plus dual-daemon card sync/plan collaboration, with fault injection for duplicate delivery, restart, cancel and v2 retry.
+- **Unified Fleet executor/adapter layer** — `BaseExecutor` + `ExecutorAdapter` now own concurrency, timeout/AbortSignal, env allowlist, output truncation, error normalization and optional health; `CommandAgent`, Hermes and the OpenChamber public runner use the same layer, and unknown agents still fail closed.
+- **Public OpenChamber runner** — `kind=openchamber` now targets `OpenChamberRunnerAgent` and the loopback runner from `@mebular/opencode-plugin/fleet-runner` (`POST /v1/run-once`), discovered through `$MEBULAR_HOME/openchamber-runner.json`. The runner is disabled by default, binds loopback only, authenticates with a per-process bearer token, and exposes `GET /health`. The private bridge/seam implementation and its docs are removed. Real OpenChamber host E2E is now covered by `npm run verify:openchamber:runner` (real `opencode serve` + real runner plugin + fake OpenAI model).
+- **Fresh-session invariant** — one Fleet task is one new session: resume/continue/attach flags are rejected in `baseArgs`/`promptArgs`, and the OpenChamber runner rejects a caller-supplied `sessionId` while creating a new session per request.
+- **DSH, OpenCode and Claude Code adapters** — `DshHeadlessAgent` (`dsh --profile headless`, stdin by default), `OpenCodeAgent` (`opencode run`) and `ClaudeCodeAgent` (`claude -p`), each with argv/stdin prompt modes and a non-sensitive `<command> --version` health probe.
+- **Agent auto-detection** — `fleet quickstart` / `fleet join` probe PATH in a fixed order (`hermes` → `dsh` → `opencode` → `claude`) and add OpenChamber only when `<MEBULAR_HOME>/openchamber-runner.json` already exists, falling back to `echo` only when nothing is found. Cursor and Claude Desktop are never auto-detected and remain dispatch-only.
+- **Executable routing metadata** — Agent directories, capability cards, `task_targets`, and route hard filters now expose `executable` (boolean), `executionMode` (`cli|http|json-rpc|in-process`) and optional advisory `health`; explicit `executable=false` or `health.status="unavailable"` is rejected, while legacy records missing these fields stay compatible.
+
+### Security and reliability
+
+- **Role-card read sanitization** — embedded, daemon and remote legacy cards rebuild `summary` on read; `agent` and `provenance` accept only safe tokens; direct summary providers must match the local device.
+- **Superseded-version finalization** — old roots are finalized instead of dangling: missing roots are recreated with `SUPERSEDED_BY`, pending MRs are never withdrawn, and terminal MR receipts converge old/current roots deterministically.
+- **MR/cancel semantics hardened** — pending MR cancel is covered, terminal MRs are never withdrawn, and concurrent materializers converge on one logical MR via deterministic event IDs.
+- **No new human UI or MCP methods** — navigation/pages/settings are unchanged; plan/card/role stay out of memory lists, domain counts, search and the star-map fleet SSE.
+
+### Changed
+
+- **`CommandAgent` prompt defaults** — a command agent now appends the prompt as the final argv element by default (`promptMode: "arg"`); `promptArgs` is treated as fixed arguments inserted before the prompt, and `promptMode: "stdin"` writes the prompt to stdin. The legacy function form of `promptArgs` still returns the full argument list. There is no `{prompt}` placeholder substitution and no config-level `env` field.
+- **Plan owner/MR readiness** — `isPlanOwnerExecutableAgent` is now enforced before writing any plan/root: `echo`, `board` (including `kind=echo`) and a `command` agent without a command are rejected with `PLAN_POLICY` + `PLAN_OWNER_UNEXECUTABLE`. `fleet doctor` reports `plan owner 就绪` (WARN when only placeholders) and FAILs a `defaultAgent` that points at an unexecutable agent. Doctor readiness is static config validation; it does not run per-agent `--version` health probes.
+- **Adapter health semantics** — `executable` is a static derivation from config/kind (not proof that a CLI is installed). `health` is an optional advisory snapshot; only an explicit `unavailable` is a route hard filter, and capability cards are not withdrawn automatically when a probe fails. The OpenChamber runner reports `GET /health`; when the discovery file is missing or stale it is `unavailable` and fails closed.
+
+### Fixed
+
+- **OpenChamber runner host contract** — `fleet-runner.js` now exports the OpenCode V2 definition shape (`{ id, setup }`), reads plugin options from `ctx.options`, and adapts the host `ctx.session` service (`create`/`prompt`/`wait`/`context`/`interrupt`) instead of assuming an SDK `ctx.client`. The default export was previously rejected by the real host, and even with the correct shape it had no `client.session.*` to call. Each request still creates a new session and returns the final assistant text.
+- **Stats count semantics** — `stats.count` now excludes internal objects, `memoryRecords` counts only known memory node types, and `internalObjects`/`internalKinds` expose internal-object totals separately.
+- **Default MCP plan owner** — `task_submit.plan` now uses a plan-specific agent (`ctx.agent` / `config.defaultAgent` / first configured agent) for the default `board` placeholder owner, so the owner and MR executor are actually runnable. The final `planAgent` must be a real `config.agents[].name`; `defaultAgent` is validated against the agent list. Empty/ghost agent configurations fail closed with `PLAN_POLICY` + `PLAN_OWNER_UNEXECUTABLE` before writing plan/root; the same guard rejects `echo`/`board` and a `command` agent without a command as owner/MR. Ordinary task defaults remain `board`.
+- **CR-003 internal endpoint whitelist** — the approved internal app endpoints (`/app/nodes`, `/app/capability-cards`, `/app/plans`, `/app/role-cards`, `/app/peers`) are documented as the only allowed internal HTTP surface; no public MCP/UI/TaskEvent changes. Capability-card writes now honor `writesEnabled` and reject non-object bodies; card runtime/provenance source are restricted to safe tokens.
+- **`/app/nodes` internal-object guard** — the raw debug write path now rejects `metadata.internal=true`, `agent_capability_card`, `agent_role_card` and `task_plan` with `403 internal_object_write_forbidden`; internal objects must use their dedicated endpoint. `GET /app/nodes` still omits role-card originals.
+
+### Verification
+
+- **OpenChamber runner real-host E2E** — `npm run verify:openchamber:runner` starts a real `opencode serve` in an isolated temp HOME/XDG/`MEBULAR_HOME`/`OPENCODE_CONFIG`, loads the real `@mebular/opencode-plugin/fleet-runner` plugin, creates a sentinel session with real `opencode run`, then executes one Fleet task through `OpenChamberRunnerAgent`. It asserts a new session id, the fake model reply, an unchanged sentinel context, 400 on `sessionId`, 401 without/with a wrong token, discovery `0600`, and fail-closed missing/wrong-token discovery. Verified on `opencode v2.0.29` and `v2.2.5`; the LLM is a fake OpenAI-compatible provider, not OpenChamber Desktop UI.
+- **P6 evidence** — [0.3.0 Fleet orchestration P6 E2E and regression evidence](docs/quality/0.3.0-fleet-orchestration-e2e.md) records the 21/21 `verify:fleet:p6` run, full Jest results, Console UI smoke, daemon verified-card path and explicit known limits.
+
+### Notes
+
+- **Real host smoke remains open** — DSH and Claude Code are not installed on the evidence machine, so their adapters have fake-CLI tests only; OpenCode has its real `opencode v2.0.29` `--version` health verified but no real `opencode run` task smoke. OpenChamber runner now has a real `opencode serve` host E2E (`verify:openchamber:runner`); that is not an OpenChamber Desktop UI test and does not touch real user sessions. Fake CLI/runner tests are not real host E2E and must not be reported as such.
+- **P6 real-network scope** — the five-node P6 E2E uses in-process `InMemoryHub` loopback plus a deterministic event bridge to isolate orchestration from anti-entropy scheduling. Real libp2p evidence remains limited to `verify:fleet:tasks` (two nodes) and `verify:daemon:cluster` (dual daemon, two nodes); `routing-e2e` also uses embedded loopback and is not counted as real-libp2p evidence. This release does not claim a real three-plus-node plan E2E or five-node real-WAN performance.
+
 ## [v0.3.0] - 2026-10-30
 
 Memory Runtime release. Mebular can now run recall, extraction, compaction and task

@@ -72,6 +72,12 @@ export interface FleetEndpoint {
   agent: string;
 }
 
+/**
+ * 保留的设备/Agent sentinel：plan root task 只指向它，任何真实 worker 都不得执行。
+ * 配置校验拒绝真实 device/agent 使用该名字（见 `validateFleetConfig`）。
+ */
+export const PLAN_SENTINEL = '__plan__';
+
 /** 因果追踪：`causedBy` 指向触发本任务/迁移的父任务；`chain` 为祖先链（去重、有序）。 */
 export interface FleetTrace {
   causedBy?: string;

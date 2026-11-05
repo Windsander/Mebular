@@ -16,7 +16,7 @@ export const IS_WINDOWS = process.platform === 'win32';
 /** 重集成用例预算：Windows 30s；macOS/Linux 15s。 */
 export const HEAVY_TIMEOUT_MS = IS_WINDOWS ? 30_000 : 15_000;
 
-/** 在重集成套件顶部调用：把本文件默认用例预算设为有界的 `HEAVY_TIMEOUT_MS`。 */
-export function useHeavyTimeout(): void {
-  jest.setTimeout(HEAVY_TIMEOUT_MS);
+/** 在重集成套件顶部调用：把本文件默认用例预算设为有界的 `HEAVY_TIMEOUT_MS`；个别更重的用例可显式放宽。 */
+export function useHeavyTimeout(timeoutMs = HEAVY_TIMEOUT_MS): void {
+  jest.setTimeout(timeoutMs);
 }

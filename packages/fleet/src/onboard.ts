@@ -22,23 +22,30 @@ import {
   fleetStoragePath,
   generateMasterKey,
   identityDeviceIdForStorage,
+  isPlanOwnerExecutableAgent,
   loadFleetConfig,
   loadToolConfig,
   masterKeyFingerprint,
+  planOwnerReadiness,
   readMasterKeyFile,
+  resumeArgConfigError,
   saveFleetConfig,
   validateFleetConfig,
   writeMasterKeyFile,
   type FleetAgentConfig,
+  type FleetAgentKind,
   type FleetConfig,
   type FleetEncryption,
   type OnboardInput,
   type OnboardResult,
 } from './config.js';
 import { CommandAgent, ExecutorRegistry, HermesAgent } from './runtime/agent.js';
-import { HttpOpenChamberSeam } from './runtime/openchamber-http.js';
-import { OpenChamberAgent } from './runtime/openchamber.js';
-import { EchoExecutor } from './runtime/executor.js';
+import { AGENT_NAMESPACE } from './agentdir.js';
+import { OpenChamberRunnerAgent } from './runtime/openchamber-runner.js';
+import { DshHeadlessAgent } from './runtime/dsh.js';
+import { OpenCodeAgent } from './runtime/opencode.js';
+import { ClaudeCodeAgent } from './runtime/claude-code.js';
+import { EchoExecutor, type TaskExecutor } from './runtime/executor.js';
 
 async function exists(path: string): Promise<boolean> {
   try {
@@ -49,29 +56,85 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
-/** 由 agent 配置构建执行器注册表（未知 kind 已在校验期拒绝）。 */
-export function buildRegistry(agents: readonly FleetAgentConfig[]): ExecutorRegistry {
+/** 由 agent 配置构造 `TaskExecutor`；新增 kind 只需登记到 factory 表（并扩展配置校验）。 */
+export type ExecutorFactory = (agent: FleetAgentConfig) => TaskExecutor;
+
+/** 已注册 kind → factory。**没有 else 兜底**：未知 kind 必须显式失败。 */
+export const DEFAULT_EXECUTOR_FACTORIES: Readonly<Record<FleetAgentKind, ExecutorFactory>> = {
+  echo: () => new EchoExecutor(),
+  command: (a) =>
+    new CommandAgent({
+      command: a.command ?? '',
+      ...(a.baseArgs !== undefined ? { baseArgs: a.baseArgs } : {}),
+      ...(a.promptArgs !== undefined ? { promptArgs: a.promptArgs } : {}),
+      ...(a.promptMode !== undefined ? { promptMode: a.promptMode } : {}),
+      ...(a.cwd !== undefined ? { cwd: a.cwd } : {}),
+      ...(a.timeoutMs !== undefined ? { timeoutMs: a.timeoutMs } : {}),
+      ...(a.maxOutputBytes !== undefined ? { maxOutputBytes: a.maxOutputBytes } : {}),
+      ...(a.concurrency !== undefined ? { concurrency: a.concurrency } : {}),
+    }),
+  hermes: (a) =>
+    new HermesAgent({
+      ...(a.baseArgs !== undefined ? { commandArgs: a.baseArgs } : {}),
+      ...(a.cwd !== undefined ? { cwd: a.cwd } : {}),
+      ...(a.timeoutMs !== undefined ? { timeoutMs: a.timeoutMs } : {}),
+      ...(a.maxOutputBytes !== undefined ? { maxOutputBytes: a.maxOutputBytes } : {}),
+      ...(a.concurrency !== undefined ? { concurrency: a.concurrency } : {}),
+    }),
+  openchamber: (a) =>
+    new OpenChamberRunnerAgent({
+      ...(a.timeoutMs !== undefined ? { timeoutMs: a.timeoutMs } : {}),
+      ...(a.maxOutputBytes !== undefined ? { maxOutputBytes: a.maxOutputBytes } : {}),
+      ...(a.concurrency !== undefined ? { concurrency: a.concurrency } : {}),
+    }),
+  dsh: (a) =>
+    new DshHeadlessAgent({
+      ...(typeof a.command === 'string' && a.command.length > 0 ? { dshPath: a.command } : {}),
+      ...(a.baseArgs !== undefined ? { baseArgs: a.baseArgs } : {}),
+      ...(a.promptMode !== undefined ? { promptMode: a.promptMode } : {}),
+      ...(a.cwd !== undefined ? { cwd: a.cwd } : {}),
+      ...(a.timeoutMs !== undefined ? { timeoutMs: a.timeoutMs } : {}),
+      ...(a.maxOutputBytes !== undefined ? { maxOutputBytes: a.maxOutputBytes } : {}),
+      ...(a.concurrency !== undefined ? { concurrency: a.concurrency } : {}),
+    }),
+  opencode: (a) =>
+    new OpenCodeAgent({
+      ...(typeof a.command === 'string' && a.command.length > 0 ? { opencodePath: a.command } : {}),
+      ...(a.baseArgs !== undefined ? { baseArgs: a.baseArgs } : {}),
+      ...(a.promptMode !== undefined ? { promptMode: a.promptMode } : {}),
+      ...(a.cwd !== undefined ? { cwd: a.cwd } : {}),
+      ...(a.timeoutMs !== undefined ? { timeoutMs: a.timeoutMs } : {}),
+      ...(a.maxOutputBytes !== undefined ? { maxOutputBytes: a.maxOutputBytes } : {}),
+      ...(a.concurrency !== undefined ? { concurrency: a.concurrency } : {}),
+    }),
+  'claude-code': (a) =>
+    new ClaudeCodeAgent({
+      ...(typeof a.command === 'string' && a.command.length > 0 ? { claudePath: a.command } : {}),
+      ...(a.baseArgs !== undefined ? { baseArgs: a.baseArgs } : {}),
+      ...(a.promptMode !== undefined ? { promptMode: a.promptMode } : {}),
+      ...(a.cwd !== undefined ? { cwd: a.cwd } : {}),
+      ...(a.timeoutMs !== undefined ? { timeoutMs: a.timeoutMs } : {}),
+      ...(a.maxOutputBytes !== undefined ? { maxOutputBytes: a.maxOutputBytes } : {}),
+      ...(a.concurrency !== undefined ? { concurrency: a.concurrency } : {}),
+    }),
+};
+
+/**
+ * 由 agent 配置构建执行器注册表（未知 kind 已在校验期拒绝；此处再显式失败，杜绝旧版
+ * `else -> OpenChamber` 的静默回退）。`factories` 可覆盖/扩展，供后续 adapter 会话使用。
+ */
+export function buildRegistry(
+  agents: readonly FleetAgentConfig[],
+  factories: Readonly<Record<string, ExecutorFactory>> = DEFAULT_EXECUTOR_FACTORIES,
+): ExecutorRegistry {
   const registry = new ExecutorRegistry();
   for (const a of agents) {
-    if (a.kind === 'echo') registry.register(a.name, new EchoExecutor());
-    else if (a.kind === 'command') {
-      registry.register(
-        a.name,
-        new CommandAgent({
-          command: a.command ?? '',
-          ...(a.baseArgs !== undefined ? { baseArgs: a.baseArgs } : {}),
-          ...(a.timeoutMs !== undefined ? { timeoutMs: a.timeoutMs } : {}),
-          ...(a.concurrency !== undefined ? { concurrency: a.concurrency } : {}),
-        }),
-      );
-    } else if (a.kind === 'hermes') {
-      registry.register(a.name, new HermesAgent({ ...(a.timeoutMs !== undefined ? { timeoutMs: a.timeoutMs } : {}) }));
-    } else {
-      registry.register(
-        a.name,
-        new OpenChamberAgent(new HttpOpenChamberSeam({ ...(a.timeoutMs !== undefined ? { timeoutMs: a.timeoutMs } : {}) })),
-      );
-    }
+    const factory = factories[a.kind];
+    if (factory === undefined) throw new Error(`UNKNOWN_AGENT_KIND: ${a.kind}`);
+    // 工厂层兜底：即使调用方绕过 loadFleetConfig，也不得把 resume/continue 参数带进 argv。
+    const resumeError = resumeArgConfigError(a);
+    if (resumeError !== undefined) throw new Error(`配置非法：${resumeError}`);
+    registry.register(a.name, factory(a));
   }
   return registry;
 }
@@ -87,7 +150,8 @@ export function mebularOptions(config: FleetConfig, encryption: FleetEncryption)
       autoSync: true,
       pushOnWrite: true,
       pushOnWriteThrottleMs: 20,
-      namespaces: [config.namespace],
+      // `agents` 域承载每设备 Agent 目录与能力卡（P1）：必须随任务域一起同步。
+      namespaces: [...new Set([config.namespace, AGENT_NAMESPACE])],
       antiEntropy: { enabled: true, intervalMs: 600_000, jitterRatio: 0.2 },
     },
   };
@@ -561,6 +625,43 @@ export async function doctor(dir: string): Promise<DoctorReport> {
     add('agent 注册表', 'FAIL', (error as Error).message, '修正 agents 配置');
   }
 
+  // 6.1) plan owner/MR readiness：echo/board 占位或空 agents 都无法承担 plan。
+  // WARN（非 FAIL）用于提示「能上车、能同步，但派 plan 会失败」，同时保持既有 doctor 的 ok 语义。
+  const readiness = planOwnerReadiness(config);
+  if (readiness.executableAgents.length > 0) {
+    const placeholders = readiness.placeholderAgents.length > 0
+      ? `；占位 agent=[${readiness.placeholderAgents.join(', ')}]（不可作为 plan owner/MR）`
+      : '';
+    add('plan owner 就绪', 'PASS', `executable=[${readiness.executableAgents.join(', ')}]${placeholders}`);
+  } else {
+    const detail = readiness.reason === 'no-agents'
+      ? 'agents 为空：没有可执行 agent'
+      : `仅有占位 agent=[${readiness.placeholderAgents.join(', ')}]（echo/board 不可执行）`;
+    add(
+      'plan owner 就绪',
+      'WARN',
+      `${detail}；plan owner/MR 会因 PLAN_OWNER_UNEXECUTABLE 失败`,
+      '配置真实 agent（command/hermes/dsh/opencode/claude-code），或运行 `fleet quickstart` / `fleet join` 重新检测本机 CLI',
+    );
+  }
+
+  // 6.2) defaultAgent：存在时必须指向本机真实且可执行的 agent（ghost/占位 → FAIL）。
+  if (config.defaultAgent !== undefined) {
+    const named = config.agents.find((agent) => agent.name === config.defaultAgent);
+    if (named === undefined) {
+      add('defaultAgent', 'FAIL', `defaultAgent=${config.defaultAgent} 不在 agents[]`, '改为已注册的真实 agent，或删除 defaultAgent');
+    } else if (!isPlanOwnerExecutableAgent(named)) {
+      add(
+        'defaultAgent',
+        'FAIL',
+        `defaultAgent=${named.name} 不是可执行 agent（kind=${named.kind}${named.command === undefined ? '' : `, command=${named.command}`}）`,
+        'echo/board/无 command 的 command 不可作为默认执行 agent：改为真实 agent 或删除 defaultAgent',
+      );
+    } else {
+      add('defaultAgent', 'PASS', `defaultAgent=${named.name}（kind=${named.kind}）`);
+    }
+  }
+
   // 7) 同步已收敛（本地是否已见对端署名的任务事件）
   if (encryption === null) {
     add('同步已收敛', 'SKIP', '主密钥不可用，跳过');
@@ -621,6 +722,19 @@ export async function doctor(dir: string): Promise<DoctorReport> {
     add('心跳新鲜', 'PASS', `role=${heartbeat.role} pid=${heartbeat.pid} age=${Date.now() - heartbeat.ts}ms sha=${heartbeat.sha}`);
   } else {
     add('心跳新鲜', 'FAIL', `心跳陈旧 age=${Date.now() - heartbeat.ts}ms（role=${heartbeat.role} pid=${heartbeat.pid}）`, '服务可能已崩溃：`fleet service status` / `fleet service logs`');
+  }
+
+  // 9.1) plan materializer：由 `fleet node`（role=node，`--run-forever`/fleet-node 服务）驱动。
+  // 缺失/陈旧/角色不符 → WARN：plan 仍可提交，但不会自动物化，需要用户启动 node。
+  const materializerHint = 'plan materializer 可能未运行，需 `fleet node --run-forever` 或安装 fleet-node 服务';
+  if (heartbeat === null) {
+    add('plan materializer', 'WARN', '无 service.heartbeat（role=node）', materializerHint);
+  } else if (heartbeat.role !== 'node') {
+    add('plan materializer', 'WARN', `最近心跳 role=${heartbeat.role}，不是 fleet-node`, materializerHint);
+  } else if (!isHeartbeatFresh(dir)) {
+    add('plan materializer', 'WARN', `fleet-node 心跳陈旧 age=${Date.now() - heartbeat.ts}ms`, materializerHint);
+  } else {
+    add('plan materializer', 'PASS', `role=node pid=${heartbeat.pid} age=${Date.now() - heartbeat.ts}ms`);
   }
 
   const skipped = checks.filter((c) => c.status === 'SKIP').map((c) => c.name);

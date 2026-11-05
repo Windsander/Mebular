@@ -189,7 +189,7 @@ describe('MemoryService', () => {
     const reservedStats = await service.namespaceStats({ includeReserved: true });
     const notesStats = reservedStats.find((entry) => entry.domain === 'notes');
     expect(notesStats).toMatchObject({
-      count: 4,
+      count: 3,
       memoryRecords: 3,
       internalObjects: 1,
       internalKinds: { compact: 1 },
@@ -197,6 +197,33 @@ describe('MemoryService', () => {
     expect(reservedStats.some((entry) => entry.domain === '__raw__')).toBe(true);
     expect((await service.namespaceStats()).some((entry) => entry.domain === '__raw__')).toBe(false);
     expect((await service.stats()).domains).toEqual(await service.namespaceStats());
+
+    await app.shutdown();
+  });
+
+  it('namespaceStats：所有 internal 节点都不进普通 count，internalObjects 仍可观测', async () => {
+    const { app, service } = await makeService();
+    await service.write([{ type: 'fact', content: 'visible', metadata: { namespace: 'generic' } }]);
+    const compact = await app.graph.createNode('compact', { summary: '内部摘要' }, undefined, { namespace: 'generic' });
+    await app.graph.updateNode(compact.id, {
+      metadata: { internal: true, internalObject: { schema: 1, kind: 'compact' } },
+    });
+    const arbitrary = await app.graph.createNode('fact', {
+      subject: 'x', predicate: 'y', object: 'z',
+    }, undefined, { namespace: 'generic' });
+    await app.graph.updateNode(arbitrary.id, {
+      metadata: { internal: true, internalObject: { schema: 1, kind: 'arbitrary_internal_kind' } },
+    });
+
+    const stats = await service.namespaceStats({ includeReserved: true });
+    const entry = stats.find((item) => item.domain === 'generic')!;
+    expect(entry).toMatchObject({
+      count: 1,
+      memoryRecords: 1,
+      internalObjects: 2,
+      internalKinds: { compact: 1, arbitrary_internal_kind: 1 },
+    });
+    expect((await service.listRecords({ namespace: 'generic' })).total).toBe(1);
 
     await app.shutdown();
   });

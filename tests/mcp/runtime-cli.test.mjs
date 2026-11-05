@@ -5,15 +5,48 @@
 
 import { describe, it, expect, afterEach } from '@jest/globals';
 import { spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { writeRegistry } from '../../packages/mcp/src/profiles.mjs';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const CLI = join(ROOT, 'packages', 'mcp', 'bin', 'mebular.mjs');
+const STANDARD_APP_TAIL = ['node_modules', '@mebular', 'core', 'packages', 'mcp', 'bin', 'mebular.mjs'];
+
+// Provider 发现会读取系统级 App 安装位置；这不能由 MEBULAR_HOME 隔离。
+// 子进程只在测试中隐藏标准 App 路径，允许通过 MEBULAR_TEST_STANDARD_APP_PATH
+// 显式放行一个临时 fixture，从而既能验证干净环境，也能验证模拟污染环境。
+const STANDARD_APP_PRELOAD = `data:text/javascript,${encodeURIComponent(`
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
+const tail = ${JSON.stringify(STANDARD_APP_TAIL)};
+const userHome = homedir();
+const candidates = process.platform === 'darwin'
+  ? [
+      join('/Applications', 'Mebular.app', 'Contents', 'Resources', ...tail),
+      join(userHome, 'Applications', 'Mebular.app', 'Contents', 'Resources', ...tail),
+    ]
+  : process.platform === 'win32'
+    ? [
+        join(process.env.LOCALAPPDATA ?? join(userHome, 'AppData', 'Local'), 'Programs', 'Mebular', 'resources', ...tail),
+        join(process.env.LOCALAPPDATA ?? join(userHome, 'AppData', 'Local'), 'Mebular', 'resources', ...tail),
+      ]
+    : [
+        join('/opt', 'Mebular', 'resources', ...tail),
+        join(userHome, '.local', 'share', 'Mebular', 'resources', ...tail),
+      ];
+const allowed = process.env.MEBULAR_TEST_STANDARD_APP_PATH ?? null;
+const blocked = new Set(candidates.filter((candidate) => candidate !== allowed));
+const existsSync = fs.existsSync;
+fs.existsSync = (candidate) => blocked.has(String(candidate)) ? false : existsSync(candidate);
+syncBuiltinESMExports();
+`)}`;
 
 const tempDirs = [];
 
@@ -58,8 +91,10 @@ function entry(id, name, home, extra = {}) {
 async function makeRoot({ current = 'default' } = {}) {
   const root = await tempDir('runtime-cli-root-');
   const serviceHome = await tempDir('runtime-cli-service-');
+  const userHome = join(root, 'user-home');
   const port = await freePort();
   await mkdir(root, { recursive: true });
+  await mkdir(userHome, { recursive: true });
   await writeFile(join(root, 'config.json'), JSON.stringify({
     deviceId: 'device-test',
     mcp: { http: { host: '127.0.0.1', port, auth: 'none' } },
@@ -80,30 +115,73 @@ async function makeRoot({ current = 'default' } = {}) {
       entry('p_a', '忆云 2', 'profiles/p_a'),
     ],
   });
-  return { root, serviceHome, port };
+  return { root, serviceHome, userHome, port };
 }
 
-function envFor(root, serviceHome, { includeHome = true, extra = {} } = {}) {
-  const env = {
-    ...process.env,
+function standardAppCliPath(userHome, localAppData = join(userHome, 'AppData', 'Local')) {
+  if (process.platform === 'darwin') {
+    return join(userHome, 'Applications', 'Mebular.app', 'Contents', 'Resources', ...STANDARD_APP_TAIL);
+  }
+  if (process.platform === 'win32') {
+    return join(localAppData, 'Programs', 'Mebular', 'resources', ...STANDARD_APP_TAIL);
+  }
+  return join(userHome, '.local', 'share', 'Mebular', 'resources', ...STANDARD_APP_TAIL);
+}
+
+async function writeStandardApp(userHome, localAppData) {
+  const cliPath = standardAppCliPath(userHome, localAppData);
+  await mkdir(dirname(cliPath), { recursive: true });
+  await writeFile(cliPath, '// fake standard App runtime\n', 'utf-8');
+  return cliPath;
+}
+
+function envFor(root, serviceHome, { includeHome = true, userHome = join(root, 'user-home'), extra = {} } = {}) {
+  const localAppData = join(userHome, 'AppData', 'Local');
+  const env = { ...process.env };
+  delete env.MEBULAR_HTTP_PORT;
+  delete env.MEBULAR_HTTP_HOST;
+  delete env.MEBULAR_SERVICE_HOME;
+  delete env.MEBULAR_TEST_STANDARD_APP_PATH;
+  delete env.MEBULAR_HOME;
+  Object.assign(env, {
+    HOME: userHome,
+    USERPROFILE: userHome,
+    LOCALAPPDATA: localAppData,
     PATH: '',
     MEBULAR_CLOUD_ROOT: root,
     MEBULAR_SERVICE_UNIT_HOME: serviceHome,
+    MEBULAR_USER_HOME: userHome,
     ...extra,
-  };
-  delete env.MEBULAR_HTTP_PORT;
-  delete env.MEBULAR_HTTP_HOST;
+  });
   if (includeHome) env.MEBULAR_HOME = root;
-  else delete env.MEBULAR_HOME;
   return env;
 }
 
 function runCli(env, ...args) {
-  return spawnSync(process.execPath, [CLI, 'runtime', ...args, '--json'], {
+  return spawnSync(process.execPath, ['--import', STANDARD_APP_PRELOAD, CLI, 'runtime', ...args, '--json'], {
     env,
     encoding: 'utf-8',
     timeout: 20_000,
   });
+}
+
+async function snapshotTree(root) {
+  const snapshot = [];
+  const walk = async (dir, prefix = '') => {
+    const entries = await readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const relative = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        snapshot.push(`d:${relative}`);
+        await walk(path, relative);
+      } else if (entry.isFile()) {
+        snapshot.push(`f:${relative}:${await readFile(path, 'utf-8')}`);
+      }
+    }
+  };
+  await walk(root);
+  return snapshot.sort();
 }
 
 async function writeRuntime(root, version) {
@@ -137,8 +215,40 @@ describe('mebular runtime CLI：resolve / status / ensure', () => {
   });
 
   it('resolve 跟随 current profile（未显式 MEBULAR_HOME）且只读', async () => {
-    const { root, serviceHome } = await makeRoot({ current: 'p_a' });
-    const result = runCli(envFor(root, serviceHome, { includeHome: false }), 'resolve');
+    const { root, serviceHome, userHome } = await makeRoot({ current: 'p_a' });
+    const assertIsolatedResolve = async () => {
+      const before = await snapshotTree(root);
+      const result = runCli(envFor(root, serviceHome, { includeHome: false }), 'resolve');
+      expect(result.status).toBe(0);
+      const json = JSON.parse(result.stdout);
+      expect(json).toMatchObject({
+        ok: true,
+        mode: 'child',
+        profileId: 'p_a',
+        home: join(root, 'profiles', 'p_a'),
+        provider: { kind: 'cli', source: 'self' },
+        daemon: { status: 'down' },
+        // service loader 可用：无 service 注册是正常 registered:false，不是 service_unknown。
+        service: { ok: true, registered: false, running: false },
+      });
+      expect(json).not.toHaveProperty('child');
+      expect(await snapshotTree(root)).toEqual(before);
+    };
+
+    await assertIsolatedResolve();
+    // 模拟测试 user home 内的标准 App 污染；未显式放行时必须与干净环境结果一致。
+    await writeStandardApp(userHome, join(userHome, 'AppData', 'Local'));
+    await assertIsolatedResolve();
+  });
+
+  it('标准 App 污染被沙箱 fixture 显式模拟时选择 app/standard，current 与只读语义不变', async () => {
+    const { root, serviceHome, userHome } = await makeRoot({ current: 'p_a' });
+    const fixtureCli = await writeStandardApp(userHome, join(userHome, 'AppData', 'Local'));
+    const before = await snapshotTree(root);
+    const result = runCli(envFor(root, serviceHome, {
+      includeHome: false,
+      extra: { MEBULAR_TEST_STANDARD_APP_PATH: fixtureCli },
+    }), 'resolve');
     expect(result.status).toBe(0);
     const json = JSON.parse(result.stdout);
     expect(json).toMatchObject({
@@ -146,12 +256,11 @@ describe('mebular runtime CLI：resolve / status / ensure', () => {
       mode: 'child',
       profileId: 'p_a',
       home: join(root, 'profiles', 'p_a'),
-      provider: { kind: 'cli', source: 'self' },
+      provider: { kind: 'app', source: 'standard', path: fixtureCli },
       daemon: { status: 'down' },
-      // service loader 可用：无 service 注册是正常 registered:false，不是 service_unknown。
-      service: { ok: true, registered: false, running: false },
     });
     expect(json).not.toHaveProperty('child');
+    expect(await snapshotTree(root)).toEqual(before);
   });
 
   it('已注册 service 时 --start child 仍解析为 service（不 spawn 第二个 daemon）', async () => {

@@ -24,6 +24,11 @@ const core = await load('dist/index.js');
 const workspace = await mkdtemp(join(tmpdir(), 'p1-lifecycle-'));
 const out = { pid: process.pid, homes: {}, cases: {} };
 
+// Jest 会在同一 worker 复跑文件；其他用例遗留的 MEBULAR_* 会污染子进程。
+// 这里只保留本 harness 显式设置的变量，避免并行/覆盖率下的假失败。
+for (const key of Object.keys(process.env)) {
+  if (key.startsWith('MEBULAR_')) delete process.env[key];
+}
 process.env.MEBULAR_USER_HOME = workspace;
 process.env.MEBULAR_NETWORK_ENABLED = '0';
 delete process.env.MEBULAR_PROVISION;

@@ -72,6 +72,22 @@ export async function loadConfigFile(home) {
   }
 }
 
+/** fleet 任务面所需的额外同步域（能力卡/Agent 目录）。 */
+export const FLEET_AGENT_NAMESPACE = 'agents';
+
+/**
+ * CR-002/B4：旧 daemon 配置只订阅 `tasks` 时，启动期幂等补齐 `agents`。
+ * - 空数组/缺省 = 订阅全部，保持原语义（不强行收窄）；
+ * - 已有非空 namespaces → 追加 agents（去重、保持原顺序）。
+ */
+export function ensureFleetSyncNamespaces(config) {
+  const namespaces = config?.sync?.namespaces;
+  if (!Array.isArray(namespaces) || namespaces.length === 0) return config;
+  const merged = [...new Set([...namespaces, FLEET_AGENT_NAMESPACE])];
+  if (merged.length === namespaces.length) return config;
+  return { ...config, sync: { ...config.sync, namespaces: merged } };
+}
+
 function truthy(value, fallback) {
   if (value === undefined) return fallback;
   return value === true || value === 'true' || value === '1';
@@ -185,7 +201,7 @@ export async function resolveMasterPublicKey(home, config) {
 /** 依配置构建并初始化 Mebular 门面 */
 export async function createMebular() {
   const home = homeDir();
-  const config = await loadConfigFile(home);
+  const config = ensureFleetSyncNamespaces(await loadConfigFile(home));
   const storageAdapter = config.storageAdapter ?? 'json';
   const storagePath = storagePathForHome(home, config, process.env);
   // F-IDENT-1：身份文件是 deviceId/deviceName 的唯一权威；env/config 只在身份缺失时作为 bootstrap。

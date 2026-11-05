@@ -69,6 +69,8 @@ The Plugin defaults to `attach`; it never starts or downloads Mebular silently.
 
 An existing Mebular app or CLI attaches automatically; when no runtime exists, open the Mebular panel and install the shared runtime when prompted. Only the CLI-only path needs `mebular serve`.
 
+> **Fleet execution scope**: `@mebular/dsh-plugin` is DSH's **Web/memory bridge** (Console panel plus official MCP tools), **not a Fleet executor**. The `task_*` tools below are dispatch/query/control entry points, not proof that this host executes tasks. To run DSH v1 as an execution host, use the official `dsh --profile headless "<job>"`; `dsh --profile sdk` belongs to v2 and is not the current scope. See the dispatcher vs executor matrix in [Fleet design](../fleet/DESIGN.md) §2.5.3.
+
 ### Commands
 
 ```bash

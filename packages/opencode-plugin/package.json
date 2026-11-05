@@ -12,10 +12,12 @@
   "main": "index.js",
   "exports": {
     ".": "./index.js",
+    "./fleet-runner": "./fleet-runner.js",
     "./package.json": "./package.json"
   },
   "files": [
     "index.js",
+    "fleet-runner.js",
     "README.md",
     "LICENSE"
   ],

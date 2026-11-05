@@ -140,7 +140,7 @@ describe('一键上车（Stage 1）库级流程', () => {
       expect(qs.serviceNote).toBe('stub');
 
       // detectAgents(hermes) 分支
-      const probed = detectAgents({ PATH: binDir }, 'linux');
+      const probed = detectAgents({ PATH: binDir, MEBULAR_HOME: join(root, 'missing') }, 'linux');
       expect(probed.agents.some((a) => a.kind === 'hermes')).toBe(true);
       expect(probed.sources).toContain('hermes:PATH');
 

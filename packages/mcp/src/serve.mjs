@@ -682,6 +682,26 @@ export function loadFleetSecurity() {
   return fleetSecurityPromise;
 }
 
+let fleetCardsPromise = null;
+
+/** CR-002：延迟加载 fleet 能力卡 canonical/schema/签名逻辑（唯一实现仍在 fleet）。 */
+export function loadFleetCards() {
+  if (fleetCardsPromise === null) {
+    fleetCardsPromise = import('../../fleet/dist/index.js').catch(() => null);
+  }
+  return fleetCardsPromise;
+}
+
+let fleetPlansPromise = null;
+
+/** P2：延迟加载 fleet plan 节点 schema/幂等逻辑（唯一实现仍在 fleet）。 */
+export function loadFleetPlans() {
+  if (fleetPlansPromise === null) {
+    fleetPlansPromise = import('../../fleet/dist/index.js').catch(() => null);
+  }
+  return fleetPlansPromise;
+}
+
 /**
  * 写端点门禁：medium 要动态码；high 要会签批准/恢复码；low 放行。
  * 导出供 S2-3 单测直接断言（HTTP 层同样走这里）。
@@ -897,6 +917,10 @@ export async function startHttpServer({
   let service = initialService;
   let config = initialConfig ?? {};
   let runtime = initialRuntime;
+  // CR-002：守护内串行化能力卡签名/写入，避免同版本并发请求产生重复节点。
+  let cardWriteQueue = Promise.resolve();
+  // P5：角色卡写入串行化（同版本幂等/冲突与能力卡同语义）。
+  let roleCardWriteQueue = Promise.resolve();
 
   // 0.3 详情保留维护：service 就绪后启动（启动一次 + 每 24h），热切换复用同一 timer。
   // 失败只记录状态/日志，不阻断 MCP；关闭时显式清理，避免测试/宿主进程残留 timer。
@@ -4134,6 +4158,31 @@ export async function startHttpServer({
             multiaddrs: app.node?.getLocalMultiaddrs?.() ?? [],
           });
         }
+        // P6：守护内部已验证在线 peer 公钥（loopback + memory.read）。
+        // 只来自 sync 握手登记的在线 peer，绝不回退 config.peers 地址簿；
+        // 供 daemon fleet 校验远端能力卡签名，补足无本地 Mebular 句柄的读路径。
+        if (path === '/app/peers' && req.method === 'GET') {
+          const peers = [];
+          try {
+            const sync = app?.sync;
+            if (sync && typeof sync.getOnlinePeers === 'function') {
+              for (const peer of sync.getOnlinePeers()) {
+                const key = typeof sync.getPeerPublicKey === 'function'
+                  ? sync.getPeerPublicKey(peer.deviceId)
+                  : undefined;
+                if (key === undefined) continue;
+                peers.push({
+                  device: peer.deviceId,
+                  peerId: typeof peer.peerId === 'string' ? peer.peerId : null,
+                  publicKeyHex: Buffer.from(key).toString('hex'),
+                });
+              }
+            }
+          } catch {
+            // 同步未启用/未就绪：返回空集合；调用方 fail-closed。
+          }
+          return sendJson(res, 200, { ok: true, count: peers.length, peers });
+        }
         if (path === '/app/namespaces' && req.method === 'GET') {
           const stats = service && typeof service.stats === 'function' ? await service.stats() : null;
           const namespaces = stats
@@ -4150,18 +4199,47 @@ export async function startHttpServer({
           }
           const type = typeof payload.type === 'string' && payload.type.length > 0 ? payload.type : null;
           if (!type) return sendJson(res, 400, { ok: false, error: 'type 必填' });
+          if (payload.metadata !== undefined
+            && (typeof payload.metadata !== 'object' || payload.metadata === null || Array.isArray(payload.metadata))) {
+            return sendJson(res, 400, { ok: false, error: 'metadata 必须为对象' });
+          }
+          // [raw-graph-debug] 不是内部对象写路径：能力卡必须走专用 /app/capability-cards，
+          // 角色卡/plan 也不能从这里的通用 metadata 写入口伪造。
+          const protectedInternalTypes = new Set(['agent_capability_card', 'agent_role_card', 'task_plan']);
+          const requestedInternalKind = payload.metadata?.internalObject?.kind;
+          const declaresInternal = payload.metadata?.internal === true;
+          if (declaresInternal || protectedInternalTypes.has(type) || protectedInternalTypes.has(requestedInternalKind)) {
+            return sendJson(res, 403, {
+              ok: false,
+              error: 'internal_object_write_forbidden',
+              message: '内部对象必须走各自专用写入端点（能力卡：/app/capability-cards；角色卡：/app/role-cards；plan：/app/plans）',
+            });
+          }
           const node = await app.graph.createNode(
             type,
             typeof payload.content === 'object' && payload.content !== null ? payload.content : {},
             Array.isArray(payload.edges) ? payload.edges : [],
-            payload.namespace ? { namespace: payload.namespace } : {},
+            {
+              ...(payload.namespace ? { namespace: payload.namespace } : {}),
+              ...(payload.metadata !== undefined ? { metadata: payload.metadata } : {}),
+            },
           );
-          return sendJson(res, 200, { ok: true, node: { id: node.id, type: node.type, namespace: node.namespace ?? 'default' } });
+          return sendJson(res, 200, {
+            ok: true,
+            node: {
+              id: node.id,
+              type: node.type,
+              namespace: node.namespace ?? 'default',
+              createdBy: node.createdBy,
+              ...(node.metadata !== undefined ? { metadata: node.metadata } : {}),
+            },
+          });
         }
         // [raw-graph-debug] 原始图调试/接入端点（调试例外）：不做内部对象、归档或
         // 墓碑过滤，仅供 daemon/fleet 原始图读写与排障。普通记忆列表与域统计必须走
         // MemoryService.listRecords()/namespaceStats()（Console 见 admin.mjs），
         // 不得把这里当作普通记忆读路径。
+        // P5：即使 raw debug 也不返回角色卡原文；角色卡只能走 /app/role-cards。
         if (path === '/app/nodes' && req.method === 'GET') {
           const filter = {};
           const ns = url.searchParams.get('namespace');
@@ -4170,11 +4248,331 @@ export async function startHttpServer({
           if (ns) filter.namespace = ns;
           if (type) filter.type = type;
           const nodes = await app.graph.listNodes(filter);
-          const trimmed = Number.isInteger(limit) && limit > 0 ? nodes.slice(0, limit) : nodes;
+          const visible = nodes.filter((n) => n.type !== 'agent_role_card'
+            && n.metadata?.internalObject?.kind !== 'agent_role_card');
+          const trimmed = Number.isInteger(limit) && limit > 0 ? visible.slice(0, limit) : visible;
           return sendJson(res, 200, {
             ok: true,
             count: trimmed.length,
-            nodes: trimmed.map((n) => ({ id: n.id, type: n.type, namespace: n.namespace ?? 'default', content: n.content })),
+            nodes: trimmed.map((n) => ({
+              id: n.id,
+              type: n.type,
+              namespace: n.namespace ?? 'default',
+              createdBy: n.createdBy,
+              content: n.content,
+              ...(n.metadata !== undefined ? { metadata: n.metadata } : {}),
+            })),
+          });
+        }
+        // P2：plan 节点专用内部端点（loopback + memory.write/read）。
+        // 唯一写入路径仍是 fleet materializer/plan store；这里只做 schema/幂等与 internal metadata，
+        // 不开放 task_plan 到 /app/nodes，也不新增公共 MCP 方法/UI。
+        if (path === '/app/plans' && req.method === 'POST') {
+          if (!app) return sendJson(res, 503, { ok: false, error: 'plans_unavailable', message: '图存储尚未初始化' });
+          if (!writesEnabled) return sendJson(res, 403, { ok: false, error: 'read_only', message: '写能力已关闭' });
+          let payload;
+          try {
+            payload = JSON.parse(body.toString('utf-8') || '{}');
+          } catch {
+            return sendJson(res, 400, { ok: false, error: 'invalid json' });
+          }
+          if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+            return sendJson(res, 400, { ok: false, error: 'plan body 必须为对象' });
+          }
+          const lib = await loadFleetPlans();
+          if (!lib || typeof lib.appendValidatedTaskPlanNode !== 'function') {
+            return sendJson(res, 503, { ok: false, error: 'plans_unavailable', message: 'plan 模块不可用' });
+          }
+          const fleetNamespace = await resolveFleetNamespace({ home, fallback: namespace });
+          const requestedNamespace = typeof payload.namespace === 'string' && payload.namespace.length > 0
+            ? payload.namespace
+            : fleetNamespace;
+          if (requestedNamespace !== fleetNamespace) {
+            return sendJson(res, 400, {
+              ok: false,
+              error: 'namespace_invalid',
+              message: `plan 只能写入任务板 namespace：${fleetNamespace}`,
+            });
+          }
+          const planInput = payload.plan !== undefined ? payload.plan : payload.content;
+          try {
+            const result = await lib.appendValidatedTaskPlanNode(app, planInput, { namespace: fleetNamespace });
+            return sendJson(res, 200, {
+              ok: true,
+              plan: result.plan,
+              nodeId: result.nodeId,
+              createdBy: result.createdBy,
+              replayed: result.replayed === true,
+            });
+          } catch (error) {
+            const code = typeof error?.code === 'string' ? error.code : null;
+            const reason = typeof error?.reason === 'string' ? error.reason : null;
+            const status = code === 'PLAN_CONFLICT' || code === 'PLAN_VERSION' || code === 'PLAN_STATE_INVALID'
+              ? 409
+              : code === 'PLAN_SCHEMA' || code === 'PLAN_BUDGET' || code === 'PLAN_POLICY'
+                || code === 'PLAN_JOIN' || code === 'PLAN_MR' || code === 'PLAN_ACCEPTANCE'
+                || code === 'PLAN_REUSE' || code === 'PLAN_DUP_STEP' || code === 'PLAN_MISSING_DEP'
+                || code === 'PLAN_CYCLE'
+                ? 422
+                : 500;
+            return sendJson(res, status, {
+              ok: false,
+              ...(code !== null ? { error: code } : { error: 'plan_write_failed' }),
+              ...(reason !== null ? { reason } : {}),
+              errors: Array.isArray(error?.errors) ? error.errors : [String(error?.message ?? error)],
+            });
+          }
+        }
+        if (path === '/app/plans' && req.method === 'GET') {
+          if (!app) return sendJson(res, 503, { ok: false, error: 'plans_unavailable', message: '图存储尚未初始化' });
+          const lib = await loadFleetPlans();
+          if (!lib || typeof lib.listTaskPlanNodes !== 'function') {
+            return sendJson(res, 503, { ok: false, error: 'plans_unavailable', message: 'plan 模块不可用' });
+          }
+          const fleetNamespace = await resolveFleetNamespace({ home, fallback: namespace });
+          const requestedNamespace = url.searchParams.get('namespace');
+          if (requestedNamespace !== null && requestedNamespace.length > 0 && requestedNamespace !== fleetNamespace) {
+            return sendJson(res, 400, {
+              ok: false,
+              error: 'namespace_invalid',
+              message: `plan 只能读取任务板 namespace：${fleetNamespace}`,
+            });
+          }
+          const planId = url.searchParams.get('planId');
+          const version = Number(url.searchParams.get('version') ?? '0');
+          let nodes = await lib.listTaskPlanNodes(app, { namespace: fleetNamespace });
+          if (planId) nodes = nodes.filter((entry) => entry.plan.planId === planId);
+          if (Number.isInteger(version) && version > 0) nodes = nodes.filter((entry) => entry.plan.version === version);
+          return sendJson(res, 200, {
+            ok: true,
+            count: nodes.length,
+            plans: nodes.map((entry) => entry.plan),
+            nodes: nodes.map((entry) => ({
+              id: entry.nodeId,
+              type: 'task_plan',
+              namespace: fleetNamespace,
+              createdBy: entry.createdBy,
+              content: entry.plan,
+              metadata: {
+                internal: true,
+                internalObject: { kind: 'task_plan' },
+              },
+            })),
+          });
+        }
+        // CR-002：daemon 身份签名能力卡（draft 无 signature），写 agents 域 internal 节点。
+        if (path === '/app/capability-cards' && req.method === 'POST') {
+          if (!app) return sendJson(res, 503, { ok: false, error: 'capability_cards_unavailable', message: '图存储尚未初始化' });
+          if (!writesEnabled) return sendJson(res, 403, { ok: false, error: 'read_only', message: '写能力已关闭' });
+          let payload;
+          try {
+            payload = JSON.parse(body.toString('utf-8') || '{}');
+          } catch {
+            return sendJson(res, 400, { ok: false, error: 'invalid json' });
+          }
+          if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+            return sendJson(res, 400, { ok: false, error: 'card body 必须为对象' });
+          }
+          const lib = await loadFleetCards();
+          if (!lib || typeof lib.signAgentCapabilityCard !== 'function'
+            || typeof lib.validateCapabilityCardDraft !== 'function'
+            || typeof lib.appendCapabilityCard !== 'function') {
+            return sendJson(res, 503, { ok: false, error: 'capability_cards_unavailable', message: '能力卡模块不可用' });
+          }
+          const namespace = typeof payload.namespace === 'string' && payload.namespace.length > 0
+            ? payload.namespace
+            : 'agents';
+          if (namespace !== 'agents') {
+            return sendJson(res, 400, { ok: false, error: 'namespace_invalid', message: '能力卡只能写入 agents 域' });
+          }
+          const draft = payload.card;
+          const validation = lib.validateCapabilityCardDraft(draft);
+          if (!validation.ok) {
+            return sendJson(res, 422, { ok: false, error: 'card_invalid', errors: validation.errors });
+          }
+          if (!deviceId) {
+            return sendJson(res, 409, { ok: false, error: 'identity_unavailable', message: '本机设备身份不可用' });
+          }
+          if (draft.device !== deviceId) {
+            return sendJson(res, 403, { ok: false, error: 'device_mismatch', message: '能力卡 device 必须是本机守护设备' });
+          }
+          const serialize = (fn) => {
+            const run = cardWriteQueue.then(fn, fn);
+            cardWriteQueue = run.catch(() => undefined);
+            return run;
+          };
+          try {
+            const result = await serialize(async () => {
+              const latest = lib.latestCapabilityCards(await lib.listCapabilityCards(app, 'agents'))
+                .find((card) => card.device === draft.device && card.agent === draft.agent) ?? null;
+              if (latest !== null) {
+                const sameContent = lib.capabilityCardFingerprint(latest) === lib.capabilityCardFingerprint(draft);
+                if (latest.version === draft.version) {
+                  return sameContent
+                    ? { status: 200, body: { ok: true, card: latest, nodeId: null, replayed: true } }
+                    : { status: 409, body: { ok: false, error: 'card_version_conflict', message: '同版本能力卡内容冲突' } };
+                }
+                if (latest.version > draft.version) {
+                  return { status: 409, body: { ok: false, error: 'card_stale', message: '能力卡版本落后于已发布版本' } };
+                }
+                if (draft.version !== latest.version + 1) {
+                  return { status: 409, body: { ok: false, error: 'card_version_gap', message: '能力卡版本必须紧邻上一版本' } };
+                }
+              } else if (draft.version !== 1) {
+                return { status: 409, body: { ok: false, error: 'card_version_gap', message: '首版能力卡 version 必须为 1' } };
+              }
+              let signed;
+              try {
+                signed = await lib.signAgentCapabilityCard(app, draft);
+              } catch (error) {
+                if (error?.code === 'CARD_SIGNER_UNAVAILABLE') {
+                  return { status: 409, body: { ok: false, error: 'identity_unavailable', message: '本机设备身份不可用，无法签名能力卡' } };
+                }
+                throw error;
+              }
+              const signedCheck = lib.validateAgentCapabilityCard(signed);
+              if (!signedCheck.ok) {
+                return { status: 500, body: { ok: false, error: 'card_invalid', errors: signedCheck.errors } };
+              }
+              const nodeId = await lib.appendCapabilityCard(app, signed, 'agents');
+              return { status: 200, body: { ok: true, card: signed, nodeId, replayed: false } };
+            });
+            return sendJson(res, result.status, result.body);
+          } catch (error) {
+            return sendJson(res, 500, { ok: false, error: 'capability_card_write_failed', message: String(error?.message ?? error) });
+          }
+        }
+        // P5：daemon 角色卡写入/读取（loopback + memory.write/read）。
+        // 只服务 fleet 内部 runtime job/route；不新增公共 MCP 方法/UI，
+        // 也不开放 agent_role_card 到 /app/nodes。author = 本机守护设备。
+        if (path === '/app/role-cards' && req.method === 'POST') {
+          if (!app) return sendJson(res, 503, { ok: false, error: 'role_cards_unavailable', message: '图存储尚未初始化' });
+          if (!writesEnabled) return sendJson(res, 403, { ok: false, error: 'read_only', message: '写能力已关闭' });
+          let payload;
+          try {
+            payload = JSON.parse(body.toString('utf-8') || '{}');
+          } catch {
+            return sendJson(res, 400, { ok: false, error: 'invalid json' });
+          }
+          if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+            return sendJson(res, 400, { ok: false, error: 'role card body 必须为对象' });
+          }
+          const lib = await loadFleetCards();
+          if (!lib || typeof lib.validateAgentRoleCard !== 'function'
+            || typeof lib.sanitizeAgentRoleCardForWrite !== 'function'
+            || typeof lib.listAgentRoleCards !== 'function'
+            || typeof lib.latestAgentRoleCards !== 'function'
+            || typeof lib.roleCardFingerprint !== 'function'
+            || typeof lib.appendAgentRoleCard !== 'function') {
+            return sendJson(res, 503, { ok: false, error: 'role_cards_unavailable', message: '角色卡模块不可用' });
+          }
+          const cardNamespace = typeof payload.namespace === 'string' && payload.namespace.length > 0
+            ? payload.namespace
+            : 'agents';
+          if (cardNamespace !== 'agents') {
+            return sendJson(res, 400, { ok: false, error: 'namespace_invalid', message: '角色卡只能写入 agents 域' });
+          }
+          const card = payload.card !== undefined ? payload.card : payload.content;
+          const validation = lib.validateAgentRoleCard(card);
+          if (!validation.ok) {
+            return sendJson(res, 422, { ok: false, error: 'role_card_invalid', errors: validation.errors });
+          }
+          // B3：服务端按安全字段重建 summary；客户端传入的原文 summary 一律丢弃。
+          const writeCard = lib.sanitizeAgentRoleCardForWrite(card);
+          const writeValidation = lib.validateAgentRoleCard(writeCard);
+          if (!writeValidation.ok) {
+            return sendJson(res, 422, { ok: false, error: 'role_card_invalid', errors: writeValidation.errors });
+          }
+          if (typeof deviceId !== 'string' || deviceId.length === 0) {
+            return sendJson(res, 409, { ok: false, error: 'identity_unavailable', message: '本机设备身份不可用' });
+          }
+          if (writeCard.device !== deviceId) {
+            return sendJson(res, 403, { ok: false, error: 'device_mismatch', message: '角色卡 device 必须是本机守护设备' });
+          }
+          const serialize = (fn) => {
+            const run = roleCardWriteQueue.then(fn, fn);
+            roleCardWriteQueue = run.catch(() => undefined);
+            return run;
+          };
+          try {
+            const result = await serialize(async () => {
+              const latest = lib.latestAgentRoleCards(await lib.listAgentRoleCards(app, 'agents'))
+                .find((entry) => entry.device === writeCard.device && entry.agent === writeCard.agent) ?? null;
+              if (latest !== null) {
+                const sameContent = lib.roleCardFingerprint(latest) === lib.roleCardFingerprint(writeCard);
+                if (latest.version === writeCard.version) {
+                  return sameContent
+                    ? { status: 200, body: { ok: true, card: latest, nodeId: null, createdBy: latest.device, replayed: true } }
+                    : { status: 409, body: { ok: false, error: 'ROLE_CARD_CONFLICT', message: '同版本角色卡内容冲突' } };
+                }
+                if (latest.version > writeCard.version) {
+                  return { status: 409, body: { ok: false, error: 'ROLE_CARD_STALE', message: '角色卡版本落后于已发布版本' } };
+                }
+                if (writeCard.version !== latest.version + 1) {
+                  return { status: 409, body: { ok: false, error: 'ROLE_CARD_VERSION_GAP', message: '角色卡版本必须紧邻上一版本' } };
+                }
+              } else if (writeCard.version !== 1) {
+                return { status: 409, body: { ok: false, error: 'ROLE_CARD_VERSION_GAP', message: '首版角色卡 version 必须为 1' } };
+              }
+              const appended = await lib.appendAgentRoleCard(app, writeCard, 'agents');
+              return {
+                status: 200,
+                body: {
+                  ok: true,
+                  card: appended.card,
+                  nodeId: appended.nodeId,
+                  createdBy: appended.createdBy,
+                  replayed: appended.replayed === true,
+                },
+              };
+            });
+            return sendJson(res, result.status, result.body);
+          } catch (error) {
+            const code = typeof error?.code === 'string' ? error.code : null;
+            const status = code === 'ROLE_CARD_CONFLICT' || code === 'ROLE_CARD_STALE' || code === 'ROLE_CARD_VERSION_GAP'
+              ? 409
+              : code === 'ROLE_CARD_AUTHOR'
+                ? 403
+                : code === 'ROLE_CARD_SCHEMA'
+                  ? 422
+                  : 500;
+            return sendJson(res, status, {
+              ok: false,
+              ...(code !== null ? { error: code } : { error: 'role_card_write_failed' }),
+              ...(Array.isArray(error?.errors) ? { errors: error.errors } : { message: String(error?.message ?? error) }),
+            });
+          }
+        }
+        if (path === '/app/role-cards' && req.method === 'GET') {
+          if (!app) return sendJson(res, 503, { ok: false, error: 'role_cards_unavailable', message: '图存储尚未初始化' });
+          const lib = await loadFleetCards();
+          if (!lib || typeof lib.listAgentRoleCardNodes !== 'function') {
+            return sendJson(res, 503, { ok: false, error: 'role_cards_unavailable', message: '角色卡模块不可用' });
+          }
+          const requested = url.searchParams.get('namespace');
+          if (requested !== null && requested.length > 0 && requested !== 'agents') {
+            return sendJson(res, 400, { ok: false, error: 'namespace_invalid', message: '角色卡只能读取 agents 域' });
+          }
+          const device = url.searchParams.get('device');
+          const agent = url.searchParams.get('agent');
+          let nodes = await lib.listAgentRoleCardNodes(app, { namespace: 'agents' });
+          if (device) nodes = nodes.filter((entry) => entry.card.device === device);
+          if (agent) nodes = nodes.filter((entry) => entry.card.agent === agent);
+          return sendJson(res, 200, {
+            ok: true,
+            count: nodes.length,
+            cards: nodes.map((entry) => entry.card),
+            nodes: nodes.map((entry) => ({
+              id: entry.nodeId,
+              type: 'agent_role_card',
+              namespace: 'agents',
+              createdBy: entry.createdBy,
+              content: entry.card,
+              metadata: {
+                internal: true,
+                internalObject: { kind: 'agent_role_card' },
+              },
+            })),
           });
         }
         // W2 A4：join 邀请（守护用自身身份生成令牌）

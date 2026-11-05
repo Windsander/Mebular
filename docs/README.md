@@ -62,6 +62,7 @@ main [`README.md`](../README.md); this index only describes document structure.
 - [Memory Runtime sidecar lifecycle](design/0.3.0-memory-runtime-sidecar.md) — process, discovery, tokens, local data and failure behaviour (Chinese)
 - [0.3.0 acceptance report](quality/0.3.0-memory-runtime-acceptance.md) — recall quality, security and performance evidence
 - [0.3.0 real model smoke](quality/0.3.0-model-smoke.md) — Qwen3-4B + llama.cpp verification; records the engine symlink and Qwen3 thinking blockers
+- [0.3.2 Fleet orchestration evidence](quality/0.3.2-fleet-orchestration.md) — executor/adapters, executable routing, checks and real/fake boundaries
 - [DSH plugin v1](design/dsh-plugin-v1.md) — historical v0.1 design; current guide is [DSH integration](integrations/DSH.md)
 - [Configuration journey v1](design/config-journey-v1.md) — Historical record of the v1 setup flow
 - [HTML prototype](design/prototype/README.md) — Historical record of the early prototype
@@ -69,9 +70,14 @@ main [`README.md`](../README.md); this index only describes document structure.
 ## Package docs
 
 - [MCP daemon](../packages/mcp) — `mebular serve`, MCP surface, console hosting
-- [Fleet](../packages/fleet) — task DAG, join tokens, security, CLI
+- [Fleet (0.3.2)](../packages/fleet) — task DAG, plans, routing, join tokens, security, CLI
   - [Runbook](../packages/fleet/RUNBOOK.md)
-  - [Design](../packages/fleet/DESIGN.md)
+  - [Design](../packages/fleet/DESIGN.md) — includes the dispatcher vs executor and agent support matrix
+  - [OpenChamber public runner](../packages/fleet/OPENCHAMBER-RUNNER.md)
+  - [Protocol invariants](../packages/fleet/PROTOCOL-INVARIANTS.md)
+  - [Orchestration contract](design/fleet-orchestration-contract.md)
+  - Historical evidence: [0.3.0 P6 E2E](quality/0.3.0-fleet-orchestration-e2e.md) ·
+    [0.3.0 P7 review](quality/0.3.0-fleet-p7-review.md)
 - [Console package](../packages/console) — console SPA and UI checks
 - [Skill](../packages/skill/SETUP.md) · [memory policy](../packages/skill/MEMORY_POLICY.md) ·
   [task playbook](../packages/skill/tasks/SKILL.md)

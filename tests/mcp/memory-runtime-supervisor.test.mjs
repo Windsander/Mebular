@@ -8,7 +8,7 @@ import { describe, it, expect, afterEach } from '@jest/globals';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { existsSync } from 'node:fs';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -857,6 +857,77 @@ describe('MemoryRuntimeSupervisor：生命周期', () => {
       profileId: () => 'default',
     });
     expect(await third.start()).toMatchObject({ state: 'starting' });
+  }, 15000);
+
+  it('dormant baseline 缺失/损坏/权限异常时 start 保守进入 starting', async () => {
+    const home = await tempDir();
+    await writeCapabilityToken(home, 'baseline-token-durable');
+    const external = spawn(process.execPath, [FAKE, 'serve'], {
+      env: { ...process.env, ...envFor(home, { FAKE_SIDECAR_HEARTBEAT_MS: '50' }) },
+      stdio: 'ignore',
+    });
+    cleanups.push(async () => {
+      if (pidAlive(external.pid)) process.kill(external.pid, 'SIGTERM');
+    });
+    await waitFor(() => existsSync(join(home, 'memory-runtime.json')));
+    const first = new MemoryRuntimeSupervisor({
+      home,
+      config: enabledConfig({ startTimeoutMs: 500 }),
+      env: envFor(home),
+      profileId: () => 'default',
+    });
+    expect(await first.start()).toMatchObject({ state: 'ready', attached: true });
+    await first.stop({ includeAttached: false, timeoutMs: 500 });
+
+    const dormantPath = join(home, 'memory-runtime', 'dormant.json');
+    const validDormant = await readFile(dormantPath, 'utf-8');
+    expect((await stat(dormantPath)).mode & 0o777).toBe(0o600);
+    const makeSupervisor = () => new MemoryRuntimeSupervisor({
+      home,
+      config: enabledConfig({ startTimeoutMs: 500 }),
+      env: envFor(home),
+      profileId: () => 'default',
+    });
+
+    await rm(dormantPath, { force: true });
+    expect(await makeSupervisor().start()).toMatchObject({ state: 'starting' });
+
+    await writeFile(dormantPath, '{ not-json', { mode: 0o600 });
+    expect(await makeSupervisor().start()).toMatchObject({ state: 'starting' });
+
+    await writeFile(dormantPath, validDormant, { mode: 0o600 });
+    await chmod(dormantPath, 0o644);
+    expect(await makeSupervisor().start()).toMatchObject({ state: 'starting' });
+  }, 20000);
+
+  it('dormant baseline 写入失败时 stop 不得报告 clean stopped', async () => {
+    const home = await tempDir();
+    await writeCapabilityToken(home, 'baseline-token-write-fail');
+    const external = spawn(process.execPath, [FAKE, 'serve'], {
+      env: { ...process.env, ...envFor(home, { FAKE_SIDECAR_HEARTBEAT_MS: '50' }) },
+      stdio: 'ignore',
+    });
+    cleanups.push(async () => {
+      if (pidAlive(external.pid)) process.kill(external.pid, 'SIGTERM');
+    });
+    await waitFor(() => existsSync(join(home, 'memory-runtime.json')));
+    const supervisor = new MemoryRuntimeSupervisor({
+      home,
+      config: enabledConfig({ startTimeoutMs: 500 }),
+      env: envFor(home),
+      profileId: () => 'default',
+    });
+    expect(await supervisor.start()).toMatchObject({ state: 'ready', attached: true });
+    // 撤销 capability 使“干净停止”本应成立；再用目录占住 dormant.json 模拟写入失败。
+    await rm(join(home, 'memory-runtime', 'capability-token'), { force: true });
+    const dormantPath = join(home, 'memory-runtime', 'dormant.json');
+    await rm(dormantPath, { force: true });
+    await mkdir(dormantPath, { recursive: true });
+
+    const stopped = await supervisor.stop({ includeAttached: false, timeoutMs: 500 });
+
+    expect(stopped).toMatchObject({ state: 'degraded', error: { code: 'disable_incomplete' } });
+    expect(stopped.state).not.toBe('stopped');
   }, 15000);
 
   for (const variant of [

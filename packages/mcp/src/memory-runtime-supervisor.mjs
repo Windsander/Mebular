@@ -15,7 +15,7 @@
 import { spawn as defaultSpawn } from 'node:child_process';
 import { randomBytes, createHash } from 'node:crypto';
 import { statSync } from 'node:fs';
-import { readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { chmod, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -742,12 +742,17 @@ export class MemoryRuntimeSupervisor {
 
   async #readDormantState() {
     try {
+      const info = await stat(this.#dormantStatePath);
+      if (process.platform !== 'win32' && (info.mode & 0o777) !== 0o600) return null;
       const value = JSON.parse(await readFile(this.#dormantStatePath, 'utf-8'));
-      if (!Number.isInteger(value?.pid) || typeof value?.startedAt !== 'number') return null;
+      if (value?.version !== undefined && value.version !== 1) return null;
+      if (!Number.isInteger(value?.pid) || value.pid <= 0) return null;
+      if (!Number.isFinite(value?.startedAt)) return null;
+      if (!(typeof value?.credential === 'string' || value?.credential === null)) return null;
       return {
         pid: value.pid,
         startedAt: value.startedAt,
-        credential: typeof value.credential === 'string' ? value.credential : null,
+        credential: value.credential,
       };
     } catch {
       return null;
@@ -755,12 +760,14 @@ export class MemoryRuntimeSupervisor {
   }
 
   async #writeDormantState(state) {
+    const tmp = `${this.#dormantStatePath}.tmp-${process.pid}`;
     try {
-      const tmp = `${this.#dormantStatePath}.tmp-${process.pid}`;
-      await writeFile(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
+      await writeFile(tmp, JSON.stringify({ version: 1, ...state }, null, 2), { mode: 0o600 });
+      if (process.platform !== 'win32') await chmod(tmp, 0o600);
       await rename(tmp, this.#dormantStatePath);
-    } catch {
-      // 状态持久化失败不改变内存判定；下次 start 仍可用 lock/凭据重新判定。
+    } catch (error) {
+      await unlink(tmp).catch(() => undefined);
+      throw error;
     }
   }
 
@@ -2178,13 +2185,16 @@ export class MemoryRuntimeSupervisor {
             ? inMemoryBaseline
             : (persistedMatches ? persistedMatches.credential : undefined);
           const credential = await this.#capabilityFingerprint();
-          if (this.dormantLockInvalidated) {
-            // 旧 dormantLock 已因 token 换代失效：继续走正常等待，
-            // 外部实例可能凭新凭据恢复；超时后保持 starting，不回退 stopped。
-          } else if (baseline !== undefined && baseline !== credential) {
-            // 保留旧 baseline：同一进程重启后仍据此判定凭据已换代，不得回退 stopped。
-            this.dormantLock = null;
-            this.dormantLockInvalidated = true;
+          if (!this.dormantLockInvalidated) {
+            if (baseline === undefined) {
+              // 没有可信 baseline（文件缺失/损坏/权限异常/写失败）：不能证明仍是同一代 dormant 实例，
+              // 保守进入 starting，绝不报告 clean stopped。
+              this.dormantLockInvalidated = true;
+            } else if (baseline !== credential) {
+              // 保留旧 baseline：同一进程重启后仍据此判定凭据已换代，不得回退 stopped。
+              this.dormantLock = null;
+              this.dormantLockInvalidated = true;
+            }
           }
           const resumeDeadline = this.now() + Math.min(500, this.configuredStartTimeout());
           while (this.now() < resumeDeadline) {
@@ -2539,8 +2549,17 @@ export class MemoryRuntimeSupervisor {
       }
     }
 
-    if (dormantBaseline) await this.#writeDormantState(dormantBaseline);
-    else await this.#clearDormantState();
+    let dormantPersistError = null;
+    if (dormantBaseline) {
+      try {
+        await this.#writeDormantState(dormantBaseline);
+      } catch (error) {
+        dormantPersistError = error;
+        clean = false;
+      }
+    } else {
+      await this.#clearDormantState();
+    }
 
     if (clean) {
       this.managedInstance = null;
@@ -2557,8 +2576,11 @@ export class MemoryRuntimeSupervisor {
         attached: Boolean(attachedDiscovery && pidAlive(attachedDiscovery.pid)),
         pid: attachedDiscovery && pidAlive(attachedDiscovery.pid) ? attachedDiscovery.pid : null,
         url: null, healthUrl: null,
-        error: publicError(includeAttached ? 'stop_incomplete' : 'disable_incomplete',
-          includeAttached ? 'sidecar 未能完整停止' : 'sidecar 未确认 dormant：禁用不完整'),
+        error: dormantPersistError
+          ? publicError(includeAttached ? 'stop_incomplete' : 'disable_incomplete',
+            `sidecar 休眠凭据基线写入失败（${dormantPersistError?.code ?? 'ERROR'}）`)
+          : publicError(includeAttached ? 'stop_incomplete' : 'disable_incomplete',
+            includeAttached ? 'sidecar 未能完整停止' : 'sidecar 未确认 dormant：禁用不完整'),
         reason: this.isEnabled() ? null : 'disabled', lock: this.lockView,
       });
     }

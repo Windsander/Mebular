@@ -2571,6 +2571,7 @@ export async function startHttpServer({
     const attempt = applyAttempt;
     await writeApplyPending(home, {
       attempt,
+      applyId: randomUUID(),
       at: new Date().toISOString(),
       fields,
       attempts: 1,

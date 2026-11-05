@@ -143,8 +143,16 @@ function runtimeMcpPort(config, options = {}) {
  */
 export async function startServeServer(options = {}) {
   const home = homeDir();
-  // 上次回滚失败留下的 pending：读 config 之前先尝试恢复 .bak，避免带着未回滚配置启动。
-  // 单次尝试有界（restoreBackup 自己受 config lock/超时约束），失败写 rollback-failed 供 admin 展示。
+  let provisionStart = isProvisionHome(home, { storagePath: process.env.MEBULAR_STORAGE_PATH });
+  // F-NET-1（C）：**先取单实例锁，再初始化网络**——第二写者应在绑定监听端口前就得到
+  // 可读的 MCP_STORAGE_LOCKED（此前 createMebular 先启网络 → 抢 4001 → 裸 EADDRINUSE）。
+  let preConfig = provisionStart ? {} : await loadConfigFile(home).catch(() => ({}));
+  const { storagePathForHome } = await import('./home-identity.mjs');
+  const preStoragePath = storagePathForHome(home, preConfig, process.env);
+  const lock = await acquireLock(home, preStoragePath);
+
+  // 上次回滚失败留下的 pending：必须在取得 home 单活锁之后、读启动配置之前恢复，
+  // 避免第二个 serve 在活跃实例存在时改写 config。单次尝试有界，失败写 rollback-failed 供 admin 展示。
   await recoverPendingRollback({
     home,
     configFile: configPath(home),
@@ -152,13 +160,9 @@ export async function startServeServer(options = {}) {
   }).catch((error) => {
     console.error(`CONFIG_ROLLBACK_RECOVERY_FAILED ${error?.code ?? 'ERROR'}`);
   });
-  const provisionStart = isProvisionHome(home, { storagePath: process.env.MEBULAR_STORAGE_PATH });
-  // F-NET-1（C）：**先取单实例锁，再初始化网络**——第二写者应在绑定监听端口前就得到
-  // 可读的 MCP_STORAGE_LOCKED（此前 createMebular 先启网络 → 抢 4001 → 裸 EADDRINUSE）。
-  const preConfig = provisionStart ? {} : await loadConfigFile(home).catch(() => ({}));
-  const { storagePathForHome } = await import('./home-identity.mjs');
-  const preStoragePath = storagePathForHome(home, preConfig, process.env);
-  const lock = await acquireLock(home, preStoragePath);
+  // 恢复/跳过/失败后都以磁盘现状重新判定启动模式与 HTTP/TLS 初值。
+  provisionStart = isProvisionHome(home, { storagePath: process.env.MEBULAR_STORAGE_PATH });
+  preConfig = provisionStart ? {} : await loadConfigFile(home).catch(() => ({}));
 
   // 热初始化 / 正常启动共用：app、join 服务、运行时快照与生命周期资源。
   let current = null;

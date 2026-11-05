@@ -1,6 +1,7 @@
 // config-apply：生产 serve 启动必须先恢复上次失败的回滚，再读取 config.json。
 import { describe, it, expect, afterEach } from '@jest/globals';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,6 +15,7 @@ import {
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const CLI = join(ROOT, 'packages/mcp/bin/mebular.mjs');
 const dirs = [];
+const hashOf = (text) => createHash('sha256').update(text).digest('hex');
 
 const HARNESS = String.raw`
 import { join } from 'node:path';
@@ -30,6 +32,22 @@ try {
   await srv.close();
 }
 process.exit(0);
+`;
+
+const LOCKED_HARNESS = String.raw`
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+const ROOT = process.env.APPLY_STARTUP_ROOT;
+const { startServeServer } = await import(pathToFileURL(join(ROOT, 'packages/mcp/src/server.mjs')).href);
+try {
+  await startServeServer({ host: '127.0.0.1', port: 0, auth: 'none' });
+  console.log('UNEXPECTED_START');
+  process.exit(2);
+} catch (error) {
+  console.log('LOCKED ' + (error?.code ?? 'ERROR'));
+  process.exit(0);
+}
 `;
 
 async function makeWorkspace() {
@@ -77,15 +95,18 @@ describe('config-apply production startup recovery', () => {
     const configFile = join(paths.home, 'config.json');
     const backupFile = `${configFile}.bak`;
     const validConfig = await readFile(configFile, 'utf-8');
-    await writeFile(configFile, '{ "broken":', 'utf-8');
+    const brokenConfig = '{ "broken":';
+    await writeFile(configFile, brokenConfig, 'utf-8');
     await writeFile(backupFile, validConfig, 'utf-8');
     await writeApplyPending(paths.home, {
       attempt: 3,
+      applyId: 'startup-apply-3',
       at: new Date().toISOString(),
       fields: ['mcp.http.port'],
       attempts: 1,
       rollingBack: true,
       reason: '新实例未健康',
+      failedConfigHash: hashOf(brokenConfig),
     });
 
     const run = spawnSync(process.execPath, ['--input-type=module', '-e', HARNESS], {
@@ -101,5 +122,51 @@ describe('config-apply production startup recovery', () => {
     expect(await readFile(configFile, 'utf-8')).toBe(validConfig);
     expect(await readApplyPending(paths.home)).toBeNull();
     expect(await readApplyResult(paths.home)).toMatchObject({ status: 'rolled-back', restored: true, attempt: 3 });
+  }, 90000);
+
+  it('已有实例持锁时第二个 serve 不触发恢复、不改 config/pending', async () => {
+    const paths = await makeWorkspace();
+    const env = envFor(paths);
+    const init = spawnSync(process.execPath, [CLI, 'init'], {
+      cwd: ROOT,
+      env,
+      encoding: 'utf8',
+      timeout: 30000,
+    });
+    expect(init.status).toBe(0);
+
+    const configFile = join(paths.home, 'config.json');
+    const backupFile = `${configFile}.bak`;
+    const currentConfig = await readFile(configFile, 'utf-8');
+    // backup 与当前配置有字节差异：一旦恢复发生，测试可直接发现。
+    await writeFile(backupFile, `${currentConfig}\n`, 'utf-8');
+    const pending = {
+      attempt: 4,
+      applyId: 'locked-apply-4',
+      at: new Date().toISOString(),
+      fields: ['mcp.http.port'],
+      attempts: 1,
+      rollingBack: true,
+      reason: '新实例未健康',
+      failedConfigHash: hashOf(currentConfig),
+    };
+    await writeApplyPending(paths.home, pending);
+    await writeFile(join(paths.home, 'lock'), JSON.stringify({
+      pid: process.pid,
+      startedAt: new Date().toISOString(),
+      storagePath: join(paths.home, 'store.jsonl'),
+    }), 'utf-8');
+
+    const run = spawnSync(process.execPath, ['--input-type=module', '-e', LOCKED_HARNESS], {
+      cwd: ROOT,
+      env,
+      encoding: 'utf8',
+      timeout: 60000,
+    });
+    expect(run.status).toBe(0);
+    expect(run.stdout).toContain('LOCKED MCP_STORAGE_LOCKED');
+    expect(await readFile(configFile, 'utf-8')).toBe(currentConfig);
+    expect(await readApplyPending(paths.home)).toMatchObject(pending);
+    expect(await readApplyResult(paths.home)).toBeNull();
   }, 90000);
 });

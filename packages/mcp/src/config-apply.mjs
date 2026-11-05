@@ -12,6 +12,7 @@
 // 全部外部交互（健康探针 / 重启通道 / 时钟）可注入，便于 hermetic 测试；零 core 依赖。
 
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { copyFile, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -162,7 +163,12 @@ export function spawnSupervisor({ supervisorPath, args, env = process.env, spawn
 export const readJoinError = (home) => readJson(joinErrorPath(home));
 
 /** 还原备份（config.json ← config.json.bak）。返回是否真的还原了。 */
-export async function restoreBackup({ configFile, backupFile = `${configFile}.bak`, copyFileImpl = copyFile }) {
+export async function restoreBackup({
+  configFile,
+  backupFile = `${configFile}.bak`,
+  copyFileImpl = copyFile,
+  expectedConfigHash = null,
+}) {
   const releaseConfigLock = await acquireConfigFileLock(configFile);
   if (!releaseConfigLock) {
     const error = new Error(`配置文件正在被其他进程写入：${configFile}`);
@@ -170,6 +176,14 @@ export async function restoreBackup({ configFile, backupFile = `${configFile}.ba
     throw error;
   }
   try {
+    if (expectedConfigHash) {
+      const actual = await configFileHash(configFile);
+      if (actual !== expectedConfigHash) {
+        const error = new Error('当前配置文件已变化：拒绝恢复备份');
+        error.code = 'CONFIG_CHANGED';
+        throw error;
+      }
+    }
     if (!existsSync(backupFile)) return false;
     await copyFileImpl(backupFile, configFile);
     return true;
@@ -178,17 +192,111 @@ export async function restoreBackup({ configFile, backupFile = `${configFile}.ba
   }
 }
 
+/** pending 的完整身份：attempt/applyId/at/fields 任一变化都视为另一条 apply。 */
+function pendingIdentity(pending) {
+  const record = pending && typeof pending === 'object' ? pending : {};
+  return {
+    attempt: record.attempt ?? null,
+    applyId: typeof record.applyId === 'string' ? record.applyId : null,
+    at: typeof record.at === 'string' ? record.at : null,
+    fields: Array.isArray(record.fields) ? record.fields.map(String) : [],
+  };
+}
+
+function samePendingIdentity(left, right) {
+  return left.attempt === right.attempt
+    && left.applyId === right.applyId
+    && left.at === right.at
+    && left.fields.length === right.fields.length
+    && left.fields.every((value, index) => value === right.fields[index]);
+}
+
+async function configFileHash(configFile) {
+  try {
+    return createHash('sha256').update(await readFile(configFile)).digest('hex');
+  } catch {
+    return null;
+  }
+}
+
+function rollbackSkippedRecord({
+  pending,
+  backupFile,
+  reason,
+  skipReason,
+  expectedConfigHash = null,
+  actualConfigHash = null,
+  configChanged = false,
+}) {
+  return {
+    status: 'rollback-skipped',
+    attempt: pending.attempt ?? null,
+    applyId: pending.applyId ?? null,
+    at: new Date().toISOString(),
+    fields: Array.isArray(pending.fields) ? pending.fields : [],
+    reason,
+    skipReason,
+    ...(configChanged ? { configChanged: true } : {}),
+    restored: false,
+    backup: backupFile,
+    expectedConfigHash,
+    actualConfigHash,
+    recovered: false,
+    retries: Number(pending.attempts ?? 1),
+  };
+}
+
+async function recordAndClearMatchingPending({ home, pending, record }) {
+  await writeApplyResult(home, record);
+  // 恢复期间可能已有新的 apply 写入 pending：只有同一完整身份才允许清理。
+  const current = await readApplyPending(home);
+  if (current
+    && current.rollingBack === true
+    && samePendingIdentity(pendingIdentity(current), pendingIdentity(pending))) {
+    await clearApplyPending(home);
+  }
+  return record;
+}
+
 /** 生产启动/下次 apply：有界重试 rollingBack 的 restore；成功清理 pending，失败保留可重试状态。 */
 export async function recoverPendingRollback({
   home,
   configFile = join(home, 'config.json'),
   backupFile = `${configFile}.bak`,
   log = () => {},
+  restoreImpl = restoreBackup,
 } = {}) {
   const pending = await readApplyPending(home);
   if (!pending || pending.rollingBack !== true) return { status: 'not_pending' };
+  const fields = Array.isArray(pending.fields) ? pending.fields : [];
+  const expectedConfigHash = typeof pending.failedConfigHash === 'string' ? pending.failedConfigHash : null;
+  const actualConfigHash = await configFileHash(configFile);
+  if (!expectedConfigHash) {
+    const record = rollbackSkippedRecord({
+      pending,
+      backupFile,
+      reason: '缺少失败配置指纹：无法证明当前配置仍是失败 apply 的产物，拒绝覆盖',
+      skipReason: 'missing_config_hash',
+      actualConfigHash,
+    });
+    log('apply: rollingBack pending 缺少配置指纹，跳过自动恢复');
+    return recordAndClearMatchingPending({ home, pending, record });
+  }
+  if (actualConfigHash !== expectedConfigHash) {
+    const record = rollbackSkippedRecord({
+      pending,
+      backupFile,
+      reason: '当前配置文件已变化：跳过旧 apply 的自动回滚，保留新配置',
+      skipReason: 'config_changed',
+      expectedConfigHash,
+      actualConfigHash,
+      configChanged: true,
+    });
+    log('apply: 当前配置已变化，跳过 rollingBack pending');
+    return recordAndClearMatchingPending({ home, pending, record });
+  }
   try {
-    const restored = await restoreBackup({ configFile, backupFile });
+    const restored = await restoreImpl({ configFile, backupFile, expectedConfigHash });
     if (!restored) {
       const error = new Error('回滚备份不存在');
       error.code = 'BACKUP_MISSING';
@@ -197,33 +305,44 @@ export async function recoverPendingRollback({
     const record = {
       status: 'rolled-back',
       attempt: pending.attempt ?? null,
+      applyId: pending.applyId ?? null,
       at: new Date().toISOString(),
-      fields: Array.isArray(pending.fields) ? pending.fields : [],
+      fields,
       reason: pending.reason ?? null,
       restored: true,
       backup: backupFile,
+      expectedConfigHash,
+      actualConfigHash,
       recovered: true,
       retries: Number(pending.attempts ?? 1),
     };
-    await writeApplyResult(home, record);
-    // 恢复期间可能已有新的 apply 写入 pending：只清理本次处理的那一条。
-    const current = await readApplyPending(home);
-    if (current
-      && current.rollingBack === true
-      && (pending.attempt == null || current.attempt === pending.attempt)) {
-      await clearApplyPending(home);
-    }
     log('apply: rollingBack pending 已自动恢复');
-    return record;
+    return recordAndClearMatchingPending({ home, pending, record });
   } catch (error) {
+    if (error?.code === 'CONFIG_CHANGED') {
+      const record = rollbackSkippedRecord({
+        pending,
+        backupFile,
+        reason: '当前配置文件已变化：跳过旧 apply 的自动回滚，保留新配置',
+        skipReason: 'config_changed',
+        expectedConfigHash,
+        actualConfigHash: await configFileHash(configFile),
+        configChanged: true,
+      });
+      log('apply: 恢复前配置已变化，跳过 rollingBack pending');
+      return recordAndClearMatchingPending({ home, pending, record });
+    }
     const record = {
       status: 'rollback-failed',
       attempt: pending.attempt ?? null,
+      applyId: pending.applyId ?? null,
       at: new Date().toISOString(),
-      fields: Array.isArray(pending.fields) ? pending.fields : [],
+      fields,
       reason: pending.reason ?? null,
       restored: false,
       backup: backupFile,
+      expectedConfigHash,
+      actualConfigHash,
       restoreError: {
         code: error?.code ?? 'RESTORE_FAILED',
         message: String(error?.message ?? error),
@@ -290,13 +409,44 @@ export async function runApplySupervisor({
     : `新实例在 ${timeoutMs}ms 内未健康（心跳/端口无响应）`;
   log(`apply: 新实例未健康（${reason}）→ 回滚`);
   // 打标记：回滚实例启动时不得写 applied（否则会短暂谎报「已生效」）
-  await writeApplyPending(home, { ...pending, rollingBack: true, reason }).catch(() => undefined);
+  const failedConfigHash = configFile ? await configFileHash(configFile) : null;
+  await writeApplyPending(home, {
+    ...pending,
+    rollingBack: true,
+    reason,
+    ...(failedConfigHash ? { failedConfigHash } : {}),
+  }).catch(() => undefined);
   let restored = false;
   let restoreError = null;
   try {
-    restored = backupFile ? await restoreBackup({ configFile, backupFile }) : false;
+    restored = backupFile
+      ? await restoreBackup({
+        configFile,
+        backupFile,
+        ...(failedConfigHash ? { expectedConfigHash: failedConfigHash } : {}),
+      })
+      : false;
   } catch (error) {
     restoreError = error;
+  }
+  if (restoreError?.code === 'CONFIG_CHANGED') {
+    const record = {
+      status: 'rollback-skipped',
+      attempt: pending.attempt ?? null,
+      applyId: pending.applyId ?? null,
+      at: new Date(now()).toISOString(),
+      fields,
+      reason: '当前配置文件已变化：跳过旧 apply 的自动回滚，保留新配置',
+      skipReason: 'config_changed',
+      configChanged: true,
+      restored: false,
+      backup: backupFile,
+      expectedConfigHash: failedConfigHash,
+      actualConfigHash: await configFileHash(configFile),
+      retries: attempts,
+    };
+    await recordAndClearMatchingPending({ home, pending, record });
+    return record;
   }
   if (restoreError) {
     const record = {

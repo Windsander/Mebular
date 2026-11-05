@@ -199,7 +199,8 @@ describe('PlatformCliAdapter / probeCliVersion', () => {
 
   itPosix('health：非 0 退出 → unavailable，且不泄露 stderr', async () => {
     const command = await writeProbeScript("printf 'secret-like-stderr\\n' >&2; exit 7");
-    const health = await probeCliVersion(command, 2_000);
+    // 10s：覆盖并行 coverage worker 下的进程启动抖动；脚本本身立即退出。
+    const health = await probeCliVersion(command, 10_000);
     expect(health.status).toBe('unavailable');
     expect(health.detail).toContain('exited 7');
     expect(health.detail).not.toContain('secret-like-stderr');

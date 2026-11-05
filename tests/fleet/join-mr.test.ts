@@ -777,7 +777,14 @@ describe('P4 join + MR gate', () => {
 
 describe('P4 cancel', () => {
   async function openLive(): Promise<{ live: Mebular; store: MebularTaskEventStore; plans: MebularTaskPlanStore }> {
-    await onboardDevice({ dir, device: A.device, agents: [{ name: A.agent, kind: 'echo' }, { name: 'worker', kind: 'echo' }] });
+    await onboardDevice({
+      dir,
+      device: A.device,
+      agents: [
+        { name: A.agent, kind: 'command', command: process.execPath },
+        { name: 'worker', kind: 'command', command: process.execPath },
+      ],
+    });
     const config = await loadToolConfig(dir);
     const live = new Mebular(offlineMebularOptions(config, await readMasterKeyFile(config.masterKeyFile)) as never);
     await live.initialize();

@@ -15,6 +15,8 @@ import {
   MebularTaskPlanStore,
   NullTransport,
   PlanMaterializer,
+  PlanValidationError,
+  appendValidatedTaskPlanNode,
   loadToolConfig,
   offlineMebularOptions,
   onboardDevice,
@@ -31,6 +33,9 @@ import {
 
 const A = { device: 'device-A', agent: 'worker' };
 const SENTINEL = { device: '__plan__', agent: '__plan__' };
+
+/** 真实可执行 Agent：plan owner/MR 不能是 echo/board。 */
+const realAgent = (name: string = A.agent) => ({ name, kind: 'command' as const, command: process.execPath });
 
 function capability(device: string, agent: string): AgentCapabilityCard {
   return {
@@ -107,7 +112,7 @@ async function openLive(): Promise<{ live: Mebular; store: MebularTaskEventStore
 
 describe('B1 默认 MCP plan owner/MR 执行者', () => {
   it('不显式传 agent：owner=board 归一化为第一个配置 Agent，MR 由其执行并 root done', async () => {
-    await onboardDevice({ dir, device: A.device, agents: [{ name: A.agent, kind: 'echo' }] });
+    await onboardDevice({ dir, device: A.device, agents: [realAgent()] });
     const { live, store, plans } = await openLive();
     const log = await ExecutionLog.open(join(dir, 'worker.exec.jsonl'));
     try {
@@ -188,7 +193,7 @@ describe('B1 默认 MCP plan owner/MR 执行者', () => {
   });
 
   it('defaultAgent 指向 ghost → 配置拒绝，plan/root 不写', async () => {
-    await onboardDevice({ dir, device: A.device, agents: [{ name: A.agent, kind: 'echo' }] });
+    await onboardDevice({ dir, device: A.device, agents: [realAgent()] });
     const { live, store, plans } = await openLive();
     try {
       const configPath = join(dir, 'fleet.config.json');
@@ -208,7 +213,7 @@ describe('B1 默认 MCP plan owner/MR 执行者', () => {
   });
 
   it('ctx.agent 指向 ghost → PLAN_OWNER_UNEXECUTABLE，plan/root 不写', async () => {
-    await onboardDevice({ dir, device: A.device, agents: [{ name: A.agent, kind: 'echo' }] });
+    await onboardDevice({ dir, device: A.device, agents: [realAgent()] });
     const { live, store, plans } = await openLive();
     try {
       const result = await toolByName('task_submit')!.handler(
@@ -225,7 +230,7 @@ describe('B1 默认 MCP plan owner/MR 执行者', () => {
   });
 
   it('非 board ghost owner + ghost planAgent → 拒绝，不写 plan/root', async () => {
-    await onboardDevice({ dir, device: A.device, agents: [{ name: A.agent, kind: 'echo' }] });
+    await onboardDevice({ dir, device: A.device, agents: [realAgent()] });
     const { live, store, plans } = await openLive();
     try {
       const plan = localPlan('plan-p7-b1r-ghost-owner-001');
@@ -243,7 +248,7 @@ describe('B1 默认 MCP plan owner/MR 执行者', () => {
   });
 
   it('非 board 显式 owner 仍必须等于 planAgent', async () => {
-    await onboardDevice({ dir, device: A.device, agents: [{ name: A.agent, kind: 'echo' }] });
+    await onboardDevice({ dir, device: A.device, agents: [realAgent()] });
     const { live } = await openLive();
     try {
       const plan = localPlan('plan-p7-b1-explicit-001');
@@ -259,9 +264,111 @@ describe('B1 默认 MCP plan owner/MR 执行者', () => {
   });
 });
 
+describe('WS4b plan owner/MR 必须是真实可执行 Agent', () => {
+  it('config 只有 board:echo → PLAN_OWNER_UNEXECUTABLE，不写 plan/root；普通 task 仍可用 board', async () => {
+    await onboardDevice({ dir, device: A.device, agents: [{ name: 'board', kind: 'echo' }] });
+    const { live, store, plans } = await openLive();
+    try {
+      // 普通 task 的 to.agent=board 占位语义不受影响。
+      const legacy = await toolByName('task_submit')!.handler(
+        { intent: 'legacy board task', to: { device: A.device, agent: 'board' } },
+        { dir, mebular: live } as ToolContext,
+      ) as { ok: boolean; from: { agent: string } };
+      expect(legacy).toMatchObject({ ok: true, from: { agent: 'board' } });
+
+      const result = await toolByName('task_submit')!.handler(
+        { intent: 'board plan', to: SENTINEL, plan: localPlan('plan-ws4b-board-001') },
+        { dir, mebular: live } as ToolContext,
+      ) as { ok: boolean; error: string; reason: string; errors: string[] };
+      expect(result).toMatchObject({
+        ok: false,
+        error: 'PLAN_POLICY',
+        reason: 'PLAN_OWNER_UNEXECUTABLE',
+      });
+      expect(result.errors.join(' ')).toMatch(/echo\/board.*demo\/看板/);
+      expect(await plans.list()).toEqual([]);
+      expect(await store.byTask(planRootTaskId('plan-ws4b-board-001', 1))).toHaveLength(0);
+    } finally {
+      await live.shutdown().catch(() => undefined);
+    }
+  });
+
+  it('echo kind 的非 board 名字同样是 PLAN_OWNER_UNEXECUTABLE', async () => {
+    await onboardDevice({ dir, device: A.device, agents: [{ name: A.agent, kind: 'echo' }] });
+    const { live, store, plans } = await openLive();
+    try {
+      const plan = localPlan('plan-ws4b-echo-kind-001');
+      plan.owner = A;
+      const result = await toolByName('task_submit')!.handler(
+        { intent: 'echo kind plan', to: SENTINEL, plan },
+        { dir, mebular: live, agent: A.agent } as ToolContext,
+      ) as { ok: boolean; error: string; reason: string; errors: string[] };
+      expect(result).toMatchObject({
+        ok: false,
+        error: 'PLAN_POLICY',
+        reason: 'PLAN_OWNER_UNEXECUTABLE',
+      });
+      expect(result.errors.join(' ')).toContain(`planAgent="${A.agent}"`);
+      expect(await plans.list()).toEqual([]);
+      expect(await store.byTask(planRootTaskId('plan-ws4b-echo-kind-001', 1))).toHaveLength(0);
+    } finally {
+      await live.shutdown().catch(() => undefined);
+    }
+  });
+
+  it('board 即使配置为 command 也仍是保留看板名 → 拒绝', async () => {
+    await onboardDevice({
+      dir,
+      device: A.device,
+      agents: [{ name: 'board', kind: 'command', command: process.execPath }],
+    });
+    const { live, plans } = await openLive();
+    try {
+      const result = await toolByName('task_submit')!.handler(
+        { intent: 'board command plan', to: SENTINEL, plan: localPlan('plan-ws4b-board-command-001') },
+        { dir, mebular: live } as ToolContext,
+      ) as { ok: boolean; error: string; reason: string };
+      expect(result).toMatchObject({
+        ok: false,
+        error: 'PLAN_POLICY',
+        reason: 'PLAN_OWNER_UNEXECUTABLE',
+      });
+      expect(await plans.list()).toEqual([]);
+    } finally {
+      await live.shutdown().catch(() => undefined);
+    }
+  });
+
+  it('daemon /app/plans 写入路径同样拒绝 board owner，并透传 reason', async () => {
+    await onboardDevice({ dir, device: A.device, agents: [realAgent()] });
+    const { live, plans } = await openLive();
+    try {
+      const plan = localPlan('plan-ws4b-daemon-board-001');
+      plan.owner = { device: A.device, agent: 'board' };
+      await expect(appendValidatedTaskPlanNode(live, plan, { namespace: 'tasks' }) as Promise<unknown>)
+        .rejects.toMatchObject({
+          name: 'PlanValidationError',
+          code: 'PLAN_POLICY',
+          reason: 'PLAN_OWNER_UNEXECUTABLE',
+        });
+      await expect(appendValidatedTaskPlanNode(live, { ...plan, owner: { device: A.device, agent: 'echo' } }, { namespace: 'tasks' }) as Promise<unknown>)
+        .rejects.toBeInstanceOf(PlanValidationError);
+      expect(await plans.list()).toEqual([]);
+
+      // 已记录缺口：daemon home 只有 board:echo 占位配置，没有 fleet.config.json 的 agent kind
+      // 信息；因此像 `{name:"worker",kind:"echo"}` 这类“非保留名的 echo kind”无法在
+      // /app/plans 直写路径识别。正常 fleet 客户端在 MCP 提交阶段已被 surface guard 拦截。
+      const echoAlias = { ...plan, planId: 'plan-ws4b-daemon-echo-alias-001', owner: { device: A.device, agent: 'worker' } };
+      await expect(appendValidatedTaskPlanNode(live, echoAlias, { namespace: 'tasks' }) as Promise<unknown>).resolves.toMatchObject({ stored: true });
+    } finally {
+      await live.shutdown().catch(() => undefined);
+    }
+  });
+});
+
 describe('B1 direct submit（非 MCP 路径）保持 caller 显式', () => {
   it('submitTaskPlan 仍要求 caller 与 owner 一致；caller=planAgent 可用', async () => {
-    await onboardDevice({ dir, device: A.device, agents: [{ name: A.agent, kind: 'echo' }] });
+    await onboardDevice({ dir, device: A.device, agents: [realAgent()] });
     const { live, store, plans } = await openLive();
     try {
       const plan = localPlan('plan-p7-b1-direct-001');

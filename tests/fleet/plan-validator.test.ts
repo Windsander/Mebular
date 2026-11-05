@@ -479,4 +479,37 @@ describe('P2 plan schema/validator', () => {
     expect(acceptancePasses({ kind: 'contains', all: ['API_OK'] }, 'x API_OK y')).toBe(true);
     expect(acceptancePasses({ kind: 'contains', all: ['API_OK'] }, 'no')).toBe(false);
   });
+
+  it('plan owner/MR 可执行性：board/echo 与本地 echo-kind 名 fail-closed', () => {
+    // shape 只做结构校验；owner 可执行性属于 policy，由 validatePlan 统一拒绝。
+    const board = rootPlan({ owner: { device: 'device-A', agent: 'board' } });
+    expect(validatePlanShape(board).ok).toBe(true);
+    expect(validatePlan(board, { caller: { device: 'device-A', agent: 'board' } })).toMatchObject({
+      ok: false,
+      code: 'PLAN_POLICY',
+      reason: 'PLAN_OWNER_UNEXECUTABLE',
+    });
+
+    const echo = rootPlan({ owner: { device: 'device-A', agent: 'echo' } });
+    expect(validatePlan(echo, { caller: { device: 'device-A', agent: 'echo' } })).toMatchObject({
+      ok: false,
+      code: 'PLAN_POLICY',
+      reason: 'PLAN_OWNER_UNEXECUTABLE',
+    });
+
+    // 非保留名但本机配置为 kind=echo：由调用方传入的名单拒绝。
+    expect(validatePlan(rootPlan(), { caller: A })).toMatchObject({ ok: true });
+    expect(validatePlan(rootPlan({ owner: B }), {
+      caller: B,
+      unexecutableOwnerAgents: ['worker'],
+    })).toMatchObject({
+      ok: false,
+      code: 'PLAN_POLICY',
+      reason: 'PLAN_OWNER_UNEXECUTABLE',
+    });
+    expect(validatePlan(rootPlan({ owner: B }), {
+      caller: B,
+      unexecutableOwnerAgents: ['other-agent'],
+    })).toMatchObject({ ok: true });
+  });
 });

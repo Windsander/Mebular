@@ -474,7 +474,7 @@ describe('P3 task_status.plan why', () => {
   });
 
   it('route NO_TARGET 在 task_status.plan step 上 additive 返回 why/blockedBy', async () => {
-    await onboardDevice({ dir, device: A.device, agents: [{ name: 'planner', kind: 'echo' }], peerDevice: B.device });
+    await onboardDevice({ dir, device: A.device, agents: [{ name: 'planner', kind: 'command', command: process.execPath }], peerDevice: B.device });
     const config = await loadToolConfig(dir);
     const encryption = await readMasterKeyFile(config.masterKeyFile);
     live = new Mebular(offlineMebularOptions(config, encryption) as never);

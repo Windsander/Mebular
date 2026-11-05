@@ -19,6 +19,7 @@ import {
   validatePlan,
   validatePlanShape,
   type PlanErrorCode,
+  type PlanPolicyReason,
   type TaskPlan,
 } from '../plan.js';
 import { ensurePlanRootTask } from './materializer.js';
@@ -32,6 +33,8 @@ export interface SubmitTaskPlanOptions {
   caller: FleetEndpoint;
   plans: TaskPlanWriteStore;
   store: TaskEventStore;
+  /** 本机不可作为 plan owner/MR 的 agent 名（kind=echo / 保留 demo 名）。 */
+  unexecutableOwnerAgents?: readonly string[];
 }
 
 export interface SubmitTaskPlanSuccess {
@@ -47,6 +50,8 @@ export interface SubmitTaskPlanSuccess {
 export interface SubmitTaskPlanFailure {
   ok: false;
   error: PlanErrorCode;
+  /** 稳定 policy reason（目前仅 PLAN_OWNER_UNEXECUTABLE）。 */
+  reason?: PlanPolicyReason;
   errors: string[];
   created: [];
   planId?: string;
@@ -55,10 +60,16 @@ export interface SubmitTaskPlanFailure {
 
 export type SubmitTaskPlanResult = SubmitTaskPlanSuccess | SubmitTaskPlanFailure;
 
-function failure(code: PlanErrorCode, errors: string[], plan?: { planId?: string; version?: number }): SubmitTaskPlanFailure {
+function failure(
+  code: PlanErrorCode,
+  errors: string[],
+  plan?: { planId?: string; version?: number },
+  reason?: PlanPolicyReason,
+): SubmitTaskPlanFailure {
   return {
     ok: false,
     error: code,
+    ...(reason !== undefined ? { reason } : {}),
     errors,
     created: [],
     ...(plan?.planId !== undefined ? { planId: plan.planId } : {}),
@@ -153,12 +164,15 @@ async function submitTaskPlanUnlocked(
       ...(childRootExists ? { parentTaskAccepted: true } : {}),
       taskStates: states,
       caller: options.caller,
+      ...(options.unexecutableOwnerAgents !== undefined
+        ? { unexecutableOwnerAgents: options.unexecutableOwnerAgents }
+        : {}),
     });
   } catch (error) {
-    if (error instanceof PlanValidationError) return failure(error.code, error.errors, candidate);
+    if (error instanceof PlanValidationError) return failure(error.code, error.errors, candidate, error.reason);
     throw error;
   }
-  if (!validation.ok) return failure(validation.code, validation.errors, candidate);
+  if (!validation.ok) return failure(validation.code, validation.errors, candidate, validation.reason);
   const plan: TaskPlan = validation.plan;
 
   let deduped = validation.deduped === true;
@@ -167,7 +181,7 @@ async function submitTaskPlanUnlocked(
       const appended = await options.plans.append(plan);
       deduped = appended.replayed;
     } catch (error) {
-      if (error instanceof PlanValidationError) return failure(error.code, error.errors, plan);
+      if (error instanceof PlanValidationError) return failure(error.code, error.errors, plan, error.reason);
       throw error;
     }
   }
@@ -175,7 +189,7 @@ async function submitTaskPlanUnlocked(
   try {
     await ensurePlanRootTask(plan, options.store, options.caller, { intent: options.intent });
   } catch (error) {
-    if (error instanceof PlanValidationError) return failure(error.code, error.errors, plan);
+    if (error instanceof PlanValidationError) return failure(error.code, error.errors, plan, error.reason);
     throw error;
   }
   const rootTaskId = planRootTaskId(plan.planId, plan.version);

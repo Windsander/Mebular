@@ -6,8 +6,10 @@
 import { Mebular } from '@mebular/core';
 import {
   identityPublicKeyForStorage,
+  isPlanOwnerExecutableAgent,
   loadToolConfig,
   readMasterKeyFile,
+  unexecutablePlanOwnerNames,
 } from './config.js';
 import { declareNamespace, offlineMebularOptions, subscribeNamespace } from './onboard.js';
 import { MebularTaskEventStore } from './store/mebular-store.js';
@@ -357,11 +359,30 @@ function planAgentUnavailable(planAgent: string): PlanOwnerNormalization {
   };
 }
 
+function planAgentUnexecutable(planAgent: string): PlanOwnerNormalization {
+  return {
+    ok: false,
+    error: 'PLAN_POLICY',
+    reason: 'PLAN_OWNER_UNEXECUTABLE',
+    errors: [
+      `PLAN_OWNER_UNEXECUTABLE: planAgent="${planAgent}" 不是本机真实可执行 Agent；`
+      + 'echo/board 只用于 demo/看板，不能承担 plan owner 或 MR 执行',
+    ],
+    created: [],
+  };
+}
+
 function normalizePlanOwnerForSession(input: unknown, session: Session): PlanOwnerNormalization {
   // B1-R：最终 planAgent（ctx.agent / defaultAgent / agents[0] / board fallback）必须是本机
   // 真实注册的 Agent；ghost agent 一律在写 plan/root 前拒绝，即使 plan.owner 也是 ghost。
-  if (!session.config.agents.some((agent) => agent.name === session.planAgent)) {
+  const planAgent = session.config.agents.find((agent) => agent.name === session.planAgent);
+  if (planAgent === undefined) {
     return planAgentUnavailable(session.planAgent);
+  }
+  // WS4b：echo/demo/看板 agent 即使在 config.agents[] 中，也不能承担 plan owner/MR。
+  // 否则 plan 会“提交成功但由 echo/board 空转”。
+  if (!isPlanOwnerExecutableAgent(planAgent)) {
+    return planAgentUnexecutable(session.planAgent);
   }
   if (typeof input !== 'object' || input === null || Array.isArray(input)) return { ok: true, plan: input };
   const plan = input as Record<string, unknown>;
@@ -412,6 +433,7 @@ export const TASK_TOOLS: TaskTool[] = [
             caller: { device: session.device, agent: session.planAgent },
             plans: planStoreOf(session),
             store: session.store,
+            unexecutableOwnerAgents: unexecutablePlanOwnerNames(session.config),
           });
         }
         const to = (input.to ?? {}) as { device?: string; agent?: string };

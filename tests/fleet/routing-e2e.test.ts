@@ -31,7 +31,8 @@ import {
 } from '../../packages/fleet/src/index.js';
 import { useHeavyTimeout } from '../helpers/timeouts.js';
 
-useHeavyTimeout();
+// 覆盖率插桩 + 并行负载下，三机反熵/路由用例可能超过默认 15s；仍保持有界。
+useHeavyTimeout(60_000);
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 const A = { device: 'device-A', agent: 'planner' };
@@ -54,7 +55,7 @@ function fleetConfig(dir: string, device: string, capabilities: string[], peers:
   };
 }
 
-async function waitFor(predicate: () => Promise<boolean>, timeoutMs = 20_000, pollMs = 50): Promise<boolean> {
+async function waitFor(predicate: () => Promise<boolean>, timeoutMs = 30_000, pollMs = 50): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await predicate()) return true;

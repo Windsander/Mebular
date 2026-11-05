@@ -369,6 +369,26 @@ host 在 `apply` 时通过 `ctx.inject(['systemPrompt'])` 注入 DSH 可选的 s
 - 测试：`tests/dsh/host.test.mjs`、`tests/dsh/client-contract.test.mjs`、
   `tests/dsh/manifest.test.mjs`。
 
+#### README 图片主题策略
+
+README 会同时被 GitHub、npm、awesome-dsh-plugin 和插件市场渲染，宿主能力不同：
+
+- 根 `README.md` / `README_CN.md` 只在 GitHub 使用，继续用 `<picture>` +
+  `prefers-color-scheme: light` 选择 `-light.svg`，fallback 为纯暗色 SVG。
+- 支持原生 HTML 的宿主（GitHub/npm）：`packages/dsh-plugin/README*.md` 的内联示意图
+  也使用 `<picture>`，按宿主主题选择 `-light` / `-dark`。
+- 丢弃原生 HTML 的宿主（awesome-dsh-plugin）：每个图片分组后的 `<details>` 回退块会
+  被保留为 Markdown 图片；回退图使用 `-auto` 自自适应 SVG，跟随宿主的系统主题。
+  这是 `<img>` 的边界：Markdown 图片不能读取宿主主题，`prefers-color-scheme` 只跟随
+  操作系统，因此 `-auto` 只用于按 OS 渲染的列表/市场。
+- 资产约定：主 README 的 `one-graph` / `memory-runtime` base 与所有 `-dark` 为纯暗色，
+  `-light` 为纯亮色，`-auto` 为自自适应；DSH 旧 base 保留原自自适应行为，README 不再引用。
+  README 内联使用 `-light` / `-dark`（`one-graph` / `memory-runtime` 用 base），回退块使用
+  `-auto`。
+- 回归由 `tests/dsh/client-contract.test.mjs` 覆盖：插件 README 必须有 8 个
+  `<picture>`、4 个 Markdown 回退块和 8 张 `-auto` 图；根 README 必须保留
+  `<picture>` + `-light` 的自适应路径。
+
 ### P7.3 · 真实 E2E、截图、文档与上架材料
 
 - 在临时 `MEBULAR_HOME` / `DSH_HOME`、非默认端口上完成 DSH Web E2E；

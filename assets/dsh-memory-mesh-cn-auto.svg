@@ -1,0 +1,131 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="520" viewBox="0 0 1080 520" role="img" aria-label="两台机器，每台运行一个 Mebular 节点；机器 A 连接 DSH、Hermes、Codex，机器 B 连接 Pi、OpenCode、Cursor；两个节点直接同步同一张记忆与任务图。">
+  <title>一张记忆图</title>
+  <desc>两台机器，每台运行一个 Mebular 节点；机器 A 连接 DSH、Hermes、Codex，机器 B 连接 Pi、OpenCode、Cursor；两个节点直接同步同一张记忆与任务图。</desc>
+  <defs>
+    <marker id="arrow-theme-dark" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#4a8acf"/>
+    </marker>
+    <marker id="arrow-theme-light" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#7fa6d9"/>
+    </marker>
+    <style>
+      .theme-light { display: none; }
+      @media (prefers-color-scheme: light) {
+        .theme-dark { display: none; }
+        .theme-light { display: block; }
+      }
+    </style>
+  </defs>
+  <g class="theme-dark">
+    <rect width="1080" height="520" fill="#03050a"/>
+    <defs><radialGradient id="glow-theme-dark" cx="50%" cy="38%" r="72%"><stop offset="0%" stop-color="#0d2140" stop-opacity="0.85"/><stop offset="100%" stop-color="#03050a" stop-opacity="0"/></radialGradient></defs>
+    <ellipse cx="540" cy="280" rx="620" ry="250" fill="url(#glow-theme-dark)"/>
+    <text x="40" y="44" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="21" fill="#e2ecff" font-weight="700" text-anchor="start" letter-spacing="1.2">一张记忆图</text>
+    <text x="40" y="72" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="13" fill="#8aa8c8" font-weight="400" text-anchor="start">不同 Agent、不同机器，共享同一张图。</text>
+    <rect x="40" y="104" width="460" height="350" rx="16" fill="#081322" stroke="#1a3a60" stroke-width="1.2"/>
+    <rect x="580" y="104" width="460" height="350" rx="16" fill="#081322" stroke="#1a3a60" stroke-width="1.2"/>
+    <line x1="314" y1="285" x2="766" y2="285" stroke="#4a8acf" stroke-width="1.4" stroke-dasharray="4 5" marker-start="url(#arrow-theme-dark)" marker-end="url(#arrow-theme-dark)"/>
+    <text x="540" y="264" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="10.5" fill="#8ac8ff" font-weight="400" text-anchor="middle">同一张图</text>
+    <text x="540" y="278" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="9.5" fill="#8aa8c8" font-weight="400" text-anchor="middle">直接同步</text>
+    <line x1="270" y1="285" x2="270" y2="175" stroke="#4a8acf" stroke-width="1.2" stroke-dasharray="3 4" opacity="0.55"/>
+    <line x1="270" y1="285" x2="175" y2="355" stroke="#4a8acf" stroke-width="1.2" stroke-dasharray="3 4" opacity="0.55"/>
+    <line x1="270" y1="285" x2="365" y2="355" stroke="#4a8acf" stroke-width="1.2" stroke-dasharray="3 4" opacity="0.55"/>
+    <circle cx="270" cy="285" r="58" fill="#0d2140" opacity="0.75"/>
+    <circle cx="270" cy="285" r="44" fill="#0d1e35" stroke="#4a8acf" stroke-width="1.5"/>
+    <line x1="258" y1="272" x2="282" y2="272" stroke="#8ac8ff" stroke-width="1.2"/>
+    <line x1="258" y1="272" x2="270" y2="294" stroke="#8ac8ff" stroke-width="1.2"/>
+    <circle cx="258" cy="272" r="3" fill="#8ac8ff"/>
+    <circle cx="282" cy="272" r="3" fill="#8ac8ff"/>
+    <circle cx="270" cy="294" r="3" fill="#8ac8ff"/>
+    <text x="270" y="312" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="9.5" fill="#e2ecff" font-weight="700" text-anchor="middle">Mebular</text>
+    <text x="270" y="324" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="8" fill="#8aa8c8" font-weight="400" text-anchor="middle">节点</text>
+    <circle cx="270" cy="175" r="40" fill="none" stroke="#8ac8ff" stroke-opacity="0.35" stroke-width="1.5"/>
+    <circle cx="270" cy="175" r="34" fill="#0d1e35" stroke="#8ac8ff" stroke-width="1.5"/>
+    <text x="270" y="172" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="13" fill="#e2ecff" font-weight="700" text-anchor="middle">DSH</text>
+    <text x="270" y="186" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="7.5" fill="#8ac8ff" font-weight="400" text-anchor="middle">本插件</text>
+    <circle cx="175" cy="355" r="34" fill="#0d1e35" stroke="#264c79" stroke-width="1.2"/>
+    <text x="175" y="359" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="11.5" fill="#cfe3ff" font-weight="400" text-anchor="middle">Hermes</text>
+    <circle cx="365" cy="355" r="34" fill="#0d1e35" stroke="#264c79" stroke-width="1.2"/>
+    <text x="365" y="359" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="11.5" fill="#cfe3ff" font-weight="400" text-anchor="middle">Codex</text>
+    <text x="270" y="438" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="9.5" fill="#8aa8c8" font-weight="400" text-anchor="middle">记忆 · 任务 · 签名历史</text>
+    <text x="64" y="136" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="18" fill="#e2ecff" font-weight="700" text-anchor="start">你的笔记本</text>
+    <line x1="810" y1="285" x2="810" y2="175" stroke="#4a8acf" stroke-width="1.2" stroke-dasharray="3 4" opacity="0.55"/>
+    <line x1="810" y1="285" x2="715" y2="355" stroke="#4a8acf" stroke-width="1.2" stroke-dasharray="3 4" opacity="0.55"/>
+    <line x1="810" y1="285" x2="905" y2="355" stroke="#4a8acf" stroke-width="1.2" stroke-dasharray="3 4" opacity="0.55"/>
+    <circle cx="810" cy="285" r="58" fill="#0d2140" opacity="0.75"/>
+    <circle cx="810" cy="285" r="44" fill="#0d1e35" stroke="#4a8acf" stroke-width="1.5"/>
+    <line x1="798" y1="272" x2="822" y2="272" stroke="#8ac8ff" stroke-width="1.2"/>
+    <line x1="798" y1="272" x2="810" y2="294" stroke="#8ac8ff" stroke-width="1.2"/>
+    <circle cx="798" cy="272" r="3" fill="#8ac8ff"/>
+    <circle cx="822" cy="272" r="3" fill="#8ac8ff"/>
+    <circle cx="810" cy="294" r="3" fill="#8ac8ff"/>
+    <text x="810" y="312" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="9.5" fill="#e2ecff" font-weight="700" text-anchor="middle">Mebular</text>
+    <text x="810" y="324" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="8" fill="#8aa8c8" font-weight="400" text-anchor="middle">节点</text>
+    <circle cx="810" cy="175" r="34" fill="#0d1e35" stroke="#264c79" stroke-width="1.2"/>
+    <text x="810" y="179" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="11.5" fill="#cfe3ff" font-weight="400" text-anchor="middle">Pi</text>
+    <circle cx="715" cy="355" r="34" fill="#0d1e35" stroke="#264c79" stroke-width="1.2"/>
+    <text x="715" y="359" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="11.5" fill="#cfe3ff" font-weight="400" text-anchor="middle">OpenCode</text>
+    <circle cx="905" cy="355" r="34" fill="#0d1e35" stroke="#264c79" stroke-width="1.2"/>
+    <text x="905" y="359" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="11.5" fill="#cfe3ff" font-weight="400" text-anchor="middle">Cursor</text>
+    <text x="810" y="438" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="9.5" fill="#8aa8c8" font-weight="400" text-anchor="middle">记忆 · 任务 · 签名历史</text>
+    <text x="604" y="136" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="18" fill="#e2ecff" font-weight="700" text-anchor="start">你的桌面</text>
+    <text x="540" y="486" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#e2ecff" font-weight="400" text-anchor="middle">每台机器运行一个 Mebular 节点；Agent 本地接入，节点之间直接同步。</text>
+    <text x="540" y="506" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="10" fill="#8aa8c8" font-weight="400" text-anchor="middle">无托管账号 · 无中心协调者</text>
+    </g>
+  <g class="theme-light">
+    <rect width="1080" height="520" fill="#ffffff"/>
+    <defs><radialGradient id="glow-theme-light" cx="50%" cy="38%" r="72%"><stop offset="0%" stop-color="#dceaff" stop-opacity="0.7"/><stop offset="100%" stop-color="#ffffff" stop-opacity="0"/></radialGradient></defs>
+    <ellipse cx="540" cy="280" rx="620" ry="250" fill="url(#glow-theme-light)"/>
+    <text x="40" y="44" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="21" fill="#0b1a33" font-weight="700" text-anchor="start" letter-spacing="1.2">一张记忆图</text>
+    <text x="40" y="72" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="13" fill="#5a7290" font-weight="400" text-anchor="start">不同 Agent、不同机器，共享同一张图。</text>
+    <rect x="40" y="104" width="460" height="350" rx="16" fill="#f7faff" stroke="#c9d8ee" stroke-width="1.2"/>
+    <rect x="580" y="104" width="460" height="350" rx="16" fill="#f7faff" stroke="#c9d8ee" stroke-width="1.2"/>
+    <line x1="314" y1="285" x2="766" y2="285" stroke="#7fa6d9" stroke-width="1.4" stroke-dasharray="4 5" marker-start="url(#arrow-theme-light)" marker-end="url(#arrow-theme-light)"/>
+    <text x="540" y="264" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="10.5" fill="#2f6fce" font-weight="400" text-anchor="middle">同一张图</text>
+    <text x="540" y="278" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="9.5" fill="#5a7290" font-weight="400" text-anchor="middle">直接同步</text>
+    <line x1="270" y1="285" x2="270" y2="175" stroke="#7fa6d9" stroke-width="1.2" stroke-dasharray="3 4" opacity="0.55"/>
+    <line x1="270" y1="285" x2="175" y2="355" stroke="#7fa6d9" stroke-width="1.2" stroke-dasharray="3 4" opacity="0.55"/>
+    <line x1="270" y1="285" x2="365" y2="355" stroke="#7fa6d9" stroke-width="1.2" stroke-dasharray="3 4" opacity="0.55"/>
+    <circle cx="270" cy="285" r="58" fill="#dceaff" opacity="0.75"/>
+    <circle cx="270" cy="285" r="44" fill="#f2f7ff" stroke="#7fa6d9" stroke-width="1.5"/>
+    <line x1="258" y1="272" x2="282" y2="272" stroke="#2f6fce" stroke-width="1.2"/>
+    <line x1="258" y1="272" x2="270" y2="294" stroke="#2f6fce" stroke-width="1.2"/>
+    <circle cx="258" cy="272" r="3" fill="#2f6fce"/>
+    <circle cx="282" cy="272" r="3" fill="#2f6fce"/>
+    <circle cx="270" cy="294" r="3" fill="#2f6fce"/>
+    <text x="270" y="312" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="9.5" fill="#0b1a33" font-weight="700" text-anchor="middle">Mebular</text>
+    <text x="270" y="324" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="8" fill="#5a7290" font-weight="400" text-anchor="middle">节点</text>
+    <circle cx="270" cy="175" r="40" fill="none" stroke="#2f6fce" stroke-opacity="0.35" stroke-width="1.5"/>
+    <circle cx="270" cy="175" r="34" fill="#ffffff" stroke="#2f6fce" stroke-width="1.5"/>
+    <text x="270" y="172" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="13" fill="#0b1a33" font-weight="700" text-anchor="middle">DSH</text>
+    <text x="270" y="186" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="7.5" fill="#2f6fce" font-weight="400" text-anchor="middle">本插件</text>
+    <circle cx="175" cy="355" r="34" fill="#ffffff" stroke="#c9d8ee" stroke-width="1.2"/>
+    <text x="175" y="359" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="11.5" fill="#0b1a33" font-weight="400" text-anchor="middle">Hermes</text>
+    <circle cx="365" cy="355" r="34" fill="#ffffff" stroke="#c9d8ee" stroke-width="1.2"/>
+    <text x="365" y="359" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="11.5" fill="#0b1a33" font-weight="400" text-anchor="middle">Codex</text>
+    <text x="270" y="438" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="9.5" fill="#5a7290" font-weight="400" text-anchor="middle">记忆 · 任务 · 签名历史</text>
+    <text x="64" y="136" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="18" fill="#0b1a33" font-weight="700" text-anchor="start">你的笔记本</text>
+    <line x1="810" y1="285" x2="810" y2="175" stroke="#7fa6d9" stroke-width="1.2" stroke-dasharray="3 4" opacity="0.55"/>
+    <line x1="810" y1="285" x2="715" y2="355" stroke="#7fa6d9" stroke-width="1.2" stroke-dasharray="3 4" opacity="0.55"/>
+    <line x1="810" y1="285" x2="905" y2="355" stroke="#7fa6d9" stroke-width="1.2" stroke-dasharray="3 4" opacity="0.55"/>
+    <circle cx="810" cy="285" r="58" fill="#dceaff" opacity="0.75"/>
+    <circle cx="810" cy="285" r="44" fill="#f2f7ff" stroke="#7fa6d9" stroke-width="1.5"/>
+    <line x1="798" y1="272" x2="822" y2="272" stroke="#2f6fce" stroke-width="1.2"/>
+    <line x1="798" y1="272" x2="810" y2="294" stroke="#2f6fce" stroke-width="1.2"/>
+    <circle cx="798" cy="272" r="3" fill="#2f6fce"/>
+    <circle cx="822" cy="272" r="3" fill="#2f6fce"/>
+    <circle cx="810" cy="294" r="3" fill="#2f6fce"/>
+    <text x="810" y="312" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="9.5" fill="#0b1a33" font-weight="700" text-anchor="middle">Mebular</text>
+    <text x="810" y="324" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="8" fill="#5a7290" font-weight="400" text-anchor="middle">节点</text>
+    <circle cx="810" cy="175" r="34" fill="#ffffff" stroke="#c9d8ee" stroke-width="1.2"/>
+    <text x="810" y="179" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="11.5" fill="#0b1a33" font-weight="400" text-anchor="middle">Pi</text>
+    <circle cx="715" cy="355" r="34" fill="#ffffff" stroke="#c9d8ee" stroke-width="1.2"/>
+    <text x="715" y="359" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="11.5" fill="#0b1a33" font-weight="400" text-anchor="middle">OpenCode</text>
+    <circle cx="905" cy="355" r="34" fill="#ffffff" stroke="#c9d8ee" stroke-width="1.2"/>
+    <text x="905" y="359" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="11.5" fill="#0b1a33" font-weight="400" text-anchor="middle">Cursor</text>
+    <text x="810" y="438" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="9.5" fill="#5a7290" font-weight="400" text-anchor="middle">记忆 · 任务 · 签名历史</text>
+    <text x="604" y="136" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="18" fill="#0b1a33" font-weight="700" text-anchor="start">你的桌面</text>
+    <text x="540" y="486" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#0b1a33" font-weight="400" text-anchor="middle">每台机器运行一个 Mebular 节点；Agent 本地接入，节点之间直接同步。</text>
+    <text x="540" y="506" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="10" fill="#5a7290" font-weight="400" text-anchor="middle">无托管账号 · 无中心协调者</text>
+    </g>
+</svg>

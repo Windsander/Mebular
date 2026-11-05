@@ -1,6 +1,16 @@
 <div align="center">
 
-![Mebular — distributed memory network](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-hero.svg)
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-hero-light.svg?v=3">
+  <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-hero-dark.svg?v=3" alt="Mebular — distributed memory network">
+</picture>
+
+<details>
+<summary>System-theme fallback</summary>
+
+![Mebular — distributed memory network (system theme)](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-hero-auto.svg?v=3)
+
+</details>
 
 **One memory. Every assistant. Every device.**
 
@@ -35,9 +45,24 @@ The Plugin defaults to `attach`; it never starts or downloads Mebular silently.
 
 <div align="center">
 
-![Why Mebular: one shared graph instead of a silo; local-first, direct sync, auditable, MCP](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/one-graph-en.svg?v=2)
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/one-graph-en-light.svg?v=3">
+  <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/one-graph-en.svg?v=3" alt="Why Mebular: one shared graph instead of a silo; local-first, direct sync, auditable, MCP">
+</picture>
 
-![Memory Runtime: lightweight MCP and immersive access share one graph.](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/memory-runtime-en.svg?v=2)
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/memory-runtime-en-light.svg?v=3">
+  <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/memory-runtime-en.svg?v=3" alt="Memory Runtime: lightweight MCP and immersive access share one graph.">
+</picture>
+
+<details>
+<summary>System-theme fallback</summary>
+
+![Why Mebular: one shared graph instead of a silo; local-first, direct sync, auditable, MCP (system theme)](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/one-graph-en-auto.svg?v=3)
+
+![Memory Runtime: lightweight MCP and immersive access share one graph. (system theme)](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/memory-runtime-en-auto.svg?v=3)
+
+</details>
 
 *0.3 adds an optional runtime above MCP. Default off; local Qwen optional.*
 
@@ -49,9 +74,24 @@ The Plugin defaults to `attach`; it never starts or downloads Mebular silently.
 
 <div align="center">
 
-![One memory graph: two machines, each running a Mebular node. Machine A connects DSH, Hermes and Codex; machine B connects Pi, OpenCode and Cursor. Both nodes sync the same graph directly.](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-memory-mesh-en.svg)
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-memory-mesh-en-light.svg?v=3">
+  <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-memory-mesh-en-dark.svg?v=3" alt="One memory graph: two machines, each running a Mebular node. Machine A connects DSH, Hermes and Codex; machine B connects Pi, OpenCode and Cursor. Both nodes sync the same graph directly.">
+</picture>
 
-![What you get in DSH: a shared Console, official MCP tools, a status dot, the attach / managed / auto lifecycle and on-demand install/update; panel: false keeps MCP only.](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-capabilities-en.svg)
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-capabilities-en-light.svg?v=3">
+  <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-capabilities-en-dark.svg?v=3" alt="What you get in DSH: a shared Console, official MCP tools, a status dot, the attach / managed / auto lifecycle and on-demand install/update; panel: false keeps MCP only.">
+</picture>
+
+<details>
+<summary>System-theme fallback</summary>
+
+![One memory graph: two machines, each running a Mebular node. Machine A connects DSH, Hermes and Codex; machine B connects Pi, OpenCode and Cursor. Both nodes sync the same graph directly. (system theme)](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-memory-mesh-en-auto.svg?v=3)
+
+![What you get in DSH: a shared Console, official MCP tools, a status dot, the attach / managed / auto lifecycle and on-demand install/update; panel: false keeps MCP only. (system theme)](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-capabilities-en-auto.svg?v=3)
+
+</details>
 
 </div>
 
@@ -59,11 +99,31 @@ The Plugin defaults to `attach`; it never starts or downloads Mebular silently.
 
 <div align="center">
 
-![Three steps: install the plugin, restart DSH; an existing App/CLI attaches, and the panel explicitly installs the shared runtime when none exists.](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-quickstart-en.svg)
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-quickstart-en-light.svg?v=3">
+  <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-quickstart-en-dark.svg?v=3" alt="Three steps: install the plugin, restart DSH; an existing App/CLI attaches, and the panel explicitly installs the shared runtime when none exists.">
+</picture>
 
-![DSH integration: DSH Web loads /console/?embed=dsh in an iframe, and the official MCP client reaches the same daemon at /mcp; shared runtime resolve selects the App/CLI/shared provider and dynamic URL.](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-connection-en.svg)
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-connection-en-light.svg?v=3">
+  <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-connection-en-dark.svg?v=3" alt="DSH integration: DSH Web loads /console/?embed=dsh in an iframe, and the official MCP client reaches the same daemon at /mcp; shared runtime resolve selects the App/CLI/shared provider and dynamic URL.">
+</picture>
 
-![Status dot: green up, amber starting/installing/updating, red down, gray waiting for the first check.](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-status-en.svg)
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-status-en-light.svg?v=3">
+  <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-status-en-dark.svg?v=3" alt="Status dot: green up, amber starting/installing/updating, red down, gray waiting for the first check.">
+</picture>
+
+<details>
+<summary>System-theme fallback</summary>
+
+![Three steps: install the plugin, restart DSH; an existing App/CLI attaches, and the panel explicitly installs the shared runtime when none exists. (system theme)](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-quickstart-en-auto.svg?v=3)
+
+![DSH integration: DSH Web loads /console/?embed=dsh in an iframe, and the official MCP client reaches the same daemon at /mcp; shared runtime resolve selects the App/CLI/shared provider and dynamic URL. (system theme)](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-connection-en-auto.svg?v=3)
+
+![Status dot: green up, amber starting/installing/updating, red down, gray waiting for the first check. (system theme)](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-status-en-auto.svg?v=3)
+
+</details>
 
 </div>
 

@@ -87,14 +87,32 @@ export async function fileMode(path: string): Promise<number> {
 
 export type FleetAgentKind = 'echo' | 'command' | 'hermes' | 'openchamber';
 
+/** 平台无关的 prompt 传递方式（CLI adapter 使用；HTTP adapter 忽略）。 */
+export type FleetAgentPromptMode = 'arg' | 'stdin';
+
+/** 已注册的执行器 kind（新增 kind 必须同时登记 factory 与校验）。 */
+export const FLEET_AGENT_KINDS: readonly FleetAgentKind[] = ['echo', 'command', 'hermes', 'openchamber'];
+
 export interface FleetAgentConfig {
   name: string;
   kind: FleetAgentKind;
   /** kind=command 时的可执行文件 */
   command?: string;
+  /** 命令后、prompt 前的固定参数（command/hermes 共用；不含凭据） */
   baseArgs?: string[];
+  /**
+   * prompt 之前的固定参数（字符串数组）；`promptMode` 决定 prompt 作为最后一个参数
+   * 还是写入 stdin。旧配置不填 → prompt 作为最后一个参数。
+   */
+  promptArgs?: string[];
+  /** `'arg'`（默认）或 `'stdin'`；仅 CLI 类 adapter 解释。 */
+  promptMode?: FleetAgentPromptMode;
+  /** 工作目录（command 为 spawn cwd；hermes 同时作为 `--in`；openchamber 透传 seam）。 */
+  cwd?: string;
   timeoutMs?: number;
   concurrency?: number;
+  /** stdout 截断上限字节（默认 65536） */
+  maxOutputBytes?: number;
   /**
    * 可选能力标签（P1）：用于生成能力卡与路由硬过滤；旧配置不填仍完全有效。
    * 只保存标签，不保存 command/env/凭据。
@@ -221,11 +239,35 @@ export function validateFleetConfig(input: unknown): string[] {
   for (const agent of (Array.isArray(c.agents) ? c.agents : []) as Array<Record<string, unknown>>) {
     if (typeof agent?.name !== 'string' || agent.name.length === 0) errors.push('agent.name 非法');
     else if (agent.name === PLAN_SENTINEL) errors.push(`agent.name 不得使用保留名 ${PLAN_SENTINEL}`);
-    if (!['echo', 'command', 'hermes', 'openchamber'].includes(String(agent?.kind))) {
+    if (!FLEET_AGENT_KINDS.includes(String(agent?.kind) as FleetAgentKind)) {
       errors.push(`agent.kind 非法：${String(agent?.kind)}`);
     }
     if (agent?.kind === 'command' && (typeof agent.command !== 'string' || agent.command.length === 0)) {
       errors.push('command agent 需要 command');
+    }
+    for (const key of ['baseArgs', 'promptArgs'] as const) {
+      if (agent?.[key] !== undefined) {
+        const value = agent[key];
+        if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
+          errors.push(`agent.${key} 若存在须为字符串数组`);
+        }
+      }
+    }
+    if (agent?.promptMode !== undefined && agent.promptMode !== 'arg' && agent.promptMode !== 'stdin') {
+      errors.push('agent.promptMode 必须为 arg|stdin');
+    }
+    if (agent?.cwd !== undefined && (typeof agent.cwd !== 'string' || agent.cwd.length === 0)) {
+      errors.push('agent.cwd 若存在须为非空字符串');
+    }
+    if (agent?.timeoutMs !== undefined && (typeof agent.timeoutMs !== 'number' || !Number.isFinite(agent.timeoutMs) || agent.timeoutMs <= 0)) {
+      errors.push('agent.timeoutMs 若存在须为正数');
+    }
+    if (agent?.concurrency !== undefined && (typeof agent.concurrency !== 'number' || !Number.isInteger(agent.concurrency) || agent.concurrency < 1)) {
+      errors.push('agent.concurrency 若存在须为正整数');
+    }
+    if (agent?.maxOutputBytes !== undefined
+      && (typeof agent.maxOutputBytes !== 'number' || !Number.isInteger(agent.maxOutputBytes) || agent.maxOutputBytes < 1)) {
+      errors.push('agent.maxOutputBytes 若存在须为正整数');
     }
     if (agent?.capabilities !== undefined) {
       if (!Array.isArray(agent.capabilities)) {

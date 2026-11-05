@@ -1,14 +1,20 @@
-// OpenChamber Agent 适配器（M4）：**中立接口 + 执行器**。
+// OpenChamber Agent 适配器（M4 / 0.3.2 WS1）：**中立接口 + 执行器**。
 //
-// fleet 对 provider 毫不知情：`OpenChamberAgent` 只依赖注入的 `OpenChamberSessionSeam`（prompt →
-// {text, sessionId?, error?}），选项仅 `timeoutMs/maxOutputBytes/cwd/model/agent`。具体 provider
-// 由调用方注入（字段与错误码见 `packages/fleet/OPENCHAMBER-SEAM.md`）。
+// fleet 对 provider 毫不知情：`OpenChamberAdapter` 只依赖注入的 `OpenChamberSessionSeam`
+// （prompt → {text, sessionId?, error?}），选项仅 `timeoutMs/maxOutputBytes/cwd/model/agent`。
+// 具体 provider 由调用方注入（字段与错误码见 `packages/fleet/OPENCHAMBER-SEAM.md`）。
 // 当前 provider #1 是 oc-hermes-bridge daemon 的 `POST /agent/run-once`（见 `openchamber-http.ts`
 // 的中立 HTTP seam）；将来换成独立 provider 或 OpenChamber 官方 API，**不改本文件**。
+//
+// 公共语义（并发/超时/截断/归一化）由 `BaseExecutor` 负责；本文件只做 seam 翻译。
 
-import type { TaskState } from '../model.js';
-import type { ExecutionOutcome, TaskExecutor } from './executor.js';
-import { truncateOutput } from './agent.js';
+import {
+  BaseExecutor,
+  type ExecutorAdapter,
+  type ExecutorDescriptor,
+  type ExecutorRequest,
+  type ExecutorResult,
+} from './executor.js';
 
 /** 一次会话提示的输入。 */
 export interface OpenChamberPromptInput {
@@ -35,32 +41,55 @@ export interface OpenChamberAgentOptions {
   cwd?: string;
   model?: string;
   agent?: string;
+  /** 并发上限（默认不额外限制，保持旧行为） */
+  concurrency?: number;
 }
 
-/** 基于注入 seam 的 OpenChamber 执行器（默认不接任何真实通道）。 */
-export class OpenChamberAgent implements TaskExecutor {
+/** OpenChamber 平台 adapter：只把统一请求映射到 seam。 */
+export class OpenChamberAdapter implements ExecutorAdapter {
+  readonly descriptor: ExecutorDescriptor = {
+    kind: 'openchamber',
+    executionMode: 'http',
+    supportsCancel: false,
+    promptMode: 'arg',
+  };
+
   constructor(
     private readonly seam: OpenChamberSessionSeam,
     private readonly options: OpenChamberAgentOptions = {},
   ) {}
 
-  async execute(task: TaskState): Promise<ExecutionOutcome> {
-    const input: OpenChamberPromptInput = { prompt: task.intent };
-    if (this.options.cwd !== undefined) input.cwd = this.options.cwd;
+  async invoke(request: ExecutorRequest): Promise<ExecutorResult> {
+    const input: OpenChamberPromptInput = { prompt: request.prompt };
+    const cwd = this.options.cwd ?? request.cwd;
+    if (cwd !== undefined) input.cwd = cwd;
     if (this.options.model !== undefined) input.model = this.options.model;
     if (this.options.agent !== undefined) input.agent = this.options.agent;
     if (this.options.timeoutMs !== undefined) input.timeoutMs = this.options.timeoutMs;
     try {
       const result = await this.seam.prompt(input);
       if (result.error !== undefined) return { ok: false, reason: `OPENCHAMBER_ERROR: ${result.error}` };
-      const truncated = truncateOutput(result.text.trim(), this.options.maxOutputBytes ?? 65_536);
       return {
         ok: true,
         ...(result.sessionId !== undefined ? { reason: `session:${result.sessionId}` } : {}),
-        resultRef: truncated.text,
+        resultRef: result.text,
       };
     } catch (error) {
       return { ok: false, reason: `OPENCHAMBER_ERROR: ${(error as Error).message}` };
     }
+  }
+}
+
+/** 基于注入 seam 的 OpenChamber 执行器（默认不接任何真实通道）。 */
+export class OpenChamberAgent extends BaseExecutor {
+  constructor(
+    seam: OpenChamberSessionSeam,
+    options: OpenChamberAgentOptions = {},
+  ) {
+    super(new OpenChamberAdapter(seam, options), {
+      timeoutMs: options.timeoutMs ?? 600_000,
+      ...(options.maxOutputBytes !== undefined ? { maxOutputBytes: options.maxOutputBytes } : {}),
+      concurrency: options.concurrency ?? Number.POSITIVE_INFINITY,
+    });
   }
 }

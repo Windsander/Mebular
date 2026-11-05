@@ -186,17 +186,23 @@ describe('CommandAgent promptMode：arg / stdin', () => {
 });
 
 describe('registry：kind -> factory 映射与未知 kind', () => {
-  it('四个既有 kind 均映射到执行器，descriptor 可读', () => {
+  it('既有 + 新增 kind 均映射到执行器，descriptor 可读', () => {
     const registry = buildRegistry([
       { name: 'e', kind: 'echo' },
       { name: 'c', kind: 'command', command: process.execPath },
       { name: 'h', kind: 'hermes' },
       { name: 'o', kind: 'openchamber' },
+      { name: 'd', kind: 'dsh' },
+      { name: 'oc', kind: 'opencode' },
+      { name: 'cc', kind: 'claude-code' },
     ]);
-    expect(registry.names()).toEqual(['c', 'e', 'h', 'o']);
+    expect(registry.names()).toEqual(['c', 'cc', 'd', 'e', 'h', 'o', 'oc']);
     expect(registry.descriptorOf('c')).toMatchObject({ kind: 'command', executionMode: 'cli', supportsCancel: true });
     expect(registry.descriptorOf('h')).toMatchObject({ kind: 'hermes', executionMode: 'cli' });
     expect(registry.descriptorOf('o')).toMatchObject({ kind: 'openchamber', executionMode: 'http' });
+    expect(registry.descriptorOf('d')).toMatchObject({ kind: 'dsh', executionMode: 'cli' });
+    expect(registry.descriptorOf('oc')).toMatchObject({ kind: 'opencode', executionMode: 'cli' });
+    expect(registry.descriptorOf('cc')).toMatchObject({ kind: 'claude-code', executionMode: 'cli' });
   });
 
   it('未知 kind：配置校验拒绝，registry 显式抛错（无 OpenChamber 兜底）', () => {

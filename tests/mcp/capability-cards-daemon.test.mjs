@@ -368,7 +368,14 @@ describe('CR-002 daemon 能力卡', () => {
       };
       const targets = await fleet.toolByName('task_targets').handler({}, { dir: home, mebular: live });
       expect(targets.ok).toBe(true);
-      expect(targets.targets).toEqual([{ device: 'device-B', agent: 'echo', kind: 'echo' }]);
+      expect(targets.targets).toEqual([{
+        device: 'device-B',
+        agent: 'echo',
+        kind: 'echo',
+        executable: false,
+        executionMode: 'in-process',
+        reason: 'demo',
+      }]);
       expect(targets.cards).toEqual([{
         device: 'device-B',
         agent: 'echo',
@@ -383,7 +390,8 @@ describe('CR-002 daemon 能力卡', () => {
         dir: home,
         mebular: { ...live, sync: { getPeerPublicKey: () => undefined } },
       });
-      expect(noKey.targets).toEqual(targets.targets);
+      // 无公钥时 cards 降级为空；目录没有执行元数据时 targets 保持旧形状（不伪造 executable）。
+      expect(noKey.targets).toEqual([{ device: 'device-B', agent: 'echo', kind: 'echo' }]);
       expect(noKey.cards).toEqual([]);
 
       const submit = await fleet.toolByName('task_submit').handler(

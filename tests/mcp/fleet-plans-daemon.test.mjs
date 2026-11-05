@@ -430,7 +430,7 @@ describe('P2 daemon /app/plans', () => {
       namespace: 'tasks',
       listen: '/ip4/127.0.0.1/tcp/0',
       peers: [],
-      agents: [{ name: 'worker', kind: 'echo' }, { name: 'planner', kind: 'command', command: process.execPath }],
+      agents: [{ name: 'worker', kind: 'command', command: process.execPath }, { name: 'planner', kind: 'command', command: process.execPath }],
       store: 'daemon',
       daemon: { endpoint: base },
     }), { mode: 0o600 });
@@ -453,7 +453,7 @@ describe('P2 daemon /app/plans', () => {
       const plans = new fleet.DaemonTaskPlanStore({ endpoint: base, namespace: 'tasks' });
       const tasks = new fleet.DaemonTaskEventStore({ endpoint: base, namespace: 'tasks' });
       const routingCards = fleet.compileCapabilityCards({
-        config: { device: 'device-B', namespace: 'tasks', agents: [{ name: 'worker', kind: 'echo' }] },
+        config: { device: 'device-B', namespace: 'tasks', agents: [{ name: 'worker', kind: 'command', command: process.execPath }] },
         now: 1,
       }).map((card) => ({ ...card, limits: { ...card.limits, maxConcurrency: 8 } }));
       const materializer = new fleet.PlanMaterializer({
@@ -513,7 +513,7 @@ describe('P2 daemon /app/plans', () => {
       namespace: 'tasks',
       listen: '/ip4/127.0.0.1/tcp/0',
       peers: [],
-      agents: [{ name: 'worker', kind: 'echo' }, { name: 'planner', kind: 'command', command: process.execPath }],
+      agents: [{ name: 'worker', kind: 'command', command: process.execPath }, { name: 'planner', kind: 'command', command: process.execPath }],
       store: 'daemon',
       daemon: { endpoint: base },
     }), { mode: 0o600 });
@@ -536,7 +536,7 @@ describe('P2 daemon /app/plans', () => {
       const plans = new fleet.DaemonTaskPlanStore({ endpoint: base, namespace: 'tasks' });
       const tasks = new fleet.DaemonTaskEventStore({ endpoint: base, namespace: 'tasks' });
       const routingCards = fleet.compileCapabilityCards({
-        config: { device: 'device-B', namespace: 'tasks', agents: [{ name: 'worker', kind: 'echo' }] },
+        config: { device: 'device-B', namespace: 'tasks', agents: [{ name: 'worker', kind: 'command', command: process.execPath }] },
         now: 1,
       }).map((card) => ({ ...card, limits: { ...card.limits, maxConcurrency: 8 } }));
       const materializer = new fleet.PlanMaterializer({

@@ -240,10 +240,11 @@ mebular memory-runtime restart
 返回 token。sidecar 运行时，`GET /health`（无需 token，仅 loopback）告诉你进程是否就绪；
 `GET /status`（host token）额外给出 capability、模型、计数、outbox 和降级原因。
 
-**0.3.0 的日志现状：** sidecar 启动结果写到 stdout，本版本还没有持久化
-`logs/sidecar.jsonl`，也没有 `mebular memory-runtime logs` 命令。排障以
-`status --json`、`/health`、`/status` 以及 MCP/Console 的 sidecar 状态为准；不要寻找本
-版本尚未提供的日志命令。
+**日志：** sidecar 会把脱敏 JSONL 写到 `<dataDir>/logs/runtime.jsonl`（有界轮转），并提供
+`mebular memory-runtime logs` / `mebular-memory-runtime logs`（`--limit` 或 `--tail`）。
+`mebular memory-runtime doctor` 额外给出最近错误、重启原因、capability/模型状态、
+staging/cache/outbox/dead 计数与最老年龄、磁盘占用。诊断不包含 token、正文或真实 home 路径。
+`status --json`、`/health`、`/status` 与 MCP/Console 的 sidecar 状态仍是主要实时视图。
 
 常见失败与处理：
 

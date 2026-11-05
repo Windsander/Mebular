@@ -132,6 +132,69 @@ export interface SidecarStatusOutbox {
   items: number;
   bytes: number;
   oldestAt: number | null;
+  /** 最老活动项年龄（毫秒）；不包含正文。 */
+  oldestAgeMs?: number | null;
+  deadItems?: number;
+  deadBytes?: number;
+  deadOldestAt?: number | null;
+  deadOldestAgeMs?: number | null;
+  /** 按操作类型/endpoint 聚合的活动与 dead 数量、最老年龄和最近失败。 */
+  byOperation?: SidecarOutboxOperationView[];
+  /** 按 endpoint 聚合（与 byOperation 同一批数据，便于兼容现有诊断习惯）。 */
+  byEndpoint?: SidecarOutboxOperationView[];
+  /** 每种 dead 稳定原因的数量。 */
+  deadReasons?: Array<{ reason: string; count: number }>;
+  /** 最近一次 revision/lease 冲突；不包含正文。 */
+  lastConflict?: SidecarOutboxConflictView | null;
+  /** timeout/partial 等可能已提交、需要权威回读对账的逻辑项；绝不伪造 committed。 */
+  ambiguous?: SidecarOutboxAmbiguousView[];
+}
+
+export interface SidecarOutboxConflictView {
+  code: string;
+  at: number;
+  endpoint: string;
+  operation: string;
+  requestId: string;
+  status?: number;
+  stage?: string;
+  currentRevision?: number;
+  expectedRevision?: number;
+  hostId?: string;
+  until?: number;
+}
+
+export interface SidecarOutboxOperationView {
+  operation: string;
+  endpoint: string;
+  active: number;
+  dead: number;
+  oldestAgeMs: number | null;
+  deadOldestAgeMs: number | null;
+  lastFailure: {
+    code: string;
+    at: number;
+    stage?: string;
+    disposition?: string;
+  } | null;
+}
+
+export interface SidecarOutboxAmbiguousView {
+  requestId: string;
+  endpoint: string;
+  operation: string;
+  stage?: string;
+  reason: string;
+  at: number;
+  ageMs: number;
+  possiblyCommitted: true;
+  hint: 'may_have_been_committed';
+  reconciliation: 'read_authoritative_objects';
+  committedObjects?: {
+    records: string[];
+    details: string[];
+    objects: string[];
+  };
 }
 
 export interface SidecarStatusLimits {
@@ -171,6 +234,35 @@ export interface SidecarStatusDetails {
     conversation: number;
     tool_output: number;
     document_slice: number;
+  };
+  /** 脱敏运维诊断：日志、磁盘与本地队列聚合；不含路径/token/正文。 */
+  diagnostics?: {
+    logs: {
+      files: number;
+      bytes: number;
+      latestAt: number | null;
+    };
+    disk: {
+      stagingBytes: number;
+      traceBytes: number;
+      cacheBytes: number;
+      detailCacheBytes: number;
+      outboxBytes: number;
+      deadBytes: number;
+      logsBytes: number;
+      totalBytes: number;
+    };
+    outbox: {
+      active: number;
+      dead: number;
+      oldestAgeMs: number | null;
+      deadOldestAgeMs: number | null;
+      byOperation: SidecarOutboxOperationView[];
+      deadReasons: Array<{ reason: string; count: number }>;
+      lastConflict: SidecarOutboxConflictView | null;
+      ambiguous: SidecarOutboxAmbiguousView[];
+    };
+    restartReason?: string | null;
   };
 }
 

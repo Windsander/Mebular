@@ -1831,10 +1831,11 @@ function printMemoryRuntime(value, exitCode = 0) {
   process.exit(exitCode);
 }
 
-async function runMemoryRuntime(action, flags) {
-  const usage = '用法：mebular memory-runtime <status|start|stop|restart> [--json] [--home DIR] [--timeout MS]';
+async function runMemoryRuntime(action, args, flags) {
+  const usage = '用法：mebular memory-runtime <status|start|stop|restart|logs|doctor|outbox> [--json] [--home DIR] [--timeout MS] [logs --limit N|--tail N]';
   try {
-    if (!['status', 'start', 'stop', 'restart'].includes(action)) {
+    const actions = ['status', 'start', 'stop', 'restart', 'logs', 'doctor', 'outbox'];
+    if (!actions.includes(action)) {
       const error = new Error(usage);
       error.code = 'USAGE';
       throw error;
@@ -1846,7 +1847,199 @@ async function runMemoryRuntime(action, flags) {
       MemoryRuntimeSupervisor,
       inspectMemoryRuntimeStatus,
       memoryRuntimeStatusExitCode,
+      resolveMemoryRuntimePaths,
     } = await import('../src/memory-runtime-supervisor.mjs');
+    const {
+      assertSafeMemoryRuntimeDataDir,
+      inspectMemoryRuntimeOutbox,
+      inspectMemoryRuntimeLocalCounts,
+      memoryRuntimeDiskUsage,
+      memoryRuntimeLogStatus,
+      readMemoryRuntimeLogs,
+      rebuildMemoryRuntimeOutboxItem,
+      purgeMemoryRuntimeOutboxItem,
+      sanitizeMemoryRuntimeEvent,
+    } = await import('../src/memory-runtime-diagnostics.mjs');
+    const dataDir = assertSafeMemoryRuntimeDataDir(
+      resolveMemoryRuntimePaths({ home, env: process.env }).dataDir,
+      home,
+    );
+
+    if (action === 'logs') {
+      const limitFlag = flags.limit === undefined ? flags.tail : flags.limit;
+      const limitRaw = limitFlag === undefined ? 50 : Number(limitFlag);
+      const limit = Number.isInteger(limitRaw) && limitRaw > 0 && limitRaw <= 500 ? limitRaw : 50;
+      const [parsedEntries, status] = await Promise.all([
+        readMemoryRuntimeLogs(dataDir, { limit }),
+        memoryRuntimeLogStatus(dataDir),
+      ]);
+      const entries = parsedEntries.map((entry) => sanitizeMemoryRuntimeEvent(entry));
+      printMemoryRuntime({
+        ok: true,
+        kind: 'memory-runtime',
+        action,
+        count: entries.length,
+        truncated: entries.length >= limit,
+        log: status,
+        entries,
+      }, 0);
+      return;
+    }
+
+    if (action === 'doctor') {
+      const supervisor = new MemoryRuntimeSupervisor({ home, config, env: process.env });
+      const [status, runtime, outbox, localCounts, disk, logStatus, logs] = await Promise.all([
+        inspectMemoryRuntimeStatus({ home, config, env: process.env }),
+        supervisor.readStatus().catch(() => null),
+        inspectMemoryRuntimeOutbox(dataDir, { now: Date.now() }),
+        inspectMemoryRuntimeLocalCounts(dataDir),
+        memoryRuntimeDiskUsage(dataDir),
+        memoryRuntimeLogStatus(dataDir),
+        readMemoryRuntimeLogs(dataDir, { limit: 100 }),
+      ]);
+      const recentErrors = logs
+        .filter((entry) => entry.level === 'error' || entry.level === 'warn')
+        .map((entry) => ({
+          ts: entry.ts,
+          level: entry.level,
+          event: entry.event,
+          ...(typeof entry.code === 'string' ? { code: entry.code } : {}),
+          ...(typeof entry.reason === 'string' ? { reason: entry.reason } : {}),
+          ...(typeof entry.stage === 'string' ? { stage: entry.stage } : {}),
+          ...(entry.possibleCommit === true ? { possibleCommit: true } : {}),
+        }));
+      for (const [source, error] of [['sidecar', status.error], ['runtime', runtime?.error]]) {
+        if (!error?.code) continue;
+        recentErrors.push({
+          ts: Date.now(),
+          level: 'error',
+          event: `${source}_status`,
+          code: error.code,
+        });
+      }
+      recentErrors.splice(0, Math.max(0, recentErrors.length - 10));
+      const restartEvents = logs.filter((entry) => entry.event === 'supervisor_restart');
+      const lastRestart = restartEvents[restartEvents.length - 1]
+        ?? [...logs].reverse().find((entry) => entry.event === 'runtime_start' || entry.event === 'runtime_resume');
+      const restartReason = typeof lastRestart?.reason === 'string'
+        ? lastRestart.reason
+        : (status.reason ?? null);
+      const next = [];
+      if (status.error?.code) next.push(`sidecar 错误：${status.error.code}`);
+      if (outbox.dead > 0) next.push(`${outbox.dead} 个 dead 操作：先看 deadReasons/lastConflict，再显式 outbox rebuild/purge`);
+      if (outbox.lastConflict) next.push(`最近冲突 ${outbox.lastConflict.code}（requestId=${outbox.lastConflict.requestId}）`);
+      if (outbox.ambiguous.length > 0) next.push('存在超时/部分写入：结果未知，需按 committedObjects 做权威回读对账，不能当作已提交');
+      if (runtime?.degraded) next.push(`运行时降级：${runtime.error?.code ?? 'degraded'}`);
+      if (recentErrors.length === 0) next.push('最近没有日志错误');
+      printMemoryRuntime({
+        ok: true,
+        kind: 'memory-runtime',
+        action,
+        enabled: status.enabled,
+        available: status.available,
+        state: status.state,
+        degraded: status.degraded === true || outbox.dead > 0 || outbox.ambiguous.length > 0 || runtime?.degraded === true,
+        installed: status.installed,
+        restartReason,
+        capability: runtime?.capability ?? null,
+        model: runtime?.model ?? null,
+        counts: {
+          staging: localCounts.stagingChunks,
+          traces: localCounts.traces,
+          cache: localCounts.cacheEntries,
+          detailCache: localCounts.detailCacheEntries,
+          outbox: outbox.active,
+          dead: outbox.dead,
+        },
+        outbox: {
+          active: outbox.active,
+          dead: outbox.dead,
+          oldestAgeMs: outbox.oldestAgeMs,
+          deadOldestAgeMs: outbox.deadOldestAgeMs,
+          byOperation: outbox.byOperation,
+          byEndpoint: outbox.byEndpoint,
+          deadReasons: outbox.deadReasons,
+          lastConflict: outbox.lastConflict,
+          ambiguous: outbox.ambiguous,
+        },
+        logs: logStatus,
+        disk,
+        recentErrors,
+        next,
+      }, 0);
+      return;
+    }
+
+    if (action === 'outbox') {
+      const sub = args[0] ?? 'list';
+      if (sub === 'list') {
+        const summary = await inspectMemoryRuntimeOutbox(dataDir, { now: Date.now(), includeItems: true });
+        printMemoryRuntime({ ok: true, kind: 'memory-runtime', action, sub, ...summary }, 0);
+        return;
+      }
+      const id = args[1];
+      if (typeof id !== 'string' || id.length === 0) {
+        const error = new Error('outbox 命令需要 id：list|show|rebuild|purge');
+        error.code = 'USAGE';
+        throw error;
+      }
+      if (sub === 'show') {
+        const summary = await inspectMemoryRuntimeOutbox(dataDir, { now: Date.now(), includeItems: true });
+        const item = summary.items.find((entry) => entry.id === id || entry.requestId === id);
+        if (!item) {
+          printMemoryRuntime({
+            ok: false,
+            kind: 'memory-runtime',
+            action,
+            sub,
+            error: { code: 'outbox_not_found', message: 'outbox 项不存在' },
+          }, 1);
+          return;
+        }
+        printMemoryRuntime({ ok: true, kind: 'memory-runtime', action, sub, item }, 0);
+        return;
+      }
+      if (sub === 'rebuild') {
+        let expectedRevision;
+        const revisionFlag = flags['expected-revision'];
+        if (revisionFlag !== undefined) {
+          if (typeof revisionFlag !== 'string' || !/^(?:0|[1-9]\d*)$/.test(revisionFlag)) {
+            const error = new Error('--expected-revision 必须显式提供非负整数');
+            error.code = 'usage';
+            throw error;
+          }
+          expectedRevision = Number(revisionFlag);
+          if (!Number.isSafeInteger(expectedRevision)) {
+            const error = new Error('--expected-revision 超出安全整数范围');
+            error.code = 'usage';
+            throw error;
+          }
+        }
+        const item = await rebuildMemoryRuntimeOutboxItem(dataDir, id, {
+          ...(expectedRevision !== undefined ? { expectedRevision } : {}),
+          now: Date.now(),
+        });
+        printMemoryRuntime({
+          ok: true,
+          kind: 'memory-runtime',
+          action,
+          sub,
+          item,
+          note: expectedRevision === undefined
+            ? '已按原 revision 重建；不会自动 rebase 到新 revision'
+            : '已按显式 --expected-revision 重建（人工覆盖，非自动）',
+        }, 0);
+        return;
+      }
+      if (sub === 'purge') {
+        const result = await purgeMemoryRuntimeOutboxItem(dataDir, id);
+        printMemoryRuntime({ ok: true, kind: 'memory-runtime', action, sub, ...result }, 0);
+        return;
+      }
+      const error = new Error('outbox 子命令：list|show|rebuild|purge');
+      error.code = 'USAGE';
+      throw error;
+    }
 
     if (action === 'status') {
       const status = await inspectMemoryRuntimeStatus({ home, config, env: process.env });
@@ -1887,7 +2080,7 @@ async function runMemoryRuntime(action, flags) {
       ...status,
     }, ok ? 0 : memoryRuntimeStatusExitCode(status));
   } catch (error) {
-    const code = error?.code === 'USAGE' ? 'usage' : (error?.code ?? 'error');
+    const code = error?.code === 'USAGE' || error?.code === 'usage' ? 'usage' : (error?.code ?? 'error');
     printMemoryRuntime({
       ok: false,
       kind: 'memory-runtime',
@@ -2068,7 +2261,7 @@ async function main() {
       return;
     }
     case 'memory-runtime': {
-      await runMemoryRuntime(argv[1], flags);
+      await runMemoryRuntime(argv[1], argv.slice(2), flags);
       return;
     }
     case 'models': {
@@ -2103,7 +2296,7 @@ async function main() {
           '  runtime current show|set|clear [--version V --runtime-path P --cli C --provider shared --owner O --installed-at ISO]  current 指针（非敏感）',
           '  runtime service install|uninstall|restart|status [--json]  共享 mebular-serve 所有权/生命周期',
           '  runtime provider list|add|remove [--kind app|cli|shared --path P --version V --capabilities a,b --id ID]  runtime provider 注册表',
-          '  memory-runtime status|start|stop|restart [--json] [--home DIR]   记忆运行时 sidecar（独立于 MCP daemon runtime）',
+          '  memory-runtime status|start|stop|restart|logs|doctor|outbox [--json] [--home DIR] [logs --limit|--tail N]   记忆运行时 sidecar（独立于 MCP daemon runtime）',
           '  models list|status|install|download|select|remove|start|stop [--json] [--pack P] [--force]  sidecar 模型（需 serve；不同步）',
           '  token grant|list|revoke [--scope a,b] [--id x] [--tokens-file p]   bearer 令牌管理',
           '  token client add|list|remove [--redirect uri] [--scope a,b] [--id x]   OAuth 客户端预注册',
@@ -2145,6 +2338,10 @@ async function main() {
       }
       return;
     case 'doctor':
+      if (argv[1] === 'memory-runtime' || flags['memory-runtime'] === true || flags['memory-runtime'] === 'true') {
+        await runMemoryRuntime('doctor', argv.slice(2), flags);
+        return;
+      }
       if (flags.net === true || flags.net === 'true') {
         await runNetDoctor();
         return;

@@ -45,6 +45,24 @@ export class LocalLayerError extends Error {
   }
 }
 
+export type OutboxFailureDisposition = 'conflict' | 'retryable' | 'permanent' | 'ambiguous';
+
+/** 脱敏后的失败诊断；只允许稳定 code/阶段/业务冲突字段，不保存正文或凭据。 */
+export interface OutboxFailureView {
+  code: string;
+  message?: string;
+  at: number;
+  status?: number;
+  retryable?: boolean;
+  disposition?: OutboxFailureDisposition;
+  /** 失败阶段：enqueue / replay / settle / finalize / readback。 */
+  stage?: string;
+  /** 409 revision/lease 诊断；只保留明确 allowlist 字段。 */
+  details?: Record<string, string | number | boolean>;
+  /** timeout/partial 等结果未知：可能已经提交，需权威回读对账。 */
+  possibleCommit?: boolean;
+}
+
 export interface OutboxItem {
   version: 1;
   id: string;
@@ -56,6 +74,14 @@ export interface OutboxItem {
   attempts: number;
   lastAttemptAt: number | null;
   lastError: string | null;
+  /** 最近一次失败的完整脱敏诊断；保留原 revision/hostId/until。 */
+  lastFailure?: OutboxFailureView;
+  /** 失败阶段；重放逻辑项在多次尝试间保持稳定。 */
+  failureStage?: string;
+  /** dead 项的中文/英文稳定原因码。 */
+  error?: string;
+  /** dead 时间；只在 dead/ 中写入。 */
+  deadAt?: number;
   /** 指数退避后的下次可尝试时间；缺省表示立即可尝试。 */
   nextAttemptAt?: number;
   /** 操作级截止时间；缺省为 createdAt + 30 天。 */
@@ -306,6 +332,8 @@ function finalizeSnapshot(source: OutboxItem): OutboxItem {
     attempts: source.attempts,
     lastAttemptAt: source.lastAttemptAt,
     lastError: source.lastError,
+    ...(source.lastFailure ? { lastFailure: minimizeOutboxValue(source.lastFailure) as OutboxItem['lastFailure'] } : {}),
+    ...(source.failureStage ? { failureStage: source.failureStage } : {}),
     ...(source.meta ? { meta: minimizeOutboxValue(source.meta) as OutboxItem['meta'] } : {}),
     ...(source.committed
       ? { committed: minimizeOutboxValue(source.committed) as OutboxItem['committed'] }
@@ -833,16 +861,30 @@ export class BoundedOutbox {
     return outcome;
   }
 
-  private async deadLetterUnlocked(item: OutboxItem, errorCode: string): Promise<boolean> {
+  private async deadLetterUnlocked(
+    item: OutboxItem,
+    errorCode: string,
+    failure?: OutboxFailureView,
+  ): Promise<boolean> {
     // mode_mismatch/drain 后不得新增 dead 副本；保留活动项等待恢复。
     if (!this.lifecycleWorkOpen()) return false;
     const path = this.pathFor(item.id);
     await this.ensureFinalizeMarkerUnlocked(item, 'dead');
+    const deadAt = this.now();
+    const safeFailure = failure
+      ? minimizeOutboxValue({
+        ...failure,
+        code: redactText(failure.code).text.slice(0, 128),
+        ...(failure.message ? { message: redactText(failure.message).text.slice(0, 256) } : {}),
+      }) as OutboxFailureView
+      : undefined;
     const dead: OutboxItem & { deadAt: number; error: string } = {
       ...item,
       body: minimizeOutboxValue(item.body),
-      deadAt: this.now(),
+      deadAt,
       error: redactText(errorCode).text.slice(0, 128),
+      ...(safeFailure ? { lastFailure: safeFailure } : {}),
+      ...(failure?.stage ? { failureStage: redactText(failure.stage).text.slice(0, 64) } : {}),
     };
     await writeJsonAtomic(this.deadPathFor(item.id), dead);
     await rm(path, { force: true });
@@ -850,7 +892,11 @@ export class BoundedOutbox {
   }
 
   /** 永久失败（400/403/422）移入 dead/，保留审计但不无限重试。 */
-  async deadLetter(id: string, errorCode: string): Promise<boolean> {
+  async deadLetter(
+    id: string,
+    errorCode: string,
+    failure?: OutboxFailureView,
+  ): Promise<boolean> {
     if (!this.lifecycleWorkOpen()) return false;
     return this.exclusive(async () => {
       await this.init();
@@ -858,7 +904,7 @@ export class BoundedOutbox {
       const item = await readJsonFile<OutboxItem>(this.pathFor(id));
       if (!isOutboxItem(item)) return false;
       if (typeof item.replayLeaseUntil === 'number' && item.replayLeaseUntil > this.now()) return false;
-      return this.deadLetterUnlocked(item, errorCode);
+      return this.deadLetterUnlocked(item, errorCode, failure);
     });
   }
 
@@ -923,12 +969,14 @@ export class BoundedOutbox {
       now = this.now(),
       error = 'partial_failure',
       retryDelayMs = 0,
+      failure,
     }: {
       outcome: OutboxReplayCompletion;
       owner?: string;
       now?: number;
       error?: string;
       retryDelayMs?: number;
+      failure?: OutboxFailureView;
     },
   ): Promise<OutboxReplayCompletion> {
     return this.exclusive(async () => {
@@ -964,7 +1012,11 @@ export class BoundedOutbox {
         return 'settled';
       }
       if (outcome === 'dead' || this.deadlineOf(item) <= now) {
-        await this.deadLetterUnlocked(item, this.deadlineOf(item) <= now ? 'retention_expired' : error);
+        await this.deadLetterUnlocked(
+          item,
+          this.deadlineOf(item) <= now ? 'retention_expired' : error,
+          failure,
+        );
         return 'dead';
       }
       const updated: OutboxItem = {
@@ -972,6 +1024,8 @@ export class BoundedOutbox {
         attempts: item.attempts + 1,
         lastAttemptAt: now,
         lastError: redactText(error).text.slice(0, 128),
+        ...(failure ? { lastFailure: minimizeOutboxValue(failure) as OutboxFailureView } : {}),
+        ...(failure?.stage ? { failureStage: redactText(failure.stage).text.slice(0, 64) } : {}),
         nextAttemptAt: now + Math.max(0, Math.floor(retryDelayMs)),
         replayLeaseUntil: 0,
         replayLeaseOwner: undefined,

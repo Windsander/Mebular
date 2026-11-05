@@ -58,7 +58,32 @@ import {
 const SMOKE_ENABLED = process.env.MEBULAR_MODEL_SMOKE === '1';
 const KEEP_TEMP = process.env.MEBULAR_MODEL_SMOKE_KEEP === '1';
 const DIAGNOSTIC_FALLBACK = process.env.MEBULAR_MODEL_SMOKE_DIAGNOSTIC_FALLBACK === '1';
+// Test-only base URL override for networks where huggingface.co is unreachable. Model bytes
+// are still downloaded and verified against the official size/SHA-256; evidence records the
+// effective base URL so a mirror-assisted run is never presented as the default HF path.
+const MODEL_BASE_URL = process.env.MEBULAR_MODEL_SMOKE_MODEL_BASE_URL?.trim() || null;
 const describeSmoke = SMOKE_ENABLED ? describe : describe.skip;
+
+function withModelBaseUrl(manifest: ModelManifest, baseUrl: string | null): ModelManifest {
+  if (!baseUrl) return manifest;
+  const base = new URL(baseUrl);
+  if (base.protocol !== 'https:') {
+    throw new Error('MEBULAR_MODEL_SMOKE_MODEL_BASE_URL must use https');
+  }
+  return {
+    ...manifest,
+    files: manifest.files.map((file) => {
+      if (!file.url) {
+        throw new Error(`model file ${file.path} has no download URL`);
+      }
+      const original = new URL(file.url);
+      return {
+        ...file,
+        url: new URL(`${original.pathname}${original.search}`, base.origin).toString(),
+      };
+    }),
+  };
+}
 
 const PACK_ID = 'qwen3-4b-instruct-q4_k_m';
 const TEST_TIMEOUT_MS = 30 * 60_000;
@@ -132,6 +157,7 @@ interface SmokeEvidence {
   model: {
     ok: boolean;
     transport: 'node-https' | 'global-fetch';
+    baseUrl?: string;
     downloadMs?: number;
     verifyMs?: number;
     installMs?: number;
@@ -504,6 +530,8 @@ class SmokeRun {
 
     const manifest = resolveCuratedManifest(PACK_ID);
     this.manifest = manifest;
+    const downloadManifest = withModelBaseUrl(manifest, MODEL_BASE_URL);
+    this.evidence.model.baseUrl = MODEL_BASE_URL ? new URL(MODEL_BASE_URL).origin : 'https://huggingface.co';
     const modelFile = manifest.files[0];
     if (!modelFile) {
       throw this.failure('model.manifest', 'manifest_missing', 'curated manifest has no model file');
@@ -521,7 +549,7 @@ class SmokeRun {
     this.evidence.config.engineSizeBytes = this.asset.sizeBytes;
 
     const engineBinary = await this.installEngine(this.asset);
-    await this.downloadModel(manifest);
+    await this.downloadModel(downloadManifest);
     await this.runInference(engineBinary);
     await this.readStatusAfterInference();
 

@@ -1,10 +1,10 @@
 {
   "schema": "mebular.scale-benchmark-failure-injection/1",
   "status": "passed",
-  "startedAt": "2026-11-05T02:41:29.007Z",
-  "finishedAt": "2026-11-05T02:41:51.616Z",
+  "startedAt": "2026-11-05T08:14:07.808Z",
+  "finishedAt": "2026-11-05T08:14:30.080Z",
   "git": {
-    "sha": "1626dd5f82e9d9ee8027fa94b6bedd8aa3f29305",
+    "sha": "19cac09eb8ef7fc895b800339ba4dd9214c6db39",
     "dirty": false,
     "dirtyFileCount": 0
   },
@@ -41,18 +41,18 @@
       },
       "checkpoints": {
         "count": 5,
-        "lastAt": "2026-11-05T02:41:30.720Z",
+        "lastAt": "2026-11-05T08:14:09.394Z",
         "lastReason": "failed",
         "errors": []
       },
       "sidecarPids": [
-        68300
+        84241
       ],
       "sidecarPidEvents": [
         {
-          "pid": 68300,
+          "pid": 84241,
           "source": "cluster-start",
-          "at": "2026-11-05T02:41:30.085Z"
+          "at": "2026-11-05T08:14:08.918Z"
         }
       ],
       "cleanup": {
@@ -61,7 +61,7 @@
         "residualPids": [],
         "sidecarStop": [
           {
-            "pid": 68300,
+            "pid": 84241,
             "stopped": true,
             "escalation": "SIGTERM",
             "skipped": false
@@ -97,19 +97,19 @@
         }
       },
       "checkpoints": {
-        "count": 13,
-        "lastAt": "2026-11-05T02:41:34.008Z",
+        "count": 14,
+        "lastAt": "2026-11-05T08:14:12.604Z",
         "lastReason": "failed",
         "errors": []
       },
       "sidecarPids": [
-        68341
+        84286
       ],
       "sidecarPidEvents": [
         {
-          "pid": 68341,
+          "pid": 84286,
           "source": "cluster-start",
-          "at": "2026-11-05T02:41:32.112Z"
+          "at": "2026-11-05T08:14:10.758Z"
         }
       ],
       "cleanup": {
@@ -118,7 +118,7 @@
         "residualPids": [],
         "sidecarStop": [
           {
-            "pid": 68341,
+            "pid": 84286,
             "stopped": true,
             "escalation": "SIGTERM",
             "skipped": false
@@ -152,18 +152,18 @@
       },
       "checkpoints": {
         "count": 8,
-        "lastAt": "2026-11-05T02:41:36.963Z",
+        "lastAt": "2026-11-05T08:14:15.491Z",
         "lastReason": "interrupted",
         "errors": []
       },
       "sidecarPids": [
-        68474
+        84347
       ],
       "sidecarPidEvents": [
         {
-          "pid": 68474,
+          "pid": 84347,
           "source": "cluster-start",
-          "at": "2026-11-05T02:41:35.510Z"
+          "at": "2026-11-05T08:14:13.997Z"
         }
       ],
       "cleanup": {
@@ -172,7 +172,7 @@
         "residualPids": [],
         "sidecarStop": [
           {
-            "pid": 68474,
+            "pid": 84347,
             "stopped": true,
             "escalation": "SIGTERM",
             "skipped": false
@@ -206,18 +206,18 @@
       },
       "checkpoints": {
         "count": 8,
-        "lastAt": "2026-11-05T02:41:40.049Z",
+        "lastAt": "2026-11-05T08:14:18.321Z",
         "lastReason": "interrupted",
         "errors": []
       },
       "sidecarPids": [
-        68531
+        84396
       ],
       "sidecarPidEvents": [
         {
-          "pid": 68531,
+          "pid": 84396,
           "source": "cluster-start",
-          "at": "2026-11-05T02:41:38.559Z"
+          "at": "2026-11-05T08:14:16.880Z"
         }
       ],
       "cleanup": {
@@ -226,7 +226,7 @@
         "residualPids": [],
         "sidecarStop": [
           {
-            "pid": 68531,
+            "pid": 84396,
             "stopped": true,
             "escalation": "SIGTERM",
             "skipped": false
@@ -250,7 +250,7 @@
         "faultInjection": {
           "type": "sidecar_sigkill",
           "atBatch": 1,
-          "pid": 68648
+          "pid": 84445
         }
       },
       "reads": {
@@ -259,25 +259,25 @@
         "faultInjection": null
       },
       "checkpoints": {
-        "count": 11,
-        "lastAt": "2026-11-05T02:41:44.190Z",
+        "count": 12,
+        "lastAt": "2026-11-05T08:14:22.638Z",
         "lastReason": "after-reads",
         "errors": []
       },
       "sidecarPids": [
-        68648,
-        68660
+        84445,
+        84460
       ],
       "sidecarPidEvents": [
         {
-          "pid": 68648,
+          "pid": 84445,
           "source": "cluster-start",
-          "at": "2026-11-05T02:41:41.406Z"
+          "at": "2026-11-05T08:14:19.711Z"
         },
         {
-          "pid": 68660,
+          "pid": 84460,
           "source": "checkpoint:seed-batch",
-          "at": "2026-11-05T02:41:43.101Z"
+          "at": "2026-11-05T08:14:21.520Z"
         }
       ],
       "cleanup": {
@@ -286,13 +286,13 @@
         "residualPids": [],
         "sidecarStop": [
           {
-            "pid": 68648,
+            "pid": 84445,
             "stopped": true,
             "escalation": null,
             "skipped": true
           },
           {
-            "pid": 68660,
+            "pid": 84460,
             "stopped": true,
             "escalation": "SIGTERM",
             "skipped": false
@@ -320,7 +320,7 @@
         "faultInjection": {
           "type": "sidecar_sigstop",
           "atBatch": 1,
-          "pid": 68719
+          "pid": 84518
         }
       },
       "reads": {
@@ -330,18 +330,18 @@
       },
       "checkpoints": {
         "count": 5,
-        "lastAt": "2026-11-05T02:41:46.288Z",
+        "lastAt": "2026-11-05T08:14:24.742Z",
         "lastReason": "failed",
         "errors": []
       },
       "sidecarPids": [
-        68719
+        84518
       ],
       "sidecarPidEvents": [
         {
-          "pid": 68719,
+          "pid": 84518,
           "source": "cluster-start",
-          "at": "2026-11-05T02:41:45.829Z"
+          "at": "2026-11-05T08:14:24.293Z"
         }
       ],
       "cleanup": {
@@ -350,7 +350,7 @@
         "residualPids": [],
         "sidecarStop": [
           {
-            "pid": 68719,
+            "pid": 84518,
             "stopped": true,
             "escalation": "SIGKILL",
             "skipped": false

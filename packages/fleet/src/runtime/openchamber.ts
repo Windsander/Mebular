@@ -52,6 +52,8 @@ export class OpenChamberAdapter implements ExecutorAdapter {
     executionMode: 'http',
     supportsCancel: false,
     promptMode: 'arg',
+    // bridge 每次 `run-once` 都新建会话，不复用用户当前会话。
+    sessionMode: 'fresh',
   };
 
   constructor(

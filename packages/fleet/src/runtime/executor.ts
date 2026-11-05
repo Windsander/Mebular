@@ -29,6 +29,15 @@ export type ExecutorExecutionMode = 'cli' | 'http' | 'json-rpc' | 'in-process';
 export const EXECUTOR_EXECUTION_MODES: readonly ExecutorExecutionMode[] = ['cli', 'http', 'json-rpc', 'in-process'];
 export type ExecutorPromptMode = 'arg' | 'stdin';
 
+/**
+ * Fleet 任务会话模式：**一个 Fleet task = 一个全新 session**。
+ *
+ * 公共层不解释任何平台的 session 语义（session id、resume/continue/attach 参数属于 adapter
+ * 或配置层），只要求每个 first-class adapter 在 descriptor 中声明该不变量。
+ */
+export type ExecutorSessionMode = 'fresh';
+export const EXECUTOR_SESSION_MODES: readonly ExecutorSessionMode[] = ['fresh'];
+
 /** Adapter 的稳定元数据（非敏感，可安全展示/写入能力卡）。 */
 export interface ExecutorDescriptor {
   /** 与 `FleetAgentConfig.kind` 对齐的稳定标识（如 `command`/`hermes`/`openchamber`）。 */
@@ -38,6 +47,8 @@ export interface ExecutorDescriptor {
   supportsStreaming?: boolean;
   /** CLI adapter 的 prompt 传递方式；HTTP/JSON-RPC 可省略。 */
   promptMode?: ExecutorPromptMode;
+  /** 会话模式：first-class adapter 必须显式声明 `fresh`（禁止 resume/continue/attach）。 */
+  sessionMode: ExecutorSessionMode;
 }
 
 /** 公共层交给 adapter 的**已归一化**请求：adapter 只按平台规则翻译。 */

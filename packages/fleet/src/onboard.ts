@@ -28,6 +28,7 @@ import {
   masterKeyFingerprint,
   planOwnerReadiness,
   readMasterKeyFile,
+  resumeArgConfigError,
   saveFleetConfig,
   validateFleetConfig,
   writeMasterKeyFile,
@@ -132,6 +133,9 @@ export function buildRegistry(
   for (const a of agents) {
     const factory = factories[a.kind];
     if (factory === undefined) throw new Error(`UNKNOWN_AGENT_KIND: ${a.kind}`);
+    // 工厂层兜底：即使调用方绕过 loadFleetConfig，也不得把 resume/continue 参数带进 argv。
+    const resumeError = resumeArgConfigError(a);
+    if (resumeError !== undefined) throw new Error(`配置非法：${resumeError}`);
     registry.register(a.name, factory(a));
   }
   return registry;

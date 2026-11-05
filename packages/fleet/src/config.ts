@@ -90,6 +90,54 @@ export type FleetAgentKind = 'echo' | 'command' | 'hermes' | 'openchamber' | 'ds
 /** 平台无关的 prompt 传递方式（CLI adapter 使用；HTTP adapter 忽略）。 */
 export type FleetAgentPromptMode = 'arg' | 'stdin';
 
+/**
+ * Fleet 任务会话参数黑名单：**一个 Fleet task = 一个全新 session**。
+ *
+ * 无论 `kind`（`command` 或 first-class adapter），本地固定参数都不得续接/恢复已有会话。
+ * 精确 token 与 `--flag=value` 形式都拦截；正常参数（`--in`/`--model`/`--profile`/`run`/`-p`）
+ * 不受影响。
+ */
+export const FLEET_RESUME_ARG_BLACKLIST: readonly string[] = [
+  '--continue',
+  '--resume',
+  '--session',
+  '--session-id',
+  '--resume-session',
+  '--fork',
+  '-r',
+];
+
+/** 返回第一个命中的 resume/session 参数（`--flag=value` 归一为 flag）；无命中返回 undefined。 */
+export function findResumeArg(args: readonly string[]): string | undefined {
+  for (const arg of args) {
+    if (FLEET_RESUME_ARG_BLACKLIST.includes(arg)) return arg;
+    if (!arg.startsWith('-')) continue;
+    const equals = arg.indexOf('=');
+    if (equals <= 0) continue;
+    const flag = arg.slice(0, equals);
+    if (FLEET_RESUME_ARG_BLACKLIST.includes(flag)) return flag;
+  }
+  return undefined;
+}
+
+/**
+ * `baseArgs` / `promptArgs` 的会话黑名单校验（配置校验与工厂构建共用）。
+ * 返回错误文案；未命中返回 undefined。非数组交给形状校验处理，这里跳过。
+ */
+export function resumeArgConfigError(
+  agent: Pick<FleetAgentConfig, 'baseArgs' | 'promptArgs'>,
+): string | undefined {
+  for (const key of ['baseArgs', 'promptArgs'] as const) {
+    const args = agent[key];
+    if (!Array.isArray(args)) continue;
+    const resumeArg = findResumeArg(args);
+    if (resumeArg !== undefined) {
+      return `agent.${key} 含禁止的会话参数 ${resumeArg}：Fleet 任务必须新开 session（禁止 resume/continue/attach 到已有会话）`;
+    }
+  }
+  return undefined;
+}
+
 /** 已注册的执行器 kind（新增 kind 必须同时登记 factory 与校验）。 */
 export const FLEET_AGENT_KINDS: readonly FleetAgentKind[] = [
   'echo',
@@ -319,6 +367,8 @@ export function validateFleetConfig(input: unknown): string[] {
         }
       }
     }
+    const resumeError = resumeArgConfigError(agent as Pick<FleetAgentConfig, 'baseArgs' | 'promptArgs'>);
+    if (resumeError !== undefined) errors.push(resumeError);
     if (agent?.promptMode !== undefined && agent.promptMode !== 'arg' && agent.promptMode !== 'stdin') {
       errors.push('agent.promptMode 必须为 arg|stdin');
     }

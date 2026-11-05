@@ -38,6 +38,7 @@ const descriptor = {
   kind: 'test',
   executionMode: 'in-process' as const,
   supportsCancel: true,
+  sessionMode: 'fresh' as const,
 };
 
 afterEach(() => {
@@ -204,12 +205,26 @@ describe('registry：kind -> factory 映射与未知 kind', () => {
       { name: 'cc', kind: 'claude-code' },
     ]);
     expect(registry.names()).toEqual(['c', 'cc', 'd', 'e', 'h', 'o', 'oc']);
-    expect(registry.descriptorOf('c')).toMatchObject({ kind: 'command', executionMode: 'cli', supportsCancel: true });
-    expect(registry.descriptorOf('h')).toMatchObject({ kind: 'hermes', executionMode: 'cli' });
-    expect(registry.descriptorOf('o')).toMatchObject({ kind: 'openchamber', executionMode: 'http' });
-    expect(registry.descriptorOf('d')).toMatchObject({ kind: 'dsh', executionMode: 'cli' });
-    expect(registry.descriptorOf('oc')).toMatchObject({ kind: 'opencode', executionMode: 'cli' });
-    expect(registry.descriptorOf('cc')).toMatchObject({ kind: 'claude-code', executionMode: 'cli' });
+    expect(registry.descriptorOf('c')).toMatchObject({ kind: 'command', executionMode: 'cli', supportsCancel: true, sessionMode: 'fresh' });
+    expect(registry.descriptorOf('h')).toMatchObject({ kind: 'hermes', executionMode: 'cli', sessionMode: 'fresh' });
+    expect(registry.descriptorOf('o')).toMatchObject({ kind: 'openchamber', executionMode: 'http', sessionMode: 'fresh' });
+    expect(registry.descriptorOf('d')).toMatchObject({ kind: 'dsh', executionMode: 'cli', sessionMode: 'fresh' });
+    expect(registry.descriptorOf('oc')).toMatchObject({ kind: 'opencode', executionMode: 'cli', sessionMode: 'fresh' });
+    expect(registry.descriptorOf('cc')).toMatchObject({ kind: 'claude-code', executionMode: 'cli', sessionMode: 'fresh' });
+  });
+
+  it('所有 first-class adapter 显式声明 sessionMode=fresh（一个任务 = 一个新 session）', () => {
+    const registry = buildRegistry([
+      { name: 'c', kind: 'command', command: process.execPath },
+      { name: 'h', kind: 'hermes' },
+      { name: 'o', kind: 'openchamber' },
+      { name: 'd', kind: 'dsh' },
+      { name: 'oc', kind: 'opencode' },
+      { name: 'cc', kind: 'claude-code' },
+    ]);
+    for (const name of registry.names()) {
+      expect(registry.descriptorOf(name)?.sessionMode).toBe('fresh');
+    }
   });
 
   it('未知 kind：配置校验拒绝，registry 显式抛错（无 OpenChamber 兜底）', () => {

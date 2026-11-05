@@ -34,6 +34,8 @@ export class ClaudeCodeAdapter extends PlatformCliAdapter {
       ...(options.baseArgs !== undefined ? { baseArgs: options.baseArgs } : {}),
       fixedArgs: ['-p'] as const,
       promptMode: options.promptMode ?? 'arg',
+      // `claude -p` 为一次性非交互执行；不复用/续接已有会话。
+      sessionMode: 'fresh',
     } satisfies PlatformCliAdapterOptions;
     super(descriptorOptions);
   }

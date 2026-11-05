@@ -16,6 +16,7 @@ import {
   type ExecutorPromptMode,
   type ExecutorRequest,
   type ExecutorResult,
+  type ExecutorSessionMode,
 } from './executor.js';
 
 const HEALTH_MAX_OUTPUT_BYTES = 4_096;
@@ -31,6 +32,11 @@ export interface PlatformCliAdapterOptions {
   /** 平台固定前缀参数（如 `run` / `-p` / `--profile headless`） */
   fixedArgs?: readonly string[];
   promptMode?: ExecutorPromptMode;
+  /**
+   * 会话模式；Fleet 任务必须新开 session，缺省即 `fresh`。
+   * first-class adapter 仍应在各自文件中显式传入，避免将来误改成续接会话。
+   */
+  sessionMode?: ExecutorSessionMode;
 }
 
 /**
@@ -47,6 +53,7 @@ export class PlatformCliAdapter implements ExecutorAdapter {
       executionMode: 'cli',
       supportsCancel: true,
       promptMode: options.promptMode ?? 'arg',
+      sessionMode: options.sessionMode ?? 'fresh',
     };
     this.cli = new CliExecutorAdapter({
       command: options.command,

@@ -29,6 +29,7 @@ import {
 } from './config.js';
 import { mebularOptions, offlineMebularOptions, onboardDevice } from './onboard.js';
 import { AGENT_NAMESPACE } from './agentdir.js';
+import { resolveOpenChamberRunnerDiscoveryFile } from './runtime/openchamber-runner.js';
 import { activateJoinInvite, buildJoinToken } from './jointoken.js';
 
 /** 加入码内信任材料的记录形状（Stage 2 将由令牌取代）。 */
@@ -101,12 +102,6 @@ export function commandExists(command: string, env: NodeJS.ProcessEnv = process.
   return false;
 }
 
-const OPENCHAMBER_ENV_KEYS = [
-  'MEBULAR_FLEET_OPENCHAMBER_ENDPOINT',
-  'MEBULAR_FLEET_OPENCHAMBER_TOKEN',
-  'MEBULAR_FLEET_OPENCHAMBER_TOKEN_FILE',
-];
-
 /**
  * PATH 探测的 CLI agent（顺序即声明顺序，保证结果稳定）：
  * `hermes` → `dsh` → `opencode` → `claude`（kind=`claude-code`）。
@@ -124,7 +119,9 @@ const PATH_AGENT_PROBES: ReadonlyArray<{ command: string; name: string; kind: Fl
 
 /**
  * agent 自动探测：PATH 有 hermes/dsh/opencode/claude → 对应 adapter；
- * 存在 `MEBULAR_FLEET_OPENCHAMBER_*` → openchamber；都没有才 fallback echo。
+ * 本机存在 `<MEBULAR_HOME>/openchamber-runner.json`（公开 runner 已启用并发布
+ * discovery）→ openchamber；都没有才 fallback echo。runner 未启用时**不声明**
+ * openchamber，避免伪造可执行能力。
  * 结果按固定顺序去重（同名/同 kind 只声明一次）。
  */
 export function detectAgents(env: NodeJS.ProcessEnv = process.env, platform: string = process.platform): AgentProbe {
@@ -142,8 +139,8 @@ export function detectAgents(env: NodeJS.ProcessEnv = process.env, platform: str
       push({ name: probe.name, kind: probe.kind }, probe.source);
     }
   }
-  if (OPENCHAMBER_ENV_KEYS.some((k) => (env[k] ?? '').length > 0)) {
-    push({ name: 'openchamber', kind: 'openchamber' }, 'openchamber:env');
+  if (existsSync(resolveOpenChamberRunnerDiscoveryFile({ env }))) {
+    push({ name: 'openchamber', kind: 'openchamber' }, 'openchamber:runner');
   }
   if (agents.length === 0) {
     push({ name: 'echo', kind: 'echo' }, 'echo:default');

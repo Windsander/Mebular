@@ -73,7 +73,7 @@ main [`README.md`](../README.md); this index only describes document structure.
 - [Fleet (0.3.2)](../packages/fleet) — task DAG, plans, routing, join tokens, security, CLI
   - [Runbook](../packages/fleet/RUNBOOK.md)
   - [Design](../packages/fleet/DESIGN.md) — includes the dispatcher vs executor and agent support matrix
-  - [OpenChamber seam](../packages/fleet/OPENCHAMBER-SEAM.md)
+  - [OpenChamber public runner](../packages/fleet/OPENCHAMBER-RUNNER.md)
   - [Protocol invariants](../packages/fleet/PROTOCOL-INVARIANTS.md)
   - [Orchestration contract](design/fleet-orchestration-contract.md)
   - Historical evidence: [0.3.0 P6 E2E](quality/0.3.0-fleet-orchestration-e2e.md) ·

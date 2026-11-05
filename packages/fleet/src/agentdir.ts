@@ -59,7 +59,7 @@ export interface DerivedAgentExecution {
  * - `echo` / `board`：demo/看板，不可执行（`in-process`）；
  * - `command`：有 `command` 才可执行，否则 `missing-command`；
  * - `hermes` / `dsh` / `opencode` / `claude-code`：CLI 执行；
- * - `openchamber`：HTTP 执行；
+ * - `openchamber`：公开 runner（HTTP）；
  * - 未知 kind：fail-closed 为不可执行（配置校验通常已拦截）。
  */
 export function deriveAgentExecution(

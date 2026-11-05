@@ -109,14 +109,15 @@ mebular print-config --client opencode   # 也可：claude、cursor、dsh、gene
 可用，不需要重写助手配置。
 
 接入 MCP 只代表该客户端是**派发方**（可提交、查询、取消任务），不代表它能在本机执行 Fleet 任务；执行需要
-执行设备上的真实 adapter。Hermes、DSH v1（`dsh --profile headless`）、OpenCode（`opencode run`）与
-Claude Code（`claude -p`）adapter 已实现；OpenChamber 仅经 `oc-hermes-bridge` 可执行。DSH 与 Claude Code
-的真实任务 smoke 仍待补，OpenCode 目前只验证了 `--version` health；Cursor 与 Claude Desktop 只能 dispatch-only。
-`@mebular/dsh-plugin` 是 Web/记忆桥，不是 Fleet executor。完整矩阵见
+执行设备上的真实 adapter。Hermes、DSH v1（`dsh --profile headless`）、OpenCode（`opencode run`）、
+Claude Code（`claude -p`）与 OpenChamber 公开 runner 已实现。OpenChamber runner 默认关闭；在
+`@mebular/opencode-plugin` 中启用 `fleetRunner` 后会发布 `<MEBULAR_HOME>/openchamber-runner.json` 供 Fleet 发现。
+DSH、Claude Code 与 OpenChamber 的真实任务 smoke 仍待补，OpenCode 目前只验证了 `--version` health；Cursor 与
+Claude Desktop 只能 dispatch-only。`@mebular/dsh-plugin` 是 Web/记忆桥，不是 Fleet executor。完整矩阵见
 [Fleet 设计 §2.5.3](../../packages/fleet/DESIGN.md)。
 
-`fleet quickstart` / `fleet join` 会自动探测 PATH 上的 Hermes、DSH、OpenCode 与 Claude Code（OpenChamber 走
-`MEBULAR_FLEET_OPENCHAMBER_*` env）；Cursor 与 Claude Desktop 不在探测内，只能派发。
+`fleet quickstart` / `fleet join` 会自动探测 PATH 上的 Hermes、DSH、OpenCode 与 Claude Code（OpenChamber 仅当
+`<MEBULAR_HOME>/openchamber-runner.json` 已存在时追加）；Cursor 与 Claude Desktop 不在探测内，只能派发。
 
 未初始化时，`/mcp` 已能完成 `initialize`、`tools/list` 与 `prompts/list`；`tools/call` 返回稳定的
 `NOT_INITIALIZED` 业务错误。这是预期行为，不是连接坏了。建新 / 加入忆云后，**同一个 MCP 会话**即可

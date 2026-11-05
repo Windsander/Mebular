@@ -2,7 +2,7 @@
 
 **状态**：v1.2 / 0.3.2 实现状态回填；v1.1 的 0.3.0 冻结内容与历史结论保留，2026-11-05
 **发布版本**：Fleet 任务编排随 Mebular **0.3.2** 发布；代码基线 `feat/fleet-orchestration` @ `b4ef1e8`（docs-only 提交不改变代码 SHA）。
-**阶段**：P0 边界仍冻结；P1–P6 已实现；0.3.2 追加统一 executor/adapter、DSH/OpenCode/Claude Code adapter、plan owner guard、agent readiness 与 executable routing。证据见 [`docs/quality/0.3.2-fleet-orchestration.md`](../quality/0.3.2-fleet-orchestration.md)。
+**阶段**：P0 边界仍冻结；P1–P6 已实现；0.3.2 追加统一 executor/adapter、DSH/OpenCode/Claude Code adapter、OpenChamber 公开 runner、plan owner guard、agent readiness 与 executable routing。证据见 [`docs/quality/0.3.2-fleet-orchestration.md`](../quality/0.3.2-fleet-orchestration.md)；OpenChamber 协议见 [`OPENCHAMBER-RUNNER.md`](../../packages/fleet/OPENCHAMBER-RUNNER.md)。
 **上位计划**：《Mebular Fleet · 黑盒任务编排（本期）》（Chief 持有；未经 CR 不修改 step、scope、Gate）
 **协议夹具**：[`plan.example.json`](../../packages/fleet/protocol/plan.example.json)、[`card.example.json`](../../packages/fleet/protocol/card.example.json)
 **相关既有契约**：
@@ -1169,7 +1169,7 @@ E-<gate>-<n>
 
 ## 13. P1–P7 Gate checklist
 
-> **0.3.2 实现状态**：P1–P6 的 Gate 项已在 `feat/fleet-orchestration` @ `b4ef1e8` 落地并复跑；下方 checklist 保留冻结时的验收项原文，不把历史勾选回填成新证据。DSH/Claude 真实任务 smoke 与真实 3+ 节点 plan E2E 仍见 §15 / 新质量报告中的边界说明。
+> **0.3.2 实现状态**：P1–P6 的 Gate 项已在 `feat/fleet-orchestration` @ `b4ef1e8` 落地并复跑；下方 checklist 保留冻结时的验收项原文，不把历史勾选回填成新证据。WS-C 已删除私有 OpenChamber bridge/seam，`kind=openchamber` 改为公开 runner（默认关闭、每任务新 session）。DSH/Claude/OpenChamber 真实任务 smoke 与真实 3+ 节点 plan E2E 仍见 §15 / 新质量报告中的边界说明。
 
 ### G0（P0，本文档）
 

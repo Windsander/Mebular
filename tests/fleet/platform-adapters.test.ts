@@ -269,10 +269,11 @@ describe('config / registry / capability card：kind 扩展', () => {
         { name: 'd', kind: 'dsh' as const },
         { name: 'oc', kind: 'opencode' as const },
         { name: 'cc', kind: 'claude-code' as const },
+        { name: 'o', kind: 'openchamber' as const },
       ],
     };
     const cards = compileCapabilityCards({ config, now: 1_700_000_000_000 });
-    expect(cards.map((card) => card.limits.timeoutMs)).toEqual([600_000, 600_000, 600_000]);
+    expect(cards.map((card) => card.limits.timeoutMs)).toEqual([600_000, 600_000, 600_000, 600_000]);
     const serialized = JSON.stringify(cards);
     expect(serialized).not.toContain('"command"');
     expect(serialized).not.toContain('"env"');

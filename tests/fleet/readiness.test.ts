@@ -42,7 +42,7 @@ function checkOf(report: Awaited<ReturnType<typeof doctor>>, name: string): { st
 describe('detectAgents：PATH 自动探测 dsh/opencode/claude', () => {
   it('dsh / opencode / claude 各自命中，kind 与 source 稳定', async () => {
     const bin = await fakeBin(['dsh', 'opencode', 'claude']);
-    const probe = detectAgents({ PATH: bin }, 'linux');
+    const probe = detectAgents({ PATH: bin, MEBULAR_HOME: join(dir, 'missing') }, 'linux');
     expect(probe.agents).toEqual([
       { name: 'dsh', kind: 'dsh' },
       { name: 'opencode', kind: 'opencode' },
@@ -50,20 +50,27 @@ describe('detectAgents：PATH 自动探测 dsh/opencode/claude', () => {
     ]);
     expect(probe.sources).toEqual(['dsh:PATH', 'opencode:PATH', 'claude-code:PATH']);
     // 结果稳定：重复调用顺序一致
-    expect(detectAgents({ PATH: bin }, 'linux')).toEqual(probe);
+    expect(detectAgents({ PATH: bin, MEBULAR_HOME: join(dir, 'missing') }, 'linux')).toEqual(probe);
   });
 
-  it('与 hermes / openchamber env 合并时顺序稳定且去重', async () => {
+  it('与 hermes / openchamber runner discovery 合并时顺序稳定且去重', async () => {
     const bin = await fakeBin(['hermes', 'dsh', 'opencode', 'claude']);
-    const probe = detectAgents({ PATH: bin, MEBULAR_FLEET_OPENCHAMBER_ENDPOINT: 'http://127.0.0.1:1' }, 'linux');
+    await writeFile(join(dir, 'openchamber-runner.json'), '{}');
+    const probe = detectAgents({ PATH: bin, MEBULAR_HOME: dir }, 'linux');
     expect(probe.agents.map((agent) => agent.name)).toEqual(['hermes', 'dsh', 'opencode', 'claude-code', 'openchamber']);
-    expect(probe.sources).toEqual(['hermes:PATH', 'dsh:PATH', 'opencode:PATH', 'claude-code:PATH', 'openchamber:env']);
+    expect(probe.sources).toEqual(['hermes:PATH', 'dsh:PATH', 'opencode:PATH', 'claude-code:PATH', 'openchamber:runner']);
     expect(new Set(probe.agents.map((agent) => agent.name)).size).toBe(probe.agents.length);
+  });
+
+  it('runner discovery 不存在时不声明 openchamber（不伪造可执行）', async () => {
+    const bin = await fakeBin(['hermes']);
+    const probe = detectAgents({ PATH: bin, MEBULAR_HOME: join(dir, 'missing') }, 'linux');
+    expect(probe.agents.map((agent) => agent.name)).toEqual(['hermes']);
   });
 
   it('没有真实 CLI 时才 fallback echo（cursor 不自动声明）', async () => {
     const bin = await fakeBin(['cursor']);
-    const none = detectAgents({ PATH: bin }, 'linux');
+    const none = detectAgents({ PATH: bin, MEBULAR_HOME: join(dir, 'missing') }, 'linux');
     expect(none.agents).toEqual([{ name: 'echo', kind: 'echo' }]);
     expect(none.sources).toEqual(['echo:default']);
   });

@@ -64,13 +64,20 @@ describe('quickstart 纯函数', () => {
     }
   });
 
-  it('detectAgents：hermes(PATH) / openchamber(env) / echo 兜底', () => {
-    expect(detectAgents({ PATH: '', MEBULAR_FLEET_OPENCHAMBER_ENDPOINT: 'http://x' }, 'linux').agents).toEqual([
-      { name: 'openchamber', kind: 'openchamber' },
-    ]);
-    const none = detectAgents({ PATH: '' }, 'linux');
-    expect(none.agents).toEqual([{ name: 'echo', kind: 'echo' }]);
-    expect(none.sources).toEqual(['echo:default']);
+  it('detectAgents：hermes(PATH) / openchamber(runner discovery) / echo 兜底', async () => {
+    const home = await tempDir();
+    try {
+      await writeFile(join(home, 'openchamber-runner.json'), '{}');
+      const withRunner = detectAgents({ PATH: '', MEBULAR_HOME: home }, 'linux');
+      expect(withRunner.agents).toEqual([{ name: 'openchamber', kind: 'openchamber' }]);
+      expect(withRunner.sources).toEqual(['openchamber:runner']);
+      // runner 未启用（无 discovery 文件）时不声明 openchamber
+      const noRunner = detectAgents({ PATH: '', MEBULAR_HOME: join(home, 'missing') }, 'linux');
+      expect(noRunner.agents).toEqual([{ name: 'echo', kind: 'echo' }]);
+      expect(noRunner.sources).toEqual(['echo:default']);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
   });
 
   it('加入码 encode/decode 往返；describeJoinCode 不含信任材料', () => {

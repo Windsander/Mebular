@@ -11,6 +11,7 @@ import {
   BaseExecutor,
   CommandAgent,
   ExecutionLog,
+  OpenChamberRunnerAgent,
   buildRegistry,
   reduceTaskEvents,
   validateFleetConfig,
@@ -205,6 +206,7 @@ describe('registry：kind -> factory 映射与未知 kind', () => {
       { name: 'cc', kind: 'claude-code' },
     ]);
     expect(registry.names()).toEqual(['c', 'cc', 'd', 'e', 'h', 'o', 'oc']);
+    expect(registry.resolve('o')).toBeInstanceOf(OpenChamberRunnerAgent);
     expect(registry.descriptorOf('c')).toMatchObject({ kind: 'command', executionMode: 'cli', supportsCancel: true, sessionMode: 'fresh' });
     expect(registry.descriptorOf('h')).toMatchObject({ kind: 'hermes', executionMode: 'cli', sessionMode: 'fresh' });
     expect(registry.descriptorOf('o')).toMatchObject({ kind: 'openchamber', executionMode: 'http', sessionMode: 'fresh' });

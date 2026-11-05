@@ -2,8 +2,8 @@
 //
 // This adapter talks to the loopback runner exposed by
 // `@mebular/opencode-plugin/fleet-runner` (discovery file
-// `$MEBULAR_HOME/openchamber-runner.json`). It does NOT read the private
-// oc-hermes-bridge daemon, does NOT resume an existing session, and never
+// `$MEBULAR_HOME/openchamber-runner.json`). It does NOT read any private
+// bridge daemon, does NOT resume an existing session, and never
 // accepts a `sessionId` from the task or the caller.
 //
 // Public execution semantics (concurrency/timeout/truncation/normalization)

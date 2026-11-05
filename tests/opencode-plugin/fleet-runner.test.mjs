@@ -16,7 +16,9 @@ import plugin, {
   RUNNER_KIND,
   RUNNER_SCHEMA,
   claimDiscovery,
+  createFleetRunnerDefinition,
   createFleetRunnerPlugin,
+  createHostSessionClient,
   evaluateDiscovery,
   readDiscoveryFile,
   releaseDiscovery,
@@ -70,6 +72,43 @@ function createFakeClient(options = {}) {
     };
   }
   return { client, state };
+}
+
+function createFakeHostSession() {
+  const state = { creates: [], prompts: [], waits: [], contexts: [], interrupts: [] };
+  const messages = [];
+  const session = {
+    async create(args) {
+      state.creates.push(args);
+      const id = `ses-host-${state.creates.length}`;
+      messages.push([]);
+      return { id, projectID: 'project-e2e', time: { created: 1, updated: 1 } };
+    },
+    async prompt(args) {
+      state.prompts.push(args);
+      const index = Number(args.sessionID.slice('ses-host-'.length)) - 1;
+      messages[index].push({ type: 'user', text: args.text });
+      messages[index].push({
+        type: 'assistant',
+        content: [{ type: 'text', text: `HOST:${args.text}` }],
+      });
+      return { id: `msg-${state.prompts.length}`, sessionID: args.sessionID, type: 'user' };
+    },
+    async wait(args) {
+      state.waits.push(args);
+      return null;
+    },
+    async context(args) {
+      state.contexts.push(args);
+      const index = Number(args.sessionID.slice('ses-host-'.length)) - 1;
+      return messages[index] ?? [];
+    },
+    async interrupt(args) {
+      state.interrupts.push(args);
+      return { interrupted: true };
+    },
+  };
+  return { session, state, messages };
 }
 
 function request(port, path, options = {}) {
@@ -427,18 +466,60 @@ describe('fleet runner plugin', () => {
     await expect(stat(join(directory, 'openchamber-runner.json'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
-  it('默认导出在未配置时不启动', async () => {
+  it('默认导出是 OpenCode V2 定义对象（id + setup），未配置时不启动', async () => {
     const directory = await tempDir();
     const { client } = createFakeClient();
     const previous = process.env.MEBULAR_HOME;
     process.env.MEBULAR_HOME = directory;
     try {
-      const hooks = await plugin({ client, directory });
-      expect(hooks).toEqual({});
+      expect(plugin.id).toBe('mebular-fleet-runner');
+      expect(typeof plugin.setup).toBe('function');
+      const hooks = await plugin.setup({ client, directory, options: {} });
+      expect(hooks).toBeUndefined();
     } finally {
       if (previous === undefined) delete process.env.MEBULAR_HOME;
       else process.env.MEBULAR_HOME = previous;
     }
+  });
+
+  it('host ctx.session 适配：新建 session、等待 idle、返回 assistant 文本', async () => {
+    const directory = await tempDir();
+    const discoveryFile = join(directory, 'openchamber-runner.json');
+    const host = createFakeHostSession();
+    const definition = createFleetRunnerDefinition({ homeDir: directory, env: {} });
+    const cleanup = await definition.setup({
+      session: host.session,
+      location: { directory },
+      options: { enabled: true, discoveryFile, requestTimeoutMs: 1_000 },
+    });
+    try {
+      const response = await request(
+        JSON.parse(await readFile(discoveryFile, 'utf8')).port,
+        '/v1/run-once',
+        {
+          method: 'POST',
+          token: JSON.parse(await readFile(discoveryFile, 'utf8')).token,
+          body: { prompt: 'do host task', title: 'fleet host task' },
+        },
+      );
+      expect(response.status).toBe(200);
+      expect(response.json.result).toMatchObject({
+        sessionId: 'ses-host-1',
+        text: 'HOST:do host task',
+      });
+      expect(host.state.creates).toEqual([{ body: { title: 'fleet host task' } }]);
+      expect(host.state.prompts).toEqual([{ sessionID: 'ses-host-1', text: 'do host task' }]);
+      expect(host.state.waits).toEqual([{ sessionID: 'ses-host-1' }]);
+      expect(host.state.contexts).toEqual([{ sessionID: 'ses-host-1' }]);
+    } finally {
+      await cleanup();
+    }
+    await expect(stat(join(directory, 'openchamber-runner.json'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('createHostSessionClient 对非 host ctx 返回 null', () => {
+    expect(createHostSessionClient({ client: {} })).toBeNull();
+    expect(createHostSessionClient({ session: {} })).toBeNull();
   });
 
   it('discovery 心跳更新 updatedAt，且不改变 token', async () => {

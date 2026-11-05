@@ -106,6 +106,7 @@
     "verify:dsh-plugin": "node scripts/verify-dsh-plugin.mjs",
     "verify:dsh:e2e": "node scripts/verify-dsh-e2e.mjs",
     "verify:immersive-journey": "node tests/integration/host-e2e/immersive-journey.mjs",
+    "verify:openchamber:runner": "node tests/integration/host-e2e/openchamber-runner-real.mjs",
     "verify:runtime:coexistence": "node scripts/verify-runtime-coexistence.mjs",
     "verify:dsh:e2e:min": "node scripts/verify-dsh-e2e.mjs --dsh-version minimum",
     "verify:dsh:e2e:latest": "node scripts/verify-dsh-e2e.mjs --dsh-version latest",

@@ -27,6 +27,7 @@ import http from 'node:http';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 
+export const PLUGIN_ID = 'mebular-fleet-runner';
 export const RUNNER_SCHEMA = 1;
 export const RUNNER_KIND = 'mebular-openchamber-runner';
 export const DISCOVERY_FILE_NAME = 'openchamber-runner.json';
@@ -799,6 +800,137 @@ async function closeServer(server) {
   });
 }
 
+function hostMessageText(message) {
+  const content = Array.isArray(message?.content) ? message.content : [];
+  const text = content
+    .filter((part) => isObject(part) && part.type === 'text' && typeof part.text === 'string')
+    .map((part) => part.text)
+    .join('\n');
+  if (text.length > 0) return text;
+  return typeof message?.text === 'string' ? message.text : '';
+}
+
+function hostMessageParts(message) {
+  const text = hostMessageText(message);
+  return text.length > 0 ? [{ type: 'text', text }] : [];
+}
+
+function hostContextMessages(value) {
+  if (Array.isArray(value)) return value;
+  if (isObject(value) && Array.isArray(value.data)) return value.data;
+  if (isObject(value) && Array.isArray(value.messages)) return value.messages;
+  return [];
+}
+
+function lastHostAssistantMessage(messages) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (isObject(message) && message.type === 'assistant') {
+      return {
+        info: { role: 'assistant' },
+        parts: hostMessageParts(message),
+      };
+    }
+  }
+  return null;
+}
+
+function legacyHostMessage(message) {
+  if (!isObject(message)) return null;
+  const role = typeof message.type === 'string' ? message.type : 'system';
+  return {
+    info: { role },
+    parts: hostMessageParts(message),
+  };
+}
+
+function hostPromptModel(model) {
+  if (!isObject(model)) return undefined;
+  const id = typeof model.id === 'string'
+    ? model.id
+    : typeof model.modelID === 'string'
+      ? model.modelID
+      : null;
+  if (id === null) return undefined;
+  return {
+    ...(typeof model.providerID === 'string' ? { providerID: model.providerID } : {}),
+    id,
+  };
+}
+
+/**
+ * Adapt OpenCode V2's in-process `ctx.session` service to the small
+ * `client.session.*` surface `startFleetRunner` already understands.
+ *
+ * V2 plugins do not receive an SDK client; `ctx.session.prompt` enqueues the
+ * turn and returns the user message, so the adapter waits for idle and reads
+ * the assistant text back through `ctx.session.context`.
+ */
+export function createHostSessionClient(ctx) {
+  const session = isObject(ctx) && isObject(ctx.session) ? ctx.session : null;
+  if (!session || typeof session.create !== 'function' || typeof session.prompt !== 'function') {
+    return null;
+  }
+  const sessionIdOfArgs = (args) => {
+    if (typeof args?.sessionID === 'string') return args.sessionID;
+    if (typeof args?.id === 'string') return args.id;
+    if (typeof args?.path?.id === 'string') return args.path.id;
+    return null;
+  };
+  return {
+    session: {
+      async create(args) {
+        const body = isObject(args?.body) ? args.body : isObject(args) ? args : {};
+        return session.create({ body: { title: body.title } });
+      },
+      async prompt(args) {
+        const sessionID = sessionIdOfArgs(args);
+        const body = isObject(args?.body) ? args.body : isObject(args) ? args : {};
+        const parts = Array.isArray(body.parts) ? body.parts : [];
+        const text = parts.length > 0
+          ? parts
+            .filter((part) => isObject(part) && part.type === 'text' && typeof part.text === 'string')
+            .map((part) => part.text)
+            .join('\n')
+          : typeof body.text === 'string'
+            ? body.text
+            : '';
+        const prompt = { sessionID, text };
+        if (typeof body.agent === 'string' && body.agent.length > 0) prompt.agent = body.agent;
+        const model = hostPromptModel(body.model);
+        if (model !== undefined) prompt.model = model;
+        await session.prompt(prompt);
+        if (typeof session.wait === 'function') {
+          await session.wait({ sessionID });
+        }
+        const context = typeof session.context === 'function'
+          ? await session.context({ sessionID })
+          : [];
+        const assistant = lastHostAssistantMessage(hostContextMessages(context));
+        return {
+          data: assistant ?? { info: { role: 'assistant' }, parts: [] },
+        };
+      },
+      async messages(args) {
+        const sessionID = sessionIdOfArgs(args);
+        const context = typeof session.context === 'function'
+          ? await session.context({ sessionID })
+          : [];
+        return {
+          data: hostContextMessages(context)
+            .map((message) => legacyHostMessage(message))
+            .filter((message) => message !== null),
+        };
+      },
+      async abort(args) {
+        const sessionID = sessionIdOfArgs(args);
+        if (!sessionID || typeof session.interrupt !== 'function') return { data: false };
+        return session.interrupt({ sessionID });
+      },
+    },
+  };
+}
+
 /**
  * Build a plugin function with injectable dependencies for tests. The default
  * export below is the normal OpenCode/OpenChamber entry point.
@@ -808,8 +940,8 @@ export function createFleetRunnerPlugin(overrides = {}) {
   let status = { enabled: false, running: false, reason: null, port: null };
 
   const plugin = async (ctx = {}, pluginOptions = {}) => {
-    const client = ctx.client ?? overrides.client;
-    const directory = ctx.directory ?? overrides.directory;
+    const client = ctx.client ?? overrides.client ?? createHostSessionClient(ctx);
+    const directory = ctx.directory ?? ctx.location?.directory ?? overrides.directory;
     const configInput = isObject(ctx.options) && (runnerSection(ctx.options) !== null || hasRunnerKeys(ctx.options))
       ? ctx.options
       : isObject(pluginOptions) && (runnerSection(pluginOptions) !== null || hasRunnerKeys(pluginOptions))
@@ -863,7 +995,31 @@ export function createFleetRunnerPlugin(overrides = {}) {
   return plugin;
 }
 
-/** Alias kept for parity with other host plugins (`createPlugin`). */
-export const createPlugin = createFleetRunnerPlugin;
+/**
+ * Build the OpenCode V2 plugin definition (`{ id, setup }`). The setup
+ * function delegates to `createFleetRunnerPlugin` and returns a cleanup
+ * function, which is the shape the real host expects from `setup`.
+ */
+export function createFleetRunnerDefinition(overrides = {}) {
+  const plugin = createFleetRunnerPlugin(overrides);
+  const definition = {
+    id: PLUGIN_ID,
+    async setup(ctx) {
+      const hooks = await plugin(ctx);
+      if (hooks && typeof hooks.dispose === 'function') {
+        return () => hooks.dispose();
+      }
+      return undefined;
+    },
+  };
+  Object.defineProperty(definition, 'status', {
+    enumerable: false,
+    value: plugin.status,
+  });
+  return definition;
+}
 
-export default createFleetRunnerPlugin();
+/** Alias kept for parity with other host plugins (`createPlugin`). */
+export const createPlugin = createFleetRunnerDefinition;
+
+export default createFleetRunnerDefinition();

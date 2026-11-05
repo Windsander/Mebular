@@ -409,13 +409,13 @@ describe('CR-002 daemon 能力卡', () => {
         type: 'meta_probe',
         namespace: 'probe',
         content: { ok: true },
-        metadata: { internal: true, internalObject: { kind: 'meta_probe' } },
+        metadata: { source: 'meta_probe', confidence: 0.5 },
       },
     });
     expect(created.status).toBe(200);
-    expect(created.body.node.metadata).toEqual({ internal: true, internalObject: { kind: 'meta_probe' } });
+    expect(created.body.node.metadata).toEqual({ source: 'meta_probe', confidence: 0.5 });
     const listed = await request('/app/nodes?namespace=probe&type=meta_probe');
-    expect(listed.body.nodes[0].metadata).toEqual({ internal: true, internalObject: { kind: 'meta_probe' } });
+    expect(listed.body.nodes[0].metadata).toEqual({ source: 'meta_probe', confidence: 0.5 });
 
     const store = new fleet.DaemonTaskEventStore({ endpoint: base, namespace: 'tasks' });
     const event = {

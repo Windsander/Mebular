@@ -67,6 +67,8 @@ const DEFAULTS = {
   output: 'docs/quality/0.3.2-scale-benchmark.json',
   keep: false,
   allowLarge: false,
+  allowExtraRecords: false,
+  auditEveryBatches: 0,
   failAfterBatches: null,
   failAfterReadSamples: null,
   killSidecarAfterBatches: null,
@@ -85,6 +87,8 @@ function usage() {
     '  --max-records <n>        未显式 --allow-large 时的 records 上限，默认 2000',
     '  --max-queries <n>        未显式 --allow-large 时的 queries 上限，默认 500',
     '  --allow-large            显式允许超过默认上限（硬上限 100000 records / 2000 queries）',
+    '  --allow-extra-records    审计发现非种子 MemoryRecord 时仍继续（仅在已确认来源后使用；JSON 会单独报告）',
+    '  --audit-every-batches <n> 每 n 个 seed 批次记录一次 capability 计数（排障用，默认 0=关闭）',
     '  --timeout-ms <n>         整体超时，默认 1800000；0 表示禁用',
     '  --request-timeout-ms <n> 单次 HTTP 请求超时，默认 120000',
     '  --label <text>           结果标签，例如 1k-smoke / 10k-full',
@@ -131,6 +135,10 @@ function parseArgs(argv) {
       options.allowLarge = true;
       continue;
     }
+    if (arg === '--allow-extra-records') {
+      options.allowExtraRecords = true;
+      continue;
+    }
     if (!arg.startsWith('--')) throw new Error(`未知参数: ${arg}`);
     const name = arg.slice(2);
     const raw = argv[index + 1];
@@ -143,6 +151,9 @@ function parseArgs(argv) {
     else if (name === 'limit') options.limit = parseInteger('--limit', raw);
     else if (name === 'max-records') options.maxRecords = parseInteger('--max-records', raw);
     else if (name === 'max-queries') options.maxQueries = parseInteger('--max-queries', raw);
+    else if (name === 'audit-every-batches') {
+      options.auditEveryBatches = parseNonNegativeInteger('--audit-every-batches', raw);
+    }
     else if (name === 'timeout-ms') options.timeoutMs = parseNonNegativeInteger('--timeout-ms', raw);
     else if (name === 'request-timeout-ms') options.requestTimeoutMs = parseInteger('--request-timeout-ms', raw);
     else if (name === 'fail-after-batches') options.failAfterBatches = parseInteger('--fail-after-batches', raw);
@@ -601,6 +612,11 @@ function emptySeedState(options) {
     batchesTotal: Math.ceil(options.records / options.batchSize),
     batchSize: options.batchSize,
     kindCounts: {},
+    countHistory: [],
+    warnings: [],
+    degradedBatches: 0,
+    duplicateRecords: 0,
+    duplicateBatches: [],
     latencyRaw: [],
     perRecordLatencyRaw: [],
     batchLatenciesMs: [],
@@ -780,6 +796,7 @@ async function seedDataset({
   options,
   runToken,
   state,
+  recordIds,
   tracker,
   onProgress,
   onCheckpoint,
@@ -847,6 +864,12 @@ async function seedDataset({
       }
 
       const latency = elapsedMs(batchStartedAt);
+      const responseWarnings = Array.isArray(response.body?.warnings) ? response.body.warnings : [];
+      if (responseWarnings.length > 0) {
+        state.warnings.push({ batch: batchIndex, warnings: responseWarnings.slice(0, 50) });
+        if (state.warnings.length > 200) state.warnings.shift();
+      }
+      if (response.body?.degraded === true) state.degradedBatches += 1;
       if (response.status !== 200) {
         const code = response.body?.error?.code ?? 'unknown';
         const error = new Error(`seed 批次 ${batchIndex} 失败：HTTP ${response.status} code=${code}`);
@@ -879,6 +902,11 @@ async function seedDataset({
         await onCheckpoint?.('seed-error');
         throw error;
       }
+      const duplicateCount = data.records.filter((record) => record?.status === 'duplicate').length;
+      if (duplicateCount > 0) {
+        state.duplicateRecords += duplicateCount;
+        state.duplicateBatches.push({ batch: batchIndex, duplicates: duplicateCount });
+      }
       if (data.detail?.ids?.length !== count || data.detail?.failed !== 0 || data.detail?.queued !== 0) {
         const error = new Error(`seed 批次 ${batchIndex} 详情数不符`);
         state.status = 'failed';
@@ -896,6 +924,9 @@ async function seedDataset({
       state.batchesCompleted += 1;
       state.writtenRecords += data.records.length;
       state.writtenDetails += data.detail.ids.length;
+      for (const record of data.records) {
+        if (typeof record?.id === 'string' && record.id.length > 0) recordIds.push(record.id);
+      }
       state.progress = {
         phase: 'seed',
         completed: state.batchesCompleted,
@@ -905,6 +936,32 @@ async function seedDataset({
         updatedAt: nowIso(),
       };
       updateSeedSummary(state, startedPerf);
+      if (options.auditEveryBatches > 0
+        && (state.batchesCompleted % options.auditEveryBatches === 0
+          || state.batchesCompleted === state.batchesTotal)) {
+        try {
+          const snapshot = await device.capability.status(AGENT_ID);
+          state.countHistory.push({
+            batch: state.batchesCompleted,
+            at: nowIso(),
+            counts: snapshot?.counts ?? null,
+            domains: Array.isArray(snapshot?.domains)
+              ? snapshot.domains.map((entry) => ({
+                domain: entry.domain,
+                count: entry.count,
+                memoryRecords: entry.memoryRecords,
+                internalObjects: entry.internalObjects,
+              }))
+              : [],
+          });
+        } catch (error) {
+          state.countHistory.push({
+            batch: state.batchesCompleted,
+            at: nowIso(),
+            error: String(error?.message ?? error),
+          });
+        }
+      }
       onProgress?.({
         batches: state.batchesTotal,
         completed: state.batchesCompleted,
@@ -1269,6 +1326,198 @@ async function verifyStorageDetailKinds({ device, runToken, records, requestTime
   };
 }
 
+function increment(map, key) {
+  const normalized = typeof key === 'string' && key.length > 0 ? key : '(unknown)';
+  map[normalized] = (map[normalized] ?? 0) + 1;
+}
+
+function digestIds(ids) {
+  return createHash('sha256').update([...ids].sort().join('\n')).digest('hex');
+}
+
+async function queryAllRecords({ device, domains, tags = null, requestTimeoutMs }) {
+  const records = [];
+  const limit = 50;
+  let offset = 0;
+  let total = null;
+  for (let page = 0; page < 10_000; page += 1) {
+    const payload = {
+      actor: { type: 'agent', agentId: AGENT_ID },
+      domains,
+      includeHistory: true,
+      includeArchived: true,
+      limit,
+      offset,
+      ...(tags !== null ? { filters: { tags } } : {}),
+    };
+    const response = await withTimeout(
+      device.capability.request('/query', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
+      requestTimeoutMs,
+      `count audit query offset=${offset}`,
+    );
+    if (response.status !== 200 || response.body?.ok !== true) {
+      throw new Error(`count audit query 失败：HTTP ${response.status} ${JSON.stringify(response.body?.error ?? null)}`);
+    }
+    const pageRecords = Array.isArray(response.body?.data?.records) ? response.body.data.records : [];
+    const pageTotal = typeof response.body?.data?.total === 'number' ? response.body.data.total : pageRecords.length;
+    total = pageTotal;
+    records.push(...pageRecords);
+    if (pageRecords.length === 0 || offset + pageRecords.length >= total) break;
+    offset += pageRecords.length;
+  }
+  return { records, total: total ?? records.length, complete: records.length === (total ?? records.length) };
+}
+
+function provenanceSummary(record) {
+  const provenance = record?.provenance && typeof record.provenance === 'object' ? record.provenance : {};
+  return {
+    source: provenance.source ?? null,
+    extractor: provenance.extractor ?? null,
+    model: provenance.model ?? null,
+    writerType: provenance.writerType ?? null,
+    writerId: provenance.writerId ?? null,
+    agentId: provenance.agentId ?? null,
+    threadId: provenance.threadId ?? null,
+    confirmation: provenance.confirmation ?? null,
+    at: typeof provenance.at === 'number' ? provenance.at : null,
+    messageIds: Array.isArray(provenance.messageIds) ? provenance.messageIds.slice(0, 3) : [],
+  };
+}
+
+function extraRecordView(record) {
+  return {
+    id: record?.id ?? null,
+    type: record?.type ?? null,
+    kind: record?.kind ?? null,
+    domain: record?.domain ?? record?.namespace ?? null,
+    tags: Array.isArray(record?.tags) ? record.tags : [],
+    legacy: record?.legacy === true,
+    createdAt: record?.createdAt ?? null,
+    updatedAt: record?.updatedAt ?? null,
+    contentPreview: typeof record?.text === 'string' ? record.text.slice(0, 180) : '',
+    provenance: provenanceSummary(record),
+  };
+}
+
+/**
+ * seed 后计数审计：以写入响应里的 10k 个种子 ID 为准，验证其全部存在；
+ * 额外记录单独按 domain/type/kind/tags/provenance 分组报告，绝不并入“通过”分子。
+ */
+async function auditDatasetCounts({ device, options, seedRecordIds, runToken, requestTimeoutMs }) {
+  const status = await device.capability.status(AGENT_ID);
+  const namespacesResponse = await withTimeout(
+    device.capability.request('/namespaces?includeCounts=true'),
+    requestTimeoutMs,
+    'count audit namespaces',
+  );
+  const namespaceStats = namespacesResponse.status === 200 && namespacesResponse.body?.ok === true
+    ? namespacesResponse.body?.data?.domains ?? []
+    : [];
+  const auditDomains = [...new Set([
+    ...(Array.isArray(status?.domains) ? status.domains.map((entry) => entry?.domain) : []),
+    DOMAIN,
+  ].filter((domain) => typeof domain === 'string' && domain.length > 0))];
+  const all = await queryAllRecords({ device, domains: auditDomains, requestTimeoutMs });
+  const tagged = await queryAllRecords({ device, domains: auditDomains, tags: ['scale-bench'], requestTimeoutMs });
+  const uniqueSeedIds = [...new Set(seedRecordIds)];
+  const seedSet = new Set(uniqueSeedIds);
+  const allIds = new Set(all.records.map((record) => record?.id).filter((id) => typeof id === 'string'));
+  const taggedIds = new Set(tagged.records.map((record) => record?.id).filter((id) => typeof id === 'string'));
+  const missingSeedIds = uniqueSeedIds.filter((id) => !allIds.has(id));
+  const missingTaggedSeedIds = uniqueSeedIds.filter((id) => !taggedIds.has(id));
+  const seedRecords = all.records.filter((record) => seedSet.has(record?.id));
+  const extras = all.records.filter((record) => !seedSet.has(record?.id));
+  const seedTextToIds = new Map();
+  for (const record of seedRecords) {
+    if (typeof record?.text !== 'string' || record.text.length === 0) continue;
+    const ids = seedTextToIds.get(record.text) ?? [];
+    ids.push(record.id);
+    seedTextToIds.set(record.text, ids);
+  }
+  const byDomain = {};
+  const byType = {};
+  const byKind = {};
+  const byTags = {};
+  const byProvenance = {};
+  const duplicateOfSeed = [];
+  for (const record of extras) {
+    increment(byDomain, record?.domain ?? record?.namespace);
+    increment(byType, record?.type);
+    increment(byKind, record?.kind);
+    increment(byTags, Array.isArray(record?.tags) && record.tags.length > 0 ? record.tags.join('+') : '(none)');
+    const provenance = provenanceSummary(record);
+    increment(byProvenance, [
+      provenance.writerType ?? '(none)',
+      provenance.writerId ?? '(none)',
+      provenance.source ?? '(none)',
+      provenance.extractor ?? '(none)',
+    ].join('/'));
+    const matchingSeedIds = typeof record?.text === 'string' ? seedTextToIds.get(record.text) ?? [] : [];
+    if (matchingSeedIds.length > 0) {
+      duplicateOfSeed.push({
+        id: record?.id ?? null,
+        matchingSeedIds: matchingSeedIds.slice(0, 3),
+        tags: Array.isArray(record?.tags) ? record.tags : [],
+        provenance,
+      });
+    }
+  }
+  const counts = status?.counts ?? {};
+  return {
+    expected: { records: options.records, details: options.details },
+    statusCounts: counts,
+    statusDomains: Array.isArray(status?.domains) ? status.domains : [],
+    namespaceStats,
+    auditDomains,
+    query: {
+      allRecords: all.records.length,
+      allTotal: all.total,
+      allComplete: all.complete,
+      taggedRecords: tagged.records.length,
+      taggedTotal: tagged.total,
+      taggedComplete: tagged.complete,
+    },
+    seed: {
+      idsFromIngest: seedRecordIds.length,
+      uniqueIds: uniqueSeedIds.length,
+      present: uniqueSeedIds.length - missingSeedIds.length,
+      missing: missingSeedIds.length,
+      missingSample: missingSeedIds.slice(0, 20),
+      taggedPresent: uniqueSeedIds.length - missingTaggedSeedIds.length,
+      missingTagged: missingTaggedSeedIds.length,
+      missingTaggedSample: missingTaggedSeedIds.slice(0, 20),
+      idsSha256: digestIds(uniqueSeedIds),
+    },
+    extras: {
+      total: extras.length,
+      verdict: extras.length === 0
+        ? 'clean'
+        : duplicateOfSeed.length > 0
+          ? 'duplicate_seed_records'
+          : 'non_seed_records',
+      tagged: extras.filter((record) => Array.isArray(record?.tags) && record.tags.includes('scale-bench')).length,
+      duplicateOfSeedText: duplicateOfSeed.length,
+      duplicateOfSeedSample: duplicateOfSeed.slice(0, 20),
+      byDomain,
+      byType,
+      byKind,
+      byTags,
+      byProvenance,
+      samples: extras.slice(0, 50).map(extraRecordView),
+    },
+    countsConsistent: {
+      statusMemoryRecordsEqualsQueryAll: counts.memoryRecords === all.records.length,
+      statusDetailsEqualsExpected: counts.details === options.details,
+      queryAllEqualsSeedPlusExtras: all.records.length === uniqueSeedIds.length + extras.length,
+    },
+    runToken,
+    at: nowIso(),
+  };
+}
+
 function pidAlive(pid) {
   try {
     process.kill(pid, 0);
@@ -1461,6 +1710,7 @@ function createResult(options, control) {
     build: null,
     preflight: null,
     storageVerification: null,
+    countAudit: null,
     detailExpandCoverage: null,
     seed: emptySeedState(options),
     reads: emptyReadsState(options),
@@ -1593,11 +1843,13 @@ async function runBenchmark(options, control) {
       details: 0,
       updatedAt: nowIso(),
     };
+    const seedRecordIds = [];
     await seedDataset({
       device,
       options,
       runToken: result.runToken,
       state: result.seed,
+      recordIds: seedRecordIds,
       tracker,
       control,
       requestTimeoutMs: options.requestTimeoutMs,
@@ -1612,14 +1864,6 @@ async function runBenchmark(options, control) {
       onCheckpoint: checkpoint,
     });
 
-    const postSeedStatus = await device.capability.status(AGENT_ID);
-    const counts = postSeedStatus?.counts ?? {};
-    if (counts.memoryRecords !== options.records || counts.details !== options.details) {
-      throw new Error(
-        `量级校验失败：期望 ${options.records} records/${options.details} details，`
-        + `实际 ${counts.memoryRecords} records/${counts.details} details`,
-      );
-    }
     result.snapshots.afterSeed = await snapshot({
       phase: 'after-seed',
       home: device.home,
@@ -1629,6 +1873,45 @@ async function runBenchmark(options, control) {
       sidecarPid: tracker.current() ?? sidecarPid,
     });
     await checkpoint('after-seed');
+
+    result.phase = 'count-audit';
+    result.countAudit = await auditDatasetCounts({
+      device,
+      options,
+      seedRecordIds,
+      runToken: result.runToken,
+      requestTimeoutMs: options.requestTimeoutMs,
+    });
+    await checkpoint('count-audit');
+    const counts = result.countAudit.statusCounts;
+    if (counts.details !== options.details) {
+      throw new Error(
+        `量级校验失败：期望 ${options.details} details，实际 ${counts.details} details`,
+      );
+    }
+    if (result.countAudit.seed.uniqueIds !== options.records
+      || result.countAudit.seed.present !== options.records
+      || result.countAudit.seed.missing !== 0) {
+      throw new Error(
+        `种子 ID 校验失败：写入响应 ${result.countAudit.seed.idsFromIngest} 个 / 去重 `
+        + `${result.countAudit.seed.uniqueIds} 个，图中存在 ${result.countAudit.seed.present} 个，`
+        + `缺失 ${result.countAudit.seed.missing} 个`,
+      );
+    }
+    if (result.countAudit.seed.missingTagged !== 0) {
+      throw new Error(
+        `种子 tag 校验失败：${result.countAudit.seed.missingTagged} 个种子记录缺少 scale-bench tag`,
+      );
+    }
+    if (result.countAudit.extras.total > 0 && !options.allowExtraRecords) {
+      throw new Error(
+        `计数审计发现 ${result.countAudit.extras.total} 条非种子 MemoryRecord；`
+        + `byType=${JSON.stringify(result.countAudit.extras.byType)} `
+        + `byDomain=${JSON.stringify(result.countAudit.extras.byDomain)} `
+        + `byTags=${JSON.stringify(result.countAudit.extras.byTags)}；`
+        + '来源确认前不得视为通过（可加 --allow-extra-records 生成完整诊断 JSON）',
+      );
+    }
 
     result.phase = 'storage-verification';
     result.storageVerification = await verifyStorageDetailKinds({
@@ -1714,6 +1997,15 @@ async function runBenchmark(options, control) {
       };
     }
     result.detailExpandCoverage = result.reads?.detailCoverage ?? result.detailExpandCoverage;
+    if (result.countAudit?.extras?.duplicateOfSeedText > 0) {
+      // 非种子记录与种子正文重复：这是产品路径的重复写入，不得以“计数口径”放行。
+      result.status = 'failed';
+      result.error = result.error ?? {
+        name: 'DuplicateRecordError',
+        code: 'duplicate_seed_records',
+        message: `检测到 ${result.countAudit.extras.duplicateOfSeedText} 条与种子正文重复的非种子记录`,
+      };
+    }
     if (!options.keep && result.status === 'passed' && result.cleanup?.cleaned !== true) {
       result.status = 'failed';
       result.error = {
@@ -1867,6 +2159,7 @@ async function main() {
     reads: result.reads,
     detailExpandCoverage: result.detailExpandCoverage ?? result.reads?.detailCoverage ?? null,
     storageVerification: result.storageVerification,
+    countAudit: result.countAudit,
     resources: {
       afterSeed: result.snapshots?.afterSeed
         ? {

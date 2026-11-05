@@ -1,0 +1,886 @@
+{
+  "schema": "mebular.scale-benchmark/2",
+  "label": "10k-audit",
+  "runToken": "8f2d3ace",
+  "startedAt": "2026-11-05T07:14:28.585Z",
+  "finishedAt": "2026-11-05T07:55:57.528Z",
+  "status": "failed",
+  "phase": "finished",
+  "command": "node tests/integration/scale-bench/run.mjs --records 10000 --details 10000 --batch-size 100 --queries 200 --allow-large --max-records 10000 --allow-extra-records --audit-every-batches 10 --request-timeout-ms 600000 --timeout-ms 21600000 --keep --label 10k-audit --output /private/var/folders/86/gpjtr2p94dg7mz24pbkrj8pw0000gn/T/opencode/scale-10k-diag2/scale-10k.json",
+  "git": {
+    "sha": "f4b11209354cdf8f649cb2377c679d17ac22cff7",
+    "shortSha": "f4b11209354c",
+    "branch": "feat/0.3.2-scale-fix",
+    "dirty": true,
+    "dirtyFileCount": 2
+  },
+  "environment": {
+    "platform": "darwin",
+    "release": "24.6.0",
+    "arch": "x64",
+    "node": "v26.8.1",
+    "v8": "14.6.202.34-node.28",
+    "cpuModel": "Intel(R) Core(TM) i7-8850H CPU @ 2.60GHz",
+    "cpuCount": 12,
+    "totalMemoryBytes": 34359738368,
+    "freeMemoryBytes": 7219208192,
+    "ci": false
+  },
+  "options": {
+    "records": 10000,
+    "details": 10000,
+    "batchSize": 100,
+    "queries": 200,
+    "limit": 20,
+    "maxRecords": 10000,
+    "maxQueries": 500,
+    "timeoutMs": 21600000,
+    "requestTimeoutMs": 600000,
+    "allowLarge": true,
+    "keep": true,
+    "failAfterBatches": null,
+    "failAfterReadSamples": null,
+    "killSidecarAfterBatches": null,
+    "freezeSidecarAfterBatches": null
+  },
+  "realBoundary": {
+    "realComponents": [
+      "MCP capability HTTP server (packages/mcp/src/serve.mjs)",
+      "GraphStore + MemoryService + event log (Mebular app)",
+      "managed Memory Runtime sidecar process (mebular-memory-runtime)",
+      "sidecar -> capability HTTP path (/write, /detail, /query, /recall)",
+      "local filesystem in a temporary home"
+    ],
+    "fakeOrStub": [],
+    "notExercised": [
+      "real host process (DSH/Hermes/OpenCode/OpenChamber)",
+      "real model or model pack",
+      "P2P/remote sync peer",
+      "Console UI"
+    ]
+  },
+  "dist": {
+    "files": [
+      {
+        "path": "dist/index.js",
+        "sha256": "0c0268450ca37362a2069861145fbe67ad2c1219455f427e1b1b76c713b8de2e",
+        "sizeBytes": 2350,
+        "mtimeMs": 1793859039915.0598
+      },
+      {
+        "path": "packages/memory-runtime/dist/index.js",
+        "sha256": "fb3951337efb80a90a5400632cab73101f9df04a9450e3e114addbe04fd55f26",
+        "sizeBytes": 626,
+        "mtimeMs": 1793859043467.428
+      },
+      {
+        "path": "packages/service/dist/index.js",
+        "sha256": "a988e2d460a265b32a4270e93162f2b3b67ff502ec4c8570e768f6daf497a802",
+        "sizeBytes": 325,
+        "mtimeMs": 1793859045503.973
+      },
+      {
+        "path": "packages/service/dist/version.json",
+        "sha256": "000db15482142a5d688f3373436bedcb5ff653f303148ca53c81827125051503",
+        "sizeBytes": 148,
+        "mtimeMs": 1793859048495.8123
+      },
+      {
+        "path": "packages/fleet/dist/version.json",
+        "sha256": "4eb831b94b3afeda7e8848c66b37afd0fbb57a8d6dc9f8bed6608a10aaae2239",
+        "sizeBytes": 146,
+        "mtimeMs": 1793859048427.0935
+      },
+      {
+        "path": "packages/mcp/src/serve.mjs",
+        "sha256": "cdcf35838d61905263761626cf8167afe2f128559188f747ca2513de7653e2cc",
+        "sizeBytes": 207824,
+        "mtimeMs": 1793858828516.786
+      },
+      {
+        "path": "packages/mcp/src/memory-capability.mjs",
+        "sha256": "8e85da7c71bf92281226d157e462373bb09b1d1d0812578437a16e09d9067a11",
+        "sizeBytes": 225628,
+        "mtimeMs": 1793858828499.4622
+      },
+      {
+        "path": "packages/memory-runtime/bin/mebular-memory-runtime.mjs",
+        "sha256": "5c11247b8b1ea39396f4d1f322da8beb4723dec21390f038cab8f562208cde2c",
+        "sizeBytes": 360,
+        "mtimeMs": 1793858828522.7407
+      }
+    ],
+    "missing": [],
+    "aggregateSha256": "6a00be3a4cc6647403393e907239bbc7e93453041e43e0db03f10e119e77d7a6",
+    "newestMtimeMs": 1793859048495.8123,
+    "oldestMtimeMs": 1793858828499.4622,
+    "newestAt": "2026-11-05T06:10:48.495Z",
+    "oldestAt": "2026-11-05T06:07:08.499Z"
+  },
+  "build": {
+    "files": [
+      {
+        "name": "service",
+        "path": "packages/service/dist/version.json",
+        "version": "0.3.0",
+        "sha": "f4b11209354cdf8f649cb2377c679d17ac22cff7",
+        "builtAt": "2026-11-05T06:10:48.495Z"
+      },
+      {
+        "name": "fleet",
+        "path": "packages/fleet/dist/version.json",
+        "version": "0.3.0",
+        "sha": "f4b11209354cdf8f649cb2377c679d17ac22cff7",
+        "builtAt": "2026-11-05T06:10:48.425Z"
+      }
+    ],
+    "sha": "f4b11209354cdf8f649cb2377c679d17ac22cff7",
+    "builtAt": "2026-11-05T06:10:48.495Z",
+    "version": "0.3.0",
+    "matchesGit": true,
+    "warnings": []
+  },
+  "preflight": {
+    "ok": true,
+    "tempDir": "<temp-dir>",
+    "diskCheck": "ok",
+    "freeDiskBytes": 315887108096,
+    "requiredDiskBytes": 655360000,
+    "freeMemoryBytes": 18070970368,
+    "requiredMemoryBytes": 756023296,
+    "totalMemoryBytes": 34359738368,
+    "availableMemorySource": "process.availableMemory",
+    "warnings": []
+  },
+  "storageVerification": null,
+  "countAudit": null,
+  "detailExpandCoverage": {
+    "samples": 0,
+    "expandAttempts": 0,
+    "missingDetail": 0,
+    "coverageRate": null,
+    "hitRate": null,
+    "byKind": []
+  },
+  "seed": {
+    "status": "failed",
+    "requestedRecords": 10000,
+    "requestedDetails": 10000,
+    "writtenRecords": 3300,
+    "writtenDetails": 3300,
+    "batchesCompleted": 33,
+    "batchesTotal": 100,
+    "batchSize": 100,
+    "kindCounts": {
+      "conversation-user": 2720,
+      "conversation-assistant": 340,
+      "tool_output": 204,
+      "document_slice": 136
+    },
+    "countHistory": [
+      {
+        "batch": 10,
+        "at": "2026-11-05T07:16:06.727Z",
+        "counts": {
+          "nodes": 2000,
+          "memoryRecords": 1000,
+          "compacts": 0,
+          "checkpoints": 0,
+          "selfRecords": 0,
+          "details": 1000,
+          "detailBytes": 243890
+        },
+        "domains": [
+          {
+            "domain": "agent:scale-bench",
+            "count": 2000
+          }
+        ]
+      },
+      {
+        "batch": 20,
+        "at": "2026-11-05T07:19:05.157Z",
+        "counts": {
+          "nodes": 4000,
+          "memoryRecords": 2000,
+          "compacts": 0,
+          "checkpoints": 0,
+          "selfRecords": 0,
+          "details": 2000,
+          "detailBytes": 488890
+        },
+        "domains": [
+          {
+            "domain": "agent:scale-bench",
+            "count": 4000
+          }
+        ]
+      },
+      {
+        "batch": 30,
+        "at": "2026-11-05T07:23:28.044Z",
+        "counts": {
+          "nodes": 6000,
+          "memoryRecords": 3000,
+          "compacts": 0,
+          "checkpoints": 0,
+          "selfRecords": 0,
+          "details": 3000,
+          "detailBytes": 733890
+        },
+        "domains": [
+          {
+            "domain": "agent:scale-bench",
+            "count": 6000
+          }
+        ]
+      }
+    ],
+    "warnings": [],
+    "degradedBatches": 0,
+    "duplicateRecords": 0,
+    "duplicateBatches": [],
+    "latencyRaw": [
+      6156.604,
+      6983.211,
+      7655.075,
+      8372.404,
+      9317.616,
+      10187.81,
+      10891.313,
+      11907.647,
+      12488.216,
+      13453.933,
+      14587.545,
+      15374.146,
+      15632.094,
+      16269.097,
+      17703.57,
+      18242.236,
+      18795.348,
+      19799.799,
+      20857.423,
+      21144.735,
+      22500.544,
+      23243.022,
+      23884.769,
+      25117.387,
+      25371.141,
+      27251.833,
+      27538.469,
+      28296.557,
+      29479.624,
+      30178.997,
+      30290.76,
+      31771.429,
+      32760.858
+    ],
+    "perRecordLatencyRaw": [
+      61.566,
+      69.832,
+      76.551,
+      83.724,
+      93.176,
+      101.878,
+      108.913,
+      119.076,
+      124.882,
+      134.539,
+      145.875,
+      153.741,
+      156.321,
+      162.691,
+      177.036,
+      182.422,
+      187.953,
+      197.998,
+      208.574,
+      211.447,
+      225.005,
+      232.43,
+      238.848,
+      251.174,
+      253.711,
+      272.518,
+      275.385,
+      282.966,
+      294.796,
+      301.79,
+      302.908,
+      317.714,
+      327.609
+    ],
+    "batchLatenciesMs": [
+      6156.604,
+      6983.211,
+      7655.075,
+      8372.404,
+      9317.616,
+      10187.81,
+      10891.313,
+      11907.647,
+      12488.216,
+      13453.933,
+      14587.545,
+      15374.146,
+      15632.094,
+      16269.097,
+      17703.57,
+      18242.236,
+      18795.348,
+      19799.799,
+      20857.423,
+      21144.735,
+      22500.544,
+      23243.022,
+      23884.769,
+      25117.387,
+      25371.141,
+      27251.833,
+      27538.469,
+      28296.557,
+      29479.624,
+      30178.997,
+      30290.76,
+      31771.429,
+      32760.858
+    ],
+    "latency": {
+      "samples": 33,
+      "minMs": 6156.604,
+      "p50Ms": 18795.348,
+      "p95Ms": 31771.429,
+      "p99Ms": 32760.858,
+      "maxMs": 32760.858,
+      "meanMs": 19197.128
+    },
+    "perRecordLatencyMs": {
+      "samples": 33,
+      "minMs": 61.566,
+      "p50Ms": 187.953,
+      "p95Ms": 317.714,
+      "p99Ms": 327.609,
+      "maxMs": 327.609,
+      "meanMs": 191.971
+    },
+    "throughput": {
+      "recordsPerSec": 1.3,
+      "detailsPerSec": 1.3,
+      "batchesPerSec": 0.01
+    },
+    "wallMs": 2534306.327,
+    "startedAt": "2026-11-05T07:14:29.291Z",
+    "finishedAt": "2026-11-05T07:55:56.034Z",
+    "failedBatch": {
+      "index": 33,
+      "count": 100,
+      "error": {
+        "name": "Error",
+        "message": "seed 批次 33 超时 (600000ms)"
+      }
+    },
+    "faultInjection": null,
+    "error": {
+      "name": "Error",
+      "message": "seed 批次 33 超时 (600000ms)"
+    },
+    "progress": {
+      "phase": "seed",
+      "completed": 33,
+      "total": 100,
+      "records": 3300,
+      "details": 3300,
+      "updatedAt": "2026-11-05T07:25:02.824Z"
+    }
+  },
+  "reads": {
+    "status": "failed",
+    "samplesRequested": 200,
+    "samplesCompleted": 0,
+    "samples": 0,
+    "queryLimit": 20,
+    "sampling": "stratified by index % 100 detail-kind bucket; equal samples per bucket",
+    "counters": {
+      "capabilityHits": 0,
+      "recallHits": 0,
+      "contextHits": 0,
+      "expandHits": 0,
+      "expandAttempts": 0,
+      "degradedCapabilityQueries": 0,
+      "degradedRecalls": 0,
+      "degradedContexts": 0,
+      "degradedExpands": 0,
+      "warningCounts": {
+        "capabilityQuery": 0,
+        "recall": 0,
+        "context": 0,
+        "expand": 0
+      },
+      "warningCodes": {
+        "capabilityQuery": [],
+        "recall": [],
+        "context": [],
+        "expand": []
+      }
+    },
+    "latencyRaw": {
+      "capabilityQuery": [],
+      "sidecarRecall": [],
+      "sidecarContext": [],
+      "detailExpand": [],
+      "recallInternalExpand": [],
+      "recallInternalTotal": []
+    },
+    "detailExpandBySourceRaw": {},
+    "kindStats": {},
+    "failures": [],
+    "consecutiveFailures": 0,
+    "aborted": false,
+    "abortReason": null,
+    "hitRate": {
+      "capabilityQuery": null,
+      "sidecarRecall": null,
+      "sidecarContext": null,
+      "detailExpand": null,
+      "detailExpandCoverage": null
+    },
+    "detailCoverage": {
+      "samples": 0,
+      "expandAttempts": 0,
+      "missingDetail": 0,
+      "coverageRate": null,
+      "hitRate": null,
+      "byKind": []
+    },
+    "latency": {
+      "capabilityQuery": {
+        "samples": 0,
+        "minMs": null,
+        "p50Ms": null,
+        "p95Ms": null,
+        "p99Ms": null,
+        "maxMs": null,
+        "meanMs": null
+      },
+      "sidecarRecall": {
+        "samples": 0,
+        "minMs": null,
+        "p50Ms": null,
+        "p95Ms": null,
+        "p99Ms": null,
+        "maxMs": null,
+        "meanMs": null
+      },
+      "sidecarContext": {
+        "samples": 0,
+        "minMs": null,
+        "p50Ms": null,
+        "p95Ms": null,
+        "p99Ms": null,
+        "maxMs": null,
+        "meanMs": null
+      },
+      "detailExpand": {
+        "samples": 0,
+        "minMs": null,
+        "p50Ms": null,
+        "p95Ms": null,
+        "p99Ms": null,
+        "maxMs": null,
+        "meanMs": null
+      },
+      "recallInternalExpand": {
+        "samples": 0,
+        "minMs": null,
+        "p50Ms": null,
+        "p95Ms": null,
+        "p99Ms": null,
+        "maxMs": null,
+        "meanMs": null
+      },
+      "recallInternalTotal": {
+        "samples": 0,
+        "minMs": null,
+        "p50Ms": null,
+        "p95Ms": null,
+        "p99Ms": null,
+        "maxMs": null,
+        "meanMs": null
+      }
+    },
+    "recallInternalTiming": {
+      "expandMs": {
+        "samples": 0,
+        "minMs": null,
+        "p50Ms": null,
+        "p95Ms": null,
+        "p99Ms": null,
+        "maxMs": null,
+        "meanMs": null
+      },
+      "totalMs": {
+        "samples": 0,
+        "minMs": null,
+        "p50Ms": null,
+        "p95Ms": null,
+        "p99Ms": null,
+        "maxMs": null,
+        "meanMs": null
+      }
+    },
+    "detailExpandBySource": {},
+    "degraded": {
+      "capabilityQueries": 0,
+      "recalls": 0,
+      "contexts": 0,
+      "expands": 0
+    },
+    "warnings": {
+      "counts": {
+        "capabilityQuery": 0,
+        "recall": 0,
+        "context": 0,
+        "expand": 0
+      },
+      "codes": {
+        "capabilityQuery": [],
+        "recall": [],
+        "context": [],
+        "expand": []
+      }
+    },
+    "startedAt": null,
+    "finishedAt": "2026-11-05T07:55:56.101Z",
+    "error": {
+      "name": "Error",
+      "message": "seed 批次 33 超时 (600000ms)"
+    }
+  },
+  "snapshots": {
+    "beforeSeed": {
+      "phase": "before-seed",
+      "at": "2026-11-05T07:14:29.283Z",
+      "host": {
+        "rssBytes": 113143808,
+        "heapTotalBytes": 41500672,
+        "heapUsedBytes": 25227048,
+        "externalBytes": 5171798,
+        "arrayBuffersBytes": 422529
+      },
+      "sidecar": {
+        "pid": 59503,
+        "rssBytes": 86839296,
+        "runtimeVersion": "0.3.0"
+      },
+      "disk": {
+        "logicalBytes": 2698,
+        "allocatedBytes": 32768,
+        "byPath": {
+          "device.jsonl": 0,
+          "memory-runtime": 683,
+          "memory-runtime/staging": 0,
+          "memory-runtime/traces.jsonl": 0,
+          "memory-runtime/cache": 0,
+          "memory-runtime/cache/details": 0,
+          "memory-runtime/outbox": 0,
+          "memory-runtime/outbox/dead": 0,
+          "memory-runtime/capability-idempotency.json": 0
+        }
+      },
+      "idempotencyLedgerEntries": 0,
+      "sidecarStatus": {
+        "state": "ready",
+        "degraded": false,
+        "counts": {
+          "stagingChunks": 0,
+          "localStagingChunks": 0,
+          "traces": 0,
+          "cachedRecords": 0,
+          "detailCacheEntries": 0,
+          "detailCacheBytes": 0,
+          "outbox": 0,
+          "deadLetter": 0,
+          "localTraces": 0,
+          "ingested": 0,
+          "settled": 0,
+          "recalls": 0,
+          "contexts": 0,
+          "feedback": 0,
+          "recallSilent": 0,
+          "compacts": 0,
+          "checkpoints": 0,
+          "selfRecords": 0,
+          "objectWritesQueued": 0,
+          "objectWritesFailed": 0
+        },
+        "details": {
+          "available": true,
+          "staging": {
+            "chunks": 0,
+            "hours": 24,
+            "maxBytes": 268435456
+          },
+          "cache": {
+            "entries": 0,
+            "bytes": 0,
+            "days": 30,
+            "maxBytes": 268435456
+          },
+          "outbox": {
+            "items": 0,
+            "bytes": 0
+          },
+          "quota": {
+            "bytesPerDomain": 268435456,
+            "bytesCloud": 1073741824,
+            "usedBytes": 0,
+            "bytes": 1073741824
+          },
+          "retentionDays": {
+            "conversation": 30,
+            "tool_output": 7,
+            "document_slice": 90
+          },
+          "maintenance": {
+            "running": true,
+            "intervalMs": 60000,
+            "lastAttemptAt": 1793862869161,
+            "lastSuccessAt": 1793862869161,
+            "lastError": null,
+            "lastResult": {
+              "stagingChunks": 0,
+              "traces": 0,
+              "cacheRemoved": 0,
+              "detailCacheRemoved": 0,
+              "outboxExpired": 0,
+              "deadRemoved": 0,
+              "bytes": 0,
+              "oldestAgeMs": null
+            }
+          },
+          "diagnostics": {
+            "logs": {
+              "files": 1,
+              "bytes": 243,
+              "latestAt": 1793862869124
+            },
+            "disk": {
+              "stagingBytes": 0,
+              "traceBytes": 0,
+              "cacheBytes": 0,
+              "detailCacheBytes": 0,
+              "outboxBytes": 0,
+              "deadBytes": 0,
+              "logsBytes": 243,
+              "totalBytes": 243
+            },
+            "outbox": {
+              "active": 0,
+              "dead": 0,
+              "oldestAgeMs": null,
+              "deadOldestAgeMs": null,
+              "byOperation": [],
+              "deadReasons": [],
+              "lastConflict": null,
+              "ambiguous": []
+            }
+          }
+        },
+        "outbox": {
+          "items": 0,
+          "bytes": 0,
+          "oldestAt": null,
+          "oldestAgeMs": null,
+          "deadItems": 0,
+          "deadBytes": 0,
+          "deadOldestAt": null,
+          "deadOldestAgeMs": null,
+          "byOperation": [],
+          "byEndpoint": [],
+          "deadReasons": [],
+          "lastConflict": null,
+          "ambiguous": []
+        },
+        "limits": {
+          "maxChunkBytes": 262144,
+          "maxContextTokens": 12000,
+          "maxRecall": 50
+        },
+        "warnings": []
+      },
+      "capabilityStatus": {
+        "counts": {
+          "nodes": 0,
+          "memoryRecords": 0,
+          "compacts": 0,
+          "checkpoints": 0,
+          "selfRecords": 0,
+          "details": 0,
+          "detailBytes": 0
+        },
+        "detailQuota": {
+          "domainBytes": 268435456,
+          "cloudBytes": 1073741824,
+          "threadBytes": 67108864
+        },
+        "detailRetentionDays": {
+          "conversation": 30,
+          "tool_output": 7,
+          "document_slice": 90,
+          "pinned": 0
+        },
+        "limits": {
+          "maxBodyBytes": 2097152,
+          "maxBatchItems": 100,
+          "maxLimit": 50,
+          "maxDetailTextBytes": 262144,
+          "maxDetailBatchItems": 100,
+          "maxDetailGetBytes": 65536,
+          "maxDetailListLimit": 50
+        }
+      }
+    }
+  },
+  "sidecarPids": [
+    59503
+  ],
+  "sidecarPidEvents": [
+    {
+      "pid": 59503,
+      "source": "cluster-start",
+      "at": "2026-11-05T07:14:29.258Z"
+    }
+  ],
+  "progress": {
+    "phase": "finished",
+    "completed": 0,
+    "total": 100,
+    "records": 0,
+    "details": 0,
+    "updatedAt": "2026-11-05T07:55:57.528Z"
+  },
+  "checkpoints": {
+    "count": 38,
+    "lastAt": "2026-11-05T07:55:56.102Z",
+    "lastReason": "failed",
+    "errors": []
+  },
+  "abort": {
+    "requested": false,
+    "reason": null,
+    "at": null
+  },
+  "cleanup": {
+    "cleaned": false,
+    "kept": true,
+    "tempHomeRemoved": false,
+    "tempRoot": "<temp-home>",
+    "sidecarPids": [
+      59503
+    ],
+    "sidecarStop": [
+      {
+        "pid": 59503,
+        "stopped": true,
+        "escalation": "SIGTERM",
+        "skipped": false
+      }
+    ],
+    "residualPids": [],
+    "residualScanAvailable": true,
+    "errors": []
+  },
+  "error": {
+    "name": "Error",
+    "code": null,
+    "message": "seed 批次 33 超时 (600000ms)"
+  },
+  "components": {
+    "sidecar": {
+      "runtimeVersion": "0.3.0",
+      "apiVersion": 1,
+      "capabilityApiVersion": 1,
+      "state": "ready",
+      "mode": "immersive",
+      "capabilities": {
+        "ingest": true,
+        "recall": true,
+        "context": true,
+        "details": true,
+        "checkpoint": true,
+        "compact": true,
+        "self": true,
+        "models": [
+          "heuristic",
+          "host"
+        ]
+      }
+    },
+    "capability": {
+      "mcpVersion": "0.3.0",
+      "coreVersion": "0.3.0",
+      "capabilityApiVersion": 1,
+      "features": {
+        "domains": true,
+        "owner": true,
+        "provenance": true,
+        "batchWrite": true,
+        "idempotency": true,
+        "supersedes": true,
+        "temporalUpdates": [
+          "validTo"
+        ],
+        "internalObjects": [
+          "compact",
+          "self_record",
+          "context_checkpoint"
+        ],
+        "details": true,
+        "detailKinds": [
+          "raw_chunk",
+          "message",
+          "tool_output",
+          "document_slice"
+        ],
+        "detailRetentionClasses": [
+          "conversation",
+          "tool_output",
+          "document_slice",
+          "pinned"
+        ],
+        "detailDeleteReasons": [
+          "user_requested",
+          "record_deleted",
+          "retention_expired",
+          "quota_evicted",
+          "checkpoint_deleted"
+        ],
+        "sync": true,
+        "graph": true,
+        "readOnly": false,
+        "readEndpoints": [
+          "version",
+          "status",
+          "namespaces",
+          "query",
+          "search",
+          "history",
+          "profile",
+          "skills",
+          "graph",
+          "detail",
+          "sync"
+        ],
+        "writeEndpoints": [
+          "write",
+          "update",
+          "delete",
+          "archive",
+          "internal-object",
+          "detail",
+          "sync"
+        ]
+      }
+    }
+  }
+}

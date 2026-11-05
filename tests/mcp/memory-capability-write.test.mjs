@@ -475,6 +475,248 @@ describe('POST /write', () => {
   });
 });
 
+describe('幂等 in-flight 单飞', () => {
+  function failureGate() {
+    let release = () => {};
+    const gate = new Promise((resolve) => { release = resolve; });
+    let enteredResolve = () => {};
+    const entered = new Promise((resolve) => { enteredResolve = resolve; });
+    return { gate, release, entered, enter: enteredResolve };
+  }
+
+  it('并发同 key 同 batch 只执行一次；另一路等待同结果或重放，图内记录精确', async () => {
+    const key = unique('idem-concurrent-key');
+    const marker = unique('idem-concurrent-content');
+    const body = writeBody([{
+      clientItemId: unique('idem_concurrent_client'),
+      domain: 'agent:opencode',
+      kind: 'observation',
+      content: { content: marker },
+      provenance: { source: 'runtime', extractor: 'heuristic' },
+    }]);
+    const originalWriteRecords = service.writeRecords.bind(service);
+    const gate = failureGate();
+    let calls = 0;
+    const spy = jest.spyOn(service, 'writeRecords').mockImplementation(async (...args) => {
+      calls += 1;
+      if (calls === 1) {
+        gate.enter();
+        await gate.gate;
+      }
+      return originalWriteRecords(...args);
+    });
+    try {
+      const firstPending = post(capability('/write'), body, {
+        token,
+        headers: { 'idempotency-key': key },
+      });
+      const secondPending = post(capability('/write'), body, {
+        token,
+        headers: { 'idempotency-key': key },
+      });
+      await gate.entered;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      // 第一路仍被 gate 挡住时第二路不得开始第二次 execute。
+      expect(calls).toBe(1);
+      gate.release();
+      const [first, second] = await Promise.all([firstPending, secondPending]);
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+      expect(first.body.data).toMatchObject({ created: 1, duplicates: 0, failed: 0, partial: false });
+      expect(second.body.data).toMatchObject({ created: 1, duplicates: 0, failed: 0, partial: false });
+      expect(second.body.data.results[0].id).toBe(first.body.data.results[0].id);
+      expect([false, true]).toContain(second.body.data.replayed);
+      expect(calls).toBe(1);
+      const records = (await app.storage.listNodes({ namespace: 'agent:opencode' }))
+        .filter((node) => node.content?.content === marker);
+      expect(records).toHaveLength(1);
+    } finally {
+      gate.release();
+      spy.mockRestore();
+    }
+  });
+
+  it('并发同 key 不同 body 立即 409，不执行第二路', async () => {
+    const key = unique('idem-conflict-key');
+    const firstBody = writeBody([{
+      clientItemId: unique('idem_conflict_first'),
+      domain: 'agent:opencode',
+      kind: 'observation',
+      content: { content: unique('idem-conflict-first') },
+      provenance: { source: 'runtime', extractor: 'heuristic' },
+    }]);
+    const secondBody = writeBody([{
+      clientItemId: unique('idem_conflict_second'),
+      domain: 'agent:opencode',
+      kind: 'observation',
+      content: { content: unique('idem-conflict-second') },
+      provenance: { source: 'runtime', extractor: 'heuristic' },
+    }]);
+    const originalWriteRecords = service.writeRecords.bind(service);
+    const gate = failureGate();
+    let calls = 0;
+    const spy = jest.spyOn(service, 'writeRecords').mockImplementation(async (...args) => {
+      calls += 1;
+      if (calls === 1) {
+        gate.enter();
+        await gate.gate;
+      }
+      return originalWriteRecords(...args);
+    });
+    try {
+      const firstPending = post(capability('/write'), firstBody, {
+        token,
+        headers: { 'idempotency-key': key },
+      });
+      await gate.entered;
+      const conflict = await post(capability('/write'), secondBody, {
+        token,
+        headers: { 'idempotency-key': key },
+      });
+      expect(conflict.status).toBe(409);
+      expect(conflict.body.error.code).toBe('idempotency_conflict');
+      expect(calls).toBe(1);
+      gate.release();
+      const first = await firstPending;
+      expect(first.status).toBe(200);
+      expect(first.body.data.created).toBe(1);
+      expect(calls).toBe(1);
+    } finally {
+      gate.release();
+      spy.mockRestore();
+    }
+  });
+
+  it('execute 抛错后清理 in-flight，后续同 key 请求可重试', async () => {
+    const created = await writeOne({
+      clientItemId: unique('idem_throw_client'),
+      domain: 'agent:opencode',
+      kind: 'observation',
+      content: { content: unique('idem-throw-record') },
+      provenance: { source: 'runtime', extractor: 'heuristic' },
+    });
+    const id = created.body.data.results[0].id;
+    const key = unique('idem-throw-key');
+    const body = { actor: agent, ids: [id] };
+    const originalDelete = service.delete.bind(service);
+    let calls = 0;
+    const spy = jest.spyOn(service, 'delete').mockImplementation(async (...args) => {
+      calls += 1;
+      if (calls === 1) throw new Error('synthetic execute failure');
+      return originalDelete(...args);
+    });
+    try {
+      const first = await post(capability('/delete'), body, {
+        token,
+        headers: { 'idempotency-key': key },
+      });
+      expect(first.status).toBe(500);
+      expect(first.body.error.code).toBe('internal');
+      expect(calls).toBe(1);
+
+      const retry = await post(capability('/delete'), body, {
+        token,
+        headers: { 'idempotency-key': key },
+      });
+      expect(retry.status).toBe(200);
+      expect(retry.body.data.deleted).toContain(id);
+      expect(calls).toBe(2);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('partial/failed 不缓存，但并发同 key 只执行一次；完成后可重试', async () => {
+    const key = unique('idem-partial-key');
+    const marker = unique('idem-partial-content');
+    const body = writeBody([{
+      clientItemId: unique('idem_partial_client'),
+      domain: 'agent:opencode',
+      kind: 'observation',
+      content: { content: marker },
+      provenance: { source: 'runtime', extractor: 'heuristic' },
+    }]);
+    const originalWriteRecords = service.writeRecords.bind(service);
+    const gate = failureGate();
+    let calls = 0;
+    const spy = jest.spyOn(service, 'writeRecords').mockImplementation(async (...args) => {
+      calls += 1;
+      if (calls === 1) {
+        gate.enter();
+        await gate.gate;
+        throw new Error('synthetic item failure');
+      }
+      return originalWriteRecords(...args);
+    });
+    try {
+      const firstPending = post(capability('/write'), body, {
+        token,
+        headers: { 'idempotency-key': key },
+      });
+      const secondPending = post(capability('/write'), body, {
+        token,
+        headers: { 'idempotency-key': key },
+      });
+      await gate.entered;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(calls).toBe(1);
+      gate.release();
+      const [first, second] = await Promise.all([firstPending, secondPending]);
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+      for (const response of [first, second]) {
+        expect(response.body.data).toMatchObject({ created: 0, duplicates: 0, failed: 1, partial: true });
+        expect(response.body.data.results[0].status).toBe('failed');
+        expect(response.body.data.replayed).toBe(false);
+      }
+      expect(calls).toBe(1);
+
+      // partial 响应不进入账本：同键重试必须重新执行并补齐。
+      const retry = await post(capability('/write'), body, {
+        token,
+        headers: { 'idempotency-key': key },
+      });
+      expect(retry.status).toBe(200);
+      expect(retry.body.data).toMatchObject({ created: 1, duplicates: 0, failed: 0, partial: false });
+      expect(calls).toBe(2);
+      const records = (await app.storage.listNodes({ namespace: 'agent:opencode' }))
+        .filter((node) => node.content?.content === marker);
+      expect(records).toHaveLength(1);
+    } finally {
+      gate.release();
+      spy.mockRestore();
+    }
+  });
+
+  it('同一幂等键不同 route 不互相重放', async () => {
+    const created = await writeOne({
+      clientItemId: unique('idem_route_client'),
+      domain: 'agent:opencode',
+      kind: 'observation',
+      content: { content: unique('idem-route-record') },
+      provenance: { source: 'runtime', extractor: 'heuristic' },
+    });
+    const id = created.body.data.results[0].id;
+    const key = unique('idem-route-key');
+    const body = { actor: agent, ids: [id] };
+    const deleted = await post(capability('/delete'), body, {
+      token,
+      headers: { 'idempotency-key': key },
+    });
+    expect(deleted.status).toBe(200);
+    expect(deleted.body.data.deleted).toContain(id);
+
+    const archived = await post(capability('/archive'), body, {
+      token,
+      headers: { 'idempotency-key': key },
+    });
+    expect(archived.status).toBe(200);
+    expect(archived.body.data.replayed).toBe(false);
+    expect(archived.body.data).toHaveProperty('archived');
+    expect(archived.body.data).not.toHaveProperty('deleted');
+  });
+});
+
 describe('统一 MemoryRecord 写路径', () => {
   const publicWrite = TOOL_SPECS.find((spec) => spec.name === 'memory_write');
 
@@ -2866,6 +3108,123 @@ describe('drain 覆盖 update/delete/archive 写路径', () => {
       }
     }, 15000);
   }
+});
+
+describe('close 等待同键 join 的在途请求', () => {
+  it('A 被 gate、B 同 key join、close 同时发生：等待两者并 clean', async () => {
+    const instanceHome = await mkdtemp(join(tmpdir(), 'memory-capability-join-close-'));
+    const savedCloudRoot = process.env.MEBULAR_CLOUD_ROOT;
+    process.env.MEBULAR_CLOUD_ROOT = join(instanceHome, 'cloud');
+    let instance = null;
+    const marker = unique('join-close-marker');
+    const key = unique('join-close-key');
+    const body = writeBody([{
+      clientItemId: unique('cand_join_close'),
+      domain: 'agent:opencode',
+      kind: 'fact',
+      content: { subject: 'close', predicate: 'join', object: marker, confidence: 0.9 },
+    }]);
+    const originalWriteRecords = service.writeRecords.bind(service);
+    let entered = false;
+    let release = () => {};
+    const gate = new Promise((resolve) => { release = resolve; });
+    let calls = 0;
+    service.writeRecords = async (...args) => {
+      calls += 1;
+      if (!entered) {
+        entered = true;
+        await gate;
+      }
+      return originalWriteRecords(...args);
+    };
+    const savedBase = base;
+    try {
+      instance = await startHttpServer({
+        home: instanceHome,
+        app,
+        service,
+        config: {
+          deviceId: 'device-w2b',
+          memoryRuntime: { enabled: true },
+          sync: { namespaces: [] },
+          mcp: { http: { host: '127.0.0.1', port: 0, auth: 'none' } },
+        },
+        buildServer: () => ({ connect: async () => undefined, close: async () => undefined }),
+        host: '127.0.0.1',
+        port: 0,
+        auth: 'none',
+      });
+      const instanceBase = `http://127.0.0.1:${instance.port}`;
+      const instanceToken = (await readCapabilityToken({ home: instanceHome, env: {} }))?.token;
+      base = instanceBase;
+      const secondBodyRead = new Promise((resolve) => {
+        const onRequest = (req) => {
+          if (!String(req.url ?? '').includes('/internal/memory/v1/write')) return;
+          instance.server.off('request', onRequest);
+          if (req.readableEnded) resolve();
+          else req.once('end', resolve);
+        };
+        instance.server.on('request', onRequest);
+      });
+
+      const firstPending = post('/internal/memory/v1/write', body, {
+        token: instanceToken,
+        headers: { 'idempotency-key': key },
+      });
+      const deadline = Date.now() + 5000;
+      while (!entered && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(entered).toBe(true);
+
+      const secondPending = post('/internal/memory/v1/write', body, {
+        token: instanceToken,
+        headers: { 'idempotency-key': key },
+      });
+      // 等 B 的请求体读完并让 handler 进入 withIdempotency/join；A 仍在 gate 内。
+      await secondBodyRead;
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(calls).toBe(1);
+
+      const closing = instance.close();
+      expect(instance.getState().closing).toBe(true);
+      const drainDeadline = Date.now() + 5000;
+      while (!instance.getState().capabilityDraining && Date.now() < drainDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(instance.getState().capabilityDraining).toBe(true);
+      let settled = false;
+      void closing.then(() => { settled = true; });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(settled).toBe(false);
+
+      release();
+      const [first, second] = await Promise.all([firstPending, secondPending]);
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+      expect(first.body.data.created).toBe(1);
+      expect(second.body.data.created).toBe(1);
+      expect(first.body.data.results[0].id).toBe(second.body.data.results[0].id);
+      // B 在 close 前 join 同一在途执行，得到同一结果而不是 close 后的重放。
+      expect(second.body.data.replayed).toBe(false);
+      expect(calls).toBe(1);
+
+      await closing;
+      expect(instance.getState().capabilityDrain).toMatchObject({ clean: true, active: 0 });
+      expect(await readCapabilityToken({ home: instanceHome, env: {} })).toBeNull();
+      const records = (await app.storage.listNodes({ namespace: 'agent:opencode' }))
+        .filter((node) => node.content?.object === marker);
+      expect(records).toHaveLength(1);
+    } finally {
+      release();
+      base = savedBase;
+      service.writeRecords = originalWriteRecords;
+      await instance?.close().catch(() => undefined);
+      await rm(instanceHome, { recursive: true, force: true });
+      if (savedCloudRoot === undefined) delete process.env.MEBULAR_CLOUD_ROOT;
+      else process.env.MEBULAR_CLOUD_ROOT = savedCloudRoot;
+    }
+  }, 20000);
 });
 
 describe('close drain 超时', () => {

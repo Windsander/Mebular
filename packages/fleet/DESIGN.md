@@ -4,8 +4,11 @@
 > 策略推导不变量以 [`src/sync/POLICY-INVARIANTS.md`](../../src/sync/POLICY-INVARIANTS.md) 为准。
 > fleet **不改 core 语义**，只消费 `@mebular/core` 的公共 API。
 >
-> **发布版本**：Fleet 任务编排计划随 Mebular **0.3.2** 发布；P0–P7 的验收证据在 0.3.0 周期采集，
-> 历史结果不因版本标签改写（见 [`docs/quality/0.3.0-fleet-orchestration-e2e.md`](../../docs/quality/0.3.0-fleet-orchestration-e2e.md)）。
+> **发布版本**：Fleet 任务编排随 Mebular **0.3.2** 发布。当前实现基线为 `feat/fleet-orchestration` @ `b4ef1e8`：
+> executor/adapters、DSH/OpenCode/Claude Code adapter、plan owner guard、agent readiness 与 executable routing 已落地；
+> 0.3.2 证据见 [`docs/quality/0.3.2-fleet-orchestration.md`](../../docs/quality/0.3.2-fleet-orchestration.md)。
+> P0–P7 的 0.3.0 周期证据保留原名与历史结论，不因版本标签改写
+> （见 [`docs/quality/0.3.0-fleet-orchestration-e2e.md`](../../docs/quality/0.3.0-fleet-orchestration-e2e.md)）。
 
 ## 0. 一句话
 
@@ -40,7 +43,7 @@
 
 ### 2.5.2 每设备 Agent 目录 + 工具面
 
-- **目录**（普通记忆域，默认 `agents`）：每设备一条**签名**记录 `{device, agents:[{name,kind,capabilities?,executable?,executionMode?,concurrency,capacity?}], updatedAt, version}`；`task_targets = 订阅任务域的对端 ∩ 其目录 (device,agent)`；`capacity/load` 为**建议性**，不参与授权/一致性。**远端 Agent 口径**：adapter 在执行设备本地；目录对外只发布执行能力投影 `kind + capabilities + executable + executionMode`（0.3.2 目标字段；`concurrency/capacity` 仅作建议性负载提示），**command/env/token 永不过网**。
+- **目录**（普通记忆域，默认 `agents`）：每设备一条**签名**记录 `{device, agents:[{name,kind,capabilities?,executable?,executionMode?,concurrency,capacity?}], updatedAt, version}`；`task_targets = 订阅任务域的对端 ∩ 其目录 (device,agent)`；`capacity/load` 为**建议性**，不参与授权/一致性。**远端 Agent 口径**：adapter 在执行设备本地；目录只发布执行能力投影 `kind + capabilities + executable(boolean) + executionMode`（`cli|http|json-rpc|in-process`；`concurrency/capacity` 仅作建议性负载提示），**command/env/token 永不过网**。`health` 不是目录字段；能力卡可携带可选 `{status,checkedAt?,latencyMs?,detail?}`，`task_targets` 会合并进目标，属 advisory。
 - **能力卡（P1）**（同 `agents` 域，internal 记忆节点）：`metadata.internal=true` + `internalObject.kind="agent_capability_card"`；由 config 的 optional `capabilities`、ExecutorRegistry、运行环境编译，设备签名、版本单调、agent 移除发 tombstone。卡片只含标签/限制/工具名，不含 command/env/凭据/原始对话。默认记忆列表、域计数、搜索、图遍历与 fleet SSE 都不返回能力卡；`task_targets` 只额外返回 `cards` 摘要，旧 `targets` 字段与顺序不变。
 - **CR-002（P1，已批准 / P6 硬化 / P7 CR-003）daemon 发布**：生产 `store:"daemon"` 下 fleet 无本地 Mebular 句柄。CR-003 批准的内部 app 端点白名单为 `/app/nodes`（optional metadata，拒绝 card/role/plan 通用写入）、`/app/capability-cards`、`/app/plans`、`/app/role-cards`、`/app/peers`；默认 loopback；非 loopback 仅 TLS+bearer/scope 且需显式部署；internal metadata，不新增公共 MCP/UI/TaskEvent。最小内部 app 扩展：`POST /app/nodes` 接受 optional `metadata`，`GET /app/nodes` 返回 optional `metadata`；新增内部 `POST /app/capability-cards`（draft 无 signature），由守护身份 `app.identity.getDeviceKey(deviceId)` 签名并写 `agents` 域 internal 节点，身份不可用返回 409，不伪造。签名/canonical/schema 仍只复用 fleet `cards.ts`；fleet 侧用 `DaemonAgentBackend` 走既有 app 面。**读取信任**：`node.createdBy === card.device` + 签名验证（本机 identity / 远端已认证公钥）。P6 新增内部 `GET /app/peers`：只返回 sync 握手登记的**在线** peer `{device, publicKeyHex}`（默认 loopback，memory.read；非 loopback 仅 TLS+bearer；不回退 `config.peers` 地址簿）；`DaemonAgentBackend` 用它验证远端卡片，旧守护无该端点或 peer 离线时远端候选 fail-closed。`/app/nodes` 是 raw debug 面，拒绝 card/role/plan 内部对象写入；能力卡只能走专用端点。旧 daemon 配置启动期幂等补齐 `agents` 同步域。embedded 路径仍用本地 Mebular。公开 MCP 方法、人类 UI、`TaskEvent` 线格式均不变。
 - **角色卡（P5）**：`agent_role_card` internal 节点（`agents` 域，`metadata.internal=true` + `internalObject.kind="agent_role_card"`；`(device, agent, kind)` 版本单调、tombstone、最新版本/author 绑定解析）。本机 runtime job 从任务历史聚合 intent/成败/样本量/最近性，可选只读 memory runtime internal compact/checkpoint 摘要（`RoleSummaryProvider`，只取 ID/意图，不复制原文）；confidence 由样本量/成功率/一致性/最近性计算，`<0.5` 低置信度。**隐私硬化**：`strengths/preferredIntents/avoid` 只允许固定安全标签白名单（如 code/test/docs/review），未知 intent/短 token/原文一律忽略；写路径（生成器、`appendAgentRoleCard`、daemon `/app/role-cards`）统一由服务端从 `agent + sampleSize + preferredIntents` 重建 `summary`，客户端 raw summary 一律丢弃；**P6 读路径（embedded、daemon、远端旧卡）同样重建 summary**，`agent` 与 `provenance.source/generator` 只接受安全 token。`evidenceRefs` 只允许 `task/summary/checkpoint/session_summary/compact`，task 只接受真实 fleet/plan ID（含 `~cN` 派生子任务），summary/checkpoint 只接受内容哈希/ULID/UUID，schema 与 daemon 端点同时拒绝任意文本。`graphRoleSummaryProvider` 要求摘要带 device/agent 并按目标过滤。默认 `shadow=true`：派发行为与无卡一致（`why.roleCard="shadow-ignored"`）。只有配置显式 `roleCards.enabled=true`、`shadow=false` 且 `confidence>=0.5` 时才作为 P3 软排序最后一项（`why.roleCard="used-soft"`），永不参与授权/硬过滤/容量。daemon 模式新增内部 `/app/role-cards` POST/GET（loopback + memory.write/read，author=本机，拒绝 `/app/nodes` 伪造/读取角色卡原文），不新增公共 MCP 方法或人类 UI；无原始对话/command/env/凭据落盘。
@@ -73,28 +76,43 @@ CLI 通用形参：`--input '<json>'`（字段与 MCP `arguments` 一致）+ `--
 **先区分两个角色**：
 
 - **派发方（dispatcher）**：提交/查询/取消任务、持有 plan、看 `task_status` 的调用方。任何能连上 MCP/CLI 的 Console 客户端或 Agent 都可以是派发方；**派发方不等于能执行本机任务**。
-- **执行方（executor）**：执行设备上真正把 `intent` 跑出结果的 Agent/适配器。适配器只装在**执行设备本地**；远端目录只发布 `kind + capabilities + executable + executionMode`（0.3.2 目标字段），不发布 command/env/token。
+- **执行方（executor）**：执行设备上真正把 `intent` 跑出结果的 Agent/适配器。适配器只装在**执行设备本地**；远端目录只发布 `kind + capabilities + executable(boolean) + executionMode`，不发布 command/env/token。
 
 | Agent / 宿主 | 执行能力 | 接入方式与现状 |
 |---|---|---|
-| **Hermes** | 可执行 | 内置 `HermesAgent`（`kind=hermes`）：`hermes [-p P] [-t T] [-m M] [--in DIR] -z <prompt> --usage-file <tmp>` |
-| **OpenChamber** | 条件可执行 | 通过 **oc-hermes-bridge** 的 `POST /agent/run-once` 执行（`kind=openchamber` + `HttpOpenChamberSeam`）；**无桥不可执行**，只能 dispatch-only |
-| **DSH v1** | 计划中（宿主 CLI；adapter 待实现） | 官方 `dsh --profile headless "<job>"` 作为 0.3.2 目标执行宿主；`dsh --profile sdk` 属于 DSH v2，不作为当前口径。现有 `@mebular/dsh-plugin` 是 **Web/记忆桥**，不是 Fleet executor，也不提供 fleet 执行器适配 |
-| **OpenCode** | 计划中 | 计划用 `opencode run`，**待 adapter 实现** |
-| **Claude Code** | 计划中 | 计划用 `claude -p`，**待 adapter 实现** |
-| **Cursor** | 条件可执行 | 仅当执行设备有 `cursor-agent` 时可按命令执行；否则 **dispatch-only** |
+| **Hermes** | 已实现 | 内置 `HermesAgent`（`kind=hermes`）：`hermes [-p P] [-t T] [-m M] [--in DIR] -z <prompt> --usage-file <tmp>`；`health()` 探测 `--version` |
+| **OpenChamber** | 条件可执行 | 通过 **oc-hermes-bridge** 的 `POST /agent/run-once` 执行（`kind=openchamber` + `HttpOpenChamberSeam`）；**无桥不可执行**；当前 adapter 无 `health()`（`degraded`），`supportsCancel=false` |
+| **DSH v1** | 已实现 | `DshHeadlessAgent`（`kind=dsh`）：`dsh [baseArgs] --profile headless [prompt|stdin]`，默认 stdin；`health()` 探测 `dsh --version`；**本机未安装 dsh，真实任务 smoke 待补，fake CLI 测试已过**。`dsh --profile sdk` 属于 DSH v2，未实现。现有 `@mebular/dsh-plugin` 是 **Web/记忆桥**，不是 Fleet executor |
+| **OpenCode** | 已实现 | `OpenCodeAgent`（`kind=opencode`）：`opencode [baseArgs] run [prompt|stdin]`；本机 `opencode v2.0.29` health 已验证；**真实 `run` 任务 smoke 待补** |
+| **Claude Code** | 已实现 | `ClaudeCodeAgent`（`kind=claude-code`）：`claude [baseArgs] -p [prompt|stdin]`；本机未安装 `claude`，只有 fake CLI 测试；**真实任务 smoke 待补** |
+| **Cursor** | 不可执行 | 0.3.2 没有 `cursor` kind/adapter；**dispatch-only**。将来接入需先实机验证非交互、exit code、stdout、超时与取消 |
 | **Claude Desktop** | 不可执行 | **只能 dispatch-only**（没有本地命令执行接缝） |
 | **`echo` / `board`** | 仅 demo/测试 | `echo` 是确定性 fake executor；`board` 是任务板占位。二者**不作为生产 plan owner/MR**，也不代表真实执行能力 |
 
-**plan readiness（提交前检查）**：
+**自动探测（`fleet quickstart` / `fleet join`）**：
+
+1. PATH 顺序固定：`hermes` → `dsh` → `opencode` → `claude`（kind=`claude-code`）；存在即声明对应 agent。
+2. OpenChamber 不探 PATH，只认本机 `MEBULAR_FLEET_OPENCHAMBER_*` env（endpoint/token/token file）。
+3. 都没有时回退 `echo`（demo）；Cursor/Claude Desktop 不在自动探测内，始终 dispatch-only。
+4. 探测只表示“本机声明存在该 CLI”，不代表 task E2E；`health()` 需要单独调用，`fleet doctor` 不逐 agent 跑 `--version`。
+
+**plan readiness（提交前检查，已实现）**：
 
 1. `plan.owner.device` 必须是提交者设备，`plan.owner.agent` 必须是提交者 Agent；跨设备代提交不在本期 scope。
 2. `planAgent`（`ctx.agent ?? config.defaultAgent ?? config.agents[0]?.name ?? "board"`）必须属于本机 `config.agents[].name`；否则返回 `PLAN_POLICY` + `PLAN_OWNER_UNEXECUTABLE`，**不创建 plan/root**（fail closed）。
-3. 生产 plan 的 owner 必须是**真实可执行 Agent**（上表“可执行/条件可执行”且条件满足）；`echo`/`board` 只用于 demo、测试与 CI，不作为生产 plan owner 或 MR 目标。测试可用 `echo` 作确定性 fake executor，但不得据此宣称生产可执行。
+3. 生产 plan 的 owner 必须是**真实可执行 Agent**：`isPlanOwnerExecutableAgent` 显式拒绝 `board`/`echo`（含 `kind=echo`）以及没有 `command` 的 `command`；`hermes`/`openchamber`/`dsh`/`opencode`/`claude-code` 按 kind 视为可执行。测试可用 `echo` 作确定性 fake executor，但不得据此宣称生产可执行。
 4. root plan 的 MR 目标固定为 `plan.owner` 的 `{device,agent}`，`dispatch="root-only"`。
-5. 每个 ready step 仍须通过 route 硬过滤（L1 授权、policy、能力、在线、容量）；无候选 → `NO_TARGET`/blocked，不建 task。
+5. 每个 ready step 仍须通过 route 硬过滤（L1 授权、policy、**executable**、**health**、能力、payload、在线、容量）；无候选 → `NO_TARGET`/blocked，不建 task。
+6. `fleet doctor` 的 `plan owner 就绪` 检查同一 readiness：有可执行 agent 为 PASS（占位 agent 会列出），只有占位/空 agents 为 WARN（不伪造真实 agent）；`defaultAgent` 指向不可执行 agent 为 FAIL。
 
-**入口**：`task_submit.plan` 提交、`task_status.plan` 查看进度与 `why/blockedBy`、`fleet doctor` 做设备/订阅/身份自检（**不替代** plan owner readiness）。**Console 不加 Fleet UI**；没有新的导航、页面、设置项或任务面板。
+**executable / health 语义**：
+
+- `executable` 由 config **静态推导**：`echo`/`board` 为 false，`command` 必须有 `command`，其余已实现 kind 为 true。它不代表 CLI 已安装。
+- 目录/能力卡把 `executable=false` 发布出去；route 见到显式 false 直接 `ADAPTER_UNAVAILABLE`。旧目录/旧卡缺字段按“未知”兼容。
+- `health` 是可选 advisory：CLI adapter 的 `health()` 用 `<command> --version`；OpenChamber 没有 probe，记 `degraded`。route 只在显式 `health.status="unavailable"` 时硬拒绝；`degraded`/未知不拒绝。
+- `fleet doctor` 不做逐 agent health 探测，也不会因 health 失败自动撤销卡片；不要把它写成“目录说能跑就一定跑得起来”。
+
+**入口**：`task_submit.plan` 提交、`task_status.plan` 查看进度与 `why/blockedBy`、`fleet doctor` 做设备/订阅/身份/readiness 自检。**Console 不加 Fleet UI**；没有新的导航、页面、设置项或任务面板。
 
 ## 2.6 一机一节点（W2）：统一守护 + fleet 客户端化
 
@@ -126,7 +144,7 @@ CLI 通用形参：`--input '<json>'`（字段与 MCP `arguments` 一致）+ `--
 - **M1**：协议与模型（envelope / 状态机 / 配额语义）+ `PROTOCOL-INVARIANTS.md` 矩阵 + 随机化 harness（含 oracle-free 扰动检查）。
 - **M2**：单机双进程最小可用（A 派活 → B 执行 → 结果回传）+ `scripts/verify-fleet-local.mjs`。
 - **M3**：真跨设备（真实 libp2p 传输，loopback 先验证）+ 订阅负例 + 时延统计 + 双机 runbook。
-- **M4（已交付）**：三种协作形态扩展 + 真实执行器适配（Hermes / OpenChamber）。其余 Agent（DSH/OpenCode/Claude Code/Cursor/Claude Desktop）的支持口径见 §2.5.3。
+- **M4（已交付）**：三种协作形态扩展 + 真实执行器适配（Hermes / OpenChamber）。0.3.2 追加 DSH headless / OpenCode / Claude Code adapter；Cursor/Claude Desktop 仍 dispatch-only。完整矩阵与真实 smoke 边界见 §2.5.3。
 
 ## 6. 夹具先行（fixture-first）
 

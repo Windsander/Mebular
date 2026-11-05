@@ -1,8 +1,8 @@
 # Mebular Fleet 黑盒任务编排 · 边界与契约 v1
 
-**状态**：v1.1 / P0 冻结稿 + CR-003（内部 app 端点白名单），2026-11-05
-**发布版本**：Fleet 任务编排计划随 Mebular **0.3.2** 发布；本文 v1.1 是 0.3.0 周期冻结的边界契约，历史结论与日期不改写。
-**阶段**：P0（只冻结边界与契约；不写生产代码）
+**状态**：v1.2 / 0.3.2 实现状态回填；v1.1 的 0.3.0 冻结内容与历史结论保留，2026-11-05
+**发布版本**：Fleet 任务编排随 Mebular **0.3.2** 发布；代码基线 `feat/fleet-orchestration` @ `b4ef1e8`（docs-only 提交不改变代码 SHA）。
+**阶段**：P0 边界仍冻结；P1–P6 已实现；0.3.2 追加统一 executor/adapter、DSH/OpenCode/Claude Code adapter、plan owner guard、agent readiness 与 executable routing。证据见 [`docs/quality/0.3.2-fleet-orchestration.md`](../quality/0.3.2-fleet-orchestration.md)。
 **上位计划**：《Mebular Fleet · 黑盒任务编排（本期）》（Chief 持有；未经 CR 不修改 step、scope、Gate）
 **协议夹具**：[`plan.example.json`](../../packages/fleet/protocol/plan.example.json)、[`card.example.json`](../../packages/fleet/protocol/card.example.json)
 **相关既有契约**：
@@ -188,7 +188,7 @@ plan 提交的约束：
 - `task_submit` 的旧必填字段 `intent` / `to` 仍保留。plan 提交时：
   - 调用者设备必须是 `plan.owner.device`；跨设备代提交不在本期 scope。
   - **所有 plan 的 owner = 提交该 plan 的调用设备/Agent**：root plan owner=A；sub-plan 由执行 step 的设备 B/C 提交，owner=B/C。`parent` 只做 provenance/policy 校验，不改变 owner。
-  - **plan owner 必须是真实可执行 Agent**：`planAgent`（`ctx.agent ?? defaultAgent ?? agents[0]?.name ?? "board"`）必须属于本机 `config.agents[].name`，否则 `PLAN_POLICY` + `PLAN_OWNER_UNEXECUTABLE`，不创建 plan/root。`echo`/`board` 只是 demo/测试（确定性 fake executor / 任务板占位），不作为生产 plan owner 或 MR 目标。
+  - **plan owner 必须是真实可执行 Agent**：`planAgent`（`ctx.agent ?? defaultAgent ?? agents[0]?.name ?? "board"`）必须属于本机 `config.agents[].name`，且通过 `isPlanOwnerExecutableAgent`；否则 `PLAN_POLICY` + `PLAN_OWNER_UNEXECUTABLE`，不创建 plan/root。`echo`/`board`（含 `kind=echo`）与没有 `command` 的 `command` 已被显式拒绝，不只是“文档约定”。`fleet doctor` 的 `plan owner 就绪` 会对只有占位的配置给 WARN，`defaultAgent` 不可执行则 FAIL。
   - `to` 必须是 `{ device: "__plan__", agent: "__plan__" }`（保留的设备/Agent sentinel；不是用户设备/执行器）。
   - `intent` 是 root task 的意图摘要；不得为空。
 - `__plan__` 是保留 device/agent sentinel；`fleet.config.json` 不得配置真实 device/agent 为 `__plan__`，否则配置校验失败。
@@ -355,10 +355,14 @@ metadata.internalObject.kind =
 | `provenance` | 是 | `source` / `configHash` / `registryHash` / `publishedAt` |
 | `signature` | 是 | `{ alg: "Ed25519", keyId, sig }`，设备签名 |
 | `tombstone` | 否 | `true` 表示该 agent 已移除；版本仍单调 |
+| `executable` | 否 | 布尔；由 config 静态推导。`false` 表示 demo/占位/缺命令，route 不得选中；旧卡缺字段按“未知”兼容 |
+| `executionMode` | 否 | `cli` / `http` / `json-rpc` / `in-process`；旧卡缺省 = 未知 |
+| `health` | 否 | advisory 快照 `{status: ok\|degraded\|unavailable, checkedAt?, latencyMs?, detail?}`；显式 `unavailable` 被 route 硬拒绝 |
 
 规则：
 
-- 不包含 command 路径、env、密钥、凭据、原始对话。远端 Agent 的 adapter 只在执行设备本地；Agent 目录只发布 `kind + capabilities + executable + executionMode`（0.3.2 目标字段；`concurrency/capacity` 仅建议性），**command/env/token 永不过网**。
+- 不包含 command 路径、env、密钥、凭据、原始对话。远端 Agent 的 adapter 只在执行设备本地；Agent 目录只发布 `kind + capabilities + executable(boolean) + executionMode`（`concurrency/capacity` 仅建议性），**command/env/token 永不过网**。`health` 不是目录字段；能力卡可选携带，`task_targets` 会合并进目标。
+- `executable` 是**静态可执行性**，不代表 CLI 已安装；`health` 才是探测快照。`fleet doctor` 不逐 agent 跑 `--version`，也不会因 health 失败自动撤销卡片。
 - `capabilities` 是硬过滤标签；不是授权本身，授权仍由 L1/peer/policy 决定。
 - 最新版本按 `(device, agent)` 解析；同版本平局取稳定序列化较大者（确定性）。
 - tombstone 是最后版本；不得在同一版本上原地修改；tombstone 后不得回退到更旧版本。
@@ -716,7 +720,7 @@ materializer 每轮只做以下事：
   "chosen": { "device": "device-B", "agent": "worker" },
   "why": {
     "code": "ASSIGNED",
-    "hardFilters": ["authorized", "policy", "capability", "payload", "online"],
+    "hardFilters": ["authorized", "policy", "executable", "health", "capability", "payload", "online", "capacity"],
     "ranking": [
       {
         "device": "device-B",
@@ -753,12 +757,15 @@ materializer 每轮只做以下事：
 | 1 | 候选集 | 有显式 `to` 时只考虑该目标；否则从授权 peer + 能力卡目录取候选 |
 | 2 | L1 授权 | 设备必须已订阅任务域/在白名单/信任链内；未授权直接拒绝 |
 | 3 | policy | `allowedDevices` / `allowedAgents` / `requireCapabilities`（`allowSubcontract` 不是候选属性，不参与 route 过滤） |
-| 4 | 能力卡 | `route.require` 的标签必须全部在卡片 `capabilities` 中；工具/限制必须兼容 |
-| 5 | payload 可达 | 目标必须能读取 `payloadRef` 所在 namespace；`permissions.taskNamespaces` 不含 → 拒绝 |
-| 6 | 在线/容量 | 自动路由排除离线；`inflight >= capacity` 排除；显式 `to` 离线/满载 → blocked，不改派 |
+| 4 | executable | 卡片显式 `executable=false` → `ADAPTER_UNAVAILABLE`；旧卡缺字段按未知放行 |
+| 5 | health | 卡片显式 `health.status="unavailable"` → `ADAPTER_UNAVAILABLE`；`degraded`/缺省不拒绝 |
+| 6 | 能力卡 | `route.require` 的标签必须全部在卡片 `capabilities` 中；工具/限制必须兼容 |
+| 7 | payload 可达 | 目标必须能读取 `payloadRef` 所在 namespace；`permissions.taskNamespaces` 不含 → 拒绝 |
+| 8 | 在线/容量 | 自动路由排除离线；`inflight >= capacity` 排除；显式 `to` 离线/满载 → blocked，不改派 |
 
 - 显式 `to` 也必须过硬过滤；不通过 → `NO_TARGET`（`EXPLICIT_OFFLINE` / `AT_CAPACITY` 等）+ step blocked，**不得**自动改派。
 - 无能力/未授权是硬拒绝，不是降权。
+- `executable`/`health` 是 0.3.2 新增硬门槛：只有**显式** `false`/`unavailable` 才拒绝；旧卡缺字段或 `degraded` 不拒绝。`executable` 由 config 静态推导，不代表 CLI 已安装。
 - 角色卡永远不参与硬过滤/授权。
 - `NO_TARGET` 不创建 task；step 为 blocked；下一轮环境变化后重新评估。
 
@@ -1050,8 +1057,8 @@ E-<gate>-<n>
 
 | 对象 | 版本 | 规则 |
 |---|---|---|
-| 产品发布 | `0.3.2`（目标） | Fleet 任务编排随该版本发布；0.3.0 周期的证据文件保留原名与历史结论 |
-| 本契约 | `v1.1` | P0 冻结 + CR-003；修改走 CR + 新 minor；不改变 scope |
+| 产品发布 | `0.3.2` | Fleet 任务编排随该版本发布；0.3.0 周期的证据文件保留原名与历史结论 |
+| 本契约 | `v1.2` | v1.1 的 P0 冻结 + CR-003 保留；v1.2 只回填 0.3.2 实现状态；修改走 CR + 新 minor；不改变 scope |
 | plan 记录 | `v=1` | 记录 schema 版本；不兼容变更走 CR |
 | plan 版本 | `version` | 同一 planId 单调；不可变；旧版本保留 |
 | 能力卡 | `v=1`，`version` | 按 `(device, agent, kind)` 单调；签名；tombstone |
@@ -1161,6 +1168,8 @@ E-<gate>-<n>
 ---
 
 ## 13. P1–P7 Gate checklist
+
+> **0.3.2 实现状态**：P1–P6 的 Gate 项已在 `feat/fleet-orchestration` @ `b4ef1e8` 落地并复跑；下方 checklist 保留冻结时的验收项原文，不把历史勾选回填成新证据。DSH/Claude 真实任务 smoke 与真实 3+ 节点 plan E2E 仍见 §15 / 新质量报告中的边界说明。
 
 ### G0（P0，本文档）
 

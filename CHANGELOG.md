@@ -25,11 +25,15 @@ stay inside Fleet; the human Console and the 16 task methods keep their existing
 
 - **Capability cards** — device-signed `agent_capability_card` internal nodes compiled from fleet config, executor registry and runtime, with tombstone/version monotonicity and an internal daemon write/read path (`/app/capability-cards`, `/app/nodes`).
 - **Plan + materializer** — immutable, versioned `task_plan` internal nodes, deterministic root/step task IDs, DAG validation, idempotent materialization, restart recovery, and `task_status.plan` progress without new MCP methods or UI.
-- **Route + policy + why** — hard filters (authorization, policy, capability, payload, online, capacity), deterministic rendezvous tie-break, `NO_TARGET`/`blockedBy`, assign-only behavior, and an additive assigned-step route audit in `task_status.plan`.
+- **Route + policy + why** — hard filters (authorization, policy, executable, health, capability, payload, online, capacity), deterministic rendezvous tie-break, `NO_TARGET`/`blockedBy`, assign-only behavior, and an additive assigned-step route audit in `task_status.plan`.
 - **Join + MR gate** — `join.mode="all"` only, subtree/acceptance completion, exactly one MR per root plan, v2 retry with explicit `reuse`, plan/step cancel cascades, and `PLAN_RETRY_REQUIRED` for plan-owned tasks.
 - **Role cards (shadow)** — rule-first `agent_role_card` internal nodes with safety-tag allowlists, confidence/evidence refs, default shadow mode, and optional enabled soft ordering that never authorizes or hard-filters.
 - **Daemon internal verified-card read path** — `GET /app/peers` exposes only sync-authenticated online peer public keys, so a daemon coordinator can verify remote capability-card signatures; old daemons keep the previous fail-closed behavior.
 - **P6 acceptance script** — `npm run verify:fleet:p6` runs a five-node embedded loopback plan E2E (branches → join → pre-MR → MR → root) plus dual-daemon card sync/plan collaboration, with fault injection for duplicate delivery, restart, cancel and v2 retry.
+- **Unified Fleet executor/adapter layer** — `BaseExecutor` + `ExecutorAdapter` now own concurrency, timeout/AbortSignal, env allowlist, output truncation, error normalization and optional health; `CommandAgent`, Hermes and OpenChamber use the same layer, and unknown agents still fail closed.
+- **DSH, OpenCode and Claude Code adapters** — `DshHeadlessAgent` (`dsh --profile headless`, stdin by default), `OpenCodeAgent` (`opencode run`) and `ClaudeCodeAgent` (`claude -p`), each with argv/stdin prompt modes and a non-sensitive `<command> --version` health probe.
+- **Agent auto-detection** — `fleet quickstart` / `fleet join` probe PATH in a fixed order (`hermes` → `dsh` → `opencode` → `claude`) and OpenChamber via `MEBULAR_FLEET_OPENCHAMBER_*`, falling back to `echo` only when nothing is found. Cursor and Claude Desktop are never auto-detected and remain dispatch-only.
+- **Executable routing metadata** — Agent directories, capability cards, `task_targets`, and route hard filters now expose `executable` (boolean), `executionMode` (`cli|http|json-rpc|in-process`) and optional advisory `health`; explicit `executable=false` or `health.status="unavailable"` is rejected, while legacy records missing these fields stay compatible.
 
 ### Security and reliability
 
@@ -38,11 +42,18 @@ stay inside Fleet; the human Console and the 16 task methods keep their existing
 - **MR/cancel semantics hardened** — pending MR cancel is covered, terminal MRs are never withdrawn, and concurrent materializers converge on one logical MR via deterministic event IDs.
 - **No new human UI or MCP methods** — navigation/pages/settings are unchanged; plan/card/role stay out of memory lists, domain counts, search and the star-map fleet SSE.
 
+### Changed
+
+- **`CommandAgent` prompt defaults** — a command agent now appends the prompt as the final argv element by default (`promptMode: "arg"`); `promptArgs` is treated as fixed arguments inserted before the prompt, and `promptMode: "stdin"` writes the prompt to stdin. The legacy function form of `promptArgs` still returns the full argument list. There is no `{prompt}` placeholder substitution and no config-level `env` field.
+- **Plan owner/MR readiness** — `isPlanOwnerExecutableAgent` is now enforced before writing any plan/root: `echo`, `board` (including `kind=echo`) and a `command` agent without a command are rejected with `PLAN_POLICY` + `PLAN_OWNER_UNEXECUTABLE`. `fleet doctor` reports `plan owner 就绪` (WARN when only placeholders) and FAILs a `defaultAgent` that points at an unexecutable agent. Doctor readiness is static config validation; it does not run per-agent `--version` health probes.
+- **Adapter health semantics** — `executable` is a static derivation from config/kind (not proof that a CLI is installed). `health` is an optional advisory snapshot; only an explicit `unavailable` is a route hard filter, and capability cards are not withdrawn automatically when a probe fails. OpenChamber has no health probe and is reported as `degraded`.
+
 ### Fixed
 
 - **Stats count semantics** — `stats.count` now excludes internal objects, `memoryRecords` counts only known memory node types, and `internalObjects`/`internalKinds` expose internal-object totals separately.
-- **Default MCP plan owner** — `task_submit.plan` now uses a plan-specific agent (`ctx.agent` / `config.defaultAgent` / first configured agent) for the default `board` placeholder owner, so the owner and MR executor are actually runnable. The final `planAgent` must be a real `config.agents[].name`; `defaultAgent` is validated against the agent list. Empty/ghost agent configurations fail closed with `PLAN_POLICY` + `PLAN_OWNER_UNEXECUTABLE` before writing plan/root. Ordinary task defaults remain `board`.
+- **Default MCP plan owner** — `task_submit.plan` now uses a plan-specific agent (`ctx.agent` / `config.defaultAgent` / first configured agent) for the default `board` placeholder owner, so the owner and MR executor are actually runnable. The final `planAgent` must be a real `config.agents[].name`; `defaultAgent` is validated against the agent list. Empty/ghost agent configurations fail closed with `PLAN_POLICY` + `PLAN_OWNER_UNEXECUTABLE` before writing plan/root; the same guard rejects `echo`/`board` and a `command` agent without a command as owner/MR. Ordinary task defaults remain `board`.
 - **CR-003 internal endpoint whitelist** — the approved internal app endpoints (`/app/nodes`, `/app/capability-cards`, `/app/plans`, `/app/role-cards`, `/app/peers`) are documented as the only allowed internal HTTP surface; no public MCP/UI/TaskEvent changes. Capability-card writes now honor `writesEnabled` and reject non-object bodies; card runtime/provenance source are restricted to safe tokens.
+- **`/app/nodes` internal-object guard** — the raw debug write path now rejects `metadata.internal=true`, `agent_capability_card`, `agent_role_card` and `task_plan` with `403 internal_object_write_forbidden`; internal objects must use their dedicated endpoint. `GET /app/nodes` still omits role-card originals.
 
 ### Verification
 
@@ -50,6 +61,7 @@ stay inside Fleet; the human Console and the 16 task methods keep their existing
 
 ### Notes
 
+- **Real host smoke remains open** — DSH and Claude Code are not installed on the evidence machine, so their adapters have fake-CLI tests only; OpenCode has its real `opencode v2.0.29` `--version` health verified but no real `opencode run` task smoke. Fake CLI tests are not real host E2E and must not be reported as such.
 - **P6 real-network scope** — the five-node P6 E2E uses in-process `InMemoryHub` loopback plus a deterministic event bridge to isolate orchestration from anti-entropy scheduling. Real libp2p evidence remains limited to `verify:fleet:tasks` (two nodes) and `verify:daemon:cluster` (dual daemon, two nodes); `routing-e2e` also uses embedded loopback and is not counted as real-libp2p evidence. This release does not claim a real three-plus-node plan E2E or five-node real-WAN performance.
 
 ## [v0.3.0] - 2026-10-30

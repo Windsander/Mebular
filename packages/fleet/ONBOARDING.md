@@ -61,14 +61,19 @@ fleet doctor --dir ~/.mebular --json
 | `对端订阅` | 对端是否已声明订阅（未订阅不算失败，等待即可） |
 | `移出状态` | 本机/对端是否被移出 |
 | `peer 可达` | 地址簿中的对端是否可达 |
+| `plan owner 就绪` | 本机是否有真实可执行 agent；只有 `echo`/`board` 时 WARN |
+| `defaultAgent` | 若配置，必须指向真实可执行 agent，否则 FAIL |
+
+> `fleet doctor` 不逐 agent 执行 `--version` health；adapter 的 `health()` 是 advisory，需要时单独调用 `ExecutorRegistry.healthOf()`。
 
 ## 5.1 执行方准备（派发 ≠ 执行）
 
 - 上车只解决**信任、订阅与派发**；能否在本机执行任务取决于**执行设备本地**是否装了真实 Agent 适配器。
-- 可执行口径：**Hermes** 可执行；**OpenChamber** 仅在 oc-hermes-bridge 在线时可执行，无桥只能 dispatch-only；**DSH v1** 用官方 `dsh --profile headless "<job>"` 作为执行宿主（`dsh --profile sdk` 是 v2；`@mebular/dsh-plugin` 是 Web/记忆桥，不是 Fleet executor）；**OpenCode**（`opencode run`）与 **Claude Code**（`claude -p`）待 adapter；**Cursor** 仅在有 `cursor-agent` 时可执行，否则 dispatch-only；**Claude Desktop** 只能 dispatch-only。
+- **自动探测**：`fleet quickstart` / `fleet join` 按 PATH `hermes → dsh → opencode → claude` 声明 agent（`claude` 的 kind 是 `claude-code`）；OpenChamber 只认 `MEBULAR_FLEET_OPENCHAMBER_*` env；都没有才回退 `echo`。Cursor/Claude Desktop 不在探测内，始终 dispatch-only。
+- 可执行口径：**Hermes** 已实现；**OpenChamber** 仅在 oc-hermes-bridge 在线时可执行（无桥 dispatch-only；无 `health()`，`supportsCancel=false`）；**DSH v1** 已实现 `dsh --profile headless`（默认 stdin；`dsh --profile sdk` 是 v2；本机未装 dsh，真实任务 smoke 待补；`@mebular/dsh-plugin` 是 Web/记忆桥，不是 Fleet executor）；**OpenCode** 已实现 `opencode run`（本机 v2.0.29 health 已验证，真实 run smoke 待补）；**Claude Code** 已实现 `claude -p`（本机未装 claude，只有 fake CLI 测试）；**Cursor** 无 kind/adapter，dispatch-only；**Claude Desktop** 只能 dispatch-only。
 - `echo` / `board` 是 demo/测试用：`echo` 是确定性 fake executor，`board` 是任务板占位；生产 plan 的 **owner 与 MR 目标必须是真实可执行 Agent**。
-- plan 提交前自检：`planAgent` 必须在 `config.agents[].name` 中，否则 `PLAN_POLICY` + `PLAN_OWNER_UNEXECUTABLE`，不会创建 plan/root。完整矩阵与 readiness 见 [`DESIGN.md`](DESIGN.md) §2.5.3。
-- 远端 Agent 的 adapter 只在执行设备本地；目录只发布 `kind + capabilities + executable + executionMode`（0.3.2 目标口径），command/env/token 永不过网。
+- plan 提交前自检：`planAgent` 必须在 `config.agents[].name` 中，且不能是 `echo`/`board`/无 `command` 的 `command`，否则 `PLAN_POLICY` + `PLAN_OWNER_UNEXECUTABLE`，不会创建 plan/root。完整矩阵与 readiness 见 [`DESIGN.md`](DESIGN.md) §2.5.3。
+- 远端 Agent 的 adapter 只在执行设备本地；目录只发布 `kind + capabilities + executable(boolean) + executionMode`，command/env/token 永不过网；`health` 只随能力卡作为 advisory 传播。
 
 ## 6. 命令边界
 

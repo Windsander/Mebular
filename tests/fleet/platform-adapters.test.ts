@@ -7,6 +7,7 @@
 // - registry 映射到正确 executor/descriptor，能力卡只暴露安全数值。
 
 import { describe, it, expect } from '@jest/globals';
+import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -19,6 +20,7 @@ import {
   validateFleetConfig,
   type TaskState,
 } from '../../packages/fleet/src/index.js';
+import { probeCliVersion } from '../../packages/fleet/src/runtime/platform-cli.js';
 import { mkEvent } from './helpers.js';
 import { useHeavyTimeout } from '../helpers/timeouts.js';
 
@@ -205,5 +207,53 @@ describe('config / registry / capability card：kind 扩展', () => {
     const serialized = JSON.stringify(cards);
     expect(serialized).not.toContain('"command"');
     expect(serialized).not.toContain('"env"');
+  });
+});
+
+describe('platform CLI health probe', () => {
+  // Windows 不能直接执行无扩展名的 shebang 脚本；覆盖率门禁只在 Linux 跑。
+  async function script(body: string): Promise<{ dir: string; path: string }> {
+    const dir = await mkdtemp(join(tmpdir(), 'fleet-probe-'));
+    const path = join(dir, 'probe');
+    await writeFile(path, `#!/usr/bin/env node\n${body}\n`);
+    await chmod(path, 0o755);
+    return { dir, path };
+  }
+
+  it('成功时仅返回首行版本', async () => {
+    if (process.platform === 'win32') return;
+    const { dir, path } = await script("process.stdout.write('fake-platform-cli 1.0.0\\nextra line\\n');");
+    try {
+      const health = await probeCliVersion(path, 2_000);
+      expect(health.status).toBe('ok');
+      expect(health.detail).toContain('fake-platform-cli 1.0.0');
+      expect(health.detail).not.toContain('extra line');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('非 0 退出时返回 exited <code>', async () => {
+    if (process.platform === 'win32') return;
+    const { dir, path } = await script('process.exit(7);');
+    try {
+      const health = await probeCliVersion(path, 500);
+      expect(health.status).toBe('unavailable');
+      expect(health.detail).toContain('exited 7');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('超时返回 timed out，不拼接 stderr', async () => {
+    if (process.platform === 'win32') return;
+    const { dir, path } = await script('setTimeout(() => process.exit(0), 5000);');
+    try {
+      const health = await probeCliVersion(path, 300);
+      expect(health.status).toBe('unavailable');
+      expect(health.detail).toContain('timed out after 300ms');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

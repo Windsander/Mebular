@@ -1,0 +1,80 @@
+{
+  "schema": 1,
+  "mode": "real-model-smoke",
+  "startedAt": "2026-11-05T10:16:00.115Z",
+  "outcome": "failed",
+  "environment": {
+    "platform": "darwin",
+    "arch": "x64",
+    "node": "v26.8.1",
+    "osRelease": "24.6.0",
+    "cpuModel": "Intel(R) Core(TM) i7-8850H CPU @ 2.60GHz",
+    "cpuCores": 12,
+    "totalMemoryBytes": 34359738368,
+    "freeMemoryBytes": 1337536512
+  },
+  "config": {
+    "packId": "qwen3-4b-instruct-q4_k_m",
+    "modelId": "qwen3-4b-instruct",
+    "quantization": "Q4_K_M",
+    "contextLength": 32768,
+    "modelFile": "Qwen3-4B-Q4_K_M.gguf",
+    "modelSha256": "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
+    "modelSizeBytes": 2497280256,
+    "engineRelease": "b12017",
+    "engineAsset": "llama-b12017-bin-macos-x64.tar.gz",
+    "engineSha256": "f51371545526a8655f30bdf2e2f157d00d7ed9bddf1939106b09ac76148e59e5",
+    "engineSizeBytes": 12248734,
+    "localTimeoutMs": 600000,
+    "localStartupTimeoutMs": 600000,
+    "threads": 4
+  },
+  "engine": {
+    "installerOk": true,
+    "version": "version: 0.8.0-dev (build 12017, commit 5047748f1)\nbuilt with AppleClang 17.0.0.17000013 for Darwin x86_64",
+    "downloadAttempts": 1,
+    "error": null,
+    "downloadMs": 145559,
+    "verifyMs": 38,
+    "extractMs": 186,
+    "installMs": 145819
+  },
+  "model": {
+    "ok": false,
+    "transport": "node-https",
+    "error": {
+      "stage": "model.download",
+      "code": "download_failed",
+      "detail": "download request failed: AggregateError"
+    },
+    "downloadMs": 230605
+  },
+  "inference": {
+    "probe": null,
+    "extract": null,
+    "summarize": null,
+    "planQuery": null,
+    "status": null
+  },
+  "phases": [
+    {
+      "name": "engine.install",
+      "ok": true,
+      "durationMs": 145819
+    },
+    {
+      "name": "model.download",
+      "ok": false,
+      "durationMs": 230605,
+      "errorCode": "download_failed",
+      "detail": "download request failed: AggregateError"
+    }
+  ],
+  "cleanup": {
+    "kept": false
+  },
+  "durationMs": 380427,
+  "failureStage": "model.download",
+  "failureCode": "download_failed",
+  "failureDetail": "download request failed: AggregateError"
+}

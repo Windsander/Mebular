@@ -214,8 +214,11 @@ describe('fleet runner plugin', () => {
       expect(typeof discovery.version).toBe('string');
       expect(typeof discovery.startedAt).toBe('number');
       expect(typeof discovery.updatedAt).toBe('number');
-      expect((await stat(discoveryFile)).mode & 0o777).toBe(0o600);
-      expect((await stat(join(directory, 'home'))).mode & 0o777).toBe(0o700);
+      if (process.platform !== 'win32') {
+        // Windows 不保留 POSIX 文件/目录权限位；该断言只在 Unix 上有意义。
+        expect((await stat(discoveryFile)).mode & 0o777).toBe(0o600);
+        expect((await stat(join(directory, 'home'))).mode & 0o777).toBe(0o700);
+      }
 
       const health = await request(handle.port, '/health');
       expect(health.status).toBe(200);

@@ -1968,6 +1968,9 @@ export function createMemoryCapabilityHandler({
   let revoked = false;
   let tokenGeneration = 0;
   let activeRequests = 0;
+  // 同一 composite key 的在途单飞：并发同键请求共享一次 execute，避免超时重试
+  // 与原请求各写一份。条目随主请求 promise 结算在 finally 清理。
+  const idempotencyInFlight = new Map();
   const activeWaiters = new Set();
   let draining = false;
   let closePromise = null;
@@ -2499,91 +2502,116 @@ export function createMemoryCapabilityHandler({
     async function withIdempotency(route, payload, tokenId, execute) {
       const key = idempotencyKeyOf(req, payload);
       if (key === null) return execute();
-      const state = await ledgerState();
       const composite = `${tokenId ?? 'none'}\u0000${route}\u0000${key}`;
       const requestHash = sha256Hex(canonicalJson(payload));
-      let existing = state.get(composite);
-      if (existing && (typeof existing.at !== 'number' || existing.at <= now() - IDEMPOTENCY_TTL_MS)) {
-        state.delete(composite);
-        existing = null;
-      }
-      if (existing) {
-        if (existing.requestHash !== requestHash) {
+
+      const joinFlight = (flight) => {
+        if (flight.requestHash !== requestHash) {
           throw new CapabilityError(409, 'idempotency_conflict', '同一幂等键对应了不同请求体', {
             key,
             route,
           });
         }
-        return {
-          data: { ...jsonClone(existing.data), replayed: true },
-          warnings: jsonClone(existing.warnings ?? []),
-          degraded: existing.degraded === true,
-        };
-      }
-      const result = await execute();
-      // 空/缺项/部分响应不进入幂等缓存：同一 outbox 键必须能重新执行未确认项。
-      // 已成功项仍由 clientItemId/contentHash 去重，不会重复写。
-      if ((route === 'write' || route === 'detail:write') && Array.isArray(payload.items)) {
-        const results = result?.data?.results;
-        const expectedIds = payload.items.map((item) => item?.clientItemId).filter((id) => typeof id === 'string');
-        const actualIds = Array.isArray(results)
-          ? results.map((entry) => entry?.clientItemId).filter((id) => typeof id === 'string')
-          : [];
-        const allHaveClientItemIds = expectedIds.length === payload.items.length;
-        const hasUnexpected = allHaveClientItemIds && actualIds.some((id) => !expectedIds.includes(id));
-        const hasMissing = allHaveClientItemIds && expectedIds.some((id) => !actualIds.includes(id));
-        const hasFailedResult = Array.isArray(results) && results.some((entry) =>
-          entry?.status !== 'created' && entry?.status !== 'duplicate');
-        // 成功状态也必须带可重放的权威字段；malformed 成功响应不得进入永久账本。
-        const hasMalformedSuccess = Array.isArray(results) && results.some((entry) => {
-          if (!isObject(entry) || (entry.status !== 'created' && entry.status !== 'duplicate')) return false;
-          if (typeof entry.id !== 'string' || entry.id.trim().length === 0) return true;
-          if ((route === 'write' || route === 'detail:write')
-            && (typeof entry.domain !== 'string' || entry.domain.trim().length === 0)) return true;
-          if (route === 'detail:write'
-            && (typeof entry.detailKind !== 'string' || entry.detailKind.trim().length === 0)) return true;
-          return false;
-        });
-        if (result?.data?.partial === true
-          || (typeof result?.data?.failed === 'number' && result.data.failed > 0)
-          || !Array.isArray(results)
-          || results.length !== payload.items.length
-          || hasUnexpected
-          || hasMissing
-          || hasFailedResult
-          || hasMalformedSuccess) {
-          return result;
-        }
-      }
-      const entry = {
-        key: composite,
-        requestHash,
-        at: now(),
-        data: jsonClone({ ...(result.data ?? {}), replayed: false }),
-        warnings: jsonClone(result.warnings ?? []),
-        degraded: result.degraded === true,
+        // 等待同一在途执行，返回等价的深拷贝，避免两个响应共享可变对象。
+        return flight.promise.then((result) => jsonClone(result));
       };
-      // LRU：同键刷新到队尾。
-      state.delete(composite);
-      state.set(composite, sanitizeLedgerEntry(entry));
-      const cutoff = now() - IDEMPOTENCY_TTL_MS;
-      for (const [entryKey, value] of state) {
-        if (typeof value.at !== 'number' || value.at <= cutoff) state.delete(entryKey);
-      }
-      while (state.size > IDEMPOTENCY_MAX_ENTRIES) {
-        const oldest = state.keys().next().value;
-        if (oldest === undefined) break;
-        state.delete(oldest);
-      }
+
+      const inFlight = idempotencyInFlight.get(composite);
+      if (inFlight) return joinFlight(inFlight);
+
+      const flight = { requestHash, promise: null };
+      flight.promise = (async () => {
+        const state = await ledgerState();
+        let existing = state.get(composite);
+        if (existing && (typeof existing.at !== 'number' || existing.at <= now() - IDEMPOTENCY_TTL_MS)) {
+          state.delete(composite);
+          existing = null;
+        }
+        if (existing) {
+          if (existing.requestHash !== requestHash) {
+            throw new CapabilityError(409, 'idempotency_conflict', '同一幂等键对应了不同请求体', {
+              key,
+              route,
+            });
+          }
+          return {
+            data: { ...jsonClone(existing.data), replayed: true },
+            warnings: jsonClone(existing.warnings ?? []),
+            degraded: existing.degraded === true,
+          };
+        }
+        const result = await execute();
+        // 空/缺项/部分响应不进入幂等缓存：同一 outbox 键必须能重新执行未确认项。
+        // 已成功项仍由 clientItemId/contentHash 去重，不会重复写。
+        if ((route === 'write' || route === 'detail:write') && Array.isArray(payload.items)) {
+          const results = result?.data?.results;
+          const expectedIds = payload.items.map((item) => item?.clientItemId).filter((id) => typeof id === 'string');
+          const actualIds = Array.isArray(results)
+            ? results.map((entry) => entry?.clientItemId).filter((id) => typeof id === 'string')
+            : [];
+          const allHaveClientItemIds = expectedIds.length === payload.items.length;
+          const hasUnexpected = allHaveClientItemIds && actualIds.some((id) => !expectedIds.includes(id));
+          const hasMissing = allHaveClientItemIds && expectedIds.some((id) => !actualIds.includes(id));
+          const hasFailedResult = Array.isArray(results) && results.some((entry) =>
+            entry?.status !== 'created' && entry?.status !== 'duplicate');
+          // 成功状态也必须带可重放的权威字段；malformed 成功响应不得进入永久账本。
+          const hasMalformedSuccess = Array.isArray(results) && results.some((entry) => {
+            if (!isObject(entry) || (entry.status !== 'created' && entry.status !== 'duplicate')) return false;
+            if (typeof entry.id !== 'string' || entry.id.trim().length === 0) return true;
+            if ((route === 'write' || route === 'detail:write')
+              && (typeof entry.domain !== 'string' || entry.domain.trim().length === 0)) return true;
+            if (route === 'detail:write'
+              && (typeof entry.detailKind !== 'string' || entry.detailKind.trim().length === 0)) return true;
+            return false;
+          });
+          if (result?.data?.partial === true
+            || (typeof result?.data?.failed === 'number' && result.data.failed > 0)
+            || !Array.isArray(results)
+            || results.length !== payload.items.length
+            || hasUnexpected
+            || hasMissing
+            || hasFailedResult
+            || hasMalformedSuccess) {
+            return result;
+          }
+        }
+        const entry = {
+          key: composite,
+          requestHash,
+          at: now(),
+          data: jsonClone({ ...(result.data ?? {}), replayed: false }),
+          warnings: jsonClone(result.warnings ?? []),
+          degraded: result.degraded === true,
+        };
+        // LRU：同键刷新到队尾。
+        state.delete(composite);
+        state.set(composite, sanitizeLedgerEntry(entry));
+        const cutoff = now() - IDEMPOTENCY_TTL_MS;
+        for (const [entryKey, value] of state) {
+          if (typeof value.at !== 'number' || value.at <= cutoff) state.delete(entryKey);
+        }
+        while (state.size > IDEMPOTENCY_MAX_ENTRIES) {
+          const oldest = state.keys().next().value;
+          if (oldest === undefined) break;
+          state.delete(oldest);
+        }
+        try {
+          await saveLedger(state);
+        } catch {
+          result.warnings = [
+            ...(result.warnings ?? []),
+            { code: 'idempotency_ledger_unavailable', message: '幂等账本写入失败；仍可依赖内容 hash 防重' },
+          ];
+        }
+        return result;
+      })();
+      idempotencyInFlight.set(composite, flight);
       try {
-        await saveLedger(state);
-      } catch {
-        result.warnings = [
-          ...(result.warnings ?? []),
-          { code: 'idempotency_ledger_unavailable', message: '幂等账本写入失败；仍可依赖内容 hash 防重' },
-        ];
+        return await flight.promise;
+      } finally {
+        // 只清理自己的条目；主请求失败时也要释放，后续同键请求可重试。
+        if (idempotencyInFlight.get(composite) === flight) idempotencyInFlight.delete(composite);
       }
-      return result;
     }
 
     // ---------- /write ----------

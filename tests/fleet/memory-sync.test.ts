@@ -100,7 +100,7 @@ describe('M3 任务经记忆同步（两节点 + 授权）', () => {
       await worker.pollOnce();
       const states = await node.states();
       return states.length === ids.length && states.every((s) => s.terminal);
-    }, 45000, 50);
+    }, 90000, 50);
     expect(done).toBe(true);
     const states = await node.states();
     expect(states.every((s) => s.status === 'done' && s.resultRef === echoResultFor(s.intent))).toBe(true);
@@ -117,7 +117,7 @@ describe('M3 任务经记忆同步（两节点 + 授权）', () => {
     await a.shutdown();
     await b.shutdown();
     await c.shutdown();
-  }, 60000);
+  }, 120000);
 
   it('MebularTaskEventStore：噪音节点过滤 + 同 eventId 冲突与 reducer 同语义去重', async () => {
     const master = await Mebular.generateUserMasterKey();

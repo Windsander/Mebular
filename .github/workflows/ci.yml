@@ -169,7 +169,7 @@ jobs:
   windows:
     name: windows build / test / lint (fleet local + onboard)
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -190,7 +190,10 @@ jobs:
         run: npm run lint
 
       - name: Test
-        run: npm test
+        # Windows shared runners consistently flake when the full suite runs in
+        # parallel (sidecar startup timeouts, 503s and temp-file cleanup races).
+        # Serial execution matches the deterministic local release gate.
+        run: npm test -- --runInBand
 
       # Windows 上不跑真 mDNS：mDNS 在多播受限的 runner 上不稳定，且 C3 的行为由 ubuntu 的
       # 确定式 harness（注入假 bonjour，`npm run verify:lan`）覆盖；此处只跑构建/单测/local/onboard。

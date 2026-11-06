@@ -90,11 +90,12 @@ function envFor(home, extra = {}) {
   };
 }
 
-async function fakeHealthServer({ pid = process.pid, profileId = 'default', cloudId = null, mode = 'immersive', state = 'ready', ready = true } = {}) {
-  const server = createServer((req, res) => {
+async function fakeHealthServer({ pid = process.pid, profileId = 'default', cloudId = null, mode = 'immersive', state = 'ready', ready = true, delayMs = 0 } = {}) {
+  const server = createServer(async (req, res) => {
     res.statusCode = 200;
     res.setHeader('content-type', 'application/json');
     if (req.url?.endsWith('/health')) {
+      if (delayMs > 0) await new Promise((resolvePromise) => setTimeout(resolvePromise, delayMs));
       res.end(JSON.stringify({
         ok: true,
         state,
@@ -396,6 +397,25 @@ describe('MemoryRuntimeSupervisor：生命周期', () => {
     expect(calls.some((call) => call.url.endsWith('/status'))).toBe(false);
     expect(calls.every((call) => !call.init?.authorization)).toBe(true);
   });
+
+  it('health 延迟 300ms 不把本地 sidecar 误判为不可用，feedback 仍走 200', async () => {
+    const home = await tempDir();
+    await writeHostToken(home, 'host-token-slow-health');
+    const port = await fakeHealthServer({ delayMs: 300 });
+    await writeDiscovery(home, { port });
+    const supervisor = new MemoryRuntimeSupervisor({
+      home,
+      config: enabledConfig(),
+      env: envFor(home),
+      profileId: () => 'default',
+    });
+    cleanups.push(() => supervisor.dispose());
+
+    // The old 200ms probe would time out here and make the next proxy request 503.
+    expect(await supervisor.status()).toMatchObject({ state: 'ready', available: true });
+    const feedback = await supervisor.submitRecallFeedback('tr_slow_health', { useful: true });
+    expect(feedback.statusCode).toBe(200);
+  }, 10000);
 
   it('stale discovery 的 dormant probe 不发送 HTTP，禁用保持 incomplete', async () => {
     const home = await tempDir();

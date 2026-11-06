@@ -40,6 +40,7 @@ import {
 } from '../../../scripts/lib/e2e-process.mjs';
 import { requestSidecar, sidecarTokenFromFile, startRealRuntime } from './lib/real-runtime.mjs';
 import { createRuntimeTap } from './lib/runtime-tap.mjs';
+import { createCapabilityFaultProxy } from './lib/capability-fault-proxy.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..', '..', '..');
@@ -94,7 +95,7 @@ async function ensurePnpm() {
 }
 
 function parseArgs(argv) {
-  const options = { scenarios: [], dshVersion: null, keep: false };
+  const options = { scenarios: [], dshVersion: null, keep: false, pluginTarball: null, probeTarball: null };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--keep') {
@@ -111,13 +112,25 @@ function parseArgs(argv) {
       index += 1;
     } else if (arg.startsWith('--dsh-version=')) {
       options.dshVersion = arg.slice('--dsh-version='.length);
+    } else if (arg === '--plugin-tarball') {
+      options.pluginTarball = argv[index + 1] ?? null;
+      index += 1;
+    } else if (arg.startsWith('--plugin-tarball=')) {
+      options.pluginTarball = arg.slice('--plugin-tarball='.length);
+    } else if (arg === '--probe-tarball') {
+      options.probeTarball = argv[index + 1] ?? null;
+      index += 1;
+    } else if (arg.startsWith('--probe-tarball=')) {
+      options.probeTarball = arg.slice('--probe-tarball='.length);
     } else {
       throw new Error(`未知参数：${arg}`);
     }
   }
-  if (options.scenarios.length === 0) options.scenarios = ['auto-discovery', 'no-discovery', 'fail-open'];
+  if (options.scenarios.length === 0) {
+    options.scenarios = ['auto-discovery', 'no-discovery', 'fail-open', 'faults'];
+  }
   for (const name of options.scenarios) {
-    if (!['auto-discovery', 'no-discovery', 'fail-open'].includes(name)) {
+    if (!['auto-discovery', 'no-discovery', 'fail-open', 'faults'].includes(name)) {
       throw new Error(`未知场景 ${name}`);
     }
   }
@@ -139,6 +152,15 @@ function memoryPatch({ daemonUrl, mode }) {
     '      ingestFlushMs: 0',
     '      ingestRetryBaseMs: 50',
     '      ingestRetries: 2',
+    ...(mode === 'faults' ? [
+      '      recall: false',
+      '      ingest: true',
+      '      checkpoints: true',
+      '      hideMemoryTools: true',
+      '      checkpointTimeoutMs: 1000',
+      '      checkpointRetryBaseMs: 50',
+      '      checkpointRetries: 2',
+    ] : []),
     '',
   ].join('\n');
 }
@@ -152,7 +174,7 @@ async function waitFor(predicate, { timeoutMs = 15000, intervalMs = 100, describ
   return result.ok;
 }
 
-async function startSidecar(runtimeRoot) {
+async function startSidecar(runtimeRoot, { proxy = null } = {}) {
   const home = join(runtimeRoot, 'mebular-home');
   await mkdir(join(home, 'memory-runtime'), { recursive: true });
   await writeFile(join(home, 'memory-runtime', 'config.json'), JSON.stringify({
@@ -168,7 +190,9 @@ async function startSidecar(runtimeRoot) {
     root: runtimeRoot,
     memoryRuntime: { enabled: true },
     manageMemoryRuntime: true,
+    writesEnabled: true,
   });
+  proxy?.setTarget(runtime.url);
   const discovery = await runtime.waitForSidecar();
   return { runtime, discovery };
 }
@@ -363,8 +387,9 @@ async function assertEnabled({ runtime, tap, probe, seedToken, detailText, hostT
 
   const requests = sidecarRequestsFromTap(tap);
   check('自动 discovery 收到请求（host 未配置 URL）', requests.length > 0, `count=${requests.length}`);
-  check('自动 discovery 请求全部认证为 bearer',
-    requests.every((request) => request.auth === 'bearer'),
+  const authenticatedRequests = requests.filter((request) => request.path !== `${SIDECAR_API}/health`);
+  check('自动 discovery 请求全部认证为 bearer（/health 按契约为公开存活探针）',
+    authenticatedRequests.every((request) => request.auth === 'bearer'),
     JSON.stringify(requests.slice(0, 8).map((request) => `${request.path}:${request.auth}`)));
   check('自动 discovery 请求未被真实 sidecar 拒绝',
     requests.every((request) => request.ok),
@@ -421,13 +446,360 @@ async function waitForStatus(runtime, predicate, { timeoutMs = 15000 } = {}) {
   return ok ? last ?? await runtime.sidecarStatus() : last;
 }
 
+async function waitPhase(path, phase, { timeoutMs = 30000 } = {}) {
+  const result = await waitForValue(
+    async () => readJsonIfExists(path),
+    (value) => value !== null && value.phase === phase,
+    { timeoutMs, intervalMs: 50, describe: `probe phase ${phase}` },
+  );
+  if (!result.ok) throw new StepError(`probe phase ${phase} timeout`);
+  return result.value;
+}
+
+async function continueProbe(path) {
+  await writeFile(path, `${JSON.stringify({ at: Date.now() })}\n`, 'utf8');
+}
+
+async function setDiscoveryMode(runtime, mode) {
+  const path = join(runtime.home, 'memory-runtime.json');
+  const record = JSON.parse(await readFile(path, 'utf8'));
+  record.mode = mode;
+  record.updatedAt = Date.now();
+  await writeFile(path, JSON.stringify(record, null, 2), { encoding: 'utf8', mode: 0o600 });
+}
+
+async function disableMemoryRuntime(runtime) {
+  const consolePage = await fetch(`${runtime.url}/console/`);
+  const csrf = consolePage.headers.get('x-mebular-csrf');
+  if (typeof csrf !== 'string' || csrf.length === 0) {
+    return { status: 0, body: { error: 'csrf_missing' } };
+  }
+  const response = await fetch(`${runtime.url}/admin/api/config`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-mebular-csrf': csrf,
+      cookie: `mebular_csrf=${csrf}`,
+    },
+    body: JSON.stringify({ patch: { memoryRuntime: { enabled: false } } }),
+  });
+  let body = null;
+  try {
+    body = await response.json();
+  } catch {
+    body = null;
+  }
+  return { status: response.status, body };
+}
+
+async function runFaultScenario({ runtime, tap, discovery, phasePath, continueFile, proxy }) {
+  await waitPhase(phasePath, 'start');
+  await continueProbe(continueFile);
+
+  const rateLimited = await waitPhase(phasePath, 'rate-limited-done');
+  const ratePuts = sidecarRequestsFromTap(tap).filter((request) => request.method === 'PUT'
+    && request.body?.state?.compactionId === 'fault-429');
+  check('429 via synthetic tap（首个 PUT 未到真实 sidecar）：重试后提交',
+    rateLimited?.state?.compaction?.committed === true
+    && ratePuts.length === 2
+    && ratePuts[0].status === 429
+    && ratePuts[0].synthetic429 === true
+    && ratePuts[1].status === 200,
+    JSON.stringify({
+      state: rateLimited?.state?.compaction,
+      statuses: ratePuts.map((request) => ({ status: request.status, synthetic: request.synthetic429 === true })),
+    }));
+  await continueProbe(continueFile);
+
+  const timedOut = await waitPhase(phasePath, 'timeout-done');
+  const timeoutPuts = sidecarRequestsFromTap(tap).filter((request) => request.method === 'PUT'
+    && request.body?.state?.compactionId === 'fault-timeout');
+  const timeoutGets = sidecarRequestsFromTap(tap).filter((request) => request.method === 'GET'
+    && request.path.startsWith(`${SIDECAR_API}/checkpoints/${THREAD_ID}`));
+  const timeoutCheckpoint = await runtime.sidecarCheckpoint(THREAD_ID, 'dsh').catch(() => null);
+  check('timeout 对账：summary_only degraded 视图仍是权威 revision 并 committed',
+    timedOut?.state?.compaction?.committed === true
+    && timeoutCheckpoint?.state?.compactionId === 'fault-timeout'
+    && timeoutCheckpoint?.contentMode === 'summary_only'
+    && timeoutCheckpoint?.degraded === true
+    && timeoutPuts.length === 3
+    && timeoutPuts.every((request) => request.status === 504 && request.upstreamStatus === 200)
+    && timeoutGets.length >= 2,
+    JSON.stringify({
+      compaction: timedOut?.state?.compaction,
+      puts: timeoutPuts.map((request) => ({ status: request.status, upstream: request.upstreamStatus })),
+      gets: timeoutGets.map((request) => ({
+        status: request.status,
+        source: request.response?.data?.source,
+        checkpointSource: request.response?.data?.checkpoint?.source,
+        stale: request.response?.data?.checkpoint?.stale,
+        revision: request.response?.data?.checkpoint?.revision,
+        compactionId: request.response?.data?.checkpoint?.state?.compactionId,
+        endSeq: request.response?.data?.checkpoint?.state?.endSeq,
+      })),
+    }));
+  proxy.setMode('fail_checkpoint_writes');
+  await continueProbe(continueFile);
+
+  const pending = await waitPhase(phasePath, 'outbox-pending');
+  check('capability 故障时真实 sidecar 以 202 queued 回复，宿主保持 pending',
+    pending?.state?.compaction?.committed === false
+    && pending?.state?.compaction?.pending === true,
+    JSON.stringify(pending?.state?.compaction));
+
+  proxy.setMode('forward');
+  const replayed = await waitFor(async () => {
+    const checkpoint = await runtime.sidecarCheckpoint(THREAD_ID, 'dsh').catch(() => null);
+    return checkpoint?.state?.compactionId === 'fault-outbox'
+      && checkpoint?.source === 'cloud'
+      && checkpoint?.pending !== true
+      && checkpoint?.stale !== true
+      && Number.isInteger(checkpoint?.revision);
+  }, { timeoutMs: 30000, describe: 'real sidecar outbox replay' });
+  check('真实 sidecar outbox 已重放同一 checkpoint', replayed === true);
+  await continueProbe(continueFile);
+
+  const reconciled = await waitPhase(phasePath, 'outbox-reconciled');
+  const outboxPuts = sidecarRequestsFromTap(tap).filter((request) => request.method === 'PUT'
+    && request.body?.state?.compactionId === 'fault-outbox');
+  check('202 → outbox replay → 有界 timer 自动 GET committed（无重复 emit）',
+    reconciled?.state?.compaction?.committed === true
+    && Number.isInteger(reconciled?.state?.compaction?.revision)
+    && outboxPuts.length === 1,
+    JSON.stringify({
+      compaction: reconciled?.state?.compaction,
+      stats: reconciled?.state?.checkpoint,
+      puts: outboxPuts.map((request) => ({
+        status: request.status,
+        expectedRevision: request.body?.expectedRevision,
+        requestId: request.body?.requestId,
+      })),
+    }));
+  await continueProbe(continueFile);
+  const duplicate = await waitPhase(phasePath, 'outbox-duplicate-done');
+  const duplicatePuts = sidecarRequestsFromTap(tap).filter((request) => request.method === 'PUT'
+    && request.body?.state?.compactionId === 'fault-outbox');
+  check('已对账的重复 compaction 不产生第二 PUT，也不重复计数 pending',
+    duplicate?.state?.compaction?.committed === true
+    && duplicatePuts.length === 1
+    && (duplicate?.state?.checkpoint?.pending ?? 0) <= 1,
+    JSON.stringify({
+      compaction: duplicate?.state?.compaction,
+      stats: duplicate?.state?.checkpoint,
+      puts: duplicatePuts.length,
+    }));
+
+  const current = await runtime.sidecarCheckpoint(THREAD_ID, 'dsh');
+  if (!current || !Number.isInteger(current.revision)) throw new StepError('external revision seed missing');
+  const externalState = {
+    ...(current.state ?? {}),
+    compactionId: 'external-revision',
+    summary: 'external revision advance',
+  };
+  const external = await requestSidecar(discovery, `/checkpoints/${encodeURIComponent(THREAD_ID)}`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      agentId: 'dsh',
+      requestId: `external-${Date.now()}`,
+      expectedRevision: current.revision,
+      domain: `task:${THREAD_ID}`,
+      state: externalState,
+      summary: 'external revision advance',
+      recordIds: [],
+      detailIds: [],
+    }),
+  });
+  check('真实 capability revision 已由外部写入前进',
+    external.status === 200 && Number.isInteger(external.data?.checkpoint?.revision),
+    JSON.stringify({ status: external.status, revision: external.data?.checkpoint?.revision }));
+  await continueProbe(continueFile);
+
+  const revisionDone = await waitPhase(phasePath, 'revision-done');
+  const revisionPuts = sidecarRequestsFromTap(tap).filter((request) => request.method === 'PUT'
+    && request.body?.state?.compactionId === 'fault-revision');
+  check('真实 409 revision 前进后 GET 当前 revision 并重试一次',
+    revisionDone?.state?.compaction?.committed === true
+    && revisionPuts.length === 2
+    && revisionPuts[0].status === 409
+    && revisionPuts[1].status === 200
+    && revisionPuts[1].body?.expectedRevision === external.data.checkpoint.revision
+    && revisionPuts[1].body?.requestId !== revisionPuts[0].body?.requestId,
+    JSON.stringify({
+      compaction: revisionDone?.state?.compaction,
+      puts: revisionPuts.map((request) => ({
+        status: request.status,
+        expectedRevision: request.body?.expectedRevision,
+        requestId: request.body?.requestId,
+      })),
+    }));
+  proxy.setMode('fail_detail_writes');
+  await continueProbe(continueFile);
+
+  const detailPartial = await waitPhase(phasePath, 'detail-partial-done');
+  check('真实 detail partial：200 但 detail.failed>0 不计 committed',
+    detailPartial?.ingest?.accepted >= 1
+    && detailPartial?.ingest?.partial >= 1
+    && detailPartial?.ingest?.failed >= 1
+    && detailPartial?.ingest?.committed === 0
+    && detailPartial?.ingest?.sent === 0,
+    JSON.stringify(detailPartial?.ingest));
+  proxy.setMode('forward');
+  await continueProbe(continueFile);
+
+  const deleteReady = await waitPhase(phasePath, 'delete-ready');
+  const deletePutsBefore = sidecarRequestsFromTap(tap).filter((request) => request.method === 'PUT'
+    && request.body?.state?.compactionId === 'fault-delete');
+  check('删除前同一 compaction 已提交一次', deleteReady?.state?.compaction?.committed === true
+    && deletePutsBefore.length === 1, JSON.stringify(deleteReady?.state?.compaction));
+  const deleted = await requestSidecar(discovery, `/checkpoints/${encodeURIComponent(THREAD_ID)}?agentId=dsh&domain=${encodeURIComponent(`task:${THREAD_ID}`)}`, {
+    method: 'DELETE',
+  });
+  check('真实 sidecar checkpoint 已删除',
+    deleted.status === 200 && deleted.data?.deleted === true,
+    JSON.stringify({ status: deleted.status, data: deleted.data }));
+  await continueProbe(continueFile);
+
+  const recreated = await waitPhase(phasePath, 'delete-recreated');
+  const deletePutsAfter = sidecarRequestsFromTap(tap).filter((request) => request.method === 'PUT'
+    && request.body?.state?.compactionId === 'fault-delete');
+  const deletedCheckpoint = await runtime.sidecarCheckpoint(THREAD_ID, 'dsh').catch(() => null);
+  check('删除后重复 compaction 使用 recreate requestId 真实重建并确认对象存在',
+    recreated?.state?.compaction?.committed === true
+    && deletePutsAfter.length === 2
+    && deletePutsAfter[1].body?.requestId !== deletePutsAfter[0].body?.requestId
+    && /_recreate_/u.test(deletePutsAfter[1].body?.requestId ?? '')
+    && deletedCheckpoint?.state?.compactionId === 'fault-delete'
+    && Number.isInteger(deletedCheckpoint?.revision),
+    JSON.stringify({
+      compaction: recreated?.state?.compaction,
+      puts: deletePutsAfter.map((request) => request.body?.requestId),
+      checkpoint: deletedCheckpoint?.state?.compactionId ?? null,
+      revision: deletedCheckpoint?.revision ?? null,
+    }));
+  await continueProbe(continueFile);
+
+  const inFlight = await waitPhase(phasePath, 'disable-inflight');
+  check('热禁用 in-flight checkpoint 尚未显示 committed',
+    inFlight?.state?.compaction?.committed === false,
+    JSON.stringify(inFlight?.state?.compaction));
+  const beforeDisableSideEffects = sidecarRequestsFromTap(tap).filter((request) => (
+    request.path.startsWith(`${SIDECAR_API}/context`) || request.path === `${SIDECAR_API}/ingest`
+  )).length;
+  const sidecarBeforeDisable = await runtime.sidecarCheckpoint(THREAD_ID, 'dsh').catch(() => null);
+  let oldCapabilityToken = '';
+  try {
+    const record = JSON.parse(await readFile(join(runtime.home, 'memory-runtime', 'capability-token'), 'utf8'));
+    oldCapabilityToken = typeof record?.token === 'string' ? record.token : '';
+  } catch {
+    oldCapabilityToken = '';
+  }
+  await setDiscoveryMode(runtime, 'mcp');
+  const disableResult = await disableMemoryRuntime(runtime);
+  check('hot disable 通过 admin config 撤销 memoryRuntime capability',
+    disableResult.status === 200 && disableResult.body?.ok === true,
+    JSON.stringify({ status: disableResult.status, body: disableResult.body }));
+  const oldTokenResponses = [];
+  if (oldCapabilityToken.length > 0) {
+    for (const [path, body] of [
+      ['/internal/memory/v1/internal-object', {
+        actor: { type: 'agent', agentId: 'dsh' },
+        kind: 'context_checkpoint',
+        op: 'get',
+        agentId: 'dsh',
+        threadId: THREAD_ID,
+      }],
+      ['/internal/memory/v1/write', {
+        actor: { type: 'agent', agentId: 'dsh' },
+        threadId: THREAD_ID,
+        items: [{
+          clientItemId: `disabled-${Date.now()}`,
+          domain: 'default',
+          kind: 'episode',
+          content: { episodeType: 'observation', content: 'disabled write probe' },
+        }],
+      }],
+    ]) {
+      const response = await fetch(`${runtime.url}${path}`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${oldCapabilityToken}`,
+        },
+        body: JSON.stringify(body),
+      });
+      let payload = null;
+      try {
+        payload = await response.json();
+      } catch {
+        payload = null;
+      }
+      oldTokenResponses.push({ path, status: response.status, code: payload?.error?.code ?? null });
+    }
+  }
+  check('禁用后旧 capability token 写 checkpoint/ingest 被拒绝',
+    oldTokenResponses.length === 2
+    && oldTokenResponses.every((entry) => entry.status === 401 || entry.status === 404)
+    && oldTokenResponses.every((entry) => entry.status !== 200),
+    JSON.stringify(oldTokenResponses));
+  await continueProbe(continueFile);
+
+  const disabled = await waitPhase(phasePath, 'disabled-done');
+  const disablePuts = sidecarRequestsFromTap(tap).filter((request) => (
+    request.method === 'PUT' && request.body?.state?.compactionId === 'fault-disable'
+  ));
+  const sidecarAfterDisable = await runtime.sidecarCheckpoint(THREAD_ID, 'dsh').catch(() => null);
+  const afterDisableRequests = sidecarRequestsFromTap(tap).filter((request) => (
+    request.path.startsWith(`${SIDECAR_API}/context`) || request.path === `${SIDECAR_API}/ingest`
+  ));
+  check('热禁用中止 in-flight checkpoint：PUT 被阻止且真实 sidecar 无该 checkpoint',
+    disabled?.state?.compaction?.committed === false
+    && disabled?.state?.compaction?.pending === false
+    && disablePuts.length === 1
+    && disablePuts[0].blockedBeforeSidecar === true
+    && disablePuts[0].upstreamStatus === undefined
+    && sidecarBeforeDisable?.state?.compactionId !== 'fault-disable'
+    && sidecarAfterDisable?.state?.compactionId !== 'fault-disable'
+    && afterDisableRequests.length === beforeDisableSideEffects
+    && disabled?.state?.runtimeEnabled === false,
+    JSON.stringify({
+      compaction: disabled?.state?.compaction,
+      disablePuts: disablePuts.map((request) => ({
+        status: request.status,
+        blocked: request.blockedBeforeSidecar === true,
+        upstream: request.upstreamStatus,
+      })),
+      sidecarCompaction: sidecarAfterDisable?.state?.compactionId ?? null,
+      afterDisableRequests: afterDisableRequests.length,
+    }));
+}
+
 async function runScenario({ mode, root, dshBin, dshInstall, dshVersion, pluginTarball, probeTarball, options }) {
   console.log(`\n▶ ${mode}`);
   const runtimeRoot = join(root, `runtime-${mode}-${Date.now()}`);
   const withSidecar = mode !== 'no-discovery';
-  const { runtime, discovery } = withSidecar
-    ? await startSidecar(runtimeRoot)
-    : await startRuntimeOnly(runtimeRoot);
+  const faults = mode === 'faults'
+    ? { rateLimitOnce: true }
+    : null;
+  let proxy = null;
+  let previousCapabilityUrl;
+  if (mode === 'faults') {
+    proxy = await createCapabilityFaultProxy({ name: 'dsh-capability-faults' });
+    previousCapabilityUrl = process.env.MEBULAR_CAPABILITY_URL;
+    process.env.MEBULAR_CAPABILITY_URL = proxy.url;
+  }
+  let runtime;
+  let discovery;
+  try {
+    if (withSidecar) {
+      ({ runtime, discovery } = await startSidecar(runtimeRoot, { proxy }));
+    } else {
+      ({ runtime, discovery } = await startRuntimeOnly(runtimeRoot));
+    }
+  } finally {
+    if (previousCapabilityUrl === undefined) delete process.env.MEBULAR_CAPABILITY_URL;
+    else process.env.MEBULAR_CAPABILITY_URL = previousCapabilityUrl;
+  }
   const hostToken = discovery === null
     ? ''
     : sidecarTokenFromFile(await readFile(discovery.tokenFile, 'utf8'));
@@ -436,7 +808,43 @@ async function runScenario({ mode, root, dshBin, dshInstall, dshVersion, pluginT
   // contains that prefix).
   const tap = discovery === null
     ? null
-    : await createRuntimeTap(new URL(discovery.url).origin, { name: `dsh-sidecar-${mode}` });
+    : await createRuntimeTap(new URL(discovery.url).origin, {
+      name: `dsh-sidecar-${mode}`,
+      beforeForward: faults === null ? null : async (record) => {
+        if (faults.rateLimitOnce
+          && record.method === 'PUT'
+          && record.body?.state?.compactionId === 'fault-429') {
+          faults.rateLimitOnce = false;
+          record.synthetic429 = true;
+          return {
+            status: 429,
+            headers: { 'retry-after': '0.05' },
+            body: { ok: false, error: { code: 'rate_limited', message: 'test-only 429', retryable: true } },
+          };
+        }
+        if (record.method === 'PUT'
+          && record.body?.state?.compactionId === 'fault-disable') {
+          record.blockedBeforeSidecar = true;
+          await new Promise((resolve) => setTimeout(resolve, 1200));
+          return {
+            status: 504,
+            body: { ok: false, error: { code: 'gateway_timeout', message: 'test-only blocked before sidecar' } },
+          };
+        }
+        return null;
+      },
+      afterResponse: faults === null ? null : (record) => {
+        const compactionId = record.body?.state?.compactionId;
+        if (record.method === 'PUT' && compactionId === 'fault-timeout') {
+          return {
+            status: 504,
+            delayMs: 1600,
+            body: { ok: false, error: { code: 'gateway_timeout', message: 'test-only lost response' } },
+          };
+        }
+        return null;
+      },
+    });
   let world = null;
   try {
     const suffix = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
@@ -457,7 +865,7 @@ async function runScenario({ mode, root, dshBin, dshInstall, dshVersion, pluginT
         && typeof seed.recordId === 'string'
         && typeof seed.detailId === 'string',
       JSON.stringify({ records: seed.records, detailId: seed.detailId }));
-      if (mode === 'auto-discovery' && tap !== null) {
+      if ((mode === 'auto-discovery' || mode === 'faults') && tap !== null) {
         await redirectDiscoveryToTap(runtime, discovery, tap);
       }
       if (mode === 'fail-open') {
@@ -476,6 +884,8 @@ async function runScenario({ mode, root, dshBin, dshInstall, dshVersion, pluginT
       probeTarball,
     });
     const resultPath = join(world.state.artifactsDir, 'memory-runtime-probe.json');
+    const phasePath = join(world.state.artifactsDir, 'memory-runtime-probe-phase.json');
+    const continueFile = join(world.state.artifactsDir, 'memory-runtime-probe-continue.json');
     const bundles = await world.installProfile({
       patch: memoryPatch({ daemonUrl: runtime.url, mode }),
     });
@@ -488,6 +898,12 @@ async function runScenario({ mode, root, dshBin, dshInstall, dshVersion, pluginT
         MEMORY_E2E_OUT: resultPath,
         MEMORY_E2E_DETAIL_QUERY: `原话 ${seedToken}`,
         MEMORY_E2E_SILENT_QUERY: `tomorrow weather small talk ${suffix}`,
+        ...(mode === 'faults' ? {
+          MEMORY_E2E_SCENARIO: 'faults',
+          MEMORY_E2E_PHASE_OUT: phasePath,
+          MEMORY_E2E_CONTINUE_FILE: continueFile,
+          MEBULAR_DSH_MEMORY_RUNTIME_TEST_STATE: '1',
+        } : {}),
         // The real sidecar lives under the Runtime home; keep the plugin's
         // discovery and token lookup pointed there. No host URL/token config.
         MEBULAR_HOME: runtime.home,
@@ -499,6 +915,9 @@ async function runScenario({ mode, root, dshBin, dshInstall, dshVersion, pluginT
     });
     check('DSH Web 已启动', /^http:\/\/127\.0\.0\.1:\d+\//.test(dshUrl), world.redact(dshUrl));
 
+    if (mode === 'faults') {
+      await runFaultScenario({ runtime, tap, discovery, phasePath, continueFile, proxy });
+    }
     const probeResult = await waitForValue(
       async () => readJsonIfExists(resultPath),
       (value) => value !== null && (value.done === true || typeof value.error === 'string'),
@@ -519,6 +938,10 @@ async function runScenario({ mode, root, dshBin, dshInstall, dshVersion, pluginT
       check('轻量态旧 /runtime/v1 已移除（404）',
         legacy.status === 404 && legacy.deprecatedHeader === null,
         `status=${legacy.status} deprecated=${legacy.deprecatedHeader ?? 'none'}`);
+    } else if (mode === 'faults') {
+      check('faults 场景完成全部 checkpoint 阶段', probe?.done === true
+        && probe?.phase === 'disabled-done',
+      JSON.stringify(probe?.phase));
     } else {
       check('sidecar 不可达时仍完成对话（失败开放）', probeResult.ok && probe?.done === true,
         JSON.stringify(probe.preStep));
@@ -532,12 +955,13 @@ async function runScenario({ mode, root, dshBin, dshInstall, dshVersion, pluginT
     if (tap !== null) {
       check('tap 状态不包含 host token', !JSON.stringify(tap.state).includes(hostToken));
     }
-    if (discovery !== null && mode !== 'fail-open') {
+    if (discovery !== null && mode !== 'fail-open' && mode !== 'faults') {
       check('Memory capability status 不含 host token', !JSON.stringify(await runtime.status()).includes(hostToken));
     }
     console.log(`  artifacts：${world.state.artifactsDir}`);
   } finally {
     await tap?.close().catch(() => undefined);
+    await proxy?.close().catch(() => undefined);
     if (world !== null) {
       await world.cleanup({ keep: options.keep || failed > 0 }).catch(() => undefined);
     }
@@ -588,8 +1012,20 @@ async function main() {
 
   let exitCode = 0;
   try {
-    const pluginTarball = await packPackage(pluginDir, packDir, '@mebular/dsh-plugin');
-    const probeTarball = await packPackage(probeDir, packDir, '@mebular/dsh-memory-runtime-probe');
+    const pluginTarball = options.pluginTarball === null
+      ? await packPackage(pluginDir, packDir, '@mebular/dsh-plugin')
+      : {
+        path: resolve(options.pluginTarball),
+        filename: options.pluginTarball,
+        size: (await stat(resolve(options.pluginTarball))).size,
+      };
+    const probeTarball = options.probeTarball === null
+      ? await packPackage(probeDir, packDir, '@mebular/dsh-memory-runtime-probe')
+      : {
+        path: resolve(options.probeTarball),
+        filename: options.probeTarball,
+        size: (await stat(resolve(options.probeTarball))).size,
+      };
     requireCheck('npm pack @mebular/dsh-plugin', pluginTarball.size > 0, pluginTarball.filename);
     requireCheck('npm pack memory runtime probe', probeTarball.size > 0, probeTarball.filename);
 

@@ -10,6 +10,7 @@
 import { readFile } from 'node:fs/promises';
 import type { CapabilityClient } from './capability-client.js';
 import type { SidecarConfig } from './config.js';
+import type { DiagnosticLog } from './diagnostic-log.js';
 import {
   agentDomain,
   canReadDomain,
@@ -27,7 +28,9 @@ import {
   type IngestStatsSnapshot,
 } from './ingest.js';
 import { MemoryObjectService } from './internal-objects.js';
+import type { LifecycleGate } from './lifecycle-gate.js';
 import type { SidecarLocalLayer } from './local-layer.js';
+import type { OutboxItem } from './local-layer.js';
 import type { SidecarInferenceProvider } from './inference-provider.js';
 import { OutboxReplayer } from './outbox-replayer.js';
 import {
@@ -53,9 +56,17 @@ export interface SettlementRuntimeOptions {
   policy?: SidecarPolicy | null;
   inference?: SidecarInferenceProvider | null;
   policyPath?: string;
+  lifecycle?: LifecycleGate | null;
+  /** WP5：脱敏运行日志；状态只暴露计数/最近错误，不返回日志正文路径。 */
+  diagnostics?: DiagnosticLog | null;
+  /** 重启/启动原因；来自 supervisor 或 CLI，不包含真实 home。 */
+  restartReason?: string | null;
   now?: () => number;
   replayerIntervalMs?: number;
   autoStartReplayer?: boolean;
+  localMaintenanceIntervalMs?: number;
+  setIntervalFn?: typeof setInterval;
+  clearIntervalFn?: typeof clearInterval;
 }
 
 export interface NamespaceDomainView {
@@ -135,6 +146,256 @@ function readableFor(policy: SidecarPolicy, agentId: string, domain: string): bo
   return canReadDomain(policy, agentId, domain);
 }
 
+export type OutboxOperationName = 'detail' | 'record' | 'compact' | 'checkpoint' | 'self' | 'other';
+
+export function outboxOperationOf(item: OutboxItem): OutboxOperationName {
+  const kind = item.meta?.kind;
+  if (kind === 'detail' || item.endpoint === '/detail') return 'detail';
+  if (kind === 'record' || item.endpoint === '/write') return 'record';
+  if (item.endpoint === '/internal-object') {
+    const bodyKind = isObject(item.body) && typeof item.body.kind === 'string' ? item.body.kind : '';
+    if (bodyKind === 'compact') return 'compact';
+    if (bodyKind === 'context_checkpoint') return 'checkpoint';
+    if (bodyKind === 'self_record') return 'self';
+  }
+  return 'other';
+}
+
+function itemFailure(item: OutboxItem): {
+  code: string;
+  at: number;
+  status?: number;
+  stage?: string;
+  disposition?: string;
+  details?: Record<string, string | number | boolean>;
+  possibleCommit?: boolean;
+} | null {
+  const failure = item.lastFailure;
+  if (failure && typeof failure.code === 'string') {
+    return {
+      code: failure.code,
+      at: typeof failure.at === 'number' ? failure.at : item.lastAttemptAt ?? item.createdAt,
+      ...(typeof failure.status === 'number' ? { status: failure.status } : {}),
+      ...(failure.stage ? { stage: failure.stage } : {}),
+      ...(failure.disposition ? { disposition: failure.disposition } : {}),
+      ...(failure.details ? { details: failure.details } : {}),
+      ...(failure.possibleCommit ? { possibleCommit: true } : {}),
+    };
+  }
+  const code = typeof item.error === 'string' ? item.error : item.lastError;
+  if (!code) return null;
+  return {
+    code,
+    at: item.lastAttemptAt ?? item.createdAt,
+    ...(item.failureStage ? { stage: item.failureStage } : {}),
+  };
+}
+
+function operationRows(
+  items: readonly OutboxItem[],
+  dead: readonly OutboxItem[],
+  now: number,
+  keyOf: (item: OutboxItem) => string,
+): Array<{
+  operation: string;
+  endpoint: string;
+  active: number;
+  dead: number;
+  oldestAgeMs: number | null;
+  deadOldestAgeMs: number | null;
+  lastFailure: { code: string; at: number; stage?: string; disposition?: string } | null;
+}> {
+  const rows = new Map<string, {
+    operation: string;
+    endpoint: string;
+    active: number;
+    dead: number;
+    oldestAt: number | null;
+    deadOldestAt: number | null;
+    lastFailure: { code: string; at: number; stage?: string; disposition?: string } | null;
+  }>();
+  const apply = (item: OutboxItem, isDead: boolean) => {
+    const operation = outboxOperationOf(item);
+    const key = keyOf(item);
+    const row = rows.get(key) ?? {
+      operation,
+      endpoint: item.endpoint,
+      active: 0,
+      dead: 0,
+      oldestAt: null,
+      deadOldestAt: null,
+      lastFailure: null,
+    };
+    if (isDead) {
+      row.dead += 1;
+      const at = typeof item.deadAt === 'number' ? item.deadAt : item.createdAt;
+      row.deadOldestAt = row.deadOldestAt === null ? at : Math.min(row.deadOldestAt, at);
+    } else {
+      row.active += 1;
+      row.oldestAt = row.oldestAt === null ? item.createdAt : Math.min(row.oldestAt, item.createdAt);
+    }
+    const failure = itemFailure(item);
+    if (failure && (!row.lastFailure || failure.at >= row.lastFailure.at)) {
+      row.lastFailure = {
+        code: failure.code,
+        at: failure.at,
+        ...(failure.stage ? { stage: failure.stage } : {}),
+        ...(failure.disposition ? { disposition: failure.disposition } : {}),
+      };
+    }
+    rows.set(key, row);
+  };
+  for (const item of items) apply(item, false);
+  for (const item of dead) apply(item, true);
+  return [...rows.values()]
+    .map((row) => ({
+      operation: row.operation,
+      endpoint: row.endpoint,
+      active: row.active,
+      dead: row.dead,
+      oldestAgeMs: row.oldestAt === null ? null : Math.max(0, now - row.oldestAt),
+      deadOldestAgeMs: row.deadOldestAt === null ? null : Math.max(0, now - row.deadOldestAt),
+      lastFailure: row.lastFailure,
+    }))
+    .sort((a, b) => (a.operation.localeCompare(b.operation) || a.endpoint.localeCompare(b.endpoint)));
+}
+
+/** 供 `/status` 与 CLI doctor 共用的 outbox 脱敏聚合；不读取正文。 */
+export function aggregateOutboxDiagnostics(
+  items: readonly OutboxItem[],
+  dead: readonly OutboxItem[],
+  now: number,
+): {
+  active: number;
+  dead: number;
+  oldestAgeMs: number | null;
+  deadOldestAgeMs: number | null;
+  byOperation: ReturnType<typeof operationRows>;
+  byEndpoint: ReturnType<typeof operationRows>;
+  deadReasons: Array<{ reason: string; count: number }>;
+  lastConflict: {
+    code: string;
+    at: number;
+    endpoint: string;
+    operation: string;
+    requestId: string;
+    status?: number;
+    stage?: string;
+    currentRevision?: number;
+    expectedRevision?: number;
+    hostId?: string;
+    until?: number;
+  } | null;
+  ambiguous: Array<{
+    requestId: string;
+    endpoint: string;
+    operation: string;
+    stage?: string;
+    reason: string;
+    at: number;
+    ageMs: number;
+    possiblyCommitted: true;
+    hint: 'may_have_been_committed';
+    reconciliation: 'read_authoritative_objects';
+    committedObjects?: { records: string[]; details: string[]; objects: string[] };
+  }>;
+} {
+  const activeOldest = items.reduce<number | null>((oldest, item) => (
+    oldest === null ? item.createdAt : Math.min(oldest, item.createdAt)
+  ), null);
+  const deadOldest = dead.reduce<number | null>((oldest, item) => {
+    const at = typeof item.deadAt === 'number' ? item.deadAt : item.createdAt;
+    return oldest === null ? at : Math.min(oldest, at);
+  }, null);
+  const reasons = new Map<string, number>();
+  for (const item of dead) {
+    const reason = typeof item.error === 'string' && item.error.length > 0
+      ? item.error
+      : item.lastFailure?.code ?? 'unknown';
+    reasons.set(reason, (reasons.get(reason) ?? 0) + 1);
+  }
+  const conflicts = [...items, ...dead]
+    .map((item) => ({ item, failure: itemFailure(item) }))
+    .filter((entry): entry is { item: OutboxItem; failure: NonNullable<ReturnType<typeof itemFailure>> } => (
+      entry.failure !== null
+      && (entry.failure.disposition === 'conflict'
+        || entry.failure.code === 'revision_mismatch'
+        || entry.failure.code === 'checkpoint_lease_held')
+    ));
+  conflicts.sort((left, right) => right.failure.at - left.failure.at);
+  const latestConflict = conflicts[0];
+  const ambiguous = [...items, ...dead]
+    .map((item) => ({ item, failure: itemFailure(item) }))
+    .filter((entry): entry is { item: OutboxItem; failure: NonNullable<ReturnType<typeof itemFailure>> } => (
+      entry.failure !== null
+      && (entry.failure.possibleCommit === true
+        || entry.failure.code === 'timeout'
+        || entry.failure.code === 'network_error'
+        || entry.failure.code === 'partial_failure')
+    ))
+    .map(({ item, failure }) => {
+      const committed = item.committed;
+      const committedObjects = committed
+        ? {
+          records: (committed.records ?? []).map((entry) => entry.id),
+          details: (committed.details ?? []).map((entry) => entry.id),
+          objects: (committed.objects ?? []).map((entry) => entry.id),
+        }
+        : undefined;
+      return {
+        requestId: item.requestId,
+        endpoint: item.endpoint,
+        operation: outboxOperationOf(item),
+        ...(failure.stage ? { stage: failure.stage } : {}),
+        reason: failure.code,
+        at: failure.at,
+        ageMs: Math.max(0, now - failure.at),
+        possiblyCommitted: true as const,
+        hint: 'may_have_been_committed' as const,
+        reconciliation: 'read_authoritative_objects' as const,
+        ...(committedObjects ? { committedObjects } : {}),
+      };
+    })
+    .sort((a, b) => b.at - a.at);
+  return {
+    active: items.length,
+    dead: dead.length,
+    oldestAgeMs: activeOldest === null ? null : Math.max(0, now - activeOldest),
+    deadOldestAgeMs: deadOldest === null ? null : Math.max(0, now - deadOldest),
+    byOperation: operationRows(items, dead, now, (item) => outboxOperationOf(item)),
+    byEndpoint: operationRows(items, dead, now, (item) => item.endpoint),
+    deadReasons: [...reasons.entries()]
+      .map(([reason, count]) => ({ reason, count }))
+      .sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason)),
+    lastConflict: latestConflict
+      ? {
+        code: latestConflict.failure.code,
+        at: latestConflict.failure.at,
+        endpoint: latestConflict.item.endpoint,
+        operation: outboxOperationOf(latestConflict.item),
+        requestId: latestConflict.item.requestId,
+        ...(typeof latestConflict.failure.status === 'number' ? { status: latestConflict.failure.status } : {}),
+        ...(typeof latestConflict.failure.details?.currentRevision === 'number'
+          ? { currentRevision: latestConflict.failure.details.currentRevision }
+          : {}),
+        ...(typeof latestConflict.failure.details?.expectedRevision === 'number'
+          ? { expectedRevision: latestConflict.failure.details.expectedRevision }
+          : isObject(latestConflict.item.body) && typeof latestConflict.item.body.expectedRevision === 'number'
+            ? { expectedRevision: latestConflict.item.body.expectedRevision }
+            : {}),
+        ...(typeof latestConflict.failure.details?.hostId === 'string'
+          ? { hostId: latestConflict.failure.details.hostId }
+          : {}),
+        ...(typeof latestConflict.failure.details?.until === 'number'
+          ? { until: latestConflict.failure.details.until }
+          : {}),
+        ...(latestConflict.failure.stage ? { stage: latestConflict.failure.stage } : {}),
+      }
+      : null,
+    ambiguous,
+  };
+}
+
 export class SettlementRuntime {
   readonly config: SidecarConfig;
   readonly local: SidecarLocalLayer;
@@ -148,6 +409,12 @@ export class SettlementRuntime {
   private readonly inference: SidecarInferenceProvider | null;
   private policy: SidecarPolicy;
   private readonly policyPath?: string;
+  private readonly localMaintenanceIntervalMs?: number;
+  private readonly setIntervalFn?: typeof setInterval;
+  private readonly clearIntervalFn?: typeof clearInterval;
+  private readonly diagnostics: DiagnosticLog | null;
+  private readonly restartReason: string | null;
+  private readonly now: () => number;
 
   constructor(options: SettlementRuntimeOptions) {
     this.config = options.config;
@@ -157,6 +424,12 @@ export class SettlementRuntime {
     this.inference = options.inference ?? null;
     this.policy = options.policy ?? { schema: 1, agents: {} };
     this.policyPath = options.policyPath;
+    this.localMaintenanceIntervalMs = options.localMaintenanceIntervalMs;
+    this.setIntervalFn = options.setIntervalFn;
+    this.clearIntervalFn = options.clearIntervalFn;
+    this.diagnostics = options.diagnostics ?? null;
+    this.restartReason = options.restartReason ?? null;
+    this.now = options.now ?? Date.now;
     const ingestOptions: IngestServiceOptions = {
       config: options.config,
       local: options.local,
@@ -169,6 +442,7 @@ export class SettlementRuntime {
       },
       policy: this.policy,
       ...(this.inference ? { inference: this.inference } : {}),
+      ...(options.lifecycle ? { lifecycle: options.lifecycle } : {}),
       ...(options.now ? { now: options.now } : {}),
     };
     this.ingest = new IngestService(ingestOptions);
@@ -184,6 +458,7 @@ export class SettlementRuntime {
       },
       policy: this.policy,
       ...(this.inference ? { inference: this.inference } : {}),
+      ...(options.lifecycle ? { lifecycle: options.lifecycle } : {}),
       ...(options.now ? { now: options.now } : {}),
     });
     this.recall = new RecallService({
@@ -200,20 +475,76 @@ export class SettlementRuntime {
       getPolicy: () => this.policy,
       checkpointSource: this.objects,
       ...(this.inference ? { inference: this.inference } : {}),
+      ...(options.lifecycle ? { lifecycle: options.lifecycle } : {}),
       ...(options.now ? { now: options.now } : {}),
+    });
+    // 非 replayer 的 dead-letter 路径（Ttl/启动清理/配额等）也必须清理对象 pending。
+    this.local.setDeadLetterHandler(async (item) => {
+      void this.diagnostics?.append('error', 'outbox_dead', {
+        requestId: item.requestId,
+        endpoint: item.endpoint,
+        operation: outboxOperationOf(item),
+        reason: typeof item.error === 'string' ? item.error : item.lastFailure?.code ?? 'dead',
+        stage: item.failureStage ?? 'cleanup',
+      }).catch(() => undefined);
+      await this.objects.applyReplayComplete(item, 'dead');
+      await this.ingest.finalizeReplayedOutbox(item, 'dead');
     });
     this.replayer = new OutboxReplayer({
       outbox: options.local.outbox,
       client: options.client,
+      ...(options.lifecycle ? { lifecycle: options.lifecycle } : {}),
       ...(options.now ? { now: options.now } : {}),
       ...(options.replayerIntervalMs !== undefined ? { intervalMs: options.replayerIntervalMs } : {}),
       onSummary: (summary) => {
         this.ingest.applyReplaySummary(summary);
         this.objects.applyReplaySummary(summary);
+        if (summary.errors.length > 0) {
+          const last = summary.errors[summary.errors.length - 1]! as {
+            code: string;
+            message: string;
+            at: number;
+            stage?: string;
+            disposition?: string;
+            possibleCommit?: boolean;
+            details?: Record<string, string | number | boolean>;
+          };
+          void this.diagnostics?.append('warn', 'outbox_replay_error', {
+            code: last.code,
+            stage: last.stage ?? 'replay',
+            disposition: last.disposition ?? null,
+            possibleCommit: last.possibleCommit === true,
+            retried: summary.retried,
+            dead: summary.dead,
+            remaining: summary.remaining,
+            ...(last.details ?? {}),
+          }).catch(() => undefined);
+        } else if (summary.settled > 0 || summary.dead > 0) {
+          void this.diagnostics?.append('info', 'outbox_replay', {
+            settled: summary.settled,
+            retried: summary.retried,
+            dead: summary.dead,
+            remaining: summary.remaining,
+          }).catch(() => undefined);
+        }
       },
       onSettled: (item, data) => (item.endpoint === '/detail' || item.meta?.kind === 'record'
         ? this.ingest.applyReplayedOutbox(item, data)
         : this.objects.applyReplayedItem(item, data)),
+      onComplete: async (item, outcome) => {
+        if (outcome === 'dead') {
+          void this.diagnostics?.append('error', 'outbox_dead', {
+            requestId: item.requestId,
+            endpoint: item.endpoint,
+            operation: outboxOperationOf(item),
+            reason: typeof item.error === 'string' ? item.error : item.lastFailure?.code ?? 'dead',
+            stage: item.failureStage ?? item.lastFailure?.stage ?? 'finalize',
+            ...(item.lastFailure?.details ?? {}),
+          }).catch(() => undefined);
+        }
+        await this.objects.applyReplayComplete(item, outcome);
+        await this.ingest.finalizeReplayedOutbox(item, outcome);
+      },
     });
     if (options.autoStartReplayer !== false) {
       this.replayer.start();
@@ -232,12 +563,24 @@ export class SettlementRuntime {
       }
     }
     await this.ingest.init();
-    // 本地过程数据：dead letter 只保留 30 天。
-    await this.local.outbox.cleanupDead(Date.now(), 30).catch(() => 0);
+    const beforeStagingCleanup = (ids: readonly string[]) => this.ingest.expireStagingDependencies(ids);
+    this.local.setMaintenanceDependencyHandler(beforeStagingCleanup);
+    await this.local.runMaintenance({ beforeStagingCleanup }).catch(() => null);
+    this.local.startMaintenance({
+      ...(this.localMaintenanceIntervalMs !== undefined
+        ? { intervalMs: this.localMaintenanceIntervalMs }
+        : {}),
+      ...(this.setIntervalFn ? { setIntervalFn: this.setIntervalFn } : {}),
+      ...(this.clearIntervalFn ? { clearIntervalFn: this.clearIntervalFn } : {}),
+      beforeStagingCleanup,
+    });
   }
 
   async stop(): Promise<void> {
+    this.local.stopMaintenance();
+    // 先让 replayer 在 finalize 仍可用时完成有界 flush，再关闭收口入口。
     await this.replayer.stop({ flushMs: 2000 });
+    this.ingest.stop();
   }
 
   get degraded(): boolean {
@@ -436,14 +779,94 @@ export class SettlementRuntime {
     details?: Partial<SidecarStatusDetails>;
     lastError?: SidecarStatusSnapshot['lastError'];
   }): Promise<SidecarStatusSnapshot> {
-    const [stats, outbox] = await Promise.all([this.local.stats(), this.local.outbox.stats()]);
+    const [stats, outbox, activeItems, deadItems, logStats] = await Promise.all([
+      this.local.stats(),
+      this.local.outbox.stats(),
+      this.local.outbox.list(),
+      this.local.outbox.listDead(),
+      this.diagnostics?.stats().catch(() => null) ?? Promise.resolve(null),
+    ]);
     const ingest = this.ingest.stats();
     const recall = this.recall.stats();
     const objects = this.objects.stats();
+    const outboxDiagnostics = aggregateOutboxDiagnostics(activeItems, deadItems, this.now());
     const errors = [ingest.lastError, recall.lastError, objects.lastError]
       .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
     errors.sort((a, b) => b.at - a.at);
     const lastError = base.lastError ?? errors[0] ?? null;
+    const maintenance = this.local.maintenanceStatus();
+    const logs = {
+      files: logStats?.files ?? 0,
+      bytes: logStats?.bytes ?? 0,
+      latestAt: logStats?.latestAt ?? null,
+    };
+    const disk = {
+      stagingBytes: stats.stagingBytes,
+      traceBytes: stats.traceBytes,
+      cacheBytes: stats.cacheBytes,
+      detailCacheBytes: stats.detailCacheBytes,
+      outboxBytes: stats.outboxBytes,
+      deadBytes: stats.deadLetterBytes,
+      logsBytes: logs.bytes,
+      totalBytes: stats.stagingBytes + stats.traceBytes + stats.cacheBytes
+        + stats.detailCacheBytes + stats.outboxBytes + stats.deadLetterBytes + logs.bytes,
+    };
+    const diagnostics = {
+      logs,
+      disk,
+      outbox: {
+        active: outboxDiagnostics.active,
+        dead: outboxDiagnostics.dead,
+        oldestAgeMs: outboxDiagnostics.oldestAgeMs,
+        deadOldestAgeMs: outboxDiagnostics.deadOldestAgeMs,
+        byOperation: outboxDiagnostics.byOperation,
+        deadReasons: outboxDiagnostics.deadReasons,
+        lastConflict: outboxDiagnostics.lastConflict,
+        ambiguous: outboxDiagnostics.ambiguous,
+      },
+      ...(this.restartReason ? { restartReason: this.restartReason } : {}),
+    };
+    const details: SidecarStatusDetails & { maintenance: typeof maintenance } = {
+      available: true,
+      staging: {
+        chunks: stats.stagingChunks,
+        hours: this.config.detail.stagingHours,
+        maxBytes: this.config.detail.stagingBytes,
+      },
+      cache: {
+        entries: stats.detailCacheEntries,
+        bytes: stats.detailCacheBytes,
+        days: this.config.detail.cacheDays,
+        maxBytes: this.config.detail.cacheBytes,
+      },
+      outbox: { items: outbox.items, bytes: outbox.bytes },
+      quota: {
+        bytesPerDomain: this.config.detail.quotaBytesPerDomain,
+        bytesCloud: this.config.detail.quotaBytesCloud,
+        usedBytes: null,
+        bytes: null,
+      },
+      retentionDays: { conversation: 30, tool_output: 7, document_slice: 90 },
+      maintenance,
+      diagnostics,
+      ...base.details,
+    };
+    const outboxView: SidecarStatusSnapshot['outbox'] = {
+      items: outbox.items,
+      bytes: outbox.bytes,
+      oldestAt: outbox.oldestAt,
+      oldestAgeMs: outboxDiagnostics.oldestAgeMs,
+      deadItems: stats.deadLetter,
+      deadBytes: stats.deadLetterBytes,
+      deadOldestAt: stats.deadLetterOldestAt,
+      deadOldestAgeMs: outboxDiagnostics.deadOldestAgeMs,
+      byOperation: outboxDiagnostics.byOperation,
+      byEndpoint: outboxDiagnostics.byEndpoint,
+      deadReasons: outboxDiagnostics.deadReasons,
+      lastConflict: outboxDiagnostics.lastConflict,
+      ambiguous: outboxDiagnostics.ambiguous,
+      ...base.outbox,
+    };
     return {
       ...base,
       counts: {
@@ -469,35 +892,8 @@ export class SettlementRuntime {
         objectWritesFailed: objects.failed,
         ...base.counts,
       },
-      outbox: {
-        items: outbox.items,
-        bytes: outbox.bytes,
-        oldestAt: outbox.oldestAt,
-        ...base.outbox,
-      },
-      details: {
-        available: true,
-        staging: {
-          chunks: stats.stagingChunks,
-          hours: this.config.detail.stagingHours,
-          maxBytes: this.config.detail.stagingBytes,
-        },
-        cache: {
-          entries: stats.detailCacheEntries,
-          bytes: stats.detailCacheBytes,
-          days: this.config.detail.cacheDays,
-          maxBytes: this.config.detail.cacheBytes,
-        },
-        outbox: { items: outbox.items, bytes: outbox.bytes },
-        quota: {
-          bytesPerDomain: this.config.detail.quotaBytesPerDomain,
-          bytesCloud: this.config.detail.quotaBytesCloud,
-          usedBytes: null,
-          bytes: null,
-        },
-        retentionDays: { conversation: 30, tool_output: 7, document_slice: 90 },
-        ...base.details,
-      },
+      outbox: outboxView,
+      details,
       lastError: lastError ?? ingest.lastError,
     };
   }

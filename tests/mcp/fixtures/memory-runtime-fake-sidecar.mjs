@@ -25,13 +25,32 @@ const home = env.MEBULAR_HOME;
 const dataDir = env.MEBULAR_MEMORY_RUNTIME_HOME ?? join(home, 'memory-runtime');
 const discoveryPath = join(home, 'memory-runtime.json');
 const tokenPath = join(dataDir, 'host-token');
+const lockPath = join(dataDir, 'start.lock');
 const hostToken = env.MEBULAR_MEMORY_RUNTIME_TOKEN ?? env.FAKE_SIDECAR_HOST_TOKEN ?? 'fake-host-token-0123456789abcdef';
 const mode = env.FAKE_SIDECAR_MODE ?? 'ready';
+const parentFlag = process.argv.indexOf('--parent-pid');
+const parentPid = parentFlag >= 0 ? Number(process.argv[parentFlag + 1]) : null;
 const profileId = env.FAKE_SIDECAR_PROFILE_ID ?? 'default';
 const cloudId = env.FAKE_SIDECAR_CLOUD_ID ?? null;
+const startedAt = Date.now();
+let sidecarMode = 'immersive';
 
 mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-writeFileSync(tokenPath, hostToken, { mode: 0o600 });
+writeFileSync(tokenPath, JSON.stringify({
+  version: 1,
+  token: hostToken,
+  issuedAt: startedAt,
+  expiresAt: 0,
+}), { mode: 0o600 });
+writeFileSync(lockPath, JSON.stringify({
+  pid: process.pid,
+  port: null,
+  startedAt,
+  updatedAt: startedAt,
+  cloudId,
+  profileId,
+  command: 'serve',
+}), { mode: 0o600 });
 
 function readJsonEnv(name, fallback) {
   const path = env[name];
@@ -47,7 +66,11 @@ function recordAuth(req) {
   const out = env.FAKE_SIDECAR_AUTH_OUT;
   if (typeof out !== 'string' || out.length === 0) return;
   try {
-    appendFileSync(out, `${JSON.stringify({ path: req.url, authorization: req.headers.authorization ?? null })}\n`);
+    appendFileSync(out, `${JSON.stringify({
+      path: req.url,
+      authorization: req.headers.authorization ?? null,
+      requestId: req.headers['x-request-id'] ?? null,
+    })}\n`);
   } catch {
     // 测试临时目录可能已清理；记录失败不影响 sidecar 响应。
   }
@@ -166,6 +189,7 @@ function progressInstall() {
 function engineView() {
   return {
     state: engineState,
+    apiToken: 'UNLISTED_API_TOKEN',
     health: engineState === 'running' ? 'ok' : 'unknown',
     packId: engineState === 'running' ? activePackId : null,
     modelId: engineState === 'running'
@@ -186,6 +210,11 @@ function engineView() {
 function activeView() {
   return {
     source: inferenceSource,
+    apiToken: 'UNLISTED_API_TOKEN',
+    clientSecret: 'UNLISTED_CLIENT_SECRET',
+    keyRef: 'TEST_MODEL_KEY',
+    baseUrl: 'https://secret.example.invalid/v1',
+    modelPath: '/private/models/secret.gguf',
     packId: inferenceSource === 'local' ? activePackId : null,
     modelId: inferenceSource === 'local'
       ? MODEL_PACKS.find((pack) => pack.packId === activePackId)?.modelId ?? null
@@ -198,6 +227,9 @@ function installJob(state = 'downloading', packId = ACTIVE_PACK) {
   const pack = MODEL_PACKS.find((entry) => entry.packId === packId);
   return {
     schema: 1,
+    apiKey: 'TEST_MODEL_KEY',
+    clientSecret: 'UNLISTED_CLIENT_SECRET',
+    installPath: '/private/models/install',
     jobId: 'job_fake_0001',
     packId,
     modelId: pack?.modelId ?? 'qwen3-4b-instruct',
@@ -235,15 +267,19 @@ function catalogView() {
     },
     recommended: {
       kind: 'local',
+      rawContent: 'RAW_MODEL_SECRET',
       packId: 'qwen3-8b-instruct-q4_k_m',
       modelId: 'qwen3-8b-instruct',
       tier: 'default',
       reason: 'default',
       warnings: [],
-      alternatives: [],
+      alternatives: [ACTIVE_PACK],
     },
     packs: MODEL_PACKS.map((pack) => ({
       ...pack,
+      apiKey: 'TEST_MODEL_KEY',
+      endpoint: 'https://secret.example.invalid/v1',
+      binaryPath: '/private/engine/llama-server',
       description: '',
       quantization: 'Q4_K_M',
       contextLength: 32768,
@@ -262,14 +298,14 @@ function catalogView() {
       expectedBytes: pack.sizeBytes,
       verifiedAt: null,
       manifest: { available: true, error: null },
-      supported: true,
+      supported: pack.packId === 'qwen3-14b-instruct-q4_k_m' ? null : true,
       active: inferenceSource === 'local' && pack.packId === activePackId,
       install: currentInstall,
       warnings: [],
     })),
     active: activeView(),
     providers: [
-      { id: 'heuristic', kind: 'builtin', configured: true, available: true, active: inferenceSource === 'heuristic', reason: null },
+      { id: 'heuristic', kind: 'builtin', configured: true, available: true, active: inferenceSource === 'heuristic', reason: null, clientSecret: 'UNLISTED_CLIENT_SECRET' },
       { id: 'host', kind: 'host', configured: true, available: true, active: inferenceSource === 'host', reason: null },
       { id: 'local', kind: 'local-engine', configured: true, available: true, active: inferenceSource === 'local', reason: null },
       { id: 'api', kind: 'remote', configured: false, available: false, active: inferenceSource === 'api', reason: 'api_not_configured' },
@@ -296,6 +332,11 @@ function catalogView() {
 function statusView() {
   progressInstall();
   return {
+    debug: {
+      installPath: '/private/models/install',
+      enginePath: '/private/engine/llama-server',
+      api_key: 'TEST_MODEL_KEY',
+    },
     active: activeView(),
     engine: engineView(),
     install: currentInstall,
@@ -326,12 +367,21 @@ const defaultTrace = {
   threadId: 'th_fake',
   queryHash: 'fake-hash',
   queryPreview: 'fake query preview',
+  rawContent: 'RAW_TRACE_SECRET',
+  apiToken: 'UNLISTED_API_TOKEN',
   domains: ['notes'],
   silenceReason: null,
   degraded: false,
   feedback: null,
   counts: { candidates: 1, expansions: 1, injected: 1, tokens: 12 },
   timing: { totalMs: 9 },
+  model: {
+    query: 'fake-query-model',
+    embedding: 'fake-embedding-model',
+    extractor: 'fake-extractor-model',
+    tookMs: 3,
+    rawContent: 'RAW_TRACE_SECRET',
+  },
 };
 
 const defaultTraceDetail = {
@@ -340,6 +390,7 @@ const defaultTraceDetail = {
   cue: { topics: ['fake topic'], entities: [{ name: 'Mebular', type: 'product' }] },
   candidates: [{
     id: 'memory-fake-1',
+    rawContent: 'RAW_TRACE_SECRET',
     type: 'fact',
     domain: 'agent:opencode',
     owner: { role: 'agent', ownerId: 'opencode', domain: 'agent:opencode', agentName: 'OpenCode' },
@@ -385,6 +436,7 @@ function writeDiscovery(port) {
     schema: 1,
     kind: 'mebular-memory-runtime',
     pid: process.pid,
+    ...(Number.isInteger(parentPid) && parentPid > 0 ? { parentPid } : {}),
     host: '127.0.0.1',
     port,
     url: base,
@@ -396,10 +448,11 @@ function writeDiscovery(port) {
     capabilityApiVersion: 1,
     minMcpVersion: '0.3.0',
     maxMcpVersion: '0.3.x',
-    state: 'ready',
-    degraded: false,
+    state: sidecarMode === 'immersive' ? 'ready' : 'stopped',
+    mode: sidecarMode,
+    degraded: sidecarMode !== 'immersive',
     tokenFile: tokenPath,
-    startedAt: Date.now(),
+    startedAt,
     updatedAt: Date.now(),
     capabilities: {
       ingest: false,
@@ -414,12 +467,56 @@ function writeDiscovery(port) {
   const tmp = `${discoveryPath}.tmp-${process.pid}`;
   writeFileSync(tmp, JSON.stringify(discovery), { mode: 0o600 });
   renameSync(tmp, discoveryPath);
+  writeFileSync(lockPath, JSON.stringify({
+    pid: process.pid,
+    port,
+    startedAt,
+    updatedAt: Date.now(),
+    cloudId,
+    profileId,
+    command: 'serve',
+  }), { mode: 0o600 });
 }
 
+const heartbeatMs = Math.max(10, Number(env.FAKE_SIDECAR_HEARTBEAT_MS ?? 50));
+const heartbeat = setInterval(() => {
+  if (!server || exiting) return;
+  try {
+    const current = JSON.parse(readFileSync(discoveryPath, 'utf-8'));
+    if (current?.pid !== process.pid || current?.startedAt !== startedAt) {
+      sidecarMode = 'mcp';
+      return;
+    }
+    writeDiscovery(server.address().port);
+  } catch {
+    sidecarMode = 'mcp';
+    if (env.FAKE_SIDECAR_RECOVER_ON_CAPABILITY_FILE === '1') {
+      try {
+        const record = JSON.parse(readFileSync(join(dataDir, 'capability-token'), 'utf-8'));
+        if (record?.version === 1 && typeof record?.token === 'string' && record.token.length > 0) {
+          sidecarMode = 'immersive';
+          writeDiscovery(server.address().port);
+        }
+      } catch {
+        // capability 仍撤销：保持 dormant，不猜端口、不恢复准入。
+      }
+    }
+  }
+}, heartbeatMs);
+heartbeat.unref();
+
 function cleanup() {
+  clearInterval(heartbeat);
+  if (parentWatch) clearInterval(parentWatch);
   try {
     const current = JSON.parse(readFileSync(discoveryPath, 'utf-8'));
     if (current?.pid === process.pid) rmSync(discoveryPath, { force: true });
+  } catch {
+    // ignore
+  }
+  try {
+    const current = JSON.parse(readFileSync(lockPath, 'utf-8'));
+    if (current?.pid === process.pid && current?.startedAt === startedAt) rmSync(lockPath, { force: true });
   } catch {
     // ignore
   }
@@ -443,6 +540,16 @@ function shutdown(code = 0) {
 process.once('SIGTERM', () => shutdown(0));
 process.once('SIGINT', () => shutdown(0));
 process.once('exit', cleanup);
+const parentWatch = Number.isInteger(parentPid) && parentPid > 0
+  ? setInterval(() => {
+    try {
+      process.kill(parentPid, 0);
+    } catch {
+      shutdown(0);
+    }
+  }, Math.max(20, Number(env.FAKE_SIDECAR_PARENT_CHECK_MS ?? 50)))
+  : null;
+parentWatch?.unref();
 
 if (mode === 'hang') {
   setInterval(() => undefined, 60_000);
@@ -450,7 +557,16 @@ if (mode === 'hang') {
   server = createServer((req, res) => {
     res.statusCode = 200;
     res.setHeader('content-type', 'application/json');
-    res.end(JSON.stringify({ ok: true, state: 'ready', ready: true, degraded: false }));
+    res.end(JSON.stringify({
+      ok: true,
+      state: 'ready',
+      mode: 'immersive',
+      ready: true,
+      degraded: false,
+      pid: process.pid,
+      profileId,
+      cloudId,
+    }));
   });
   server.listen(0, '127.0.0.1', () => {
     writeDiscovery(server.address().port);
@@ -462,7 +578,16 @@ if (mode === 'hang') {
     res.setHeader('content-type', 'application/json');
     const path = String(req.url ?? '');
     if (path.endsWith('/health')) {
-      res.end(JSON.stringify({ ok: true, state: 'ready', ready: true, degraded: false, pid: process.pid, profileId, cloudId }));
+      res.end(JSON.stringify({
+        ok: true,
+        state: sidecarMode === 'immersive' ? 'ready' : 'stopped',
+        mode: sidecarMode,
+        ready: sidecarMode === 'immersive',
+        degraded: sidecarMode !== 'immersive',
+        pid: process.pid,
+        profileId,
+        cloudId,
+      }));
       return;
     }
     if (path.includes('/memory-runtime/v1/')) {
@@ -473,6 +598,37 @@ if (mode === 'hang') {
       }
       const pathname = new URL(path, 'http://127.0.0.1').pathname;
       const relative = pathname.slice(pathname.indexOf('/memory-runtime/v1/') + '/memory-runtime/v1/'.length);
+      if (relative === 'status') {
+        sendEnvelope(res, 200, {
+          mode: sidecarMode,
+          state: sidecarMode === 'immersive' ? 'ready' : 'stopped',
+          pid: process.pid,
+          identity: { cloudId, profileId, hostId: 'h_fake' },
+          runtimeVersion: '0.3.0',
+          degraded: sidecarMode !== 'immersive',
+          capability: {
+            reachable: sidecarMode === 'immersive',
+            version: 1,
+            lastOkAt: sidecarMode === 'immersive' ? Date.now() : null,
+            error: sidecarMode === 'immersive' ? null : 'capability_disabled',
+          },
+          model: {
+            configured: inferenceSource,
+            active: inferenceSource,
+            degraded: false,
+            reason: null,
+            sources: ['heuristic', 'host'],
+          },
+        });
+        return;
+      }
+      const diagnosticRead = (req.method === 'GET' || req.method === 'HEAD')
+        && (['version', 'status', 'inference', 'models', 'traces'].includes(relative)
+          || relative.startsWith('traces/'));
+      if (sidecarMode !== 'immersive' && !diagnosticRead) {
+        sendError(res, 409, 'mode_mismatch', 'fake sidecar 已休眠');
+        return;
+      }
       if (relative === 'models') {
         recordAdmin(req);
         sendEnvelope(res, 200, catalogView());

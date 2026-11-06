@@ -114,6 +114,18 @@ const DEFAULT_CONFIG = Object.freeze({
   hostExtractMaxChars: 6000,
   dedupeCacheSize: 1024,
   maxQueue: 256,
+  eventReconnectMs: 1000,
+  eventReconnectMaxMs: 30000,
+  checkpointRetryMs: 1000,
+  checkpointPendingTimeoutMs: 30000,
+  // Respect the server's Retry-After up to this explicit bound; values above
+  // it are recorded as truncated instead of silently pretending to obey.
+  maxRetryAfterMs: 120000,
+  writeRecoveryMs: 1000,
+  writeRecoveryMaxMs: 30000,
+  writeRecoveryAttempts: 5,
+  disposeWaitMs: 2000,
+  whenIdleWaitMs: 2000,
 });
 
 /** @param {unknown} value */
@@ -794,14 +806,29 @@ export function resolvePluginConfig(input, options = {}) {
 
   const namespaces = uniqueStrings(merged.namespaces, 16).filter((item) => !item.startsWith('__'));
   const domains = uniqueStrings(merged.domains, 16).filter((item) => !item.startsWith('__') && item !== 'system');
+  // `domain` is the single-domain env/config alias documented for OpenCode.
+  // It is a real recall filter, not a decorative key: when present it is
+  // prepended to `domains` and therefore reaches the /context request.
+  const domain = asText(merged.domain);
+  if (domain.length > 0) {
+    if (domain.startsWith('__') || domain === 'system') {
+      warnings.push('domain_invalid');
+    } else if (!domains.includes(domain)) {
+      domains.unshift(domain);
+    }
+  }
   if (domains.length === 0 && namespaces.length > 0) domains.push(...namespaces);
   if (domains.length === 0 && safeNamespace) domains.push(safeNamespace);
 
-  let modelSource = asText(merged.modelSource).toLowerCase();
+  const requestedModelSource = asText(merged.modelSource).toLowerCase();
+  let modelSource = requestedModelSource;
   if (modelSource === 'current' || modelSource === 'host/current' || modelSource === 'generated') {
     modelSource = 'host';
   }
-  if (modelSource !== 'host') modelSource = 'heuristic';
+  if (modelSource !== 'host' && modelSource !== 'heuristic') {
+    if (requestedModelSource.length > 0) warnings.push('model_source_invalid');
+    modelSource = 'heuristic';
+  }
 
   const hiddenToolPrefixes = uniqueStrings(merged.hiddenToolPrefixes, 16);
   if (!hiddenToolPrefixes.includes(MEMORY_TOOL_PREFIX)) {
@@ -850,6 +877,16 @@ export function resolvePluginConfig(input, options = {}) {
     dedupeCacheSize: asInt(merged.dedupeCacheSize, DEFAULT_CONFIG.dedupeCacheSize, 8, 8192),
     maxQueue: asInt(merged.maxQueue, DEFAULT_CONFIG.maxQueue, 1, 2048),
     checkpointTimeoutMs: asInt(merged.checkpointTimeoutMs, DEFAULT_CONFIG.checkpointTimeoutMs, 50, 15000),
+    eventReconnectMs: asInt(merged.eventReconnectMs, DEFAULT_CONFIG.eventReconnectMs, 10, 60000),
+    eventReconnectMaxMs: asInt(merged.eventReconnectMaxMs, DEFAULT_CONFIG.eventReconnectMaxMs, 10, 300000),
+    checkpointRetryMs: asInt(merged.checkpointRetryMs, DEFAULT_CONFIG.checkpointRetryMs, 10, 60000),
+    checkpointPendingTimeoutMs: asInt(merged.checkpointPendingTimeoutMs, DEFAULT_CONFIG.checkpointPendingTimeoutMs, 50, 600000),
+    maxRetryAfterMs: asInt(merged.maxRetryAfterMs, DEFAULT_CONFIG.maxRetryAfterMs, 0, 300000),
+    writeRecoveryMs: asInt(merged.writeRecoveryMs, DEFAULT_CONFIG.writeRecoveryMs, 10, 60000),
+    writeRecoveryMaxMs: asInt(merged.writeRecoveryMaxMs, DEFAULT_CONFIG.writeRecoveryMaxMs, 10, 300000),
+    writeRecoveryAttempts: asInt(merged.writeRecoveryAttempts, DEFAULT_CONFIG.writeRecoveryAttempts, 1, 20),
+    disposeWaitMs: asInt(merged.disposeWaitMs, DEFAULT_CONFIG.disposeWaitMs, 50, 10000),
+    whenIdleWaitMs: asInt(merged.whenIdleWaitMs, DEFAULT_CONFIG.whenIdleWaitMs, 50, 30000),
     configFile: fromFile.found ? configFile : null,
     configFileFound: fromFile.found,
     discoveryPath,
@@ -1188,6 +1225,210 @@ function delay(ms, setTimeoutFn) {
   });
 }
 
+/** Resolves true when the timer fired, false when the lifecycle aborted. */
+function abortableDelay(ms, setTimeoutFn, signal) {
+  if (!signal) return delay(ms, setTimeoutFn).then(() => true);
+  if (signal.aborted) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    let timer = null;
+    const finish = (value) => {
+      if (timer !== null) clearTimeout(timer);
+      signal.removeEventListener?.('abort', onAbort);
+      resolve(value);
+    };
+    const onAbort = () => finish(false);
+    timer = setTimeoutFn(() => finish(true), ms);
+    timer?.unref?.();
+    signal.addEventListener?.('abort', onAbort, { once: true });
+  });
+}
+
+function headerValue(headers, name) {
+  if (!headers) return '';
+  const wanted = String(name).toLowerCase();
+  if (typeof headers.get === 'function') {
+    const value = headers.get(name);
+    return typeof value === 'string' ? value : '';
+  }
+  if (typeof headers !== 'object') return '';
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() !== wanted) continue;
+    return Array.isArray(value) ? String(value[0] ?? '') : String(value ?? '');
+  }
+  return '';
+}
+
+/** Parse `Retry-After` as delta-seconds or HTTP-date; report explicit truncation. */
+function parseRetryAfter(headers, maxMs) {
+  const raw = headerValue(headers, 'retry-after').trim();
+  if (raw.length === 0) return null;
+  let milliseconds = null;
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    milliseconds = seconds * 1000;
+  } else {
+    const date = Date.parse(raw);
+    if (Number.isFinite(date)) milliseconds = Math.max(0, date - Date.now());
+  }
+  if (milliseconds === null) return null;
+  const rawMs = Math.max(0, Math.round(milliseconds));
+  const limit = Number.isFinite(maxMs) ? Math.max(0, maxMs) : rawMs;
+  const bounded = Math.min(rawMs, limit);
+  return {
+    ms: bounded,
+    rawMs,
+    truncated: bounded < rawMs,
+  };
+}
+
+function retryAfterFields(headers, maxMs) {
+  const parsed = parseRetryAfter(headers, maxMs);
+  return parsed
+    ? {
+      retryAfterMs: parsed.ms,
+      retryAfterRawMs: parsed.rawMs,
+      retryAfterTruncated: parsed.truncated,
+    }
+    : { retryAfterMs: null, retryAfterRawMs: null, retryAfterTruncated: false };
+}
+
+function safeJson(value) {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value ?? '');
+  }
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(',')}]`;
+  if (isObject(value)) {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value ?? null);
+}
+
+const CROCKFORD_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+
+function timestampFromUlid(value) {
+  const text = String(value ?? '').toUpperCase();
+  const match = /(?:^|[_:.-])([0-9A-HJKMNP-TV-Z]{26})(?=$|[_:.-])/.exec(text);
+  if (!match) return null;
+  let timestamp = 0;
+  for (const character of match[1].slice(0, 10)) {
+    const index = CROCKFORD_ALPHABET.indexOf(character);
+    if (index < 0) return null;
+    timestamp = (timestamp * 32) + index;
+  }
+  return Number.isFinite(timestamp) && timestamp > 0 ? timestamp : null;
+}
+
+function finiteTimestamp(value) {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) return Math.trunc(value);
+  if (typeof value === 'string' && value.trim().length > 0) {
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return null;
+}
+
+/**
+ * Same logical compaction must produce the same checkpoint body on retry.
+ * Prefer the host event timestamp, then a ULID-derived timestamp; a stable 0
+ * is better than a new `Date.now()` that changes the capability idempotency
+ * body on every retry.
+ */
+function stableCompactionTimestamp(data, compactionId, eventID = null) {
+  const candidates = [
+    data?.at,
+    data?.timestamp,
+    data?.createdAt,
+    data?.time?.created,
+    data?.time?.start,
+    data?.time?.end,
+  ];
+  for (const candidate of candidates) {
+    const parsed = finiteTimestamp(candidate);
+    if (parsed !== null) return parsed;
+  }
+  return timestampFromUlid(compactionId) ?? timestampFromUlid(eventID) ?? 0;
+}
+
+/**
+ * Logical compaction identity from host fields. The transport envelope `id`
+ * is deliberately excluded so a fresh-envelope replay does not create a new
+ * checkpoint. Stable host time and seq distinguish distinct compactions that
+ * share the same summary/count.
+ */
+function compactionLogicalId(data, sessionID) {
+  const explicit = asText(data?.compactionId) || asText(data?.compactionID);
+  if (explicit.length > 0) return explicit;
+  const summary = asText(data?.text) || asText(data?.summary);
+  const model = isObject(data?.model)
+    ? `${asText(data.model.providerID) || asText(data.model.providerId)}/${asText(data.model.id) || asText(data.model.modelID)}`
+    : '';
+  const eventTime = [
+    data?.at,
+    data?.timestamp,
+    data?.createdAt,
+    data?.time?.created,
+    data?.time?.start,
+    data?.time?.end,
+  ].map(finiteTimestamp).find((value) => value !== null) ?? '';
+  return `cmp_${hashText([
+    asText(sessionID),
+    summary,
+    data?.messageCount ?? '',
+    asText(data?.endSeq) || asText(data?.seq),
+    asText(data?.lastMessageID) || asText(data?.lastMessageId),
+    asText(data?.transcriptHash),
+    asText(data?.reason) || '',
+    model,
+    eventTime,
+  ].join('\u0000')).slice(0, 32)}`;
+}
+
+function eventDedupeKey(event) {
+  const type = asText(event?.type);
+  const data = isObject(event?.data) ? event.data : {};
+  const session = asText(data.sessionID) || asText(event?.sessionID);
+  if (type === 'session.compaction.ended') {
+    // Checkpoint-level duplicate/evidence handling owns compaction identity.
+    // Dropping an event here would hide same-id summary/ref updates.
+    return null;
+  }
+  const id = asText(event?.id) || asText(data.eventID) || asText(data.eventId);
+  if (id) return `${type}:id:${id}`;
+  // Hosts may re-deliver an event after reconnect with a fresh envelope but
+  // the same logical identifiers. Use those stable fields before falling back
+  // to the whole serialized event.
+  if (type === 'session.text.ended') {
+    return `${type}:${session}:${asText(data.assistantMessageID)}:${hashText(asText(data.text))}`;
+  }
+  if (type === 'session.tool.input.started') {
+    return `${type}:${session}:${asText(data.id)}:${asText(data.name)}`;
+  }
+  if (type === 'session.tool.called') {
+    return `${type}:${session}:${asText(data.id)}:${hashText(safeJson(data.input))}`;
+  }
+  if (type === 'session.tool.success' || type === 'session.tool.failed') {
+    return `${type}:${session}:${asText(data.id)}:${hashText(safeJson({ content: data.content, error: data.error }))}`;
+  }
+  if (type === 'session.inbox.delivered'
+    || type === 'session.execution.started'
+    || type === 'session.execution.succeeded'
+    || type === 'session.execution.failed'
+    || type === 'session.execution.interrupted'
+    || type === 'session.idle') {
+    // Lifecycle notifications are not logical writes: re-handling one only
+    // re-reads the session and hits chunk/turn dedupe. Do not collapse
+    // legitimate repeated turns in the same session.
+    return null;
+  }
+  return `${type}:hash:${hashText(safeJson(event))}`;
+}
+
+
 /**
  * Create a controller with explicit dependencies. The plugin definition uses
  * this internally; tests use it to drive fake ctx/fetch/session objects.
@@ -1210,22 +1451,70 @@ export function createController(dependencies = {}) {
   let started = false;
   let eventAbort = null;
   let eventTask = null;
+  let eventGeneration = 0;
+  let eventReconnectTimer = null;
+  let eventReconnectAttempt = 0;
+  const eventTasks = new Set();
   const registrations = [];
   const seenTurns = new Map();
   const seenChunks = new Map();
+  const seenEvents = new Map();
   const injectedIds = new Map();
   const buffers = new Map();
   const toolCalls = new Map();
   const contextReads = new Map();
   const recalls = new Map();
+  const pendingCheckpoints = new Map();
+  const checkpointRevisions = new Map();
+  const knownRecordIds = new Map();
+  const knownDetailIds = new Map();
+  const compactionChunkRefs = new Map();
   const inflight = new Set();
+  let lifecycleAbort = typeof AbortController === 'function' ? new AbortController() : null;
+  let authRecoveryTimer = null;
+  let authRecoveryAttempt = 0;
   const stats = {
-    context: { attempts: 0, hits: 0, empty: 0, failures: 0, timeouts: 0, deduped: 0, injected: 0, truncated: 0, cooldown: 0 },
-    ingest: { buffered: 0, chunks: 0, batches: 0, sent: 0, failed: 0, duplicates: 0, contextReads: 0, contextFailures: 0, skipped: 0 },
-    checkpoints: { attempts: 0, sent: 0, failed: 0, conflicts: 0, pending: 0 },
+    context: { attempts: 0, hits: 0, empty: 0, failures: 0, timeouts: 0, deduped: 0, injected: 0, truncated: 0, cooldown: 0, retryAfterTruncated: 0 },
+    ingest: {
+      buffered: 0,
+      chunks: 0,
+      batches: 0,
+      accepted: 0,
+      sent: 0,
+      committed: 0,
+      failed: 0,
+      failedExtraction: 0,
+      partial: 0,
+      empty: 0,
+      pending: 0,
+      queued: 0,
+      duplicates: 0,
+      retryAfterTruncated: 0,
+      rejected: 0,
+      contextReads: 0,
+      contextFailures: 0,
+      skipped: 0,
+    },
+    checkpoints: {
+      attempts: 0,
+      sent: 0,
+      failed: 0,
+      duplicates: 0,
+      updates: 0,
+      conflicts: 0,
+      pending: 0,
+      replayed: 0,
+      expired: 0,
+      interrupted: 0,
+      rejected: 0,
+      droppedRefs: 0,
+      retryAfterTruncated: 0,
+    },
     model: { calls: 0, succeeded: 0, failed: 0, fallbacks: 0, skipped: 0 },
     tools: { maskedAgents: 0, maskedTools: 0, governanceAgents: 0 },
-    events: { received: 0, handled: 0, failures: 0 },
+    events: { received: 0, handled: 0, failures: 0, duplicates: 0, subscriptions: 0, reconnects: 0 },
+    writes: { rejected: 0, disabled: 0, recovered: 0, authProbes: 0, readForbidden: 0 },
+    lifecycle: { disposeTimeouts: 0, idleTimeouts: 0, abortedRequests: 0 },
   };
 
   let disabledReason = null;
@@ -1242,6 +1531,7 @@ export function createController(dependencies = {}) {
   let ingestAllowed = enabled && config.ingest;
   let checkpointAllowed = enabled && config.checkpoints;
   let writesDisabled = false;
+  let writesPolicyBlocked = false;
   let recallCooldownUntil = 0;
   let discoveryTimer = null;
   let discoveryCheckedAt = -Infinity;
@@ -1256,6 +1546,8 @@ export function createController(dependencies = {}) {
     degraded: config.discoveryDegraded,
     capabilities: null,
     discovered: config.discoveryFound,
+    url: config.runtimeUrl || null,
+    profileId: null,
   };
   const tokenState = {
     value: config.token,
@@ -1296,21 +1588,27 @@ export function createController(dependencies = {}) {
         config.runtimeUrl = '';
         runtimeState.discovered = false;
         runtimeState.state = result.reason;
+        runtimeState.url = null;
+        checkpointRevisions.clear();
         if (disabledReason === null || disabledReason === 'runtime_not_discovered') {
           disabledReason = result.reason || 'runtime_not_discovered';
         }
-        enabled = false;
-        recallAllowed = false;
-        ingestAllowed = false;
-        checkpointAllowed = false;
-        hostAvailable = false;
-        if (typeof status === 'object' && status !== null) {
-          status.enabled = false;
-          status.reason = disabledReason;
-        }
+        disableRuntime(disabledReason, { forceReason: true });
       }
       return false;
     }
+    const previousUrl = runtimeState.url;
+    const previousProfileId = runtimeState.profileId;
+    const nextProfileId = asText(discovery.profileId) || null;
+    if (previousUrl !== null
+      && (previousUrl !== discovery.url || previousProfileId !== nextProfileId)) {
+      // A different sidecar instance may reuse the same thread/domain key with
+      // its own revision space. Never carry the previous instance's revision.
+      checkpointRevisions.clear();
+      clearWritePolicy('discovery_identity_changed');
+    }
+    runtimeState.url = discovery.url;
+    runtimeState.profileId = nextProfileId;
     config.runtimeUrl = discovery.url;
     config.discoveryFound = true;
     config.discoveryError = null;
@@ -1346,6 +1644,8 @@ export function createController(dependencies = {}) {
         status.reason = null;
       }
       probed = false;
+      clearWritePolicy('re_enabled');
+      if (writesDisabled) scheduleAuthRecovery();
     }
     return true;
   }
@@ -1358,7 +1658,9 @@ export function createController(dependencies = {}) {
       probed = ok;
       if (!ok) return false;
     }
-    return enabled && !closed;
+    const active = enabled && !closed;
+    if (started && active && (ingestAllowed || checkpointAllowed) && capabilities.events) startEventLoop();
+    return active;
   }
 
   async function ensureContextHook() {
@@ -1409,13 +1711,22 @@ export function createController(dependencies = {}) {
     }
     if (read.reason === 'token_file_insecure') {
       status.warnings.push('token_file_insecure');
-      writesDisabled = true;
+      markWritesDisabled('token_file_insecure');
     }
     return tokenState.value;
   }
 
   function noteFailure(code, message = null) {
     status.lastWarning = { code, at: now(), ...(message ? { message } : {}) };
+  }
+
+  function requestIsWrite(path, method) {
+    const verb = String(method ?? 'GET').toUpperCase();
+    if (verb === 'GET' || verb === 'HEAD') return false;
+    return path.startsWith('/ingest')
+      || path.startsWith('/checkpoints/')
+      || path.startsWith('/self/')
+      || path.startsWith('/compact');
   }
 
   async function requestJson(path, body, options = {}) {
@@ -1429,6 +1740,21 @@ export function createController(dependencies = {}) {
       const controller = typeof AbortController === 'function' ? new AbortController() : null;
       let timer = null;
       let timedOut = false;
+      let aborted = false;
+      const lifecycleSignal = lifecycleAbort?.signal;
+      if (lifecycleSignal?.aborted) {
+        return { ok: false, code: 'aborted' };
+      }
+      const abortFromLifecycle = () => {
+        aborted = true;
+        stats.lifecycle.abortedRequests += 1;
+        try {
+          controller?.abort();
+        } catch {
+          // Best effort.
+        }
+      };
+      lifecycleSignal?.addEventListener?.('abort', abortFromLifecycle, { once: true });
       const headers = {
         accept: 'application/json',
         'x-mebular-adapter': `${config.agentId}/${PACKAGE_VERSION}`,
@@ -1462,6 +1788,7 @@ export function createController(dependencies = {}) {
               code: isObject(document?.error) && typeof document.error.code === 'string'
                 ? document.error.code
                 : `http_${responseStatus ?? 'error'}`,
+              ...retryAfterFields(response?.headers, config.maxRetryAfterMs),
               document,
             };
           }
@@ -1472,6 +1799,7 @@ export function createController(dependencies = {}) {
               code: isObject(document.error) && typeof document.error.code === 'string'
                 ? document.error.code
                 : 'runtime_error',
+              ...retryAfterFields(response?.headers, config.maxRetryAfterMs),
               document,
             };
           }
@@ -1484,10 +1812,11 @@ export function createController(dependencies = {}) {
               ? document.data
               : document,
             warnings: Array.isArray(document?.warnings) ? document.warnings : [],
+            ...retryAfterFields(response?.headers, config.maxRetryAfterMs),
             document,
           };
         } catch {
-          return { ok: false, code: timedOut ? 'timeout' : 'fetch_failed' };
+          return { ok: false, code: timedOut ? 'timeout' : aborted ? 'aborted' : 'fetch_failed' };
         }
       })();
 
@@ -1508,6 +1837,7 @@ export function createController(dependencies = {}) {
         return await Promise.race([run, timeout]);
       } finally {
         if (timer !== null) clearTimeoutFn(timer);
+        lifecycleSignal?.removeEventListener?.('abort', abortFromLifecycle);
       }
     };
 
@@ -1517,18 +1847,236 @@ export function createController(dependencies = {}) {
       refreshToken(true);
       result = await attempt();
     }
-    if (!result.ok && (result.status === 401 || result.status === 403)) {
-      writesDisabled = true;
-      noteFailure('runtime_unauthorized');
+    if (!result.ok && result.status === 401) {
+      markWritesDisabled('runtime_unauthorized');
+    } else if (!result.ok && result.status === 403) {
+      if (requestIsWrite(path, method)) {
+        markWritesPolicyBlocked('runtime_forbidden');
+      } else {
+        stats.writes.readForbidden += 1;
+        noteFailure('runtime_forbidden_read');
+      }
     } else if (result.ok && useAuth && writesDisabled) {
       // A rotated host token recovered on retry; resume ingest/checkpoint.
-      writesDisabled = false;
+      clearWritesDisabled('request_succeeded');
     }
     return result;
   }
 
-  function disableRuntime(reason) {
-    if (disabledReason === null) disabledReason = reason;
+  function clearBuffers() {
+    for (const buffer of buffers.values()) {
+      if (buffer.timer !== null) clearTimeoutFn(buffer.timer);
+    }
+    buffers.clear();
+    toolCalls.clear();
+  }
+
+  function clearPendingCheckpointTimer(entry) {
+    if (entry?.timer !== null && entry?.timer !== undefined) {
+      clearTimeoutFn(entry.timer);
+      entry.timer = null;
+    }
+  }
+
+  function removePendingCheckpoint(entry) {
+    if (!entry || !pendingCheckpoints.has(entry.key)) return false;
+    clearPendingCheckpointTimer(entry);
+    pendingCheckpoints.delete(entry.key);
+    stats.checkpoints.pending = pendingCheckpoints.size;
+    return true;
+  }
+
+  function clearAuthRecovery() {
+    if (authRecoveryTimer !== null) {
+      clearTimeoutFn(authRecoveryTimer);
+      authRecoveryTimer = null;
+    }
+  }
+
+  function scheduleAuthRecovery() {
+    if (closed || !enabled || !writesDisabled || writesPolicyBlocked || typeof fetchImpl !== 'function') return;
+    if (authRecoveryTimer !== null) return;
+    if (authRecoveryAttempt >= config.writeRecoveryAttempts) {
+      status.writeState = {
+        ...(status.writeState ?? {}),
+        disabled: true,
+        state: 'failed',
+        reason: status.writeState?.reason ?? 'runtime_unauthorized',
+        attempts: authRecoveryAttempt,
+        nextRetryAt: null,
+        at: now(),
+      };
+      return;
+    }
+    const base = Math.max(10, config.writeRecoveryMs);
+    const wait = Math.min(
+      Math.max(base, config.writeRecoveryMaxMs),
+      base * (2 ** authRecoveryAttempt),
+    );
+    authRecoveryAttempt += 1;
+    const nextRetryAt = now() + wait;
+    status.writeState = {
+      ...(status.writeState ?? {}),
+      disabled: true,
+      state: 'recovering',
+      attempts: authRecoveryAttempt,
+      nextRetryAt,
+      at: now(),
+    };
+    authRecoveryTimer = setTimeoutFn(() => {
+      authRecoveryTimer = null;
+      if (closed || !enabled || !writesDisabled) return;
+      stats.writes.authProbes += 1;
+      void track((async () => {
+        const result = await requestJson('/status', undefined, { method: 'GET', timeoutMs: 1000 });
+        if (result.ok) {
+          clearWritesDisabled('auth_probe_succeeded');
+        } else if (!closed && enabled && writesDisabled) {
+          scheduleAuthRecovery();
+        }
+      })());
+    }, wait);
+    authRecoveryTimer?.unref?.();
+  }
+
+  function markWritesDisabled(reason) {
+    if (writesPolicyBlocked) return;
+    if (!writesDisabled) stats.writes.disabled += 1;
+    writesDisabled = true;
+    status.writeState = {
+      ...(status.writeState ?? {}),
+      disabled: true,
+      state: 'degraded',
+      reason,
+      attempts: authRecoveryAttempt,
+      nextRetryAt: null,
+      at: now(),
+    };
+    noteFailure(reason);
+    scheduleAuthRecovery();
+  }
+
+  function markWritesPolicyBlocked(reason) {
+    if (!writesDisabled) stats.writes.disabled += 1;
+    writesDisabled = true;
+    writesPolicyBlocked = true;
+    clearAuthRecovery();
+    status.writeState = {
+      ...(status.writeState ?? {}),
+      disabled: true,
+      state: 'failed',
+      policy: true,
+      reason,
+      attempts: authRecoveryAttempt,
+      nextRetryAt: null,
+      at: now(),
+    };
+    noteFailure(reason);
+  }
+
+  function clearWritesDisabled(reason) {
+    if (!writesDisabled || writesPolicyBlocked) return;
+    writesDisabled = false;
+    clearAuthRecovery();
+    authRecoveryAttempt = 0;
+    stats.writes.recovered += 1;
+    status.writeState = {
+      disabled: false,
+      state: 'ready',
+      reason: null,
+      attempts: 0,
+      nextRetryAt: null,
+      recoveredReason: reason,
+      at: now(),
+    };
+  }
+
+  function clearWritePolicy(reason) {
+    if (!writesPolicyBlocked) return;
+    writesPolicyBlocked = false;
+    writesDisabled = false;
+    clearAuthRecovery();
+    authRecoveryAttempt = 0;
+    stats.writes.recovered += 1;
+    status.writeState = {
+      disabled: false,
+      state: 'ready',
+      reason: null,
+      policy: false,
+      attempts: 0,
+      nextRetryAt: null,
+      recoveredReason: reason,
+      at: now(),
+    };
+  }
+
+  function recordWriteRejected(kind) {
+    stats.writes.rejected += 1;
+    status.writeState = {
+      ...(status.writeState ?? {}),
+      lastRejected: { kind, reason: status.writeState?.reason ?? 'writes_disabled', at: now() },
+    };
+    noteFailure('write_rejected');
+  }
+
+  function abortLifecycleRequests({ restart = false } = {}) {
+    try {
+      lifecycleAbort?.abort();
+    } catch {
+      // Best effort.
+    }
+    lifecycleAbort = restart && !closed && typeof AbortController === 'function'
+      ? new AbortController()
+      : null;
+  }
+
+  /**
+   * A pending checkpoint is only an in-memory intent. Disable/shutdown must
+   * make it visibly failed instead of letting it disappear or hang forever.
+   */
+  function failAllPendingCheckpoints(reason) {
+    if (pendingCheckpoints.size === 0) return 0;
+    const entries = [...pendingCheckpoints.values()];
+    for (const entry of entries) {
+      entry.settled = true;
+      removePendingCheckpoint(entry);
+    }
+    stats.checkpoints.failed += entries.length;
+    if (reason === 'checkpoint_disabled' || reason === 'checkpoint_shutdown') {
+      stats.checkpoints.interrupted += entries.length;
+    } else if (reason === 'checkpoint_pending_expired') {
+      stats.checkpoints.expired += entries.length;
+    }
+    status.checkpoint = {
+      state: 'failed',
+      reason,
+      pending: 0,
+      failed: entries.length,
+      at: now(),
+    };
+    noteFailure(reason);
+    return entries.length;
+  }
+
+  function stopEventLoop() {
+    eventGeneration += 1;
+    if (eventReconnectTimer !== null) {
+      clearTimeoutFn(eventReconnectTimer);
+      eventReconnectTimer = null;
+    }
+    try {
+      eventAbort?.abort();
+    } catch {
+      // Best effort.
+    }
+    eventAbort = null;
+    eventTask = null;
+    eventReconnectAttempt = 0;
+  }
+
+  function disableRuntime(reason, options = {}) {
+    if (closed) return;
+    if (disabledReason === null || options.forceReason) disabledReason = reason;
     enabled = false;
     recallAllowed = false;
     ingestAllowed = false;
@@ -1536,6 +2084,13 @@ export function createController(dependencies = {}) {
     hostAvailable = false;
     status.enabled = false;
     status.reason = reason;
+    // Hot disable: cancel event subscription, reconnect/backoff timers,
+    // in-flight requests, buffered turns and pending checkpoints. No flush.
+    stopEventLoop();
+    clearAuthRecovery();
+    abortLifecycleRequests({ restart: true });
+    clearBuffers();
+    failAllPendingCheckpoints('checkpoint_disabled');
   }
 
   async function probeRuntime() {
@@ -1632,6 +2187,28 @@ export function createController(dependencies = {}) {
     inflight.add(wrapped);
     void wrapped.finally(() => inflight.delete(wrapped));
     return wrapped;
+  }
+
+  function waitForLifecycle(promise) {
+    const signal = lifecycleAbort?.signal;
+    if (!signal) return Promise.resolve(promise);
+    if (signal.aborted) {
+      return Promise.reject(Object.assign(new Error('aborted'), { code: 'aborted' }));
+    }
+    return new Promise((resolve, reject) => {
+      const onAbort = () => reject(Object.assign(new Error('aborted'), { code: 'aborted' }));
+      signal.addEventListener('abort', onAbort, { once: true });
+      Promise.resolve(promise).then(
+        (value) => {
+          signal.removeEventListener('abort', onAbort);
+          resolve(value);
+        },
+        (error) => {
+          signal.removeEventListener('abort', onAbort);
+          reject(error);
+        },
+      );
+    });
   }
 
   function agentNameOf(value) {
@@ -1763,6 +2340,7 @@ export function createController(dependencies = {}) {
       maxFragments: config.maxFragments,
       maxBytes: config.maxContextBytes,
       tokenBudget: config.recallTokenBudget,
+      limit: config.recallLimit,
       includeOtherAgents: config.includeOtherAgents,
       includeCheckpoint: config.includeCheckpoint,
       includeSelf: config.includeSelf,
@@ -1774,8 +2352,25 @@ export function createController(dependencies = {}) {
     if (!result.ok) {
       stats.context.failures += 1;
       if (result.code === 'timeout') stats.context.timeouts += 1;
-      recallCooldownUntil = now() + 30_000;
+      const rawRetryAfter = Number.isFinite(result.retryAfterRawMs)
+        ? result.retryAfterRawMs
+        : Number.isFinite(result.retryAfterMs) ? result.retryAfterMs : 0;
+      const retryAfter = Math.min(rawRetryAfter, config.maxRetryAfterMs);
       noteFailure(result.code === 'timeout' ? 'runtime_timeout' : 'runtime_error');
+      if (rawRetryAfter > retryAfter) {
+        stats.context.retryAfterTruncated += 1;
+        noteFailure('retry_after_truncated');
+      }
+      recallCooldownUntil = now() + Math.max(30_000, retryAfter);
+      if (result.status === 409 && result.code === 'mode_mismatch') {
+        disableRuntime('runtime_mode_mismatch');
+      } else if (result.status === 401) {
+        // requestJson already attempted one token-file refresh. A persistent
+        // 401 stays visible and injects nothing; it must not spin.
+        noteFailure('runtime_unauthorized');
+      } else if (result.status === 403) {
+        noteFailure('runtime_forbidden');
+      }
       return;
     }
     const blocks = contextBlocksFromResponse(result.data);
@@ -1816,10 +2411,15 @@ export function createController(dependencies = {}) {
     if (result.data?.truncated || text.includes('[truncated]')) stats.context.truncated += 1;
   }
 
-  async function handleContext(event) {
+  function handleContext(event) {
+    return track(handleContextInternal(event));
+  }
+
+  async function handleContextInternal(event) {
     if (closed) return;
     try {
       if (!(await ensureRuntime(!enabled))) return;
+      if (closed || !enabled) return;
       applyToolMask(event);
       const turn = extractLastUserTurn(event?.messages);
       if (turn) bufferChunk(event?.sessionID, 'user', turn.text, turn.id);
@@ -1848,7 +2448,12 @@ export function createController(dependencies = {}) {
   }
 
   function bufferChunk(sessionID, role, text, messageId) {
-    if (!ingestAllowed || writesDisabled || closed) return false;
+    if (!ingestAllowed || closed) return false;
+    if (writesDisabled) {
+      recordWriteRejected('ingest');
+      stats.ingest.rejected += 1;
+      return false;
+    }
     if (!refreshDiscovery(false)) return false;
     const session = safeThreadId(sessionID);
     const content = asText(text);
@@ -1957,7 +2562,8 @@ export function createController(dependencies = {}) {
     const task = (async () => {
       if (!capabilities.sessionContext) return;
       try {
-        const result = await ctx.session.context({ sessionID: session });
+        const result = await waitForLifecycle(ctx.session.context({ sessionID: session }));
+        if (closed || !enabled || !ingestAllowed) return;
         const messages = asArray(result);
         const recent = messages.slice(-config.maxCaptureMessages);
         stats.ingest.contextReads += 1;
@@ -1978,17 +2584,71 @@ export function createController(dependencies = {}) {
     return chunks.map((chunk) => ({
       role: chunk.role,
       text: chunk.text,
-      at: chunk.at,
+      // `at` stays local for ordering; including host wall-clock time in the
+      // idempotent body would make a restart replay conflict on the sidecar
+      // hash even with the same requestId. The sidecar assigns its own
+      // accepted time when `at` is omitted.
       ...(chunk.messageId ? { messageId: chunk.messageId } : {}),
       ...(chunk.contentHash ? { contentHash: chunk.contentHash } : {}),
       ...(chunk.redaction ? { redaction: chunk.redaction } : {}),
     }));
   }
 
+  // Process-local, bounded knowledge of graph ids actually returned by this
+  // plugin's ingest calls. It is intentionally not persisted and is evicted
+  // by count; ids absent here are never trusted from host checkpoint events.
+  function rememberIngestGraphIds(session, data) {
+    if (!session || !isObject(data)) return;
+    const records = Array.isArray(data.records) ? data.records : [];
+    const rememberSet = (map, key, ids) => {
+      if (ids.length === 0) return;
+      let set = map.get(key);
+      if (!set) {
+        set = new Set();
+        map.set(key, set);
+      }
+      for (const id of ids) set.add(id);
+      while (set.size > 512) set.delete(set.values().next().value);
+      while (map.size > 128) map.delete(map.keys().next().value);
+    };
+    const domainForRecord = (record) => asText(record?.domain) || asText(record?.namespace) || 'default';
+    for (const record of records) {
+      const id = asText(record?.id);
+      if (!id) continue;
+      const domain = domainForRecord(record);
+      const key = `${session}\u0000${domain}`;
+      rememberSet(knownRecordIds, key, [id]);
+      rememberSet(
+        knownDetailIds,
+        key,
+        (Array.isArray(record?.detailIds) ? record.detailIds : []).map(asText).filter(Boolean),
+      );
+    }
+    const detailIds = (Array.isArray(data.detail?.ids) ? data.detail.ids : [])
+      .map(asText)
+      .filter(Boolean);
+    if (detailIds.length > 0) {
+      const domains = [...new Set(records.map(domainForRecord))];
+      const domain = domains.length === 1 ? domains[0] : 'default';
+      rememberSet(knownDetailIds, `${session}\u0000${domain}`, detailIds);
+    }
+  }
+
+  function knownGraphIdsFor(map, session, domain, ids) {
+    const set = map.get(`${session}\u0000${domain}`) ?? new Set();
+    return ids.filter((id) => set.has(id));
+  }
+
   async function sendIngest(chunks, options = {}) {
     const session = safeThreadId(options.sessionID);
-    if (!ingestAllowed || writesDisabled || closed || !session || chunks.length === 0) {
+    const lifecycleSignal = lifecycleAbort?.signal;
+    if (!session || chunks.length === 0 || !ingestAllowed || closed) {
       return { ok: false, code: 'ingest_disabled' };
+    }
+    if (writesDisabled) {
+      recordWriteRejected('ingest');
+      stats.ingest.rejected += 1;
+      return { ok: false, code: 'writes_disabled' };
     }
     if (!refreshDiscovery(false)) return { ok: false, code: 'runtime_not_discovered' };
     const extractor = options.extractor === 'host' ? 'host' : 'heuristic';
@@ -2022,19 +2682,86 @@ export function createController(dependencies = {}) {
       lastResult = result;
       if (result.ok) {
         stats.ingest.batches += 1;
+        stats.ingest.accepted += 1;
         stats.ingest.chunks += chunks.length;
         stats.ingest.sent += chunks.length;
+        const extractionStatus = asText(result.data?.extraction?.status);
+        const detail = isObject(result.data?.detail) ? result.data.detail : {};
+        const detailQueued = Number(detail.queued) > 0;
+        const detailFailed = Number(detail.failed) > 0;
+        const recordCount = Array.isArray(result.data?.records) ? result.data.records.length : 0;
+        const detailCount = Number.isInteger(detail.written) && detail.written > 0
+          ? detail.written
+          : Array.isArray(detail.ids) ? detail.ids.length : 0;
+        const hasObjects = recordCount > 0 || detailCount > 0
+          || (Number.isInteger(result.data?.accepted?.records) && result.data.accepted.records > 0);
+        const queued = result.data?.queued === true || detailQueued;
+        const pending = result.status === 202
+          || result.data?.pending === true
+          || extractionStatus === 'pending';
+        if (detailFailed && hasObjects) {
+          // C05: a detail write partially failed but graph objects already
+          // exist. This is partial, not a pure extraction failure.
+          stats.ingest.partial += 1;
+          noteFailure('detail_write_failed');
+        } else if (extractionStatus === 'failed') {
+          stats.ingest.failedExtraction += 1;
+          noteFailure('extraction_failed');
+        } else if (detailFailed) {
+          stats.ingest.partial += 1;
+          noteFailure('detail_write_failed');
+        } else if (queued) {
+          stats.ingest.queued += 1;
+        } else if (pending) {
+          // 202 with queued:false is still pending, not queued.
+          stats.ingest.pending += 1;
+        } else if (extractionStatus === 'completed' && hasObjects) {
+          stats.ingest.committed += 1;
+        } else if (extractionStatus === 'completed') {
+          stats.ingest.empty += 1;
+        }
         if (result.data?.duplicate === true) stats.ingest.duplicates += 1;
+        rememberIngestGraphIds(session, result.data);
         return result;
       }
-      if (result.status === 401 || result.status === 403) break;
+      if (result.status === 401) {
+        markWritesDisabled('runtime_unauthorized');
+        break;
+      }
+      if (result.status === 403) {
+        markWritesPolicyBlocked('runtime_forbidden');
+        break;
+      }
+      if (result.status === 409 && result.code === 'mode_mismatch') {
+        disableRuntime('runtime_mode_mismatch');
+        break;
+      }
+      if (result.code === 'aborted') break;
       const retryable = result.code === 'timeout'
         || result.code === 'fetch_failed'
         || (typeof result.status === 'number' && (result.status >= 500 || result.status === 429));
       if (!retryable) break;
+      const retryDelay = Number.isFinite(result.retryAfterRawMs)
+        ? result.retryAfterRawMs
+        : result.retryAfterMs;
+      if (attempt === 0 && Number.isFinite(retryDelay) && retryDelay > 0) {
+        if (result.retryAfterTruncated === true) {
+          stats.ingest.retryAfterTruncated += 1;
+          noteFailure('retry_after_truncated');
+        }
+        const waited = await abortableDelay(
+          result.retryAfterMs,
+          setTimeoutFn,
+          lifecycleSignal,
+        );
+        if (!waited) break;
+        if (closed || !enabled || !ingestAllowed || writesDisabled) break;
+      }
     }
     stats.ingest.failed += 1;
-    noteFailure(lastResult?.code === 'timeout' ? 'runtime_timeout' : 'runtime_error');
+    noteFailure(lastResult?.retryAfterTruncated === true
+      ? 'retry_after_truncated'
+      : lastResult?.code === 'timeout' ? 'runtime_timeout' : 'runtime_error');
     return lastResult ?? { ok: false, code: 'runtime_error' };
   }
 
@@ -2059,7 +2786,7 @@ export function createController(dependencies = {}) {
     let timer = null;
     try {
       const result = await Promise.race([
-        Promise.resolve(ctx.session.generate({
+        waitForLifecycle(ctx.session.generate({
           sessionID,
           prompt: `${HOST_EXTRACTION_PROMPT}\n\n<<<TRANSCRIPT\n${transcript}\nTRANSCRIPT>>>`,
         })),
@@ -2111,21 +2838,545 @@ export function createController(dependencies = {}) {
     return `task:${sessionID}`;
   }
 
+  const CHECKPOINT_MAX_REBASES = 1;
+
+  function checkpointResponsePending(result) {
+    return result.status === 202
+      || result.data?.pending === true
+      || result.data?.checkpoint?.pending === true
+      || result.document?.pending === true;
+  }
+
+  function checkpointDomainIdentity(checkpoint) {
+    if (!isObject(checkpoint)) return '';
+    const state = isObject(checkpoint.state) ? checkpoint.state : {};
+    return asText(checkpoint.domain)
+      || asText(checkpoint.namespace)
+      || asText(state.task?.key);
+  }
+
+  function checkpointDomainMatches(entry, checkpoint) {
+    return checkpointDomainIdentity(checkpoint) === entry.domain;
+  }
+
+  function checkpointMatches(entry, checkpoint) {
+    if (!isObject(checkpoint) || !checkpointDomainMatches(entry, checkpoint)) return false;
+    const state = isObject(checkpoint.state) ? checkpoint.state : {};
+    const compactionId = asText(state.compactionId) || asText(checkpoint.compactionId);
+    if (asText(entry.compactionId).length > 0 && compactionId === asText(entry.compactionId)) return true;
+    // Old plugin revisions used the transport event id as compactionId. Keep
+    // recognizing those committed objects, without using transport ids for
+    // newly generated logical ids.
+    const sourceEventId = asText(state.sourceEventId) || asText(checkpoint.sourceEventId);
+    return entry.legacyIds.includes(compactionId) || entry.legacyIds.includes(sourceEventId);
+  }
+
+  function isLegacyTransportCheckpoint(checkpoint) {
+    if (!isObject(checkpoint)) return false;
+    const state = isObject(checkpoint.state) ? checkpoint.state : {};
+    const compactionId = asText(state.compactionId) || asText(checkpoint.compactionId);
+    const sourceEventId = asText(state.sourceEventId) || asText(checkpoint.sourceEventId);
+    // Only the documented old transport shape is legacy. A new manual id
+    // such as "c1" or "manual-1" must never be treated as legacy merely
+    // because it lacks the cmp_ prefix.
+    return /^evt[_:.-]/i.test(compactionId)
+      || (compactionId.length === 0 && /^evt[_:.-]/i.test(sourceEventId));
+  }
+
+  function normalizedCheckpointState(checkpoint) {
+    const state = isObject(checkpoint?.state) ? checkpoint.state : {};
+    const cloned = JSON.parse(JSON.stringify(state));
+    const normalizeRefItems = (items) => (Array.isArray(items)
+      ? items.map((item) => (isObject(item)
+        ? { ...item, recordIds: Array.isArray(item.recordIds) ? item.recordIds : [] }
+        : item))
+      : items);
+    cloned.decisions = normalizeRefItems(cloned.decisions);
+    if (isObject(cloned.progress)) {
+      cloned.progress = {
+        ...cloned.progress,
+        done: normalizeRefItems(cloned.progress.done),
+        doing: normalizeRefItems(cloned.progress.doing),
+        blocked: normalizeRefItems(cloned.progress.blocked),
+      };
+    }
+    delete cloned.at;
+    delete cloned.sourceEventId;
+    delete cloned.compactionId;
+    delete cloned.host;
+    return cloned;
+  }
+
+  function checkpointEvidence(checkpoint) {
+    const state = isObject(checkpoint?.state) ? checkpoint.state : {};
+    const recordIds = Array.isArray(checkpoint?.recordIds)
+      ? checkpoint.recordIds
+      : Array.isArray(state.references?.recordIds) ? state.references.recordIds : [];
+    const detailIds = Array.isArray(checkpoint?.detailIds)
+      ? checkpoint.detailIds
+      : Array.isArray(state.references?.detailIds) ? state.references.detailIds : [];
+    return canonicalJson({
+      summary: typeof checkpoint?.summary === 'string' ? checkpoint.summary : null,
+      state: normalizedCheckpointState(checkpoint),
+      recordIds: [...new Set(recordIds.map(asText).filter(Boolean))].sort(),
+      detailIds: [...new Set(detailIds.map(asText).filter(Boolean))].sort(),
+    });
+  }
+
+  function entryEvidence(entry) {
+    return canonicalJson({
+      summary: typeof entry.body?.summary === 'string' ? entry.body.summary : null,
+      state: normalizedCheckpointState(entry.body),
+      recordIds: [...new Set((entry.body?.recordIds ?? []).map(asText).filter(Boolean))].sort(),
+      detailIds: [...new Set((entry.body?.detailIds ?? []).map(asText).filter(Boolean))].sort(),
+    });
+  }
+
+  function checkpointRevisionKey(entry) {
+    return `${config.agentId}\u0000${entry.domain}`;
+  }
+
+  function checkpointGetPath(entry) {
+    const separator = entry.path.includes('?') ? '&' : '?';
+    return `${entry.path}${separator}domain=${encodeURIComponent(entry.domain)}`;
+  }
+
+  function setCheckpointRevision(entry, revision) {
+    if (!entry || !Number.isInteger(revision) || revision < 0) return;
+    const key = checkpointRevisionKey(entry);
+    checkpointRevisions.set(key, revision);
+    while (checkpointRevisions.size > config.dedupeCacheSize) {
+      const oldest = checkpointRevisions.keys().next().value;
+      if (oldest === undefined) break;
+      checkpointRevisions.delete(oldest);
+    }
+    entry.confirmedRevision = revision;
+  }
+
+  function checkpointStopped() {
+    return closed || !enabled || !checkpointAllowed;
+  }
+
+  async function resolveCheckpointRevision(entry) {
+    const cached = checkpointRevisions.get(checkpointRevisionKey(entry));
+    const cachedRevision = Number.isInteger(cached) && cached >= 0 ? cached : 0;
+    // Always read the authoritative domain-scoped view for this logical
+    // compaction. A cached revision alone cannot prove the object identity
+    // after an instance switch, delete/recreate, or pending cache overwrite.
+    const current = await requestJson(checkpointGetPath(entry), undefined, {
+      method: 'GET',
+      timeoutMs: config.checkpointTimeoutMs,
+    });
+    if (checkpointStopped()) return { failure: 'checkpoint_interrupted' };
+    if (!current.ok) {
+      if (current.status === 401) return { failure: 'checkpoint_unauthorized' };
+      if (current.status === 403) {
+        stats.writes.readForbidden += 1;
+        return { failure: 'checkpoint_read_forbidden' };
+      }
+      if (current.status === 409 && current.code === 'mode_mismatch') return { failure: 'runtime_mode_mismatch' };
+      if (current.code === 'aborted') return { failure: 'checkpoint_interrupted' };
+      // No authoritative revision while capability/network is unavailable.
+      // Reuse the last confirmed revision for this key if present; otherwise
+      // use the create convention (0) so a real collision fails explicitly.
+      return { revision: cachedRevision, source: cachedRevision > 0 ? 'cached_fallback' : 'unavailable' };
+    }
+    const checkpoint = current.data?.checkpoint;
+    const dataSource = asText(current.data?.source);
+    if (isObject(checkpoint) && checkpoint.pending !== true) {
+      const identity = checkpointDomainIdentity(checkpoint);
+      if (identity.length === 0) {
+        // Legacy sidecars may omit domain entirely. Without an identity the
+        // revision cannot be trusted for a task-domain key; use the safe
+        // create convention and let a real collision fail explicitly.
+        return { revision: 0, source: 'domain_unknown_absent', checkpoint: null };
+      }
+      if (identity !== entry.domain) {
+        // A domain-scoped GET on a legacy sidecar can still return default.
+        // Treat that as "this domain has no checkpoint" rather than poisoning
+        // the task key with a foreign revision.
+        return { revision: 0, source: 'foreign_domain_absent', checkpoint: null };
+      }
+    }
+    const revision = Number.isInteger(checkpoint?.revision) ? checkpoint.revision : null;
+    if (isObject(checkpoint) && checkpoint.pending !== true && revision !== null) {
+      setCheckpointRevision(entry, revision);
+      return {
+        revision,
+        source: dataSource || asText(checkpoint.source) || 'get',
+        checkpoint,
+      };
+    }
+    if (!checkpoint && dataSource === 'cloud') {
+      return { revision: 0, source: 'authoritative_absent', checkpoint: null };
+    }
+    if (checkpoint?.pending === true) {
+      return { revision: cachedRevision, source: 'pending_unknown', checkpoint };
+    }
+    return { revision: cachedRevision, source: 'unavailable', checkpoint: checkpoint ?? null };
+  }
+
+  function finishCheckpoint(entry, outcome, detail = {}) {
+    if (!entry || entry.settled) return false;
+    entry.settled = true;
+    const wasPending = removePendingCheckpoint(entry);
+    if (outcome === 'committed') {
+      setCheckpointRevision(entry, detail.revision);
+      if (detail.duplicate === true) stats.checkpoints.duplicates += 1;
+      else stats.checkpoints.sent += 1;
+      status.checkpoint = {
+        state: 'committed',
+        revision: Number.isFinite(detail.revision) ? detail.revision : null,
+        expectedRevision: entry.body?.expectedRevision ?? null,
+        revisionSource: entry.revisionSource ?? null,
+        duplicate: detail.duplicate === true,
+        pending: stats.checkpoints.pending,
+        at: now(),
+      };
+      return true;
+    }
+    stats.checkpoints.failed += 1;
+    if (detail.reason === 'checkpoint_pending_expired') stats.checkpoints.expired += 1;
+    if (detail.reason === 'checkpoint_interrupted') stats.checkpoints.interrupted += 1;
+    status.checkpoint = {
+      state: 'failed',
+      reason: detail.reason ?? 'checkpoint_failed',
+      pending: stats.checkpoints.pending,
+      retryAfterMs: entry.retryAfterMs ?? null,
+      retryAfterRawMs: entry.retryAfterRawMs ?? null,
+      retryAfterTruncated: entry.retryAfterTruncated === true,
+      retryAfterLimitedByDeadline: entry.retryAfterLimitedByDeadline === true,
+      at: now(),
+    };
+    noteFailure(detail.reason ?? 'checkpoint_failed');
+    if (wasPending && detail.reason === 'checkpoint_unauthorized') markWritesDisabled('runtime_unauthorized');
+    return true;
+  }
+
+  function schedulePendingCheckpoint(entry, reason, mode, retryAfterMs = null) {
+    if (!entry || entry.settled) return;
+    if (closed || !enabled || !checkpointAllowed) {
+      finishCheckpoint(entry, 'failed', { reason: 'checkpoint_interrupted' });
+      return;
+    }
+    if (!pendingCheckpoints.has(entry.key)) pendingCheckpoints.set(entry.key, entry);
+    stats.checkpoints.pending = pendingCheckpoints.size;
+    entry.pendingReason = reason;
+    entry.mode = mode;
+    const base = Math.max(10, config.checkpointRetryMs);
+    const exponent = Math.min(Math.max(entry.attempts - 1, 0), 5);
+    const rawRetryAfter = Number.isFinite(retryAfterMs) && retryAfterMs >= 0 ? retryAfterMs : null;
+    const cappedRetryAfter = rawRetryAfter === null
+      ? null
+      : Math.min(rawRetryAfter, config.maxRetryAfterMs);
+    const retryAfterTruncated = rawRetryAfter !== null && cappedRetryAfter < rawRetryAfter;
+    const backoff = cappedRetryAfter === null
+      ? Math.min(base * (2 ** exponent), 30000)
+      : cappedRetryAfter;
+    const target = now() + Math.max(1, Math.round(backoff));
+    entry.retryAt = Math.min(entry.deadlineAt, target);
+    entry.retryAfterRawMs = rawRetryAfter;
+    entry.retryAfterMs = cappedRetryAfter;
+    entry.retryAfterTruncated = retryAfterTruncated;
+    entry.retryAfterLimitedByDeadline = cappedRetryAfter !== null && target > entry.deadlineAt;
+    if (retryAfterTruncated || entry.retryAfterLimitedByDeadline) {
+      stats.checkpoints.retryAfterTruncated += 1;
+      noteFailure(retryAfterTruncated ? 'retry_after_truncated' : 'retry_after_limited_by_deadline');
+    }
+    clearPendingCheckpointTimer(entry);
+    entry.timer = setTimeoutFn(() => {
+      entry.timer = null;
+      if (closed) return;
+      void track(replayPendingCheckpoint(entry));
+    }, Math.max(1, entry.retryAt - now()));
+    entry.timer?.unref?.();
+    status.checkpoint = {
+      state: 'pending',
+      reason,
+      pending: stats.checkpoints.pending,
+      expectedRevision: entry.body?.expectedRevision ?? null,
+      revisionSource: entry.revisionSource ?? null,
+      retryAfterMs: entry.retryAfterMs,
+      retryAfterRawMs: entry.retryAfterRawMs ?? null,
+      retryAfterTruncated: entry.retryAfterTruncated === true,
+      retryAt: entry.retryAt,
+      deadlineAt: entry.deadlineAt,
+      retryAfterLimitedByDeadline: entry.retryAfterLimitedByDeadline,
+      at: now(),
+    };
+    noteFailure(reason === 'revision_mismatch' ? 'checkpoint_conflict' : 'checkpoint_pending');
+  }
+
+  async function replayPendingCheckpoint(entry) {
+    if (!entry || entry.settled || !pendingCheckpoints.has(entry.key)) return false;
+    if (checkpointStopped()) {
+      finishCheckpoint(entry, 'failed', { reason: 'checkpoint_interrupted' });
+      return false;
+    }
+    if (entry.retryAfterLimitedByDeadline === true || now() >= entry.deadlineAt) {
+      finishCheckpoint(entry, 'failed', { reason: 'checkpoint_pending_expired' });
+      return false;
+    }
+    stats.checkpoints.replayed += 1;
+    return sendCheckpoint(entry);
+  }
+
+  async function sendCheckpoint(entry) {
+    if (!entry || entry.settled) return false;
+    if (checkpointStopped()) {
+      finishCheckpoint(entry, 'failed', { reason: 'checkpoint_interrupted' });
+      return false;
+    }
+    if (writesDisabled) {
+      recordWriteRejected('checkpoint');
+      stats.checkpoints.rejected += 1;
+      finishCheckpoint(entry, 'failed', { reason: 'checkpoint_unauthorized' });
+      return false;
+    }
+    if (now() >= entry.deadlineAt) {
+      finishCheckpoint(entry, 'failed', { reason: 'checkpoint_pending_expired' });
+      return false;
+    }
+    stats.checkpoints.attempts += 1;
+    entry.attempts += 1;
+
+    if (entry.mode === 'poll') {
+      const current = await requestJson(checkpointGetPath(entry), undefined, {
+        method: 'GET',
+        timeoutMs: config.checkpointTimeoutMs,
+      });
+      if (entry.settled) return false;
+      if (checkpointStopped()) {
+        finishCheckpoint(entry, 'failed', { reason: 'checkpoint_interrupted' });
+        return false;
+      }
+      if (current.ok) {
+        const checkpoint = current.data?.checkpoint;
+        if (isObject(checkpoint)
+          && checkpoint.pending !== true
+          && Number.isFinite(checkpoint.revision)
+          && checkpointMatches(entry, checkpoint)) {
+          // Authoritative read confirms the queued write committed. This is
+          // the only path that turns a 202/pending checkpoint into committed.
+          finishCheckpoint(entry, 'committed', { revision: checkpoint.revision });
+          return checkpoint;
+        }
+        // Still queued, absent, or a different (older) committed revision.
+        // Keep polling until the bounded deadline; never claim committed.
+        schedulePendingCheckpoint(entry, 'checkpoint_queued', 'poll');
+        return false;
+      }
+      if (current.status === 401) {
+        markWritesDisabled('runtime_unauthorized');
+        finishCheckpoint(entry, 'failed', { reason: 'checkpoint_unauthorized' });
+        return false;
+      }
+      if (current.status === 403) {
+        stats.writes.readForbidden += 1;
+        finishCheckpoint(entry, 'failed', { reason: 'checkpoint_read_forbidden' });
+        return false;
+      }
+      if (current.status === 409 && current.code === 'mode_mismatch') {
+        disableRuntime('runtime_mode_mismatch');
+        finishCheckpoint(entry, 'failed', { reason: 'runtime_mode_mismatch' });
+        return false;
+      }
+      if (current.code === 'aborted') {
+        finishCheckpoint(entry, 'failed', { reason: 'checkpoint_interrupted' });
+        return false;
+      }
+      const retryable = current.code === 'timeout'
+        || current.code === 'fetch_failed'
+        || (typeof current.status === 'number' && (current.status >= 500 || current.status === 429));
+      if (retryable) {
+        schedulePendingCheckpoint(
+          entry,
+          current.code ?? 'checkpoint_pending',
+          'poll',
+          Number.isFinite(current.retryAfterRawMs) ? current.retryAfterRawMs : current.retryAfterMs,
+        );
+        return false;
+      }
+      finishCheckpoint(entry, 'failed', { reason: current.code ?? 'checkpoint_failed' });
+      return false;
+    }
+
+    const result = await requestJson(entry.path, entry.body, {
+      method: 'PUT',
+      timeoutMs: config.checkpointTimeoutMs,
+      idempotencyKey: entry.idempotencyKey,
+    });
+    if (entry.settled) return false;
+    if (checkpointStopped()) {
+      finishCheckpoint(entry, 'failed', { reason: 'checkpoint_interrupted' });
+      return false;
+    }
+    if (result.ok) {
+      if (checkpointResponsePending(result)) {
+        // 202 only means the sidecar accepted/queued the write. Poll the
+        // authoritative GET view until it commits or the deadline fails.
+        entry.mode = 'poll';
+        schedulePendingCheckpoint(entry, 'checkpoint_queued', 'poll');
+        return false;
+      }
+      const checkpoint = result.data?.checkpoint ?? true;
+      const revision = isObject(checkpoint) && Number.isFinite(checkpoint.revision)
+        ? checkpoint.revision
+        : null;
+      finishCheckpoint(entry, 'committed', { revision });
+      return checkpoint;
+    }
+
+    if (result.status === 409 && result.code === 'revision_mismatch') {
+      stats.checkpoints.conflicts += 1;
+      if (entry.rebases < CHECKPOINT_MAX_REBASES) {
+        entry.rebases += 1;
+        const current = await requestJson(checkpointGetPath(entry), undefined, {
+          method: 'GET',
+          timeoutMs: config.checkpointTimeoutMs,
+        });
+        if (entry.settled) return false;
+        if (checkpointStopped()) {
+          finishCheckpoint(entry, 'failed', { reason: 'checkpoint_interrupted' });
+          return false;
+        }
+        const dataSource = asText(current.data?.source);
+        const checkpoint = current.data?.checkpoint;
+        const currentRevision = Number.isInteger(checkpoint?.revision) ? checkpoint.revision : null;
+        let revision = null;
+        if (current.ok && checkpoint?.pending !== true && currentRevision !== null) {
+          const identity = checkpointDomainIdentity(checkpoint);
+          revision = identity === entry.domain ? currentRevision : 0;
+        } else if (current.ok && !checkpoint && dataSource === 'cloud') {
+          revision = 0;
+        }
+        if (revision !== null) {
+          entry.body = {
+            ...entry.body,
+            expectedRevision: revision,
+            requestId: `${entry.baseIdempotencyKey}_r${revision}`.slice(0, 200),
+          };
+          // A retry of a direct update uses a new idempotency key/requestId
+          // so the sidecar cannot replay the cached 409 response.
+          entry.idempotencyKey = `${entry.baseIdempotencyKey}_r${revision}`.slice(0, 200);
+          entry.revisionSource = dataSource || 'get';
+          return sendCheckpoint(entry);
+        }
+      }
+      finishCheckpoint(entry, 'failed', { reason: 'checkpoint_revision_conflict' });
+      return false;
+    }
+
+    if (result.status === 409 && result.code === 'checkpoint_lease_held') {
+      if (entry.attempts < 4) {
+        schedulePendingCheckpoint(
+          entry,
+          'checkpoint_lease_held',
+          'put',
+          Number.isFinite(result.retryAfterRawMs) ? result.retryAfterRawMs : result.retryAfterMs,
+        );
+      } else {
+        finishCheckpoint(entry, 'failed', { reason: 'checkpoint_lease_held' });
+      }
+      return false;
+    }
+
+    if (result.status === 409 && result.code === 'mode_mismatch') {
+      disableRuntime('runtime_mode_mismatch');
+      finishCheckpoint(entry, 'failed', { reason: 'runtime_mode_mismatch' });
+      return false;
+    }
+
+    if (result.status === 401) {
+      markWritesDisabled('runtime_unauthorized');
+      finishCheckpoint(entry, 'failed', { reason: 'checkpoint_unauthorized' });
+      return false;
+    }
+    if (result.status === 403) {
+      markWritesPolicyBlocked('runtime_forbidden');
+      finishCheckpoint(entry, 'failed', { reason: 'checkpoint_forbidden' });
+      return false;
+    }
+
+    if (result.code === 'aborted') {
+      finishCheckpoint(entry, 'failed', { reason: 'checkpoint_interrupted' });
+      return false;
+    }
+
+    const retryable = result.code === 'timeout'
+      || result.code === 'fetch_failed'
+      || (typeof result.status === 'number' && (result.status >= 500 || result.status === 429));
+    if (retryable) {
+      schedulePendingCheckpoint(
+        entry,
+        result.code ?? 'checkpoint_pending',
+        'put',
+        Number.isFinite(result.retryAfterRawMs) ? result.retryAfterRawMs : result.retryAfterMs,
+      );
+      return false;
+    }
+
+    finishCheckpoint(entry, 'failed', { reason: result.code ?? 'checkpoint_failed' });
+    return false;
+  }
+
   async function putCheckpoint(sessionID, data, eventID, options = {}) {
-    if (!checkpointAllowed || writesDisabled || closed) return false;
+    if (closed || !enabled) {
+      stats.checkpoints.failed += 1;
+      stats.checkpoints.interrupted += 1;
+      status.checkpoint = {
+        state: 'failed',
+        reason: 'checkpoint_interrupted',
+        pending: stats.checkpoints.pending,
+        at: now(),
+      };
+      noteFailure('checkpoint_interrupted');
+      return false;
+    }
+    if (!checkpointAllowed) return false;
+    if (writesDisabled) {
+      recordWriteRejected('checkpoint');
+      stats.checkpoints.rejected += 1;
+      stats.checkpoints.failed += 1;
+      status.checkpoint = { state: 'failed', reason: 'checkpoint_unauthorized', pending: stats.checkpoints.pending, at: now() };
+      return false;
+    }
     const session = safeThreadId(sessionID);
     if (!session) return false;
     const summaryText = asText(data?.text) || asText(data?.summary);
     const summary = summaryText.length > 0 ? truncateChars(summaryText, 4000) : null;
-    const compactionId = asText(data?.compactionId)
-      || asText(data?.compactionID)
-      || asText(eventID)
-      || `cmp_${hashText(`${session}:${summary ?? ''}`).slice(0, 32)}`;
-    const endSeq = asText(data?.endSeq) || asText(data?.seq) || asText(eventID) || 'end';
+    const compactionId = compactionLogicalId(data, session);
+    const eventAt = stableCompactionTimestamp(data, compactionId, eventID);
+    const endSeq = asText(data?.endSeq) || asText(data?.seq) || 'end';
     const domain = checkpointDomain(session);
     const fleetTaskId = asText(data?.fleetTaskId) || asText(data?.taskId);
-    const recordIds = uniqueStrings(options.recordIds, 200);
-    const detailIds = uniqueStrings(options.detailIds, 200);
+    const trustedRecordIds = knownGraphIdsFor(
+      knownRecordIds,
+      session,
+      domain,
+      uniqueStrings(Array.isArray(options.recordIds) ? options.recordIds : [], 200),
+    );
+    const trustedDetailIds = knownGraphIdsFor(
+      knownDetailIds,
+      session,
+      domain,
+      uniqueStrings(Array.isArray(options.detailIds) ? options.detailIds : [], 200),
+    );
+    const hostRecordIds = uniqueStrings(Array.isArray(data?.recordIds) ? data.recordIds : [], 200);
+    const hostDetailIds = uniqueStrings([
+      ...(Array.isArray(data?.detailIds) ? data.detailIds : []),
+      ...(Array.isArray(data?.detail?.ids) ? data.detail.ids : []),
+    ], 200);
+    const acceptedHostRecordIds = knownGraphIdsFor(knownRecordIds, session, domain, hostRecordIds);
+    const acceptedHostDetailIds = knownGraphIdsFor(knownDetailIds, session, domain, hostDetailIds);
+    const droppedRefs = (hostRecordIds.length - acceptedHostRecordIds.length)
+      + (hostDetailIds.length - acceptedHostDetailIds.length);
+    if (droppedRefs > 0) {
+      stats.checkpoints.droppedRefs += droppedRefs;
+      noteFailure('checkpoint_refs_dropped');
+    }
+    const recordIds = uniqueStrings([...trustedRecordIds, ...acceptedHostRecordIds], 200);
+    const detailIds = uniqueStrings([...trustedDetailIds, ...acceptedHostDetailIds], 200);
     const checkpointOptions = {
       threadId: session,
       domain,
@@ -2142,7 +3393,7 @@ export function createController(dependencies = {}) {
         compactionId,
         ...(asText(eventID) ? { sourceEventId: asText(eventID) } : {}),
         reason: asText(data?.reason) || 'auto',
-        at: now(),
+        at: eventAt,
         ...(Number.isFinite(data?.messageCount) ? { messageCount: data.messageCount } : {}),
         ...(asText(data?.lastMessageID) || asText(data?.lastMessageId)
           ? { lastMessageId: asText(data?.lastMessageID) || asText(data?.lastMessageId) }
@@ -2158,7 +3409,7 @@ export function createController(dependencies = {}) {
       compactionId,
       ...(asText(eventID) ? { sourceEventId: asText(eventID) } : {}),
       reason: asText(data?.reason) || 'auto',
-      at: now(),
+      at: eventAt,
       ...(Number.isFinite(data?.messageCount) ? { messageCount: data.messageCount } : {}),
       ...(asText(data?.lastMessageID) || asText(data?.lastMessageId)
         ? { lastMessageId: asText(data?.lastMessageID) || asText(data?.lastMessageId) }
@@ -2167,6 +3418,7 @@ export function createController(dependencies = {}) {
       ...(isObject(data?.model) ? { model: data.model } : {}),
     });
     const body = {
+      requestId: '',
       actor: { type: 'agent', agentId: config.agentId },
       agentId: config.agentId,
       threadId: session,
@@ -2181,36 +3433,96 @@ export function createController(dependencies = {}) {
     const safeSeq = endSeq.replace(/[^A-Za-z0-9._:-]/g, '_').slice(0, 40);
     const idempotencyKey = `opencode_${session}_${safeCompaction}_${safeSeq}`.slice(0, 190);
     const path = `/checkpoints/${encodeURIComponent(session)}?agentId=${encodeURIComponent(config.agentId)}`;
-    stats.checkpoints.attempts += 1;
-    let result = await requestJson(path, body, {
-      method: 'PUT',
-      timeoutMs: config.checkpointTimeoutMs,
+    const entry = {
+      key: `checkpoint:${idempotencyKey}`,
+      path,
+      body,
+      baseIdempotencyKey: idempotencyKey,
       idempotencyKey,
-    });
-    if (!result.ok && result.code === 'revision_mismatch') {
-      stats.checkpoints.conflicts += 1;
-      const current = await requestJson(path, undefined, {
-        method: 'GET',
-        timeoutMs: config.checkpointTimeoutMs,
-      });
-      const revision = current.ok ? current.data?.checkpoint?.revision : null;
-      if (Number.isFinite(revision)) {
-        result = await requestJson(path, { ...body, expectedRevision: revision }, {
-          method: 'PUT',
-          timeoutMs: config.checkpointTimeoutMs,
-          idempotencyKey: `${idempotencyKey}_r${revision}`.slice(0, 200),
-        });
-      }
-    }
-    if (!result.ok) {
-      stats.checkpoints.failed += 1;
-      stats.checkpoints.pending += 1;
-      noteFailure(result.code === 'revision_mismatch' ? 'checkpoint_conflict' : 'checkpoint_pending');
+      session,
+      domain,
+      compactionId,
+      eventId: asText(eventID),
+      legacyIds: uniqueStrings([
+        eventID,
+        data?.eventID,
+        data?.eventId,
+        `cmp_${hashText(`${session}:${summary ?? ''}`).slice(0, 32)}`,
+      ], 8),
+      attempts: 0,
+      rebases: 0,
+      mode: 'put',
+      pendingReason: null,
+      retryAt: null,
+      deadlineAt: now() + config.checkpointPendingTimeoutMs,
+      timer: null,
+      settled: false,
+      confirmedRevision: null,
+      revisionSource: null,
+    };
+    const resolvedRevision = await resolveCheckpointRevision(entry);
+    if (entry.settled) return false;
+    if (checkpointStopped()) {
+      finishCheckpoint(entry, 'failed', { reason: 'checkpoint_interrupted' });
       return false;
     }
-    stats.checkpoints.sent += 1;
-    return result.data?.checkpoint ?? true;
+    if (writesDisabled) {
+      recordWriteRejected('checkpoint');
+      stats.checkpoints.rejected += 1;
+      finishCheckpoint(entry, 'failed', { reason: 'checkpoint_unauthorized' });
+      return false;
+    }
+    if (resolvedRevision.failure) {
+      if (resolvedRevision.failure === 'runtime_mode_mismatch') {
+        disableRuntime('runtime_mode_mismatch');
+      } else if (resolvedRevision.failure === 'checkpoint_unauthorized') {
+        markWritesDisabled('runtime_unauthorized');
+      } else if (resolvedRevision.failure === 'checkpoint_forbidden') {
+        markWritesPolicyBlocked('runtime_forbidden');
+      }
+      finishCheckpoint(entry, 'failed', { reason: resolvedRevision.failure });
+      return false;
+    }
+    entry.revisionSource = resolvedRevision.source;
+    const evidenceMatchesExisting = resolvedRevision.checkpoint
+      ? checkpointEvidence(resolvedRevision.checkpoint) === entryEvidence(entry)
+      : false;
+    const sameLogicalCheckpoint = resolvedRevision.checkpoint
+      && resolvedRevision.checkpoint.pending !== true
+      && (checkpointMatches(entry, resolvedRevision.checkpoint)
+        || (isLegacyTransportCheckpoint(resolvedRevision.checkpoint) && evidenceMatchesExisting));
+    if (sameLogicalCheckpoint) {
+      if (evidenceMatchesExisting) {
+        // A restart/fresh-envelope replay may have a different expectedRevision
+        // or sourceEventId but the same logical evidence. Treat the existing
+        // committed object as the idempotent result.
+        finishCheckpoint(entry, 'committed', {
+          revision: resolvedRevision.checkpoint.revision,
+          duplicate: true,
+        });
+        return resolvedRevision.checkpoint;
+      }
+      // Same logical compaction but new summary/state/recordIds/detailIds is
+      // an explicit update, never a silent duplicate skip.
+      const contentKey = hashText(entryEvidence(entry)).slice(0, 16);
+      entry.idempotencyKey = `${entry.baseIdempotencyKey}_u${resolvedRevision.checkpoint.revision}_${contentKey}`.slice(0, 200);
+      entry.body = {
+        ...entry.body,
+        requestId: entry.idempotencyKey,
+        expectedRevision: resolvedRevision.checkpoint.revision,
+      };
+      stats.checkpoints.updates += 1;
+      entry.revisionSource = `${resolvedRevision.source || 'get'}+evidence_update`;
+      return sendCheckpoint(entry);
+    }
+    entry.body = {
+      ...entry.body,
+      requestId: entry.idempotencyKey,
+      expectedRevision: resolvedRevision.revision,
+    };
+    return sendCheckpoint(entry);
   }
+
 
   /**
    * Expand a fragment that appeared in this thread's recent /context response.
@@ -2254,36 +3566,93 @@ export function createController(dependencies = {}) {
     const sessionID = safeThreadId(data.sessionID ?? event?.sessionID);
     if (!sessionID) return;
     const eventID = asText(event?.id) || asText(data?.eventID) || asText(data?.eventId);
+    const eventAt = finiteTimestamp(event?.at)
+      ?? finiteTimestamp(event?.timestamp)
+      ?? finiteTimestamp(event?.time)
+      ?? finiteTimestamp(event?.time?.created)
+      ?? finiteTimestamp(event?.time?.start)
+      ?? finiteTimestamp(event?.time?.end);
     const summary = asText(data.text) || asText(data.summary);
+    const logicalCompactionId = compactionLogicalId({
+      ...data,
+      ...(eventAt !== null ? { at: eventAt } : {}),
+    }, sessionID);
     let recordIds = [];
     let detailIds = [];
     if (ingestAllowed && summary.length > 0) {
       const redacted = redactText(summary, { token: tokenState.value, home: config.home });
+      const chunkText = truncateBytes(
+        `[compaction ${asText(data.reason) || 'auto'}] ${redacted.text}`,
+        config.maxChunkBytes,
+      );
       const chunk = {
-        key: `${sessionID}:system:compaction:${hashText(redacted.text)}`,
+        key: `${sessionID}:system:compaction:${logicalCompactionId}:${eventAt ?? 0}:${hashText(redacted.text)}`,
         role: 'system',
-        text: truncateBytes(`[compaction ${asText(data.reason) || 'auto'}] ${redacted.text}`, config.maxChunkBytes),
+        text: chunkText,
         at: now(),
         ...(eventID ? { messageId: eventID } : {}),
-        contentHash: hashText(redacted.text),
+        contentHash: hashText(chunkText),
         redaction: { applied: redacted.applied, rules: redacted.rules },
       };
-      if (!seenChunks.has(chunk.key)) {
-        remember(seenChunks, chunk.key);
+      if (seenChunks.has(chunk.key)) {
+        const cachedRefs = compactionChunkRefs.get(chunk.key);
+        if (cachedRefs) {
+          recordIds = [...cachedRefs.recordIds];
+          detailIds = [...cachedRefs.detailIds];
+        }
+      } else {
         const ingested = await sendIngest([chunk], { sessionID, extractor: 'heuristic' });
-        if (ingested?.ok && Array.isArray(ingested.data?.records)) {
+        const extractionStatus = asText(ingested?.data?.extraction?.status);
+        const detail = isObject(ingested?.data?.detail) ? ingested.data.detail : {};
+        const settled = ingested?.ok === true
+          && ingested.data?.queued !== true
+          && ingested.data?.pending !== true
+          && Number(detail.failed ?? 0) === 0
+          && Number(detail.queued ?? 0) === 0
+          && extractionStatus !== 'failed'
+          && extractionStatus !== 'pending'
+          && Array.isArray(ingested.data?.records)
+          && ingested.data.records.length > 0;
+        if (settled) {
+          remember(seenChunks, chunk.key);
           recordIds = uniqueStrings(ingested.data.records.map((record) => record?.id), 200);
-          detailIds = uniqueStrings(ingested.data.records.flatMap((record) => (
-            Array.isArray(record?.detailIds) ? record.detailIds : []
-          )), 200);
+          detailIds = uniqueStrings([
+            ...ingested.data.records.flatMap((record) => (
+              Array.isArray(record?.detailIds) ? record.detailIds : []
+            )),
+            ...(Array.isArray(ingested.data.detail?.ids) ? ingested.data.detail.ids : []),
+          ], 200);
+          compactionChunkRefs.set(chunk.key, { recordIds: [...recordIds], detailIds: [...detailIds] });
+          while (compactionChunkRefs.size > config.dedupeCacheSize) {
+            const oldest = compactionChunkRefs.keys().next().value;
+            if (oldest === undefined) break;
+            compactionChunkRefs.delete(oldest);
+          }
         }
       }
     }
-    await putCheckpoint(sessionID, data, eventID, { recordIds, detailIds });
+    await putCheckpoint(sessionID, {
+      ...data,
+      compactionId: logicalCompactionId,
+      ...(eventAt !== null ? { at: eventAt } : {}),
+    }, eventID, { recordIds, detailIds });
   }
 
-  async function handleEvent(event) {
+  function handleEvent(event) {
+    return track(handleEventInternal(event));
+  }
+
+  async function handleEventInternal(event) {
     if (!enabled || closed || !isObject(event)) return;
+    const eventKey = eventDedupeKey(event);
+    if (eventKey && seenEvents.has(eventKey)) {
+      // Host reconnects may replay an already handled event. The logical
+      // write must stay single-shot; chunk-level dedupe alone is not enough
+      // for compaction/checkpoint events.
+      stats.events.duplicates += 1;
+      return;
+    }
+    if (eventKey) remember(seenEvents, eventKey);
     stats.events.received += 1;
     try {
       const data = isObject(event.data) ? event.data : {};
@@ -2338,26 +3707,71 @@ export function createController(dependencies = {}) {
     }
   }
 
+  function scheduleEventReconnect() {
+    if (closed || !enabled || !capabilities.events) return;
+    if (!ingestAllowed && !checkpointAllowed) return;
+    if (eventReconnectTimer !== null || eventTask !== null) return;
+    const base = Math.max(10, config.eventReconnectMs);
+    const cap = Math.max(base, config.eventReconnectMaxMs);
+    const wait = Math.min(cap, base * (2 ** Math.min(eventReconnectAttempt, 6)));
+    eventReconnectAttempt += 1;
+    stats.events.reconnects += 1;
+    eventReconnectTimer = setTimeoutFn(() => {
+      eventReconnectTimer = null;
+      if (closed || !enabled) return;
+      startEventLoop();
+    }, wait);
+    eventReconnectTimer?.unref?.();
+  }
+
   function startEventLoop() {
+    if (closed || !enabled) return;
     if (eventTask !== null) return;
+    if (!capabilities.events) return;
+    if (!ingestAllowed && !checkpointAllowed) return;
+    if (eventReconnectTimer !== null) {
+      clearTimeoutFn(eventReconnectTimer);
+      eventReconnectTimer = null;
+    }
+    eventGeneration += 1;
+    const generation = eventGeneration;
     eventAbort = typeof AbortController === 'function' ? new AbortController() : null;
     const signal = eventAbort?.signal;
-    eventTask = (async () => {
+    const task = (async () => {
       try {
         const stream = await ctx.event.subscribe({ types: [...EVENT_TYPES], ...(signal ? { signal } : {}) });
-        if (!stream || typeof stream[Symbol.asyncIterator] !== 'function') return;
+        if (!stream || typeof stream[Symbol.asyncIterator] !== 'function') {
+          if (!closed && generation === eventGeneration) status.eventsError = 'event_stream_invalid';
+          return;
+        }
+        if (generation !== eventGeneration || signal?.aborted) return;
+        stats.events.subscriptions += 1;
+        status.eventsError = null;
         for await (const event of stream) {
-          if (closed || signal?.aborted) break;
+          if (closed || generation !== eventGeneration || signal?.aborted) break;
+          if (!isObject(event)) continue;
+          eventReconnectAttempt = 0;
           // Ingest/checkpoint are asynchronous; never hold up the host event
           // stream (or the model turn) on Runtime I/O.
           void handleEvent(event);
         }
       } catch {
-        if (!closed && !signal?.aborted) {
+        if (!closed && generation === eventGeneration && !signal?.aborted) {
           status.eventsError = 'event_stream_failed';
+        }
+      } finally {
+        if (eventTask === task) eventTask = null;
+        eventTasks.delete(task);
+        if (!closed && generation === eventGeneration && enabled) {
+          // A stream that ends (cleanly or with an error) must be replaced;
+          // otherwise the adapter silently stops observing events. The retry
+          // delay is bounded and exponential only while connects yield nothing.
+          scheduleEventReconnect();
         }
       }
     })();
+    eventTask = task;
+    eventTasks.add(task);
   }
 
   async function registerStatusTool() {
@@ -2396,18 +3810,19 @@ export function createController(dependencies = {}) {
       clearTimeoutFn(discoveryTimer);
       discoveryTimer = null;
     }
-    try {
-      eventAbort?.abort();
-    } catch {
-      // Best effort.
+    // No persistent host spool: an interrupted pending checkpoint becomes
+    // visibly failed on shutdown instead of silently disappearing.
+    stopEventLoop();
+    clearAuthRecovery();
+    abortLifecycleRequests({ restart: false });
+    failAllPendingCheckpoints('checkpoint_shutdown');
+    clearBuffers();
+    if (eventTasks.size > 0) {
+      await Promise.race([
+        Promise.allSettled([...eventTasks]),
+        delay(50, setTimeoutFn),
+      ]);
     }
-    if (eventTask !== null) {
-      await Promise.race([eventTask.catch(() => undefined), delay(50, setTimeoutFn)]);
-    }
-    for (const buffer of buffers.values()) {
-      if (buffer.timer !== null) clearTimeoutFn(buffer.timer);
-    }
-    buffers.clear();
     for (const registration of registrations.splice(0)) {
       try {
         await registration.dispose?.();
@@ -2415,11 +3830,27 @@ export function createController(dependencies = {}) {
         // Best effort.
       }
     }
-    await Promise.allSettled([...inflight]);
+    const settled = await Promise.race([
+      Promise.allSettled([...inflight]),
+      delay(config.disposeWaitMs, setTimeoutFn).then(() => null),
+    ]);
+    if (settled === null) {
+      stats.lifecycle.disposeTimeouts += 1;
+      status.lifecycle = { disposeTimedOut: true, at: now() };
+    }
   }
 
+  // Bounded flush: a Retry-After wait or slow host hook must not make this
+  // API hang. Timeout is reported in lifecycle.idleTimeouts.
   async function whenIdle() {
-    await Promise.allSettled([...inflight]);
+    const settled = await Promise.race([
+      Promise.allSettled([...inflight]),
+      delay(config.whenIdleWaitMs, setTimeoutFn).then(() => null),
+    ]);
+    if (settled === null) {
+      stats.lifecycle.idleTimeouts += 1;
+      status.lifecycle = { ...(status.lifecycle ?? {}), idleTimedOut: true, at: now() };
+    }
   }
 
   function getStatus() {
@@ -2457,17 +3888,22 @@ export function createController(dependencies = {}) {
       },
       features: {
         recall: active && recallAllowed,
-        ingest: active && ingestAllowed && capabilities.events,
-        checkpoints: active && checkpointAllowed && capabilities.events,
+        ingest: active && ingestAllowed && capabilities.events && !writesDisabled,
+        checkpoints: active && checkpointAllowed && capabilities.events && !writesDisabled,
         fragments: active && recallAllowed,
         toolMasking: active && config.hideMemoryTools,
         hostModel: active && hostAvailable,
+        writes: active && !writesDisabled,
       },
       model: {
         selected: config.modelSource,
         effective: active && hostAvailable ? 'host' : 'heuristic',
         hostAvailable: active && hostAvailable,
         reason: config.modelSource === 'host' && !capabilities.generate ? 'generate_unavailable' : null,
+        // The plugin's extractor choice is local to this adapter. It neither
+        // reads nor mirrors the Console model.source setting.
+        sourceScope: 'opencode-plugin',
+        consoleModelSourceIndependent: true,
         ...stats.model,
       },
       agent: {
@@ -2476,6 +3912,36 @@ export function createController(dependencies = {}) {
         namespaces: [...config.namespaces],
         domains: [...config.domains],
         governanceAgents: [...config.governanceAgents],
+      },
+      checkpoints: {
+        pending: stats.checkpoints.pending,
+        last: status.checkpoint,
+      },
+      ingest: {
+        committed: stats.ingest.committed,
+        failedExtraction: stats.ingest.failedExtraction,
+        partial: stats.ingest.partial,
+        empty: stats.ingest.empty,
+        pending: stats.ingest.pending,
+        queued: stats.ingest.queued,
+        rejected: stats.ingest.rejected,
+      },
+      writes: {
+        ...stats.writes,
+        ...(status.writeState ?? {}),
+        disabled: writesDisabled,
+      },
+      lifecycle: {
+        ...stats.lifecycle,
+        ...(status.lifecycle ?? {}),
+      },
+      events: {
+        subscribed: stats.events.subscriptions,
+        reconnects: stats.events.reconnects,
+        duplicates: stats.events.duplicates,
+        reconnectAttempt: eventReconnectAttempt,
+        reconnectScheduled: eventReconnectTimer !== null,
+        error: status.eventsError,
       },
       counts: clone(stats),
       warnings: [...new Set(status.warnings)],
@@ -2491,6 +3957,9 @@ export function createController(dependencies = {}) {
     reason: disabledReason,
     recallReason: null,
     lastWarning: null,
+    checkpoint: null,
+    writeState: null,
+    lifecycle: null,
     warnings: [...config.warnings],
     eventsError: null,
   };

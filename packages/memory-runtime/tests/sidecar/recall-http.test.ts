@@ -65,7 +65,7 @@ async function setup(): Promise<Harness> {
   const home = await mkdtemp(join(tmpdir(), 'mebular-recall-http-'));
   const local = new SidecarLocalLayer({ root: join(home, 'memory-runtime'), now: () => NOW });
   await local.init();
-  const fake = await startFakeCapability();
+  const fake = await startFakeCapability({ now: () => NOW });
   fake.setRecords([preference()]);
   const client = new CapabilityClient({ baseUrl: fake.baseUrl, token: 'cap-token', retries: 0, retryDelayMs: 0 });
   const identity = { cloudId: 'cl_test', profileId: 'default', hostId: 'h_test' };
@@ -631,5 +631,164 @@ describe('sidecar recall/context HTTP', () => {
     expect(noSummary.body.data.blocks).toEqual([]);
     expect(noSummary.body.data.degraded).toBe(true);
     expect(noSummary.body.data.warnings).toContain('summary_unavailable');
+  });
+
+  it('/context includeSelf：顺序、关闭、合法缺失、capability 不可用时不注入 cache', async () => {
+    const { server, fake } = await setup();
+    fake.selfRecords.push({
+      id: '01JSELFHTTP',
+      domain: 'agent:opencode',
+      agentId: 'opencode',
+      revision: 1,
+      content: { displayName: 'OpenCode HTTP', goals: ['stabilize context'] },
+      createdAt: NOW - 1000,
+      updatedAt: NOW - 1000,
+    } as any);
+    fake.checkpoints.push({
+      id: '01JCKPTHTTP',
+      domain: 'task:th_http_self',
+      agentId: 'opencode',
+      threadId: 'th_http_self',
+      revision: 1,
+      state: {
+        schema: 2,
+        contentMode: 'structured',
+        task: { key: 'task:th_http_self', threadId: 'th_http_self', fleetTaskId: null },
+        goal: 'HTTP self order',
+        constraints: [],
+        decisions: [],
+        progress: { done: [], doing: [], blocked: [] },
+        nextSteps: [{ id: 'n1', text: 'verify order' }],
+        files: [],
+        openQuestions: [],
+        references: { recordIds: [], detailIds: [], messageIds: [], fleetTaskId: null, urls: [] },
+      },
+      summary: null,
+      recordIds: [],
+      lease: null,
+      expiresAt: 0,
+      createdAt: NOW - 500,
+      updatedAt: NOW - 500,
+    } as any);
+
+    const included = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_http_self',
+      turnId: 'turn_http_self_1',
+      query: '我的偏好是什么？',
+      includeSelf: true,
+      includeCheckpoint: true,
+    });
+    expect(included.status).toBe(200);
+    expect(included.body.data.blocks.map((block: any) => block.kind)).toEqual(['self', 'checkpoint', 'fragment']);
+    expect(included.body.data.blocks[0].content).toContain('OpenCode HTTP');
+    expect(included.body.data.blocks[0].provenance).toBeTruthy();
+
+    const excluded = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_http_self',
+      turnId: 'turn_http_self_2',
+      query: '我的偏好是什么？',
+      includeSelf: false,
+      includeCheckpoint: true,
+    });
+    expect(excluded.body.data.blocks.map((block: any) => block.kind)).toEqual(['checkpoint', 'fragment']);
+
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const offline = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_http_self',
+      turnId: 'turn_http_self_3',
+      query: '我的偏好是什么？',
+      includeSelf: true,
+      includeCheckpoint: true,
+    });
+    expect(offline.status).toBe(200);
+    expect(offline.body.data.blocks).toEqual([]);
+    expect(offline.body.data.degraded).toBe(true);
+    expect(offline.body.data.warnings).toEqual(expect.arrayContaining([
+      'self_stale',
+      'checkpoint_stale',
+    ]));
+    fake.setFailure(null);
+  });
+
+  it('/context includeSelf：SelfRecord 不存在时非 degraded 空且无 self 块', async () => {
+    const { server, fake } = await setup();
+    fake.selfRecords.length = 0;
+    const context = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_http_self_absent',
+      turnId: 'turn_http_self_absent',
+      query: '我的偏好是什么？',
+      includeSelf: true,
+    });
+    expect(context.status).toBe(200);
+    expect(context.body.data.blocks.some((block: any) => block.kind === 'self')).toBe(false);
+    expect(context.body.data.degraded).toBe(false);
+    expect(context.body.data.warnings).not.toContain('self_unavailable');
+  });
+
+  it('/context CJK 预算按 UTF-8 字节：self/checkpoint 不超 maxBytes', async () => {
+    const { server, fake } = await setup();
+    fake.selfRecords.push({
+      id: '01JSELFCJK',
+      domain: 'agent:opencode',
+      agentId: 'opencode',
+      revision: 1,
+      content: {
+        displayName: '中文'.repeat(400),
+        goals: ['稳定性'.repeat(300)],
+        boundaries: ['边界'.repeat(200)],
+      },
+      createdAt: NOW - 1000,
+      updatedAt: NOW - 1000,
+    } as any);
+    fake.checkpoints.push({
+      id: '01JCKPTCJK',
+      domain: 'task:th_http_cjk',
+      agentId: 'opencode',
+      threadId: 'th_http_cjk',
+      revision: 1,
+      state: {
+        schema: 2,
+        contentMode: 'structured',
+        task: { key: 'task:th_http_cjk', threadId: 'th_http_cjk', fleetTaskId: null },
+        goal: '检查点目标'.repeat(500),
+        constraints: [],
+        decisions: [],
+        progress: { done: [], doing: [], blocked: [] },
+        nextSteps: [{ id: 'n1', text: '下一步'.repeat(300) }],
+        files: [],
+        openQuestions: [],
+        references: { recordIds: [], detailIds: [], messageIds: [], fleetTaskId: null, urls: [] },
+      },
+      summary: null,
+      recordIds: [],
+      lease: null,
+      expiresAt: 0,
+      createdAt: NOW - 500,
+      updatedAt: NOW - 500,
+    } as any);
+
+    const context = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_http_cjk',
+      turnId: 'turn_http_cjk',
+      query: '我的偏好是什么？',
+      includeSelf: true,
+      includeCheckpoint: true,
+      maxBytes: 2400,
+      tokenBudget: 1200,
+    });
+    expect(context.status).toBe(200);
+    expect(context.body.data.blocks[0].kind).toBe('self');
+    expect(context.body.data.blocks[1].kind).toBe('checkpoint');
+    for (const block of context.body.data.blocks) {
+      expect(Buffer.byteLength(block.content, 'utf8')).toBeLessThanOrEqual(2400);
+      expect(block.bytes).toBe(Buffer.byteLength(block.content, 'utf8'));
+    }
+    expect(context.body.data.estimatedBytes).toBeLessThanOrEqual(2400);
+    expect(context.body.data.estimatedTokens).toBeLessThanOrEqual(1200);
   });
 });

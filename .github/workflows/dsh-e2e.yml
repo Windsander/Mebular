@@ -25,6 +25,7 @@ on:
       - 'packages/mcp/**'
       - 'packages/console/**'
       - 'tests/dsh/**'
+      - 'tests/integration/host-e2e/**'
       - 'scripts/verify-dsh-e2e.mjs'
       - 'scripts/lib/**'
       - '.github/workflows/dsh-e2e.yml'
@@ -42,6 +43,7 @@ on:
       - 'packages/mcp/**'
       - 'packages/console/**'
       - 'tests/dsh/**'
+      - 'tests/integration/host-e2e/**'
       - 'scripts/verify-dsh-e2e.mjs'
       - 'scripts/lib/**'
       - '.github/workflows/dsh-e2e.yml'
@@ -303,5 +305,67 @@ jobs:
           name: dsh-memory-runtime-e2e-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/mebular-memory-runtime-e2e-*
+          if-no-files-found: warn
+          retention-days: 14
+
+  checkpoint-recovery:
+    name: dsh-checkpoint-recovery
+    runs-on: ubuntu-latest
+    # Real DSH + real sidecar/capability checkpoint fault matrix plus its
+    # negative control. Faults are injected only by test proxies; graph writes
+    # and outbox replay stay real.
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Prepare pnpm
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global pnpm@12.15.0 --no-audit --no-fund
+          INSTALLED="$(pnpm --version)"
+          if [ "$INSTALLED" != "12.15.0" ]; then
+            echo "::error::pnpm version mismatch: expected 12.15.0, got $INSTALLED"
+            exit 1
+          fi
+          pnpm --version
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Run checkpoint fault matrix
+        shell: bash
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          npm run verify:dsh:checkpoint-faults
+
+      - name: Run checkpoint negative control
+        shell: bash
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          npm run verify:dsh:checkpoint-negative
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-checkpoint-recovery-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/mebular-dsh-real-runtime-e2e-*
+            ${{ runner.temp }}/mebular-dsh-checkpoint-negative-*
           if-no-files-found: warn
           retention-days: 14

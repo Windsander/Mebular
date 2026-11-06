@@ -38,9 +38,9 @@ export type SidecarState =
 /**
  * 产品模式与进程状态分离：
  * - `immersive`：沉浸式，sidecar 运行并写 discovery；
- * - `mcp`：轻量 MCP，不启动 sidecar、不写 discovery。
+ * - `mcp`：外部 sidecar 可继续存活，但沉浸式准入/重放/模型工作已休眠。
  *
- * sidecar 自己只会写 `immersive`；`mcp` 保留给未来的只读发现文档与兼容解析。
+ * attached/manual 撤销后，sidecar 用现有 mode 面发布 dormant，不新增控制协议。
  */
 export type SidecarMode = 'mcp' | 'immersive';
 
@@ -59,6 +59,8 @@ export interface SidecarDiscovery {
   schema: 1;
   kind: 'mebular-memory-runtime';
   pid: number;
+  /** managed 子进程的监督父 PID；attached/manual 不设置。 */
+  parentPid?: number;
   host: string;
   port: number;
   url: string;
@@ -81,6 +83,7 @@ export interface SidecarDiscovery {
 
 export interface SidecarDiscoveryInput {
   pid: number;
+  parentPid?: number;
   host: string;
   port: number;
   tokenFile: string;
@@ -126,6 +129,7 @@ export function buildDiscovery(input: SidecarDiscoveryInput): SidecarDiscovery {
     schema: DISCOVERY_SCHEMA,
     kind: DISCOVERY_KIND,
     pid: input.pid,
+    ...(input.parentPid !== undefined ? { parentPid: input.parentPid } : {}),
     host: input.host,
     port: input.port,
     url,
@@ -165,6 +169,7 @@ export async function writeDiscovery(path: string, discovery: SidecarDiscovery):
     schema: DISCOVERY_SCHEMA,
     kind: DISCOVERY_KIND,
     pid: discovery.pid,
+    ...(discovery.parentPid !== undefined ? { parentPid: discovery.parentPid } : {}),
     host: discovery.host,
     port: discovery.port,
     url: discovery.url,
@@ -208,6 +213,7 @@ function isStoredSidecarDiscovery(value: unknown): value is StoredSidecarDiscove
     && typeof record.pid === 'number'
     && Number.isInteger(record.pid)
     && record.pid > 0
+    && (record.parentPid === undefined || (Number.isInteger(record.parentPid) && record.parentPid > 0))
     && typeof record.host === 'string'
     && typeof record.port === 'number'
     && typeof record.url === 'string'
@@ -231,9 +237,12 @@ export async function readDiscovery(path: string): Promise<SidecarDiscovery | nu
  * 删除 discovery，但只在 pid 匹配时执行。
  * 文件缺失、损坏或 pid 不匹配都返回 false，绝不误删新实例。
  */
-export async function clearDiscovery(path: string, { pid }: { pid: number }): Promise<boolean> {
+export async function clearDiscovery(
+  path: string,
+  { pid, startedAt }: { pid: number; startedAt?: number },
+): Promise<boolean> {
   const current = await readDiscovery(path);
-  if (!current || current.pid !== pid) return false;
+  if (!current || current.pid !== pid || (startedAt !== undefined && current.startedAt !== startedAt)) return false;
   try {
     await unlink(path);
     return true;
@@ -252,16 +261,31 @@ export async function touchDiscovery(
     pid,
     now = Date.now(),
     state,
+    mode,
     degraded,
-  }: { pid: number; now?: number; state?: SidecarState; degraded?: boolean },
+    capabilities,
+    startedAt,
+  }: {
+    pid: number;
+    now?: number;
+    state?: SidecarState;
+    mode?: SidecarMode;
+    degraded?: boolean;
+    capabilities?: Partial<SidecarDiscoveryCapabilities>;
+    startedAt?: number;
+  },
 ): Promise<boolean> {
   const current = await readDiscovery(path);
-  if (!current || current.pid !== pid) return false;
+  if (!current || current.pid !== pid || (startedAt !== undefined && current.startedAt !== startedAt)) return false;
   const next: SidecarDiscovery = {
     ...current,
     updatedAt: now,
     ...(state !== undefined ? { state } : {}),
+    ...(mode !== undefined ? { mode } : {}),
     ...(degraded !== undefined ? { degraded } : {}),
+    ...(capabilities !== undefined
+      ? { capabilities: { ...current.capabilities, ...capabilities } }
+      : {}),
   };
   await writeDiscovery(path, next);
   return true;

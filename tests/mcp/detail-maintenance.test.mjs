@@ -1,10 +1,12 @@
 // C1b：详情过期维护调度（启动一次 + 每 24h）与 MCP 生命周期接入。
 import { describe, it, expect, afterEach, jest } from '@jest/globals';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { IdentityManager, Mebular, MemoryService } from '@mebular/core';
 import { startHttpServer } from '../../packages/mcp/src/serve.mjs';
+import { createMemoryCapabilityHandler } from '../../packages/mcp/src/memory-capability.mjs';
+import { readCapabilityToken } from '../../packages/mcp/src/memory-runtime-token.mjs';
 import {
   createDetailMaintenance,
   DETAIL_MAINTENANCE_INTERVAL_MS,
@@ -128,7 +130,16 @@ describe('createDetailMaintenance', () => {
 
   it('扫描失败只记录 status 与日志，不抛出，也不影响下一次定时扫描', async () => {
     const now = Date.UTC(2026, 0, 3, 8, 0, 0);
-    const failure = Object.assign(new Error('disk unavailable'), { code: 'EIO' });
+    const sentinels = [
+      'sk-maintenance-secret-123456',
+      'ghp_abcdefghijklmnop',
+      'xoxb-1234567890',
+      'AKIAABCDEFGHIJKLMNOP',
+      'AIzaabcdefghijklmnopqrstuvwxyz',
+      '-----BEGIN PRIVATE KEY-----\nmaintenance-private-key-sentinel\n-----END PRIVATE KEY-----',
+      'maintenance-private-key-sentinel',
+    ];
+    const failure = Object.assign(new Error(`disk unavailable api_key=${sentinels[0]} ${sentinels.slice(1, -1).join(' ')}`), { code: 'EIO' });
     const service = {
       pruneExpiredDetails: jest.fn()
         .mockRejectedValueOnce(failure)
@@ -152,9 +163,12 @@ describe('createDetailMaintenance', () => {
     await expect(maintenance.idle()).resolves.toMatchObject({ code: 'EIO' });
     expect(maintenance.status()).toMatchObject({
       running: true,
-      lastError: { reason: 'startup', code: 'EIO', message: 'disk unavailable', at: now },
+      lastError: { reason: 'startup', code: 'EIO', at: now },
     });
-    expect(logger.error).toHaveBeenCalledWith('DETAIL_MAINTENANCE_FAILED EIO disk unavailable');
+    expect(maintenance.status().lastError.message).toContain('api_key=[redacted]');
+    expect(logger.error).toHaveBeenCalledTimes(1);
+    const diagnosticText = `${maintenance.status().lastError.message}\n${logger.error.mock.calls[0][0]}`;
+    for (const sentinel of sentinels) expect(diagnosticText).not.toContain(sentinel);
 
     callback();
     await maintenance.idle();
@@ -191,6 +205,117 @@ describe('createDetailMaintenance', () => {
     await maintenance.idle();
     expect(service.pruneExpiredDetails).toHaveBeenCalledTimes(1);
     expect(maintenance.status().running).toBe(false);
+  });
+});
+
+describe('capability 幂等账本周期维护', () => {
+  it('零请求推进完整间隔：24h 账本物理过期、脱敏且保持 0600/0700', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'mebular-capability-ledger-idle-'));
+    cleanups.push(async () => { await rm(home, { recursive: true, force: true }); });
+    let now = Date.UTC(2026, 0, 5);
+    let callback = null;
+    const timer = fakeTimer();
+    const sentinels = [
+      'sk-ledger-content-sentinel-123456',
+      'ghp_abcdefghijklmnop',
+      'xoxb-1234567890',
+      'AKIAABCDEFGHIJKLMNOP',
+      'AIzaabcdefghijklmnopqrstuvwxyz',
+      '-----BEGIN PRIVATE KEY-----\nledger-private-key-sentinel\n-----END PRIVATE KEY-----',
+      'ledger-private-key-sentinel',
+    ];
+    const service = {
+      writeDetails: async (items) => ({
+        results: items.map((item, index) => ({
+          clientItemId: item.clientItemId,
+          status: 'created',
+          id: `detail-ledger-${index}`,
+          type: 'detail_record',
+          kind: 'detail_record',
+          domain: item.domain,
+          detailKind: item.detailKind,
+          contentHash: item.contentHash,
+          message: `api_key=${sentinels[0]} ${sentinels.slice(1, -1).join(' ')}`,
+        })),
+        created: items.length,
+        duplicates: 0,
+        failed: 0,
+        partial: false,
+        evicted: [],
+      }),
+    };
+    const handler = createMemoryCapabilityHandler({
+      home,
+      getConfig: () => ({ memoryRuntime: { enabled: true } }),
+      getService: () => service,
+      now: () => now,
+      idempotencyMaintenanceIntervalMs: 1_000,
+      setIntervalFn: (fn) => {
+        callback = fn;
+        return timer;
+      },
+      clearIntervalFn: jest.fn(),
+    });
+    cleanups.push(async () => { await handler.dispose(); });
+    await handler.prepare();
+    await handler.idempotencyIdle();
+    expect(callback).not.toBeNull();
+    const capabilityToken = (await readCapabilityToken({ home, env: {} }))?.token;
+    expect(typeof capabilityToken).toBe('string');
+
+    const res = {
+      statusCode: 200,
+      body: '',
+      setHeader() {},
+      end(body) { this.body = body; },
+    };
+    await handler({
+      req: {
+        method: 'POST',
+        socket: { remoteAddress: '127.0.0.1' },
+        headers: {
+          'idempotency-key': 'ledger-idle-expiry',
+          authorization: `Bearer ${capabilityToken}`,
+          host: '127.0.0.1',
+        },
+      },
+      res,
+      url: new URL('http://127.0.0.1/internal/memory/v1/detail'),
+      body: Buffer.from(JSON.stringify({
+        actor: { type: 'user' },
+        op: 'write',
+        items: [{
+          clientItemId: 'detail-ledger-item',
+          domain: 'default',
+          detailKind: 'raw_chunk',
+          role: 'user',
+          recordIds: ['record-1'],
+          text: 'detail response contains no body',
+        }],
+      })),
+    });
+    expect(res.body).toContain('"ok":true');
+    expect(res.statusCode).toBe(200);
+    const ledgerPath = join(home, 'memory-runtime', 'capability-idempotency.json');
+    const initial = await readFile(ledgerPath, 'utf8');
+    for (const sentinel of sentinels) expect(initial).not.toContain(sentinel);
+    expect(initial).toContain('[redacted]');
+
+    now += 24 * 60 * 60 * 1000 + 1_000;
+    callback();
+    await handler.idempotencyIdle();
+    const expired = await readFile(ledgerPath, 'utf8');
+    expect(JSON.parse(expired).entries).toEqual([]);
+    for (const sentinel of sentinels) expect(expired).not.toContain(sentinel);
+    expect(handler.idempotencyMaintenance().lastResult).toMatchObject({
+      removed: 1,
+      count: 0,
+    });
+    expect(handler.idempotencyMaintenance().lastResult.bytes).toBeGreaterThan(0);
+    if (process.platform !== 'win32') {
+      expect((await stat(ledgerPath)).mode & 0o777).toBe(0o600);
+      expect((await stat(join(home, 'memory-runtime'))).mode & 0o777).toBe(0o700);
+    }
   });
 });
 

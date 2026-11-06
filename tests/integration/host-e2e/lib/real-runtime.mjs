@@ -119,6 +119,7 @@ async function readSidecarJsonLines(home, relativePath) {
  *   auth?: 'none' | 'bearer',
  *   token?: string,
  *   root?: string | null,
+ *   port?: number,
  *   memoryRuntime?: { enabled?: boolean } | null,
  *   manageMemoryRuntime?: boolean,
  *   writesEnabled?: boolean,
@@ -137,6 +138,7 @@ export async function startRealRuntime(options = {}) {
   const memoryRuntime = options.memoryRuntime ?? { enabled: true };
   const manageMemoryRuntime = options.manageMemoryRuntime !== false;
   const root = options.root ?? await mkdtemp(join(tmpdir(), 'mebular-host-e2e-runtime-'));
+  const port = Number.isInteger(options.port) && options.port > 0 ? options.port : 0;
   const home = join(root, 'mebular-home');
   const cloudRoot = join(root, 'cloud-root');
   await mkdir(home, { recursive: true });
@@ -184,7 +186,7 @@ export async function startRealRuntime(options = {}) {
     buildServer,
     config: { memoryRuntime },
     host: '127.0.0.1',
-    port: 0,
+    port,
     auth,
     manageMemoryRuntime,
     ...(options.writesEnabled === true ? { writesEnabled: true } : {}),

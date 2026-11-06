@@ -9,7 +9,8 @@ import { CapabilityClient } from '../../src/sidecar/capability-client.js';
 import { defaultSidecarConfig, type SidecarConfig } from '../../src/sidecar/config.js';
 import { defaultSidecarPolicy, type SidecarPolicy } from '../../src/sidecar/domains.js';
 import { SidecarLocalLayer } from '../../src/sidecar/local-layer.js';
-import { RecallService } from '../../src/sidecar/recall.js';
+import { LifecycleGate } from '../../src/sidecar/lifecycle-gate.js';
+import { RecallService, type RecallServiceOptions } from '../../src/sidecar/recall.js';
 import { startFakeCapability, type FakeCapabilityServer, type FakeCompact, type FakeMemoryRecord } from './fake-capability.js';
 
 const NOW = 1_760_000_000_000;
@@ -62,12 +63,16 @@ async function setup(options: {
   records?: FakeMemoryRecord[];
   compacts?: FakeCompact[];
   policy?: SidecarPolicy;
+  inference?: any;
+  lifecycle?: any;
   mutateConfig?: (config: SidecarConfig) => void;
+  checkpointSource?: RecallServiceOptions['checkpointSource'];
+  selfSource?: RecallServiceOptions['selfSource'];
 } = {}): Promise<Harness> {
   const home = await mkdtemp(join(tmpdir(), 'mebular-recall-'));
   const local = new SidecarLocalLayer({ root: join(home, 'memory-runtime'), now: () => NOW });
   await local.init();
-  const fake = await startFakeCapability();
+  const fake = await startFakeCapability({ now: () => NOW });
   fake.setRecords(options.records ?? []);
   fake.setCompacts(options.compacts ?? []);
   const client = new CapabilityClient({ baseUrl: fake.baseUrl, token: 'cap-token', retries: 0, retryDelayMs: 0 });
@@ -80,6 +85,10 @@ async function setup(options: {
     client,
     identity: { cloudId: 'cl_test', profileId: 'default', hostId: 'h_test', deviceId: 'device-local' },
     policy: options.policy ?? defaultSidecarPolicy(),
+    checkpointSource: options.checkpointSource ?? null,
+    selfSource: options.selfSource ?? null,
+    ...(options.inference ? { inference: options.inference } : {}),
+    ...(options.lifecycle ? { lifecycle: options.lifecycle } : {}),
     now: () => NOW,
   });
   const harness = { home, local, fake, service, config };
@@ -377,6 +386,62 @@ describe('RecallService', () => {
     });
     expect(withDetail.detail?.text).toBe(text);
     expect(fake.detailRequests.some((request) => request.body?.op === 'get')).toBe(true);
+  });
+
+  it('详情展开覆盖 canonical detail kinds：tool_output/document_slice 不只查 raw_chunk', async () => {
+    const recordId = '01JDETAILKINDS';
+    const { service, fake } = await setup({
+      records: [record({
+        id: recordId,
+        type: 'episode',
+        kind: 'episode',
+        domain: 'agent:opencode',
+        content: { title: '工具输出记录', content: '构建输出与文档片段', episodeType: 'task' },
+        text: '构建输出与文档片段',
+        detailAvailable: true,
+      })],
+    });
+    fake.details.push(
+      {
+        id: '01JDETAILTOOL',
+        detailKind: 'tool_output',
+        domain: 'agent:opencode',
+        recordIds: [recordId],
+        role: 'tool',
+        text: 'tool output body',
+        retentionClass: 'tool_output',
+        provenance: { source: 'runtime', agentId: 'opencode', threadId: 'th_recall' },
+        createdAt: NOW - 1000,
+      },
+      {
+        id: '01JDETAILDOC',
+        detailKind: 'document_slice',
+        domain: 'agent:opencode',
+        recordIds: [recordId],
+        text: 'document slice body',
+        retentionClass: 'document_slice',
+        provenance: { source: 'runtime', agentId: 'opencode', threadId: 'th_recall' },
+        createdAt: NOW - 900,
+      },
+    );
+    const response = await service.handleRecall({
+      agentId: 'opencode',
+      threadId: 'th_recall',
+      query: '我当时原话怎么说的？工具输出和文档片段',
+    });
+    const fragment = response.data.fragments.find((entry) => entry.sourceIds.includes(recordId));
+    expect(fragment).toBeDefined();
+    expect(fragment!.detailIds).toEqual(expect.arrayContaining(['01JDETAILTOOL', '01JDETAILDOC']));
+    const listRequest = fake.detailRequests.find((request) => request.body?.op === 'list');
+    expect(listRequest?.body?.detailKinds).toEqual(expect.arrayContaining([
+      'raw_chunk',
+      'message',
+      'tool_output',
+      'document_slice',
+    ]));
+    const trace = await service.getTrace(response.data.traceId!);
+    const expansion = (trace?.expansions ?? []).find((entry) => entry.fragmentId === fragment!.id);
+    expect(expansion?.detailKind).toBe('tool_output');
   });
 
   it('详情过期/删除时诚实降级，不伪造原文', async () => {
@@ -758,5 +823,467 @@ describe('RecallService', () => {
     expect(feedback.feedback).toMatchObject({ useful: true, reason: 'helpful' });
     expect((await local.store.getTrace(response.data.traceId!))?.feedback).toMatchObject({ useful: true });
     expect(await local.store.listTraces()).toHaveLength(1);
+  });
+
+  it('includeSelf=true 按 self → checkpoint → fragment 顺序注入，false 不注入', async () => {
+    const self = {
+      id: '01JSELF0001',
+      type: 'self_record',
+      kind: 'self_record',
+      domain: 'agent:opencode',
+      agentId: 'opencode',
+      revision: 2,
+      content: { displayName: 'OpenCode', goals: ['ship v0.3.2'] },
+      source: 'cloud',
+      stale: false,
+      updatedAt: NOW - 1000,
+    };
+    const checkpoint = {
+      id: '01JCKPT0001',
+      type: 'context_checkpoint',
+      kind: 'context_checkpoint',
+      domain: 'task:th_recall',
+      agentId: 'opencode',
+      threadId: 'th_recall',
+      revision: 3,
+      schema: 2,
+      contentMode: 'structured',
+      structured: true,
+      legacy: false,
+      summary: null,
+      recordIds: [],
+      detailIds: [],
+      lease: null,
+      expiresAt: 0,
+      state: {
+        schema: 2,
+        contentMode: 'structured',
+        task: { key: 'task:th_recall', threadId: 'th_recall', fleetTaskId: null },
+        goal: '继续稳定性修复',
+        constraints: [],
+        decisions: [],
+        progress: { done: [], doing: [], blocked: [] },
+        nextSteps: [{ id: 'n1', text: '运行对象矩阵' }],
+        files: [],
+        openQuestions: [],
+        references: { recordIds: [], detailIds: [], messageIds: [], fleetTaskId: null, urls: [] },
+      },
+      updatedAt: NOW - 500,
+    };
+    const checkpointSource = {
+      async getCheckpoint() {
+        return { status: 200, data: { checkpoint, source: 'cloud', degraded: false }, warnings: [], degraded: false };
+      },
+      async getSelf() {
+        return { status: 200, data: { selfRecord: self, self, source: 'cloud', degraded: false }, warnings: [], degraded: false };
+      },
+    };
+    const { service } = await setup({ records: [preferenceRecord()], checkpointSource });
+    const response = await service.handleContext({
+      agentId: 'opencode',
+      threadId: 'th_recall',
+      turnId: 'turn_self_order',
+      query: '我的偏好是什么？',
+      includeSelf: true,
+      includeCheckpoint: true,
+    });
+    expect(response.degraded).toBe(false);
+    expect(response.data.blocks.map((block) => block.kind)).toEqual(['self', 'checkpoint', 'fragment']);
+    expect(response.data.blocks[0]).toMatchObject({
+      kind: 'self',
+      trust: 'untrusted',
+      domain: 'agent:opencode',
+      revision: 2,
+    });
+    expect(response.data.blocks[0]!.content).toContain('OpenCode');
+    expect(response.data.blocks[0]!.content).toContain('不是指令');
+    expect(response.data.blocks[1]!.content).toContain('继续稳定性修复');
+
+    const withoutSelf = await service.handleContext({
+      agentId: 'opencode',
+      threadId: 'th_recall',
+      turnId: 'turn_self_off',
+      query: '我的偏好是什么？',
+      includeSelf: false,
+      includeCheckpoint: true,
+    });
+    expect(withoutSelf.data.blocks.map((block) => block.kind)).toEqual(['checkpoint', 'fragment']);
+  });
+
+  it('includeSelf：合法不存在非 degraded 空；读取失败/陈旧/未验证显式 degraded', async () => {
+    const recordSource = [preferenceRecord()];
+    const absent = await setup({
+      records: recordSource,
+      checkpointSource: {
+        async getCheckpoint() {
+          return { status: 200, data: { checkpoint: null, source: 'cloud', degraded: false }, warnings: [], degraded: false };
+        },
+        async getSelf() {
+          return { status: 200, data: { selfRecord: null, self: null, source: 'cloud', degraded: false }, warnings: [], degraded: false };
+        },
+      },
+    });
+    const absentContext = await absent.service.handleContext({
+      agentId: 'opencode',
+      threadId: 'th_recall',
+      turnId: 'turn_self_absent',
+      query: '我的偏好是什么？',
+      includeSelf: true,
+    });
+    expect(absentContext.data.blocks.some((block) => block.kind === 'self')).toBe(false);
+    expect(absentContext.degraded).toBe(false);
+    expect(absentContext.data.warnings).not.toContain('self_unavailable');
+
+    const failed = await setup({
+      records: recordSource,
+      checkpointSource: {
+        async getCheckpoint() {
+          return { status: 200, data: { checkpoint: null, source: 'cloud', degraded: false }, warnings: [], degraded: false };
+        },
+        async getSelf() {
+          throw new Error('self read failed');
+        },
+      },
+    });
+    const failedContext = await failed.service.handleContext({
+      agentId: 'opencode',
+      threadId: 'th_recall',
+      turnId: 'turn_self_failed',
+      query: '我的偏好是什么？',
+      includeSelf: true,
+    });
+    expect(failedContext.data.blocks.some((block) => block.kind === 'self')).toBe(false);
+    expect(failedContext.degraded).toBe(true);
+    expect(failedContext.data.warnings).toContain('self_read_failed');
+
+    const stale = await setup({
+      records: recordSource,
+      checkpointSource: {
+        async getCheckpoint() {
+          return { status: 200, data: { checkpoint: null, source: 'cloud', degraded: false }, warnings: [], degraded: false };
+        },
+        async getSelf() {
+          return {
+            status: 200,
+            data: {
+              selfRecord: { id: '01JSELFOLD', domain: 'agent:opencode', agentId: 'opencode', revision: 1, content: { displayName: 'old' }, source: 'cache', stale: true },
+              self: null,
+              source: 'cache',
+              degraded: true,
+            },
+            warnings: ['capability_unavailable', 'cache_stale'],
+            degraded: true,
+          };
+        },
+      },
+    });
+    const staleContext = await stale.service.handleContext({
+      agentId: 'opencode',
+      threadId: 'th_recall',
+      turnId: 'turn_self_stale',
+      query: '我的偏好是什么？',
+      includeSelf: true,
+    });
+    expect(staleContext.data.blocks.some((block) => block.kind === 'self')).toBe(false);
+    expect(staleContext.degraded).toBe(true);
+    expect(staleContext.data.warnings).toContain('self_stale');
+
+    const otherAgent = await setup({
+      records: recordSource,
+      checkpointSource: {
+        async getCheckpoint() {
+          return { status: 200, data: { checkpoint: null, source: 'cloud', degraded: false }, warnings: [], degraded: false };
+        },
+        async getSelf() {
+          return {
+            status: 200,
+            data: {
+              selfRecord: { id: '01JSELFOTHER', domain: 'agent:hermes', agentId: 'hermes', revision: 1, content: { displayName: 'Hermes' }, source: 'cloud', stale: false },
+              self: null,
+              source: 'cloud',
+              degraded: false,
+            },
+            warnings: [],
+            degraded: false,
+          };
+        },
+      },
+    });
+    const otherContext = await otherAgent.service.handleContext({
+      agentId: 'opencode',
+      threadId: 'th_recall',
+      turnId: 'turn_self_other',
+      query: '我的偏好是什么？',
+      includeSelf: true,
+    });
+    expect(otherContext.data.blocks.some((block) => block.kind === 'self')).toBe(false);
+    expect(otherContext.degraded).toBe(true);
+    expect(otherContext.data.warnings).toContain('self_scope_mismatch');
+  });
+
+  it('checkpoint：source=cache/stale/pending 均不注入，并给出稳定 degraded 原因', async () => {
+    const baseState = {
+      schema: 2,
+      contentMode: 'structured',
+      task: { key: 'task:th_recall', threadId: 'th_recall', fleetTaskId: null },
+      goal: 'cache checkpoint must not inject',
+      constraints: [],
+      decisions: [],
+      progress: { done: [], doing: [], blocked: [] },
+      nextSteps: [],
+      files: [],
+      openQuestions: [],
+      references: { recordIds: [], detailIds: [], messageIds: [], fleetTaskId: null, urls: [] },
+    };
+    const view = (extra: Record<string, unknown>) => ({
+      id: '01JCKPTBAD',
+      type: 'context_checkpoint',
+      kind: 'context_checkpoint',
+      domain: 'task:th_recall',
+      agentId: 'opencode',
+      threadId: 'th_recall',
+      revision: 4,
+      schema: 2,
+      contentMode: 'structured',
+      structured: true,
+      legacy: false,
+      summary: null,
+      recordIds: [],
+      detailIds: [],
+      lease: null,
+      expiresAt: 0,
+      state: baseState,
+      ...extra,
+    });
+    const cases: Array<{ name: string; data: Record<string, unknown>; warning: string }> = [
+      {
+        name: 'cache',
+        data: { checkpoint: view({ source: 'cache', stale: true }), source: 'cache', degraded: true },
+        warning: 'checkpoint_stale',
+      },
+      {
+        name: 'stale',
+        data: { checkpoint: view({ source: 'cloud', stale: true }), source: 'cloud', degraded: true },
+        warning: 'checkpoint_stale',
+      },
+      {
+        name: 'pending',
+        data: { checkpoint: view({ source: 'cloud', pending: true }), source: 'cloud', degraded: true },
+        warning: 'checkpoint_pending',
+      },
+    ];
+    for (const entry of cases) {
+      const harness = await setup({
+        records: [preferenceRecord()],
+        checkpointSource: {
+          async getCheckpoint() {
+            return { status: 200, data: entry.data, warnings: [], degraded: true };
+          },
+        },
+      });
+      const response = await harness.service.handleContext({
+        agentId: 'opencode',
+        threadId: 'th_recall',
+        turnId: `turn_ckpt_${entry.name}`,
+        query: '我的偏好是什么？',
+        includeSelf: false,
+        includeCheckpoint: true,
+      });
+      expect(response.data.blocks.some((block) => block.kind === 'checkpoint')).toBe(false);
+      expect(response.degraded).toBe(true);
+      expect(response.data.warnings).toContain(entry.warning);
+    }
+  });
+
+  it('self 预算与顺序：小预算仍先保留 self，再截断后续块', async () => {
+    const self = {
+      id: '01JSELFBUDGET',
+      domain: 'agent:opencode',
+      agentId: 'opencode',
+      revision: 1,
+      content: { displayName: 'OpenCode', goals: ['bounded context'] },
+      source: 'cloud',
+      stale: false,
+      updatedAt: NOW,
+    };
+    const checkpoint = {
+      id: '01JCKPTBUDGET',
+      domain: 'task:th_recall',
+      agentId: 'opencode',
+      threadId: 'th_recall',
+      revision: 1,
+      schema: 2,
+      contentMode: 'structured',
+      structured: true,
+      legacy: false,
+      summary: null,
+      recordIds: [],
+      detailIds: [],
+      lease: null,
+      expiresAt: 0,
+      state: {
+        schema: 2,
+        contentMode: 'structured',
+        task: { key: 'task:th_recall', threadId: 'th_recall', fleetTaskId: null },
+        goal: 'budget checkpoint body',
+        constraints: [],
+        decisions: [],
+        progress: { done: [], doing: [], blocked: [] },
+        nextSteps: Array.from({ length: 20 }, (_, index) => ({ id: `n${index}`, text: `next ${index} ${'x'.repeat(80)}` })),
+        files: [],
+        openQuestions: [],
+        references: { recordIds: [], detailIds: [], messageIds: [], fleetTaskId: null, urls: [] },
+      },
+      updatedAt: NOW,
+    };
+    const { service } = await setup({
+      records: [preferenceRecord()],
+      checkpointSource: {
+        async getCheckpoint() {
+          return { status: 200, data: { checkpoint, source: 'cloud', degraded: false }, warnings: [], degraded: false };
+        },
+        async getSelf() {
+          return { status: 200, data: { selfRecord: self, self, source: 'cloud', degraded: false }, warnings: [], degraded: false };
+        },
+      },
+    });
+    const response = await service.handleContext({
+      agentId: 'opencode',
+      threadId: 'th_recall',
+      turnId: 'turn_self_budget',
+      query: '我的偏好是什么？',
+      includeSelf: true,
+      maxBytes: 640,
+      tokenBudget: 260,
+    });
+    expect(response.data.blocks[0]?.kind).toBe('self');
+    expect(response.data.blocks[0]!.content).toContain('bounded context');
+    expect(response.data.estimatedBytes).toBeLessThanOrEqual(640);
+    expect(response.data.estimatedTokens).toBeLessThanOrEqual(260);
+  });
+
+  it('提前失败路径也把 self/checkpoint 计入 estimatedBytes/Tokens', async () => {
+    const self = {
+      id: '01JSELFEARLY',
+      domain: 'agent:opencode',
+      agentId: 'opencode',
+      revision: 1,
+      content: { displayName: 'Early Failure Self' },
+      source: 'cloud',
+      stale: false,
+      updatedAt: NOW,
+    };
+    const checkpoint = {
+      id: '01JCKPTEARLY',
+      domain: 'task:th_recall',
+      agentId: 'opencode',
+      threadId: 'th_recall',
+      revision: 1,
+      schema: 2,
+      contentMode: 'structured',
+      structured: true,
+      legacy: false,
+      summary: null,
+      recordIds: [],
+      detailIds: [],
+      lease: null,
+      expiresAt: 0,
+      state: {
+        schema: 2,
+        contentMode: 'structured',
+        task: { key: 'task:th_recall', threadId: 'th_recall', fleetTaskId: null },
+        goal: 'early failure checkpoint',
+        constraints: [],
+        decisions: [],
+        progress: { done: [], doing: [], blocked: [] },
+        nextSteps: [{ id: 'n1', text: 'next' }],
+        files: [],
+        openQuestions: [],
+        references: { recordIds: [], detailIds: [], messageIds: [], fleetTaskId: null, urls: [] },
+      },
+      updatedAt: NOW,
+    };
+    const { service, fake } = await setup({
+      checkpointSource: {
+        async getCheckpoint() {
+          return {
+            status: 200,
+            data: { checkpoint, source: 'cloud', degraded: false },
+            warnings: [],
+            degraded: false,
+          };
+        },
+        async getSelf() {
+          return {
+            status: 200,
+            data: { selfRecord: self, self, source: 'cloud', degraded: false },
+            warnings: [],
+            degraded: false,
+          };
+        },
+      },
+    });
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const response = await service.handleContext({
+      agentId: 'opencode',
+      threadId: 'th_recall',
+      turnId: 'turn_early_failure',
+      query: '我的偏好是什么？',
+      includeSelf: true,
+      includeCheckpoint: true,
+    });
+    expect(response.data.blocks.map((block) => block.kind)).toEqual(['self', 'checkpoint']);
+    const expectedBytes = response.data.blocks.reduce((sum, block) => sum + block.bytes, 0);
+    const expectedTokens = response.data.blocks.reduce((sum, block) => sum + block.tokens, 0);
+    expect(response.data.estimatedBytes).toBe(expectedBytes);
+    expect(response.data.estimatedTokens).toBe(expectedTokens);
+    expect(expectedBytes).toBeGreaterThan(0);
+  });
+
+  it('模型 plan 晚到且 drain 已开始：丢弃结果，不写 trace，返回 409', async () => {
+    const gate = new LifecycleGate();
+    let release = () => {};
+    const modelGate = new Promise<void>((resolve) => { release = resolve; });
+    let started = false;
+    const model = {
+      selectOptionalSource: async () => ({ source: 'heuristic', degraded: false, warnings: [] }),
+      planQuery: async () => {
+        started = true;
+        await modelGate;
+        return {
+          ok: true,
+          query: '用户偏好',
+          degraded: false,
+          warnings: [],
+          latencyMs: 0,
+          source: 'heuristic',
+          model: 'fake',
+        };
+      },
+      clearFailure: () => undefined,
+      noteFailure: () => undefined,
+      noteHostCandidates: () => undefined,
+    };
+    const { service, local } = await setup({
+      records: [preferenceRecord()],
+      inference: model,
+      lifecycle: gate,
+      mutateConfig: (config) => { config.recall.queryPlan = 'model'; },
+    });
+    const pending = service.handleRecall({
+      agentId: 'opencode',
+      threadId: 'th_recall',
+      query: '你记得我的喜好吗？',
+    });
+    const deadline = Date.now() + 5000;
+    while (!started && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(started).toBe(true);
+    gate.beginDrain('test');
+    gate.finishDrain();
+    release();
+    await expect(pending).rejects.toMatchObject({ status: 409, code: 'mode_mismatch' });
+    expect(await local.store.listTraces()).toHaveLength(0);
   });
 });

@@ -1,6 +1,6 @@
 // W2b：/internal/memory/v1 写端点（write/update/delete/archive/internal-object/sync）。
 // 真实 Mebular + MemoryService + 沙箱 home；不启网络/模型。
-import { describe, it, expect, beforeAll, afterAll } from '@jest/globals';
+import { describe, it, expect, beforeAll, afterAll, jest } from '@jest/globals';
 import http from 'node:http';
 import { createHash } from 'node:crypto';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { IdentityManager, Mebular, MemoryService } from '@mebular/core';
 import { startHttpServer } from '../../packages/mcp/src/serve.mjs';
+import { createMemoryCapabilityHandler } from '../../packages/mcp/src/memory-capability.mjs';
 import { readCapabilityToken } from '../../packages/mcp/src/memory-runtime-token.mjs';
 import { TOOL_NAMES, TOOL_SPECS } from '../../packages/mcp/src/tools.mjs';
 
@@ -284,6 +285,34 @@ describe('POST /write', () => {
     }
   });
 
+  it('malformed write 成功项空 id 不进入幂等账本', async () => {
+    const key = unique('malformed-write-idem-key');
+    const marker = unique('malformed-write-idem');
+    const body = writeBody([{
+      clientItemId: unique('malformed-write-client'),
+      domain: 'agent:opencode',
+      kind: 'observation',
+      content: { content: marker },
+      provenance: { source: 'runtime', extractor: 'heuristic' },
+    }]);
+    const spy = jest.spyOn(service, 'writeRecords');
+    spy.mockResolvedValueOnce([{
+      node: { id: '', type: 'episode', kind: 'observation' },
+      vectorIndexed: true,
+    }]);
+    try {
+      const first = await post(capability('/write'), body, { token, headers: { 'idempotency-key': key } });
+      expect(first.status).toBe(200);
+      expect(first.body.data.results[0].id).toBe('');
+      const retry = await post(capability('/write'), body, { token, headers: { 'idempotency-key': key } });
+      expect(retry.body.data.replayed).toBe(false);
+      expect(retry.body.data.results[0].id).not.toBe('');
+      expect(spy).toHaveBeenCalledTimes(2);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('内容重复 / clientItemId 重复 → duplicate，不写第二条', async () => {
     const marker = unique('dup-content');
     const item = {
@@ -443,6 +472,248 @@ describe('POST /write', () => {
     }], { sync: 'cloud' }), { token });
     expect(legacy.status).toBe(400);
     expect(legacy.body.error.code).toBe('legacy_sync_unsupported');
+  });
+});
+
+describe('幂等 in-flight 单飞', () => {
+  function failureGate() {
+    let release = () => {};
+    const gate = new Promise((resolve) => { release = resolve; });
+    let enteredResolve = () => {};
+    const entered = new Promise((resolve) => { enteredResolve = resolve; });
+    return { gate, release, entered, enter: enteredResolve };
+  }
+
+  it('并发同 key 同 batch 只执行一次；另一路等待同结果或重放，图内记录精确', async () => {
+    const key = unique('idem-concurrent-key');
+    const marker = unique('idem-concurrent-content');
+    const body = writeBody([{
+      clientItemId: unique('idem_concurrent_client'),
+      domain: 'agent:opencode',
+      kind: 'observation',
+      content: { content: marker },
+      provenance: { source: 'runtime', extractor: 'heuristic' },
+    }]);
+    const originalWriteRecords = service.writeRecords.bind(service);
+    const gate = failureGate();
+    let calls = 0;
+    const spy = jest.spyOn(service, 'writeRecords').mockImplementation(async (...args) => {
+      calls += 1;
+      if (calls === 1) {
+        gate.enter();
+        await gate.gate;
+      }
+      return originalWriteRecords(...args);
+    });
+    try {
+      const firstPending = post(capability('/write'), body, {
+        token,
+        headers: { 'idempotency-key': key },
+      });
+      const secondPending = post(capability('/write'), body, {
+        token,
+        headers: { 'idempotency-key': key },
+      });
+      await gate.entered;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      // 第一路仍被 gate 挡住时第二路不得开始第二次 execute。
+      expect(calls).toBe(1);
+      gate.release();
+      const [first, second] = await Promise.all([firstPending, secondPending]);
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+      expect(first.body.data).toMatchObject({ created: 1, duplicates: 0, failed: 0, partial: false });
+      expect(second.body.data).toMatchObject({ created: 1, duplicates: 0, failed: 0, partial: false });
+      expect(second.body.data.results[0].id).toBe(first.body.data.results[0].id);
+      expect([false, true]).toContain(second.body.data.replayed);
+      expect(calls).toBe(1);
+      const records = (await app.storage.listNodes({ namespace: 'agent:opencode' }))
+        .filter((node) => node.content?.content === marker);
+      expect(records).toHaveLength(1);
+    } finally {
+      gate.release();
+      spy.mockRestore();
+    }
+  });
+
+  it('并发同 key 不同 body 立即 409，不执行第二路', async () => {
+    const key = unique('idem-conflict-key');
+    const firstBody = writeBody([{
+      clientItemId: unique('idem_conflict_first'),
+      domain: 'agent:opencode',
+      kind: 'observation',
+      content: { content: unique('idem-conflict-first') },
+      provenance: { source: 'runtime', extractor: 'heuristic' },
+    }]);
+    const secondBody = writeBody([{
+      clientItemId: unique('idem_conflict_second'),
+      domain: 'agent:opencode',
+      kind: 'observation',
+      content: { content: unique('idem-conflict-second') },
+      provenance: { source: 'runtime', extractor: 'heuristic' },
+    }]);
+    const originalWriteRecords = service.writeRecords.bind(service);
+    const gate = failureGate();
+    let calls = 0;
+    const spy = jest.spyOn(service, 'writeRecords').mockImplementation(async (...args) => {
+      calls += 1;
+      if (calls === 1) {
+        gate.enter();
+        await gate.gate;
+      }
+      return originalWriteRecords(...args);
+    });
+    try {
+      const firstPending = post(capability('/write'), firstBody, {
+        token,
+        headers: { 'idempotency-key': key },
+      });
+      await gate.entered;
+      const conflict = await post(capability('/write'), secondBody, {
+        token,
+        headers: { 'idempotency-key': key },
+      });
+      expect(conflict.status).toBe(409);
+      expect(conflict.body.error.code).toBe('idempotency_conflict');
+      expect(calls).toBe(1);
+      gate.release();
+      const first = await firstPending;
+      expect(first.status).toBe(200);
+      expect(first.body.data.created).toBe(1);
+      expect(calls).toBe(1);
+    } finally {
+      gate.release();
+      spy.mockRestore();
+    }
+  });
+
+  it('execute 抛错后清理 in-flight，后续同 key 请求可重试', async () => {
+    const created = await writeOne({
+      clientItemId: unique('idem_throw_client'),
+      domain: 'agent:opencode',
+      kind: 'observation',
+      content: { content: unique('idem-throw-record') },
+      provenance: { source: 'runtime', extractor: 'heuristic' },
+    });
+    const id = created.body.data.results[0].id;
+    const key = unique('idem-throw-key');
+    const body = { actor: agent, ids: [id] };
+    const originalDelete = service.delete.bind(service);
+    let calls = 0;
+    const spy = jest.spyOn(service, 'delete').mockImplementation(async (...args) => {
+      calls += 1;
+      if (calls === 1) throw new Error('synthetic execute failure');
+      return originalDelete(...args);
+    });
+    try {
+      const first = await post(capability('/delete'), body, {
+        token,
+        headers: { 'idempotency-key': key },
+      });
+      expect(first.status).toBe(500);
+      expect(first.body.error.code).toBe('internal');
+      expect(calls).toBe(1);
+
+      const retry = await post(capability('/delete'), body, {
+        token,
+        headers: { 'idempotency-key': key },
+      });
+      expect(retry.status).toBe(200);
+      expect(retry.body.data.deleted).toContain(id);
+      expect(calls).toBe(2);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('partial/failed 不缓存，但并发同 key 只执行一次；完成后可重试', async () => {
+    const key = unique('idem-partial-key');
+    const marker = unique('idem-partial-content');
+    const body = writeBody([{
+      clientItemId: unique('idem_partial_client'),
+      domain: 'agent:opencode',
+      kind: 'observation',
+      content: { content: marker },
+      provenance: { source: 'runtime', extractor: 'heuristic' },
+    }]);
+    const originalWriteRecords = service.writeRecords.bind(service);
+    const gate = failureGate();
+    let calls = 0;
+    const spy = jest.spyOn(service, 'writeRecords').mockImplementation(async (...args) => {
+      calls += 1;
+      if (calls === 1) {
+        gate.enter();
+        await gate.gate;
+        throw new Error('synthetic item failure');
+      }
+      return originalWriteRecords(...args);
+    });
+    try {
+      const firstPending = post(capability('/write'), body, {
+        token,
+        headers: { 'idempotency-key': key },
+      });
+      const secondPending = post(capability('/write'), body, {
+        token,
+        headers: { 'idempotency-key': key },
+      });
+      await gate.entered;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(calls).toBe(1);
+      gate.release();
+      const [first, second] = await Promise.all([firstPending, secondPending]);
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+      for (const response of [first, second]) {
+        expect(response.body.data).toMatchObject({ created: 0, duplicates: 0, failed: 1, partial: true });
+        expect(response.body.data.results[0].status).toBe('failed');
+        expect(response.body.data.replayed).toBe(false);
+      }
+      expect(calls).toBe(1);
+
+      // partial 响应不进入账本：同键重试必须重新执行并补齐。
+      const retry = await post(capability('/write'), body, {
+        token,
+        headers: { 'idempotency-key': key },
+      });
+      expect(retry.status).toBe(200);
+      expect(retry.body.data).toMatchObject({ created: 1, duplicates: 0, failed: 0, partial: false });
+      expect(calls).toBe(2);
+      const records = (await app.storage.listNodes({ namespace: 'agent:opencode' }))
+        .filter((node) => node.content?.content === marker);
+      expect(records).toHaveLength(1);
+    } finally {
+      gate.release();
+      spy.mockRestore();
+    }
+  });
+
+  it('同一幂等键不同 route 不互相重放', async () => {
+    const created = await writeOne({
+      clientItemId: unique('idem_route_client'),
+      domain: 'agent:opencode',
+      kind: 'observation',
+      content: { content: unique('idem-route-record') },
+      provenance: { source: 'runtime', extractor: 'heuristic' },
+    });
+    const id = created.body.data.results[0].id;
+    const key = unique('idem-route-key');
+    const body = { actor: agent, ids: [id] };
+    const deleted = await post(capability('/delete'), body, {
+      token,
+      headers: { 'idempotency-key': key },
+    });
+    expect(deleted.status).toBe(200);
+    expect(deleted.body.data.deleted).toContain(id);
+
+    const archived = await post(capability('/archive'), body, {
+      token,
+      headers: { 'idempotency-key': key },
+    });
+    expect(archived.status).toBe(200);
+    expect(archived.body.data.replayed).toBe(false);
+    expect(archived.body.data).toHaveProperty('archived');
+    expect(archived.body.data).not.toHaveProperty('deleted');
   });
 });
 
@@ -1459,6 +1730,102 @@ describe('POST /internal-object', () => {
     expect((await app.graph.getNode(object.id)).deletedAt).toBeGreaterThan(0);
   });
 
+  it('compact：deferredSummary 恢复真实摘要/sourceHashes 一次写入，占位标题被拒绝', async () => {
+    const subject = unique('deferred-subject');
+    const observation = unique('deferred-observation');
+    const sourceA = await writeOne({
+      domain: 'agent:opencode',
+      kind: 'fact',
+      content: { subject, predicate: 'supports', object: unique('deferred-object') },
+      provenance: { source: 'runtime' },
+    });
+    const sourceB = await writeOne({
+      domain: 'agent:opencode',
+      kind: 'observation',
+      content: { content: observation },
+      provenance: { source: 'runtime' },
+    });
+    const sourceIds = [sourceA.body.data.results[0].id, sourceB.body.data.results[0].id];
+
+    const placeholder = await post(capability('/internal-object'), {
+      actor: agent,
+      kind: 'compact',
+      op: 'upsert',
+      domain: 'agent:opencode',
+      summary: 'Compact · 2 records',
+      sourceIds,
+      strategy: 'summary',
+    }, { token });
+    expect(placeholder.status).toBe(422);
+    expect(placeholder.body.error.code).toBe('compact_summary_placeholder');
+
+    const deferred = await post(capability('/internal-object'), {
+      actor: agent,
+      kind: 'compact',
+      op: 'upsert',
+      domain: 'agent:opencode',
+      sourceIds,
+      strategy: 'summary',
+      deferredSummary: true,
+    }, { token });
+    expect(deferred.status).toBe(200);
+    const object = deferred.body.data.object;
+    expect(object.summary).toContain(subject);
+    expect(object.summary).toContain(observation);
+    expect(object.summary).not.toBe('Compact · 2 records');
+    expect(object.sourceHashes).toHaveLength(2);
+    expect(object.sourceHashes.every((hash) => hash.startsWith('sha256:'))).toBe(true);
+
+    const again = await post(capability('/internal-object'), {
+      actor: agent,
+      kind: 'compact',
+      op: 'upsert',
+      domain: 'agent:opencode',
+      sourceIds,
+      strategy: 'summary',
+      deferredSummary: true,
+    }, { token });
+    expect(again.status).toBe(200);
+    expect(again.body.data.object.id).toBe(object.id);
+    const compacts = await app.graph.listNodes({ type: 'compact' });
+    expect(compacts.filter((node) => node.id === object.id)).toHaveLength(1);
+  });
+
+  it('compact：deferredSummary 对 200 个 CJK 来源按 UTF-8 字节截断，不超过 64 KiB', async () => {
+    const sourceIds = [];
+    for (let batch = 0; batch < 2; batch += 1) {
+      const items = Array.from({ length: 100 }, (_, index) => ({
+        clientItemId: unique(`cjk-${batch}-${index}`),
+        domain: 'agent:opencode',
+        kind: 'observation',
+        content: { content: `中文来源-${batch}-${index}-${'稳定性'.repeat(300)}` },
+        provenance: { source: 'runtime', extractor: 'heuristic' },
+      }));
+      const written = await post(capability('/write'), writeBody(items), { token });
+      expect(written.status).toBe(200);
+      sourceIds.push(...written.body.data.results.map((result) => result.id));
+    }
+    expect(sourceIds).toHaveLength(200);
+
+    const deferred = await post(capability('/internal-object'), {
+      actor: agent,
+      kind: 'compact',
+      op: 'upsert',
+      domain: 'agent:opencode',
+      sourceIds,
+      strategy: 'summary',
+      deferredSummary: true,
+    }, { token });
+    expect(deferred.status).toBe(200);
+    const object = deferred.body.data.object;
+    expect(object.sourceIds).toHaveLength(200);
+    expect(object.sourceHashes).toHaveLength(200);
+    expect(Buffer.byteLength(object.summary, 'utf8')).toBeLessThanOrEqual(64 * 1024);
+    expect(object.summary).toContain('中文来源');
+    expect(object.summary).toContain('…');
+    expect(object.summary).not.toBe(`Compact · 200 records · episode:200`);
+  });
+
   it('self_record：始终 agent 域、revision 冲突、其他 Agent 拒绝、无 sync 字段', async () => {
     const first = await post(capability('/internal-object'), {
       actor: agent,
@@ -1778,6 +2145,31 @@ describe('POST /internal-object', () => {
   });
 
   it('context_checkpoint schema 2：结构化字段、task 共享 revision、跨 Agent 读、summary_only 降级', async () => {
+    const refRecord = await writeOne({
+      domain: 'task:fleet_ckpt_2',
+      kind: 'fact',
+      content: { subject: unique('ckpt-ref'), predicate: 'supports', object: 'checkpoint references' },
+      provenance: { source: 'runtime', threadId: 'fleet_ckpt_2' },
+    });
+    const refRecordId = refRecord.body.data.results[0].id;
+    const refDetail = await post(capability('/detail'), {
+      actor: agent,
+      op: 'write',
+      items: [{
+        clientItemId: unique('ckpt_detail'),
+        domain: 'task:fleet_ckpt_2',
+        detailKind: 'raw_chunk',
+        threadId: 'fleet_ckpt_2',
+        recordIds: [refRecordId],
+        role: 'user',
+        text: 'checkpoint evidence detail',
+        retentionClass: 'conversation',
+        expiresAt: 0,
+        provenance: { source: 'runtime', extractor: 'heuristic', threadId: 'fleet_ckpt_2' },
+      }],
+    }, { token });
+    expect(refDetail.status).toBe(200);
+    const refDetailId = refDetail.body.data.results[0].id;
     const taskState = (revisionText) => ({
       schema: 2,
       contentMode: 'structured',
@@ -1793,7 +2185,7 @@ describe('POST /internal-object', () => {
       nextSteps: [{ id: 'n1', text: 'DSH 真实旅程', owner: 'dsh' }],
       files: [{ path: 'packages/mcp/src/memory-capability.mjs', role: 'write', status: 'in_progress' }],
       openQuestions: [{ id: 'q1', text: '详情跨域复制？', blocking: true }],
-      references: { recordIds: ['01JREF'], detailIds: ['01KDETAIL'], messageIds: ['m1'], fleetTaskId: 'fleet_ckpt_2', urls: [] },
+      references: { recordIds: [refRecordId], detailIds: [refDetailId], messageIds: ['m1'], fleetTaskId: 'fleet_ckpt_2', urls: [] },
     });
     const first = await post(capability('/internal-object'), {
       actor: agent,
@@ -1805,8 +2197,8 @@ describe('POST /internal-object', () => {
       expectedRevision: 0,
       state: taskState('跨设备任务'),
       summary: null,
-      recordIds: ['01JREF'],
-      detailIds: ['01KDETAIL'],
+      recordIds: [refRecordId],
+      detailIds: [refDetailId],
     }, { token });
     expect(first.status).toBe(200);
     expect(first.body.data.object).toMatchObject({
@@ -1816,8 +2208,9 @@ describe('POST /internal-object', () => {
       schema: 2,
       contentMode: 'structured',
       structured: true,
-      detailIds: ['01KDETAIL'],
+      detailIds: [refDetailId],
     });
+    expect(first.body.data.object.recordIds).toEqual([refRecordId]);
     expect(first.body.data.object.updatedBy.agentId).toBe('opencode');
 
     const hermesRead = await post(capability('/internal-object'), {
@@ -1943,6 +2336,388 @@ describe('POST /internal-object', () => {
       summary: 'legacy summary',
     });
     expect(legacyRead.body.degraded).toBe(true);
+  });
+
+  it('context_checkpoint：引用必须存在、类型正确、存活、同域；拒绝悬空/跨域/墓碑', async () => {
+    const refA = await writeOne({
+      domain: 'task:th_refs',
+      kind: 'fact',
+      content: { subject: unique('ref-a'), predicate: 'is', object: 'live' },
+      provenance: { source: 'runtime', threadId: 'th_refs' },
+    });
+    const recordA = refA.body.data.results[0].id;
+    const detailA = await post(capability('/detail'), {
+      actor: agent,
+      op: 'write',
+      items: [{
+        clientItemId: unique('ref-detail'),
+        domain: 'task:th_refs',
+        detailKind: 'raw_chunk',
+        threadId: 'th_refs',
+        recordIds: [recordA],
+        role: 'user',
+        text: 'reference evidence',
+        retentionClass: 'conversation',
+        expiresAt: 0,
+        provenance: { source: 'runtime', extractor: 'heuristic', threadId: 'th_refs' },
+      }],
+    }, { token });
+    expect(detailA.status).toBe(200);
+    const detailId = detailA.body.data.results[0].id;
+    const refB = await writeOne({
+      domain: 'default',
+      kind: 'observation',
+      content: { content: unique('ref-b') },
+      provenance: { source: 'runtime' },
+    });
+    const recordB = refB.body.data.results[0].id;
+    const agentRef = await writeOne({
+      domain: 'agent:opencode',
+      kind: 'observation',
+      content: { content: unique('ref-agent') },
+      provenance: { source: 'runtime' },
+    });
+    const recordAgent = agentRef.body.data.results[0].id;
+    const stateFor = (recordIds, detailIds, extra = {}) => ({
+      schema: 2,
+      contentMode: 'structured',
+      task: { key: 'task:th_refs', threadId: 'th_refs', fleetTaskId: null },
+      goal: 'refs',
+      constraints: [],
+      decisions: [],
+      progress: { done: [], doing: [], blocked: [] },
+      nextSteps: [{ id: 'n1', text: 'next' }],
+      files: [],
+      openQuestions: [],
+      references: { recordIds, detailIds, messageIds: [], fleetTaskId: null, urls: [] },
+      ...extra,
+    });
+    const upsert = (recordIds, detailIds, extra = {}) => post(capability('/internal-object'), {
+      actor: agent,
+      kind: 'context_checkpoint',
+      op: 'upsert',
+      agentId: 'opencode',
+      threadId: 'th_refs',
+      domain: 'task:th_refs',
+      state: stateFor(recordIds, detailIds),
+      recordIds,
+      detailIds,
+      ...extra,
+    }, { token });
+
+    const valid = await upsert([recordA], [detailId]);
+    expect(valid.status).toBe(200);
+    expect(valid.body.data.object.recordIds).toEqual([recordA]);
+    expect(valid.body.data.object.detailIds).toEqual([detailId]);
+
+    const missing = await upsert(['01JDOESNOTEXIST0000000000000'], []);
+    expect(missing.status).toBe(404);
+    expect(missing.body.error.code).toBe('not_found');
+
+    const missingStateRef = await upsert([recordA], [], {
+      state: stateFor([recordA], ['01JDOESNOTEXISTDETAIL000000']),
+      recordIds: [],
+      detailIds: [],
+    });
+    expect(missingStateRef.status).toBe(404);
+    expect(missingStateRef.body.error.code).toBe('not_found');
+
+    const wrongType = await upsert([detailId], []);
+    expect(wrongType.status).toBe(400);
+    expect(wrongType.body.error.code).toBe('invalid_reference_type');
+
+    const crossDomain = await upsert([recordA, recordB], []);
+    expect(crossDomain.status).toBe(400);
+    expect(crossDomain.body.error.code).toBe('domain_mismatch');
+
+    const agentRefOnly = await upsert([recordAgent], []);
+    expect(agentRefOnly.status).toBe(400);
+    expect(agentRefOnly.body.error.code).toBe('domain_mismatch');
+
+    const defaultRefOnly = await upsert([recordB], []);
+    expect(defaultRefOnly.status).toBe(400);
+    expect(defaultRefOnly.body.error.code).toBe('domain_mismatch');
+
+    const deleted = await post(capability('/delete'), {
+      actor: { type: 'user' },
+      ids: [recordA],
+      reason: 'test tombstone reference',
+    }, { token });
+    expect(deleted.status).toBe(200);
+    const tombstoned = await upsert([recordA], []);
+    expect(tombstoned.status).toBe(404);
+    expect(tombstoned.body.error.code).toBe('not_found');
+  });
+
+  it('context_checkpoint：显式 expiresAt 读取过滤、expiresAt=0 不过期、周期墓碑不删记录/详情', async () => {
+    const makeRefs = async (threadId) => {
+      const record = await writeOne({
+        domain: `task:${threadId}`,
+        kind: 'observation',
+        content: { content: unique(`expiry-record-${threadId}`) },
+        provenance: { source: 'runtime', threadId },
+      });
+      const recordId = record.body.data.results[0].id;
+      const detail = await post(capability('/detail'), {
+        actor: agent,
+        op: 'write',
+        items: [{
+          clientItemId: unique(`expiry-detail-${threadId}`),
+          domain: `task:${threadId}`,
+          detailKind: 'raw_chunk',
+          threadId,
+          recordIds: [recordId],
+          role: 'user',
+          text: 'expiry evidence',
+          retentionClass: 'conversation',
+          expiresAt: 0,
+          provenance: { source: 'runtime', extractor: 'heuristic', threadId },
+        }],
+      }, { token });
+      return { recordId, detailId: detail.body.data.results[0].id };
+    };
+    const expiredRefs = await makeRefs('th_expired');
+    const permanentRefs = await makeRefs('th_permanent');
+    const state = (threadId, { recordId, detailId }) => ({
+      schema: 2,
+      contentMode: 'structured',
+      task: { key: `task:${threadId}`, threadId, fleetTaskId: null },
+      goal: 'expiry',
+      constraints: [],
+      decisions: [],
+      progress: { done: [], doing: [], blocked: [] },
+      nextSteps: [{ id: 'n1', text: 'next' }],
+      files: [],
+      openQuestions: [],
+      references: { recordIds: [recordId], detailIds: [detailId], messageIds: [], fleetTaskId: null, urls: [] },
+    });
+    const expiredAt = Date.now() - 1000;
+    const expired = await post(capability('/internal-object'), {
+      actor: agent,
+      kind: 'context_checkpoint',
+      op: 'upsert',
+      agentId: 'opencode',
+      threadId: 'th_expired',
+      domain: 'task:th_expired',
+      state: state('th_expired', expiredRefs),
+      recordIds: [expiredRefs.recordId],
+      detailIds: [expiredRefs.detailId],
+      expiresAt: expiredAt,
+    }, { token });
+    expect(expired.status).toBe(200);
+    const expiredId = expired.body.data.object.id;
+    const expiredRead = await post(capability('/internal-object'), {
+      actor: agent,
+      kind: 'context_checkpoint',
+      op: 'get',
+      agentId: 'opencode',
+      threadId: 'th_expired',
+      domain: 'task:th_expired',
+    }, { token });
+    expect(expiredRead.status).toBe(200);
+    expect(expiredRead.body.data.object).toBeNull();
+
+    const permanent = await post(capability('/internal-object'), {
+      actor: agent,
+      kind: 'context_checkpoint',
+      op: 'upsert',
+      agentId: 'opencode',
+      threadId: 'th_permanent',
+      domain: 'task:th_permanent',
+      state: state('th_permanent', permanentRefs),
+      recordIds: [permanentRefs.recordId],
+      detailIds: [permanentRefs.detailId],
+      expiresAt: 0,
+    }, { token });
+    expect(permanent.status).toBe(200);
+    const permanentId = permanent.body.data.object.id;
+    const permanentRead = await post(capability('/internal-object'), {
+      actor: agent,
+      kind: 'context_checkpoint',
+      op: 'get',
+      agentId: 'opencode',
+      threadId: 'th_permanent',
+      domain: 'task:th_permanent',
+    }, { token });
+    expect(permanentRead.body.data.object).toMatchObject({ id: permanentId, expiresAt: 0 });
+
+    const maintenance = createMemoryCapabilityHandler({
+      home,
+      getConfig: () => ({ memoryRuntime: { enabled: true } }),
+      getApp: () => app,
+      getService: () => service,
+      getIdentity: () => ({ cloudId: 'cl_test', userId: 'user' }),
+    });
+    const result = await maintenance.runCheckpointMaintenance();
+    expect(result.removed).toBeGreaterThanOrEqual(1);
+    expect((await app.graph.getNode(expiredId)).deletedAt).toBeGreaterThan(0);
+    expect((await app.graph.getNode(permanentId)).deletedAt).toBeUndefined();
+    for (const refs of [expiredRefs, permanentRefs]) {
+      expect((await app.graph.getNode(refs.recordId)).deletedAt).toBeUndefined();
+      expect((await app.graph.getNode(refs.detailId)).deletedAt).toBeUndefined();
+    }
+    expect((await app.graph.getNode(expiredRefs.recordId)).type).not.toBe('context_checkpoint');
+  });
+
+  it('context_checkpoint：过期 R2 + 永久 R1，GET 不复活 R1；维护后 upsert 不复用 R2', async () => {
+    const threadId = 'th_revision_highwater';
+    const domain = `task:${threadId}`;
+    const state = (goal) => ({
+      schema: 2,
+      contentMode: 'structured',
+      task: { key: domain, threadId, fleetTaskId: null },
+      goal,
+      constraints: [],
+      decisions: [],
+      progress: { done: [], doing: [], blocked: [] },
+      nextSteps: [{ id: 'n1', text: 'next' }],
+      files: [],
+      openQuestions: [],
+      references: { recordIds: [], detailIds: [], messageIds: [], fleetTaskId: null, urls: [] },
+    });
+    const upsert = (goal, extra = {}) => post(capability('/internal-object'), {
+      actor: agent,
+      kind: 'context_checkpoint',
+      op: 'upsert',
+      agentId: 'opencode',
+      threadId,
+      domain,
+      state: state(goal),
+      ...extra,
+    }, { token });
+
+    const r1 = await upsert('R1 permanent', { expectedRevision: 0, expiresAt: 0 });
+    expect(r1.status).toBe(200);
+    expect(r1.body.data.object.revision).toBe(1);
+    const r1Id = r1.body.data.object.id;
+    const r2 = await upsert('R2 expired', { expectedRevision: 1, expiresAt: Date.now() - 1000 });
+    expect(r2.status).toBe(200);
+    expect(r2.body.data.object.revision).toBe(2);
+    const r2Id = r2.body.data.object.id;
+
+    const get = () => post(capability('/internal-object'), {
+      actor: agent,
+      kind: 'context_checkpoint',
+      op: 'get',
+      agentId: 'opencode',
+      threadId,
+      domain,
+    }, { token });
+    const beforeMaintenance = await get();
+    expect(beforeMaintenance.status).toBe(200);
+    expect(beforeMaintenance.body.data.object).toBeNull();
+    expect(beforeMaintenance.body.data.highWater).toBe(2);
+
+    const maintenance = createMemoryCapabilityHandler({
+      home,
+      getConfig: () => ({ memoryRuntime: { enabled: true } }),
+      getApp: () => app,
+      getService: () => service,
+      getIdentity: () => ({ cloudId: 'cl_test', userId: 'user' }),
+    });
+    const removed = await maintenance.runCheckpointMaintenance();
+    expect(removed.removed).toBeGreaterThanOrEqual(1);
+    expect((await app.graph.getNode(r2Id)).deletedAt).toBeGreaterThan(0);
+    expect((await app.graph.getNode(r1Id)).deletedAt).toBeUndefined();
+
+    const afterMaintenance = await get();
+    expect(afterMaintenance.body.data.object).toBeNull();
+    expect(afterMaintenance.body.data.highWater).toBe(2);
+
+    const staleExpected = await upsert('must conflict', { expectedRevision: 1 });
+    expect(staleExpected.status).toBe(409);
+    expect(staleExpected.body.error.code).toBe('revision_mismatch');
+    expect(staleExpected.body.error.details.currentRevision).toBe(2);
+
+    const r3 = await upsert('R3 after tombstone', { expectedRevision: 2, expiresAt: 0 });
+    expect(r3.status).toBe(200);
+    expect(r3.body.data.object.revision).toBe(3);
+    const current = await get();
+    expect(current.body.data.object).toMatchObject({ revision: 3, summary: null });
+  });
+
+  it('context_checkpoint：显式删除/全部过期后 expectedRevision=0 可重建，但 revision 不复用', async () => {
+    const assertRecreate = async (threadId, { expireFirst = false } = {}) => {
+      const domain = `task:${threadId}`;
+      const state = {
+        schema: 2,
+        contentMode: 'structured',
+        task: { key: domain, threadId, fleetTaskId: null },
+        goal: 'recreate',
+        constraints: [],
+        decisions: [],
+        progress: { done: [], doing: [], blocked: [] },
+        nextSteps: [{ id: 'n1', text: 'next' }],
+        files: [],
+        openQuestions: [],
+        references: { recordIds: [], detailIds: [], messageIds: [], fleetTaskId: null, urls: [] },
+      };
+      const first = await post(capability('/internal-object'), {
+        actor: agent,
+        kind: 'context_checkpoint',
+        op: 'upsert',
+        agentId: 'opencode',
+        threadId,
+        domain,
+        state,
+        expectedRevision: 0,
+        expiresAt: expireFirst ? Date.now() - 1000 : 0,
+      }, { token });
+      expect(first.status).toBe(200);
+      expect(first.body.data.object.revision).toBe(1);
+
+      if (expireFirst) {
+        const maintenance = createMemoryCapabilityHandler({
+          home,
+          getConfig: () => ({ memoryRuntime: { enabled: true } }),
+          getApp: () => app,
+          getService: () => service,
+          getIdentity: () => ({ cloudId: 'cl_test', userId: 'user' }),
+        });
+        await maintenance.runCheckpointMaintenance();
+      } else {
+        const deleted = await post(capability('/internal-object'), {
+          actor: { type: 'user' },
+          kind: 'context_checkpoint',
+          op: 'delete',
+          agentId: 'opencode',
+          threadId,
+          domain,
+        }, { token });
+        expect(deleted.status).toBe(200);
+        expect(deleted.body.data.deleted).toBe(true);
+      }
+
+      const empty = await post(capability('/internal-object'), {
+        actor: agent,
+        kind: 'context_checkpoint',
+        op: 'get',
+        agentId: 'opencode',
+        threadId,
+        domain,
+      }, { token });
+      expect(empty.status).toBe(200);
+      expect(empty.body.data.object).toBeNull();
+      expect(empty.body.data.highWater).toBe(1);
+
+      const recreated = await post(capability('/internal-object'), {
+        actor: agent,
+        kind: 'context_checkpoint',
+        op: 'upsert',
+        agentId: 'opencode',
+        threadId,
+        domain,
+        state,
+        expectedRevision: 0,
+        expiresAt: 0,
+      }, { token });
+      expect(recreated.status).toBe(200);
+      expect(recreated.body.data.object.revision).toBe(2);
+      expect(recreated.body.data.object.state.goal).toBe('recreate');
+    };
+
+    await assertRecreate('th_recreate_delete');
+    await assertRecreate('th_recreate_expired', { expireFirst: true });
   });
 
   it('context_checkpoint default：按 (agentId, threadId) revision 隔离，其他 Agent 不可读', async () => {
@@ -2133,7 +2908,7 @@ describe('GET/POST /sync', () => {
       else process.env.MEBULAR_CLOUD_ROOT = savedRoot;
       await rm(fakeHome, { recursive: true, force: true });
     }
-  });
+  }, 15000);
 });
 
 describe('公共工具面与轻量模式边界', () => {
@@ -2142,4 +2917,369 @@ describe('公共工具面与轻量模式边界', () => {
     expect(TOOL_NAMES).not.toContain('memory_capability');
     expect(TOOL_NAMES).not.toContain('memory_runtime_write');
   });
+});
+
+describe('close 与已认证在途写', () => {
+  it('close 撤销后，已进入 handler 的写请求不得再提交图或返回成功', async () => {
+    const marker = unique('close-inflight');
+    const storage = app.storage;
+    const originalListNodes = storage.listNodes.bind(storage);
+    let release = () => {};
+    const gate = new Promise((resolve) => { release = resolve; });
+    let entered = false;
+    storage.listNodes = async (...args) => {
+      if (!entered) {
+        entered = true;
+        await gate;
+      }
+      return originalListNodes(...args);
+    };
+    try {
+      const pending = post(capability('/write'), writeBody([{
+        clientItemId: unique('cand_close'),
+        domain: 'agent:opencode',
+        kind: 'fact',
+        content: { subject: 'close', predicate: 'marker', object: marker, confidence: 0.9 },
+      }]), { token });
+      const deadline = Date.now() + 5000;
+      while (!entered && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(entered).toBe(true);
+      const closing = server.close();
+      expect(server.getState().closing).toBe(true);
+      const drainDeadline = Date.now() + 5000;
+      while (!server.getState().capabilityDraining && Date.now() < drainDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(server.getState().capabilityDraining).toBe(true);
+      release();
+      const response = await pending;
+      expect(response.status).toBe(409);
+      expect(response.body?.error?.code).toBe('mode_mismatch');
+      await closing;
+      expect(await readCapabilityToken({ home, env: {} })).toBeNull();
+      const nodes = await originalListNodes();
+      expect(JSON.stringify(nodes)).not.toContain(marker);
+    } finally {
+      storage.listNodes = originalListNodes;
+    }
+  }, 15000);
+});
+
+describe('close 等待真实 writeRecords 完成', () => {
+  it('已进入 service.writeRecords 的写必须完成后再 revoke，close 不得提前返回', async () => {
+    const second = await startHttpServer({
+      home,
+      app,
+      service,
+      config: {
+        deviceId: 'device-w2b',
+        memoryRuntime: { enabled: true },
+        sync: { namespaces: [] },
+        mcp: { http: { host: '127.0.0.1', port: 0, auth: 'none' } },
+      },
+      buildServer: () => ({ connect: async () => undefined, close: async () => undefined }),
+      host: '127.0.0.1',
+      port: 0,
+      auth: 'none',
+    });
+    const secondBase = `http://127.0.0.1:${second.port}`;
+    const savedBase = base;
+    base = secondBase;
+    const secondToken = (await readCapabilityToken({ home, env: {} }))?.token;
+    const marker = unique('write-records-close');
+    const originalWriteRecords = service.writeRecords.bind(service);
+    let entered = false;
+    let release = () => {};
+    const gate = new Promise((resolve) => { release = resolve; });
+    service.writeRecords = async (...args) => {
+      if (!entered) {
+        entered = true;
+        await gate;
+      }
+      return originalWriteRecords(...args);
+    };
+    try {
+      const pending = post('/internal/memory/v1/write', writeBody([{
+        clientItemId: unique('cand_write_close'),
+        domain: 'agent:opencode',
+        kind: 'fact',
+        content: { subject: 'close', predicate: 'writeRecords', object: marker, confidence: 0.9 },
+      }]), { token: secondToken });
+      const deadline = Date.now() + 5000;
+      while (!entered && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(entered).toBe(true);
+      const closing = second.close();
+      let settled = false;
+      void closing.then(() => { settled = true; });
+      const drainDeadline = Date.now() + 5000;
+      while (!second.getState().capabilityDraining && Date.now() < drainDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(second.getState().capabilityDraining).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(settled).toBe(false);
+      expect(second.getState().closing).toBe(true);
+      release();
+      const response = await pending;
+      expect(response.status).toBe(200);
+      await closing;
+      expect(second.getState().capabilityDrain).toMatchObject({ clean: true });
+      const nodes = await app.storage.listNodes();
+      expect(JSON.stringify(nodes)).toContain(marker);
+    } finally {
+      base = savedBase;
+      service.writeRecords = originalWriteRecords;
+      await second.close().catch(() => undefined);
+    }
+  }, 20000);
+});
+
+describe('drain 覆盖 update/delete/archive 写路径', () => {
+  for (const route of ['update', 'delete', 'archive']) {
+    it(`${route} 在 drain 后不得提交`, async () => {
+      const instance = await startHttpServer({
+        home,
+        app,
+        service,
+        config: {
+          deviceId: 'device-w2b',
+          memoryRuntime: { enabled: true },
+          sync: { namespaces: [] },
+          mcp: { http: { host: '127.0.0.1', port: 0, auth: 'none' } },
+        },
+        buildServer: () => ({ connect: async () => undefined, close: async () => undefined }),
+        host: '127.0.0.1',
+        port: 0,
+        auth: 'none',
+      });
+      const instanceBase = `http://127.0.0.1:${instance.port}`;
+      const savedBase = base;
+      base = instanceBase;
+      const instanceToken = (await readCapabilityToken({ home, env: {} }))?.token;
+      const id = unique(`record_${route}`);
+      const written = await post('/internal/memory/v1/write', writeBody([{
+        clientItemId: unique(`cand_${route}`),
+        domain: 'agent:opencode',
+        kind: 'fact',
+        content: { subject: route, predicate: 'marker', object: id, confidence: 0.9 },
+      }]), { token: instanceToken });
+      expect(written.status).toBe(200);
+      const recordId = written.body.data.results[0].id;
+      const originalGetNode = app.graph.getNode.bind(app.graph);
+      let entered = false;
+      let release = () => {};
+      const gate = new Promise((resolve) => { release = resolve; });
+      app.graph.getNode = async (...args) => {
+        if (!entered) {
+          entered = true;
+          await gate;
+        }
+        return originalGetNode(...args);
+      };
+      try {
+        const body = route === 'update'
+          ? { actor: agent, items: [{ id: recordId, patch: { tags: ['changed'] } }] }
+          : { actor: agent, ids: [recordId], ...(route === 'archive' ? { archived: true } : {}) };
+        const pending = post(`/internal/memory/v1/${route}`, body, { token: instanceToken });
+        const deadline = Date.now() + 5000;
+        while (!entered && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        expect(entered).toBe(true);
+        const closing = instance.close();
+        const drainDeadline = Date.now() + 5000;
+        while (!instance.getState().capabilityDraining && Date.now() < drainDeadline) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        expect(instance.getState().capabilityDraining).toBe(true);
+        release();
+        const response = await pending;
+        expect(response.status).toBe(409);
+        expect(response.body?.error?.code).toBe('mode_mismatch');
+        await closing;
+      } finally {
+        base = savedBase;
+        app.graph.getNode = originalGetNode;
+        await instance.close().catch(() => undefined);
+      }
+    }, 15000);
+  }
+});
+
+describe('close 等待同键 join 的在途请求', () => {
+  it('A 被 gate、B 同 key join、close 同时发生：等待两者并 clean', async () => {
+    const instanceHome = await mkdtemp(join(tmpdir(), 'memory-capability-join-close-'));
+    const savedCloudRoot = process.env.MEBULAR_CLOUD_ROOT;
+    process.env.MEBULAR_CLOUD_ROOT = join(instanceHome, 'cloud');
+    let instance = null;
+    const marker = unique('join-close-marker');
+    const key = unique('join-close-key');
+    const body = writeBody([{
+      clientItemId: unique('cand_join_close'),
+      domain: 'agent:opencode',
+      kind: 'fact',
+      content: { subject: 'close', predicate: 'join', object: marker, confidence: 0.9 },
+    }]);
+    const originalWriteRecords = service.writeRecords.bind(service);
+    let entered = false;
+    let release = () => {};
+    const gate = new Promise((resolve) => { release = resolve; });
+    let calls = 0;
+    service.writeRecords = async (...args) => {
+      calls += 1;
+      if (!entered) {
+        entered = true;
+        await gate;
+      }
+      return originalWriteRecords(...args);
+    };
+    const savedBase = base;
+    try {
+      instance = await startHttpServer({
+        home: instanceHome,
+        app,
+        service,
+        config: {
+          deviceId: 'device-w2b',
+          memoryRuntime: { enabled: true },
+          sync: { namespaces: [] },
+          mcp: { http: { host: '127.0.0.1', port: 0, auth: 'none' } },
+        },
+        buildServer: () => ({ connect: async () => undefined, close: async () => undefined }),
+        host: '127.0.0.1',
+        port: 0,
+        auth: 'none',
+      });
+      const instanceBase = `http://127.0.0.1:${instance.port}`;
+      const instanceToken = (await readCapabilityToken({ home: instanceHome, env: {} }))?.token;
+      base = instanceBase;
+      const secondBodyRead = new Promise((resolve) => {
+        const onRequest = (req) => {
+          if (!String(req.url ?? '').includes('/internal/memory/v1/write')) return;
+          instance.server.off('request', onRequest);
+          if (req.readableEnded) resolve();
+          else req.once('end', resolve);
+        };
+        instance.server.on('request', onRequest);
+      });
+
+      const firstPending = post('/internal/memory/v1/write', body, {
+        token: instanceToken,
+        headers: { 'idempotency-key': key },
+      });
+      const deadline = Date.now() + 5000;
+      while (!entered && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(entered).toBe(true);
+
+      const secondPending = post('/internal/memory/v1/write', body, {
+        token: instanceToken,
+        headers: { 'idempotency-key': key },
+      });
+      // 等 B 的请求体读完并让 handler 进入 withIdempotency/join；A 仍在 gate 内。
+      await secondBodyRead;
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(calls).toBe(1);
+
+      const closing = instance.close();
+      expect(instance.getState().closing).toBe(true);
+      const drainDeadline = Date.now() + 5000;
+      while (!instance.getState().capabilityDraining && Date.now() < drainDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(instance.getState().capabilityDraining).toBe(true);
+      let settled = false;
+      void closing.then(() => { settled = true; });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(settled).toBe(false);
+
+      release();
+      const [first, second] = await Promise.all([firstPending, secondPending]);
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+      expect(first.body.data.created).toBe(1);
+      expect(second.body.data.created).toBe(1);
+      expect(first.body.data.results[0].id).toBe(second.body.data.results[0].id);
+      // B 在 close 前 join 同一在途执行，得到同一结果而不是 close 后的重放。
+      expect(second.body.data.replayed).toBe(false);
+      expect(calls).toBe(1);
+
+      await closing;
+      expect(instance.getState().capabilityDrain).toMatchObject({ clean: true, active: 0 });
+      expect(await readCapabilityToken({ home: instanceHome, env: {} })).toBeNull();
+      const records = (await app.storage.listNodes({ namespace: 'agent:opencode' }))
+        .filter((node) => node.content?.object === marker);
+      expect(records).toHaveLength(1);
+    } finally {
+      release();
+      base = savedBase;
+      service.writeRecords = originalWriteRecords;
+      await instance?.close().catch(() => undefined);
+      await rm(instanceHome, { recursive: true, force: true });
+      if (savedCloudRoot === undefined) delete process.env.MEBULAR_CLOUD_ROOT;
+      else process.env.MEBULAR_CLOUD_ROOT = savedCloudRoot;
+    }
+  }, 20000);
+});
+
+describe('close drain 超时', () => {
+  it('超时明确 incomplete 且不撤销 token，不声明 clean', async () => {
+    const instance = await startHttpServer({
+      home,
+      app,
+      service,
+      config: {
+        deviceId: 'device-w2b',
+        memoryRuntime: { enabled: true },
+        sync: { namespaces: [] },
+        mcp: { http: { host: '127.0.0.1', port: 0, auth: 'none' } },
+      },
+      buildServer: () => ({ connect: async () => undefined, close: async () => undefined }),
+      host: '127.0.0.1',
+      port: 0,
+      auth: 'none',
+    });
+    const instanceBase = `http://127.0.0.1:${instance.port}`;
+    const instanceToken = (await readCapabilityToken({ home, env: {} }))?.token;
+    const originalWriteRecords = service.writeRecords.bind(service);
+    let entered = false;
+    let release = () => {};
+    const gate = new Promise((resolve) => { release = resolve; });
+    service.writeRecords = async (...args) => {
+      if (!entered) {
+        entered = true;
+        await gate;
+      }
+      return originalWriteRecords(...args);
+    };
+    const savedBase = base;
+    base = instanceBase;
+    try {
+      const pending = post('/internal/memory/v1/write', writeBody([{
+        clientItemId: unique('cand_timeout'),
+        domain: 'agent:opencode',
+        kind: 'fact',
+        content: { subject: 'timeout', predicate: 'marker', object: unique('timeout'), confidence: 0.9 },
+      }]), { token: instanceToken }).catch(() => null);
+      const deadline = Date.now() + 5000;
+      while (!entered && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(entered).toBe(true);
+      await instance.close();
+      expect(instance.getState().capabilityDrain).toMatchObject({ clean: false });
+      expect(await readCapabilityToken({ home, env: {} })).not.toBeNull();
+      release();
+      await pending;
+    } finally {
+      base = savedBase;
+      service.writeRecords = originalWriteRecords;
+      await instance.close().catch(() => undefined);
+    }
+  }, 20000);
 });

@@ -1007,9 +1007,15 @@ export async function buildSettings({ app, service, config, runtime, home }) {
     // A/D：三元组 + 暴露面（单一真源驱动；GUI 编辑器改由 configSchema 渲染）
     effective: effectiveRows,
     // G：应用结果（green=已生效 / red=未按预期生效或已回滚 / in-progress=重启中）
-    lastApply: applyPending
-      ? { status: 'in-progress', at: applyPending.at ?? null, fields: applyPending.fields ?? [], attempt: applyPending.attempt ?? null }
-      : (applyResult ?? null),
+    // rollingBack 的 pending 只有在恢复失败时才会留下结果；此时必须优先展示 rollback-failed，
+    // 不能被 pending 误报成 in-progress。
+    lastApply: applyPending?.rollingBack === true
+      ? (applyResult?.status === 'rollback-failed'
+        ? applyResult
+        : { status: 'in-progress', at: applyPending.at ?? null, fields: applyPending.fields ?? [], attempt: applyPending.attempt ?? null })
+      : (applyPending
+        ? { status: 'in-progress', at: applyPending.at ?? null, fields: applyPending.fields ?? [], attempt: applyPending.attempt ?? null }
+        : (applyResult ?? null)),
     configSchema: consoleSchema(),
     statusSchema: consoleStatusSchema(),
     restart: {

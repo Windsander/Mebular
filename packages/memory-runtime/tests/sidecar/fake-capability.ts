@@ -46,6 +46,7 @@ export interface FakeCapabilityServer {
   setCheckpointLeaseHost: (hostId: string) => void;
   setFailure: (failure: { status: number; code: string; retryable?: boolean } | null) => void;
   setDetailFailure: (failure: { status: number; code: string; retryable?: boolean } | null) => void;
+  setDetailEvicted: (ids: string[]) => void;
   close: () => Promise<void>;
 }
 
@@ -55,6 +56,8 @@ export interface FakeCapabilityOptions {
    * 只返回相关候选。默认关闭，保持既有 sidecar 测试的“返回全部记录”行为。
    */
   filterQuery?: boolean;
+  /** 与固定 sidecar 测试时钟对齐，避免真实墙钟误伤已生成的 expiresAt。 */
+  now?: () => number;
 }
 
 export interface FakeMemoryRecord {
@@ -269,6 +272,7 @@ function recordMatchesQuery(record: FakeMemoryRecord, query: string): boolean {
 
 export async function startFakeCapability(options: FakeCapabilityOptions = {}): Promise<FakeCapabilityServer> {
   const filterQuery = options.filterQuery === true;
+  const now = options.now ?? Date.now;
   const requests: FakeCapabilityRequest[] = [];
   const writeRequests: FakeCapabilityRequest[] = [];
   const detailRequests: FakeCapabilityRequest[] = [];
@@ -280,6 +284,7 @@ export async function startFakeCapability(options: FakeCapabilityOptions = {}): 
   let details: FakeDetail[] = [];
   let failure: { status: number; code: string; retryable?: boolean } | null = null;
   let detailFailure: { status: number; code: string; retryable?: boolean } | null = null;
+  let detailEvicted: string[] = [];
   let leaseHost = 'h_fake';
   let counter = 0;
 
@@ -420,6 +425,7 @@ export async function startFakeCapability(options: FakeCapabilityOptions = {}): 
     state: checkpoint.state,
     summary: checkpoint.summary,
     recordIds: checkpoint.recordIds,
+    detailIds: Array.isArray((checkpoint as any).detailIds) ? (checkpoint as any).detailIds : [],
     lease: checkpoint.lease,
     expiresAt: checkpoint.expiresAt,
     provenance: checkpoint.provenance ?? {},
@@ -734,6 +740,32 @@ export async function startFakeCapability(options: FakeCapabilityOptions = {}): 
             return;
           }
           const strategy = body.strategy === 'dedupe' ? 'dedupe' : 'summary';
+          let summary: string;
+          if (body.deferredSummary === true) {
+            const sorted = [...sources].sort((a, b) => a.id.localeCompare(b.id));
+            const lines: string[] = [];
+            for (const source of sorted) {
+              const content: any = isObjectLike(source.content) ? source.content : {};
+              const text = typeof content.object === 'string'
+                ? `${content.subject ?? ''} ${content.predicate ?? ''} ${content.object}`.trim()
+                : typeof content.content === 'string'
+                  ? content.content
+                  : typeof source.text === 'string' ? source.text : '';
+              if (text.trim().length > 0) lines.push(`- [${source.kind ?? source.type}] ${text.trim().slice(0, 240)}`);
+            }
+            const header = `Compact · ${sorted.length} records`;
+            summary = (lines.length > 0 ? `${header}\n${lines.join('\n')}` : header).slice(0, 64 * 1024);
+          } else {
+            summary = String(body.summary ?? '');
+            if (summary.trim().length === 0) {
+              fail(400, 'invalid_request', 'summary 不能为空');
+              return;
+            }
+            if (/^Compact · \d+ records(?: · [^\n]*)?$/.test(summary.trim())) {
+              fail(422, 'compact_summary_placeholder', 'compact 摘要不能是占位标题');
+              return;
+            }
+          }
           const identityKey = sha256({
             domain: body.domain,
             strategy,
@@ -746,17 +778,17 @@ export async function startFakeCapability(options: FakeCapabilityOptions = {}): 
             return;
           }
           counter += 1;
-          const createdAt = Date.now();
+          const createdAt = now();
           const compact: FakeCompact = {
             id: `01FAKEC${String(counter).padStart(4, '0')}`,
             type: 'compact',
             kind: 'compact',
             domain: body.domain,
-            summary: String(body.summary ?? ''),
+            summary,
             sourceIds,
             sourceHashes,
             strategy,
-            tokenCount: typeof body.tokenCount === 'number' ? body.tokenCount : null,
+            tokenCount: typeof body.tokenCount === 'number' ? body.tokenCount : summary.length > 0 ? Math.max(1, Math.ceil([...summary].length / 4)) : null,
             provenance: isObjectLike(body.provenance) ? body.provenance : {},
             createdAt,
             updatedAt: createdAt,
@@ -800,7 +832,7 @@ export async function startFakeCapability(options: FakeCapabilityOptions = {}): 
             return;
           }
           counter += 1;
-          const createdAt = Date.now();
+          const createdAt = now();
           const record = isObjectLike(body.record) ? body.record : {};
           const self: FakeSelfRecord = {
             id: `01FAKES${String(counter).padStart(4, '0')}`,
@@ -838,7 +870,7 @@ export async function startFakeCapability(options: FakeCapabilityOptions = {}): 
           if (body.op === 'get') {
             const threadId = body.threadId;
             const current = currentCheckpoint(agentId, threadId, body.domain);
-            const visible = current && !(current.expiresAt > 0 && current.expiresAt < Date.now()) ? current : null;
+            const visible = current && !(current.expiresAt > 0 && current.expiresAt < now()) ? current : null;
             send(200, envelope({ object: visible ? checkpointView(visible) : null, replayed: false }));
             return;
           }
@@ -847,7 +879,7 @@ export async function startFakeCapability(options: FakeCapabilityOptions = {}): 
               .filter((checkpoint) => (checkpoint.domain.startsWith('task:') || checkpoint.agentId === agentId))
               .filter((checkpoint) => !body.domain || checkpoint.domain === body.domain)
               .filter((checkpoint) => !body.threadId || checkpoint.threadId === body.threadId)
-              .filter((checkpoint) => !(checkpoint.expiresAt > 0 && checkpoint.expiresAt < Date.now()))
+              .filter((checkpoint) => !(checkpoint.expiresAt > 0 && checkpoint.expiresAt < now()))
               .sort((a, b) => b.revision - a.revision)
               .map(checkpointView);
             send(200, envelope({ objects, total: objects.length, replayed: false }));
@@ -909,7 +941,7 @@ export async function startFakeCapability(options: FakeCapabilityOptions = {}): 
             }, true);
             return;
           }
-          if (current?.lease && current.lease.until > Date.now() && current.lease.hostId !== leaseHost) {
+          if (current?.lease && current.lease.until > now() && current.lease.hostId !== leaseHost) {
             if (body.force !== true) {
               fail(409, 'checkpoint_lease_held', 'checkpoint 租约被其他 host 持有', {
                 hostId: current.lease.hostId,
@@ -926,7 +958,7 @@ export async function startFakeCapability(options: FakeCapabilityOptions = {}): 
             ? Math.min(body.leaseMs, 3_600_000)
             : 60_000;
           counter += 1;
-          const createdAt = Date.now();
+          const createdAt = now();
           const checkpoint: FakeCheckpoint = {
             id: `01FAKEP${String(counter).padStart(4, '0')}`,
             domain: String(domain),
@@ -1006,6 +1038,18 @@ export async function startFakeCapability(options: FakeCapabilityOptions = {}): 
               && detail.contentHash === contentHash
               && (detail.chunkIndex ?? -1) === (item.chunkIndex ?? -1));
             if (existing) {
+              const mergedRecordIds = [...new Set([...existing.recordIds, ...recordIds])];
+              if (mergedRecordIds.length > 200) {
+                return {
+                  clientItemId: item.clientItemId,
+                  status: 'failed',
+                  domain: item.domain,
+                  detailKind: item.detailKind ?? 'raw_chunk',
+                  code: 'validation_failed',
+                  retryable: false,
+                };
+              }
+              existing.recordIds = mergedRecordIds;
               return {
                 clientItemId: item.clientItemId,
                 status: 'duplicate',
@@ -1017,7 +1061,7 @@ export async function startFakeCapability(options: FakeCapabilityOptions = {}): 
               };
             }
             counter += 1;
-            const createdAt = Date.now();
+            const createdAt = now();
             const detail: FakeDetail = {
               id: `01FAKED${String(counter).padStart(4, '0')}`,
               type: 'detail_record',
@@ -1056,6 +1100,7 @@ export async function startFakeCapability(options: FakeCapabilityOptions = {}): 
             duplicates: results.filter((result: any) => result.status === 'duplicate').length,
             failed: results.filter((result: any) => result.status === 'failed').length,
             partial: results.some((result: any) => result.status === 'failed'),
+            evicted: [...detailEvicted],
           }));
           return;
         }
@@ -1074,7 +1119,7 @@ export async function startFakeCapability(options: FakeCapabilityOptions = {}): 
             fail(410, 'detail_deleted', '详情已删除');
             return;
           }
-          if (typeof detail.expiresAt === 'number' && detail.expiresAt > 0 && detail.expiresAt < Date.now()) {
+          if (typeof detail.expiresAt === 'number' && detail.expiresAt > 0 && detail.expiresAt < now()) {
             fail(410, 'detail_expired', '详情已过期');
             return;
           }
@@ -1119,7 +1164,7 @@ export async function startFakeCapability(options: FakeCapabilityOptions = {}): 
               forbidden.push(id);
               continue;
             }
-            detail.deletedAt = Date.now();
+            detail.deletedAt = now();
             detail.metadata = { ...(detail.metadata ?? {}), deletedReason: body?.reason ?? 'user_requested' };
             deleted.push(id);
           }
@@ -1228,6 +1273,7 @@ export async function startFakeCapability(options: FakeCapabilityOptions = {}): 
     setDetailFailure: (next) => {
       detailFailure = next;
     },
+    setDetailEvicted: (ids) => { detailEvicted = [...ids]; },
     close: () => new Promise<void>((resolve) => {
       server.close(() => resolve());
       server.closeAllConnections?.();

@@ -49,7 +49,7 @@ function forwardHeaders(headers) {
 
 function responseHeaders(headers) {
   const out = {};
-  for (const key of ['content-type', 'x-request-id', 'x-mebular-mode', 'x-mebular-degraded', 'www-authenticate']) {
+  for (const key of ['content-type', 'x-request-id', 'x-mebular-mode', 'x-mebular-degraded', 'www-authenticate', 'retry-after']) {
     const value = headers.get(key);
     if (value !== null) out[key] = value;
   }
@@ -105,7 +105,28 @@ export async function createRuntimeTap(targetUrl, options = {}) {
       error: null,
       tookMs: null,
     };
+    const writeOverride = (override) => {
+      const text = typeof override.body === 'string'
+        ? override.body
+        : JSON.stringify(override.body ?? {});
+      record.status = override.status;
+      record.ok = override.status >= 200 && override.status < 300;
+      record.response = typeof override.body === 'string' ? null : override.body ?? null;
+      record.tookMs = Date.now() - started;
+      res.writeHead(override.status, {
+        'content-type': 'application/json',
+        ...(override.headers ?? {}),
+      });
+      res.end(text);
+    };
     try {
+      const before = typeof options.beforeForward === 'function'
+        ? await options.beforeForward(record)
+        : null;
+      if (before !== null) {
+        writeOverride(before);
+        return;
+      }
       const response = await fetch(`${target}${path}`, {
         method,
         headers: forwardHeaders(incoming),
@@ -114,6 +135,21 @@ export async function createRuntimeTap(targetUrl, options = {}) {
       });
       const buffer = Buffer.from(await response.arrayBuffer());
       const responseType = response.headers.get('content-type') ?? '';
+      record.upstreamStatus = response.status;
+      const after = typeof options.afterResponse === 'function'
+        ? await options.afterResponse(record, {
+          status: response.status,
+          headers: response.headers,
+          body: parseBody(buffer, responseType),
+        })
+        : null;
+      if (after !== null) {
+        if (Number.isFinite(after.delayMs) && after.delayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, after.delayMs));
+        }
+        writeOverride(after);
+        return;
+      }
       record.status = response.status;
       record.ok = response.status >= 200 && response.status < 300;
       record.response = parseBody(buffer, responseType);

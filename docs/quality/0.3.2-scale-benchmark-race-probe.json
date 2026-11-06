@@ -1,0 +1,125 @@
+{
+  "schema": "mebular.scale-benchmark-race-probe/1",
+  "status": "not-reproduced",
+  "startedAt": "2026-11-05T08:48:08.890Z",
+  "finishedAt": "2026-11-05T08:48:19.262Z",
+  "command": "node tests/integration/scale-bench/race-probe.mjs --out docs/quality/0.3.2-scale-benchmark-race-probe.json",
+  "git": {
+    "sha": "ca2193e5fe9dc24a8c9804e417f76e225472ab21",
+    "shortSha": "ca2193e5fe9d",
+    "branch": "fix/0.3.2-idempotency-inflight",
+    "dirty": false,
+    "dirtyFileCount": 0
+  },
+  "environment": {
+    "platform": "darwin",
+    "release": "24.6.0",
+    "arch": "x64",
+    "node": "v26.8.1",
+    "cpuModel": "Intel(R) Core(TM) i7-8850H CPU @ 2.60GHz",
+    "cpuCount": 12,
+    "totalMemoryBytes": 34359738368,
+    "freeMemoryBytes": 1276088320
+  },
+  "options": {
+    "out": "/Users/sobertli/.local/share/opencode/worktree/a2c07e66cba5a7cc7cccad71ec68f3b1d72c6194/v032-idempotency/docs/quality/0.3.2-scale-benchmark-race-probe.json",
+    "records": 100,
+    "timeoutMs": 200,
+    "waitMs": 3000
+  },
+  "realBoundary": {
+    "realComponents": [
+      "MCP capability HTTP server (packages/mcp/src/serve.mjs)",
+      "GraphStore + MemoryService + event log (Mebular app)",
+      "managed Memory Runtime sidecar process (mebular-memory-runtime)",
+      "sidecar -> capability HTTP path (/ingest, /write, /detail, /status)"
+    ],
+    "fakeOrStub": [],
+    "controlledInputs": [
+      "concurrent-idempotency: two /write requests with identical Idempotency-Key/requestId",
+      "retry-timeout: sidecar capability.timeoutMs lowered to 200ms (default 5000ms)"
+    ]
+  },
+  "probes": [
+    {
+      "name": "concurrent-idempotency",
+      "startedAt": "2026-11-05T08:48:09.033Z",
+      "finishedAt": "2026-11-05T08:48:09.333Z",
+      "requestId": "req_race_probe_concurrent_0001",
+      "logicalRecords": 100,
+      "responses": [
+        {
+          "status": 200,
+          "ok": true,
+          "created": 100,
+          "duplicates": 0,
+          "failed": 0,
+          "replayed": false,
+          "resultIds": [
+            "01M6NE9RBGEQDWWP5DCFZ6Y33H",
+            "01M6NE9RBT0T5CEXJ5G017AS3S",
+            "01M6NE9RBXM7DEGRV2PB69YSGJ"
+          ]
+        },
+        {
+          "status": 200,
+          "ok": true,
+          "created": 100,
+          "duplicates": 0,
+          "failed": 0,
+          "replayed": false,
+          "resultIds": [
+            "01M6NE9RBGEQDWWP5DCFZ6Y33H",
+            "01M6NE9RBT0T5CEXJ5G017AS3S",
+            "01M6NE9RBXM7DEGRV2PB69YSGJ"
+          ]
+        }
+      ],
+      "counts": {
+        "nodes": 100,
+        "memoryRecords": 100,
+        "compacts": 0,
+        "checkpoints": 0,
+        "selfRecords": 0,
+        "details": 0,
+        "detailBytes": 0
+      },
+      "duplicated": 0,
+      "reproduced": false
+    },
+    {
+      "name": "retry-timeout",
+      "startedAt": "2026-11-05T08:48:09.683Z",
+      "finishedAt": "2026-11-05T08:48:19.176Z",
+      "capabilityTimeoutMs": 200,
+      "logicalRecords": 100,
+      "ingestHttpStatus": 200,
+      "queued": false,
+      "recordsReturned": 100,
+      "detailsReturned": 100,
+      "warnings": [],
+      "countsBeforeWait": {
+        "nodes": 200,
+        "memoryRecords": 100,
+        "compacts": 0,
+        "checkpoints": 0,
+        "selfRecords": 0,
+        "details": 100,
+        "detailBytes": 3000
+      },
+      "countsAfterWait": {
+        "nodes": 200,
+        "memoryRecords": 100,
+        "compacts": 0,
+        "checkpoints": 0,
+        "selfRecords": 0,
+        "details": 100,
+        "detailBytes": 3000
+      },
+      "duplicated": 0,
+      "sameSignatureAs10k": false
+    }
+  ],
+  "cleanup": null,
+  "error": null
+}

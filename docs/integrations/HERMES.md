@@ -9,6 +9,10 @@ Hermes can use Mebular in two layers, and they can run together:
 | **MCP** | The official Mebular MCP server: explicit `memory_*` and `task_*` tools | Available when configured |
 | **Memory Runtime** (`MemoryProvider`) | Automatic recall before a turn, turn/compaction ingest, state-only checkpoints, session-boundary archive | Follows the sidecar discovery mode; no host-level enable/collection switch |
 
+v0.3.2 hardens the provider's durable spool, checkpoint replay and failure exits. A host
+spool entry is pending host work, not a committed graph object; every committed state still
+comes from an authoritative sidecar/graph revision.
+
 The provider lives in [`integrations/hermes/mebular-memory`](../../integrations/hermes/mebular-memory/).
 The optional companion lives in
 [`integrations/hermes/mebular-companion`](../../integrations/hermes/mebular-companion/).
@@ -93,15 +97,15 @@ when the MCP setting `memoryRuntime.enabled=true` (or when you start it manually
    While it is ready, `<home>/memory-runtime.json` exists and contains the sidecar URL
    plus `tokenFile` (normally `<home>/memory-runtime/host-token`).
 
-3. Install the provider from the release bundle (available **after** the 0.3.0
+3. Install the provider from the release bundle (available **after** the 0.3.2
    release; use the source command below before the release). The provider must be
    installed as `plugins/mebular`, because Hermes uses the directory name as the value
    of `memory.provider`:
 
    ```bash
-   gh release download v0.3.0 -p 'mebular-hermes-plugins-*.tar.gz'
+   gh release download v0.3.2 -p 'mebular-hermes-plugins-*.tar.gz'
    mkdir -p mebular-hermes-plugins
-   tar -xzf mebular-hermes-plugins-0.3.0.tar.gz -C mebular-hermes-plugins
+   tar -xzf mebular-hermes-plugins-0.3.2.tar.gz -C mebular-hermes-plugins
    cd mebular-hermes-plugins
 
    HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}" ./install.sh
@@ -161,7 +165,9 @@ URL resolution, in priority order:
 
 `<home>` comes from `MEBULAR_MEMORY_RUNTIME_HOME`, then `MEBULAR_HOME`, then the current
 Mebular profile (or `~/.mebular`). The provider does **not** scan the network, guess a
-port, or read the MCP daemon's `runtime.json`.
+port, or read the MCP daemon's `runtime.json`. Discovery must be fresh (15 s stale /
+30 s dead) and compatible; `mode=mcp` / `state=stopped` is dormant and disables recall,
+ingest and checkpoint work until an explicit re-enable publishes a fresh discovery.
 
 Token resolution:
 
@@ -192,6 +198,7 @@ over the environment, as listed above. Common settings:
 | `archive_flush_timeout` | `1.5` | Seconds to try flushing archive ingest before compression |
 | `checkpoint_timeout` | `2.5` | Seconds for checkpoint PUT/GET |
 | `queue_limit` | `100` | Bounded durable spool |
+| `sync_max_attempts` | `12` | Terminal per-item retry bound; reaching it moves the item to dead instead of warning forever |
 
 Environment variables: `MEBULAR_MEMORY_RUNTIME_URL`, `MEBULAR_MEMORY_RUNTIME_TOKEN`,
 `MEBULAR_MEMORY_RUNTIME_HOME`, `MEBULAR_HOME`, `MEBULAR_MEMORY_AGENT_ID`,
@@ -237,25 +244,53 @@ Checkpoints are deliberately honest:
 
 Hermes' `MemoryProvider` API v1 does not expose a compaction summary. The provider
 therefore sends `summary:null` and state-only metadata; it never uses archive text or a
-model-generated guess as a summary. A failed or interrupted checkpoint remains pending
-in memory and is retried while the provider lives; it is never reported as committed and
-never blocks Hermes compression.
+model-generated guess as a summary. A checkpoint write that is not yet committed is
+persisted in the existing `queue.jsonl` before the provider acknowledges it as pending;
+if that durable write fails, the provider reports failure instead of accepting a
+memory-only pending checkpoint. After restart it reopens the single-writer spool and
+replays checkpoint entries with stable IDs. A 202/queued handoff removes only the host
+copy; it does not claim graph settlement. The checkpoint is reported as committed only
+after an authoritative revision is returned. A final unconfirmed checkpoint becomes dead
+at the configured retry bound, never silent permanent pending, and never blocks Hermes
+compression. Server-side checkpoint evidence references must exist, have the expected
+type, be live and be in the same domain.
 
 ## Failure behavior
 
 - A failed recall returns an empty string; the turn continues. Repeat failures trigger a
-  short cooldown instead of waiting on every turn.
-- Failed writes stay in `$HERMES_HOME/mebular-memory/queue.jsonl` (mode `0600`, bounded by
-  `queue_limit`) and are retried by a background worker. Non-retryable errors (for
-  example `mode_mismatch`, `unauthorized`, `invalid_request` or
-  `payload_too_large`) are dropped with a warning instead of growing forever.
-- Checkpoint failures stay pending and are retried; the sidecar may itself queue the
-  write in its outbox. Nothing is reported as committed until the sidecar returns a
-  committed revision.
-- The spool is a single-process file; do not run two Hermes writers on the same
-  `HERMES_HOME`.
+  30-second cooldown instead of waiting on every turn.
+- Ingest outcomes are classified before the spool entry is removed: `committed` requires
+  completed extraction plus confirmed record/detail writes; `handoff` means a 202/queued
+  write moved replay ownership to the sidecar outbox; `failed` (including detail partial
+  failure) keeps the host copy until a bounded dead exit; a pending extraction stays in
+  the spool. A transport 2xx is never treated as committed by itself.
+- Failed or pending writes stay in `$HERMES_HOME/mebular-memory/queue.jsonl` (mode `0600`,
+  default 100 entries / 16 MiB, 30-day maximum age or earlier operation deadline) and are
+  retried by a background worker with bounded backoff and `Retry-After`. The spool is a
+  single-process file; do not run two Hermes writers on the same `HERMES_HOME`.
+- `sync_max_attempts` (default 12) is a terminal bound. Reaching it moves the item to
+  dead with a visible reason instead of only warning. Non-retryable
+  `invalid_request`/`payload_too_large`-style errors go to dead directly.
+- `mode_mismatch`/`cloud_mismatch` is a dormant state, not a transient outage: the worker
+  stops adding new work, preserves already-persisted pending items, probes the mode on a
+  bounded interval, and lets D2 expiry move long-offline work to dead. It does not delete
+  or flush the spool.
+- Authentication failures are retried within `sync_max_attempts`; persistent 401/403
+  becomes dead/visible rather than an unlimited loop. A mode or auth failure never grows
+  the spool indefinitely.
+- Checkpoint failures replay from the same spool. Nothing is reported as committed until
+  the sidecar returns an authoritative revision; a 202 is only pending/queued.
+- If the dead file cannot be written, the provider keeps a bounded `dead-pending`,
+  orphan-dead-pending or `quarantine.jsonl` record (or a visible live-queue marker) rather
+  than losing the diagnostic silently. Status reports `spool.dead`, `spool.deadPending`,
+  `spool.orphanDeadPending`, `spool.quarantine` and byte/age fields. Status also
+  distinguishes `ingestDegraded` from committed and failed.
 - If the sidecar is unavailable, recall is empty, ingest stays queued and checkpoints
-  stay pending; Hermes itself keeps working.
+  stay pending; Hermes itself keeps working. Deletion of the provider or its native
+  `MEMORY.md`/`USER.md` is separate from the Mebular graph.
+- Provider-through-`agent.memory_provider` is adapter evidence, not proof of a real
+  Hermes process. Real/fake boundaries and fresh v0.3.2 counts are in the
+  [verification matrix](../quality/0.3.2-verification.md).
 
 ## Upgrade from 0.2 / old prototype
 
@@ -278,10 +313,11 @@ never blocks Hermes compression.
   `MEBULAR_RUNTIME_NAMESPACE` as read-only compatibility aliases, but new configuration
   should use `domain` / `MEBULAR_MEMORY_DOMAIN`. Requests always send `domain`.
 - To turn the sidecar off, set `memoryRuntime.enabled=false` (or explicitly run
-  `mebular memory-runtime stop`). The sidecar stops; 29 MCP tools and settled memories
-  remain. Keep or delete `<home>/memory-runtime/`; deleting it does not delete memories
-  already settled through MCP. Disabling/removing only the Hermes provider does not stop
-  the sidecar.
+  `mebular memory-runtime stop`). Managed mode stops the owned process; attached/manual
+  mode may leave the external process alive but dormant. 29 MCP tools and settled
+  memories remain. Keep or delete `<home>/memory-runtime/`; deleting it does not delete
+  memories already settled through MCP. Disabling/removing only the Hermes provider does
+  not stop the sidecar.
 - **Version and downgrade boundary.** Run the same Mebular version on every device; there is
   no mixed-version window. Explicitly stop the sidecar before changing package versions.
   Unsettled staging/outbox entries are device-local, are not migrated or guaranteed to

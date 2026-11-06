@@ -7,12 +7,12 @@ import { existsSync } from 'node:fs';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { MemoryService } from '@mebular/core';
-import { createMebular, homeDir, loadConfigFile } from './config.mjs';
+import { createMebular, configPath, homeDir, loadConfigFile } from './config.mjs';
 import { registerTools } from './tools.mjs';
 import { startHttpServer, acquireLock, pidAlive } from './serve.mjs';
 import { APP_VERSION } from './version.mjs';
 import { createJoinServer } from './jointoken.mjs';
-import { clearApplyPending, readApplyPending, writeApplyResult, writeServeReady } from './config-apply.mjs';
+import { clearApplyPending, readApplyPending, recoverPendingRollback, writeApplyResult, writeServeReady } from './config-apply.mjs';
 import { buildSettings } from './admin.mjs';
 import { isProvisionHome } from './provision.mjs';
 import { acquireActiveLock, profileIdForHome, resolveCloudRoot } from './profiles.mjs';
@@ -143,13 +143,26 @@ function runtimeMcpPort(config, options = {}) {
  */
 export async function startServeServer(options = {}) {
   const home = homeDir();
-  const provisionStart = isProvisionHome(home, { storagePath: process.env.MEBULAR_STORAGE_PATH });
+  let provisionStart = isProvisionHome(home, { storagePath: process.env.MEBULAR_STORAGE_PATH });
   // F-NET-1（C）：**先取单实例锁，再初始化网络**——第二写者应在绑定监听端口前就得到
   // 可读的 MCP_STORAGE_LOCKED（此前 createMebular 先启网络 → 抢 4001 → 裸 EADDRINUSE）。
-  const preConfig = provisionStart ? {} : await loadConfigFile(home).catch(() => ({}));
+  let preConfig = provisionStart ? {} : await loadConfigFile(home).catch(() => ({}));
   const { storagePathForHome } = await import('./home-identity.mjs');
   const preStoragePath = storagePathForHome(home, preConfig, process.env);
   const lock = await acquireLock(home, preStoragePath);
+
+  // 上次回滚失败留下的 pending：必须在取得 home 单活锁之后、读启动配置之前恢复，
+  // 避免第二个 serve 在活跃实例存在时改写 config。单次尝试有界，失败写 rollback-failed 供 admin 展示。
+  await recoverPendingRollback({
+    home,
+    configFile: configPath(home),
+    log: (message) => console.error(message),
+  }).catch((error) => {
+    console.error(`CONFIG_ROLLBACK_RECOVERY_FAILED ${error?.code ?? 'ERROR'}`);
+  });
+  // 恢复/跳过/失败后都以磁盘现状重新判定启动模式与 HTTP/TLS 初值。
+  provisionStart = isProvisionHome(home, { storagePath: process.env.MEBULAR_STORAGE_PATH });
+  preConfig = provisionStart ? {} : await loadConfigFile(home).catch(() => ({}));
 
   // 热初始化 / 正常启动共用：app、join 服务、运行时快照与生命周期资源。
   let current = null;

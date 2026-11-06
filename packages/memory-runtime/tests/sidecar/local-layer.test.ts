@@ -1,8 +1,8 @@
 // sidecar 本地层：目录/权限、staging/Trace 路径、有界 outbox、TTL cache、
 // 详情只读 cache 与 staging 配额。
 
-import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals';
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -263,5 +263,251 @@ describe('SidecarLocalLayer', () => {
     expect(await cache.get('c')).toBeNull();
     expect(await cache.clear()).toBe(1);
     expect((await cache.stats()).entries).toBe(0);
+  });
+
+  it('零请求/不重启推进完整间隔：物理清理 staging/trace/cache/outbox 依赖与 dead，诊断无正文', async () => {
+    let callback: (() => void) | null = null;
+    const timer = { unref: jest.fn() };
+    const layer = new SidecarLocalLayer({
+      root,
+      stagingHours: 1,
+      traceRetentionDays: 1,
+      now: () => now,
+    });
+    await layer.init();
+    const text = 'idle staging';
+    const chunk = {
+      schema: 1 as const,
+      id: 'rc_idle_expiry',
+      threadId: 'th_idle',
+      agentId: 'opencode',
+      hostId: 'h_test',
+      role: 'user' as const,
+      text,
+      mime: 'text/plain' as const,
+      at: now,
+      contentHash: sha256Hex(text),
+      redaction: { applied: false, rules: [] },
+      expiresAt: now + 1_000,
+    };
+    await layer.putStagingChunk('cl_test', chunk);
+    await layer.store.putTrace({
+      schema: 1,
+      id: 'tr_idle_expiry',
+      cloudId: 'cl_test',
+      agentId: 'opencode',
+      hostId: 'h_test',
+      at: now,
+      queryHash: sha256Hex('idle'),
+      queryPreview: '',
+      namespaces: [],
+      hits: [],
+      model: {},
+      tookMs: 0,
+      degraded: false,
+    });
+    await layer.cache.set('idle-cache', { value: 1 }, { ttlMs: 1_000 });
+    await layer.putCachedDetail('detail-idle', {
+      detail: { text: 'cached', expiresAt: now + 1_000, availability: ['available'] },
+    });
+    const sentinel = 'sk-idle-outbox-never-persist-123456';
+    await layer.outbox.enqueue({
+      id: 'ob_idle_dependency',
+      requestId: 'req_idle_dependency',
+      endpoint: '/detail',
+      body: { text: `api_key=${sentinel}` },
+      meta: { kind: 'detail', stagingChunkIds: [chunk.id] },
+      createdAt: now,
+    });
+    const activePath = join(root, 'outbox', 'ob_idle_dependency.json');
+    expect(await readFile(activePath, 'utf8')).not.toContain(sentinel);
+
+    const setIntervalFn = jest.fn((fn: () => void) => {
+      callback = fn;
+      return timer;
+    });
+    layer.startMaintenance({
+      intervalMs: 1_000,
+      setIntervalFn: setIntervalFn as unknown as typeof setInterval,
+      clearIntervalFn: jest.fn() as unknown as typeof clearInterval,
+    });
+    expect(callback).not.toBeNull();
+    expect(timer.unref).toHaveBeenCalledTimes(1);
+
+    now += 24 * 60 * 60 * 1000 + 1;
+    callback!();
+    await layer.idleMaintenance();
+    const afterIdle = await layer.stats();
+    expect(afterIdle).toMatchObject({
+      stagingChunks: 0,
+      traces: 0,
+      cacheEntries: 0,
+      detailCacheEntries: 0,
+      outboxItems: 0,
+      deadLetter: 1,
+    });
+    expect(await readFile(join(root, 'staging', 'chunks.jsonl'), 'utf8')).toBe('');
+    expect(await readFile(join(root, 'traces.jsonl'), 'utf8')).toBe('');
+    const dead = await readFile(join(root, 'outbox', 'dead', 'ob_idle_dependency.json'), 'utf8');
+    expect(dead).toContain('retention_expired');
+    expect(dead).not.toContain(sentinel);
+    const diagnostics = JSON.stringify(layer.maintenanceStatus());
+    expect(diagnostics).not.toContain(sentinel);
+    expect(diagnostics).not.toContain('idle staging');
+    expect(layer.maintenanceStatus().lastResult).toMatchObject({
+      cacheRemoved: 1,
+      detailCacheRemoved: 1,
+      outboxExpired: 1,
+      deadRemoved: 0,
+    });
+    expect(layer.maintenanceStatus().lastResult?.bytes).toBeGreaterThan(0);
+
+    now += 30 * 24 * 60 * 60 * 1000;
+    callback!();
+    await layer.idleMaintenance();
+    expect((await layer.stats()).deadLetter).toBe(0);
+    expect(layer.maintenanceStatus().lastResult?.deadRemoved).toBe(1);
+    layer.stopMaintenance();
+  });
+
+  it('in-flight replay lease 保护的 staging 不被 cleanup 物理删除，lease 到期后才 dead/清理', async () => {
+    const layer = new SidecarLocalLayer({ root, stagingHours: 24, now: () => now });
+    await layer.init();
+    const text = 'in-flight replay staging';
+    const chunk = {
+      schema: 1 as const,
+      id: 'rc_inflight_replay',
+      threadId: 'th_inflight_replay',
+      agentId: 'opencode',
+      hostId: 'h_test',
+      role: 'user' as const,
+      text,
+      mime: 'text/plain' as const,
+      at: now,
+      contentHash: sha256Hex(text),
+      redaction: { applied: false, rules: [] },
+      expiresAt: now + 500,
+    };
+    await layer.putStagingChunk('cl_test', chunk);
+    await layer.outbox.enqueue({
+      id: 'ob_inflight_replay',
+      requestId: 'req_inflight_replay',
+      endpoint: '/write',
+      body: { items: [] },
+      createdAt: now,
+      expiresAt: now + 1_000,
+      meta: { kind: 'record', stagingChunkIds: [chunk.id] },
+    });
+    const leaseMs = 125_000;
+    expect(await layer.outbox.acquireReplayLease('ob_inflight_replay', { now, leaseMs }))
+      .toMatchObject({ state: 'acquired' });
+
+    now += 1_000;
+    await layer.cleanup(now);
+    expect((await layer.store.listStagingChunks({ includeExpired: true }))
+      .map((entry) => entry.id)).toContain(chunk.id);
+    expect(await layer.outbox.stats()).toMatchObject({ items: 1 });
+    expect(await layer.outbox.deadStats()).toMatchObject({ items: 0 });
+
+    now += leaseMs + 1;
+    await layer.cleanup(now);
+    expect(await layer.store.listStagingChunks({ includeExpired: true })).toHaveLength(0);
+    expect(await layer.outbox.stats()).toMatchObject({ items: 0 });
+    expect(await layer.outbox.deadStats()).toMatchObject({ items: 1 });
+  });
+
+  it('staging 配额淘汰不得删除 in-flight replay 依赖', async () => {
+    const layer = new SidecarLocalLayer({ root, stagingBytes: 4, now: () => now });
+    await layer.init();
+    const firstText = 'AAAA';
+    const firstChunk = {
+      schema: 1 as const,
+      id: 'rc_quota_keep_replay',
+      threadId: 'th_quota_keep_replay',
+      agentId: 'opencode',
+      hostId: 'h_test',
+      role: 'user' as const,
+      text: firstText,
+      mime: 'text/plain' as const,
+      at: now,
+      contentHash: sha256Hex(firstText),
+      redaction: { applied: false, rules: [] },
+      expiresAt: now + 60_000,
+    };
+    await layer.putStagingChunk('cl_test', firstChunk);
+    await layer.outbox.enqueue({
+      id: 'ob_quota_keep_replay',
+      requestId: 'req_quota_keep_replay',
+      endpoint: '/write',
+      body: { items: [] },
+      createdAt: now,
+      meta: { kind: 'record', stagingChunkIds: [firstChunk.id] },
+    });
+    await layer.outbox.acquireReplayLease('ob_quota_keep_replay', { now, leaseMs: 125_000 });
+
+    const secondText = 'BBBB';
+    await layer.putStagingChunk('cl_test', {
+      ...firstChunk,
+      id: 'rc_quota_new_chunk',
+      text: secondText,
+      contentHash: sha256Hex(secondText),
+      at: now + 1,
+    });
+    const remaining = await layer.store.listStagingChunks({ includeExpired: true });
+    expect(remaining.map((chunk) => chunk.id)).toContain(firstChunk.id);
+    expect(await layer.outbox.stats()).toMatchObject({ items: 1 });
+    expect(await layer.outbox.deadStats()).toMatchObject({ items: 0 });
+  });
+
+  it('D2：active 最长 30 天或更早 deadline，dead 再保留 30 天', async () => {
+    const outbox = new BoundedOutbox({
+      root: join(root, 'outbox'),
+      deadRoot: join(root, 'outbox', 'dead'),
+      now: () => now,
+    });
+    await outbox.init();
+    await outbox.enqueue({
+      id: 'ob_thirty_days',
+      requestId: 'req_thirty_days',
+      endpoint: '/write',
+      body: { items: [] },
+      createdAt: now,
+    });
+    await outbox.enqueue({
+      id: 'ob_earlier_deadline',
+      requestId: 'req_earlier_deadline',
+      endpoint: '/write',
+      body: { items: [] },
+      createdAt: now,
+      expiresAt: now + 500,
+    });
+
+    now += 500;
+    expect(await outbox.cleanup(now)).toEqual({ expired: 1, deadRemoved: 0 });
+    now += 30 * 24 * 60 * 60 * 1000 - 500;
+    expect(await outbox.cleanup(now)).toEqual({ expired: 1, deadRemoved: 0 });
+    expect((await outbox.deadStats()).items).toBe(2);
+    const dead = await readFile(join(root, 'outbox', 'dead', 'ob_thirty_days.json'), 'utf8');
+    expect(dead).toContain('retention_expired');
+
+    now += 30 * 24 * 60 * 60 * 1000;
+    expect(await outbox.cleanup(now)).toEqual({ expired: 0, deadRemoved: 2 });
+    expect((await outbox.deadStats()).items).toBe(0);
+  });
+
+  it('Detail cache 在物理维护前也按实际 expiresAt/deletedAt 失效', async () => {
+    const layer = new SidecarLocalLayer({ root, now: () => now });
+    await layer.init();
+    await layer.putCachedDetail('detail-expiry', {
+      detail: { text: 'not-after-expiry', expiresAt: now + 10, availability: ['available'] },
+    });
+    now += 10;
+    expect(await layer.getCachedDetail('detail-expiry')).toBeNull();
+    expect((await layer.stats()).detailCacheEntries).toBe(0);
+
+    await layer.putCachedDetail('detail-deleted', {
+      detail: { text: 'deleted', expiresAt: 0, deletedAt: now, availability: ['deleted'] },
+    });
+    expect(await layer.getCachedDetail('detail-deleted')).toBeNull();
   });
 });

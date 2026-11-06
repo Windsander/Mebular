@@ -15,6 +15,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { chmod, copyFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { dirname, join } from 'node:path';
+import { acquireConfigFileLock } from './config-lock.mjs';
 
 /** 旧 config 身份字段的备份名（与 config-apply 的 config.json.bak 区分）。 */
 export const LEGACY_CONFIG_BACKUP_SUFFIX = '.identity-legacy.bak';
@@ -349,8 +350,16 @@ export async function createIdentityForStorage(input) {
  * 无论旧值是否与身份一致都移除（身份是唯一权威）；文件不存在或无字段时 no-op。
  * 备份只在首次迁移时创建，保留最早的 legacy 快照。
  */
-export async function cleanLegacyConfig({ configPath: cfgPath, identity = null } = {}) {
+export async function cleanLegacyConfig({ configPath: cfgPath, identity = null, lock = true } = {}) {
   if (typeof cfgPath !== 'string' || cfgPath.length === 0 || !existsSync(cfgPath)) {
+    return { migrated: false, backupPath: null, warnings: [] };
+  }
+  const releaseConfigLock = lock ? await acquireConfigFileLock(cfgPath) : null;
+  if (lock && !releaseConfigLock) {
+    throw errorWith('CONFIG_BUSY', `配置文件正在被其他进程写入：${cfgPath}`);
+  }
+  try {
+  if (!existsSync(cfgPath)) {
     return { migrated: false, backupPath: null, warnings: [] };
   }
   let current;
@@ -386,4 +395,7 @@ export async function cleanLegacyConfig({ configPath: cfgPath, identity = null }
     warnings.push(`已从 config.json 移除旧身份字段，设备身份以 ${identity.deviceId} 为准`);
   }
   return { migrated: true, backupPath, warnings };
+  } finally {
+    if (releaseConfigLock) await releaseConfigLock();
+  }
 }

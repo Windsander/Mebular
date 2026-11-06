@@ -9,6 +9,10 @@ OpenChamber is an OpenCode-based desktop host. Mebular supports it in two layers
 | **MCP** | The official 29-tool Mebular server in OpenCode's global config | Available when configured |
 | **Memory Runtime** (`@mebular/opencode-plugin`) | Request-only recall, event ingest, compaction checkpoints, optional current-model extraction | Follows the sidecar discovery mode; no host-level enable/collection switch |
 
+v0.3.2 tightens the plugin's event reconnection, 202/pending/committed classification,
+checkpoint revision handling and partial-failure counters. The sidecar remains the only
+graph writer; the plugin still keeps no durable host spool.
+
 OpenChamber reuses OpenCode's global configuration. Mebular writes only the
 `mcp.servers.mebular` entry. It never writes OpenChamber's private
 `opencode.managed.json` or the per-instance copies under `run/instances`.
@@ -136,12 +140,26 @@ yourself; Mebular does not send an `opencode reload` to a running host.
   de-duplicated and inject nothing.
 - **Ingest:** subscribes to session events and sends user/assistant/tool/compaction
   content to `POST /memory-runtime/v1/ingest` with bounded, idempotent batches. Model
-  requests never wait for ingest. Buffers are in memory, not a durable spool.
+  requests never wait for ingest. Buffers are in memory, not a durable spool. A 202 with
+  `queued:false` is pending; `queued:true` is a sidecar-outbox handoff; HTTP 200 with
+  `extraction.status:'failed'` is failed; only completed extraction with confirmed
+  record/detail objects counts as committed. A partial detail write is counted as
+  `partial`, not committed and not rolled back.
 - **Checkpoints:** folds `session.compaction.ended` into a ContextCheckpoint. If the event
   carries a summary, the plugin first ingests one `system` compaction chunk, then
   `PUT`s `/memory-runtime/v1/checkpoints/:threadId` with `domain=task:<sessionId>`; a
-  missing summary means no invented summary. A `revision_mismatch` triggers one GET and
-  one retry; failure remains pending and is never reported as committed.
+  missing summary means no invented summary. A 202 is `pending` with no committed
+  revision; the plugin polls an authoritative GET within a bounded deadline and only
+  reports committed when it returns the graph-confirmed revision. Updates carry the last
+  confirmed `expectedRevision`; a `revision_mismatch` gets one GET and one retry, while a
+  queued/replayed conflict becomes visible failed/pending instead of silently rebasing.
+  The capability keeps revision monotonic above the high-water mark, so a deleted or
+  expired checkpoint does not reuse an old revision. Server-side checkpoint evidence
+  references must exist, have the expected type, be live and be in the same domain.
+- **Event reconnect:** if the session event stream ends or disconnects, the plugin
+  re-subscribes with bounded exponential backoff and deduplicates logical writes, so a
+  reconnect does not double-ingest a turn. Status exposes `events.subscribed`,
+  `events.reconnects`, `events.reconnectScheduled` and `events.error`.
 - **Tool masking:** ordinary agents have currently visible `mebular_*` tools removed from
   the request tool table; `governanceAgents` (default `mebular-memory` and
   `mebular-governance`) keep them. `mebular_status` is a plugin diagnostic tool, not an
@@ -167,7 +185,9 @@ The plugin does not blindly connect to port 7341 and never treats the MCP daemon
 `runtime.json` as the sidecar. Explicit `runtimeUrl` may be either the sidecar origin
 (`http://127.0.0.1:7341`) or the full `/memory-runtime/v1` base. The obsolete
 `/runtime/v1` path is rejected (`runtime_url_legacy`); non-loopback plain `http` is
-rejected (`runtime_insecure_url`).
+rejected (`runtime_insecure_url`). Discovery must be fresh (15 s stale / 30 s dead) and
+compatible; `mode=mcp` / `state=stopped` is dormant and disables recall, ingest and
+checkpoints until an explicit re-enable publishes a fresh immersive discovery.
 
 Token resolution:
 
@@ -231,14 +251,27 @@ after a turn. This has three consequences:
 ## Failure behavior
 
 - Recall timeout, no hit or HTTP error: no block is injected; the request continues, and
-  repeated failures enter a 30 s cooldown.
+  repeated failures enter a 30 s cooldown. A 429 `Retry-After` is honoured within a
+  bounded delay and shares the cooldown.
 - Ingest is fire-and-forget with bounded in-memory queues; failures are counted and do
-  not block the model loop. There is no durable ingest spool in this plugin.
-- A failed or interrupted compaction is not reported as a committed checkpoint. A
-  `revision_mismatch` gets one read-and-retry; still failing stays pending/visible.
+  not block the model loop. Counters distinguish committed, pending, queued, partial,
+  empty and rejected; runtime/model degradation is reported separately from per-ingest
+  counters. There is no durable ingest spool in this plugin; work interrupted
+  before sidecar acceptance becomes failed/visible, while sidecar-accepted work replays
+  from the sidecar outbox.
+- A failed or interrupted compaction is not reported as a committed checkpoint. A 202 is
+  only pending; a `revision_mismatch` gets one read-and-retry, and still failing stays
+  pending/failed with a visible reason rather than a silent overwrite.
+- If the event stream disconnects, the plugin re-subscribes with bounded backoff and
+  deduplicated logical writes; a persistent disconnect is visible in status instead of
+  silently stopping ingest.
 - If the OpenCode version or context hook is unsupported, the plugin disables itself with
   a reason instead of failing the host.
 - MCP remains available even when the immersive plugin is disabled.
+- A real OpenCode process plus real runtime is the host evidence. A controller fallback
+  or fake OpenAI-compatible provider is supplemental only; no OpenChamber Desktop/UI
+  claim is inferred. Fresh v0.3.2 counts and boundaries are in the
+  [verification matrix](../quality/0.3.2-verification.md).
 
 ## Upgrade from 0.2 / old prototype
 
@@ -257,10 +290,11 @@ after a turn. This has three consequences:
 - Prototype data under `<home>/runtime/` is not read or migrated. Do not delete
   `<cloudRoot>/runtime/`; that is the MCP daemon install root, not sidecar data.
 - To turn the sidecar off, set `memoryRuntime.enabled=false` or explicitly run
-  `mebular memory-runtime stop`. Removing the OpenCode plugin only disables that host
-  adapter; it does not stop the sidecar. The 29 MCP tools and settled memories remain.
-  `<home>/memory-runtime/` may be kept or deleted; deleting it does not delete settled
-  memories.
+  `mebular memory-runtime stop`. Managed mode stops the owned process; attached/manual
+  mode may leave the external process alive but dormant. Removing the OpenCode plugin only
+  disables that host adapter; it does not stop the sidecar. The 29 MCP tools and settled
+  memories remain. `<home>/memory-runtime/` may be kept or deleted; deleting it does not
+  delete settled memories.
 - **Version and downgrade boundary.** Run the same Mebular version on every device; there is
   no mixed-version window. Explicitly stop the sidecar before changing package versions.
   Unsettled staging/outbox entries are device-local, are not migrated or guaranteed to

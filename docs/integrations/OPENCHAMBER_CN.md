@@ -9,6 +9,9 @@ OpenChamber 是基于 OpenCode 的桌面宿主。Mebular 通过两层接入：
 | **MCP** | OpenCode global 配置里的官方 29 工具 Mebular server | 配置后可用 |
 | **Memory Runtime**（`@mebular/opencode-plugin`） | request-only 召回、事件 ingest、压缩检查点、可选当前模型抽取 | 自动跟随 sidecar discovery 模式；无逐宿主 enable/采集开关 |
 
+v0.3.2 收紧了插件的事件重连、202/pending/committed 分类、checkpoint revision 和部分失败
+计数。sidecar 仍是唯一图写入者；插件仍没有持久宿主 spool。
+
 OpenChamber 复用 OpenCode 的 global 配置。Mebular 只写 `mcp.servers.mebular`，永不写
 OpenChamber 私有的 `opencode.managed.json` 或 `run/instances` 下的实例副本。
 
@@ -125,12 +128,21 @@ OpenChamber 复用同一份 global 配置；OpenCode 在启动或重载时加载
   不重复注入。
 - **Ingest：** 订阅会话事件，把 user/assistant/tool/compaction 内容以有界、幂等批次送到
   `POST /memory-runtime/v1/ingest`。模型请求从不等待 ingest。缓冲在内存中，不是持久
-  spool。
+  spool。202 + `queued:false` 是 pending；`queued:true` 是 sidecar outbox 交接；HTTP 200 +
+  `extraction.status:'failed'` 是 failed；只有抽取完成且 record/detail 对象确认才计入
+  committed。detail 部分写入计为 `partial`，不提交也不回滚。
 - **检查点：** 把 `session.compaction.ended` 折叠成 ContextCheckpoint。事件带 summary 时，
   先 ingest 一条 `system` compaction chunk，再 `PUT
   /memory-runtime/v1/checkpoints/:threadId`，`domain=task:<sessionId>`；没有 summary 就不
-  编造 summary。`revision_mismatch` 会 GET 当前 revision 并重试一次；失败保持 pending，
-  绝不报告为已提交。
+  编造 summary。202 是 `pending` 且没有已提交 revision；插件在有界期限内轮询权威 GET，
+  只有返回图确认的 revision 才报告 committed。更新携带最后确认的 `expectedRevision`；
+  `revision_mismatch` 做一次 GET 和一次重试，queued/重放冲突变为显式 failed/pending，
+  而不是静默 rebase。capability 让 revision 在 high-water 之上继续单调递增，删除或过期的
+  checkpoint 不会复用旧 revision。服务端要求 checkpoint 证据引用存在、类型正确、存活且
+  同域。
+- **事件重连：** 会话事件流结束或断开时，插件按有界指数退避重新订阅，并对逻辑写入去重，
+  避免一次 turn 被重复 ingest。状态暴露 `events.subscribed`、`events.reconnects`、
+  `events.reconnectScheduled` 和 `events.error`。
 - **工具遮蔽：** 普通 Agent 的请求工具表会删除当前可见的 `mebular_*`；
   `governanceAgents`（默认 `mebular-memory`、`mebular-governance`）保留。`mebular_status`
   是插件诊断工具，不是 MCP 工具。29 个 MCP 工具不变。
@@ -153,7 +165,9 @@ URL 优先级：
 插件不盲连 7341，也不把 MCP daemon 的 `runtime.json` 当作 sidecar。显式 `runtimeUrl` 可以
 写 sidecar 根地址（`http://127.0.0.1:7341`）或完整的 `/memory-runtime/v1` base。旧
 `/runtime/v1` 会被拒绝（`runtime_url_legacy`）；非回环 plain `http` 会被拒绝
-（`runtime_insecure_url`）。
+（`runtime_insecure_url`）。发现必须新鲜（15 秒 stale / 30 秒 dead）且兼容；`mode=mcp` /
+`state=stopped` 表示 dormant，会禁用召回、ingest 和 checkpoint，直到显式重新启用并发布
+新的沉浸式 discovery。
 
 Token 优先级：
 
@@ -212,13 +226,21 @@ OpenCode 不会把模型凭据交给插件，插件也不会索取。选择 `hos
 
 ## 失败行为
 
-- 召回超时、无命中或 HTTP 失败：不注入任何块，请求继续；连续失败进入 30 秒冷却。
-- Ingest 是 fire-and-forget，有界内存队列；失败只计数，不阻塞模型循环。本插件没有持久
-  ingest spool。
-- 压缩失败或中断不会被报告为已提交的 checkpoint。`revision_mismatch` 会读一次并重试
-  一次；仍失败则保持 pending/可见。
+- 召回超时、无命中或 HTTP 失败：不注入任何块，请求继续；连续失败进入 30 秒冷却。429
+  `Retry-After` 在有界延迟内遵守，并共享冷却。
+- Ingest 是 fire-and-forget，有界内存队列；失败只计数，不阻塞模型循环。计数区分
+  committed、pending、queued、partial、empty 和 rejected；运行时/模型降级与单次 ingest
+  计数分开报告。本插件没有持久 ingest spool；sidecar 接受前中断的工作变为 failed/可见，
+  已接受的工作从 sidecar outbox 重放。
+- 压缩失败或中断不会被报告为已提交的 checkpoint。202 只是 pending；`revision_mismatch`
+  会读一次并重试一次，仍失败则保持 pending/failed 并带可见原因，不会静默覆盖。
+- 事件流断开时，插件按有界退避重新订阅并对逻辑写入去重；持续断开会在状态中可见，
+  不会静默停止 ingest。
 - OpenCode 版本或 context hook 不支持时，插件带原因禁用自身，不影响宿主。
 - 即使沉浸式插件被禁用，MCP 仍然可用。
+- 真实 OpenCode 进程 + 真实 runtime 才是宿主证据。控制器回退或 fake OpenAI-compatible
+  provider 仅作补充；不能据此推断 OpenChamber Desktop/UI 声明。v0.3.2 新计数和边界见
+  [验收矩阵](../quality/0.3.2-verification.md)。
 
 ## 从 0.2 升级 / 从旧原型迁移
 
@@ -235,7 +257,8 @@ OpenCode 不会把模型凭据交给插件，插件也不会索取。选择 `hos
 - 原型写到 `<home>/runtime/` 的本地数据不会被读取或迁移。不要删除
   `<cloudRoot>/runtime/`；那是 MCP daemon 的安装根，不是 sidecar 数据。
 - 要关闭 sidecar，设置 `memoryRuntime.enabled=false`，或显式运行
-  `mebular memory-runtime stop`。移除 OpenCode 插件只会禁用该宿主适配器，不会停止
+  `mebular memory-runtime stop`。managed 模式停止拥有的进程；attached/manual 模式可以
+  保留外部进程但使其 dormant。移除 OpenCode 插件只会禁用该宿主适配器，不会停止
   sidecar。29 个 MCP 工具和已沉降记忆保留。`<home>/memory-runtime/` 可保留或删除；
   删除它不会删除已沉降记忆。
 - **版本与降级边界。** 所有设备必须运行相同的 Mebular 版本，没有混版窗口。更改包版本前

@@ -8,7 +8,7 @@
 // No model is started. The probe only emits/awaits events on a fake agent and
 // writes an observation document; assertions happen in the harness.
 
-import { existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 export const name = '@mebular/dsh-memory-runtime-probe';
@@ -64,6 +64,17 @@ export function apply(ctx, config = {}) {
     && process.env.MEMORY_E2E_START_FILE.length > 0
     ? process.env.MEMORY_E2E_START_FILE
     : null;
+  const scenario = typeof process.env.MEMORY_E2E_SCENARIO === 'string'
+    ? process.env.MEMORY_E2E_SCENARIO
+    : 'default';
+  const phaseOut = typeof process.env.MEMORY_E2E_PHASE_OUT === 'string'
+    && process.env.MEMORY_E2E_PHASE_OUT.length > 0
+    ? process.env.MEMORY_E2E_PHASE_OUT
+    : null;
+  const continueFile = typeof process.env.MEMORY_E2E_CONTINUE_FILE === 'string'
+    && process.env.MEMORY_E2E_CONTINUE_FILE.length > 0
+    ? process.env.MEMORY_E2E_CONTINUE_FILE
+    : null;
   const startedAt = new Date().toISOString();
   const state = {
     pid: process.pid,
@@ -90,16 +101,88 @@ export function apply(ctx, config = {}) {
     }
   }
 
+  function writePhase(phase, extra = {}) {
+    state.phase = phase;
+    state.faults = { ...(state.faults ?? {}), ...extra };
+    persist();
+    if (phaseOut === null) return;
+    try {
+      mkdirSync(dirname(phaseOut), { recursive: true });
+      const tmp = `${phaseOut}.tmp-${process.pid}`;
+      writeFileSync(tmp, `${JSON.stringify({ phase, ...extra })}\n`, 'utf-8');
+      renameSync(tmp, phaseOut);
+    } catch {
+      // Best effort.
+    }
+  }
+
+  async function waitContinue() {
+    if (continueFile === null) return;
+    while (!stopped && !existsSync(continueFile)) await sleep(50);
+    if (stopped) return;
+    try {
+      rmSync(continueFile, { force: true });
+    } catch {
+      // Best effort.
+    }
+  }
+
+  function adapterState() {
+    const symbol = Symbol.for('mebular.dsh.memoryRuntime.testState');
+    try {
+      return globalThis?.[symbol]?.()
+        ?? ctx?.[symbol]?.()
+        ?? ctx?.root?.[symbol]?.()
+        ?? null;
+    } catch {
+      return null;
+    }
+  }
+
   function fakeSession() {
+    const events = [];
+    const nodes = [];
+    const append = (type, data, options = {}) => {
+      const seq = events.length;
+      events.push({ type, seq, time: seq, data: structuredClone(data) });
+      const op = options.surfaceOp;
+      if (op === 'append') nodes.push(seq);
+      else if (op?.op === 'replace') {
+        const start = nodes.indexOf(op.startSeq);
+        const end = nodes.indexOf(op.endSeq);
+        if (start < 0 || end < start) throw new Error('invalid surface replace');
+        nodes.splice(start, end - start + 1);
+        nodes.push(seq);
+      }
+      return events[seq];
+    };
     return {
       id: 'memory-e2e-session',
       inheritedEventCount: 0,
       firstLiveSeq: 0,
       seq: 100,
-      surface: { nodes: [1], contentGeneration: 0 },
-      ownEvents: () => [],
+      surface: { nodes, contentGeneration: 0 },
+      ownEvents: () => events,
+      snapshotEvents: () => events,
       isOwnSeq: () => true,
+      append,
     };
+  }
+
+  function surfaceMemory(session) {
+    const current = new Set(session.surface.nodes);
+    return session.snapshotEvents()
+      .filter((event) => current.has(event.seq)
+        && event.type === 'user/message'
+        && event.data?.source?.kind === 'mebular-memory')
+      .map((event) => event.data);
+  }
+
+  function surfaceText(session) {
+    return surfaceMemory(session)
+      .flatMap((message) => (Array.isArray(message.content) ? message.content : []))
+      .map((part) => (typeof part?.text === 'string' ? part.text : ''))
+      .join('\n');
   }
 
   function fakeAgent(session, tools) {
@@ -110,11 +193,134 @@ export function apply(ctx, config = {}) {
     };
   }
 
+  function compactionEvents(compactionId, seqBase, summary) {
+    return [
+      sessionEvent('compaction/start', seqBase, { compactionId, turn: 1 }),
+      sessionEvent('compaction/summary', seqBase + 1, {
+        compactionId,
+        summary: [{ type: 'text', text: summary }],
+        shadowedRange: { start: 1, end: 9 },
+        shadowedSeqs: [1, 2, 3],
+        shadowedTokenCount: 42,
+        provider: 'fake',
+        model: 'no-model',
+      }),
+      sessionEvent('user/message', seqBase + 2, {
+        id: `fault-replacement-${compactionId}`,
+        role: 'user',
+        content: [{ type: 'text', text: summary }],
+        source: { kind: 'compact-checkpoint', compactionId },
+      }),
+      sessionEvent('compaction/end', seqBase + 3, { compactionId, turn: 1 }),
+    ];
+  }
+
+  function summarizeCompaction(checkpointId) {
+    const value = adapterState();
+    return {
+      checkpoint: value?.checkpoints ?? null,
+      compaction: (value?.compactions ?? []).find((entry) => entry.compactionId === checkpointId) ?? null,
+      runtimeEnabled: value?.enabled ?? null,
+    };
+  }
+
+  function summarizeIngest() {
+    return adapterState()?.ingest ?? null;
+  }
+
+  async function runFaults() {
+    const session = fakeSession();
+    const faultSummary = (label) => [
+      '## Objective',
+      label,
+      '## Next Move',
+      '- continue the fault scenario',
+    ].join('\n');
+    const emitCompaction = (compactionId, seqBase, summary) => {
+      for (const event of compactionEvents(compactionId, seqBase, summary)) {
+        emit('session/event', session, event);
+      }
+    };
+
+    writePhase('start');
+    await waitContinue();
+
+    emitCompaction('fault-429', 10, faultSummary('rate limited checkpoint summary'));
+    await sleep(1000);
+    writePhase('rate-limited-done', { state: summarizeCompaction('fault-429') });
+    await waitContinue();
+
+    // summary_only deliberately: cloud summary_only is still authoritative even
+    // though the sidecar reports degraded:true.
+    emitCompaction('fault-timeout', 20, 'timeout checkpoint summary only');
+    await sleep(5000);
+    writePhase('timeout-done', { state: summarizeCompaction('fault-timeout') });
+    await waitContinue();
+
+    emitCompaction('fault-outbox', 30, faultSummary('outbox checkpoint summary'));
+    await sleep(1000);
+    writePhase('outbox-pending', { state: summarizeCompaction('fault-outbox') });
+    await waitContinue();
+
+    // No duplicate event: the bounded reconciliation timer must observe the
+    // sidecar outbox replay and move the same operation to committed.
+    await sleep(12000);
+    writePhase('outbox-reconciled', { state: summarizeCompaction('fault-outbox') });
+    await waitContinue();
+
+    // A duplicate of an already reconciled operation must not write again.
+    emitCompaction('fault-outbox', 30, faultSummary('outbox checkpoint summary'));
+    await sleep(1000);
+    writePhase('outbox-duplicate-done', { state: summarizeCompaction('fault-outbox') });
+    await waitContinue();
+
+    emitCompaction('fault-revision', 40, faultSummary('revision checkpoint summary'));
+    await sleep(2500);
+    writePhase('revision-done', { state: summarizeCompaction('fault-revision') });
+    await waitContinue();
+
+    emit('session/event', session, sessionEvent(
+      'user/message',
+      60,
+      humanMessage('I prefer dark theme for detail partial', 'fault-detail-partial'),
+    ));
+    await sleep(1500);
+    writePhase('detail-partial-done', { ingest: summarizeIngest() });
+    await waitContinue();
+
+    emitCompaction('fault-delete', 70, faultSummary('delete recreate checkpoint summary'));
+    await sleep(1200);
+    writePhase('delete-ready', { state: summarizeCompaction('fault-delete') });
+    await waitContinue();
+
+    // Same logical compaction after an external delete: the adapter must verify
+    // absence and recreate with a nonce requestId instead of replaying old 200.
+    emitCompaction('fault-delete', 70, faultSummary('delete recreate checkpoint summary'));
+    await sleep(1800);
+    writePhase('delete-recreated', { state: summarizeCompaction('fault-delete') });
+    await waitContinue();
+
+    emitCompaction('fault-disable', 80, faultSummary('disabled in-flight checkpoint summary'));
+    await sleep(200);
+    writePhase('disable-inflight', { state: summarizeCompaction('fault-disable') });
+    await waitContinue();
+    // Force discovery re-read while the PUT is still in flight.
+    emit('tools/change');
+    await sleep(1600);
+    writePhase('disabled-done', { state: summarizeCompaction('fault-disable') });
+    await sleep(100);
+    state.done = true;
+  }
+
   async function run() {
     await sleep(750);
     if (startFile !== null) {
       while (!stopped && !existsSync(startFile)) await sleep(100);
       if (stopped) return;
+    }
+    if (scenario === 'faults') {
+      await runFaults();
+      return;
     }
     const session = fakeSession();
     const toolNames = [
@@ -136,7 +342,7 @@ export function apply(ctx, config = {}) {
     const agent = fakeAgent(session, tools);
 
     emit('agent/created', { agent });
-    await Promise.resolve();
+    await sleep(200);
     state.tools = {
       initialDeny: denies.at(-1) ?? null,
       replayedDeny: null,
@@ -168,33 +374,34 @@ export function apply(ctx, config = {}) {
         fallback: async () => ({ kind: 'enter', messages: stepMessages }),
       };
     };
-    const textOf = (decision) => {
-      const last = decision?.messages?.at(-1);
-      if (!last || !Array.isArray(last.content)) return '';
-      return last.content.map((part) => (typeof part?.text === 'string' ? part.text : '')).join('\n');
-    };
-
     const firstStep = step('memory e2e query', 'memory-e2e-human-1', 1);
     const first = await waterfall('agent/pre-step', firstStep.payload, firstStep.fallback);
+    const firstMemory = surfaceMemory(session);
     const second = await waterfall('agent/pre-step', firstStep.payload, firstStep.fallback);
+    const secondMemory = surfaceMemory(session);
     const nextStep = step('memory e2e query', 'memory-e2e-human-2', 2);
     const nextTurn = await waterfall('agent/pre-step', nextStep.payload, nextStep.fallback);
+    const nextMemory = surfaceMemory(session);
     const detailStep = step(detailQuery, 'memory-e2e-human-3', 3);
-    const detailTurn = await waterfall('agent/pre-step', detailStep.payload, detailStep.fallback);
+    await waterfall('agent/pre-step', detailStep.payload, detailStep.fallback);
+    const detailMemory = surfaceMemory(session);
+    const detailText = surfaceText(session);
     const silenceStep = step(silentQuery, 'memory-e2e-human-4', 4);
-    const silenceTurn = await waterfall('agent/pre-step', silenceStep.payload, silenceStep.fallback);
+    await waterfall('agent/pre-step', silenceStep.payload, silenceStep.fallback);
+    const silenceMemory = surfaceMemory(session);
     state.preStep = {
       firstMessageCount: Array.isArray(first?.messages) ? first.messages.length : null,
-      injected: Array.isArray(first?.messages) && first.messages.length > 1,
-      injectedSource: first?.messages?.at(-1)?.source?.kind ?? null,
+      injected: firstMemory.length > 0,
+      injectedSource: firstMemory.at(-1)?.source?.kind ?? null,
       secondMessageCount: Array.isArray(second?.messages) ? second.messages.length : null,
+      secondInjected: secondMemory.length > 0,
       nextTurnMessageCount: Array.isArray(nextTurn?.messages) ? nextTurn.messages.length : null,
-      nextTurnInjected: Array.isArray(nextTurn?.messages) && nextTurn.messages.length > 1,
-      detailInjected: Array.isArray(detailTurn?.messages) && detailTurn.messages.length > 1,
-      detailSource: detailTurn?.messages?.at(-1)?.source?.kind ?? null,
-      detailText: textOf(detailTurn),
-      silenceInjected: Array.isArray(silenceTurn?.messages) && silenceTurn.messages.length > 1,
-      silenceText: textOf(silenceTurn),
+      nextTurnInjected: nextMemory.length > 0,
+      detailInjected: detailMemory.length > 0,
+      detailSource: detailMemory.at(-1)?.source?.kind ?? null,
+      detailText,
+      silenceInjected: silenceMemory.length > 0,
+      silenceText: surfaceText(session),
     };
 
     const userEvent = sessionEvent('user/message', 1, humanMessage('memory e2e ingest', 'memory-e2e-user-1'));
@@ -260,10 +467,11 @@ export function apply(ctx, config = {}) {
 
     await sleep(900);
     const checkpointStep = step('继续上次任务', 'memory-e2e-human-5', 5);
-    const checkpointTurn = await waterfall('agent/pre-step', checkpointStep.payload, checkpointStep.fallback);
-    state.preStep.checkpointInjected = Array.isArray(checkpointTurn?.messages) && checkpointTurn.messages.length > 1;
-    state.preStep.checkpointSource = checkpointTurn?.messages?.at(-1)?.source?.kind ?? null;
-    state.preStep.checkpointText = textOf(checkpointTurn);
+    await waterfall('agent/pre-step', checkpointStep.payload, checkpointStep.fallback);
+    const checkpointMemory = surfaceMemory(session);
+    state.preStep.checkpointInjected = checkpointMemory.length > 0;
+    state.preStep.checkpointSource = checkpointMemory.at(-1)?.source?.kind ?? null;
+    state.preStep.checkpointText = surfaceText(session);
 
     await sleep(500);
     state.done = true;

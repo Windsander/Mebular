@@ -11,9 +11,10 @@
 daemon、一个 `mebular-serve`、一个当前 profile/home、一份数据。Plugin 默认只
 `attach`；只有用户显式选择 `managed`/`auto` 或点击面板安装时，才会启动/安装 runtime。
 
-0.3.0 在 MCP 之外增加可选的 Memory Runtime bridge。它默认关闭，因此现有
-attach/managed/panel/MCP 行为在显式 opt-in 前完全不变。见下文
-[Memory Runtime（可选）](#memory-runtime可选)。
+Mebular 0.3 在 MCP 之外增加可选的 Memory Runtime bridge。它默认关闭，因此现有
+attach/managed/panel/MCP 行为在显式 opt-in 前完全不变。v0.3.2 收紧了 bridge 的
+202/pending/committed 状态、checkpoint revision、冷却和 dormant 行为。见下文
+[Memory Runtime（自动跟随模式）](#memory-runtime自动跟随模式)。
 
 ## 两个入口，一个 runtime
 
@@ -30,7 +31,7 @@ supervisor 的 `runtime resolve`/`supervise` 和 daemon HTTP 端点工作。
 从 npm 安装到 DSH 的 Web profile：
 
 ```bash
-dsh plugin --profile web add @mebular/dsh-plugin@0.3.0
+dsh plugin --profile web add @mebular/dsh-plugin@0.3.2
 ```
 
 开发时从工作树安装：
@@ -125,7 +126,7 @@ daemon child。service/外部 daemon 不会被插件停止。
 
 ## Memory Runtime（自动跟随模式）
 
-0.3.0 可以在 MCP 之外接入独立的 Memory Runtime sidecar。两层、两个进程：
+Mebular 0.3.2 可以在 MCP 之外接入独立的 Memory Runtime sidecar。两层、两个进程：
 
 | 层 | 默认 | 做什么 |
 | --- | --- | --- |
@@ -191,8 +192,10 @@ sidecar discovery，不需要逐宿主开启。
 
 - **发现：** `memoryRuntime.url` > `MEBULAR_MEMORY_RUNTIME_URL` >
   `<home>/memory-runtime.json`。`<home>` 依次取 `MEBULAR_HOME`、`MEBULAR_CLOUD_ROOT`、
-  当前 profile。发现文件必须是 `ready`/`degraded`、`mode` 不是 `mcp`、心跳不超过 15 秒、
-  `apiVersion=1`；否则沉浸式路径带原因禁用且不发请求。
+  当前 profile。发现文件必须是 `ready`/`degraded`、`mode` 不是 `mcp`、心跳不超过 15 秒
+  （30 秒为 dead）、`apiVersion=1`；否则沉浸式路径带原因禁用且不发请求。
+  `mode=mcp` / `state=stopped` 是干净 dormant 信号：bridge 保持禁用，直到显式重新启用
+  并发布新的沉浸式 discovery。陈旧、profile/实例不匹配的 discovery 会被拒绝，绝不猜测。
 - **认证：** `memoryRuntime.token` > `tokenEnv` 指定的环境变量（默认
   `MEBULAR_MEMORY_RUNTIME_TOKEN`）> `memoryRuntime.tokenFile` > 发现 `tokenFile` >
   `<home>/memory-runtime/host-token`。这是 sidecar 的 **host token**，不是 MCP capability
@@ -204,7 +207,8 @@ sidecar discovery，不需要逐宿主开启。
   404/405 时才回落到 `/recall`。命中时只保留**一条当前 source-tagged 上下文消息**：
   `role:'user'` + `source.kind='mebular-memory'`；它不是用户气泡，也不进入用户可见历史。
   绝不使用 `source.kind='user'`，不伪造新的人类 turn；按
-  `(agentId, surface, query, turn)` 去重 30 分钟。适配器每个 human turn 先从 propose batch
+  `(agentId, surface, query, turn)` 去重 30 分钟。召回连续超时/失败会进入有界冷却，
+  而不是每轮都等待。适配器每个 human turn 先从 propose batch
   剔除所有历史 `mebular-memory` 消息，再用 session surface replacement 把上一轮 memory
   节点替换为当前命中；无命中/超时/失败时移除上一轮节点（空 system 节点不投影为模型消息），
   原样返回 decision。普通 user/assistant/tool 消息不修改。
@@ -212,14 +216,25 @@ sidecar discovery，不需要逐宿主开启。
   source-tagged 快照；这是平台行为，不是普通用户消息，也不意味着旧块会留在下一轮模型请求。
 - **Ingest：** 监听 live own `session/event`，把 user/assistant/tool 事件批量送到
   `POST /memory-runtime/v1/ingest`；跳过 fork/resume 的 inherited prefix 和适配器自己的
-  注入。队列有界（256），按 16 条/250ms 批处理；网络错误、超时、429、5xx 默认最多重试
-  两次，复用稳定的 `requestId`/`Idempotency-Key`。DSH **没有持久 ingest spool**：有界
-  重试后失败的批次记录 warning 并丢弃，不会重新入队。
+  注入。队列有界（256），按 16 条/250ms 批处理；网络错误、超时、429、5xx 在首次尝试后
+  最多重试两次，复用稳定的 `requestId`/`Idempotency-Key`。429 `Retry-After` 在有界延迟内
+  遵守，并共享召回/写入冷却；重试接受绝不产生 committed。DSH **没有持久 ingest spool**：
+  有界重试后失败的批次记录 warning 并丢弃，不会重新入队。传输成功与沉淀分开：
+  202 + `queued:false` 是 **pending**，`queued:true` 是 sidecar outbox 交接，HTTP 200 +
+  `extraction.status:'failed'` 是 failed，只有抽取完成且 record/detail 写入确认才计入
+  committed。record/detail 部分写入报告为 partial，不提交也不回滚；可用但降级的结果保留
+  `degraded` 标记，不并入成功或失败。
 - **检查点：** 把 `compaction/start → summary → replacement → end` 折叠成一个
   ContextCheckpoint，并 `PUT` 到 `/memory-runtime/v1/checkpoints/:threadId`，带
   `domain=task:<threadId>`（或配置的 task domain）。只有 summary 与 replacement 都完整才
-  提交；失败、中断或不完整折叠绝不会被报告为已提交。DSH 没有持久 checkpoint spool；
-  失败状态在适配器状态中可见，下一次压缩可以再写。请求不发送 `sync`。
+  提交；失败、中断或不完整折叠绝不会被报告为已提交。202 响应是 `pending:true` 且**没有
+  已提交 revision**；适配器记录为 pending，只有权威 GET 返回图确认的 revision 才转为
+  committed。更新携带最后确认的 `expectedRevision`；直接 `409 revision_mismatch` 做一次
+  权威 GET 和一次重试，queued/重放冲突变为显式 pending/failed，而不是静默 rebase。capability
+  让 revision 在 high-water 之上继续单调递增；删除或过期的 checkpoint 不会复用旧 revision。
+  pending 与最后提交视图保持分离。DSH 没有持久 checkpoint spool：接受前中断的 checkpoint
+  报告为 interrupted/failed，绝不报告为 committed；sidecar 已接受的工作从 sidecar outbox
+  重放。请求不发送 `sync`。服务端要求 checkpoint 证据引用存在、类型正确、存活且同域。
 - **工具面：** MCP 仍是 29 个工具，没有 `runtime_*` 工具。`hideMemoryTools` 对普通 Agent
   删除当前可见的 `mcp__mebular__memory_*`；`task_*` 和治理白名单（`governanceTools`，
   以及 `memoryAgentPresets` 中的 Agent）保留。适配器本身只走 HTTP，不注册记忆工具。
@@ -243,7 +258,11 @@ sidecar discovery，不需要逐宿主开启。
   的 checkpoint。
 - DSH 不暴露自己的 LLM 凭据，本适配器也不读取它们。
 - DSH 没有持久 ingest/checkpoint spool。只有 Hermes provider 有持久 `queue.jsonl`；
-  DSH 的失败有界且会在状态中可见。
+  DSH 的失败有界且会在状态中可见。接受前中断的 checkpoint 变为 interrupted/failed，
+  不会永远 pending；sidecar 已接受的 202 工作从 sidecar outbox 重放。
+- DSH 的确定性测试模型和真实 DSH 进程是不同证据层。DSH E2E 证明真实宿主进程、适配器和
+  运行时路径，不证明真实模型质量。v0.3.2 的新计数和边界见
+  [验收矩阵](../quality/0.3.2-verification.md)，不写在本指南里。
 
 数据边界与模型回退规则见 [Memory Runtime 指南](../guides/MEMORY_RUNTIME_CN.md)。
 
@@ -262,10 +281,10 @@ sidecar discovery，不需要逐宿主开启。
 - 原型写到 `<home>/runtime/` 的本地数据不会被读取或迁移。不要删除
   `<cloudRoot>/runtime/`；那是 MCP daemon 的安装根，不是 sidecar 数据。
 - 要关闭 sidecar，把 Mebular 记忆模式切回轻量 MCP（或
-  `mebular memory-runtime stop`）。适配器看到 discovery 消失即停止
-  ingest/recall/checkpoint，不需要改宿主配置。sidecar 停止，
-  29 个 MCP 工具和已沉降记忆保留。`<home>/memory-runtime/` 可保留或删除；删除它不会
-  删除已沉降记忆。
+  `mebular memory-runtime stop`）。适配器看到 discovery 消失或 dormant
+  `mode=mcp` / `state=stopped` 记录即停止 ingest/recall/checkpoint，不需要改宿主配置；
+  attached/manual 进程可以继续存活但处于 dormant。29 个 MCP 工具和已沉降记忆保留。
+  `<home>/memory-runtime/` 可保留或删除；删除它不会删除已沉降记忆。
 - **版本与降级边界。** 所有设备必须运行相同的 Mebular 版本，没有混版窗口。更改包版本前
   显式运行 `mebular memory-runtime stop`。未沉降 staging/outbox 条目只在本机，不迁移、
   不保证最终沉降，并随本机目录删除而丢弃；已沉降或已同步详情仍受正常图保留/删除策略
@@ -299,10 +318,10 @@ HTTP 请求，不是整个 DSH 插件完全不注册 listener/timer。
   "runtimeMode": "reused",
   "managed": false,
   "panel": true,
-  "version": "0.3.0",
-  "pluginVersion": "0.3.0",
+  "version": "0.3.2",
+  "pluginVersion": "0.3.2",
   "profile": { "id": "default", "name": "我的忆云" },
-  "provider": { "kind": "app", "source": "registry", "version": "0.3.0" },
+  "provider": { "kind": "app", "source": "registry", "version": "0.3.2" },
   "service": { "registered": false, "running": false, "foreign": false },
   "downloadRequired": false,
   "install": { "state": "idle", "allowed": true },
@@ -398,11 +417,11 @@ npm run verify:runtime:coexistence
 
 ## 发布与版本
 
-- 版本：`0.3.0`，随统一 Mebular v0.3.0 release train（七个 lockstep npm 包加独立的 `dsh-plugin` 同版本）
-- npm：`@mebular/dsh-plugin@0.3.0`
+- 版本：`0.3.2`，随统一 Mebular v0.3.2 release train（七个 lockstep npm 包加独立的 `dsh-plugin` 同版本）
+- npm：`@mebular/dsh-plugin@0.3.2`
 - 插件是独立适配器：代码隔离在 `packages/dsh-plugin`，由独立 npm job 发布；插件运行时从
   自己的 `package.json` 读取 pinned runtime 版本，发布 bump 不需要改插件源码。
-- 发布先 `@mebular/core@0.3.0`，再 `@mebular/dsh-plugin@0.3.0`；详见
+- 发布先 `@mebular/core@0.3.2`，再 `@mebular/dsh-plugin@0.3.2`；详见
   [发布 SOP](../operations/RELEASE.md)。
 - 插件已收录于
   [awesome-dsh-plugin](https://awesome-dsh-plugin.com/zh/p/Windsander/Mebular--packages-dsh-plugin/)

@@ -16,6 +16,7 @@ import {
   originAllowed,
   parseHostHeader,
 } from '../../packages/mcp/src/memory-capability.mjs';
+import { createMemoryCapabilityHandler } from '../../packages/mcp/src/memory-capability.mjs';
 
 const cleanups = [];
 const dirs = [];
@@ -99,6 +100,41 @@ function request(base, path, { method = 'GET', token, headers = {} } = {}) {
     req.on('error', reject);
     req.end();
   });
+}
+
+function callCapability(handler, { token = null, path = '/internal/memory/v1/version', method = 'GET' } = {}) {
+  const req = {
+    method,
+    url: path,
+    headers: {
+      host: '127.0.0.1:7331',
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+    },
+    socket: { remoteAddress: '127.0.0.1', localPort: 7331 },
+  };
+  const res = {
+    statusCode: 200,
+    headers: {},
+    setHeader(key, value) { this.headers[key.toLowerCase()] = value; },
+    end(text = '') {
+      this.text = String(text);
+      try {
+        this.body = JSON.parse(this.text);
+      } catch {
+        this.body = null;
+      }
+    },
+  };
+  return Promise.resolve(handler({
+    req,
+    res,
+    url: new URL(`http://127.0.0.1:7331${path}`),
+    body: undefined,
+  })).then(() => ({
+    status: res.statusCode,
+    headers: res.headers,
+    body: res.body,
+  }));
 }
 
 describe('轻量模式（默认）', () => {
@@ -258,6 +294,45 @@ describe('路由/方法', () => {
     });
     expect(options.status).toBe(405);
     expect(options.headers['access-control-allow-origin']).toBeUndefined();
+  });
+
+  it('revoke/dispose 是不可恢复门闩：旧 token 持续失败，只有显式 prepare 才能换发', async () => {
+    const home = await tempDir('memory-capability-revoke-');
+    process.env.MEBULAR_CLOUD_ROOT = join(home, 'cloud');
+    delete process.env.MEBULAR_CAPABILITY_TOKEN;
+    const handler = createMemoryCapabilityHandler({
+      home,
+      getConfig: () => ({ memoryRuntime: { enabled: true } }),
+      getService: () => fakeService,
+      getApp: () => fakeApp,
+      env: {},
+      now: () => Date.now(),
+    });
+    cleanups.push(() => handler.dispose());
+    const prepared = await handler.prepare();
+    expect(prepared).toMatchObject({ enabled: true });
+    const tokenA = (await readCapabilityToken({ home, env: {} }))?.token;
+    expect((await callCapability(handler, { token: tokenA })).status).toBe(200);
+
+    await handler.revoke();
+    await expect(stat(capabilityTokenPath(home))).rejects.toThrow();
+    const stale = await callCapability(handler, { token: tokenA });
+    expect(stale.status).toBe(401);
+    expect(stale.body?.error?.code).toBe('capability_token_invalid');
+    // 旧 token 请求不得触发 ensureToken 自动复活并写回 token 文件。
+    await expect(stat(capabilityTokenPath(home))).rejects.toThrow();
+
+    await handler.prepare();
+    const tokenB = (await readCapabilityToken({ home, env: {} }))?.token;
+    expect(tokenB).not.toBe(tokenA);
+    expect((await callCapability(handler, { token: tokenB })).status).toBe(200);
+    expect((await callCapability(handler, { token: tokenA })).status).toBe(401);
+
+    await handler.dispose();
+    await expect(stat(capabilityTokenPath(home))).rejects.toThrow();
+    expect((await callCapability(handler, { token: tokenB })).status).toBe(503);
+    expect(await handler.prepare()).toMatchObject({ enabled: false, tokenId: null });
+    await expect(stat(capabilityTokenPath(home))).rejects.toThrow();
   });
 
   it('daemon 关闭后撤销 token 文件', async () => {

@@ -8,11 +8,36 @@
 // 本模块不 import @mebular/core，不打开图/事件日志。
 
 import { CapabilityClient, CapabilityClientError } from './capability-client.js';
+import { SidecarSettlementError } from './errors.js';
 import type { IngestErrorView, OutboxReplaySummary } from './ingest.js';
-import type { BoundedOutbox, OutboxItem } from './local-layer.js';
+import type { LifecycleGate } from './lifecycle-gate.js';
+import { redactText } from './text.js';
+import {
+  LocalLayerError,
+  OUTBOX_REPLAY_LEASE_MS,
+  type BoundedOutbox,
+  type OutboxFailureView,
+  type OutboxItem,
+  type OutboxReplayCompletion,
+} from './local-layer.js';
 
 const RETRY_BASE_MS = 1000;
 const RETRY_MAX_MS = 60_000;
+const REPLAY_LEASE_MARGIN_MS = 5_000;
+/** 租约冲突只能协作重试有限次；超过后必须显式 dead，不能永久占位。 */
+const MAX_LEASE_CONFLICT_ATTEMPTS = 6;
+
+const DIAGNOSTIC_DETAIL_KEYS = [
+  'agentId',
+  'threadId',
+  'domain',
+  'hostId',
+  'until',
+  'currentRevision',
+  'expectedRevision',
+  'operation',
+  'phase',
+] as const;
 
 export interface OutboxReplayerOptions {
   outbox: BoundedOutbox;
@@ -23,33 +48,151 @@ export interface OutboxReplayerOptions {
   onSummary?: (summary: OutboxReplaySummary) => void;
   /** 成功写回后的对象缓存/计数回填；返回 false 表示仍需重试（部分成功）。 */
   onSettled?: (item: OutboxItem, data: unknown) => void | boolean | Promise<void | boolean>;
+  /** 一次 replay 尝试最终以 retry/dead 结束时通知；成功由 onSettled 自行收口。 */
+  onComplete?: (item: OutboxItem, outcome: OutboxReplayCompletion) => void | Promise<void>;
+  /** 跨 WP 门闩：drain 后晚到的响应只能 skipped，不得写 outbox/staging/cache。 */
+  lifecycle?: LifecycleGate | null;
 }
 
 interface ItemOutcome {
   outcome: 'settled' | 'retry' | 'dead' | 'skipped';
   count?: number;
-  error?: IngestErrorView;
+  error?: ReplayErrorView;
+}
+
+/** 重放诊断在基础 IngestErrorView 上保留冲突字段；不写入正文。 */
+interface ReplayErrorView extends IngestErrorView {
+  status?: number;
+  retryable?: boolean;
+  disposition?: 'conflict' | 'retryable' | 'permanent' | 'ambiguous';
+  stage?: string;
+  details?: Record<string, string | number | boolean>;
+  possibleCommit?: boolean;
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
-function errorView(error: unknown, at: number): IngestErrorView {
-  if (error instanceof CapabilityClientError) {
-    return { code: error.code, message: error.message, at };
+function diagnosticDetails(value: unknown): Record<string, string | number | boolean> | undefined {
+  if (!isObject(value)) return undefined;
+  const out: Record<string, string | number | boolean> = {};
+  for (const key of DIAGNOSTIC_DETAIL_KEYS) {
+    const entry = value[key];
+    if (typeof entry === 'string') {
+      const redacted = redactText(entry).text
+        .replace(/[\u0000-\u001f\u007f]/g, '')
+        .slice(0, 128);
+      if (redacted.length > 0) out[key] = redacted;
+    } else if (typeof entry === 'number' && Number.isFinite(entry)) {
+      out[key] = entry;
+    } else if (typeof entry === 'boolean') {
+      out[key] = entry;
+    }
   }
-  return { code: 'internal', message: (error as Error)?.message ?? 'outbox 重放失败', at };
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
-function retryable(error: unknown): boolean {
-  if (error instanceof CapabilityClientError) {
-    if (error.retryable) return true;
-    // token 轮换后可能恢复；保留在 outbox 等待下一次重放。
-    if (error.status === 401 || error.status === 0) return true;
-    return error.status === 429 || error.status >= 500;
+function dispositionOf(code: string, status: number, retryableValue: boolean): ReplayErrorView['disposition'] {
+  if (code === 'revision_mismatch' || code === 'checkpoint_lease_held'
+    || code === 'idempotency_conflict' || code === 'mode_mismatch') return 'conflict';
+  if (code === 'timeout' || code === 'network_error' || code === 'partial_failure') return 'ambiguous';
+  if (code === 'retention_expired' || code === 'validation_failed' || code === 'invalid_request'
+    || code === 'content_hash_mismatch' || code === 'domain_mismatch'
+    || code === 'domain_write_forbidden' || code === 'forbidden_scope'
+    || code === 'invalid_outbox_item' || code === 'invalid_cache_key') return 'permanent';
+  if (retryableValue || status === 0 || status === 401 || status === 408 || status === 429 || status >= 500) {
+    return 'retryable';
   }
-  return true;
+  return 'permanent';
+}
+
+function errorView(
+  error: unknown,
+  at: number,
+  stage = 'replay',
+  { afterResponse = false }: { afterResponse?: boolean } = {},
+): ReplayErrorView {
+  if (error instanceof CapabilityClientError) {
+    const details = diagnosticDetails(error.details);
+    return {
+      code: error.code,
+      message: redactText(error.message).text.slice(0, 512),
+      at,
+      status: error.status,
+      retryable: error.retryable,
+      disposition: dispositionOf(error.code, error.status, error.retryable),
+      stage,
+      ...(details ? { details } : {}),
+      ...(error.code === 'timeout' || error.code === 'network_error' || afterResponse
+        ? { possibleCommit: true }
+        : {}),
+    };
+  }
+  if (error instanceof SidecarSettlementError) {
+    const details = diagnosticDetails(error.details);
+    return {
+      code: error.code,
+      message: redactText(error.message).text.slice(0, 512),
+      at,
+      status: error.status,
+      retryable: error.retryable,
+      disposition: dispositionOf(error.code, error.status, error.retryable),
+      stage,
+      ...(details ? { details } : {}),
+      ...(afterResponse ? { possibleCommit: true } : {}),
+    };
+  }
+  if (error instanceof LocalLayerError) {
+    const retryableValue = error.code !== 'invalid_outbox_item' && error.code !== 'invalid_cache_key';
+    return {
+      code: error.code,
+      message: redactText(error.message).text.slice(0, 512),
+      at,
+      retryable: retryableValue,
+      disposition: retryableValue ? 'retryable' : 'permanent',
+      stage,
+      ...(afterResponse ? { possibleCommit: true } : {}),
+    };
+  }
+  // 普通本地 settle/回读错误没有结构化永久语义：保持有界重试，
+  // 不能因为一次本地异常就把可能已提交的写操作推进 dead。
+  return {
+    code: 'internal',
+    message: redactText((error as Error)?.message ?? 'outbox 重放失败').text.slice(0, 512),
+    at,
+    retryable: true,
+    disposition: 'retryable',
+    stage,
+    ...(afterResponse ? { possibleCommit: true } : {}),
+  };
+}
+
+function failureOf(view: ReplayErrorView): OutboxFailureView {
+  return {
+    code: view.code,
+    message: view.message,
+    at: view.at,
+    ...(view.status !== undefined ? { status: view.status } : {}),
+    ...(view.retryable !== undefined ? { retryable: view.retryable } : {}),
+    ...(view.disposition ? { disposition: view.disposition } : {}),
+    ...(view.stage ? { stage: view.stage } : {}),
+    ...(view.details ? { details: view.details } : {}),
+    ...(view.possibleCommit ? { possibleCommit: true } : {}),
+  };
+}
+
+function leaseConflictExhausted(view: ReplayErrorView, attempts: number, now: number): boolean {
+  if (view.code !== 'checkpoint_lease_held') return false;
+  if (attempts >= MAX_LEASE_CONFLICT_ATTEMPTS) return true;
+  const until = typeof view.details?.until === 'number' ? view.details.until : null;
+  // 租约已过期仍冲突，再给一次协作重试；之后不再无限等待。
+  return until !== null && until <= now && attempts >= 2;
+}
+
+function revoked(error: unknown): boolean {
+  return error instanceof CapabilityClientError
+    && (error.code === 'capability_disabled' || error.code === 'mode_mismatch');
 }
 
 function settledCount(data: unknown): number {
@@ -73,6 +216,8 @@ export class OutboxReplayer {
   private readonly now: () => number;
   private readonly onSummary?: (summary: OutboxReplaySummary) => void;
   private readonly onSettled?: (item: OutboxItem, data: unknown) => void | boolean | Promise<void | boolean>;
+  private readonly onComplete?: (item: OutboxItem, outcome: OutboxReplayCompletion) => void | Promise<void>;
+  private readonly lifecycle: LifecycleGate | null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private inFlight: Promise<OutboxReplaySummary> | null = null;
 
@@ -84,6 +229,8 @@ export class OutboxReplayer {
     this.now = options.now ?? Date.now;
     this.onSummary = options.onSummary;
     this.onSettled = options.onSettled;
+    this.onComplete = options.onComplete;
+    this.lifecycle = options.lifecycle ?? null;
   }
 
   start(): void {
@@ -121,7 +268,7 @@ export class OutboxReplayer {
   }
 
   private async replayUnlocked(): Promise<OutboxReplaySummary> {
-    const errors: IngestErrorView[] = [];
+    const errors: ReplayErrorView[] = [];
     let settled = 0;
     let retried = 0;
     let dead = 0;
@@ -161,36 +308,131 @@ export class OutboxReplayer {
     return summary;
   }
 
+  private leaseMs(): number {
+    const timeoutMs = typeof (this.client as { timeoutMs?: unknown } | null)?.timeoutMs === 'number'
+      ? (this.client as unknown as { timeoutMs: number }).timeoutMs
+      : 0;
+    return Math.max(OUTBOX_REPLAY_LEASE_MS, Math.max(0, timeoutMs) + REPLAY_LEASE_MARGIN_MS);
+  }
+
+  private async notifyComplete(id: string, outcome: OutboxReplayCompletion): Promise<void> {
+    if (!this.onComplete || outcome === 'settled' || outcome === 'skipped') return;
+    const item = await this.outbox.get(id) ?? await this.outbox.getDead(id);
+    if (!item) return;
+    await this.onComplete(item, outcome);
+  }
+
   private async replayItem(item: OutboxItem): Promise<ItemOutcome> {
-    try {
-      const envelope = await this.client!.post(item.endpoint, item.body, {
-        idempotencyKey: item.requestId,
-        retries: 0,
-      });
-      let keepForRetry = false;
-      try {
-        keepForRetry = (await this.onSettled?.(item, envelope.data)) === false;
-      } catch {
-        // 回填缓存/计数失败不影响已提交的 capability 写入。
-      }
-      if (keepForRetry) {
-        const delay = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** Math.min(6, item.attempts));
-        await this.outbox.recordAttempt(item.id, { error: 'partial_failure', retryDelayMs: delay });
-        return { outcome: 'retry' };
-      }
-      await this.outbox.remove(item.id);
-      return { outcome: 'settled', count: settledCount(envelope.data) };
-    } catch (error) {
-      const view = errorView(error, this.now());
-      if (retryable(error)) {
-        const delay = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** Math.min(6, item.attempts));
-        await this.outbox.recordAttempt(item.id, { error: view.code, retryDelayMs: delay });
+    const leaseMs = this.leaseMs();
+    const lease = await this.outbox.acquireReplayLease(item.id, { now: this.now(), leaseMs });
+    if (lease.state !== 'acquired') {
+      if (lease.state === 'expired') {
+        await this.notifyComplete(item.id, 'dead');
         return {
-          outcome: 'retry',
-          error: { ...view, code: view.code === 'internal' ? 'capability_unavailable' : view.code },
+          outcome: 'dead',
+          error: {
+            code: 'retention_expired',
+            message: 'outbox 操作已超过截止时间',
+            at: this.now(),
+            disposition: 'permanent',
+            stage: 'replay',
+          },
         };
       }
-      await this.outbox.deadLetter(item.id, view.code);
+      return { outcome: 'skipped' };
+    }
+    const leased = lease.item;
+    const owner = leased.replayLeaseOwner;
+    let phase: 'replay' | 'settle' = 'replay';
+    try {
+      const envelope = await this.client!.post(leased.endpoint, leased.body, {
+        idempotencyKey: leased.requestId,
+        retries: 0,
+      });
+      // 响应在 drain 后才到达：capability 可能已提交，但本地不得再当作新提交，
+      // 也不得续租/删除 pending；本次禁用必须保持 incomplete。
+      if (this.lifecycle && !this.lifecycle.acceptsWork()) {
+        this.lifecycle.noteAmbiguousSuccess('replay_late_success');
+        return { outcome: 'skipped' };
+      }
+      phase = 'settle';
+      // 响应已确认：把 lease 续到覆盖本地回读/详情写入阶段；owner 不符/已过期则拒绝。
+      await this.outbox.renewReplayLease(leased.id, {
+        owner,
+        now: this.now(),
+        leaseMs,
+      });
+      // 权威回读/必需项确认失败不能吞掉；交由同一 retry/dead/deadline 路径处理。
+      const keepForRetry = (await this.onSettled?.(leased, envelope.data)) === false;
+      if (keepForRetry) {
+        const delay = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** Math.min(6, leased.attempts));
+        const partialFailure: ReplayErrorView = {
+          code: 'partial_failure',
+          message: '部分写入未完成；可能已有对象提交，需要权威回读对账',
+          at: this.now(),
+          disposition: 'ambiguous',
+          stage: 'settle',
+          possibleCommit: true,
+        };
+        const completion = await this.outbox.completeReplay(leased.id, {
+          outcome: 'retry',
+          owner,
+          now: this.now(),
+          error: 'partial_failure',
+          retryDelayMs: delay,
+          failure: failureOf(partialFailure),
+        });
+        await this.notifyComplete(leased.id, completion);
+        return { outcome: completion === 'skipped' ? 'skipped' : completion, error: partialFailure };
+      }
+      // HTTP/capability 已确认且本地必需项对账完成；即使响应在 deadline 后到达，
+      // 也只能按 committed 移除活动项，不能再由 cleanup 写成 dead。
+      const completion = await this.outbox.completeReplay(leased.id, {
+        outcome: 'settled',
+        owner,
+        now: this.now(),
+      });
+      await this.notifyComplete(leased.id, completion);
+      if (completion === 'skipped') return { outcome: 'skipped' };
+      return { outcome: 'settled', count: settledCount(envelope.data) };
+    } catch (error) {
+      if (revoked(error)) {
+        // 撤销后晚到的失败/晚到的成功都不得改写 pending：不重试、不死信、不删除。
+        return { outcome: 'skipped' };
+      }
+      if (this.lifecycle && !this.lifecycle.acceptsWork()) {
+        // drain 后晚到的失败/超时同样只能 skipped：不 recordAttempt、不写 dead。
+        return { outcome: 'skipped' };
+      }
+      const view = errorView(error, this.now(), phase, { afterResponse: phase === 'settle' });
+      const conflictExhausted = leaseConflictExhausted(view, leased.attempts, this.now());
+      const canRetry = !conflictExhausted
+        && view.disposition !== 'permanent'
+        && (view.disposition !== 'conflict' || view.code === 'checkpoint_lease_held');
+      const until = typeof view.details?.until === 'number' ? view.details.until : null;
+      const leaseWait = view.code === 'checkpoint_lease_held' && until !== null
+        ? Math.max(0, until - this.now() + 100)
+        : 0;
+      const delay = Math.min(
+        RETRY_MAX_MS,
+        Math.max(leaseWait, RETRY_BASE_MS * 2 ** Math.min(6, leased.attempts)),
+      );
+      const completion = await this.outbox.completeReplay(leased.id, {
+        outcome: canRetry ? 'retry' : 'dead',
+        owner,
+        now: this.now(),
+        error: view.code,
+        retryDelayMs: delay,
+        failure: failureOf(view),
+      });
+      await this.notifyComplete(leased.id, completion);
+      if (completion === 'retry') {
+        return {
+          outcome: 'retry',
+          error: view,
+        };
+      }
+      if (completion === 'skipped') return { outcome: 'skipped' };
       return { outcome: 'dead', error: view };
     }
   }

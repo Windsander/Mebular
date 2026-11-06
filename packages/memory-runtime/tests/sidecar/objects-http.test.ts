@@ -9,6 +9,7 @@ import { CapabilityClient } from '../../src/sidecar/capability-client.js';
 import { defaultSidecarConfig } from '../../src/sidecar/config.js';
 import { defaultSidecarPolicy } from '../../src/sidecar/domains.js';
 import { SidecarLocalLayer } from '../../src/sidecar/local-layer.js';
+import { LifecycleGate } from '../../src/sidecar/lifecycle-gate.js';
 import { SidecarServer } from '../../src/sidecar/server.js';
 import { SettlementRuntime } from '../../src/sidecar/settlement.js';
 import {
@@ -89,11 +90,14 @@ function checkpointState(threadId: string, goal: string, extra: Record<string, u
   };
 }
 
-async function setup(records: FakeMemoryRecord[] = compactRecords()): Promise<Harness> {
+async function setup(
+  records: FakeMemoryRecord[] = compactRecords(),
+  options: { inference?: any; lifecycle?: any } = {},
+): Promise<Harness> {
   const home = await mkdtemp(join(tmpdir(), 'mebular-objects-http-'));
   const local = new SidecarLocalLayer({ root: join(home, 'memory-runtime'), now: () => NOW });
   await local.init();
-  const fake = await startFakeCapability();
+  const fake = await startFakeCapability({ now: () => NOW });
   fake.setRecords(records);
   const client = new CapabilityClient({ baseUrl: fake.baseUrl, token: 'cap-token', retries: 0, retryDelayMs: 0 });
   const identity = { cloudId: 'cl_test', profileId: 'default', hostId: 'h_test' };
@@ -106,6 +110,8 @@ async function setup(records: FakeMemoryRecord[] = compactRecords()): Promise<Ha
     identity,
     policy: defaultSidecarPolicy(),
     autoStartReplayer: false,
+    ...(options.inference ? { inference: options.inference } : {}),
+    ...(options.lifecycle ? { lifecycle: options.lifecycle } : {}),
     now: () => NOW,
   });
   await runtime.init();
@@ -372,7 +378,7 @@ describe('sidecar compact / self / checkpoint HTTP', () => {
   });
 
   it('checkpoint：lease 冲突由 capability 裁定；capability 不可用进入 outbox 并返回 pending', async () => {
-    const { server, fake, runtime } = await setup();
+    const { server, fake, runtime, home } = await setup();
     const url = `${server.url}/checkpoints/th_lease?agentId=opencode`;
 
     const first = await request(url, 'PUT', {
@@ -416,8 +422,21 @@ describe('sidecar compact / self / checkpoint HTTP', () => {
     const status = await request(`${server.url}/status`, 'GET');
     expect(status.body.data.degraded).toBe(true);
     expect(status.body.data.counts).toMatchObject({ outbox: 1, objectWritesQueued: 1 });
+    expect(status.body.data.outbox).toMatchObject({
+      items: 1,
+      deadItems: 0,
+      byOperation: expect.arrayContaining([
+        expect.objectContaining({ operation: 'checkpoint', active: 1, dead: 0 }),
+      ]),
+    });
+    expect(status.body.data.details.diagnostics).toMatchObject({
+      logs: { files: 0, bytes: 0 },
+      disk: { totalBytes: expect.any(Number) },
+      outbox: { active: 1, dead: 0 },
+    });
     expect(JSON.stringify(status.body)).not.toContain('offline pending');
     expect(JSON.stringify(status.body)).not.toContain('cap-token');
+    expect(JSON.stringify(status.body)).not.toContain(home);
 
     fake.setFailure(null);
     const replayed = await runtime.replayer.replayOnce();
@@ -427,6 +446,219 @@ describe('sidecar compact / self / checkpoint HTTP', () => {
     const recovered = await request(`${server.url}/checkpoints/th_offline?agentId=opencode`, 'GET');
     expect(recovered.status).toBe(200);
     expect(recovered.body.data.checkpoint).toMatchObject({ revision: 1, pending: false, source: 'cloud' });
+  });
+
+  it('checkpoint：202 pending 不覆盖最后 committed；离线 GET 分离两个视图', async () => {
+    const { server, fake, runtime } = await setup();
+    const url = `${server.url}/checkpoints/th_split?agentId=opencode`;
+
+    const committed = await request(url, 'PUT', {
+      agentId: 'opencode',
+      expectedRevision: 0,
+      state: checkpointState('th_split', 'committed v1', { cursor: 1 }),
+      summary: 'committed one',
+    });
+    expect(committed.status).toBe(200);
+    expect(committed.body.data.checkpoint.revision).toBe(1);
+
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const pending = await request(url, 'PUT', {
+      agentId: 'opencode',
+      expectedRevision: 1,
+      state: checkpointState('th_split', 'pending v2', { cursor: 2 }),
+      summary: 'pending two',
+    });
+    expect(pending.status).toBe(202);
+    expect(pending.body.data.checkpoint).toMatchObject({ revision: null, pending: true });
+
+    const offline = await request(url, 'GET');
+    expect(offline.status).toBe(200);
+    expect(offline.body.data).toMatchObject({
+      source: 'cache',
+      degraded: true,
+      checkpoint: {
+        revision: 1,
+        summary: 'committed one',
+        source: 'cache',
+        stale: true,
+      },
+      pending: true,
+      pendingCheckpoint: {
+        revision: null,
+        pending: true,
+        summary: 'pending two',
+      },
+    });
+    expect(offline.body.data.checkpoint.pending).toBe(false);
+    expect(offline.body.data.pendingCheckpoint.id).toBeNull();
+    expect(JSON.stringify(offline.body)).not.toContain('cap-token');
+
+    fake.setFailure(null);
+    const committedWithPending = await request(url, 'GET');
+    expect(committedWithPending.status).toBe(200);
+    expect(committedWithPending.body.data).toMatchObject({
+      source: 'cloud',
+      checkpoint: { revision: 1, summary: 'committed one' },
+      pending: true,
+      pendingCheckpoint: { revision: null, pending: true, summary: 'pending two' },
+      degraded: true,
+    });
+    expect(committedWithPending.body.warnings).toContain('checkpoint_pending');
+
+    const replayed = await runtime.replayer.replayOnce();
+    expect(replayed.remaining).toBe(0);
+    const recovered = await request(url, 'GET');
+    expect(recovered.body.data.checkpoint).toMatchObject({
+      revision: 2,
+      summary: 'pending two',
+      pending: false,
+      source: 'cloud',
+    });
+  });
+
+  it('checkpoint：只有 pending 时离线 GET 明确 pending-only，不返回伪 committed', async () => {
+    const { server, fake } = await setup();
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const url = `${server.url}/checkpoints/th_pending_only?agentId=opencode`;
+    const pending = await request(url, 'PUT', {
+      agentId: 'opencode',
+      state: checkpointState('th_pending_only', 'offline only', { cursor: 9 }),
+      summary: 'only pending',
+    });
+    expect(pending.status).toBe(202);
+
+    const offline = await request(url, 'GET');
+    expect(offline.status).toBe(200);
+    expect(offline.body.data).toMatchObject({
+      source: 'cache',
+      degraded: true,
+      checkpoint: null,
+      pending: true,
+      pendingUnavailable: false,
+      pendingCheckpoint: { revision: null, pending: true },
+    });
+    expect(offline.body.data.pendingCheckpoint.committed).toBeUndefined();
+  });
+
+  it('checkpoint：outbox dead 后清理 pending cache，离线 GET 不再长期 pending', async () => {
+    const { server, fake, runtime } = await setup();
+    const url = `${server.url}/checkpoints/th_dead_pending?agentId=opencode`;
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const pending = await request(url, 'PUT', {
+      agentId: 'opencode',
+      state: checkpointState('th_dead_pending', 'will die', { cursor: 1 }),
+      summary: 'dead pending',
+    });
+    expect(pending.status).toBe(202);
+
+    fake.setFailure({ status: 400, code: 'invalid_request' });
+    const replayed = await runtime.replayer.replayOnce();
+    expect(replayed.remaining).toBe(0);
+    expect((await runtime.local.outbox.deadStats()).items).toBe(1);
+
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const afterDead = await request(url, 'GET');
+    expect(afterDead.status).toBe(200);
+    expect(afterDead.body.data).toMatchObject({
+      source: 'cache',
+      checkpoint: null,
+      pending: false,
+      pendingCheckpoint: null,
+      pendingUnavailable: true,
+      degraded: true,
+    });
+  });
+
+  it('checkpoint：`:pending` 后缀与允许冒号的 threadId 不再冲突', async () => {
+    const { server, fake } = await setup();
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const pending = await request(`${server.url}/checkpoints/x?agentId=opencode`, 'PUT', {
+      agentId: 'opencode',
+      state: checkpointState('x', 'pending for x', { cursor: 1 }),
+      summary: 'pending x',
+    });
+    expect(pending.status).toBe(202);
+
+    fake.setFailure(null);
+    const committed = await request(`${server.url}/checkpoints/x:pending?agentId=opencode`, 'PUT', {
+      agentId: 'opencode',
+      state: checkpointState('x:pending', 'committed x:pending', { cursor: 2 }),
+      summary: 'committed x:pending',
+    });
+    expect(committed.status).toBe(200);
+    expect(committed.body.data.checkpoint.revision).toBe(1);
+
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const offlineX = await request(`${server.url}/checkpoints/x?agentId=opencode`, 'GET');
+    expect(offlineX.body.data).toMatchObject({
+      pending: true,
+      pendingCheckpoint: { threadId: 'x', summary: 'pending x' },
+    });
+    const offlineColon = await request(`${server.url}/checkpoints/x:pending?agentId=opencode`, 'GET');
+    expect(offlineColon.body.data).toMatchObject({
+      checkpoint: { threadId: 'x:pending', summary: 'committed x:pending', revision: 1 },
+      pending: false,
+    });
+  });
+
+  it('checkpoint：pending sweep 只清确认 dead，保留 active/skipped；非 replayer dead 也清理', async () => {
+    const { server, fake, runtime } = await setup();
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const offlineA = await request(`${server.url}/checkpoints/th_sweep_a?agentId=opencode`, 'PUT', {
+      agentId: 'opencode',
+      state: checkpointState('th_sweep_a', 'sweep a', { cursor: 1 }),
+      summary: 'sweep a',
+      expiresAt: NOW + 1000,
+    });
+    const offlineB = await request(`${server.url}/checkpoints/th_sweep_b?agentId=opencode`, 'PUT', {
+      agentId: 'opencode',
+      state: checkpointState('th_sweep_b', 'sweep b', { cursor: 2 }),
+      summary: 'sweep b',
+    });
+    expect(offlineA.status).toBe(202);
+    expect(offlineB.status).toBe(202);
+    const items = await runtime.local.outbox.list();
+    const itemA = items.find((item) => String((item.body as any).threadId) === 'th_sweep_a');
+    const itemB = items.find((item) => String((item.body as any).threadId) === 'th_sweep_b');
+    expect(itemA).toBeDefined();
+    expect(itemB).toBeDefined();
+
+    await runtime.objects.applyReplayComplete(itemA!, 'skipped');
+    const afterSkipped = await request(`${server.url}/checkpoints/th_sweep_a?agentId=opencode`, 'GET');
+    expect(afterSkipped.body.data.pending).toBe(true);
+
+    // 非 replayer 路径：本地维护按 deadline 将 A 移入 dead，也必须清 pending。
+    await runtime.local.runMaintenance({ now: NOW + 2000 });
+    expect((await runtime.local.outbox.deadStats()).items).toBe(1);
+    const afterNonReplayerDead = await request(`${server.url}/checkpoints/th_sweep_a?agentId=opencode`, 'GET');
+    expect(afterNonReplayerDead.body.data).toMatchObject({
+      checkpoint: null,
+      pending: false,
+      pendingUnavailable: true,
+    });
+
+    // 仍有 active B 时，即使 stats 看到 remaining=0 也不能误清新 pending。
+    runtime.objects.applyReplaySummary({ settled: 0, remaining: 0 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const afterSweep = await request(`${server.url}/checkpoints/th_sweep_b?agentId=opencode`, 'GET');
+    expect(afterSweep.body.data.pending).toBe(true);
+    expect(afterSweep.body.data.pendingCheckpoint.summary).toBe('sweep b');
+  });
+
+  it('checkpoint：更早 expiresAt 原样成为 outbox 操作 deadline', async () => {
+    const { server, fake, runtime } = await setup();
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const expiresAt = NOW + 60_000;
+    const pending = await request(`${server.url}/checkpoints/th_deadline?agentId=opencode`, 'PUT', {
+      agentId: 'opencode',
+      state: checkpointState('th_deadline', 'deadline', { cursor: 1 }),
+      expiresAt,
+    });
+    expect(pending.status).toBe(202);
+    const [item] = await runtime.local.outbox.list();
+    expect(item).toBeDefined();
+    expect(item!).toMatchObject({ expiresAt });
+    expect((item!.body as any).expiresAt).toBe(expiresAt);
   });
 
   it('checkpoint：域/权限约束拒绝其他 Agent 与非法域', async () => {
@@ -576,6 +808,135 @@ describe('sidecar compact / self / checkpoint HTTP', () => {
     });
   });
 
+  it('self：cloud committed 命中返回 pendingSelfRecord，重放后才清理', async () => {
+    const { server, fake, runtime } = await setup();
+    const url = `${server.url}/self/opencode`;
+    const first = await request(url, 'PUT', {
+      expectedRevision: 0,
+      displayName: 'OpenCode committed',
+    });
+    expect(first.status).toBe(200);
+    expect(first.body.data.selfRecord.revision).toBe(1);
+
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const pending = await request(url, 'PUT', {
+      expectedRevision: 1,
+      displayName: 'OpenCode pending',
+    });
+    expect(pending.status).toBe(202);
+
+    fake.setFailure(null);
+    const withPending = await request(url, 'GET');
+    expect(withPending.status).toBe(200);
+    expect(withPending.body.data).toMatchObject({
+      selfRecord: { revision: 1, content: { displayName: 'OpenCode committed' } },
+      pending: true,
+      pendingSelfRecord: { revision: null, pending: true, content: { displayName: 'OpenCode pending' } },
+      degraded: true,
+    });
+    expect(withPending.body.warnings).toContain('self_pending');
+
+    const replayed = await runtime.replayer.replayOnce();
+    expect(replayed.remaining).toBe(0);
+    const recovered = await request(url, 'GET');
+    expect(recovered.body.data).toMatchObject({
+      selfRecord: { revision: 2, content: { displayName: 'OpenCode pending' } },
+      pending: false,
+      pendingSelfRecord: null,
+      degraded: false,
+    });
+  });
+
+  it('compact：离线只排队恢复元数据，不提交占位摘要；恢复后真实摘要与 sourceHashes 一次写入', async () => {
+    const { server, fake, runtime } = await setup();
+    const before = JSON.parse(JSON.stringify(fake.records));
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const pending = await request(`${server.url}/compact`, 'POST', {
+      agentId: 'opencode',
+      domain: 'agent:opencode',
+      sourceIds: ['01JSRC1', '01JSRC2'],
+    });
+    expect(pending.status).toBe(202);
+    expect(pending.body.data).toMatchObject({
+      status: 'pending',
+      queued: true,
+      deferred: true,
+      sourceIds: ['01JSRC1', '01JSRC2'],
+      sourceHashes: [],
+    });
+    expect(pending.body.data.summary).toBe('');
+    expect(fake.compacts).toHaveLength(0);
+
+    const [item] = await runtime.local.outbox.list();
+    expect(item).toBeDefined();
+    const body = item!.body as Record<string, unknown>;
+    expect(body.deferredSummary).toBe(true);
+    expect(body.summary).toBeUndefined();
+    expect(body.sourceHashes).toBeUndefined();
+
+    fake.setFailure(null);
+    const replayed = await runtime.replayer.replayOnce();
+    expect(replayed.remaining).toBe(0);
+    expect(fake.compacts).toHaveLength(1);
+    const compact = fake.compacts[0]!;
+    expect(compact.summary).toContain('Mebular uses sidecar');
+    expect(compact.summary).toContain('pnpm workspace build 已通过');
+    expect(compact.summary).not.toBe('Compact · 2 records');
+    expect(compact.sourceIds).toEqual(['01JSRC1', '01JSRC2']);
+    expect(compact.sourceHashes).toHaveLength(2);
+    expect(compact.sourceHashes!.every((hash) => hash.startsWith('sha256:'))).toBe(true);
+    expect(fake.records).toEqual(before);
+  });
+
+  it('compact：离线没有 sourceIds 显式失败，不排队占位；恢复后来源缺失进入 dead', async () => {
+    const { server, fake, runtime } = await setup();
+    fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
+    const noSources = await request(`${server.url}/compact`, 'POST', {
+      agentId: 'opencode',
+      domain: 'agent:opencode',
+    });
+    expect(noSources.status).toBe(503);
+    expect(noSources.body.error.code).toBe('capability_unavailable');
+    expect(await runtime.local.outbox.list()).toHaveLength(0);
+    expect(fake.compacts).toHaveLength(0);
+
+    const queued = await request(`${server.url}/compact`, 'POST', {
+      agentId: 'opencode',
+      domain: 'agent:opencode',
+      sourceIds: ['01JSRC1'],
+    });
+    expect(queued.status).toBe(202);
+    fake.setRecords(fake.records.filter((record) => record.id !== '01JSRC1'));
+    fake.setFailure(null);
+    const replayed = await runtime.replayer.replayOnce();
+    expect(replayed.remaining).toBe(0);
+    const outbox = await runtime.local.outbox.stats();
+    expect(outbox.items).toBe(0);
+    expect((await runtime.local.outbox.deadStats()).items).toBe(1);
+    expect(fake.compacts).toHaveLength(0);
+  });
+
+  it('compact：直接提交占位标题被 capability 拒绝，不产生图对象', async () => {
+    const { fake } = await setup();
+    const response = await fetch(`${fake.baseUrl}/internal-object`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        actor: { type: 'agent', agentId: 'opencode' },
+        kind: 'compact',
+        op: 'upsert',
+        domain: 'agent:opencode',
+        sourceIds: ['01JSRC1'],
+        summary: 'Compact · 1 records',
+      }),
+    });
+    const body = await response.json();
+    if (response.status !== 422) throw new Error(`status=${response.status} body=${JSON.stringify(body)}`);
+    expect(response.status).toBe(422);
+    expect(body.error.code).toBe('compact_summary_placeholder');
+    expect(fake.compacts).toHaveLength(0);
+  });
+
   it('compact：capability 不可用时带 sourceIds 进入 outbox，恢复后只写一次', async () => {
     const { server, fake, runtime } = await setup();
     fake.setFailure({ status: 503, code: 'capability_unavailable', retryable: true });
@@ -654,5 +1015,121 @@ describe('sidecar compact / self / checkpoint HTTP', () => {
     expect(namespaces.status).toBe(200);
     const agent = namespaces.body.data.domains.find((domain: any) => domain.domain === 'agent:opencode');
     expect(agent).toMatchObject({ readable: true, writable: true, crossAgent: false });
+  });
+
+  it('compact 模型摘要晚到：drain 后丢弃结果，不提交 compact/缓存', async () => {
+    const gate = new LifecycleGate();
+    let release = () => {};
+    const modelGate = new Promise<void>((resolve) => { release = resolve; });
+    let started = false;
+    const model = {
+      selectOptionalSource: async () => ({ source: 'heuristic', degraded: false, warnings: [] }),
+      summarize: async () => {
+        started = true;
+        await modelGate;
+        return {
+          ok: true,
+          summary: '真实摘要内容',
+          model: 'fake-summary',
+          degraded: false,
+          warnings: [],
+          latencyMs: 0,
+        };
+      },
+      clearFailure: () => undefined,
+      noteFailure: () => undefined,
+      noteHostCandidates: () => undefined,
+      currentStatus: () => ({ degraded: false, warnings: [] }),
+    };
+    const { server, fake } = await setup(compactRecords(), { inference: model, lifecycle: gate });
+    const pending = request(`${server.url}/compact`, 'POST', {
+      agentId: 'opencode',
+      domain: 'agent:opencode',
+      limit: 3,
+    });
+    const deadline = Date.now() + 5000;
+    while (!started && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(started).toBe(true);
+    gate.beginDrain('test');
+    gate.finishDrain();
+    release();
+    const response = await pending;
+    expect(response.status).toBe(409);
+    expect(response.body?.error?.code).toBe('mode_mismatch');
+    expect(fake.compacts).toHaveLength(0);
+  });
+
+  it('status：409 replay 冲突暴露 revision/hostId/阶段/dead 聚合，不因本地错误清空诊断', async () => {
+    const { server, runtime } = await setup();
+    const url = `${server.url}/checkpoints/th_conflict_status?agentId=opencode`;
+    const first = await request(url, 'PUT', {
+      agentId: 'opencode',
+      expectedRevision: 0,
+      state: checkpointState('th_conflict_status', 'v1'),
+      summary: 'v1',
+    });
+    expect(first.status).toBe(200);
+    const second = await request(url, 'PUT', {
+      agentId: 'opencode',
+      expectedRevision: 1,
+      state: checkpointState('th_conflict_status', 'v2'),
+      summary: 'v2',
+    });
+    expect(second.status).toBe(200);
+    expect(second.body.data.checkpoint.revision).toBe(2);
+
+    await runtime.local.outbox.enqueue({
+      id: 'ob_status_conflict',
+      requestId: 'req_status_conflict',
+      endpoint: '/internal-object',
+      body: {
+        requestId: 'req_status_conflict',
+        actor: { type: 'agent', agentId: 'opencode' },
+        kind: 'context_checkpoint',
+        op: 'upsert',
+        agentId: 'opencode',
+        threadId: 'th_conflict_status',
+        domain: 'task:th_conflict_status',
+        state: {},
+        expectedRevision: 1,
+      },
+      createdAt: NOW,
+      expiresAt: NOW + 120_000,
+    });
+    const replay = await runtime.replayer.replayOnce();
+    expect(replay).toMatchObject({ dead: 1, remaining: 0 });
+
+    const status = await request(`${server.url}/status`, 'GET');
+    expect(status.body.data.lastError).toMatchObject({
+      code: 'revision_mismatch',
+      stage: 'replay',
+      disposition: 'conflict',
+      details: {
+        currentRevision: 2,
+        expectedRevision: 1,
+        threadId: 'th_conflict_status',
+      },
+    });
+    expect(status.body.data.outbox).toMatchObject({
+      items: 0,
+      deadItems: 1,
+      deadReasons: [{ reason: 'revision_mismatch', count: 1 }],
+      lastConflict: {
+        code: 'revision_mismatch',
+        operation: 'checkpoint',
+        requestId: 'req_status_conflict',
+        currentRevision: 2,
+        expectedRevision: 1,
+      },
+    });
+    expect(status.body.data.outbox.byOperation).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        operation: 'checkpoint',
+        dead: 1,
+        lastFailure: expect.objectContaining({ code: 'revision_mismatch', disposition: 'conflict' }),
+      }),
+    ]));
   });
 });

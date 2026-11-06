@@ -13,13 +13,15 @@
 // 本模块不读取/返回 host token 或 capability token 明文。
 
 import { spawn as defaultSpawn } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, createHash } from 'node:crypto';
 import { statSync } from 'node:fs';
-import { readFile, unlink } from 'node:fs/promises';
+import { chmod, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { APP_VERSION } from './version.mjs';
+import { readCapabilityToken } from './memory-runtime-token.mjs';
+import { appendMemoryRuntimeLogSync } from './memory-runtime-diagnostics.mjs';
 
 export const MEMORY_RUNTIME_DISCOVERY_FILE = 'memory-runtime.json';
 export const MEMORY_RUNTIME_DATA_DIR = 'memory-runtime';
@@ -30,12 +32,16 @@ export const MEMORY_RUNTIME_DEFAULT_PORT = 7341;
 export const MEMORY_RUNTIME_DEFAULT_START_TIMEOUT_MS = 5000;
 export const MEMORY_RUNTIME_HEALTH_TIMEOUT_MS = 200;
 export const MEMORY_RUNTIME_HEALTH_CHECK_MS = 5000;
+export const MEMORY_RUNTIME_DISCOVERY_STALE_MS = 15_000;
+export const MEMORY_RUNTIME_DISCOVERY_DEAD_MS = 30_000;
 export const MEMORY_RUNTIME_RESTART_WINDOW_MS = 5 * 60 * 1000;
 export const MEMORY_RUNTIME_MAX_RESTARTS = 3;
 export const MEMORY_RUNTIME_RESTART_BACKOFF_MS = 500;
 export const MEMORY_RUNTIME_RESTART_BACKOFF_MAX_MS = 30_000;
 export const MEMORY_RUNTIME_RESTART_COOLDOWN_MS = 5 * 60 * 1000;
 export const MEMORY_RUNTIME_BIN = 'mebular-memory-runtime';
+/** 默认 sidecar heartbeat 为 5s；禁用/停止必须覆盖至少一个完整心跳 + 有界收尾。 */
+export const MEMORY_RUNTIME_ATTACHED_DORMANT_WAIT_MS = 12_000;
 
 const SIDECAR_KIND = 'mebular-memory-runtime';
 const CAPABILITY_API_VERSION = 1;
@@ -48,6 +54,41 @@ function isObject(value) {
 
 function stringOrNull(value) {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+}
+
+function loopbackHostname(hostname) {
+  const normalized = String(hostname ?? '').replace(/^\[|\]$/g, '').toLowerCase();
+  return normalized === '127.0.0.1' || normalized === '::1' || normalized === 'localhost';
+}
+
+function validDiscoveryUrls(discovery) {
+  try {
+    const base = new URL(discovery.url);
+    const health = new URL(discovery.healthUrl);
+    const basePath = '/memory-runtime/v1';
+    return base.protocol === 'http:'
+      && health.protocol === 'http:'
+      && loopbackHostname(base.hostname)
+      && loopbackHostname(health.hostname)
+      && base.username === '' && base.password === ''
+      && health.username === '' && health.password === ''
+      && base.pathname === basePath
+      && health.pathname === `${basePath}/health`
+      && base.search === '' && base.hash === ''
+      && health.search === '' && health.hash === ''
+      && base.origin === health.origin
+      && Number(base.port) === discovery.port;
+  } catch {
+    return false;
+  }
+}
+
+function sameDiscoveryInstance(left, right) {
+  return Boolean(left && right)
+    && left.pid === right.pid
+    && left.startedAt === right.startedAt
+    && left.url === right.url
+    && left.tokenFile === right.tokenFile;
 }
 
 export function pidAlive(pid) {
@@ -222,6 +263,7 @@ function makeDisabledStatus({ enabled = false, reason = 'disabled' } = {}) {
     apiVersion: null,
     capabilityApiVersion: null,
     commandSource: null,
+    discoveryMode: null,
     installed: enabled ? null : false,
     startedAt: null,
     lastOkAt: null,
@@ -252,7 +294,9 @@ function isSidecarDiscovery(value) {
 
 async function readDiscovery(path) {
   const value = await readJson(path, null);
-  return isSidecarDiscovery(value) ? value : null;
+  if (!isSidecarDiscovery(value)) return null;
+  if (value.mode !== undefined && value.mode !== 'immersive' && value.mode !== 'mcp') return null;
+  return { ...value, mode: value.mode ?? 'immersive' };
 }
 
 async function readLock(path) {
@@ -288,6 +332,26 @@ const PROXY_SECRET_KEYS = new Set([
   'capability_token',
   'password',
   'secret',
+  'keyref',
+  'baseurl',
+  'modelpath',
+  'installedpath',
+  'modelsdir',
+  'apikey',
+  'api_key',
+  'api-key',
+  'accesstoken',
+  'refreshtoken',
+  'secretref',
+  'credentialref',
+  'endpoint',
+  'binarypath',
+  'installpath',
+  'enginepath',
+  'path',
+  'rootdir',
+  'homedir',
+  'debug',
 ]);
 
 /**
@@ -312,6 +376,114 @@ function scrubProxyValue(value, secrets) {
     return text;
   }
   return value;
+}
+
+function traceText(value, max = 512) {
+  return typeof value === 'string' ? value.slice(0, max) : null;
+}
+
+function traceNumber(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function traceStrings(value) {
+  return Array.isArray(value) ? value.filter((entry) => typeof entry === 'string').slice(0, 100) : [];
+}
+
+function traceOwnerView(owner) {
+  return {
+    role: traceText(owner?.role, 64),
+    ownerId: traceText(owner?.ownerId, 256),
+    domain: traceText(owner?.domain, 256),
+    agentName: traceText(owner?.agentName, 128),
+  };
+}
+
+function traceProvenanceView(provenance) {
+  return {
+    source: traceText(provenance?.source, 64),
+    extractor: traceText(provenance?.extractor, 64),
+    hostId: traceText(provenance?.hostId, 128),
+  };
+}
+
+function traceSummaryView(trace) {
+  const feedback = trace?.feedback;
+  return {
+    id: traceText(trace?.id, 160),
+    recallId: traceText(trace?.recallId, 160),
+    schema: traceNumber(trace?.schema),
+    at: traceNumber(trace?.at),
+    agentId: traceText(trace?.agentId, 256),
+    threadId: traceText(trace?.threadId, 256),
+    queryHash: traceText(trace?.queryHash, 256),
+    queryPreview: traceText(trace?.queryPreview, 160),
+    domains: traceStrings(trace?.domains),
+    silenceReason: traceText(trace?.silenceReason, 128),
+    degraded: trace?.degraded === true,
+    feedback: feedback && typeof feedback === 'object' ? {
+      useful: feedback.useful === true,
+      reason: traceText(feedback.reason, 500),
+      at: traceNumber(feedback.at),
+    } : null,
+    counts: {
+      candidates: traceNumber(trace?.counts?.candidates),
+      expansions: traceNumber(trace?.counts?.expansions),
+      injected: traceNumber(trace?.counts?.injected),
+      tokens: traceNumber(trace?.counts?.tokens),
+    },
+    timing: { totalMs: traceNumber(trace?.timing?.totalMs) },
+    model: {
+      query: traceText(trace?.model?.query, 128),
+      embedding: traceText(trace?.model?.embedding, 128),
+      extractor: traceText(trace?.model?.extractor, 128),
+      tookMs: traceNumber(trace?.model?.tookMs),
+    },
+  };
+}
+
+function traceDetailView(trace) {
+  return {
+    ...traceSummaryView(trace),
+    hits: Array.isArray(trace?.hits) ? trace.hits.slice(0, 100).map((hit) => ({
+      id: traceText(hit?.id, 256),
+      type: traceText(hit?.type, 64),
+      score: traceNumber(hit?.score),
+      rank: traceNumber(hit?.rank),
+    })) : [],
+    cue: {
+      topics: traceStrings(trace?.cue?.topics),
+      entities: Array.isArray(trace?.cue?.entities) ? trace.cue.entities.slice(0, 100).map((entity) => ({
+        name: traceText(entity?.name, 256),
+        type: traceText(entity?.type, 64),
+      })) : [],
+    },
+    candidates: Array.isArray(trace?.candidates) ? trace.candidates.slice(0, 100).map((candidate) => ({
+      id: traceText(candidate?.id, 256),
+      type: traceText(candidate?.type, 64),
+      domain: traceText(candidate?.domain, 256),
+      owner: traceOwnerView(candidate?.owner),
+      provenance: traceProvenanceView(candidate?.provenance),
+      confidence: traceNumber(candidate?.confidence),
+      score: traceNumber(candidate?.score),
+      rank: traceNumber(candidate?.rank),
+    })) : [],
+    expansions: Array.isArray(trace?.expansions) ? trace.expansions.slice(0, 100).map((expansion) => ({
+      sourceId: traceText(expansion?.sourceId, 256),
+      reason: traceText(expansion?.reason, 128),
+      status: traceText(expansion?.status, 64),
+    })) : [],
+    injected: Array.isArray(trace?.injected) ? trace.injected.slice(0, 100).map((fragment) => ({
+      fragmentId: traceText(fragment?.fragmentId, 256),
+      sourceId: traceText(fragment?.sourceId, 256),
+      layer: traceText(fragment?.layer, 64),
+      tokens: traceNumber(fragment?.tokens),
+      citations: traceStrings(fragment?.citations),
+      confidence: traceNumber(fragment?.confidence),
+      owner: traceOwnerView(fragment?.owner),
+      provenance: traceProvenanceView(fragment?.provenance),
+    })) : [],
+  };
 }
 
 function proxyErrorMessage(body, fallback) {
@@ -377,6 +549,9 @@ export class MemoryRuntimeSupervisor {
     this.child = null;
     this.childToken = null;
     this.childSecrets = [];
+    this.managedInstance = null;
+    this.dormantLock = null;
+    this.dormantLockInvalidated = false;
     this.startPromise = null;
     this.restartTimer = null;
     this.cooldownTimer = null;
@@ -438,7 +613,7 @@ export class MemoryRuntimeSupervisor {
       ...this.statusState,
       ...patch,
       enabled: this.isEnabled(),
-      available: nextState === 'ready' || nextState === 'degraded',
+      available: this.isEnabled() && (patch.available ?? (nextState === 'ready' || nextState === 'degraded')),
     };
     return this.snapshot();
   }
@@ -450,14 +625,14 @@ export class MemoryRuntimeSupervisor {
   #profileMismatch(discovery) {
     const expectedProfile = this.#profileId();
     const actualProfile = discoveryProfileId(discovery);
-    if (expectedProfile && actualProfile && expectedProfile !== actualProfile) return true;
+    if (expectedProfile && expectedProfile !== actualProfile) return true;
     const expectedCloud = this.#cloudId();
     const actualCloud = discoveryCloudId(discovery);
-    return Boolean(expectedCloud && actualCloud && expectedCloud !== actualCloud);
+    return Boolean(expectedCloud && expectedCloud !== actualCloud);
   }
 
   #homeMismatch(discovery) {
-    if (typeof discovery?.tokenFile !== 'string' || discovery.tokenFile.length === 0) return false;
+    if (typeof discovery?.tokenFile !== 'string' || discovery.tokenFile.length === 0) return true;
     return resolve(dirname(discovery.tokenFile)) !== this.paths.dataDir;
   }
 
@@ -470,7 +645,14 @@ export class MemoryRuntimeSupervisor {
     );
   }
 
-  async #fetchHealth(discovery) {
+  #healthIdentityMatches(discovery, body, { allowDormant = false } = {}) {
+    if (!isObject(body) || body.pid !== discovery.pid) return false;
+    if (stringOrNull(body.profileId) !== discoveryProfileId(discovery)) return false;
+    if (stringOrNull(body.cloudId) !== discoveryCloudId(discovery)) return false;
+    return body.mode === discovery.mode || (allowDormant && body.mode === 'mcp');
+  }
+
+  async #fetchHealth(discovery, { acceptDormant = false } = {}) {
     if (!this.fetchImpl || typeof discovery?.healthUrl !== 'string') return { ok: false };
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), Math.max(1, this.healthTimeoutMs));
@@ -483,8 +665,10 @@ export class MemoryRuntimeSupervisor {
       });
       if (!response || response.ok !== true) return { ok: false };
       const body = await response.json().catch(() => ({}));
+      const ready = body?.ready !== false;
+      const dormant = acceptDormant && body?.mode === 'mcp' && body?.state === 'stopped';
       return {
-        ok: body?.ok !== false && body?.ready !== false,
+        ok: body?.ok !== false && (ready || dormant),
         degraded: body?.degraded === true || body?.state === 'degraded',
         body,
       };
@@ -509,14 +693,131 @@ export class MemoryRuntimeSupervisor {
     return lock;
   }
 
+  /** 从 start.lock 构造可验证候选；不写回 discovery，只用于显式 stop。 */
+  #discoveryFromLock(lock) {
+    if (!lock || lock.command !== 'serve' || !Number.isInteger(lock.port) || lock.port <= 0) return null;
+    const base = `http://127.0.0.1:${lock.port}/memory-runtime/v1`;
+    return {
+      schema: 1,
+      kind: SIDECAR_KIND,
+      pid: lock.pid,
+      host: '127.0.0.1',
+      port: lock.port,
+      url: base,
+      healthUrl: `${base}/health`,
+      tokenFile: this.paths.hostTokenPath,
+      cloudId: lock.cloudId,
+      profileId: lock.profileId,
+      runtimeVersion: APP_VERSION,
+      apiVersion: 1,
+      capabilityApiVersion: CAPABILITY_API_VERSION,
+      minMcpVersion: '0.3.0',
+      maxMcpVersion: '0.3.x',
+      state: 'ready',
+      mode: 'immersive',
+      degraded: false,
+      startedAt: lock.startedAt,
+      updatedAt: this.now(),
+      capabilities: {},
+    };
+  }
+
+  /** 当前实际 capability token（env 优先，其次生产文件）的指纹；null 表示没有可用凭据。 */
+  async #capabilityFingerprint() {
+    try {
+      const record = await readCapabilityToken({
+        home: this.paths.home,
+        env: this.env,
+        now: this.now(),
+      });
+      if (!record?.token) return null;
+      return createHash('sha256').update(record.token).digest('hex');
+    } catch {
+      return null;
+    }
+  }
+
+  get #dormantStatePath() {
+    return join(this.paths.dataDir, 'dormant.json');
+  }
+
+  async #readDormantState() {
+    try {
+      const info = await stat(this.#dormantStatePath);
+      if (process.platform !== 'win32' && (info.mode & 0o777) !== 0o600) return null;
+      const value = JSON.parse(await readFile(this.#dormantStatePath, 'utf-8'));
+      if (value?.version !== undefined && value.version !== 1) return null;
+      if (!Number.isInteger(value?.pid) || value.pid <= 0) return null;
+      if (!Number.isFinite(value?.startedAt)) return null;
+      if (!(typeof value?.credential === 'string' || value?.credential === null)) return null;
+      return {
+        pid: value.pid,
+        startedAt: value.startedAt,
+        credential: value.credential,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  async #writeDormantState(state) {
+    const tmp = `${this.#dormantStatePath}.tmp-${process.pid}`;
+    try {
+      await writeFile(tmp, JSON.stringify({ version: 1, ...state }, null, 2), { mode: 0o600 });
+      if (process.platform !== 'win32') await chmod(tmp, 0o600);
+      await rename(tmp, this.#dormantStatePath);
+    } catch (error) {
+      await unlink(tmp).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  async #clearDormantState() {
+    await unlink(this.#dormantStatePath).catch(() => undefined);
+  }
+
   /**
    * 读取 discovery/health 并更新快照。
    * @returns {Promise<boolean>} 是否可接流量（ready 或 degraded）。
    */
   async #refreshDiscovery({ fetchHealth = true } = {}) {
+    if (!this.isEnabled()) {
+      if (this.statusState.error?.code !== 'disable_incomplete') {
+        this.statusState = makeDisabledStatus({ enabled: false, reason: 'disabled' });
+      }
+      return false;
+    }
     await this.#readLockView();
     const discovery = await readDiscovery(this.paths.discoveryPath);
     if (!discovery) {
+      if (this.dormantLock) {
+        const lock = await readLock(this.paths.lockPath);
+        const credential = await this.#capabilityFingerprint();
+        if (!lock
+          || lock.pid !== this.dormantLock.pid
+          || lock.startedAt !== this.dormantLock.startedAt
+          || !pidAlive(lock.pid)
+          || credential !== this.dormantLock.credential) {
+          this.dormantLockInvalidated = true;
+          this.dormantLock = null;
+          // 保留持久化 baseline：跨进程启动仍能识别 credential 已换代。
+        } else {
+          this.#setState({
+            state: 'stopped',
+            available: false,
+            degraded: false,
+            managed: false,
+            attached: false,
+            pid: lock.pid,
+            url: null,
+            healthUrl: null,
+            reason: 'disabled',
+            error: null,
+            lock: this.lockView,
+          });
+          return false;
+        }
+      }
       if (this.child && this.child.exitCode === null) {
         const state = this.readySeen ? 'degraded' : 'starting';
         this.#setState({
@@ -527,13 +828,16 @@ export class MemoryRuntimeSupervisor {
           pid: this.child.pid ?? null,
           url: null,
           healthUrl: null,
+          discoveryMode: null,
           restarts: this.restarts,
           error: this.readySeen ? publicError('discovery_missing', 'sidecar discovery 缺失') : null,
           lock: this.lockView,
         });
         return false;
       }
-      if (this.statusState.state !== 'failed') {
+      if (this.statusState.state !== 'failed'
+        || ['discovery_dead', 'discovery_stale', 'discovery_future', 'discovery_invalid', 'instance_mismatch']
+          .includes(this.statusState.error?.code)) {
         const startingByLock = this.isEnabled()
           && this.lockView !== null
           && this.lockView.stale !== true
@@ -546,6 +850,7 @@ export class MemoryRuntimeSupervisor {
           pid: this.lockView?.pid ?? null,
           url: null,
           healthUrl: null,
+          discoveryMode: null,
           restarts: this.restarts,
           error: null,
           lock: this.lockView,
@@ -559,23 +864,11 @@ export class MemoryRuntimeSupervisor {
       return false;
     }
 
-    if (!pidAlive(discovery.pid)) {
-      await unlink(this.paths.discoveryPath).catch(() => undefined);
-      this.#setState({
-        state: 'stopped',
-        degraded: false,
-        managed: false,
-        attached: false,
-        pid: null,
-        url: null,
-        healthUrl: null,
-        error: null,
-        lock: this.lockView,
-      });
-      return false;
-    }
-
     const managed = Boolean(this.child && this.child.pid === discovery.pid);
+    if (managed) {
+      // 记录本实例拥有的 pid/startedAt；child 被强杀后仍可确认 discovery/start.lock 归属。
+      this.managedInstance = { pid: discovery.pid, startedAt: discovery.startedAt };
+    }
     if (this.#homeMismatch(discovery)) {
       this.#setState({
         state: 'failed',
@@ -628,9 +921,90 @@ export class MemoryRuntimeSupervisor {
       return false;
     }
 
+    if (!pidAlive(discovery.pid)) {
+      // 只读 status/inspect 绝不 unlink；身份校验先于 dead 判定与后续清理。
+      this.#setState({
+        state: 'stopped',
+        available: false,
+        degraded: false,
+        managed: false,
+        attached: false,
+        pid: discovery.pid,
+        url: null,
+        healthUrl: null,
+        discoveryMode: discovery.mode,
+        error: publicError('discovery_dead', 'sidecar discovery 对应进程已退出'),
+        lock: this.lockView,
+      });
+      return false;
+    }
+
+    if (!validDiscoveryUrls(discovery)) {
+      this.#setState({
+        state: 'failed', available: false, degraded: false, managed, attached: !managed,
+        pid: discovery.pid, url: null, healthUrl: null,
+        error: publicError('discovery_invalid', 'sidecar discovery URL 非法：拒绝连接或转发凭据'),
+        lock: this.lockView,
+      });
+      return false;
+    }
+    const age = this.now() - discovery.updatedAt;
+    if (!Number.isFinite(age) || age < -1000 || age > MEMORY_RUNTIME_DISCOVERY_DEAD_MS) {
+      this.#setState({
+        state: 'failed', available: false, degraded: false, managed, attached: !managed,
+        pid: discovery.pid, url: null, healthUrl: null,
+        error: publicError(age < -1000 ? 'discovery_future' : 'discovery_dead', 'sidecar discovery 已失效'),
+        lock: this.lockView,
+      });
+      return false;
+    }
+    if (age > MEMORY_RUNTIME_DISCOVERY_STALE_MS) {
+      this.#setState({
+        state: 'degraded', available: false, degraded: true, managed, attached: !managed,
+        pid: discovery.pid, url: null, healthUrl: null,
+        error: publicError('discovery_stale', 'sidecar discovery 已超过 15 秒未刷新'),
+        lock: this.lockView,
+      });
+      return false;
+    }
+    if (discovery.mode === 'mcp') {
+      const dormantClean = discovery.state === 'stopped';
+      this.#setState({
+        state: dormantClean ? 'stopped' : 'degraded',
+        available: false,
+        degraded: !dormantClean,
+        managed,
+        attached: !managed,
+        pid: discovery.pid,
+        url: null,
+        healthUrl: null,
+        discoveryMode: 'mcp',
+        reason: 'disabled',
+        error: dormantClean
+          ? null
+          : publicError('disable_incomplete', 'sidecar 尚未完成 dormant 收尾'),
+        lock: this.lockView,
+      });
+      return false;
+    }
+
     const health = fetchHealth ? await this.#fetchHealth(discovery) : { ok: true };
+    const healthBody = health.body ?? {};
+    const healthMismatch = health.ok && !this.#healthIdentityMatches(discovery, healthBody);
+    if (healthMismatch) {
+      this.#setState({
+        state: 'failed', available: false, degraded: false, managed, attached: !managed,
+        pid: discovery.pid, url: null, healthUrl: null,
+        error: publicError('instance_mismatch', 'sidecar health 与 discovery 实例身份不一致'),
+        lock: this.lockView,
+      });
+      return false;
+    }
     if (health.ok) {
       this.readySeen = true;
+      this.dormantLock = null;
+      this.dormantLockInvalidated = false;
+      await this.#clearDormantState();
       const degraded = discovery.degraded === true || health.degraded === true;
       this.#setState({
         state: degraded ? 'degraded' : 'ready',
@@ -644,6 +1018,7 @@ export class MemoryRuntimeSupervisor {
         apiVersion: discovery.apiVersion ?? null,
         capabilityApiVersion: discovery.capabilityApiVersion ?? null,
         startedAt: discovery.startedAt ?? null,
+        discoveryMode: 'immersive',
         lastOkAt: this.now(),
         restarts: this.restarts,
         reason: null,
@@ -656,6 +1031,7 @@ export class MemoryRuntimeSupervisor {
     const starting = managed && !this.readySeen;
     this.#setState({
       state: starting ? 'starting' : 'degraded',
+      available: false,
       degraded: !starting,
       managed,
       attached: !managed,
@@ -666,6 +1042,7 @@ export class MemoryRuntimeSupervisor {
       apiVersion: discovery.apiVersion ?? null,
       capabilityApiVersion: discovery.capabilityApiVersion ?? null,
       startedAt: discovery.startedAt ?? null,
+      discoveryMode: discovery.mode,
       restarts: this.restarts,
       error: starting ? null : publicError('health_check_failed', 'sidecar 健康检查失败'),
       lock: this.lockView,
@@ -674,7 +1051,8 @@ export class MemoryRuntimeSupervisor {
   }
 
   async status() {
-    if (!this.isEnabled() && !this.statusState.managed && !this.statusState.pid) {
+    if (!this.isEnabled() && !this.statusState.managed && !this.statusState.pid
+      && this.statusState.error?.code !== 'disable_incomplete') {
       this.statusState = makeDisabledStatus({ enabled: false, reason: 'disabled' });
     }
     try {
@@ -700,9 +1078,10 @@ export class MemoryRuntimeSupervisor {
         state: result.state,
         reason: result.reason ?? null,
         error: result.error ?? null,
-        mode: null,
+        mode: this.statusState.discoveryMode ?? null,
         runtimeVersion: null,
         degraded: result.state === 'degraded',
+        capability: null,
         model: null,
       };
     }
@@ -734,6 +1113,14 @@ export class MemoryRuntimeSupervisor {
       mode: typeof data.mode === 'string' ? data.mode : null,
       runtimeVersion: typeof data.runtimeVersion === 'string' ? data.runtimeVersion : null,
       degraded: data.degraded === true || result.body?.degraded === true,
+      capability: isObject(data.capability)
+        ? {
+            reachable: data.capability.reachable === true,
+            version: Number.isInteger(data.capability.version) ? data.capability.version : null,
+            lastOkAt: typeof data.capability.lastOkAt === 'number' ? data.capability.lastOkAt : null,
+            error: typeof data.capability.error === 'string' ? data.capability.error : null,
+          }
+        : null,
       model,
     };
   }
@@ -923,7 +1310,7 @@ export class MemoryRuntimeSupervisor {
       };
     }
     const data = result.body?.data ?? result.body ?? {};
-    const traces = Array.isArray(data.traces) ? data.traces : [];
+    const traces = Array.isArray(data.traces) ? data.traces.slice(0, safeLimit).map(traceSummaryView) : [];
     if (!result.ok) {
       return {
         ok: false,
@@ -1001,7 +1388,7 @@ export class MemoryRuntimeSupervisor {
       available: true,
       disabled: false,
       state: result.state,
-      trace: data,
+      trace: traceDetailView(data),
       degraded: result.body?.degraded === true,
     };
   }
@@ -1051,35 +1438,132 @@ export class MemoryRuntimeSupervisor {
   }
 
   async #resolveHostToken(discovery) {
-    if (this.child && discovery?.pid === this.child.pid && typeof this.childToken === 'string') {
-      return this.childToken;
-    }
     const fromEnv = stringOrNull(this.env?.MEBULAR_MEMORY_RUNTIME_TOKEN);
-    if (fromEnv) return fromEnv;
+    if (fromEnv) return { token: fromEnv, source: 'override', refreshable: false };
     if (typeof discovery?.tokenFile !== 'string' || discovery.tokenFile.length === 0) return null;
-    // 只读当前 home 的 sidecar token；discovery 路径不匹配时拒绝读取。
+    // 只读当前 home 的生产 JSON token；raw 文件不是隐式生产回退格式。
     if (resolve(dirname(discovery.tokenFile)) !== this.paths.dataDir) return null;
     try {
-      const token = (await readFile(discovery.tokenFile, 'utf-8')).trim();
-      return token.length > 0 ? token : null;
+      if (process.platform !== 'win32' && ((await stat(discovery.tokenFile)).mode & 0o077) !== 0) return null;
+      const record = JSON.parse(await readFile(discovery.tokenFile, 'utf-8'));
+      if (record?.version !== 1 || typeof record?.token !== 'string' || record.token.length === 0) return null;
+      if (typeof record.expiresAt === 'number' && record.expiresAt > 0 && this.now() >= record.expiresAt) return null;
+      return { token: record.token, source: 'file', refreshable: true };
     } catch {
+      // 显式测试/嵌入在文件尚未可见时仍可使用本子进程持有的凭据。
+      if (this.child && discovery?.pid === this.child.pid && typeof this.childToken === 'string') {
+        return { token: this.childToken, source: 'child', refreshable: true };
+      }
       return null;
     }
+  }
+
+  async #removeDiscoveryIfMatches(expected) {
+    if (!expected || this.#homeMismatch(expected) || this.#profileMismatch(expected)) return false;
+    const current = await readDiscovery(this.paths.discoveryPath);
+    if (!sameDiscoveryInstance(current, expected)) return false;
+    // 删除前再读一次，缩窄操作者重启/替换实例时的竞态窗口。
+    const confirmed = await readDiscovery(this.paths.discoveryPath);
+    if (!sameDiscoveryInstance(confirmed, expected)) return false;
+    await unlink(this.paths.discoveryPath);
+    return true;
+  }
+
+  async #readSidecarMode(discovery) {
+    const age = this.now() - discovery.updatedAt;
+    if (!validDiscoveryUrls(discovery) || this.#homeMismatch(discovery)
+      || this.#profileMismatch(discovery) || this.#versionMismatch(discovery)
+      || !Number.isFinite(age) || age < -1000 || age > MEMORY_RUNTIME_DISCOVERY_STALE_MS) {
+      return null;
+    }
+    const health = await this.#fetchHealth(discovery, { acceptDormant: true });
+    if (!this.#healthIdentityMatches(discovery, health.body, { allowDormant: true })) return null;
+    const credential = await this.#resolveHostToken(discovery);
+    if (!credential || !this.fetchImpl) return null;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), Math.max(1, this.healthTimeoutMs));
+    timer.unref?.();
+    try {
+      const response = await this.fetchImpl(`${discovery.url.replace(/\/+$/, '')}/status`, {
+        method: 'GET',
+        headers: { accept: 'application/json', authorization: `Bearer ${credential.token}` },
+        signal: controller.signal,
+      });
+      if (!response?.ok) return null;
+      const body = await response.json().catch(() => null);
+      const data = body?.data;
+      if (data?.pid !== discovery.pid) return null;
+      if (typeof data.startedAt === 'number' && data.startedAt !== discovery.startedAt) return null;
+      const mode = data?.mode;
+      const state = data?.state;
+      if ((mode !== 'mcp' && mode !== 'immersive') || typeof state !== 'string') return null;
+      return { mode, state };
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async #waitAttachedDormant(discovery, timeoutMs) {
+    // 陈旧/非法 discovery 无法证明实例身份：不发送 HTTP，立即报告 incomplete。
+    const age = this.now() - discovery.updatedAt;
+    if (!validDiscoveryUrls(discovery)
+      || this.#homeMismatch(discovery)
+      || this.#profileMismatch(discovery)
+      || this.#versionMismatch(discovery)
+      || !Number.isFinite(age)
+      || age < -1000
+      || age > MEMORY_RUNTIME_DISCOVERY_STALE_MS) {
+      return false;
+    }
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    for (;;) {
+      if (!pidAlive(discovery.pid)) return true;
+      const observed = await this.#readSidecarMode(discovery);
+      if (observed?.mode === 'mcp' && observed.state === 'stopped') return true;
+      if (Date.now() >= deadline) return false;
+      await sleep(Math.min(50, Math.max(1, deadline - Date.now())));
+    }
+  }
+
+  /**
+   * 显式 stop 前的实例校验：与 attach 使用同一套 freshness/URL/home/profile/version、
+   * health 身份和 token 鉴权的 /status 校验；任何一项无法确认都不得发送信号。
+   */
+  async #verifyLiveInstance(discovery, { requireDiscovery = true } = {}) {
+    if (!discovery || !Number.isInteger(discovery.pid) || !pidAlive(discovery.pid)) return false;
+    if (this.#homeMismatch(discovery) || this.#profileMismatch(discovery) || this.#versionMismatch(discovery)) {
+      return false;
+    }
+    if (!validDiscoveryUrls(discovery)) return false;
+    const age = this.now() - discovery.updatedAt;
+    if (!Number.isFinite(age) || age < -1000 || age > MEMORY_RUNTIME_DISCOVERY_STALE_MS) return false;
+    const health = await this.#fetchHealth(discovery, { acceptDormant: true });
+    if (!health.ok || !this.#healthIdentityMatches(discovery, health.body, { allowDormant: true })) {
+      return false;
+    }
+    // 需要 host token 的 /status：确认 pid（以及新实例提供的 startedAt）仍属于同一实例。
+    const observed = await this.#readSidecarMode(discovery);
+    if (!observed) return false;
+    if (health.body?.ready === false
+      && !(observed.mode === 'mcp' && observed.state === 'stopped')) {
+      return false;
+    }
+    if (!requireDiscovery) return true;
+    // 探测期间实例可能被替换；确认 discovery 仍是同一 pid/startedAt/url/tokenFile。
+    return sameDiscoveryInstance(await readDiscovery(this.paths.discoveryPath), discovery);
   }
 
   async #proxyHostApi(pathname, { method = 'GET', body = null, timeoutMs = 2500 } = {}) {
     await this.status().catch(() => undefined);
     if (!this.isEnabled()) {
       return {
-        enabled: false,
-        available: false,
-        disabled: true,
-        state: 'stopped',
-        reason: 'disabled',
-        error: null,
+        enabled: false, available: false, disabled: true, state: 'stopped', reason: 'disabled', error: null,
       };
     }
-    if (!['ready', 'degraded'].includes(this.statusState.state) || typeof this.statusState.url !== 'string') {
+    if (!this.statusState.available || !['ready', 'degraded'].includes(this.statusState.state)
+      || typeof this.statusState.url !== 'string') {
       return {
         enabled: true,
         available: false,
@@ -1089,73 +1573,97 @@ export class MemoryRuntimeSupervisor {
         error: this.statusState.error ?? publicError('sidecar_unavailable', 'Memory Runtime sidecar 未就绪'),
       };
     }
+    const validatedDiscovery = (candidate) => {
+      const age = candidate ? this.now() - candidate.updatedAt : Number.POSITIVE_INFINITY;
+      return candidate
+        && candidate.pid === this.statusState.pid
+        && candidate.startedAt === this.statusState.startedAt
+        && candidate.url === this.statusState.url
+        && candidate.mode === 'immersive'
+        && age >= -1000 && age <= MEMORY_RUNTIME_DISCOVERY_STALE_MS
+        && validDiscoveryUrls(candidate)
+        && !this.#homeMismatch(candidate)
+        && !this.#profileMismatch(candidate)
+        && !this.#versionMismatch(candidate);
+    };
     const discovery = await readDiscovery(this.paths.discoveryPath);
-    if (!discovery) {
+    if (!validatedDiscovery(discovery)) {
       return {
         enabled: true,
         available: false,
         disabled: false,
         state: this.statusState.state,
         reason: null,
-        error: publicError('discovery_missing', 'sidecar discovery 缺失'),
-      };
-    }
-    const token = await this.#resolveHostToken(discovery);
-    if (!token) {
-      return {
-        enabled: true,
-        available: false,
-        disabled: false,
-        state: this.statusState.state,
-        reason: null,
-        error: publicError('host_token_missing', '无法读取 sidecar host token'),
+        error: publicError(discovery ? 'instance_mismatch' : 'discovery_missing', 'sidecar discovery 已变化或失效'),
       };
     }
     if (!this.fetchImpl) {
       return {
-        enabled: true,
-        available: false,
-        disabled: false,
-        state: this.statusState.state,
-        reason: null,
+        enabled: true, available: false, disabled: false, state: this.statusState.state, reason: null,
         error: publicError('fetch_unavailable', '当前运行环境不支持 HTTP 代理'),
       };
     }
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), Math.max(1, timeoutMs));
-    timer.unref?.();
-    try {
-      const base = discovery.url.replace(/\/+$/, '');
-      const url = new URL(`${base}/${String(pathname).replace(/^\/+/, '')}`);
-      const headers = {
-        accept: 'application/json',
-        authorization: `Bearer ${token}`,
-      };
-      const init = { method, headers, signal: controller.signal };
-      if (body !== null && body !== undefined) {
-        headers['content-type'] = 'application/json';
-        init.body = JSON.stringify(body);
-      }
-      const response = await this.fetchImpl(url.toString(), init);
-      const text = await response.text().catch(() => '');
-      let parsed = null;
+
+    const requestId = `proxy_${randomBytes(16).toString('hex')}`;
+    const attemptedSecrets = new Set();
+    const execute = async (instance, token) => {
+      attemptedSecrets.add(token);
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), Math.max(1, timeoutMs));
+      timer.unref?.();
       try {
-        parsed = text.length > 0 ? JSON.parse(text) : null;
-      } catch {
-        parsed = null;
+        const base = instance.url.replace(/\/+$/, '');
+        const url = new URL(`${base}/${String(pathname).replace(/^\/+/, '')}`);
+        const headers = {
+          accept: 'application/json',
+          authorization: `Bearer ${token}`,
+          'x-request-id': requestId,
+        };
+        const init = { method, headers, signal: controller.signal };
+        if (body !== null && body !== undefined) {
+          headers['content-type'] = 'application/json';
+          init.body = JSON.stringify(body);
+        }
+        const response = await this.fetchImpl(url.toString(), init);
+        const text = await response.text().catch(() => '');
+        let parsed = null;
+        try {
+          parsed = text.length > 0 ? JSON.parse(text) : null;
+        } catch {
+          parsed = null;
+        }
+        return { response, text, parsed };
+      } catch (error) {
+        return { transportError: error };
+      } finally {
+        clearTimeout(timer);
       }
-      const scrubbed = scrubProxyValue(parsed, [token, this.childToken]);
+    };
+
+    let credential = await this.#resolveHostToken(discovery);
+    if (!credential) {
       return {
-        enabled: true,
-        available: true,
-        disabled: false,
-        state: this.statusState.state,
-        statusCode: response.status,
-        ok: response.ok === true,
-        body: scrubbed,
-        ...(parsed === null && text.length > 0 ? { message: redact(text, [token]) } : {}),
+        enabled: true, available: false, disabled: false, state: this.statusState.state, reason: null,
+        error: publicError('host_token_missing', '无法读取 sidecar host token'),
       };
-    } catch (error) {
+    }
+    let attemptedDiscovery = discovery;
+    let attempt = await execute(attemptedDiscovery, credential.token);
+    if (attempt.response?.status === 401 && credential.refreshable) {
+      // 操作者可能已在 401 前后重启 sidecar；新实例也必须重新通过完整校验。
+      await this.status().catch(() => undefined);
+      const current = await readDiscovery(this.paths.discoveryPath);
+      if (validatedDiscovery(current)) {
+        const refreshed = await this.#resolveHostToken(current);
+        if (refreshed?.refreshable) {
+          attemptedDiscovery = current;
+          credential = refreshed;
+          attempt = await execute(attemptedDiscovery, credential.token);
+        }
+      }
+    }
+    if (attempt.transportError) {
+      const error = attempt.transportError;
       return {
         enabled: true,
         available: false,
@@ -1167,9 +1675,20 @@ export class MemoryRuntimeSupervisor {
           error?.name === 'AbortError' ? 'sidecar 请求超时' : '无法连接 Memory Runtime sidecar',
         ),
       };
-    } finally {
-      clearTimeout(timer);
     }
+    const secrets = [...attemptedSecrets, this.childToken];
+    return {
+      enabled: true,
+      available: true,
+      disabled: false,
+      state: this.statusState.state,
+      statusCode: attempt.response.status,
+      ok: attempt.response.ok === true,
+      body: scrubProxyValue(attempt.parsed, secrets),
+      ...(attempt.parsed === null && attempt.text.length > 0
+        ? { message: redact(attempt.text, secrets) }
+        : {}),
+    };
   }
 
   #resolveCommand() {
@@ -1200,7 +1719,9 @@ export class MemoryRuntimeSupervisor {
     const fromEnv = stringOrNull(this.env?.MEBULAR_CAPABILITY_TOKEN);
     if (fromEnv) return fromEnv;
     const record = await readJson(this.paths.capabilityTokenPath, null);
-    return typeof record?.token === 'string' && record.token.length > 0 ? record.token : null;
+    if (record?.version !== 1 || typeof record?.token !== 'string' || record.token.length === 0) return null;
+    if (typeof record.expiresAt === 'number' && record.expiresAt > 0 && this.now() >= record.expiresAt) return null;
+    return record.token;
   }
 
   async #waitForDiscovery(deadline) {
@@ -1387,6 +1908,15 @@ export class MemoryRuntimeSupervisor {
       ),
       lock: this.lockView,
     });
+    appendMemoryRuntimeLogSync(this.paths.dataDir, {
+      level: 'error',
+      event: 'supervisor_restart',
+      reason: 'child_exit',
+      code: 'sidecar_crashed',
+      exitCode: typeof code === 'number' ? code : null,
+      signal: typeof signal === 'string' ? signal : null,
+      restarts: this.restarts,
+    }, { now: this.now });
     this.#scheduleRestart();
   }
 
@@ -1542,9 +2072,39 @@ export class MemoryRuntimeSupervisor {
     return false;
   }
 
+  async #waitForOrphanedManagedExit(discovery) {
+    const deadline = Date.now() + Math.max(100, this.configuredStartTimeout());
+    this.#setState({
+      state: 'starting', available: false, degraded: false, managed: false, attached: true,
+      pid: discovery.pid, url: null, healthUrl: null, error: null,
+    });
+    for (;;) {
+      const current = await readDiscovery(this.paths.discoveryPath);
+      if (!sameDiscoveryInstance(current, discovery) || !pidAlive(discovery.pid)) return true;
+      if (Date.now() >= deadline || this.stopping || this.disposed) return false;
+      await sleep(Math.min(this.healthPollMs, 50));
+    }
+  }
+
   async #startOnce({ force = false, manual = false, isRestart = false } = {}) {
     if (this.disposed) return this.snapshot();
     this.stopping = false;
+
+    const beforeStart = await readDiscovery(this.paths.discoveryPath);
+    if (beforeStart && Number.isInteger(beforeStart.parentPid)
+      && beforeStart.parentPid !== process.pid && !pidAlive(beforeStart.parentPid)) {
+      // 只等待旧 parent supervision 收尾；绝不替父进程杀 attached/manual 或旧 child。
+      if (!await this.#waitForOrphanedManagedExit(beforeStart)) {
+        if (!this.stopping && !this.disposed) {
+          this.#setState({
+            state: 'degraded', available: false, degraded: true, managed: false, attached: true,
+            pid: beforeStart.pid,
+            error: publicError('orphaned_sidecar_alive', '旧 managed sidecar 尚未按父监督退出：不终止、不替换'),
+          });
+        }
+        return this.snapshot();
+      }
+    }
 
     const discovered = await this.#refreshDiscovery({ fetchHealth: true });
     if (discovered && ['ready', 'degraded'].includes(this.statusState.state)) {
@@ -1588,7 +2148,17 @@ export class MemoryRuntimeSupervisor {
       });
       return this.snapshot();
     }
-    if (existing) await unlink(this.paths.discoveryPath).catch(() => undefined);
+    if (existing) {
+      const removed = await this.#removeDiscoveryIfMatches(existing).catch(() => false);
+      const remaining = removed ? null : await readDiscovery(this.paths.discoveryPath);
+      if (sameDiscoveryInstance(remaining, existing)) {
+        this.#setState({
+          state: 'failed', available: false, degraded: false,
+          error: publicError('discovery_cleanup_failed', '无法安全清理旧 discovery：不启动替换实例'),
+        });
+        return this.snapshot();
+      }
+    }
 
     const lock = await this.#readLockView();
     if (lock && pidAlive(lock.pid)) {
@@ -1604,6 +2174,76 @@ export class MemoryRuntimeSupervisor {
         });
         return this.snapshot();
       }
+      // 已验证的 dormant 外部/manual 实例不是“正在启动”：不要卡在 sidecar_starting。
+      const dormantCandidate = this.#discoveryFromLock(lock);
+      if (dormantCandidate && await this.#verifyLiveInstance(dormantCandidate, { requireDiscovery: false })) {
+        const observed = await this.#readSidecarMode(dormantCandidate);
+        if (observed?.mode === 'mcp' && observed.state === 'stopped') {
+          const persisted = await this.#readDormantState();
+          const persistedMatches = persisted
+            && persisted.pid === lock.pid
+            && persisted.startedAt === lock.startedAt
+            ? persisted
+            : null;
+          if (persisted && !persistedMatches) await this.#clearDormantState();
+          const inMemoryBaseline = this.dormantLock
+            && this.dormantLock.pid === lock.pid
+            && this.dormantLock.startedAt === lock.startedAt
+            ? this.dormantLock.credential
+            : undefined;
+          const baseline = inMemoryBaseline !== undefined
+            ? inMemoryBaseline
+            : (persistedMatches ? persistedMatches.credential : undefined);
+          const credential = await this.#capabilityFingerprint();
+          if (!this.dormantLockInvalidated) {
+            if (baseline === undefined) {
+              // 没有可信 baseline（文件缺失/损坏/权限异常/写失败）：不能证明仍是同一代 dormant 实例，
+              // 保守进入 starting，绝不报告 clean stopped。
+              this.dormantLockInvalidated = true;
+            } else if (baseline !== credential) {
+              // 保留旧 baseline：同一进程重启后仍据此判定凭据已换代，不得回退 stopped。
+              this.dormantLock = null;
+              this.dormantLockInvalidated = true;
+            }
+          }
+          const resumeDeadline = this.now() + Math.min(500, this.configuredStartTimeout());
+          while (this.now() < resumeDeadline) {
+            const discovery = await readDiscovery(this.paths.discoveryPath);
+            if (discovery) {
+              const ready = await this.#refreshDiscovery({ fetchHealth: true });
+              if (ready) return this.snapshot();
+              break;
+            }
+            await sleep(50);
+          }
+          if (!this.dormantLockInvalidated) {
+            this.#setState({
+              state: 'stopped',
+              available: false,
+              degraded: false,
+              managed: false,
+              attached: false,
+              pid: lock.pid,
+              url: null,
+              healthUrl: null,
+              reason: 'disabled',
+              error: null,
+              lock: this.lockView,
+            });
+            this.dormantLock = {
+              pid: lock.pid,
+              startedAt: lock.startedAt,
+              credential,
+            };
+            await this.#writeDormantState({
+              pid: lock.pid,
+              startedAt: lock.startedAt,
+              credential,
+            });
+            return this.snapshot();
+          }
+        }
+      }
       const deadline = this.now() + Math.max(100, this.configuredStartTimeout());
       const ready = await this.#waitForDiscovery(deadline);
       if (ready) {
@@ -1612,6 +2252,26 @@ export class MemoryRuntimeSupervisor {
       }
       if (this.stopping || this.disposed) return this.snapshot();
       if (this.statusState.error && ['profile_mismatch', 'home_mismatch', 'version_incompatible'].includes(this.statusState.error.code)) {
+        return this.snapshot();
+      }
+      if (this.dormantLockInvalidated
+        && this.lockView
+        && Number.isInteger(this.lockView.pid)
+        && pidAlive(this.lockView.pid)) {
+        this.#setState({
+          state: 'starting',
+          available: false,
+          degraded: false,
+          managed: false,
+          attached: false,
+          pid: this.lockView.pid,
+          url: null,
+          healthUrl: null,
+          discoveryMode: 'mcp',
+          reason: null,
+          error: null,
+          lock: this.lockView,
+        });
         return this.snapshot();
       }
       this.#setState({
@@ -1667,15 +2327,19 @@ export class MemoryRuntimeSupervisor {
 
   async stop({ includeAttached = false, timeoutMs = 5000 } = {}) {
     this.stopping = true;
+    let dormantBaseline = null;
     this.#clearRestartTimer();
     this.#clearCooldownTimer();
     this.#stopWatchdog();
 
-    // 让正在启动的流程看到 stopping 并退出，避免它在本函数返回后又拉起子进程。
-    if (this.startPromise) {
-      await Promise.race([this.startPromise.catch(() => undefined), sleep(250)]);
-    }
+    if (this.startPromise) await Promise.race([this.startPromise.catch(() => undefined), sleep(250)]);
+    const discoveredAtStop = await readDiscovery(this.paths.discoveryPath);
     const child = this.child;
+    const attachedDiscovery = discoveredAtStop
+      && discoveredAtStop.pid !== child?.pid
+      && discoveredAtStop.pid !== this.managedInstance?.pid
+      ? discoveredAtStop
+      : null;
     if (child) {
       this.#killChild('SIGTERM');
       await this.#waitChildExit(child, timeoutMs);
@@ -1685,9 +2349,7 @@ export class MemoryRuntimeSupervisor {
       }
       if (this.child === child) this.child = null;
     }
-    if (this.startPromise) {
-      await Promise.race([this.startPromise.catch(() => undefined), sleep(250)]);
-    }
+    if (this.startPromise) await Promise.race([this.startPromise.catch(() => undefined), sleep(250)]);
     const lateChild = this.child;
     if (lateChild && lateChild !== child) {
       this.#killChild('SIGTERM');
@@ -1696,55 +2358,259 @@ export class MemoryRuntimeSupervisor {
       if (this.child === lateChild) this.child = null;
     }
 
-    // Windows 的 SIGTERM 是强制终止，sidecar 可能来不及清理 discovery/lock。
-    // 只清理确实属于本 supervisor 已停止子进程的残留，不碰 attach 实例。
-    const stoppedPids = new Set([child?.pid, lateChild?.pid].filter((pid) => Number.isInteger(pid)));
+    let clean = true;
+    const stoppedPids = new Set([child?.pid, lateChild?.pid, this.managedInstance?.pid]
+      .filter((pid) => Number.isInteger(pid)));
     for (const pid of stoppedPids) {
-      if (pidAlive(pid)) continue;
-      const discovery = await readDiscovery(this.paths.discoveryPath);
-      if (discovery?.pid === pid) {
-        await unlink(this.paths.discoveryPath).catch(() => undefined);
+      if (pidAlive(pid)) {
+        clean = false;
+        continue;
+      }
+      const current = await readDiscovery(this.paths.discoveryPath);
+      const knownStartedAt = discoveredAtStop?.pid === pid
+        ? discoveredAtStop.startedAt
+        : this.managedInstance?.pid === pid
+          ? this.managedInstance.startedAt
+          : this.statusState.pid === pid ? this.statusState.startedAt : null;
+      if (current?.pid === pid && knownStartedAt !== null && current.startedAt === knownStartedAt) {
+        const expected = current;
+        const removed = await this.#removeDiscoveryIfMatches(expected).catch(() => false);
+        if (!removed && sameDiscoveryInstance(await readDiscovery(this.paths.discoveryPath), expected)) {
+          clean = false;
+        }
+      } else if (current?.pid === pid) {
+        // 身份不明的残留不得删除，也不得静默当作已清理。
+        clean = false;
       }
       const lock = await this.#readLockView();
       if (lock?.pid === pid) {
-        await unlink(this.paths.lockPath).catch(() => undefined);
+        if (knownStartedAt === null || lock.startedAt !== knownStartedAt) {
+          clean = false;
+        } else {
+          await unlink(this.paths.lockPath).catch(() => {
+            clean = false;
+          });
+        }
       }
     }
 
     if (includeAttached) {
-      await this.#readLockView();
       const discovery = await readDiscovery(this.paths.discoveryPath);
-      if (discovery && !this.#homeMismatch(discovery) && pidAlive(discovery.pid)) {
-        await this.#stopPid(discovery.pid, timeoutMs);
-        const current = await readDiscovery(this.paths.discoveryPath);
-        if (current?.pid === discovery.pid && !pidAlive(discovery.pid)) {
-          await unlink(this.paths.discoveryPath).catch(() => undefined);
+      const verified = discovery && await this.#verifyLiveInstance(discovery)
+        ? discovery
+        : null;
+      if (verified) {
+        // 信号前二次读取，缩窄操作者重启/替换实例的竞态窗口。
+        const confirmed = await readDiscovery(this.paths.discoveryPath);
+        if (!sameDiscoveryInstance(confirmed, verified)) {
+          clean = false;
+        } else {
+          if (pidAlive(verified.pid) && !await this.#stopPid(verified.pid, timeoutMs)) clean = false;
+          if (!pidAlive(verified.pid)) {
+            const removed = await this.#removeDiscoveryIfMatches(verified).catch(() => false);
+            if (!removed && sameDiscoveryInstance(await readDiscovery(this.paths.discoveryPath), verified)) {
+              clean = false;
+            }
+          }
+        }
+      } else if (discovery) {
+        // 不可验证的 live PID 绝不 kill；只允许清理已退出实例的匹配 discovery。
+        if (!pidAlive(discovery.pid)) {
+          const removed = await this.#removeDiscoveryIfMatches(discovery).catch(() => false);
+          if (!removed && sameDiscoveryInstance(await readDiscovery(this.paths.discoveryPath), discovery)) {
+            clean = false;
+          }
+        } else {
+          clean = false;
         }
       }
       const lock = await this.#readLockView();
-      if (lock && lock.command === 'serve' && pidAlive(lock.pid)) {
-        await this.#stopPid(lock.pid, timeoutMs);
+      if (lock && lock.command === 'serve') {
+        if (!pidAlive(lock.pid)) {
+          await unlink(this.paths.lockPath).catch(() => {
+            clean = false;
+          });
+        } else {
+          // 只有 lock 与已验证 discovery 的 pid/startedAt 完全一致时才允许信号；
+          // 否则可能是复用 PID 或陈旧锁，必须留给操作者处理并报告 incomplete。
+          const matchesVerified = Boolean(verified)
+            && verified.pid === lock.pid
+            && verified.startedAt === lock.startedAt;
+          if (!matchesVerified) {
+            // discovery 已被 stop 删除时，从 start.lock + health/status identity + pid/startedAt 验证；
+            // 不重建 discovery，也不对不可验证的复用 PID 发信号。
+            const candidate = this.#discoveryFromLock(lock);
+            const verifiedFromLock = candidate
+              && await this.#verifyLiveInstance(candidate, { requireDiscovery: false });
+            if (!verifiedFromLock) {
+              clean = false;
+            } else {
+              const confirmedLock = await this.#readLockView();
+              if (!confirmedLock
+                || confirmedLock.pid !== lock.pid
+                || confirmedLock.startedAt !== lock.startedAt
+                || !pidAlive(lock.pid)) {
+                clean = false;
+              } else if (!await this.#stopPid(lock.pid, timeoutMs)) {
+                clean = false;
+              }
+            }
+          } else {
+            const confirmedLock = await this.#readLockView();
+            const confirmedDiscovery = await readDiscovery(this.paths.discoveryPath);
+            if (!confirmedLock
+              || confirmedLock.pid !== lock.pid
+              || confirmedLock.startedAt !== lock.startedAt
+              || !sameDiscoveryInstance(confirmedDiscovery, verified)
+              || !pidAlive(lock.pid)) {
+              clean = false;
+            } else if (!await this.#stopPid(lock.pid, timeoutMs)) {
+              clean = false;
+            }
+          }
+        }
       }
-      await unlink(this.paths.lockPath).catch(() => undefined);
+      const remainingLock = await this.#readLockView();
+      if (remainingLock && !pidAlive(remainingLock.pid)) {
+        await unlink(this.paths.lockPath).catch(() => {
+          clean = false;
+        });
+      }
+    } else if (attachedDiscovery && !this.#homeMismatch(attachedDiscovery)
+      && !this.#profileMismatch(attachedDiscovery)) {
+      // D1：外部 PID 归操作者；仅撤销匹配 discovery，再验证旧凭据也无法工作。
+      const capabilityBefore = await this.#capabilityFingerprint();
+      await this.#removeDiscoveryIfMatches(attachedDiscovery).catch(() => false);
+      if (pidAlive(attachedDiscovery.pid)
+        && !await this.#waitAttachedDormant(
+          attachedDiscovery,
+          Math.max(timeoutMs, MEMORY_RUNTIME_ATTACHED_DORMANT_WAIT_MS),
+        )) {
+        clean = false;
+      }
+      let remaining = await readDiscovery(this.paths.discoveryPath);
+      const needsDormant = (candidate) => candidate
+        && !this.#homeMismatch(candidate)
+        && !this.#profileMismatch(candidate)
+        && !this.#versionMismatch(candidate)
+        && (candidate.mode !== 'mcp' || candidate.state !== 'stopped');
+      if (needsDormant(remaining)) {
+        // 操作者可能在禁用期间替换实例；新实例同样必须撤销并验证，不能漏过。
+        await this.#removeDiscoveryIfMatches(remaining).catch(() => false);
+        if (pidAlive(remaining.pid)
+          && !await this.#waitAttachedDormant(
+            remaining,
+            Math.max(timeoutMs, MEMORY_RUNTIME_ATTACHED_DORMANT_WAIT_MS),
+          )) {
+          clean = false;
+        }
+        remaining = await readDiscovery(this.paths.discoveryPath);
+      }
+      if (needsDormant(remaining)) clean = false;
+      // 能力仍有效且凭据未撤销/未换代：不能把“可能被同一 token 唤醒”的实例报告为 clean stopped。
+      const capabilityAfter = await this.#capabilityFingerprint();
+      const credentialUnchanged = capabilityBefore === null
+        ? capabilityAfter !== null
+        : capabilityAfter === capabilityBefore;
+      if (credentialUnchanged) clean = false;
+      // 外部进程仍存活：记录停止时的 credential baseline（可能是 null=已撤销）。
+      // 下一次 start 只有在当前凭据仍等于 baseline 时才允许报告 stopped。
+      if (pidAlive(attachedDiscovery.pid)) {
+        dormantBaseline = {
+          pid: attachedDiscovery.pid,
+          startedAt: attachedDiscovery.startedAt,
+          credential: capabilityBefore,
+        };
+      }
+    } else {
+      // discovery 缺失时仍可能存活 manual/attached 实例：从 start.lock 验证 identity/token/status。
+      const lock = await this.#readLockView();
+      if (lock && lock.command === 'serve' && !pidAlive(lock.pid)) {
+        await unlink(this.paths.lockPath).catch(() => {
+          clean = false;
+        });
+      } else if (lock && lock.command === 'serve' && pidAlive(lock.pid)) {
+        const capabilityBefore = await this.#capabilityFingerprint();
+        const candidate = this.#discoveryFromLock(lock);
+        const verified = candidate
+          && await this.#verifyLiveInstance(candidate, { requireDiscovery: false });
+        if (!verified) {
+          clean = false;
+        } else {
+          const observed = await this.#readSidecarMode(candidate);
+          if (!(observed?.mode === 'mcp' && observed.state === 'stopped')) {
+            // 仍然 immersive/starting/degraded：没有确认 dormant，不能 clean。
+            clean = false;
+          } else {
+            if (lock.pid !== this.child?.pid && lock.pid !== this.managedInstance?.pid) {
+              dormantBaseline = {
+                pid: lock.pid,
+                startedAt: lock.startedAt,
+                credential: capabilityBefore,
+              };
+            }
+            const capabilityAfter = await this.#capabilityFingerprint();
+            const credentialUnchanged = capabilityBefore === null
+              ? capabilityAfter !== null
+              : capabilityAfter === capabilityBefore;
+            if (credentialUnchanged) clean = false;
+          }
+        }
+      }
     }
 
-    this.#setState({
-      state: 'stopped',
-      degraded: false,
-      managed: false,
-      attached: false,
-      pid: null,
-      url: null,
-      healthUrl: null,
-      error: null,
-      reason: this.isEnabled() ? null : 'disabled',
-      lock: null,
-    });
+    let dormantPersistError = null;
+    if (dormantBaseline) {
+      try {
+        await this.#writeDormantState(dormantBaseline);
+      } catch (error) {
+        dormantPersistError = error;
+        clean = false;
+      }
+    } else {
+      await this.#clearDormantState();
+    }
+
+    if (clean) {
+      this.managedInstance = null;
+      this.dormantLock = null;
+      this.dormantLockInvalidated = false;
+      this.#setState({
+        state: 'stopped', available: false, degraded: false, managed: false, attached: false,
+        pid: null, url: null, healthUrl: null, error: null,
+        reason: this.isEnabled() ? null : 'disabled', lock: null,
+      });
+    } else {
+      this.#setState({
+        state: 'degraded', available: false, degraded: true, managed: false,
+        attached: Boolean(attachedDiscovery && pidAlive(attachedDiscovery.pid)),
+        pid: attachedDiscovery && pidAlive(attachedDiscovery.pid) ? attachedDiscovery.pid : null,
+        url: null, healthUrl: null,
+        error: dormantPersistError
+          ? publicError(includeAttached ? 'stop_incomplete' : 'disable_incomplete',
+            `sidecar 休眠凭据基线写入失败（${dormantPersistError?.code ?? 'ERROR'}）`)
+          : publicError(includeAttached ? 'stop_incomplete' : 'disable_incomplete',
+            includeAttached ? 'sidecar 未能完整停止' : 'sidecar 未确认 dormant：禁用不完整'),
+        reason: this.isEnabled() ? null : 'disabled', lock: this.lockView,
+      });
+    }
     this.stopping = false;
     return this.snapshot();
   }
 
   async restart({ includeAttached = false, timeoutMs = 5000, manual = false, force = true } = {}) {
+    if (!includeAttached && !this.child) {
+      const external = await readDiscovery(this.paths.discoveryPath);
+      if (external && pidAlive(external.pid)) {
+        // 配置变化不是操作者 restart：不撤销/替换 attached/manual 实例。
+        return this.start({ force: false, manual: false });
+      }
+    }
+    appendMemoryRuntimeLogSync(this.paths.dataDir, {
+      level: 'info',
+      event: 'supervisor_restart',
+      reason: manual ? 'operator_restart' : 'config_restart',
+    }, { now: this.now });
     await this.stop({ includeAttached, timeoutMs });
     this.crashTimes = [];
     this.restarts = 0;
@@ -1754,49 +2620,9 @@ export class MemoryRuntimeSupervisor {
 
   async dispose() {
     this.disposed = true;
-    this.#clearRestartTimer();
-    this.#clearCooldownTimer();
-    this.#stopWatchdog();
-    if (this.startPromise) {
-      await Promise.race([this.startPromise.catch(() => undefined), sleep(250)]);
-    }
-    const child = this.child;
-    if (child) {
-      this.#killChild('SIGTERM');
-      await this.#waitChildExit(child, 3000);
-      if (child.exitCode === null) this.#killChild('SIGKILL');
-      if (this.child === child) this.child = null;
-    }
-    const lateChild = this.child;
-    if (lateChild && lateChild !== child) {
-      this.#killChild('SIGTERM');
-      await this.#waitChildExit(lateChild, 1000);
-      if (lateChild.exitCode === null) this.#killChild('SIGKILL');
-      if (this.child === lateChild) this.child = null;
-    }
-    // Windows 强制终止不会执行 sidecar 自己的清理；只清理本 supervisor
-    // 确实停止的子进程残留，attach 的实例不动。
-    const stoppedPids = new Set([child?.pid, lateChild?.pid].filter((pid) => Number.isInteger(pid)));
-    for (const pid of stoppedPids) {
-      if (pidAlive(pid)) continue;
-      const discovery = await readDiscovery(this.paths.discoveryPath);
-      if (discovery?.pid === pid) {
-        await unlink(this.paths.discoveryPath).catch(() => undefined);
-      }
-      const lock = await this.#readLockView();
-      if (lock?.pid === pid) {
-        await unlink(this.paths.lockPath).catch(() => undefined);
-      }
-    }
-    this.#setState({
-      state: 'stopped',
-      managed: false,
-      attached: false,
-      pid: null,
-      url: null,
-      healthUrl: null,
-      error: null,
-    });
+    const status = await this.stop({ includeAttached: false, timeoutMs: 3000 });
+    this.disposed = true;
+    if (!status.error) this.#setState({ reason: 'disposed', available: false });
   }
 }
 

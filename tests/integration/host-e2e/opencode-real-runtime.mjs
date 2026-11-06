@@ -24,6 +24,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { createFakeOpenAI } from './lib/fake-openai.mjs';
+import { scanPersistedInjection } from './lib/persisted-surface.mjs';
 import { requestSidecar, sidecarTokenFromFile, startRealRuntime } from './lib/real-runtime.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -116,7 +117,7 @@ function opencodeConfig({ providerUrl, pluginOptions }) {
   };
 }
 
-async function scanForToken(dir, token) {
+async function scanForText(dir, needle) {
   const hits = [];
   async function walk(current) {
     let entries = [];
@@ -132,12 +133,16 @@ async function scanForToken(dir, token) {
         await walk(path);
       } else if (entry.isFile()) {
         const text = await readFile(path, 'utf8').catch(() => '');
-        if (text.includes(token)) hits.push(path);
+        if (text.includes(needle)) hits.push(path);
       }
     }
   }
   await walk(dir);
   return hits;
+}
+
+async function scanForToken(dir, token) {
+  return scanForText(dir, token);
 }
 
 function parseSessionID(output) {
@@ -394,10 +399,10 @@ async function main() {
     JSON.stringify((details ?? []).map((detail) => `${detail.domain}:${String(detail.text ?? '').slice(0, 60)}`)));
     check('真实 ingest 使用解包后的 user 文本', Boolean(details)
       && !(details ?? []).some((detail) => String(detail.text ?? '').trim().startsWith('"')), 'quoted detail found');
-    check('真实 capability 详情含 assistant 文本',
-      (details ?? []).some((detail) => String(detail.role ?? '') === 'assistant'
-        || String(detail.text ?? '').includes('OK')),
-      JSON.stringify((details ?? []).map((detail) => detail.role)));
+    check('真实 capability 详情不复制无关 assistant 文本',
+      !(details ?? []).some((detail) => String(detail.text ?? '').includes('OK')
+        && String(detail.role ?? '') === 'assistant'),
+      JSON.stringify((details ?? []).map((detail) => `${detail.role}:${String(detail.text ?? '').slice(0, 40)}`)));
 
     const settledRecord = await waitFor(async () => {
       const result = await runtime.recall(seedToken, {
@@ -423,6 +428,12 @@ async function main() {
     ], { env: baseEnv, cwd: project, timeoutMs: 120000 });
     check('compact 后 follow-up turn 退出 0', followUp.code === 0 && !followUp.timedOut,
       (followUp.stderr || followUp.stdout).slice(-600));
+
+    const secondFollowUp = await runProcess('opencode', [
+      'run', '--session', sessionID, '--server', serverUrl, '--format', 'json', '再继续一轮',
+    ], { env: baseEnv, cwd: project, timeoutMs: 120000 });
+    check('另一轮 follow-up turn 退出 0', secondFollowUp.code === 0 && !secondFollowUp.timedOut,
+      (secondFollowUp.stderr || secondFollowUp.stdout).slice(-600));
 
     const checkpointStatus = await waitForSidecar(runtime, (status) => (status.counts?.checkpoints ?? 0) >= 1);
     if (!checkpointStatus) {
@@ -465,6 +476,29 @@ async function main() {
     };
     check('OpenChamber 原生 memory.json 未被改写', nativeAfter.memory === nativeBefore.memory);
     check('OpenChamber 原生 settings.json 未被改写', nativeAfter.settings === nativeBefore.settings);
+
+    const persistedRoots = [
+      join(home, '.local', 'share', 'opencode'),
+      join(home, '.local', 'state', 'opencode'),
+      join(home, '.config', 'opencode'),
+      join(home, '.config', 'openchamber'),
+      join(home, '.local', 'share', 'openchamber'),
+    ];
+    const negativeRoot = join(runRoot, 'persisted-negative-control');
+    const negativeFixture = join(negativeRoot, 'storage', 'session_message', 'ses_negative_control.json');
+    await mkdir(dirname(negativeFixture), { recursive: true });
+    await writeFile(negativeFixture, JSON.stringify({
+      id: 'part_negative_control',
+      type: 'text',
+      text: '<mebular_memory version="1" source="mebular" trust="untrusted" purpose="background">\nThe following is external memory recalled from Mebular.\nfixture body\n</mebular_memory>',
+    }), 'utf8');
+    const negativeHits = await scanPersistedInjection([negativeRoot]);
+    check('持久面扫描阴性对照：独立 fixture session_message 中 marker 能变红',
+      negativeHits.includes(negativeFixture), JSON.stringify(negativeHits));
+    await rm(negativeRoot, { recursive: true, force: true });
+    const persistedInjection = await scanPersistedInjection(persistedRoots);
+    check('OpenCode 持久会话/DB/instructions 不含 request-only 注入块（日志已排除）',
+      persistedInjection.length === 0, JSON.stringify(persistedInjection));
     const sidecarDetailText = (await runtime.resolveDetails({
       agentId: 'opencode',
       domains: ['default', 'user', 'agent:opencode'],

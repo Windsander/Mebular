@@ -26,6 +26,37 @@
 - high 档只覆盖设备**首次加入**；之后的订阅按设计永远自主。
 - 动态码是本地「人到场」门槛，不是第二密码学因子。
 
+## 逻辑 Agent 身份不是认证
+
+`agentId`、`actor.type` 和声称的任务参与关系是用于分区和过滤的逻辑断言。它们不是已认证
+主体、namespace ACL、多用户账号或密码学 Agent 隔离。持有 host token 或 capability token
+的人可以在该信任边界内读取本地存储；修改断言的 `agentId` 不会创建新的已认证身份。
+
+## Checkpoint 证据必须同域
+
+Checkpoint 的 `recordIds`、`detailIds` 和 `state.references` 图 ID 会验证存在性、预期
+类型、存活状态、同域以及（对 detail）未过期。跨域、悬空或类型错误的引用会让操作失败，
+而不是提交悬空证据。外部 message ID 仍是宿主引用，不是图证明。这种严格性是有意设计；
+不要为了把离线重放显示成 committed 而放宽它。
+
+## v0.3.2 规模与模型证据
+
+- 10k 全量在合并 SHA `c37e74b`（包含 `ca2193e`）上通过：10,000 records + 10,000
+  details、0 条非种子 extras、200/200 读取，cleanup 无残留。1k/2k 计数审计同样以
+  0 extras 通过，6/6 失败注入场景通过。延迟来自单台非空闲宿主，不是 SLA。原始
+  10,023/10,000 失败仍保留在规模报告中作为历史证据。
+- v0.3.2 真实模型 canary 已在 Qwen3-4B Q4_K_M / macOS x64 / test-only mirror 上通过：
+  真实下载 2,497,280,256 bytes、官方 SHA-256 校验、llama.cpp b12017 启动，且
+  extract/summarize/planQuery 均非 degraded。它不验证默认 HF transport、其他 pack/平台、
+  模型质量或真实宿主 + 真实模型注入。见
+  [0.3.2 真实模型 smoke 报告](../quality/0.3.2-model-smoke.md)。
+- recall@k、遗漏率、误召回轮次率、多种子答案质量，以及真实宿主 + 真实模型的注入防护测试
+  都不在 v0.3.2 证据集内。
+
 ## 混合版本
 
 greenfield 模型：没有兼容层、没有混跑窗口。所有设备必须同版本。旧授权事件类型会被忽略。
+
+v0.3.2 升级/回滚演练只覆盖同一临时 home 的顺序 v0.3.0 → v0.3.2 → v0.3.0 路径；不验证
+混版并发、双向协议兼容或 0.2.4 直升/降级路径。旧图数据可读只是数据保留说明，不代表
+接受这些路径。

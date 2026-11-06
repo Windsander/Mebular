@@ -16,12 +16,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 The GitHub Release body is extracted from this file: everything between the release's
 `## [vX.Y.Z]` heading and the next `## [` heading. Keep that section self-contained.
 
-## [Unreleased]
+## [v0.3.2] - 2026-11-05
+
+Memory Runtime stability release. It makes lifecycle, local data, detail evidence,
+checkpoint revisions, host failure states and diagnostics match the documented contract.
+It also includes Fleet black-box orchestration (capability/role cards, immutable plans,
+routing, join/MR) and the unified executor/adapter layer with the public OpenChamber runner.
+The public MCP surface stays at 29 tools, the graph/event/sync formats are unchanged, and
+there is no new host, model source or public `runtime_*` tool.
+
+### Fleet orchestration
 
 Fleet black-box task orchestration (P1–P6). Internal capability/role cards and immutable plans
 stay inside Fleet; the human Console and the 16 task methods keep their existing shape.
 
-### Added
+#### Added
 
 - **Capability cards** — device-signed `agent_capability_card` internal nodes compiled from fleet config, executor registry and runtime, with tombstone/version monotonicity and an internal daemon write/read path (`/app/capability-cards`, `/app/nodes`).
 - **Plan + materializer** — immutable, versioned `task_plan` internal nodes, deterministic root/step task IDs, DAG validation, idempotent materialization, restart recovery, and `task_status.plan` progress without new MCP methods or UI.
@@ -37,20 +46,20 @@ stay inside Fleet; the human Console and the 16 task methods keep their existing
 - **Agent auto-detection** — `fleet quickstart` / `fleet join` probe PATH in a fixed order (`hermes` → `dsh` → `opencode` → `claude`) and add OpenChamber only when `<MEBULAR_HOME>/openchamber-runner.json` already exists, falling back to `echo` only when nothing is found. Cursor and Claude Desktop are never auto-detected and remain dispatch-only.
 - **Executable routing metadata** — Agent directories, capability cards, `task_targets`, and route hard filters now expose `executable` (boolean), `executionMode` (`cli|http|json-rpc|in-process`) and optional advisory `health`; explicit `executable=false` or `health.status="unavailable"` is rejected, while legacy records missing these fields stay compatible.
 
-### Security and reliability
+#### Security and reliability
 
 - **Role-card read sanitization** — embedded, daemon and remote legacy cards rebuild `summary` on read; `agent` and `provenance` accept only safe tokens; direct summary providers must match the local device.
 - **Superseded-version finalization** — old roots are finalized instead of dangling: missing roots are recreated with `SUPERSEDED_BY`, pending MRs are never withdrawn, and terminal MR receipts converge old/current roots deterministically.
 - **MR/cancel semantics hardened** — pending MR cancel is covered, terminal MRs are never withdrawn, and concurrent materializers converge on one logical MR via deterministic event IDs.
 - **No new human UI or MCP methods** — navigation/pages/settings are unchanged; plan/card/role stay out of memory lists, domain counts, search and the star-map fleet SSE.
 
-### Changed
+#### Changed
 
 - **`CommandAgent` prompt defaults** — a command agent now appends the prompt as the final argv element by default (`promptMode: "arg"`); `promptArgs` is treated as fixed arguments inserted before the prompt, and `promptMode: "stdin"` writes the prompt to stdin. The legacy function form of `promptArgs` still returns the full argument list. There is no `{prompt}` placeholder substitution and no config-level `env` field.
 - **Plan owner/MR readiness** — `isPlanOwnerExecutableAgent` is now enforced before writing any plan/root: `echo`, `board` (including `kind=echo`) and a `command` agent without a command are rejected with `PLAN_POLICY` + `PLAN_OWNER_UNEXECUTABLE`. `fleet doctor` reports `plan owner 就绪` (WARN when only placeholders) and FAILs a `defaultAgent` that points at an unexecutable agent. Doctor readiness is static config validation; it does not run per-agent `--version` health probes.
 - **Adapter health semantics** — `executable` is a static derivation from config/kind (not proof that a CLI is installed). `health` is an optional advisory snapshot; only an explicit `unavailable` is a route hard filter, and capability cards are not withdrawn automatically when a probe fails. The OpenChamber runner reports `GET /health`; when the discovery file is missing or stale it is `unavailable` and fails closed.
 
-### Fixed
+#### Fixed
 
 - **DSH panel version label** — the panel header now shows the installed `@mebular/dsh-plugin` package version (`pluginVersion`) instead of the running Mebular runtime version, so updating the plugin updates the label. The runtime version remains available in the header tooltip when it differs.
 - **OpenChamber runner host contract** — `fleet-runner.js` now exports the OpenCode V2 definition shape (`{ id, setup }`), reads plugin options from `ctx.options`, and adapts the host `ctx.session` service (`create`/`prompt`/`wait`/`context`/`interrupt`) instead of assuming an SDK `ctx.client`. The default export was previously rejected by the real host, and even with the correct shape it had no `client.session.*` to call. Each request still creates a new session and returns the final assistant text.
@@ -59,15 +68,60 @@ stay inside Fleet; the human Console and the 16 task methods keep their existing
 - **CR-003 internal endpoint whitelist** — the approved internal app endpoints (`/app/nodes`, `/app/capability-cards`, `/app/plans`, `/app/role-cards`, `/app/peers`) are documented as the only allowed internal HTTP surface; no public MCP/UI/TaskEvent changes. Capability-card writes now honor `writesEnabled` and reject non-object bodies; card runtime/provenance source are restricted to safe tokens.
 - **`/app/nodes` internal-object guard** — the raw debug write path now rejects `metadata.internal=true`, `agent_capability_card`, `agent_role_card` and `task_plan` with `403 internal_object_write_forbidden`; internal objects must use their dedicated endpoint. `GET /app/nodes` still omits role-card originals.
 
-### Verification
+#### Verification
 
 - **OpenChamber runner real-host E2E** — `npm run verify:openchamber:runner` starts a real `opencode serve` in an isolated temp HOME/XDG/`MEBULAR_HOME`/`OPENCODE_CONFIG`, loads the real `@mebular/opencode-plugin/fleet-runner` plugin, creates a sentinel session with real `opencode run`, then executes one Fleet task through `OpenChamberRunnerAgent`. It asserts a new session id, the fake model reply, an unchanged sentinel context, 400 on `sessionId`, 401 without/with a wrong token, discovery `0600`, and fail-closed missing/wrong-token discovery. Verified on `opencode v2.0.29` and `v2.2.5`; the LLM is a fake OpenAI-compatible provider, not OpenChamber Desktop UI.
 - **P6 evidence** — [0.3.0 Fleet orchestration P6 E2E and regression evidence](docs/quality/0.3.0-fleet-orchestration-e2e.md) records the 21/21 `verify:fleet:p6` run, full Jest results, Console UI smoke, daemon verified-card path and explicit known limits.
 
-### Notes
+#### Notes
 
 - **Real host smoke remains open** — DSH and Claude Code are not installed on the evidence machine, so their adapters have fake-CLI tests only; OpenCode has its real `opencode v2.0.29` `--version` health verified but no real `opencode run` task smoke. OpenChamber runner now has a real `opencode serve` host E2E (`verify:openchamber:runner`); that is not an OpenChamber Desktop UI test and does not touch real user sessions. Fake CLI/runner tests are not real host E2E and must not be reported as such.
 - **P6 real-network scope** — the five-node P6 E2E uses in-process `InMemoryHub` loopback plus a deterministic event bridge to isolate orchestration from anti-entropy scheduling. Real libp2p evidence remains limited to `verify:fleet:tasks` (two nodes) and `verify:daemon:cluster` (dual daemon, two nodes); `routing-e2e` also uses embedded loopback and is not counted as real-libp2p evidence. This release does not claim a real three-plus-node plan E2E or five-node real-WAN performance.
+
+### Added
+
+- **Explicit dormant lifecycle** — managed, attached and manual sidecars now have separate ownership and disable semantics. Managed disable stops only the MCP-owned child; attached/manual disable revokes capability and detaches without killing or replacing the operator's process. Disable never flushes queued writes. A clean disable publishes `mode=mcp` / `state=stopped` and rejects new work with `409 mode_mismatch`; if dormancy cannot be confirmed, status is visibly `degraded` / `disable_incomplete`.
+- **Detail lifecycle and evidence association** — settled details use `raw_chunk`, `message`, `tool_output` or `document_slice`, with role/detail-kind retention (`conversation` 30 d, `tool_output` 7 d, `document_slice` 90 d, explicit `pinned`). Multi-domain extraction links only the supporting evidence, and checkpoint graph references are validated for existence, expected type, live state and same domain. Bounded idle maintenance now covers staging, traces, cache, outbox and dead entries; cleanup is dependency-aware.
+- **Checkpoint high-water and honest views** — checkpoint revisions remain monotonic after delete/expiry, GET exposes `highWater`/`latestRevision`, and pending vs last-committed views stay separate. A 202 checkpoint is `pending` with no committed revision; only graph confirmation can mark it committed. `includeSelf=true` consumes the current same-agent SelfRecord in `self → checkpoint → compact/fragment` order, with explicit degraded reasons for read/staleness failures and no fabricated empty success.
+- **Host reliability alignment** — DSH now separates accepted/pending/queued/committed/partial states, honours 429 `Retry-After`, applies recall/write cooldown, orders checkpoint revisions and never treats 202 as committed. Hermes persists checkpoint pending in its existing durable spool, replays it after restart, treats `sync_max_attempts` as a real terminal bound, preserves mode-mismatch pending work, and keeps bounded `dead-pending`/orphan/quarantine diagnostics. OpenCode re-subscribes after event-stream disconnect with bounded deduplicated replay, distinguishes pending/queued/partial/committed, and keeps request-only injection and no durable host spool.
+- **Operations surface** — sanitized JSONL logs under `<dataDir>/logs/runtime.jsonl`, `mebular memory-runtime logs`, `doctor` (recent errors, restart reason, capability/model state, staging/cache/outbox/dead counts and ages, disk use, conflicts and ambiguous operations) and `outbox list|show|rebuild|purge`. Diagnostics never contain tokens, message bodies or the real home path.
+- **v0.3.2 verification artifacts** — a real graph/capability/sidecar count-audited scale harness (1k/2k/10k) with failure/interruption injection, and a concise [v0.3.2 verification matrix](docs/quality/0.3.2-verification.md) recording test counts, host boundaries, upgrade/rollback evidence and pending items.
+
+### Changed
+
+- **Transport success no longer implies settlement** — `accepted`, `pending`, `queued`, `committed`, `failed`, `dead` and `degraded` have separate meanings. HTTP 202 means only pending/queued; `queued:true` requires a durable record; HTTP 200 with `extraction.status:'failed'` is failed; partial record/detail writes are reported as partial. Retry acceptance and capability health never create committed state.
+- **Disable and restart semantics** — disabling immersive stops admission, replay and model work without flushing; external attached/manual processes remain operator-owned. Re-enable requires fresh authorization/discovery and resumes idempotent replay only then. MCP restart no longer leaves a stale enabled snapshot or unlinks discovery from read-only status paths.
+- **Checkpoint and detail boundaries** — `expiresAt=0` means no authoritative checkpoint expiry; `retention.checkpointDays` applies only to local cache. Checkpoint/detail deletion is online-only and does not cascade to related records. Deleting a graph object still is not physical erasure: event history, tombstoned nodes, peer snapshots, host copies and the idempotency ledger remain disclosed copies.
+- **Host documentation and status vocabulary** — DSH/OpenCode no longer describe a 202 or a queued handoff as committed; Hermes no longer says auth/mode errors drop spool items. Lightweight mode is described as zero immersive side effects, not zero listeners or timers.
+
+### Fixed
+
+- **False committed states** — DSH, Hermes and OpenCode no longer turn a 202/pending/queued response into a committed record or checkpoint. Pending and last-committed checkpoint views no longer overwrite each other.
+- **Offline recovery** — queued work keeps its stable idempotency key across restart; ambiguous timeouts remain outcome-unknown and require authoritative readback; staging expiry first fails dependent work instead of silently losing details. Offline Compact no longer commits a title-only placeholder; it fails or replays with a real body and source hashes.
+- **Lifecycle leaks** — a sidecar can no longer keep accepting ingest/recall after capability or discovery revocation, create new outbox/staging work while draining, or be woken by a cached credential from the previous generation.
+- **Graceful close drain** — MCP close no longer force-closes active HTTP connections before they can answer; an already-admitted config PATCH can return its contract `409` instead of a socket error, while over-budget sessions are still force-closed at the close deadline.
+- **Detail association** — recall now queries all canonical detail kinds, so `tool_output` and `document_slice` details are expandable instead of incorrectly reporting `detail_pending_sync`; this fixes the P1 gap observed by the historical 1k benchmark.
+- **Capability idempotency single-flight** — concurrent requests with the same composite idempotency key and body now join one in-flight execution instead of both writing; the same key with a different body returns `409 idempotency_conflict`, and failures release the in-flight entry for a later retry. This closes the timeout-retry duplicate-write race that produced 23 extra `MemoryRecord`s in the original 10k benchmark.
+- **Host cleanup and bounds** — Hermes spool replay and dead/quarantine recovery are bounded and restart-safe; DSH and OpenCode drop interrupted non-durable work visibly; OpenCode event disconnect resumes with bounded backoff; outbox/dead cleanup and disk diagnostics run while alive and idle.
+
+### Verification
+
+- **Recorded integration test line (2026-11-06; docs-only changes follow)** — `npm test -- --runInBand` passed 307 suites (1 skipped, 308 total) / 3,389 tests (1 skipped, 3,390 total), 0 failed, on merged `535f44f` (includes `origin/main` `9d13b59` and close fix `266d4d4`); `25d839a` only adjusts Windows/CI test guards. WP1 lifecycle/privacy: 177 tests. WP3A object/context: 147 tests. These counts are not copied from the historical 0.3.0 report.
+- **Coverage** — `npm run test:coverage -- --runInBand` reproduced 307 suites / 3,389 tests at statements 89.16% / branches 77.92% / functions 90.26% / lines 92.20%. The first default-parallel coverage run had six resource-contention timeouts (including a CLI `degraded` case and ingest/perf); the serial rerun is the recorded result. Sidecar coverage: 27 suites / 327 tests, statements 78.31% / branches 68.61% / functions 83.13% / lines 81.87%.
+- **Host and immersive** — all four host E2E suites exited 0: DSH 115, Hermes 57, OpenCode 41 and OpenCode checkpoint recovery 32 (plus DSH 330 adapter/unit, Hermes 94 Python behavior and OpenCode 106 plugin tests). The OpenCode host gate used a temporary-HOME `opencode v2.2.0` installed with the official V2 installer because the machine default 2.0.29 is below the plugin's `>=2.2.0` requirement; the gate ran through PATH and the user environment was not changed. Immersive journey: 84 passed, 0 failed, 0 defects. DSH memory runtime: 37 passed; DSH negative control passed.
+- **DSH E2E and packaging** — DSH E2E minimum passed 8/9 scenarios / 200/211 checks; the only failure, `managed-cli-missing` (11 checks), is environment-blocked by the installed `/Applications/Mebular.app` 0.2.4 and is not counted as a pass. `tests/dsh/e2e/versions.json` has minimum and current both `0.2.1-rc.2`, so `latest` was not run separately. `verify:mcp:publish`, `verify:opencode:publish`, `verify:hermes:package` and `verify:dsh-plugin` passed; the DSH packaging check passed 207/207.
+- **Scale** — the final 10k run passed on merged SHA `c37e74b` (includes the `ca2193e` idempotency single-flight fix): 10,000/10,000 records and details, 0 non-seed extras, 0 missing seed IDs, 200/200 reads, 100% detail-expand coverage and clean cleanup. Seed wall time was 4,759.8 s (2.10 records/s); batch p50/p95/p99 were 52.13/71.50/95.15 s; recall/context p95 were 148.62/152.72 ms and expand p95 was 7.56 ms. The 1k and 2k count audits also passed with 0 extras, and the post-fix race probe was `not-reproduced` (100/100 in both probes). 6/6 failure/interruption injection scenarios passed. See [the scale report](docs/quality/0.3.2-scale-benchmark.md).
+- **Upgrade/rollback** — a sequential single-home v0.3.0 → v0.3.2 → v0.3.0 drill passed (11/11 seed, 30/30 upgrade, 25/27 rollback, 0 non-informational failures); old records, details, Compacts, checkpoints and self records remained readable and the graph/event log were not rewritten. This does not cover mixed versions or a 0.2.4 direct path. See the [verification matrix](docs/quality/0.3.2-verification.md).
+- **Docs** — `npm run check:docs`, `npm run check:i18n` and `git diff --check` pass after this documentation change.
+- **Real-model canary and remaining pending items** — the canary passed for Qwen3-4B Q4_K_M on macOS x64 with a test-only mirror base URL: 2,497,280,256 bytes downloaded, official size/SHA-256 verified, llama.cpp b12017 started, and extract/summarize/planQuery returned non-degraded results. It does not prove the default Hugging Face transport, other packs/platforms, model quality or real-host + real-model injection. Still pending: real-host + real-model prompt injection, recall-quality metrics, the DSH `managed-cli-missing` environment limitation, 0.2.4 direct upgrade/rollback and mixed-version concurrency. See [the model smoke report](docs/quality/0.3.2-model-smoke.md).
+
+### Notes
+
+- **No migration / same-version boundary** — 0.3.0 and 0.2 nodes, events, namespaces, tags and IDs keep their values and are not rewritten. Run the same version on every device; there is no compatibility layer or mixed-version window. The v0.3.2 drill covers only the sequential v0.3.0 → v0.3.2 → v0.3.0 path, not mixed-version concurrency or a direct 0.2.4 upgrade/rollback.
+- **Stop before changing packages** — run `mebular memory-runtime stop` explicitly. Unsettled staging/outbox entries are device-local, are not migrated or guaranteed to settle, and are discarded with `<home>/memory-runtime/`. Settled details remain graph objects and synced peer copies remain subject to normal retention/deletion.
+- **Erasure and host copies** — graph deletion is not physical content erasure. DSH's durable `session.v4.jsonl`, Hermes' `queue.jsonl`, model-provider logs and offline peer snapshots are outside Mebular's physical-erasure guarantee. Mebular only synchronizes cooperative tombstones.
+- **Logical identity and strict evidence** — `agentId`, actor and task participation are assertions, not authentication. Checkpoint evidence must exist, have the expected type, be live and be in the same domain; cross-domain or dangling references fail rather than commit.
+- **Scale/model honesty** — the 10k benchmark passed on `c37e74b` with 10,000/10,000 records/details and 200/200 reads; its single-host, non-idle timings are not an SLA. The v0.3.2 real-model canary passed only for Qwen3-4B Q4_K_M on macOS x64 with a test-only mirror base URL (2,497,280,256 bytes, official SHA-256 verified, llama.cpp b12017, non-degraded extract/summarize/planQuery); the default HF transport, other packs/platforms, model quality and real-host + real-model injection remain unverified. The historical 0.3.0 model smoke is not a 0.3.2 canary.
 
 ## [v0.3.0] - 2026-10-30
 

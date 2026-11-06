@@ -1,0 +1,3747 @@
+{
+  "schema": "mebular.upgrade-rollback.evidence/1",
+  "status": "pass",
+  "generatedAt": "2026-11-05T04:31:40.736Z",
+  "runId": "20261105042956-efe5ecae",
+  "startedAt": "2026-11-05T04:29:56.776Z",
+  "finishedAt": "2026-11-05T04:31:40.736Z",
+  "refs": {
+    "old": {
+      "ref": "v0.3.0",
+      "commit": "e273d6a89223aa3b045285c7259f4ba7d7574179"
+    },
+    "new": {
+      "ref": "0ce06f4f6ef9b99f47b168db43ab0edcae7a0b38",
+      "commit": "0ce06f4f6ef9b99f47b168db43ab0edcae7a0b38"
+    },
+    "harness": {
+      "path": "tests/acceptance/upgrade-rollback/runtime-driver.mjs",
+      "commit": "1c2b661533ec2d14f417cb9f9e121d9bdcae40ed"
+    }
+  },
+  "environment": {
+    "platform": "darwin",
+    "release": "24.6.0",
+    "arch": "x64",
+    "cpu": "Intel(R) Core(TM) i7-8850H CPU @ 2.60GHz",
+    "logicalCpus": 12,
+    "memoryBytes": 34359738368,
+    "node": "v26.8.1",
+    "npm": "11.19.0"
+  },
+  "build": {
+    "old": {
+      "dir": "<temp-work>/build-old",
+      "sha": "e273d6a89223aa3b045285c7259f4ba7d7574179",
+      "packageVersion": "0.3.0",
+      "matchesRef": true,
+      "npmCi": {
+        "status": 0,
+        "elapsedMs": 33022
+      },
+      "build": {
+        "status": 0,
+        "elapsedMs": 12531
+      }
+    },
+    "new": {
+      "dir": "<temp-work>/build-new",
+      "sha": "0ce06f4f6ef9b99f47b168db43ab0edcae7a0b38",
+      "packageVersion": "0.3.0",
+      "matchesRef": true,
+      "npmCi": {
+        "status": 0,
+        "elapsedMs": 33418
+      },
+      "build": {
+        "status": 0,
+        "elapsedMs": 13573
+      }
+    }
+  },
+  "commands": [
+    {
+      "label": "git archive v0.3.0",
+      "command": "git archive --format=tar --output=<temp-work>/build-old.tar e273d6a89223aa3b045285c7259f4ba7d7574179",
+      "cwd": "<repo>",
+      "at": "2026-11-05T04:29:56.839Z"
+    },
+    {
+      "label": "extract v0.3.0",
+      "command": "tar -xf <temp-work>/build-old.tar -C <temp-work>/build-old",
+      "cwd": "<repo>",
+      "at": "2026-11-05T04:29:57.048Z"
+    },
+    {
+      "label": "old npm ci",
+      "command": "npm ci --no-audit --no-fund",
+      "cwd": "<temp-build>",
+      "at": "2026-11-05T04:29:57.425Z"
+    },
+    {
+      "label": "old build",
+      "command": "npm run build",
+      "cwd": "<temp-build>",
+      "at": "2026-11-05T04:30:30.447Z"
+    },
+    {
+      "label": "git archive 0ce06f4f6ef9b99f47b168db43ab0edcae7a0b38",
+      "command": "git archive --format=tar --output=<temp-work>/build-new.tar 0ce06f4f6ef9b99f47b168db43ab0edcae7a0b38",
+      "cwd": "<repo>",
+      "at": "2026-11-05T04:30:42.981Z"
+    },
+    {
+      "label": "extract 0ce06f4f6ef9b99f47b168db43ab0edcae7a0b38",
+      "command": "tar -xf <temp-work>/build-new.tar -C <temp-work>/build-new",
+      "cwd": "<repo>",
+      "at": "2026-11-05T04:30:43.231Z"
+    },
+    {
+      "label": "new npm ci",
+      "command": "npm ci --no-audit --no-fund",
+      "cwd": "<temp-build>",
+      "at": "2026-11-05T04:30:43.622Z"
+    },
+    {
+      "label": "new build",
+      "command": "npm run build",
+      "cwd": "<temp-build>",
+      "at": "2026-11-05T04:31:17.040Z"
+    },
+    {
+      "label": "driver seed",
+      "command": "<node> <real-home>/.local/share/opencode/worktree/a2c07e66cba5a7cc7cccad71ec68f3b1d72c6194/v032-upgrade-rollback/tests/acceptance/upgrade-rollback/runtime-driver.mjs",
+      "cwd": "<repo>",
+      "at": "2026-11-05T04:31:30.614Z"
+    },
+    {
+      "label": "driver upgrade",
+      "command": "<node> <real-home>/.local/share/opencode/worktree/a2c07e66cba5a7cc7cccad71ec68f3b1d72c6194/v032-upgrade-rollback/tests/acceptance/upgrade-rollback/runtime-driver.mjs",
+      "cwd": "<repo>",
+      "at": "2026-11-05T04:31:32.301Z"
+    },
+    {
+      "label": "driver rollback",
+      "command": "<node> <real-home>/.local/share/opencode/worktree/a2c07e66cba5a7cc7cccad71ec68f3b1d72c6194/v032-upgrade-rollback/tests/acceptance/upgrade-rollback/runtime-driver.mjs",
+      "cwd": "<repo>",
+      "at": "2026-11-05T04:31:34.354Z"
+    }
+  ],
+  "stages": {
+    "seed": {
+      "ok": true,
+      "failedChecks": [],
+      "errors": [],
+      "buildSha": "e273d6a89223aa3b045285c7259f4ba7d7574179",
+      "packageVersion": "0.3.0",
+      "identity": {
+        "userId": "user",
+        "deviceId": "device-upgrade-rollback",
+        "cloudId": null,
+        "profileId": null,
+        "hostId": "h_d5535fbb872a7927"
+      },
+      "checks": {
+        "cli.memoryRuntime": {
+          "ok": true,
+          "actual": {
+            "ok": true,
+            "enabled": true,
+            "state": "ready",
+            "available": true,
+            "managed": false,
+            "runtimeVersion": "0.3.0",
+            "apiVersion": 1,
+            "installed": true
+          }
+        },
+        "cli.versionCommand": {
+          "ok": true,
+          "actual": {
+            "supported": false,
+            "output": "未知命令：--version"
+          },
+          "informational": true
+        },
+        "seed.userRecordCreated": {
+          "ok": true,
+          "actual": {
+            "id": "01M6MZKW9WRBRJ3R4HQJ2C45Y4"
+          }
+        },
+        "seed.toolRecordCreated": {
+          "ok": true,
+          "actual": {
+            "id": "01M6MZKWA60ZWH8JYKS5MP8TQF"
+          }
+        },
+        "seed.docRecordCreated": {
+          "ok": true,
+          "actual": {
+            "id": "01M6MZKWADGY590Q3C5BWR8NS8"
+          }
+        },
+        "seed.defaultRecordCreated": {
+          "ok": true,
+          "actual": {
+            "id": "01M6MZKWAKWNBJQ1KFQJK5CFAZ"
+          }
+        },
+        "seed.detailsCreated": {
+          "ok": true,
+          "actual": {
+            "rawId": "01M6MZKWAWXKZYMR54X0NHGCR6",
+            "toolId": "01M6MZKWB3A49TQA6J9KG3B84N",
+            "docId": "01M6MZKWB987GNB4R2T7Y3V01J",
+            "defaultDetailId": "01M6MZKWBF5GXFC7NRBY3N35K6"
+          }
+        },
+        "seed.compactsCreated": {
+          "ok": true,
+          "actual": {
+            "user": "01M6MZKWBNY99Z4QNPRB1A8YF0",
+            "default": "01M6MZKWBVQZXR2KFV2ZP3QNAV"
+          }
+        },
+        "seed.checkpointCreated": {
+          "ok": true,
+          "actual": {
+            "id": "01M6MZKWC4SDS8FA7YDJWTHXCK",
+            "revision": 1
+          }
+        },
+        "seed.selfCreated": {
+          "ok": true,
+          "actual": {
+            "id": "01M6MZKWCAK958N7A8D5D83H6W",
+            "revision": 1
+          }
+        },
+        "seed.detailList": {
+          "ok": true,
+          "actual": {
+            "user": [
+              {
+                "id": "01M6MZKWAWXKZYMR54X0NHGCR6",
+                "detailKind": "raw_chunk",
+                "retentionClass": "conversation",
+                "expiresAt": 1796445092187,
+                "availability": [
+                  "available"
+                ],
+                "text": null,
+                "recordIds": [
+                  "01M6MZKW9WRBRJ3R4HQJ2C45Y4"
+                ]
+              }
+            ],
+            "tool": [
+              {
+                "id": "01M6MZKWB3A49TQA6J9KG3B84N",
+                "detailKind": "tool_output",
+                "retentionClass": "conversation",
+                "expiresAt": 1796445092194,
+                "availability": [
+                  "available"
+                ],
+                "text": null,
+                "recordIds": [
+                  "01M6MZKWA60ZWH8JYKS5MP8TQF"
+                ]
+              }
+            ],
+            "doc": [
+              {
+                "id": "01M6MZKWB987GNB4R2T7Y3V01J",
+                "detailKind": "document_slice",
+                "retentionClass": "conversation",
+                "expiresAt": 1796445092201,
+                "availability": [
+                  "available"
+                ],
+                "text": null,
+                "recordIds": [
+                  "01M6MZKWADGY590Q3C5BWR8NS8"
+                ]
+              }
+            ],
+            "default": [
+              {
+                "id": "01M6MZKWBF5GXFC7NRBY3N35K6",
+                "detailKind": "raw_chunk",
+                "retentionClass": "conversation",
+                "expiresAt": 1796445092207,
+                "availability": [
+                  "available"
+                ],
+                "text": null,
+                "recordIds": [
+                  "01M6MZKWAKWNBJQ1KFQJK5CFAZ"
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "objects": {
+        "recordUser": "01M6MZKW9WRBRJ3R4HQJ2C45Y4",
+        "recordTool": "01M6MZKWA60ZWH8JYKS5MP8TQF",
+        "recordDoc": "01M6MZKWADGY590Q3C5BWR8NS8",
+        "recordDefault": "01M6MZKWAKWNBJQ1KFQJK5CFAZ",
+        "detailRaw": "01M6MZKWAWXKZYMR54X0NHGCR6",
+        "detailTool": "01M6MZKWB3A49TQA6J9KG3B84N",
+        "detailDoc": "01M6MZKWB987GNB4R2T7Y3V01J",
+        "detailDefault": "01M6MZKWBF5GXFC7NRBY3N35K6",
+        "compactUser": "01M6MZKWBNY99Z4QNPRB1A8YF0",
+        "compactDefault": "01M6MZKWBVQZXR2KFV2ZP3QNAV",
+        "checkpoint": "01M6MZKWC4SDS8FA7YDJWTHXCK",
+        "checkpointThreadId": "thread-upgrade-20261105042956-efe5ecae",
+        "self": "01M6MZKWCAK958N7A8D5D83H6W",
+        "selfAgentId": "opencode",
+        "details": {
+          "user": [
+            {
+              "id": "01M6MZKWAWXKZYMR54X0NHGCR6",
+              "detailKind": "raw_chunk",
+              "retentionClass": "conversation",
+              "expiresAt": 1796445092187,
+              "availability": [
+                "available"
+              ],
+              "text": null,
+              "recordIds": [
+                "01M6MZKW9WRBRJ3R4HQJ2C45Y4"
+              ]
+            }
+          ],
+          "tool": [
+            {
+              "id": "01M6MZKWB3A49TQA6J9KG3B84N",
+              "detailKind": "tool_output",
+              "retentionClass": "conversation",
+              "expiresAt": 1796445092194,
+              "availability": [
+                "available"
+              ],
+              "text": null,
+              "recordIds": [
+                "01M6MZKWA60ZWH8JYKS5MP8TQF"
+              ]
+            }
+          ],
+          "doc": [
+            {
+              "id": "01M6MZKWB987GNB4R2T7Y3V01J",
+              "detailKind": "document_slice",
+              "retentionClass": "conversation",
+              "expiresAt": 1796445092201,
+              "availability": [
+                "available"
+              ],
+              "text": null,
+              "recordIds": [
+                "01M6MZKWADGY590Q3C5BWR8NS8"
+              ]
+            }
+          ],
+          "default": [
+            {
+              "id": "01M6MZKWBF5GXFC7NRBY3N35K6",
+              "detailKind": "raw_chunk",
+              "retentionClass": "conversation",
+              "expiresAt": 1796445092207,
+              "availability": [
+                "available"
+              ],
+              "text": null,
+              "recordIds": [
+                "01M6MZKWAKWNBJQ1KFQJK5CFAZ"
+              ]
+            }
+          ]
+        }
+      },
+      "snapshotBefore": {
+        "nodeCount": 0,
+        "eventCount": 0,
+        "stateHash": "a461bf77bc4e4d732f7afc121c70e7f70ed8bf225a082a4e01951d1eb6b5c278",
+        "counts": {
+          "nodes": 0,
+          "memoryRecords": 0,
+          "compacts": 0,
+          "checkpoints": 0,
+          "selfRecords": 0,
+          "details": 0,
+          "detailBytes": 0
+        },
+        "file": {
+          "exists": true,
+          "bytes": 73,
+          "sha256": "ff065bb6b602b208674c7021c2bde093c4995ff4d3fe6c9179c6fe120f37542b",
+          "mtimeMs": 1793853091071.3367
+        }
+      },
+      "snapshotAfter": {
+        "nodeCount": 12,
+        "eventCount": 20,
+        "stateHash": "1ae63b667e5162952a83dd2d04f175ab0d54878b697372fa2bee7e74ececf9ed",
+        "counts": {
+          "nodes": 12,
+          "memoryRecords": 4,
+          "compacts": 2,
+          "checkpoints": 1,
+          "selfRecords": 1,
+          "details": 4,
+          "detailBytes": 96
+        }
+      },
+      "fileAfterClose": {
+        "exists": true,
+        "bytes": 52222,
+        "sha256": "a364ff8708bf3b3aefa23d4c1ee38c80b731f68e7252589c3197b6bfe771bf10",
+        "mtimeMs": 1793853092236.5886
+      },
+      "sidecarAfterClose": {
+        "pid": 41986,
+        "pidAlive": false,
+        "discoveryPresent": false,
+        "state": null
+      }
+    },
+    "upgrade": {
+      "ok": true,
+      "failedChecks": [],
+      "errors": [],
+      "buildSha": "0ce06f4f6ef9b99f47b168db43ab0edcae7a0b38",
+      "packageVersion": "0.3.0",
+      "identity": {
+        "userId": "user",
+        "deviceId": "device-upgrade-rollback",
+        "cloudId": null,
+        "profileId": null,
+        "hostId": "h_d5535fbb872a7927"
+      },
+      "checks": {
+        "cli.memoryRuntime": {
+          "ok": true,
+          "actual": {
+            "ok": true,
+            "enabled": true,
+            "state": "ready",
+            "available": true,
+            "managed": false,
+            "runtimeVersion": "0.3.0",
+            "apiVersion": 1,
+            "installed": true
+          }
+        },
+        "cli.versionCommand": {
+          "ok": true,
+          "actual": {
+            "supported": false,
+            "output": "未知命令：--version"
+          },
+          "informational": true
+        },
+        "upgrade.previousStageOk": {
+          "ok": true
+        },
+        "upgrade.oldUserRecordReadable": {
+          "ok": true,
+          "actual": {
+            "ids": [
+              "01M6MZKW9WRBRJ3R4HQJ2C45Y4"
+            ]
+          }
+        },
+        "upgrade.oldDefaultRecordReadable": {
+          "ok": true,
+          "actual": {
+            "ids": [
+              "01M6MZKWAKWNBJQ1KFQJK5CFAZ"
+            ]
+          }
+        },
+        "upgrade.oldRecordReadable.user": {
+          "ok": true,
+          "actual": {
+            "ids": [
+              "01M6MZKW9WRBRJ3R4HQJ2C45Y4"
+            ]
+          }
+        },
+        "upgrade.oldDetailReadable.user": {
+          "ok": true,
+          "actual": {
+            "details": [
+              {
+                "id": "01M6MZKWAWXKZYMR54X0NHGCR6",
+                "detailKind": "raw_chunk",
+                "retentionClass": "conversation",
+                "expiresAt": 1796445092187,
+                "availability": [
+                  "available"
+                ],
+                "text": null,
+                "recordIds": [
+                  "01M6MZKW9WRBRJ3R4HQJ2C45Y4"
+                ]
+              }
+            ]
+          }
+        },
+        "upgrade.oldRecordReadable.tool": {
+          "ok": true,
+          "actual": {
+            "ids": [
+              "01M6MZKWA60ZWH8JYKS5MP8TQF"
+            ]
+          }
+        },
+        "upgrade.oldDetailReadable.tool": {
+          "ok": true,
+          "actual": {
+            "details": [
+              {
+                "id": "01M6MZKWB3A49TQA6J9KG3B84N",
+                "detailKind": "tool_output",
+                "retentionClass": "conversation",
+                "expiresAt": 1796445092194,
+                "availability": [
+                  "available"
+                ],
+                "text": null,
+                "recordIds": [
+                  "01M6MZKWA60ZWH8JYKS5MP8TQF"
+                ]
+              }
+            ]
+          }
+        },
+        "upgrade.oldRecordReadable.doc": {
+          "ok": true,
+          "actual": {
+            "ids": [
+              "01M6MZKWADGY590Q3C5BWR8NS8"
+            ]
+          }
+        },
+        "upgrade.oldDetailReadable.doc": {
+          "ok": true,
+          "actual": {
+            "details": [
+              {
+                "id": "01M6MZKWB987GNB4R2T7Y3V01J",
+                "detailKind": "document_slice",
+                "retentionClass": "conversation",
+                "expiresAt": 1796445092201,
+                "availability": [
+                  "available"
+                ],
+                "text": null,
+                "recordIds": [
+                  "01M6MZKWADGY590Q3C5BWR8NS8"
+                ]
+              }
+            ]
+          }
+        },
+        "upgrade.oldRecordReadable.default": {
+          "ok": true,
+          "actual": {
+            "ids": [
+              "01M6MZKWAKWNBJQ1KFQJK5CFAZ"
+            ]
+          }
+        },
+        "upgrade.oldDetailReadable.default": {
+          "ok": true,
+          "actual": {
+            "details": [
+              {
+                "id": "01M6MZKWBF5GXFC7NRBY3N35K6",
+                "detailKind": "raw_chunk",
+                "retentionClass": "conversation",
+                "expiresAt": 1796445092207,
+                "availability": [
+                  "available"
+                ],
+                "text": null,
+                "recordIds": [
+                  "01M6MZKWAKWNBJQ1KFQJK5CFAZ"
+                ]
+              }
+            ]
+          }
+        },
+        "upgrade.detailKindsPreserved": {
+          "ok": true,
+          "actual": {
+            "kinds": [
+              "document_slice",
+              "raw_chunk",
+              "raw_chunk",
+              "tool_output"
+            ]
+          }
+        },
+        "upgrade.oldDetailRetentionPreserved": {
+          "ok": true,
+          "actual": {
+            "raw": "conversation",
+            "tool": "conversation",
+            "doc": "conversation",
+            "default": "conversation"
+          }
+        },
+        "upgrade.expand.raw": {
+          "ok": true,
+          "actual": {
+            "fragment": true,
+            "fragmentId": "mf_e58c7aaac4d74fe490c30283f00ea0a3",
+            "detailAvailable": true,
+            "detailKinds": [
+              "fact_object",
+              "raw_quote"
+            ],
+            "expanded": true,
+            "detailKind": "raw_chunk",
+            "text": "dfc0fab6265b36b3fd0aa41a",
+            "source": "capability",
+            "stale": false,
+            "warnings": []
+          }
+        },
+        "upgrade.expand.tool": {
+          "ok": true,
+          "informational": true,
+          "actual": {
+            "fragment": true,
+            "fragmentId": "mf_0963e28924e347d4a406d00691b880a7",
+            "detailAvailable": true,
+            "detailKinds": [
+              "fact_object",
+              "raw_quote"
+            ],
+            "expanded": true,
+            "detailKind": "raw_chunk",
+            "text": "db21a1e95c9e93b5befb8556",
+            "source": "capability",
+            "stale": false,
+            "warnings": []
+          }
+        },
+        "upgrade.expand.doc": {
+          "ok": true,
+          "informational": true,
+          "actual": {
+            "fragment": true,
+            "fragmentId": "mf_f1edf535eda848afb8578e3dca84538a",
+            "detailAvailable": true,
+            "detailKinds": [
+              "fact_object",
+              "raw_quote"
+            ],
+            "expanded": true,
+            "detailKind": "raw_chunk",
+            "text": "def1ad8250091eea7b3fe4c6",
+            "source": "capability",
+            "stale": false,
+            "warnings": []
+          }
+        },
+        "upgrade.expand.default": {
+          "ok": true,
+          "actual": {
+            "fragment": true,
+            "fragmentId": "mf_736718801b524eb087e8cbcc2e592a67",
+            "detailAvailable": true,
+            "detailKinds": [
+              "fact_object",
+              "raw_quote"
+            ],
+            "expanded": true,
+            "detailKind": "raw_chunk",
+            "text": "d5927aba3e19adadc52a2880",
+            "source": "capability",
+            "stale": false,
+            "warnings": []
+          }
+        },
+        "upgrade.oldCheckpointReadable": {
+          "ok": true,
+          "actual": {
+            "id": "01M6MZKWC4SDS8FA7YDJWTHXCK",
+            "revision": 1
+          }
+        },
+        "upgrade.oldSelfReadable": {
+          "ok": true,
+          "actual": {
+            "id": "01M6MZKWCAK958N7A8D5D83H6W",
+            "revision": 1
+          }
+        },
+        "upgrade.oldCompactReadable": {
+          "ok": true,
+          "actual": {
+            "id": "01M6MZKWBNY99Z4QNPRB1A8YF0"
+          }
+        },
+        "upgrade.sidecar.checkpoint": {
+          "ok": true,
+          "actual": {
+            "id": "01M6MZKWC4SDS8FA7YDJWTHXCK",
+            "revision": 1
+          }
+        },
+        "upgrade.sidecar.self": {
+          "ok": true,
+          "actual": {
+            "id": "01M6MZKWCAK958N7A8D5D83H6W",
+            "revision": 1
+          }
+        },
+        "upgrade.internalObjectsHiddenFromMcp": {
+          "ok": true,
+          "actual": {
+            "leaked": []
+          }
+        },
+        "upgrade.memoryGraphInternalHidden": {
+          "ok": true,
+          "actual": {
+            "blocked": true,
+            "error": "memory_graph 返回错误：{\"ok\":false,\"error\":{\"code\":\"E_INTERNAL\",\"message\":\"内部对象不可通过记忆图访问\"}}"
+          }
+        },
+        "upgrade.currentRecordCreated": {
+          "ok": true,
+          "actual": {
+            "id": "01M6MZKYBFHNXFXD0EV1PMEKJM"
+          }
+        },
+        "upgrade.currentDetailRetentionClasses": {
+          "ok": true,
+          "actual": {
+            "document_slice": {
+              "retentionClass": "document_slice",
+              "days": 90
+            },
+            "tool_output": {
+              "retentionClass": "tool_output",
+              "days": 7
+            },
+            "raw_chunk": {
+              "retentionClass": "conversation",
+              "days": 30
+            }
+          }
+        },
+        "upgrade.currentDetailRetentionWindows": {
+          "ok": true,
+          "actual": {
+            "document_slice": {
+              "retentionClass": "document_slice",
+              "days": 90
+            },
+            "tool_output": {
+              "retentionClass": "tool_output",
+              "days": 7
+            },
+            "raw_chunk": {
+              "retentionClass": "conversation",
+              "days": 30
+            }
+          }
+        },
+        "upgrade.currentInternalCreated": {
+          "ok": true,
+          "actual": {
+            "compact": "01M6MZKYCC8DTSYYS8DSHJGS07",
+            "checkpoint": "01M6MZKYCKZ7E1ZCV75BWNBK1Y",
+            "checkpointRevision": 2,
+            "self": "01M6MZKYCSTQFCGYHNEPCQ6WJK",
+            "selfRevision": 2
+          }
+        }
+      },
+      "objects": {
+        "recordUser": "01M6MZKW9WRBRJ3R4HQJ2C45Y4",
+        "recordTool": "01M6MZKWA60ZWH8JYKS5MP8TQF",
+        "recordDoc": "01M6MZKWADGY590Q3C5BWR8NS8",
+        "recordDefault": "01M6MZKWAKWNBJQ1KFQJK5CFAZ",
+        "detailRaw": "01M6MZKWAWXKZYMR54X0NHGCR6",
+        "detailTool": "01M6MZKWB3A49TQA6J9KG3B84N",
+        "detailDoc": "01M6MZKWB987GNB4R2T7Y3V01J",
+        "detailDefault": "01M6MZKWBF5GXFC7NRBY3N35K6",
+        "compactUser": "01M6MZKWBNY99Z4QNPRB1A8YF0",
+        "compactDefault": "01M6MZKWBVQZXR2KFV2ZP3QNAV",
+        "checkpoint": "01M6MZKWC4SDS8FA7YDJWTHXCK",
+        "checkpointThreadId": "thread-upgrade-20261105042956-efe5ecae",
+        "self": "01M6MZKWCAK958N7A8D5D83H6W",
+        "selfAgentId": "opencode",
+        "details": {
+          "user": [
+            {
+              "id": "01M6MZKWAWXKZYMR54X0NHGCR6",
+              "detailKind": "raw_chunk",
+              "retentionClass": "conversation",
+              "expiresAt": 1796445092187,
+              "availability": [
+                "available"
+              ],
+              "text": null,
+              "recordIds": [
+                "01M6MZKW9WRBRJ3R4HQJ2C45Y4"
+              ]
+            }
+          ],
+          "tool": [
+            {
+              "id": "01M6MZKWB3A49TQA6J9KG3B84N",
+              "detailKind": "tool_output",
+              "retentionClass": "conversation",
+              "expiresAt": 1796445092194,
+              "availability": [
+                "available"
+              ],
+              "text": null,
+              "recordIds": [
+                "01M6MZKWA60ZWH8JYKS5MP8TQF"
+              ]
+            }
+          ],
+          "doc": [
+            {
+              "id": "01M6MZKWB987GNB4R2T7Y3V01J",
+              "detailKind": "document_slice",
+              "retentionClass": "conversation",
+              "expiresAt": 1796445092201,
+              "availability": [
+                "available"
+              ],
+              "text": null,
+              "recordIds": [
+                "01M6MZKWADGY590Q3C5BWR8NS8"
+              ]
+            }
+          ],
+          "default": [
+            {
+              "id": "01M6MZKWBF5GXFC7NRBY3N35K6",
+              "detailKind": "raw_chunk",
+              "retentionClass": "conversation",
+              "expiresAt": 1796445092207,
+              "availability": [
+                "available"
+              ],
+              "text": null,
+              "recordIds": [
+                "01M6MZKWAKWNBJQ1KFQJK5CFAZ"
+              ]
+            }
+          ]
+        },
+        "recordCurrent": "01M6MZKYBFHNXFXD0EV1PMEKJM",
+        "detailCurrent": "01M6MZKYBRKXBMTDVQ330Q9Z3X",
+        "detailCurrentTool": "01M6MZKYBYEZN08AK0Y5NA0DW4",
+        "detailCurrentDoc": "01M6MZKYC33BYYN13CT994TR06",
+        "compactCurrent": "01M6MZKYCC8DTSYYS8DSHJGS07",
+        "checkpointV2": "01M6MZKYCKZ7E1ZCV75BWNBK1Y",
+        "checkpointRevision": 2,
+        "selfV2": "01M6MZKYCSTQFCGYHNEPCQ6WJK",
+        "selfRevision": 2
+      },
+      "snapshotBefore": {
+        "nodeCount": 12,
+        "eventCount": 20,
+        "stateHash": "1ae63b667e5162952a83dd2d04f175ab0d54878b697372fa2bee7e74ececf9ed",
+        "counts": {
+          "nodes": 12,
+          "memoryRecords": 4,
+          "compacts": 2,
+          "checkpoints": 1,
+          "selfRecords": 1,
+          "details": 4,
+          "detailBytes": 96
+        },
+        "file": {
+          "exists": true,
+          "bytes": 73,
+          "sha256": "ff065bb6b602b208674c7021c2bde093c4995ff4d3fe6c9179c6fe120f37542b",
+          "mtimeMs": 1793853091071.3367
+        }
+      },
+      "snapshotAfter": {
+        "nodeCount": 19,
+        "eventCount": 33,
+        "stateHash": "a2770229fa1593541fe5b325dace694f85f9b9a624cdf3aff755e421aea05b55",
+        "counts": {
+          "nodes": 19,
+          "memoryRecords": 5,
+          "compacts": 3,
+          "checkpoints": 2,
+          "selfRecords": 2,
+          "details": 7,
+          "detailBytes": 168
+        }
+      },
+      "fileAfterClose": {
+        "exists": true,
+        "bytes": 88719,
+        "sha256": "5fffee710772b19aebaa47cd77d06adb3656793a7c0841b9febe722a01501f76",
+        "mtimeMs": 1793853094299.3867
+      },
+      "sidecarAfterClose": {
+        "pid": 41993,
+        "pidAlive": false,
+        "discoveryPresent": false,
+        "state": null
+      }
+    },
+    "rollback": {
+      "ok": true,
+      "failedChecks": [],
+      "errors": [],
+      "buildSha": "e273d6a89223aa3b045285c7259f4ba7d7574179",
+      "packageVersion": "0.3.0",
+      "identity": {
+        "userId": "user",
+        "deviceId": "device-upgrade-rollback",
+        "cloudId": null,
+        "profileId": null,
+        "hostId": "h_d5535fbb872a7927"
+      },
+      "checks": {
+        "cli.memoryRuntime": {
+          "ok": true,
+          "actual": {
+            "ok": true,
+            "enabled": true,
+            "state": "ready",
+            "available": true,
+            "managed": false,
+            "runtimeVersion": "0.3.0",
+            "apiVersion": 1,
+            "installed": true
+          }
+        },
+        "cli.versionCommand": {
+          "ok": true,
+          "actual": {
+            "supported": false,
+            "output": "未知命令：--version"
+          },
+          "informational": true
+        },
+        "rollback.previousStageOk": {
+          "ok": true
+        },
+        "rollback.oldUserRecordReadable": {
+          "ok": true,
+          "actual": {
+            "ids": [
+              "01M6MZKW9WRBRJ3R4HQJ2C45Y4"
+            ]
+          }
+        },
+        "rollback.oldDefaultRecordReadable": {
+          "ok": true,
+          "actual": {
+            "ids": [
+              "01M6MZKWAKWNBJQ1KFQJK5CFAZ"
+            ]
+          }
+        },
+        "rollback.currentRecordReadable": {
+          "ok": true,
+          "actual": {
+            "ids": [
+              "01M6MZKYBFHNXFXD0EV1PMEKJM"
+            ]
+          }
+        },
+        "rollback.oldRecordReadable.user": {
+          "ok": true,
+          "actual": {
+            "ids": [
+              "01M6MZKW9WRBRJ3R4HQJ2C45Y4"
+            ]
+          }
+        },
+        "rollback.oldDetailReadable.user": {
+          "ok": true,
+          "actual": {
+            "details": [
+              {
+                "id": "01M6MZKWAWXKZYMR54X0NHGCR6",
+                "detailKind": "raw_chunk",
+                "retentionClass": "conversation",
+                "expiresAt": 1796445092187,
+                "availability": [
+                  "available"
+                ],
+                "text": null,
+                "recordIds": [
+                  "01M6MZKW9WRBRJ3R4HQJ2C45Y4"
+                ]
+              }
+            ]
+          }
+        },
+        "rollback.oldRecordReadable.tool": {
+          "ok": true,
+          "actual": {
+            "ids": [
+              "01M6MZKWA60ZWH8JYKS5MP8TQF"
+            ]
+          }
+        },
+        "rollback.oldDetailReadable.tool": {
+          "ok": true,
+          "actual": {
+            "details": [
+              {
+                "id": "01M6MZKWB3A49TQA6J9KG3B84N",
+                "detailKind": "tool_output",
+                "retentionClass": "conversation",
+                "expiresAt": 1796445092194,
+                "availability": [
+                  "available"
+                ],
+                "text": null,
+                "recordIds": [
+                  "01M6MZKWA60ZWH8JYKS5MP8TQF"
+                ]
+              }
+            ]
+          }
+        },
+        "rollback.oldRecordReadable.doc": {
+          "ok": true,
+          "actual": {
+            "ids": [
+              "01M6MZKWADGY590Q3C5BWR8NS8"
+            ]
+          }
+        },
+        "rollback.oldDetailReadable.doc": {
+          "ok": true,
+          "actual": {
+            "details": [
+              {
+                "id": "01M6MZKWB987GNB4R2T7Y3V01J",
+                "detailKind": "document_slice",
+                "retentionClass": "conversation",
+                "expiresAt": 1796445092201,
+                "availability": [
+                  "available"
+                ],
+                "text": null,
+                "recordIds": [
+                  "01M6MZKWADGY590Q3C5BWR8NS8"
+                ]
+              }
+            ]
+          }
+        },
+        "rollback.oldRecordReadable.default": {
+          "ok": true,
+          "actual": {
+            "ids": [
+              "01M6MZKWAKWNBJQ1KFQJK5CFAZ"
+            ]
+          }
+        },
+        "rollback.oldDetailReadable.default": {
+          "ok": true,
+          "actual": {
+            "details": [
+              {
+                "id": "01M6MZKWBF5GXFC7NRBY3N35K6",
+                "detailKind": "raw_chunk",
+                "retentionClass": "conversation",
+                "expiresAt": 1796445092207,
+                "availability": [
+                  "available"
+                ],
+                "text": null,
+                "recordIds": [
+                  "01M6MZKWAKWNBJQ1KFQJK5CFAZ"
+                ]
+              }
+            ]
+          }
+        },
+        "rollback.currentDetailsReadable": {
+          "ok": true,
+          "actual": {
+            "current": [
+              {
+                "id": "01M6MZKYC33BYYN13CT994TR06",
+                "detailKind": "document_slice",
+                "retentionClass": "document_slice",
+                "expiresAt": 1801629094275,
+                "availability": [
+                  "available"
+                ],
+                "text": null,
+                "recordIds": [
+                  "01M6MZKYBFHNXFXD0EV1PMEKJM"
+                ]
+              },
+              {
+                "id": "01M6MZKYBYEZN08AK0Y5NA0DW4",
+                "detailKind": "tool_output",
+                "retentionClass": "tool_output",
+                "expiresAt": 1794457894270,
+                "availability": [
+                  "available"
+                ],
+                "text": null,
+                "recordIds": [
+                  "01M6MZKYBFHNXFXD0EV1PMEKJM"
+                ]
+              },
+              {
+                "id": "01M6MZKYBRKXBMTDVQ330Q9Z3X",
+                "detailKind": "raw_chunk",
+                "retentionClass": "conversation",
+                "expiresAt": 1796445094263,
+                "availability": [
+                  "available"
+                ],
+                "text": null,
+                "recordIds": [
+                  "01M6MZKYBFHNXFXD0EV1PMEKJM"
+                ]
+              }
+            ]
+          }
+        },
+        "rollback.detailTextsIntact": {
+          "ok": true,
+          "actual": {
+            "raw": "dfc0fab6265b36b3fd0aa41a",
+            "tool": "db21a1e95c9e93b5befb8556",
+            "doc": "def1ad8250091eea7b3fe4c6"
+          }
+        },
+        "rollback.expand.raw": {
+          "ok": true,
+          "actual": {
+            "fragment": true,
+            "fragmentId": "mf_f2b3139d6d6543d7a98e8dc3060d2575",
+            "detailAvailable": true,
+            "detailKinds": [
+              "fact_object",
+              "raw_quote"
+            ],
+            "expanded": true,
+            "detailKind": "raw_chunk",
+            "text": "dfc0fab6265b36b3fd0aa41a",
+            "source": "capability",
+            "stale": false,
+            "warnings": []
+          }
+        },
+        "rollback.expand.tool": {
+          "ok": false,
+          "informational": true,
+          "actual": {
+            "fragment": true,
+            "fragmentId": "mf_c0a72366db3b4e88853e294051da07fe",
+            "detailAvailable": false,
+            "detailKinds": [
+              "fact_object"
+            ],
+            "expanded": false,
+            "detailKind": null,
+            "text": null,
+            "source": null,
+            "stale": null,
+            "warnings": [
+              "detail_pending_sync"
+            ]
+          }
+        },
+        "rollback.expand.doc": {
+          "ok": false,
+          "informational": true,
+          "actual": {
+            "fragment": true,
+            "fragmentId": "mf_5733f53273b74d668c74cfb4dd797691",
+            "detailAvailable": false,
+            "detailKinds": [
+              "fact_object"
+            ],
+            "expanded": false,
+            "detailKind": null,
+            "text": null,
+            "source": null,
+            "stale": null,
+            "warnings": [
+              "detail_pending_sync"
+            ]
+          }
+        },
+        "rollback.latestCheckpointReadable": {
+          "ok": true,
+          "actual": {
+            "id": "01M6MZKYCKZ7E1ZCV75BWNBK1Y",
+            "revision": 2
+          }
+        },
+        "rollback.oldCheckpointRevisionPresent": {
+          "ok": true,
+          "actual": {
+            "id": "01M6MZKWC4SDS8FA7YDJWTHXCK"
+          }
+        },
+        "rollback.oldSelfRevisionPresent": {
+          "ok": true,
+          "actual": {
+            "id": "01M6MZKWCAK958N7A8D5D83H6W"
+          }
+        },
+        "rollback.oldCompactReadable": {
+          "ok": true,
+          "actual": {
+            "id": "01M6MZKWBNY99Z4QNPRB1A8YF0"
+          }
+        },
+        "rollback.latestSelfReadable": {
+          "ok": true,
+          "actual": {
+            "id": "01M6MZKYCSTQFCGYHNEPCQ6WJK",
+            "revision": 2,
+            "expectedRevision": 2
+          }
+        },
+        "rollback.sidecar.checkpoint": {
+          "ok": true,
+          "actual": {
+            "id": "01M6MZKYCKZ7E1ZCV75BWNBK1Y",
+            "revision": 2
+          }
+        },
+        "rollback.sidecar.self": {
+          "ok": true,
+          "actual": {
+            "id": "01M6MZKYCSTQFCGYHNEPCQ6WJK",
+            "revision": 2
+          }
+        },
+        "rollback.currentInternalObjectsHiddenFromMcp": {
+          "ok": true,
+          "actual": {
+            "leaked": []
+          }
+        }
+      },
+      "objects": {},
+      "snapshotBefore": {
+        "nodeCount": 19,
+        "eventCount": 33,
+        "stateHash": "a2770229fa1593541fe5b325dace694f85f9b9a624cdf3aff755e421aea05b55",
+        "counts": {
+          "nodes": 19,
+          "memoryRecords": 5,
+          "compacts": 3,
+          "checkpoints": 2,
+          "selfRecords": 2,
+          "details": 7,
+          "detailBytes": 168
+        },
+        "file": {
+          "exists": true,
+          "bytes": 73,
+          "sha256": "ff065bb6b602b208674c7021c2bde093c4995ff4d3fe6c9179c6fe120f37542b",
+          "mtimeMs": 1793853091071.3367
+        }
+      },
+      "snapshotAfter": {
+        "nodeCount": 19,
+        "eventCount": 33,
+        "stateHash": "a2770229fa1593541fe5b325dace694f85f9b9a624cdf3aff755e421aea05b55",
+        "counts": {
+          "nodes": 19,
+          "memoryRecords": 5,
+          "compacts": 3,
+          "checkpoints": 2,
+          "selfRecords": 2,
+          "details": 7,
+          "detailBytes": 168
+        }
+      },
+      "fileAfterClose": {
+        "exists": true,
+        "bytes": 88719,
+        "sha256": "5fffee710772b19aebaa47cd77d06adb3656793a7c0841b9febe722a01501f76",
+        "mtimeMs": 1793853094299.3867
+      },
+      "sidecarAfterClose": {
+        "pid": 42085,
+        "pidAlive": false,
+        "discoveryPresent": false,
+        "state": null
+      }
+    }
+  },
+  "stageRuns": {
+    "seed": {
+      "status": 0,
+      "signal": null,
+      "elapsedMs": 1686,
+      "stderr": [
+        "[seed] OK"
+      ],
+      "error": null
+    },
+    "upgrade": {
+      "status": 0,
+      "signal": null,
+      "elapsedMs": 2052,
+      "stderr": [
+        "[upgrade] OK"
+      ],
+      "error": null
+    },
+    "rollback": {
+      "status": 0,
+      "signal": null,
+      "elapsedMs": 1911,
+      "stderr": [
+        "[rollback] OK"
+      ],
+      "error": null
+    }
+  },
+  "checks": [
+    {
+      "name": "seed.driver",
+      "ok": true,
+      "actual": {
+        "elapsedMs": 1686
+      }
+    },
+    {
+      "name": "upgrade.driver",
+      "ok": true,
+      "actual": {
+        "elapsedMs": 2052
+      }
+    },
+    {
+      "name": "rollback.driver",
+      "ok": true,
+      "actual": {
+        "elapsedMs": 1911
+      }
+    },
+    {
+      "name": "build.old.matchesRef",
+      "ok": true,
+      "actual": {
+        "expected": "e273d6a89223aa3b045285c7259f4ba7d7574179",
+        "actual": "e273d6a89223aa3b045285c7259f4ba7d7574179"
+      }
+    },
+    {
+      "name": "build.new.matchesRef",
+      "ok": true,
+      "actual": {
+        "expected": "0ce06f4f6ef9b99f47b168db43ab0edcae7a0b38",
+        "actual": "0ce06f4f6ef9b99f47b168db43ab0edcae7a0b38"
+      }
+    },
+    {
+      "name": "upgrade.oldDataReadable",
+      "ok": true
+    },
+    {
+      "name": "upgrade.publicMcpAndCli",
+      "ok": true
+    },
+    {
+      "name": "upgrade.internalHidden",
+      "ok": true
+    },
+    {
+      "name": "upgrade.checkpointSelfDetail",
+      "ok": true
+    },
+    {
+      "name": "rollback.oldAndCurrentDataReadable",
+      "ok": true
+    },
+    {
+      "name": "rollback.latestInternalReadable",
+      "ok": true
+    },
+    {
+      "name": "rollback.currentInternalHidden",
+      "ok": true
+    },
+    {
+      "name": "noMigrationRewrite",
+      "ok": true,
+      "actual": {
+        "seedToUpgradeNodes": true,
+        "seedToUpgradeEvents": true,
+        "upgradeToRollbackNodes": true,
+        "upgradeToRollbackEvents": true,
+        "rollbackNodesUnchanged": true,
+        "rollbackEventsUnchanged": true,
+        "upgradeToRollbackFile": true,
+        "rollbackDidNotRewriteFile": true
+      }
+    },
+    {
+      "name": "dataIntegrity.noMissingIds",
+      "ok": true,
+      "actual": {
+        "missing": []
+      }
+    },
+    {
+      "name": "compatibility.oldReadsCurrentInternal",
+      "ok": true,
+      "actual": {
+        "oldReadsCurrentCompact": true,
+        "oldReadsCurrentCheckpoint": true,
+        "oldReadsCurrentSelf": true
+      }
+    }
+  ],
+  "dataIntegrity": {
+    "allOriginalAndCurrentIdsPresentAfterRollback": true,
+    "missingIds": [],
+    "oldDetailTextsIntact": true,
+    "oldRecordsReadable": true,
+    "currentRecordReadable": true,
+    "currentDetailsReadable": true,
+    "oldCheckpointRevisionPresent": true,
+    "oldSelfRevisionPresent": true,
+    "latestCheckpointReadable": true,
+    "latestSelfReadable": true
+  },
+  "noMigrationRewrite": {
+    "seedToUpgradeNodes": true,
+    "upgradeToRollbackNodes": true,
+    "rollbackNodesUnchanged": true,
+    "seedToUpgradeEvents": true,
+    "upgradeToRollbackEvents": true,
+    "rollbackEventsUnchanged": true,
+    "upgradeToRollbackFile": true,
+    "rollbackDidNotRewriteFile": true
+  },
+  "internalVisibility": {
+    "upgradeOldInternalHidden": true,
+    "upgradeMemoryGraphBlocked": true,
+    "rollbackCurrentInternalHidden": true
+  },
+  "compatibility": {
+    "upgradeReadsOldCompact": true,
+    "upgradeReadsOldCheckpoint": true,
+    "upgradeReadsOldSelf": true,
+    "oldReadsCurrentCompact": true,
+    "oldReadsCurrentCheckpoint": true,
+    "oldReadsCurrentSelf": true,
+    "oldDetailRetentionClasses": {
+      "raw": "conversation",
+      "tool": "conversation",
+      "doc": "conversation",
+      "default": "conversation"
+    },
+    "oldDetailRetentionDays": {
+      "raw": 30,
+      "tool": 30,
+      "doc": 30,
+      "default": 30
+    },
+    "upgradeExpandRaw": true,
+    "upgradeExpandDefault": true,
+    "currentExpandTool": true,
+    "currentExpandDoc": true,
+    "oldRollbackExpandRaw": true,
+    "oldRollbackExpandTool": false,
+    "oldRollbackExpandDoc": false
+  },
+  "identities": {
+    "deviceId": "device-upgrade-rollback",
+    "userId": "user",
+    "cloudId": null,
+    "profileId": null,
+    "hostId": "h_d5535fbb872a7927"
+  },
+  "objectIds": {
+    "recordUser": "01M6MZKW9WRBRJ3R4HQJ2C45Y4",
+    "recordTool": "01M6MZKWA60ZWH8JYKS5MP8TQF",
+    "recordDoc": "01M6MZKWADGY590Q3C5BWR8NS8",
+    "recordDefault": "01M6MZKWAKWNBJQ1KFQJK5CFAZ",
+    "detailRaw": "01M6MZKWAWXKZYMR54X0NHGCR6",
+    "detailTool": "01M6MZKWB3A49TQA6J9KG3B84N",
+    "detailDoc": "01M6MZKWB987GNB4R2T7Y3V01J",
+    "detailDefault": "01M6MZKWBF5GXFC7NRBY3N35K6",
+    "compactUser": "01M6MZKWBNY99Z4QNPRB1A8YF0",
+    "compactDefault": "01M6MZKWBVQZXR2KFV2ZP3QNAV",
+    "checkpoint": "01M6MZKWC4SDS8FA7YDJWTHXCK",
+    "self": "01M6MZKWCAK958N7A8D5D83H6W",
+    "recordCurrent": "01M6MZKYBFHNXFXD0EV1PMEKJM",
+    "detailCurrent": "01M6MZKYBRKXBMTDVQ330Q9Z3X",
+    "detailCurrentTool": "01M6MZKYBYEZN08AK0Y5NA0DW4",
+    "detailCurrentDoc": "01M6MZKYC33BYYN13CT994TR06",
+    "compactCurrent": "01M6MZKYCC8DTSYYS8DSHJGS07",
+    "checkpointV2": "01M6MZKYCKZ7E1ZCV75BWNBK1Y",
+    "selfV2": "01M6MZKYCSTQFCGYHNEPCQ6WJK"
+  },
+  "snapshots": {
+    "seed": {
+      "at": "2026-11-05T04:31:32.252Z",
+      "status": {
+        "deviceId": "device-upgrade-rollback",
+        "nodeCount": 12,
+        "edgeCount": 0,
+        "stateHash": "1ae63b667e5162952a83dd2d04f175ab0d54878b697372fa2bee7e74ececf9ed",
+        "stateHashByNamespace": {
+          "agent:opencode": "70ff94a1f5301a7402b86232792b4020ab4d564ac7f171c677d6b065c35d30a7",
+          "default": "c47ccec5cab994c9b349179e93dfffb1d325ebf845cb93e25a53ee5a3a1e1f9f",
+          "user": "58a9a57035be6d4b21b4998ed1d202f73d9adaed0c947764d80af85b1aeff36c"
+        },
+        "pendingEventCount": 20
+      },
+      "identity": {
+        "userId": "user",
+        "deviceId": "device-upgrade-rollback",
+        "cloudId": null,
+        "profileId": null,
+        "hostId": "h_d5535fbb872a7927"
+      },
+      "counts": {
+        "nodes": 12,
+        "memoryRecords": 4,
+        "compacts": 2,
+        "checkpoints": 1,
+        "selfRecords": 1,
+        "details": 4,
+        "detailBytes": 96
+      },
+      "nodes": [
+        {
+          "id": "01M6MZKW9WRBRJ3R4HQJ2C45Y4",
+          "type": "fact",
+          "namespace": "user",
+          "createdAt": 1793853092156,
+          "updatedAt": 1793853092156,
+          "deletedAt": null,
+          "contentHash": "7254e776337644e5b2df775ff7079884870aec73cedd4cc756e02458df4085c4",
+          "internalKind": null,
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWA60ZWH8JYKS5MP8TQF",
+          "type": "fact",
+          "namespace": "user",
+          "createdAt": 1793853092166,
+          "updatedAt": 1793853092166,
+          "deletedAt": null,
+          "contentHash": "b2a8bcd2e6ab8681f189a423cab0c84492fb8184fcf3b557bd8dbf4413f8fbc6",
+          "internalKind": null,
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWADGY590Q3C5BWR8NS8",
+          "type": "fact",
+          "namespace": "user",
+          "createdAt": 1793853092173,
+          "updatedAt": 1793853092173,
+          "deletedAt": null,
+          "contentHash": "d2a02d01a4b5e0907fe0312ba8c70d0b89cb169ac8df86771424eec7b91d2dde",
+          "internalKind": null,
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWAKWNBJQ1KFQJK5CFAZ",
+          "type": "fact",
+          "namespace": "default",
+          "createdAt": 1793853092179,
+          "updatedAt": 1793853092179,
+          "deletedAt": null,
+          "contentHash": "dae56650fa7fc05fc2a6f7d28af3107294b162d32b416aa24b53b0857880f5a6",
+          "internalKind": null,
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWAWXKZYMR54X0NHGCR6",
+          "type": "detail_record",
+          "namespace": "user",
+          "createdAt": 1793853092188,
+          "updatedAt": 1793853092190,
+          "deletedAt": null,
+          "contentHash": "05d37b519fdf6852aff60f2a425a65114f88d6078dab4011b756af21f4caa4eb",
+          "internalKind": "detail_record",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWB3A49TQA6J9KG3B84N",
+          "type": "detail_record",
+          "namespace": "user",
+          "createdAt": 1793853092195,
+          "updatedAt": 1793853092196,
+          "deletedAt": null,
+          "contentHash": "5aae55060ab68165ef6272006839d2ffe997849fb468ef8b79f73009fee204a9",
+          "internalKind": "detail_record",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWB987GNB4R2T7Y3V01J",
+          "type": "detail_record",
+          "namespace": "user",
+          "createdAt": 1793853092201,
+          "updatedAt": 1793853092202,
+          "deletedAt": null,
+          "contentHash": "6af7e0e7bde323b4bb38fa941e385b9de952fcae4388431b0f2c27498b6bee6e",
+          "internalKind": "detail_record",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWBF5GXFC7NRBY3N35K6",
+          "type": "detail_record",
+          "namespace": "default",
+          "createdAt": 1793853092207,
+          "updatedAt": 1793853092208,
+          "deletedAt": null,
+          "contentHash": "68d1f1a015f15963047c5c67ff1592625c79d45742226674ebcf9d46aab8d6ac",
+          "internalKind": "detail_record",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWBNY99Z4QNPRB1A8YF0",
+          "type": "compact",
+          "namespace": "user",
+          "createdAt": 1793853092213,
+          "updatedAt": 1793853092214,
+          "deletedAt": null,
+          "contentHash": "961455d036e698bab1fd9319989aefcacfd3b06bf49e1511c139c6b697039d7a",
+          "internalKind": "compact",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWBVQZXR2KFV2ZP3QNAV",
+          "type": "compact",
+          "namespace": "default",
+          "createdAt": 1793853092219,
+          "updatedAt": 1793853092220,
+          "deletedAt": null,
+          "contentHash": "ba44206f156a3ac6bbbf41e3d392daed77362bfe0eee5a3379eba10df827a570",
+          "internalKind": "compact",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWC4SDS8FA7YDJWTHXCK",
+          "type": "context_checkpoint",
+          "namespace": "default",
+          "createdAt": 1793853092228,
+          "updatedAt": 1793853092229,
+          "deletedAt": null,
+          "contentHash": "7504957f2faf690f7607d5a7195ac2408182a96db54a1d56c330706e56bdbe24",
+          "internalKind": "context_checkpoint",
+          "internalRevision": 1
+        },
+        {
+          "id": "01M6MZKWCAK958N7A8D5D83H6W",
+          "type": "self_record",
+          "namespace": "agent:opencode",
+          "createdAt": 1793853092234,
+          "updatedAt": 1793853092235,
+          "deletedAt": null,
+          "contentHash": "fec4b5f6ed0fd7fa67025461b705a2d0c93fc5935d39d352f0d8f04c636d21d1",
+          "internalKind": "self_record",
+          "internalRevision": 1
+        }
+      ],
+      "events": [
+        {
+          "id": "sha256:90f48c2a63e7e83c7b0505f0d76d71784aa9971066d70fb33733f11a47288a9f",
+          "type": "node_created",
+          "timestamp": 1793853092157,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "69108dab0da659e590523c4a3dccb721318e0cee8f1afe1639116b72c34b3acd"
+        },
+        {
+          "id": "sha256:226eddf314a39aec03034e2b011b8df35c09a1d2c5cc3f97a367439f9fbf7b9d",
+          "type": "node_created",
+          "timestamp": 1793853092166,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "82f2933666f6e1cb5ffed6313e8dc770e12929115ce461bc77ed07a67fdbe485"
+        },
+        {
+          "id": "sha256:0b4eadef2900117e71d56300750d6c3b7a3a9325514afc63892ee293e418efea",
+          "type": "node_created",
+          "timestamp": 1793853092173,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "a3c38a998d056a460aa3359184647bc5949f228c910a87d2663a67859b4176a1"
+        },
+        {
+          "id": "sha256:0f99e381972c27233bee62e92acb757315a4d0649c939dfbd46f39a58e966a45",
+          "type": "node_created",
+          "timestamp": 1793853092179,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "51c6d48c1a368ba266670fde3a55126c30981ecc6559ff84e100d85ee7577bcb"
+        },
+        {
+          "id": "sha256:dbedb8594b9276760d14c83fbf221a3ad37c402e05c6903101248657623d5b04",
+          "type": "node_created",
+          "timestamp": 1793853092188,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "799139bfd683ba0e52c6256b71250e45217b492609489d4abba777be8311801f"
+        },
+        {
+          "id": "sha256:e84eb2332e847f2788055fa287514258648a07a77cae3990952c7fee6a8c58a9",
+          "type": "node_updated",
+          "timestamp": 1793853092190,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "b591cd8a02d8543dc231e4be0aaa863cbd513e5891c6434bef0829dc1ac78827"
+        },
+        {
+          "id": "sha256:5c199354e3efb0e3c54a2eec6d6ea95eb679a65d51fc18fa3db7b9a2d3e44dd6",
+          "type": "node_created",
+          "timestamp": 1793853092195,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "9f7f880e2d51c6a3fd7bbfad40e665d9fe4c950d38ff093692d992b7da23edfc"
+        },
+        {
+          "id": "sha256:38326147579f8f6585b177c1763aec6a2baa79a0da76a859027033d80606d683",
+          "type": "node_updated",
+          "timestamp": 1793853092196,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "8c0ba60eeab347dc1e2522403ecfebdddc7aeb5f05f357dae8e4ea887323ed0d"
+        },
+        {
+          "id": "sha256:3221523e49f3d639b54a2d9bd6fcb4aeb6b2664b8382ecf5d159e2975449fea2",
+          "type": "node_created",
+          "timestamp": 1793853092201,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "56ab64077e0967cf0b8a5a67b67c8c32f3d58b6c2c0963e5467181fc0601211f"
+        },
+        {
+          "id": "sha256:36b30bd0e73483a219dc5672fc64d10559a6d41e9cb022271ef8afd4a2933d81",
+          "type": "node_updated",
+          "timestamp": 1793853092202,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "187522f1401c4b9aead0c1bb4e92c7cfcdea84dabe83a5c70e23f4ffe0753aea"
+        },
+        {
+          "id": "sha256:087f357bd73810ce59b842784a7b79c562fc48e7539b8b9b495182be28c6f1ee",
+          "type": "node_created",
+          "timestamp": 1793853092207,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "516469341bf4c0193215f858b5a0467ee601003e56037819218cb347f714b441"
+        },
+        {
+          "id": "sha256:246557f993d6681cd5ab3a50103e5201445477d1b430afb5f8962c640ee9bc1e",
+          "type": "node_updated",
+          "timestamp": 1793853092208,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "981c7276946887b8f6f2c04f88a26310dc0e7658a10766b0fb14c75da3a0b8b3"
+        },
+        {
+          "id": "sha256:a7096afae01169d363e9d45dce77d770b683d7d4881b8afc6955a292f9886148",
+          "type": "node_created",
+          "timestamp": 1793853092213,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "3ea4acd9a8d057193c393b3dc8dc5e33fb8794d0f7d67954bcb42d90bca67177"
+        },
+        {
+          "id": "sha256:fa01b8622942f6f6109bf703a4dd0eea231447c559b7603a3e9822281430e8ac",
+          "type": "node_updated",
+          "timestamp": 1793853092214,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "70d5090a0db893aa3d681967dda45f0407d85e80a973c824b1ad79fe444d3991"
+        },
+        {
+          "id": "sha256:781d02cb41ac70207f9efd4ed82184fd322433bcaa53a1fcf848b8232b49177d",
+          "type": "node_created",
+          "timestamp": 1793853092219,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "355ccc5b7be845f097ab2cfda7116065373f321f467b83f78125ac2996002d8d"
+        },
+        {
+          "id": "sha256:0f496198c2fc817ceb458377c62aa65d7b31701e8bd73b8f246b192bba5d5da7",
+          "type": "node_updated",
+          "timestamp": 1793853092220,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "2f8ee021e0d62e2055dc8015dc7b058fae5ca52f77ec0bb34c9e7cc16254c21d"
+        },
+        {
+          "id": "sha256:d3ef0c4d220e934661295dd4a35800e528c80dc832e0b5f0de1ee86f9e7b2ee0",
+          "type": "node_created",
+          "timestamp": 1793853092228,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "07638f446dd8408710d825dbb7287d697b6691805b17f50630d1cde66b17173d"
+        },
+        {
+          "id": "sha256:679a7c65e483e25f71393ef60effdaf17597cb19ac590e67a9415ec4a0224437",
+          "type": "node_updated",
+          "timestamp": 1793853092229,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "74223feebaf6df3a5b5e25befe94d236418bc3c587fa4763976d5a579aca1b91"
+        },
+        {
+          "id": "sha256:9d38542f55304c68b6c79a59359821b62c99c7e34c58af1169385515ae27bb6e",
+          "type": "node_created",
+          "timestamp": 1793853092234,
+          "namespace": "agent:opencode",
+          "author": "device-upgrade-rollback",
+          "dataHash": "cfa27cb5d21b804ed0a503f0c89964bcf262dd1eaf3793d8e54fa87a68689087"
+        },
+        {
+          "id": "sha256:6257a5e9fc023ab4773ff8dc5146176e7691ec5b52b7967f3ad89c606c01339a",
+          "type": "node_updated",
+          "timestamp": 1793853092235,
+          "namespace": "agent:opencode",
+          "author": "device-upgrade-rollback",
+          "dataHash": "158c107ede25afbbd660cbd9b9b664cdc139781b92efbe306b9023b5e8462891"
+        }
+      ],
+      "sidecarConfig": {
+        "exists": true,
+        "bytes": 73,
+        "sha256": "ff065bb6b602b208674c7021c2bde093c4995ff4d3fe6c9179c6fe120f37542b",
+        "mtimeMs": 1793853091071.3367
+      }
+    },
+    "upgradeBefore": {
+      "at": "2026-11-05T04:31:33.861Z",
+      "status": {
+        "deviceId": "device-upgrade-rollback",
+        "nodeCount": 12,
+        "edgeCount": 0,
+        "stateHash": "1ae63b667e5162952a83dd2d04f175ab0d54878b697372fa2bee7e74ececf9ed",
+        "stateHashByNamespace": {
+          "agent:opencode": "70ff94a1f5301a7402b86232792b4020ab4d564ac7f171c677d6b065c35d30a7",
+          "default": "c47ccec5cab994c9b349179e93dfffb1d325ebf845cb93e25a53ee5a3a1e1f9f",
+          "user": "58a9a57035be6d4b21b4998ed1d202f73d9adaed0c947764d80af85b1aeff36c"
+        },
+        "pendingEventCount": 20
+      },
+      "identity": {
+        "userId": "user",
+        "deviceId": "device-upgrade-rollback",
+        "cloudId": null,
+        "profileId": null,
+        "hostId": "h_d5535fbb872a7927"
+      },
+      "counts": {
+        "nodes": 12,
+        "memoryRecords": 4,
+        "compacts": 2,
+        "checkpoints": 1,
+        "selfRecords": 1,
+        "details": 4,
+        "detailBytes": 96
+      },
+      "nodes": [
+        {
+          "id": "01M6MZKW9WRBRJ3R4HQJ2C45Y4",
+          "type": "fact",
+          "namespace": "user",
+          "createdAt": 1793853092156,
+          "updatedAt": 1793853092156,
+          "deletedAt": null,
+          "contentHash": "7254e776337644e5b2df775ff7079884870aec73cedd4cc756e02458df4085c4",
+          "internalKind": null,
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWA60ZWH8JYKS5MP8TQF",
+          "type": "fact",
+          "namespace": "user",
+          "createdAt": 1793853092166,
+          "updatedAt": 1793853092166,
+          "deletedAt": null,
+          "contentHash": "b2a8bcd2e6ab8681f189a423cab0c84492fb8184fcf3b557bd8dbf4413f8fbc6",
+          "internalKind": null,
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWADGY590Q3C5BWR8NS8",
+          "type": "fact",
+          "namespace": "user",
+          "createdAt": 1793853092173,
+          "updatedAt": 1793853092173,
+          "deletedAt": null,
+          "contentHash": "d2a02d01a4b5e0907fe0312ba8c70d0b89cb169ac8df86771424eec7b91d2dde",
+          "internalKind": null,
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWAKWNBJQ1KFQJK5CFAZ",
+          "type": "fact",
+          "namespace": "default",
+          "createdAt": 1793853092179,
+          "updatedAt": 1793853092179,
+          "deletedAt": null,
+          "contentHash": "dae56650fa7fc05fc2a6f7d28af3107294b162d32b416aa24b53b0857880f5a6",
+          "internalKind": null,
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWAWXKZYMR54X0NHGCR6",
+          "type": "detail_record",
+          "namespace": "user",
+          "createdAt": 1793853092188,
+          "updatedAt": 1793853092190,
+          "deletedAt": null,
+          "contentHash": "05d37b519fdf6852aff60f2a425a65114f88d6078dab4011b756af21f4caa4eb",
+          "internalKind": "detail_record",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWB3A49TQA6J9KG3B84N",
+          "type": "detail_record",
+          "namespace": "user",
+          "createdAt": 1793853092195,
+          "updatedAt": 1793853092196,
+          "deletedAt": null,
+          "contentHash": "5aae55060ab68165ef6272006839d2ffe997849fb468ef8b79f73009fee204a9",
+          "internalKind": "detail_record",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWB987GNB4R2T7Y3V01J",
+          "type": "detail_record",
+          "namespace": "user",
+          "createdAt": 1793853092201,
+          "updatedAt": 1793853092202,
+          "deletedAt": null,
+          "contentHash": "6af7e0e7bde323b4bb38fa941e385b9de952fcae4388431b0f2c27498b6bee6e",
+          "internalKind": "detail_record",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWBF5GXFC7NRBY3N35K6",
+          "type": "detail_record",
+          "namespace": "default",
+          "createdAt": 1793853092207,
+          "updatedAt": 1793853092208,
+          "deletedAt": null,
+          "contentHash": "68d1f1a015f15963047c5c67ff1592625c79d45742226674ebcf9d46aab8d6ac",
+          "internalKind": "detail_record",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWBNY99Z4QNPRB1A8YF0",
+          "type": "compact",
+          "namespace": "user",
+          "createdAt": 1793853092213,
+          "updatedAt": 1793853092214,
+          "deletedAt": null,
+          "contentHash": "961455d036e698bab1fd9319989aefcacfd3b06bf49e1511c139c6b697039d7a",
+          "internalKind": "compact",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWBVQZXR2KFV2ZP3QNAV",
+          "type": "compact",
+          "namespace": "default",
+          "createdAt": 1793853092219,
+          "updatedAt": 1793853092220,
+          "deletedAt": null,
+          "contentHash": "ba44206f156a3ac6bbbf41e3d392daed77362bfe0eee5a3379eba10df827a570",
+          "internalKind": "compact",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWC4SDS8FA7YDJWTHXCK",
+          "type": "context_checkpoint",
+          "namespace": "default",
+          "createdAt": 1793853092228,
+          "updatedAt": 1793853092229,
+          "deletedAt": null,
+          "contentHash": "7504957f2faf690f7607d5a7195ac2408182a96db54a1d56c330706e56bdbe24",
+          "internalKind": "context_checkpoint",
+          "internalRevision": 1
+        },
+        {
+          "id": "01M6MZKWCAK958N7A8D5D83H6W",
+          "type": "self_record",
+          "namespace": "agent:opencode",
+          "createdAt": 1793853092234,
+          "updatedAt": 1793853092235,
+          "deletedAt": null,
+          "contentHash": "fec4b5f6ed0fd7fa67025461b705a2d0c93fc5935d39d352f0d8f04c636d21d1",
+          "internalKind": "self_record",
+          "internalRevision": 1
+        }
+      ],
+      "events": [
+        {
+          "id": "sha256:90f48c2a63e7e83c7b0505f0d76d71784aa9971066d70fb33733f11a47288a9f",
+          "type": "node_created",
+          "timestamp": 1793853092157,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "69108dab0da659e590523c4a3dccb721318e0cee8f1afe1639116b72c34b3acd"
+        },
+        {
+          "id": "sha256:226eddf314a39aec03034e2b011b8df35c09a1d2c5cc3f97a367439f9fbf7b9d",
+          "type": "node_created",
+          "timestamp": 1793853092166,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "82f2933666f6e1cb5ffed6313e8dc770e12929115ce461bc77ed07a67fdbe485"
+        },
+        {
+          "id": "sha256:0b4eadef2900117e71d56300750d6c3b7a3a9325514afc63892ee293e418efea",
+          "type": "node_created",
+          "timestamp": 1793853092173,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "a3c38a998d056a460aa3359184647bc5949f228c910a87d2663a67859b4176a1"
+        },
+        {
+          "id": "sha256:0f99e381972c27233bee62e92acb757315a4d0649c939dfbd46f39a58e966a45",
+          "type": "node_created",
+          "timestamp": 1793853092179,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "51c6d48c1a368ba266670fde3a55126c30981ecc6559ff84e100d85ee7577bcb"
+        },
+        {
+          "id": "sha256:dbedb8594b9276760d14c83fbf221a3ad37c402e05c6903101248657623d5b04",
+          "type": "node_created",
+          "timestamp": 1793853092188,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "799139bfd683ba0e52c6256b71250e45217b492609489d4abba777be8311801f"
+        },
+        {
+          "id": "sha256:e84eb2332e847f2788055fa287514258648a07a77cae3990952c7fee6a8c58a9",
+          "type": "node_updated",
+          "timestamp": 1793853092190,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "b591cd8a02d8543dc231e4be0aaa863cbd513e5891c6434bef0829dc1ac78827"
+        },
+        {
+          "id": "sha256:5c199354e3efb0e3c54a2eec6d6ea95eb679a65d51fc18fa3db7b9a2d3e44dd6",
+          "type": "node_created",
+          "timestamp": 1793853092195,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "9f7f880e2d51c6a3fd7bbfad40e665d9fe4c950d38ff093692d992b7da23edfc"
+        },
+        {
+          "id": "sha256:38326147579f8f6585b177c1763aec6a2baa79a0da76a859027033d80606d683",
+          "type": "node_updated",
+          "timestamp": 1793853092196,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "8c0ba60eeab347dc1e2522403ecfebdddc7aeb5f05f357dae8e4ea887323ed0d"
+        },
+        {
+          "id": "sha256:3221523e49f3d639b54a2d9bd6fcb4aeb6b2664b8382ecf5d159e2975449fea2",
+          "type": "node_created",
+          "timestamp": 1793853092201,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "56ab64077e0967cf0b8a5a67b67c8c32f3d58b6c2c0963e5467181fc0601211f"
+        },
+        {
+          "id": "sha256:36b30bd0e73483a219dc5672fc64d10559a6d41e9cb022271ef8afd4a2933d81",
+          "type": "node_updated",
+          "timestamp": 1793853092202,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "187522f1401c4b9aead0c1bb4e92c7cfcdea84dabe83a5c70e23f4ffe0753aea"
+        },
+        {
+          "id": "sha256:087f357bd73810ce59b842784a7b79c562fc48e7539b8b9b495182be28c6f1ee",
+          "type": "node_created",
+          "timestamp": 1793853092207,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "516469341bf4c0193215f858b5a0467ee601003e56037819218cb347f714b441"
+        },
+        {
+          "id": "sha256:246557f993d6681cd5ab3a50103e5201445477d1b430afb5f8962c640ee9bc1e",
+          "type": "node_updated",
+          "timestamp": 1793853092208,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "981c7276946887b8f6f2c04f88a26310dc0e7658a10766b0fb14c75da3a0b8b3"
+        },
+        {
+          "id": "sha256:a7096afae01169d363e9d45dce77d770b683d7d4881b8afc6955a292f9886148",
+          "type": "node_created",
+          "timestamp": 1793853092213,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "3ea4acd9a8d057193c393b3dc8dc5e33fb8794d0f7d67954bcb42d90bca67177"
+        },
+        {
+          "id": "sha256:fa01b8622942f6f6109bf703a4dd0eea231447c559b7603a3e9822281430e8ac",
+          "type": "node_updated",
+          "timestamp": 1793853092214,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "70d5090a0db893aa3d681967dda45f0407d85e80a973c824b1ad79fe444d3991"
+        },
+        {
+          "id": "sha256:781d02cb41ac70207f9efd4ed82184fd322433bcaa53a1fcf848b8232b49177d",
+          "type": "node_created",
+          "timestamp": 1793853092219,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "355ccc5b7be845f097ab2cfda7116065373f321f467b83f78125ac2996002d8d"
+        },
+        {
+          "id": "sha256:0f496198c2fc817ceb458377c62aa65d7b31701e8bd73b8f246b192bba5d5da7",
+          "type": "node_updated",
+          "timestamp": 1793853092220,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "2f8ee021e0d62e2055dc8015dc7b058fae5ca52f77ec0bb34c9e7cc16254c21d"
+        },
+        {
+          "id": "sha256:d3ef0c4d220e934661295dd4a35800e528c80dc832e0b5f0de1ee86f9e7b2ee0",
+          "type": "node_created",
+          "timestamp": 1793853092228,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "07638f446dd8408710d825dbb7287d697b6691805b17f50630d1cde66b17173d"
+        },
+        {
+          "id": "sha256:679a7c65e483e25f71393ef60effdaf17597cb19ac590e67a9415ec4a0224437",
+          "type": "node_updated",
+          "timestamp": 1793853092229,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "74223feebaf6df3a5b5e25befe94d236418bc3c587fa4763976d5a579aca1b91"
+        },
+        {
+          "id": "sha256:9d38542f55304c68b6c79a59359821b62c99c7e34c58af1169385515ae27bb6e",
+          "type": "node_created",
+          "timestamp": 1793853092234,
+          "namespace": "agent:opencode",
+          "author": "device-upgrade-rollback",
+          "dataHash": "cfa27cb5d21b804ed0a503f0c89964bcf262dd1eaf3793d8e54fa87a68689087"
+        },
+        {
+          "id": "sha256:6257a5e9fc023ab4773ff8dc5146176e7691ec5b52b7967f3ad89c606c01339a",
+          "type": "node_updated",
+          "timestamp": 1793853092235,
+          "namespace": "agent:opencode",
+          "author": "device-upgrade-rollback",
+          "dataHash": "158c107ede25afbbd660cbd9b9b664cdc139781b92efbe306b9023b5e8462891"
+        }
+      ],
+      "sidecarConfig": {
+        "exists": true,
+        "bytes": 73,
+        "sha256": "ff065bb6b602b208674c7021c2bde093c4995ff4d3fe6c9179c6fe120f37542b",
+        "mtimeMs": 1793853091071.3367
+      }
+    },
+    "upgradeAfter": {
+      "at": "2026-11-05T04:31:34.304Z",
+      "status": {
+        "deviceId": "device-upgrade-rollback",
+        "nodeCount": 19,
+        "edgeCount": 0,
+        "stateHash": "a2770229fa1593541fe5b325dace694f85f9b9a624cdf3aff755e421aea05b55",
+        "stateHashByNamespace": {
+          "agent:opencode": "95671f6cf2371531c32fd68c09aad917bfccbe0261b78e28b93cf8fcf220b1cd",
+          "default": "c59a244417e9a66c524a86dae2a8c3227b2707bf14715194f83df703b51c5229",
+          "user": "4ce1f4582420c6ee68d80e7e4a4bd3b1cce8cc9bb730b1ce951459090ae4cae3"
+        },
+        "pendingEventCount": 33
+      },
+      "identity": {
+        "userId": "user",
+        "deviceId": "device-upgrade-rollback",
+        "cloudId": null,
+        "profileId": null,
+        "hostId": "h_d5535fbb872a7927"
+      },
+      "counts": {
+        "nodes": 19,
+        "memoryRecords": 5,
+        "compacts": 3,
+        "checkpoints": 2,
+        "selfRecords": 2,
+        "details": 7,
+        "detailBytes": 168
+      },
+      "nodes": [
+        {
+          "id": "01M6MZKW9WRBRJ3R4HQJ2C45Y4",
+          "type": "fact",
+          "namespace": "user",
+          "createdAt": 1793853092156,
+          "updatedAt": 1793853092156,
+          "deletedAt": null,
+          "contentHash": "7254e776337644e5b2df775ff7079884870aec73cedd4cc756e02458df4085c4",
+          "internalKind": null,
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWA60ZWH8JYKS5MP8TQF",
+          "type": "fact",
+          "namespace": "user",
+          "createdAt": 1793853092166,
+          "updatedAt": 1793853092166,
+          "deletedAt": null,
+          "contentHash": "b2a8bcd2e6ab8681f189a423cab0c84492fb8184fcf3b557bd8dbf4413f8fbc6",
+          "internalKind": null,
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWADGY590Q3C5BWR8NS8",
+          "type": "fact",
+          "namespace": "user",
+          "createdAt": 1793853092173,
+          "updatedAt": 1793853092173,
+          "deletedAt": null,
+          "contentHash": "d2a02d01a4b5e0907fe0312ba8c70d0b89cb169ac8df86771424eec7b91d2dde",
+          "internalKind": null,
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWAKWNBJQ1KFQJK5CFAZ",
+          "type": "fact",
+          "namespace": "default",
+          "createdAt": 1793853092179,
+          "updatedAt": 1793853092179,
+          "deletedAt": null,
+          "contentHash": "dae56650fa7fc05fc2a6f7d28af3107294b162d32b416aa24b53b0857880f5a6",
+          "internalKind": null,
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWAWXKZYMR54X0NHGCR6",
+          "type": "detail_record",
+          "namespace": "user",
+          "createdAt": 1793853092188,
+          "updatedAt": 1793853092190,
+          "deletedAt": null,
+          "contentHash": "05d37b519fdf6852aff60f2a425a65114f88d6078dab4011b756af21f4caa4eb",
+          "internalKind": "detail_record",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWB3A49TQA6J9KG3B84N",
+          "type": "detail_record",
+          "namespace": "user",
+          "createdAt": 1793853092195,
+          "updatedAt": 1793853092196,
+          "deletedAt": null,
+          "contentHash": "5aae55060ab68165ef6272006839d2ffe997849fb468ef8b79f73009fee204a9",
+          "internalKind": "detail_record",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWB987GNB4R2T7Y3V01J",
+          "type": "detail_record",
+          "namespace": "user",
+          "createdAt": 1793853092201,
+          "updatedAt": 1793853092202,
+          "deletedAt": null,
+          "contentHash": "6af7e0e7bde323b4bb38fa941e385b9de952fcae4388431b0f2c27498b6bee6e",
+          "internalKind": "detail_record",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWBF5GXFC7NRBY3N35K6",
+          "type": "detail_record",
+          "namespace": "default",
+          "createdAt": 1793853092207,
+          "updatedAt": 1793853092208,
+          "deletedAt": null,
+          "contentHash": "68d1f1a015f15963047c5c67ff1592625c79d45742226674ebcf9d46aab8d6ac",
+          "internalKind": "detail_record",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWBNY99Z4QNPRB1A8YF0",
+          "type": "compact",
+          "namespace": "user",
+          "createdAt": 1793853092213,
+          "updatedAt": 1793853092214,
+          "deletedAt": null,
+          "contentHash": "961455d036e698bab1fd9319989aefcacfd3b06bf49e1511c139c6b697039d7a",
+          "internalKind": "compact",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWBVQZXR2KFV2ZP3QNAV",
+          "type": "compact",
+          "namespace": "default",
+          "createdAt": 1793853092219,
+          "updatedAt": 1793853092220,
+          "deletedAt": null,
+          "contentHash": "ba44206f156a3ac6bbbf41e3d392daed77362bfe0eee5a3379eba10df827a570",
+          "internalKind": "compact",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWC4SDS8FA7YDJWTHXCK",
+          "type": "context_checkpoint",
+          "namespace": "default",
+          "createdAt": 1793853092228,
+          "updatedAt": 1793853092229,
+          "deletedAt": null,
+          "contentHash": "7504957f2faf690f7607d5a7195ac2408182a96db54a1d56c330706e56bdbe24",
+          "internalKind": "context_checkpoint",
+          "internalRevision": 1
+        },
+        {
+          "id": "01M6MZKWCAK958N7A8D5D83H6W",
+          "type": "self_record",
+          "namespace": "agent:opencode",
+          "createdAt": 1793853092234,
+          "updatedAt": 1793853092235,
+          "deletedAt": null,
+          "contentHash": "fec4b5f6ed0fd7fa67025461b705a2d0c93fc5935d39d352f0d8f04c636d21d1",
+          "internalKind": "self_record",
+          "internalRevision": 1
+        },
+        {
+          "id": "01M6MZKYBFHNXFXD0EV1PMEKJM",
+          "type": "fact",
+          "namespace": "user",
+          "createdAt": 1793853094255,
+          "updatedAt": 1793853094255,
+          "deletedAt": null,
+          "contentHash": "e229aaecb97be7d207cc164c5946ed94cd719c530485e1ece402a7dc3fb81eb2",
+          "internalKind": null,
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKYBRKXBMTDVQ330Q9Z3X",
+          "type": "detail_record",
+          "namespace": "user",
+          "createdAt": 1793853094264,
+          "updatedAt": 1793853094265,
+          "deletedAt": null,
+          "contentHash": "301eca8cc479c2ac813b135d97e12ee236490c4c87ccd35a171c3339419ed5b4",
+          "internalKind": "detail_record",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKYBYEZN08AK0Y5NA0DW4",
+          "type": "detail_record",
+          "namespace": "user",
+          "createdAt": 1793853094270,
+          "updatedAt": 1793853094271,
+          "deletedAt": null,
+          "contentHash": "5d5e3b4c674379be1377ce051efaed613774fc7a743069bd7ba648aa89946134",
+          "internalKind": "detail_record",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKYC33BYYN13CT994TR06",
+          "type": "detail_record",
+          "namespace": "user",
+          "createdAt": 1793853094275,
+          "updatedAt": 1793853094277,
+          "deletedAt": null,
+          "contentHash": "10a71ad96897dd8177b3cc6152a9381c3e51c0463b6d085601534ab611e99b25",
+          "internalKind": "detail_record",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKYCC8DTSYYS8DSHJGS07",
+          "type": "compact",
+          "namespace": "user",
+          "createdAt": 1793853094284,
+          "updatedAt": 1793853094285,
+          "deletedAt": null,
+          "contentHash": "7217cee53b05b2609f829a35aa90223ddab264c6674b765d37a12c5dfe1bf116",
+          "internalKind": "compact",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKYCKZ7E1ZCV75BWNBK1Y",
+          "type": "context_checkpoint",
+          "namespace": "default",
+          "createdAt": 1793853094291,
+          "updatedAt": 1793853094292,
+          "deletedAt": null,
+          "contentHash": "ebf40f27409e02a13acb147b1802dfbcba07fdf447227eccd829b8603e23f79c",
+          "internalKind": "context_checkpoint",
+          "internalRevision": 2
+        },
+        {
+          "id": "01M6MZKYCSTQFCGYHNEPCQ6WJK",
+          "type": "self_record",
+          "namespace": "agent:opencode",
+          "createdAt": 1793853094297,
+          "updatedAt": 1793853094298,
+          "deletedAt": null,
+          "contentHash": "9bec43d8dfff9bc3a45fb04b006db41045289646478df9b3ec8a3a5847b8af66",
+          "internalKind": "self_record",
+          "internalRevision": 2
+        }
+      ],
+      "events": [
+        {
+          "id": "sha256:90f48c2a63e7e83c7b0505f0d76d71784aa9971066d70fb33733f11a47288a9f",
+          "type": "node_created",
+          "timestamp": 1793853092157,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "69108dab0da659e590523c4a3dccb721318e0cee8f1afe1639116b72c34b3acd"
+        },
+        {
+          "id": "sha256:226eddf314a39aec03034e2b011b8df35c09a1d2c5cc3f97a367439f9fbf7b9d",
+          "type": "node_created",
+          "timestamp": 1793853092166,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "82f2933666f6e1cb5ffed6313e8dc770e12929115ce461bc77ed07a67fdbe485"
+        },
+        {
+          "id": "sha256:0b4eadef2900117e71d56300750d6c3b7a3a9325514afc63892ee293e418efea",
+          "type": "node_created",
+          "timestamp": 1793853092173,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "a3c38a998d056a460aa3359184647bc5949f228c910a87d2663a67859b4176a1"
+        },
+        {
+          "id": "sha256:0f99e381972c27233bee62e92acb757315a4d0649c939dfbd46f39a58e966a45",
+          "type": "node_created",
+          "timestamp": 1793853092179,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "51c6d48c1a368ba266670fde3a55126c30981ecc6559ff84e100d85ee7577bcb"
+        },
+        {
+          "id": "sha256:dbedb8594b9276760d14c83fbf221a3ad37c402e05c6903101248657623d5b04",
+          "type": "node_created",
+          "timestamp": 1793853092188,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "799139bfd683ba0e52c6256b71250e45217b492609489d4abba777be8311801f"
+        },
+        {
+          "id": "sha256:e84eb2332e847f2788055fa287514258648a07a77cae3990952c7fee6a8c58a9",
+          "type": "node_updated",
+          "timestamp": 1793853092190,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "b591cd8a02d8543dc231e4be0aaa863cbd513e5891c6434bef0829dc1ac78827"
+        },
+        {
+          "id": "sha256:5c199354e3efb0e3c54a2eec6d6ea95eb679a65d51fc18fa3db7b9a2d3e44dd6",
+          "type": "node_created",
+          "timestamp": 1793853092195,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "9f7f880e2d51c6a3fd7bbfad40e665d9fe4c950d38ff093692d992b7da23edfc"
+        },
+        {
+          "id": "sha256:38326147579f8f6585b177c1763aec6a2baa79a0da76a859027033d80606d683",
+          "type": "node_updated",
+          "timestamp": 1793853092196,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "8c0ba60eeab347dc1e2522403ecfebdddc7aeb5f05f357dae8e4ea887323ed0d"
+        },
+        {
+          "id": "sha256:3221523e49f3d639b54a2d9bd6fcb4aeb6b2664b8382ecf5d159e2975449fea2",
+          "type": "node_created",
+          "timestamp": 1793853092201,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "56ab64077e0967cf0b8a5a67b67c8c32f3d58b6c2c0963e5467181fc0601211f"
+        },
+        {
+          "id": "sha256:36b30bd0e73483a219dc5672fc64d10559a6d41e9cb022271ef8afd4a2933d81",
+          "type": "node_updated",
+          "timestamp": 1793853092202,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "187522f1401c4b9aead0c1bb4e92c7cfcdea84dabe83a5c70e23f4ffe0753aea"
+        },
+        {
+          "id": "sha256:087f357bd73810ce59b842784a7b79c562fc48e7539b8b9b495182be28c6f1ee",
+          "type": "node_created",
+          "timestamp": 1793853092207,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "516469341bf4c0193215f858b5a0467ee601003e56037819218cb347f714b441"
+        },
+        {
+          "id": "sha256:246557f993d6681cd5ab3a50103e5201445477d1b430afb5f8962c640ee9bc1e",
+          "type": "node_updated",
+          "timestamp": 1793853092208,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "981c7276946887b8f6f2c04f88a26310dc0e7658a10766b0fb14c75da3a0b8b3"
+        },
+        {
+          "id": "sha256:a7096afae01169d363e9d45dce77d770b683d7d4881b8afc6955a292f9886148",
+          "type": "node_created",
+          "timestamp": 1793853092213,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "3ea4acd9a8d057193c393b3dc8dc5e33fb8794d0f7d67954bcb42d90bca67177"
+        },
+        {
+          "id": "sha256:fa01b8622942f6f6109bf703a4dd0eea231447c559b7603a3e9822281430e8ac",
+          "type": "node_updated",
+          "timestamp": 1793853092214,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "70d5090a0db893aa3d681967dda45f0407d85e80a973c824b1ad79fe444d3991"
+        },
+        {
+          "id": "sha256:781d02cb41ac70207f9efd4ed82184fd322433bcaa53a1fcf848b8232b49177d",
+          "type": "node_created",
+          "timestamp": 1793853092219,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "355ccc5b7be845f097ab2cfda7116065373f321f467b83f78125ac2996002d8d"
+        },
+        {
+          "id": "sha256:0f496198c2fc817ceb458377c62aa65d7b31701e8bd73b8f246b192bba5d5da7",
+          "type": "node_updated",
+          "timestamp": 1793853092220,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "2f8ee021e0d62e2055dc8015dc7b058fae5ca52f77ec0bb34c9e7cc16254c21d"
+        },
+        {
+          "id": "sha256:d3ef0c4d220e934661295dd4a35800e528c80dc832e0b5f0de1ee86f9e7b2ee0",
+          "type": "node_created",
+          "timestamp": 1793853092228,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "07638f446dd8408710d825dbb7287d697b6691805b17f50630d1cde66b17173d"
+        },
+        {
+          "id": "sha256:679a7c65e483e25f71393ef60effdaf17597cb19ac590e67a9415ec4a0224437",
+          "type": "node_updated",
+          "timestamp": 1793853092229,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "74223feebaf6df3a5b5e25befe94d236418bc3c587fa4763976d5a579aca1b91"
+        },
+        {
+          "id": "sha256:9d38542f55304c68b6c79a59359821b62c99c7e34c58af1169385515ae27bb6e",
+          "type": "node_created",
+          "timestamp": 1793853092234,
+          "namespace": "agent:opencode",
+          "author": "device-upgrade-rollback",
+          "dataHash": "cfa27cb5d21b804ed0a503f0c89964bcf262dd1eaf3793d8e54fa87a68689087"
+        },
+        {
+          "id": "sha256:6257a5e9fc023ab4773ff8dc5146176e7691ec5b52b7967f3ad89c606c01339a",
+          "type": "node_updated",
+          "timestamp": 1793853092235,
+          "namespace": "agent:opencode",
+          "author": "device-upgrade-rollback",
+          "dataHash": "158c107ede25afbbd660cbd9b9b664cdc139781b92efbe306b9023b5e8462891"
+        },
+        {
+          "id": "sha256:e61041c6a4e32e1bbfef2921c846e8d98b9496fb81b3bbfbda63ce682489a6c1",
+          "type": "node_created",
+          "timestamp": 1793853094255,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "e8c21f74f52024a9a9e2189f66629e1f43e69610cb9001bc8f45fdb65e8f92b7"
+        },
+        {
+          "id": "sha256:8b9e22e2eebdfde066e347b511bf776db0185155b78e2511e90635b2bc387a01",
+          "type": "node_created",
+          "timestamp": 1793853094264,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "342454418584b58b2b0f2534edb069e5e8a13cd9c337a8cc93c6e328ffd912aa"
+        },
+        {
+          "id": "sha256:6ee532fc3c9f88dd754af8fee3511d5bcc276917755679824664077c9535928a",
+          "type": "node_updated",
+          "timestamp": 1793853094266,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "77b0c458debf918df96b7d610bc9cd7153d95498334c80e7831249125accab51"
+        },
+        {
+          "id": "sha256:410cd13114d953d3d7cc5264d5b0a0961f004e79e344f30a2c08682580fc87a0",
+          "type": "node_created",
+          "timestamp": 1793853094270,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "35081d7313273996c0e519155901c38f3ee2555222867e64190c1142f05a90d1"
+        },
+        {
+          "id": "sha256:049d7ae05bca144629ec0c99632a06aa2a24817ab28e1503e036195c086e0e2a",
+          "type": "node_updated",
+          "timestamp": 1793853094271,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "c8537f45c2f3e18de86cccb8c26095afadbb166a0956cf7ef2a2072818f7af89"
+        },
+        {
+          "id": "sha256:19822494de199fa97680df2a8592d8b6568b63b765a846f4fc9a0975fab46c7f",
+          "type": "node_created",
+          "timestamp": 1793853094276,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "c94afd52d8dad0a53e979256df553c7ceb64377fe5dcc7c61cefc5ee4912c089"
+        },
+        {
+          "id": "sha256:17b9eba34d8f2950e36ba8f0fa81caa35be66741cae6dd0c4c9c3ae5eaabcaaf",
+          "type": "node_updated",
+          "timestamp": 1793853094277,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "d8158903f60fcf3a93bef401fc15ea8e6bdebf02259af098d1fc88f918af0637"
+        },
+        {
+          "id": "sha256:7b6416b38ad4f668eb362cdeb552442a4f75c05125270c102e1cd5cf649425a0",
+          "type": "node_created",
+          "timestamp": 1793853094284,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "9e48a7e7ffcd5cb7d0ccd7038e2f6d8aaab0a49c0bdbaec134ba90262e32ef24"
+        },
+        {
+          "id": "sha256:9e81dad1c0917ed5302baf85c9b0ad176234a70ca8e5f420cacc1af82270c238",
+          "type": "node_updated",
+          "timestamp": 1793853094285,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "b8fb16f87346a86dda80c12df1cdd844d6609cf784546e9e3109a8ef3978e2b9"
+        },
+        {
+          "id": "sha256:b55d2d4d94d67c1b71a2a1cf2f1eb1ff036a8bf2f5ac23d3bf57795a1944434b",
+          "type": "node_created",
+          "timestamp": 1793853094291,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "3ee040658441e80a364ede8bfc7e0783dec27993ef7fe4d6d01c487852d5272d"
+        },
+        {
+          "id": "sha256:1a0f9f7c46d250bf48d7ddcf339b38a1d30e095a6574df4d9de731e3a6d14832",
+          "type": "node_updated",
+          "timestamp": 1793853094292,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "31bc29cd87f39d614b2ef9cc0ad2870327e8a22bdf36867defe6c6cc3f7210b0"
+        },
+        {
+          "id": "sha256:91da2ecee59ab4ff4d83ef1a987865fc70bb5fdee1d8aa39528168ba640427dd",
+          "type": "node_created",
+          "timestamp": 1793853094297,
+          "namespace": "agent:opencode",
+          "author": "device-upgrade-rollback",
+          "dataHash": "616175b10dc13dee6519558c2d6f7b07f34898962b79901bf4da929c3830c475"
+        },
+        {
+          "id": "sha256:b629a2646269732bd058150c787332bd2b7de08b579489d20ed71974f8c7e378",
+          "type": "node_updated",
+          "timestamp": 1793853094298,
+          "namespace": "agent:opencode",
+          "author": "device-upgrade-rollback",
+          "dataHash": "62db92339faff69c07be225674a0e10174fbf504c9062432414e236aba1f5159"
+        }
+      ],
+      "sidecarConfig": {
+        "exists": true,
+        "bytes": 73,
+        "sha256": "ff065bb6b602b208674c7021c2bde093c4995ff4d3fe6c9179c6fe120f37542b",
+        "mtimeMs": 1793853091071.3367
+      }
+    },
+    "rollbackBefore": {
+      "at": "2026-11-05T04:31:35.860Z",
+      "status": {
+        "deviceId": "device-upgrade-rollback",
+        "nodeCount": 19,
+        "edgeCount": 0,
+        "stateHash": "a2770229fa1593541fe5b325dace694f85f9b9a624cdf3aff755e421aea05b55",
+        "stateHashByNamespace": {
+          "agent:opencode": "95671f6cf2371531c32fd68c09aad917bfccbe0261b78e28b93cf8fcf220b1cd",
+          "default": "c59a244417e9a66c524a86dae2a8c3227b2707bf14715194f83df703b51c5229",
+          "user": "4ce1f4582420c6ee68d80e7e4a4bd3b1cce8cc9bb730b1ce951459090ae4cae3"
+        },
+        "pendingEventCount": 33
+      },
+      "identity": {
+        "userId": "user",
+        "deviceId": "device-upgrade-rollback",
+        "cloudId": null,
+        "profileId": null,
+        "hostId": "h_d5535fbb872a7927"
+      },
+      "counts": {
+        "nodes": 19,
+        "memoryRecords": 5,
+        "compacts": 3,
+        "checkpoints": 2,
+        "selfRecords": 2,
+        "details": 7,
+        "detailBytes": 168
+      },
+      "nodes": [
+        {
+          "id": "01M6MZKW9WRBRJ3R4HQJ2C45Y4",
+          "type": "fact",
+          "namespace": "user",
+          "createdAt": 1793853092156,
+          "updatedAt": 1793853092156,
+          "deletedAt": null,
+          "contentHash": "7254e776337644e5b2df775ff7079884870aec73cedd4cc756e02458df4085c4",
+          "internalKind": null,
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWA60ZWH8JYKS5MP8TQF",
+          "type": "fact",
+          "namespace": "user",
+          "createdAt": 1793853092166,
+          "updatedAt": 1793853092166,
+          "deletedAt": null,
+          "contentHash": "b2a8bcd2e6ab8681f189a423cab0c84492fb8184fcf3b557bd8dbf4413f8fbc6",
+          "internalKind": null,
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWADGY590Q3C5BWR8NS8",
+          "type": "fact",
+          "namespace": "user",
+          "createdAt": 1793853092173,
+          "updatedAt": 1793853092173,
+          "deletedAt": null,
+          "contentHash": "d2a02d01a4b5e0907fe0312ba8c70d0b89cb169ac8df86771424eec7b91d2dde",
+          "internalKind": null,
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWAKWNBJQ1KFQJK5CFAZ",
+          "type": "fact",
+          "namespace": "default",
+          "createdAt": 1793853092179,
+          "updatedAt": 1793853092179,
+          "deletedAt": null,
+          "contentHash": "dae56650fa7fc05fc2a6f7d28af3107294b162d32b416aa24b53b0857880f5a6",
+          "internalKind": null,
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWAWXKZYMR54X0NHGCR6",
+          "type": "detail_record",
+          "namespace": "user",
+          "createdAt": 1793853092188,
+          "updatedAt": 1793853092190,
+          "deletedAt": null,
+          "contentHash": "05d37b519fdf6852aff60f2a425a65114f88d6078dab4011b756af21f4caa4eb",
+          "internalKind": "detail_record",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWB3A49TQA6J9KG3B84N",
+          "type": "detail_record",
+          "namespace": "user",
+          "createdAt": 1793853092195,
+          "updatedAt": 1793853092196,
+          "deletedAt": null,
+          "contentHash": "5aae55060ab68165ef6272006839d2ffe997849fb468ef8b79f73009fee204a9",
+          "internalKind": "detail_record",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWB987GNB4R2T7Y3V01J",
+          "type": "detail_record",
+          "namespace": "user",
+          "createdAt": 1793853092201,
+          "updatedAt": 1793853092202,
+          "deletedAt": null,
+          "contentHash": "6af7e0e7bde323b4bb38fa941e385b9de952fcae4388431b0f2c27498b6bee6e",
+          "internalKind": "detail_record",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWBF5GXFC7NRBY3N35K6",
+          "type": "detail_record",
+          "namespace": "default",
+          "createdAt": 1793853092207,
+          "updatedAt": 1793853092208,
+          "deletedAt": null,
+          "contentHash": "68d1f1a015f15963047c5c67ff1592625c79d45742226674ebcf9d46aab8d6ac",
+          "internalKind": "detail_record",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWBNY99Z4QNPRB1A8YF0",
+          "type": "compact",
+          "namespace": "user",
+          "createdAt": 1793853092213,
+          "updatedAt": 1793853092214,
+          "deletedAt": null,
+          "contentHash": "961455d036e698bab1fd9319989aefcacfd3b06bf49e1511c139c6b697039d7a",
+          "internalKind": "compact",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWBVQZXR2KFV2ZP3QNAV",
+          "type": "compact",
+          "namespace": "default",
+          "createdAt": 1793853092219,
+          "updatedAt": 1793853092220,
+          "deletedAt": null,
+          "contentHash": "ba44206f156a3ac6bbbf41e3d392daed77362bfe0eee5a3379eba10df827a570",
+          "internalKind": "compact",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWC4SDS8FA7YDJWTHXCK",
+          "type": "context_checkpoint",
+          "namespace": "default",
+          "createdAt": 1793853092228,
+          "updatedAt": 1793853092229,
+          "deletedAt": null,
+          "contentHash": "7504957f2faf690f7607d5a7195ac2408182a96db54a1d56c330706e56bdbe24",
+          "internalKind": "context_checkpoint",
+          "internalRevision": 1
+        },
+        {
+          "id": "01M6MZKWCAK958N7A8D5D83H6W",
+          "type": "self_record",
+          "namespace": "agent:opencode",
+          "createdAt": 1793853092234,
+          "updatedAt": 1793853092235,
+          "deletedAt": null,
+          "contentHash": "fec4b5f6ed0fd7fa67025461b705a2d0c93fc5935d39d352f0d8f04c636d21d1",
+          "internalKind": "self_record",
+          "internalRevision": 1
+        },
+        {
+          "id": "01M6MZKYBFHNXFXD0EV1PMEKJM",
+          "type": "fact",
+          "namespace": "user",
+          "createdAt": 1793853094255,
+          "updatedAt": 1793853094255,
+          "deletedAt": null,
+          "contentHash": "e229aaecb97be7d207cc164c5946ed94cd719c530485e1ece402a7dc3fb81eb2",
+          "internalKind": null,
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKYBRKXBMTDVQ330Q9Z3X",
+          "type": "detail_record",
+          "namespace": "user",
+          "createdAt": 1793853094264,
+          "updatedAt": 1793853094265,
+          "deletedAt": null,
+          "contentHash": "301eca8cc479c2ac813b135d97e12ee236490c4c87ccd35a171c3339419ed5b4",
+          "internalKind": "detail_record",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKYBYEZN08AK0Y5NA0DW4",
+          "type": "detail_record",
+          "namespace": "user",
+          "createdAt": 1793853094270,
+          "updatedAt": 1793853094271,
+          "deletedAt": null,
+          "contentHash": "5d5e3b4c674379be1377ce051efaed613774fc7a743069bd7ba648aa89946134",
+          "internalKind": "detail_record",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKYC33BYYN13CT994TR06",
+          "type": "detail_record",
+          "namespace": "user",
+          "createdAt": 1793853094275,
+          "updatedAt": 1793853094277,
+          "deletedAt": null,
+          "contentHash": "10a71ad96897dd8177b3cc6152a9381c3e51c0463b6d085601534ab611e99b25",
+          "internalKind": "detail_record",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKYCC8DTSYYS8DSHJGS07",
+          "type": "compact",
+          "namespace": "user",
+          "createdAt": 1793853094284,
+          "updatedAt": 1793853094285,
+          "deletedAt": null,
+          "contentHash": "7217cee53b05b2609f829a35aa90223ddab264c6674b765d37a12c5dfe1bf116",
+          "internalKind": "compact",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKYCKZ7E1ZCV75BWNBK1Y",
+          "type": "context_checkpoint",
+          "namespace": "default",
+          "createdAt": 1793853094291,
+          "updatedAt": 1793853094292,
+          "deletedAt": null,
+          "contentHash": "ebf40f27409e02a13acb147b1802dfbcba07fdf447227eccd829b8603e23f79c",
+          "internalKind": "context_checkpoint",
+          "internalRevision": 2
+        },
+        {
+          "id": "01M6MZKYCSTQFCGYHNEPCQ6WJK",
+          "type": "self_record",
+          "namespace": "agent:opencode",
+          "createdAt": 1793853094297,
+          "updatedAt": 1793853094298,
+          "deletedAt": null,
+          "contentHash": "9bec43d8dfff9bc3a45fb04b006db41045289646478df9b3ec8a3a5847b8af66",
+          "internalKind": "self_record",
+          "internalRevision": 2
+        }
+      ],
+      "events": [
+        {
+          "id": "sha256:90f48c2a63e7e83c7b0505f0d76d71784aa9971066d70fb33733f11a47288a9f",
+          "type": "node_created",
+          "timestamp": 1793853092157,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "69108dab0da659e590523c4a3dccb721318e0cee8f1afe1639116b72c34b3acd"
+        },
+        {
+          "id": "sha256:226eddf314a39aec03034e2b011b8df35c09a1d2c5cc3f97a367439f9fbf7b9d",
+          "type": "node_created",
+          "timestamp": 1793853092166,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "82f2933666f6e1cb5ffed6313e8dc770e12929115ce461bc77ed07a67fdbe485"
+        },
+        {
+          "id": "sha256:0b4eadef2900117e71d56300750d6c3b7a3a9325514afc63892ee293e418efea",
+          "type": "node_created",
+          "timestamp": 1793853092173,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "a3c38a998d056a460aa3359184647bc5949f228c910a87d2663a67859b4176a1"
+        },
+        {
+          "id": "sha256:0f99e381972c27233bee62e92acb757315a4d0649c939dfbd46f39a58e966a45",
+          "type": "node_created",
+          "timestamp": 1793853092179,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "51c6d48c1a368ba266670fde3a55126c30981ecc6559ff84e100d85ee7577bcb"
+        },
+        {
+          "id": "sha256:dbedb8594b9276760d14c83fbf221a3ad37c402e05c6903101248657623d5b04",
+          "type": "node_created",
+          "timestamp": 1793853092188,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "799139bfd683ba0e52c6256b71250e45217b492609489d4abba777be8311801f"
+        },
+        {
+          "id": "sha256:e84eb2332e847f2788055fa287514258648a07a77cae3990952c7fee6a8c58a9",
+          "type": "node_updated",
+          "timestamp": 1793853092190,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "b591cd8a02d8543dc231e4be0aaa863cbd513e5891c6434bef0829dc1ac78827"
+        },
+        {
+          "id": "sha256:5c199354e3efb0e3c54a2eec6d6ea95eb679a65d51fc18fa3db7b9a2d3e44dd6",
+          "type": "node_created",
+          "timestamp": 1793853092195,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "9f7f880e2d51c6a3fd7bbfad40e665d9fe4c950d38ff093692d992b7da23edfc"
+        },
+        {
+          "id": "sha256:38326147579f8f6585b177c1763aec6a2baa79a0da76a859027033d80606d683",
+          "type": "node_updated",
+          "timestamp": 1793853092196,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "8c0ba60eeab347dc1e2522403ecfebdddc7aeb5f05f357dae8e4ea887323ed0d"
+        },
+        {
+          "id": "sha256:3221523e49f3d639b54a2d9bd6fcb4aeb6b2664b8382ecf5d159e2975449fea2",
+          "type": "node_created",
+          "timestamp": 1793853092201,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "56ab64077e0967cf0b8a5a67b67c8c32f3d58b6c2c0963e5467181fc0601211f"
+        },
+        {
+          "id": "sha256:36b30bd0e73483a219dc5672fc64d10559a6d41e9cb022271ef8afd4a2933d81",
+          "type": "node_updated",
+          "timestamp": 1793853092202,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "187522f1401c4b9aead0c1bb4e92c7cfcdea84dabe83a5c70e23f4ffe0753aea"
+        },
+        {
+          "id": "sha256:087f357bd73810ce59b842784a7b79c562fc48e7539b8b9b495182be28c6f1ee",
+          "type": "node_created",
+          "timestamp": 1793853092207,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "516469341bf4c0193215f858b5a0467ee601003e56037819218cb347f714b441"
+        },
+        {
+          "id": "sha256:246557f993d6681cd5ab3a50103e5201445477d1b430afb5f8962c640ee9bc1e",
+          "type": "node_updated",
+          "timestamp": 1793853092208,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "981c7276946887b8f6f2c04f88a26310dc0e7658a10766b0fb14c75da3a0b8b3"
+        },
+        {
+          "id": "sha256:a7096afae01169d363e9d45dce77d770b683d7d4881b8afc6955a292f9886148",
+          "type": "node_created",
+          "timestamp": 1793853092213,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "3ea4acd9a8d057193c393b3dc8dc5e33fb8794d0f7d67954bcb42d90bca67177"
+        },
+        {
+          "id": "sha256:fa01b8622942f6f6109bf703a4dd0eea231447c559b7603a3e9822281430e8ac",
+          "type": "node_updated",
+          "timestamp": 1793853092214,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "70d5090a0db893aa3d681967dda45f0407d85e80a973c824b1ad79fe444d3991"
+        },
+        {
+          "id": "sha256:781d02cb41ac70207f9efd4ed82184fd322433bcaa53a1fcf848b8232b49177d",
+          "type": "node_created",
+          "timestamp": 1793853092219,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "355ccc5b7be845f097ab2cfda7116065373f321f467b83f78125ac2996002d8d"
+        },
+        {
+          "id": "sha256:0f496198c2fc817ceb458377c62aa65d7b31701e8bd73b8f246b192bba5d5da7",
+          "type": "node_updated",
+          "timestamp": 1793853092220,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "2f8ee021e0d62e2055dc8015dc7b058fae5ca52f77ec0bb34c9e7cc16254c21d"
+        },
+        {
+          "id": "sha256:d3ef0c4d220e934661295dd4a35800e528c80dc832e0b5f0de1ee86f9e7b2ee0",
+          "type": "node_created",
+          "timestamp": 1793853092228,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "07638f446dd8408710d825dbb7287d697b6691805b17f50630d1cde66b17173d"
+        },
+        {
+          "id": "sha256:679a7c65e483e25f71393ef60effdaf17597cb19ac590e67a9415ec4a0224437",
+          "type": "node_updated",
+          "timestamp": 1793853092229,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "74223feebaf6df3a5b5e25befe94d236418bc3c587fa4763976d5a579aca1b91"
+        },
+        {
+          "id": "sha256:9d38542f55304c68b6c79a59359821b62c99c7e34c58af1169385515ae27bb6e",
+          "type": "node_created",
+          "timestamp": 1793853092234,
+          "namespace": "agent:opencode",
+          "author": "device-upgrade-rollback",
+          "dataHash": "cfa27cb5d21b804ed0a503f0c89964bcf262dd1eaf3793d8e54fa87a68689087"
+        },
+        {
+          "id": "sha256:6257a5e9fc023ab4773ff8dc5146176e7691ec5b52b7967f3ad89c606c01339a",
+          "type": "node_updated",
+          "timestamp": 1793853092235,
+          "namespace": "agent:opencode",
+          "author": "device-upgrade-rollback",
+          "dataHash": "158c107ede25afbbd660cbd9b9b664cdc139781b92efbe306b9023b5e8462891"
+        },
+        {
+          "id": "sha256:e61041c6a4e32e1bbfef2921c846e8d98b9496fb81b3bbfbda63ce682489a6c1",
+          "type": "node_created",
+          "timestamp": 1793853094255,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "e8c21f74f52024a9a9e2189f66629e1f43e69610cb9001bc8f45fdb65e8f92b7"
+        },
+        {
+          "id": "sha256:8b9e22e2eebdfde066e347b511bf776db0185155b78e2511e90635b2bc387a01",
+          "type": "node_created",
+          "timestamp": 1793853094264,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "342454418584b58b2b0f2534edb069e5e8a13cd9c337a8cc93c6e328ffd912aa"
+        },
+        {
+          "id": "sha256:6ee532fc3c9f88dd754af8fee3511d5bcc276917755679824664077c9535928a",
+          "type": "node_updated",
+          "timestamp": 1793853094266,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "77b0c458debf918df96b7d610bc9cd7153d95498334c80e7831249125accab51"
+        },
+        {
+          "id": "sha256:410cd13114d953d3d7cc5264d5b0a0961f004e79e344f30a2c08682580fc87a0",
+          "type": "node_created",
+          "timestamp": 1793853094270,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "35081d7313273996c0e519155901c38f3ee2555222867e64190c1142f05a90d1"
+        },
+        {
+          "id": "sha256:049d7ae05bca144629ec0c99632a06aa2a24817ab28e1503e036195c086e0e2a",
+          "type": "node_updated",
+          "timestamp": 1793853094271,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "c8537f45c2f3e18de86cccb8c26095afadbb166a0956cf7ef2a2072818f7af89"
+        },
+        {
+          "id": "sha256:19822494de199fa97680df2a8592d8b6568b63b765a846f4fc9a0975fab46c7f",
+          "type": "node_created",
+          "timestamp": 1793853094276,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "c94afd52d8dad0a53e979256df553c7ceb64377fe5dcc7c61cefc5ee4912c089"
+        },
+        {
+          "id": "sha256:17b9eba34d8f2950e36ba8f0fa81caa35be66741cae6dd0c4c9c3ae5eaabcaaf",
+          "type": "node_updated",
+          "timestamp": 1793853094277,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "d8158903f60fcf3a93bef401fc15ea8e6bdebf02259af098d1fc88f918af0637"
+        },
+        {
+          "id": "sha256:7b6416b38ad4f668eb362cdeb552442a4f75c05125270c102e1cd5cf649425a0",
+          "type": "node_created",
+          "timestamp": 1793853094284,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "9e48a7e7ffcd5cb7d0ccd7038e2f6d8aaab0a49c0bdbaec134ba90262e32ef24"
+        },
+        {
+          "id": "sha256:9e81dad1c0917ed5302baf85c9b0ad176234a70ca8e5f420cacc1af82270c238",
+          "type": "node_updated",
+          "timestamp": 1793853094285,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "b8fb16f87346a86dda80c12df1cdd844d6609cf784546e9e3109a8ef3978e2b9"
+        },
+        {
+          "id": "sha256:b55d2d4d94d67c1b71a2a1cf2f1eb1ff036a8bf2f5ac23d3bf57795a1944434b",
+          "type": "node_created",
+          "timestamp": 1793853094291,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "3ee040658441e80a364ede8bfc7e0783dec27993ef7fe4d6d01c487852d5272d"
+        },
+        {
+          "id": "sha256:1a0f9f7c46d250bf48d7ddcf339b38a1d30e095a6574df4d9de731e3a6d14832",
+          "type": "node_updated",
+          "timestamp": 1793853094292,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "31bc29cd87f39d614b2ef9cc0ad2870327e8a22bdf36867defe6c6cc3f7210b0"
+        },
+        {
+          "id": "sha256:91da2ecee59ab4ff4d83ef1a987865fc70bb5fdee1d8aa39528168ba640427dd",
+          "type": "node_created",
+          "timestamp": 1793853094297,
+          "namespace": "agent:opencode",
+          "author": "device-upgrade-rollback",
+          "dataHash": "616175b10dc13dee6519558c2d6f7b07f34898962b79901bf4da929c3830c475"
+        },
+        {
+          "id": "sha256:b629a2646269732bd058150c787332bd2b7de08b579489d20ed71974f8c7e378",
+          "type": "node_updated",
+          "timestamp": 1793853094298,
+          "namespace": "agent:opencode",
+          "author": "device-upgrade-rollback",
+          "dataHash": "62db92339faff69c07be225674a0e10174fbf504c9062432414e236aba1f5159"
+        }
+      ],
+      "sidecarConfig": {
+        "exists": true,
+        "bytes": 73,
+        "sha256": "ff065bb6b602b208674c7021c2bde093c4995ff4d3fe6c9179c6fe120f37542b",
+        "mtimeMs": 1793853091071.3367
+      }
+    },
+    "rollbackAfter": {
+      "at": "2026-11-05T04:31:36.220Z",
+      "status": {
+        "deviceId": "device-upgrade-rollback",
+        "nodeCount": 19,
+        "edgeCount": 0,
+        "stateHash": "a2770229fa1593541fe5b325dace694f85f9b9a624cdf3aff755e421aea05b55",
+        "stateHashByNamespace": {
+          "agent:opencode": "95671f6cf2371531c32fd68c09aad917bfccbe0261b78e28b93cf8fcf220b1cd",
+          "default": "c59a244417e9a66c524a86dae2a8c3227b2707bf14715194f83df703b51c5229",
+          "user": "4ce1f4582420c6ee68d80e7e4a4bd3b1cce8cc9bb730b1ce951459090ae4cae3"
+        },
+        "pendingEventCount": 33
+      },
+      "identity": {
+        "userId": "user",
+        "deviceId": "device-upgrade-rollback",
+        "cloudId": null,
+        "profileId": null,
+        "hostId": "h_d5535fbb872a7927"
+      },
+      "counts": {
+        "nodes": 19,
+        "memoryRecords": 5,
+        "compacts": 3,
+        "checkpoints": 2,
+        "selfRecords": 2,
+        "details": 7,
+        "detailBytes": 168
+      },
+      "nodes": [
+        {
+          "id": "01M6MZKW9WRBRJ3R4HQJ2C45Y4",
+          "type": "fact",
+          "namespace": "user",
+          "createdAt": 1793853092156,
+          "updatedAt": 1793853092156,
+          "deletedAt": null,
+          "contentHash": "7254e776337644e5b2df775ff7079884870aec73cedd4cc756e02458df4085c4",
+          "internalKind": null,
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWA60ZWH8JYKS5MP8TQF",
+          "type": "fact",
+          "namespace": "user",
+          "createdAt": 1793853092166,
+          "updatedAt": 1793853092166,
+          "deletedAt": null,
+          "contentHash": "b2a8bcd2e6ab8681f189a423cab0c84492fb8184fcf3b557bd8dbf4413f8fbc6",
+          "internalKind": null,
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWADGY590Q3C5BWR8NS8",
+          "type": "fact",
+          "namespace": "user",
+          "createdAt": 1793853092173,
+          "updatedAt": 1793853092173,
+          "deletedAt": null,
+          "contentHash": "d2a02d01a4b5e0907fe0312ba8c70d0b89cb169ac8df86771424eec7b91d2dde",
+          "internalKind": null,
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWAKWNBJQ1KFQJK5CFAZ",
+          "type": "fact",
+          "namespace": "default",
+          "createdAt": 1793853092179,
+          "updatedAt": 1793853092179,
+          "deletedAt": null,
+          "contentHash": "dae56650fa7fc05fc2a6f7d28af3107294b162d32b416aa24b53b0857880f5a6",
+          "internalKind": null,
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWAWXKZYMR54X0NHGCR6",
+          "type": "detail_record",
+          "namespace": "user",
+          "createdAt": 1793853092188,
+          "updatedAt": 1793853092190,
+          "deletedAt": null,
+          "contentHash": "05d37b519fdf6852aff60f2a425a65114f88d6078dab4011b756af21f4caa4eb",
+          "internalKind": "detail_record",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWB3A49TQA6J9KG3B84N",
+          "type": "detail_record",
+          "namespace": "user",
+          "createdAt": 1793853092195,
+          "updatedAt": 1793853092196,
+          "deletedAt": null,
+          "contentHash": "5aae55060ab68165ef6272006839d2ffe997849fb468ef8b79f73009fee204a9",
+          "internalKind": "detail_record",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWB987GNB4R2T7Y3V01J",
+          "type": "detail_record",
+          "namespace": "user",
+          "createdAt": 1793853092201,
+          "updatedAt": 1793853092202,
+          "deletedAt": null,
+          "contentHash": "6af7e0e7bde323b4bb38fa941e385b9de952fcae4388431b0f2c27498b6bee6e",
+          "internalKind": "detail_record",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWBF5GXFC7NRBY3N35K6",
+          "type": "detail_record",
+          "namespace": "default",
+          "createdAt": 1793853092207,
+          "updatedAt": 1793853092208,
+          "deletedAt": null,
+          "contentHash": "68d1f1a015f15963047c5c67ff1592625c79d45742226674ebcf9d46aab8d6ac",
+          "internalKind": "detail_record",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWBNY99Z4QNPRB1A8YF0",
+          "type": "compact",
+          "namespace": "user",
+          "createdAt": 1793853092213,
+          "updatedAt": 1793853092214,
+          "deletedAt": null,
+          "contentHash": "961455d036e698bab1fd9319989aefcacfd3b06bf49e1511c139c6b697039d7a",
+          "internalKind": "compact",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWBVQZXR2KFV2ZP3QNAV",
+          "type": "compact",
+          "namespace": "default",
+          "createdAt": 1793853092219,
+          "updatedAt": 1793853092220,
+          "deletedAt": null,
+          "contentHash": "ba44206f156a3ac6bbbf41e3d392daed77362bfe0eee5a3379eba10df827a570",
+          "internalKind": "compact",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKWC4SDS8FA7YDJWTHXCK",
+          "type": "context_checkpoint",
+          "namespace": "default",
+          "createdAt": 1793853092228,
+          "updatedAt": 1793853092229,
+          "deletedAt": null,
+          "contentHash": "7504957f2faf690f7607d5a7195ac2408182a96db54a1d56c330706e56bdbe24",
+          "internalKind": "context_checkpoint",
+          "internalRevision": 1
+        },
+        {
+          "id": "01M6MZKWCAK958N7A8D5D83H6W",
+          "type": "self_record",
+          "namespace": "agent:opencode",
+          "createdAt": 1793853092234,
+          "updatedAt": 1793853092235,
+          "deletedAt": null,
+          "contentHash": "fec4b5f6ed0fd7fa67025461b705a2d0c93fc5935d39d352f0d8f04c636d21d1",
+          "internalKind": "self_record",
+          "internalRevision": 1
+        },
+        {
+          "id": "01M6MZKYBFHNXFXD0EV1PMEKJM",
+          "type": "fact",
+          "namespace": "user",
+          "createdAt": 1793853094255,
+          "updatedAt": 1793853094255,
+          "deletedAt": null,
+          "contentHash": "e229aaecb97be7d207cc164c5946ed94cd719c530485e1ece402a7dc3fb81eb2",
+          "internalKind": null,
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKYBRKXBMTDVQ330Q9Z3X",
+          "type": "detail_record",
+          "namespace": "user",
+          "createdAt": 1793853094264,
+          "updatedAt": 1793853094265,
+          "deletedAt": null,
+          "contentHash": "301eca8cc479c2ac813b135d97e12ee236490c4c87ccd35a171c3339419ed5b4",
+          "internalKind": "detail_record",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKYBYEZN08AK0Y5NA0DW4",
+          "type": "detail_record",
+          "namespace": "user",
+          "createdAt": 1793853094270,
+          "updatedAt": 1793853094271,
+          "deletedAt": null,
+          "contentHash": "5d5e3b4c674379be1377ce051efaed613774fc7a743069bd7ba648aa89946134",
+          "internalKind": "detail_record",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKYC33BYYN13CT994TR06",
+          "type": "detail_record",
+          "namespace": "user",
+          "createdAt": 1793853094275,
+          "updatedAt": 1793853094277,
+          "deletedAt": null,
+          "contentHash": "10a71ad96897dd8177b3cc6152a9381c3e51c0463b6d085601534ab611e99b25",
+          "internalKind": "detail_record",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKYCC8DTSYYS8DSHJGS07",
+          "type": "compact",
+          "namespace": "user",
+          "createdAt": 1793853094284,
+          "updatedAt": 1793853094285,
+          "deletedAt": null,
+          "contentHash": "7217cee53b05b2609f829a35aa90223ddab264c6674b765d37a12c5dfe1bf116",
+          "internalKind": "compact",
+          "internalRevision": null
+        },
+        {
+          "id": "01M6MZKYCKZ7E1ZCV75BWNBK1Y",
+          "type": "context_checkpoint",
+          "namespace": "default",
+          "createdAt": 1793853094291,
+          "updatedAt": 1793853094292,
+          "deletedAt": null,
+          "contentHash": "ebf40f27409e02a13acb147b1802dfbcba07fdf447227eccd829b8603e23f79c",
+          "internalKind": "context_checkpoint",
+          "internalRevision": 2
+        },
+        {
+          "id": "01M6MZKYCSTQFCGYHNEPCQ6WJK",
+          "type": "self_record",
+          "namespace": "agent:opencode",
+          "createdAt": 1793853094297,
+          "updatedAt": 1793853094298,
+          "deletedAt": null,
+          "contentHash": "9bec43d8dfff9bc3a45fb04b006db41045289646478df9b3ec8a3a5847b8af66",
+          "internalKind": "self_record",
+          "internalRevision": 2
+        }
+      ],
+      "events": [
+        {
+          "id": "sha256:90f48c2a63e7e83c7b0505f0d76d71784aa9971066d70fb33733f11a47288a9f",
+          "type": "node_created",
+          "timestamp": 1793853092157,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "69108dab0da659e590523c4a3dccb721318e0cee8f1afe1639116b72c34b3acd"
+        },
+        {
+          "id": "sha256:226eddf314a39aec03034e2b011b8df35c09a1d2c5cc3f97a367439f9fbf7b9d",
+          "type": "node_created",
+          "timestamp": 1793853092166,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "82f2933666f6e1cb5ffed6313e8dc770e12929115ce461bc77ed07a67fdbe485"
+        },
+        {
+          "id": "sha256:0b4eadef2900117e71d56300750d6c3b7a3a9325514afc63892ee293e418efea",
+          "type": "node_created",
+          "timestamp": 1793853092173,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "a3c38a998d056a460aa3359184647bc5949f228c910a87d2663a67859b4176a1"
+        },
+        {
+          "id": "sha256:0f99e381972c27233bee62e92acb757315a4d0649c939dfbd46f39a58e966a45",
+          "type": "node_created",
+          "timestamp": 1793853092179,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "51c6d48c1a368ba266670fde3a55126c30981ecc6559ff84e100d85ee7577bcb"
+        },
+        {
+          "id": "sha256:dbedb8594b9276760d14c83fbf221a3ad37c402e05c6903101248657623d5b04",
+          "type": "node_created",
+          "timestamp": 1793853092188,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "799139bfd683ba0e52c6256b71250e45217b492609489d4abba777be8311801f"
+        },
+        {
+          "id": "sha256:e84eb2332e847f2788055fa287514258648a07a77cae3990952c7fee6a8c58a9",
+          "type": "node_updated",
+          "timestamp": 1793853092190,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "b591cd8a02d8543dc231e4be0aaa863cbd513e5891c6434bef0829dc1ac78827"
+        },
+        {
+          "id": "sha256:5c199354e3efb0e3c54a2eec6d6ea95eb679a65d51fc18fa3db7b9a2d3e44dd6",
+          "type": "node_created",
+          "timestamp": 1793853092195,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "9f7f880e2d51c6a3fd7bbfad40e665d9fe4c950d38ff093692d992b7da23edfc"
+        },
+        {
+          "id": "sha256:38326147579f8f6585b177c1763aec6a2baa79a0da76a859027033d80606d683",
+          "type": "node_updated",
+          "timestamp": 1793853092196,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "8c0ba60eeab347dc1e2522403ecfebdddc7aeb5f05f357dae8e4ea887323ed0d"
+        },
+        {
+          "id": "sha256:3221523e49f3d639b54a2d9bd6fcb4aeb6b2664b8382ecf5d159e2975449fea2",
+          "type": "node_created",
+          "timestamp": 1793853092201,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "56ab64077e0967cf0b8a5a67b67c8c32f3d58b6c2c0963e5467181fc0601211f"
+        },
+        {
+          "id": "sha256:36b30bd0e73483a219dc5672fc64d10559a6d41e9cb022271ef8afd4a2933d81",
+          "type": "node_updated",
+          "timestamp": 1793853092202,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "187522f1401c4b9aead0c1bb4e92c7cfcdea84dabe83a5c70e23f4ffe0753aea"
+        },
+        {
+          "id": "sha256:087f357bd73810ce59b842784a7b79c562fc48e7539b8b9b495182be28c6f1ee",
+          "type": "node_created",
+          "timestamp": 1793853092207,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "516469341bf4c0193215f858b5a0467ee601003e56037819218cb347f714b441"
+        },
+        {
+          "id": "sha256:246557f993d6681cd5ab3a50103e5201445477d1b430afb5f8962c640ee9bc1e",
+          "type": "node_updated",
+          "timestamp": 1793853092208,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "981c7276946887b8f6f2c04f88a26310dc0e7658a10766b0fb14c75da3a0b8b3"
+        },
+        {
+          "id": "sha256:a7096afae01169d363e9d45dce77d770b683d7d4881b8afc6955a292f9886148",
+          "type": "node_created",
+          "timestamp": 1793853092213,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "3ea4acd9a8d057193c393b3dc8dc5e33fb8794d0f7d67954bcb42d90bca67177"
+        },
+        {
+          "id": "sha256:fa01b8622942f6f6109bf703a4dd0eea231447c559b7603a3e9822281430e8ac",
+          "type": "node_updated",
+          "timestamp": 1793853092214,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "70d5090a0db893aa3d681967dda45f0407d85e80a973c824b1ad79fe444d3991"
+        },
+        {
+          "id": "sha256:781d02cb41ac70207f9efd4ed82184fd322433bcaa53a1fcf848b8232b49177d",
+          "type": "node_created",
+          "timestamp": 1793853092219,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "355ccc5b7be845f097ab2cfda7116065373f321f467b83f78125ac2996002d8d"
+        },
+        {
+          "id": "sha256:0f496198c2fc817ceb458377c62aa65d7b31701e8bd73b8f246b192bba5d5da7",
+          "type": "node_updated",
+          "timestamp": 1793853092220,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "2f8ee021e0d62e2055dc8015dc7b058fae5ca52f77ec0bb34c9e7cc16254c21d"
+        },
+        {
+          "id": "sha256:d3ef0c4d220e934661295dd4a35800e528c80dc832e0b5f0de1ee86f9e7b2ee0",
+          "type": "node_created",
+          "timestamp": 1793853092228,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "07638f446dd8408710d825dbb7287d697b6691805b17f50630d1cde66b17173d"
+        },
+        {
+          "id": "sha256:679a7c65e483e25f71393ef60effdaf17597cb19ac590e67a9415ec4a0224437",
+          "type": "node_updated",
+          "timestamp": 1793853092229,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "74223feebaf6df3a5b5e25befe94d236418bc3c587fa4763976d5a579aca1b91"
+        },
+        {
+          "id": "sha256:9d38542f55304c68b6c79a59359821b62c99c7e34c58af1169385515ae27bb6e",
+          "type": "node_created",
+          "timestamp": 1793853092234,
+          "namespace": "agent:opencode",
+          "author": "device-upgrade-rollback",
+          "dataHash": "cfa27cb5d21b804ed0a503f0c89964bcf262dd1eaf3793d8e54fa87a68689087"
+        },
+        {
+          "id": "sha256:6257a5e9fc023ab4773ff8dc5146176e7691ec5b52b7967f3ad89c606c01339a",
+          "type": "node_updated",
+          "timestamp": 1793853092235,
+          "namespace": "agent:opencode",
+          "author": "device-upgrade-rollback",
+          "dataHash": "158c107ede25afbbd660cbd9b9b664cdc139781b92efbe306b9023b5e8462891"
+        },
+        {
+          "id": "sha256:e61041c6a4e32e1bbfef2921c846e8d98b9496fb81b3bbfbda63ce682489a6c1",
+          "type": "node_created",
+          "timestamp": 1793853094255,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "e8c21f74f52024a9a9e2189f66629e1f43e69610cb9001bc8f45fdb65e8f92b7"
+        },
+        {
+          "id": "sha256:8b9e22e2eebdfde066e347b511bf776db0185155b78e2511e90635b2bc387a01",
+          "type": "node_created",
+          "timestamp": 1793853094264,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "342454418584b58b2b0f2534edb069e5e8a13cd9c337a8cc93c6e328ffd912aa"
+        },
+        {
+          "id": "sha256:6ee532fc3c9f88dd754af8fee3511d5bcc276917755679824664077c9535928a",
+          "type": "node_updated",
+          "timestamp": 1793853094266,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "77b0c458debf918df96b7d610bc9cd7153d95498334c80e7831249125accab51"
+        },
+        {
+          "id": "sha256:410cd13114d953d3d7cc5264d5b0a0961f004e79e344f30a2c08682580fc87a0",
+          "type": "node_created",
+          "timestamp": 1793853094270,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "35081d7313273996c0e519155901c38f3ee2555222867e64190c1142f05a90d1"
+        },
+        {
+          "id": "sha256:049d7ae05bca144629ec0c99632a06aa2a24817ab28e1503e036195c086e0e2a",
+          "type": "node_updated",
+          "timestamp": 1793853094271,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "c8537f45c2f3e18de86cccb8c26095afadbb166a0956cf7ef2a2072818f7af89"
+        },
+        {
+          "id": "sha256:19822494de199fa97680df2a8592d8b6568b63b765a846f4fc9a0975fab46c7f",
+          "type": "node_created",
+          "timestamp": 1793853094276,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "c94afd52d8dad0a53e979256df553c7ceb64377fe5dcc7c61cefc5ee4912c089"
+        },
+        {
+          "id": "sha256:17b9eba34d8f2950e36ba8f0fa81caa35be66741cae6dd0c4c9c3ae5eaabcaaf",
+          "type": "node_updated",
+          "timestamp": 1793853094277,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "d8158903f60fcf3a93bef401fc15ea8e6bdebf02259af098d1fc88f918af0637"
+        },
+        {
+          "id": "sha256:7b6416b38ad4f668eb362cdeb552442a4f75c05125270c102e1cd5cf649425a0",
+          "type": "node_created",
+          "timestamp": 1793853094284,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "9e48a7e7ffcd5cb7d0ccd7038e2f6d8aaab0a49c0bdbaec134ba90262e32ef24"
+        },
+        {
+          "id": "sha256:9e81dad1c0917ed5302baf85c9b0ad176234a70ca8e5f420cacc1af82270c238",
+          "type": "node_updated",
+          "timestamp": 1793853094285,
+          "namespace": "user",
+          "author": "device-upgrade-rollback",
+          "dataHash": "b8fb16f87346a86dda80c12df1cdd844d6609cf784546e9e3109a8ef3978e2b9"
+        },
+        {
+          "id": "sha256:b55d2d4d94d67c1b71a2a1cf2f1eb1ff036a8bf2f5ac23d3bf57795a1944434b",
+          "type": "node_created",
+          "timestamp": 1793853094291,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "3ee040658441e80a364ede8bfc7e0783dec27993ef7fe4d6d01c487852d5272d"
+        },
+        {
+          "id": "sha256:1a0f9f7c46d250bf48d7ddcf339b38a1d30e095a6574df4d9de731e3a6d14832",
+          "type": "node_updated",
+          "timestamp": 1793853094292,
+          "namespace": "default",
+          "author": "device-upgrade-rollback",
+          "dataHash": "31bc29cd87f39d614b2ef9cc0ad2870327e8a22bdf36867defe6c6cc3f7210b0"
+        },
+        {
+          "id": "sha256:91da2ecee59ab4ff4d83ef1a987865fc70bb5fdee1d8aa39528168ba640427dd",
+          "type": "node_created",
+          "timestamp": 1793853094297,
+          "namespace": "agent:opencode",
+          "author": "device-upgrade-rollback",
+          "dataHash": "616175b10dc13dee6519558c2d6f7b07f34898962b79901bf4da929c3830c475"
+        },
+        {
+          "id": "sha256:b629a2646269732bd058150c787332bd2b7de08b579489d20ed71974f8c7e378",
+          "type": "node_updated",
+          "timestamp": 1793853094298,
+          "namespace": "agent:opencode",
+          "author": "device-upgrade-rollback",
+          "dataHash": "62db92339faff69c07be225674a0e10174fbf504c9062432414e236aba1f5159"
+        }
+      ],
+      "sidecarConfig": {
+        "exists": true,
+        "bytes": 73,
+        "sha256": "ff065bb6b602b208674c7021c2bde093c4995ff4d3fe6c9179c6fe120f37542b",
+        "mtimeMs": 1793853091071.3367
+      }
+    }
+  },
+  "realFakeBoundary": {
+    "real": [
+      "真实 v0.3.0 tag 构建（dist + packages/mcp + packages/memory-runtime）",
+      "真实当前集成线 SHA 构建",
+      "真实 Mebular app / GraphStore / 事件日志",
+      "真实 MCP capability HTTP 服务与真实 MCP Streamable HTTP client",
+      "真实 managed sidecar 进程（mebular-memory-runtime）",
+      "真实临时文件系统与同一 home 跨版本重启",
+      "真实公共 MCP 工具（memory_write / memory_query / memory_graph / memory_status）",
+      "真实公共 CLI（mebular memory-runtime status）"
+    ],
+    "fake": [],
+    "stub": [],
+    "notCovered": [
+      "混版并发运行、双向协议兼容或跨版本同时在线承诺",
+      "真实 DSH / Hermes / OpenCode / OpenChamber 宿主进程",
+      "真实模型或模型包",
+      "P2P / 跨设备同步对端",
+      "Console UI 或桌面应用",
+      "0.2.4 直升/降级路径（本次演练按任务范围只覆盖 v0.3.0 → 当前集成线；公开 0.2 指南的数据保留说明不等于完整升级/回滚验收）"
+    ]
+  },
+  "limitations": [
+    "旧版 v0.3.0 的 Detail 写入把 tool_output/document_slice 也存为 conversation retentionClass；当前版读取旧数据时保留原值，不回写，因此旧 detail 的权威到期时间仍约 30 天。当前版新写入的 detail 按 detailKind 使用 7/30/90 天。",
+    "旧版 v0.3.0 回滚后，recall 展开 tool_output/document_slice 仍失败（detail_pending_sync）；capability 权威读取仍成功。当前版可展开。",
+    "两个构建的 CLI 均不支持 `mebular --version`（返回“未知命令”）；本次记录为公开 CLI 行为差异，不影响 `memory-runtime status`。",
+    "当前集成线的 package.json 版本仍为 0.3.0（功能线未 bump 版本号）；本报告用 commit SHA 区分 v0.3.0 tag 与当前集成线，不用版本号区分。",
+    "公开 0.2 升级指南的“不强制迁移/数据保留”不等于本报告已验证 0.2.4 → 当前版本；若发布说明要保留该直升承诺，需单独补测。",
+    "本演练不承诺混版并发、双向兼容或旧版能理解未来新增对象类型；只验证单一 home 的顺序升级/回滚。"
+  ],
+  "cleanup": {
+    "buildDirsRemoved": true,
+    "homeRemoved": true,
+    "residualPids": [],
+    "globalInstall": false,
+    "outsideRealHome": true
+  }
+}

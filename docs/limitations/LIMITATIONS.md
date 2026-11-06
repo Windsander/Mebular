@@ -26,6 +26,46 @@ Master-key rotation / re-anchoring is not implemented. Back up the user master k
 - high tier only gates the first admission (`join`) of a device; later subscriptions are autonomous by design.
 - TOTP is a local human-presence gate, not a second cryptographic factor.
 
+## Logical agent identity, not authentication
+
+`agentId`, `actor.type` and claimed task participation are logical assertions used for
+partitioning and filtering. They are not authenticated principals, namespace ACLs,
+multi-user accounts or cryptographic agent isolation. A holder of the host token or the
+capability token can read the local store within that trust boundary; changing an asserted
+`agentId` does not create a new authenticated identity.
+
+## Checkpoint evidence must be same-domain
+
+Checkpoint `recordIds`, `detailIds` and `state.references` graph IDs are validated for
+existence, expected type, live state, same domain and (for details) non-expiry. A
+cross-domain, dangling or wrong-type reference fails the operation instead of committing
+dangling evidence. External message IDs remain host references and are not graph proof.
+This strictness is intentional; do not weaken it to make an offline replay appear
+committed.
+
+## v0.3.2 scale and model evidence
+
+- The 10k full benchmark passed on merged SHA `c37e74b` (includes `ca2193e`): 10,000
+  records + 10,000 details, 0 non-seed extras, 200/200 reads and clean cleanup. The 1k/2k
+  count audits also passed with 0 extras, and 6/6 failure-injection scenarios passed.
+  Timings are from one non-idle host and are not an SLA. The original 10,023/10,000
+  failure remains in the scale report as historical evidence.
+- The v0.3.2 real-model canary passed for Qwen3-4B Q4_K_M on macOS x64 with a test-only
+  mirror base URL: 2,497,280,256 bytes downloaded, official SHA-256 verified, llama.cpp
+  b12017 started, and extract/summarize/planQuery were non-degraded. It does not verify
+  the default Hugging Face transport, other packs/platforms, model quality or real-host +
+  real-model injection. See the
+  [0.3.2 model smoke report](../quality/0.3.2-model-smoke.md).
+- Recall quality metrics (recall@k, omission rate, false-recall turn rate, multi-seed
+  answer quality) and a real-host + real-model prompt-injection test are not part of the
+  v0.3.2 evidence set.
+
 ## Mixed versions
 
-This is a greenfield model. There is no compatibility layer and no mixed-version window. Run the same version on every device. Old authorization event types are ignored.
+This is a greenfield model. There is no compatibility layer and no mixed-version window.
+Run the same version on every device. Old authorization event types are ignored.
+
+The v0.3.2 upgrade/rollback drill covers a sequential single-home v0.3.0 → v0.3.2 →
+v0.3.0 path only. It does not verify mixed-version concurrency, bidirectional protocol
+compatibility, or a direct 0.2.4 upgrade/rollback path. Keeping old graph data readable is
+a data-retention statement, not acceptance of those paths.

@@ -99,6 +99,18 @@ describe('DetailRecord core model', () => {
     expect(pinned).toBe(0);
   });
 
+  it('core 同样拒绝 tool role 搭配 raw_chunk/message', async () => {
+    const marker = `core-tool-kind-${Date.now()}`;
+    const recordId = await makeRecord('agent:core', marker);
+    for (const detailKind of ['raw_chunk', 'message'] as const) {
+      await expect(service.writeDetails([detailInput('agent:core', [recordId], `${marker}-${detailKind}`, {
+        detailKind,
+        role: 'tool',
+        retentionClass: 'tool_output',
+      })])).rejects.toMatchObject({ details: { field: 'detailKind' } });
+    }
+  });
+
   it('过期维护只墓碑详情，不删除 MemoryRecord；record detailAvailable 读取时派生', async () => {
     const marker = `core-prune-${Date.now()}`;
     const recordId = await makeRecord('agent:core', marker);
@@ -139,6 +151,41 @@ describe('DetailRecord core model', () => {
     const afterDelete = await app.graph.getNode(recordId);
     expect(afterDelete?.updatedAt).toBe(before?.updatedAt);
     expect(afterDelete?.metadata?.detailAvailable).toBeUndefined();
+  });
+
+  it('duplicate 合并超过 200 时只失败该项，同批其他 Detail 仍成功并保留已有关联', async () => {
+    const domain = `batch-limit-${Date.now()}`;
+    const recordIds: string[] = [];
+    for (let index = 0; index < 200; index += 1) {
+      const node = await app.graph.createNode('episode', { content: `batch-limit-${index}` }, undefined, {
+        namespace: domain,
+      });
+      recordIds.push(node.id);
+    }
+    const extra = await app.graph.createNode('episode', { content: 'batch-limit-extra' }, undefined, {
+      namespace: domain,
+    });
+    const text = `batch-limit-shared-${Date.now()}`;
+    const initial = await service.writeDetails([
+      detailInput(domain, recordIds, text, { chunkIndex: 5 }),
+    ]);
+    expect(initial.created).toBe(1);
+    const initialId = initial.results[0]!.id!;
+
+    const mixed = await service.writeDetails([
+      detailInput(domain, [extra.id], text, { chunkIndex: 5 }),
+      detailInput(domain, [extra.id], `${text}-good`, { chunkIndex: 6 }),
+    ]);
+    expect(mixed.results[0]).toMatchObject({
+      status: 'failed',
+      code: 'detail_record_ids_exceeded',
+      retryable: false,
+    });
+    expect(mixed.results[1]).toMatchObject({ status: 'created' });
+    expect(mixed).toMatchObject({ created: 1, failed: 1, partial: true });
+    const existing = await service.getDetail(initialId);
+    expect(existing?.recordIds).toHaveLength(200);
+    expect(existing?.recordIds).not.toContain(extra.id);
   });
 
   it('单域配额可收紧：先淘汰最旧 tool_output，再淘汰 conversation；pinned 不可淘汰', async () => {

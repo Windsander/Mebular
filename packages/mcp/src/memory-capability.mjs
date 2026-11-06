@@ -98,6 +98,7 @@ const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 const IDEMPOTENCY_MAX_ENTRIES = 5000;
 const IDEMPOTENCY_LEDGER_VERSION = 1;
 const IDEMPOTENCY_LEDGER_FILE = 'capability-idempotency.json';
+const IDEMPOTENCY_MAINTENANCE_INTERVAL_MS = 60_000;
 const MAX_SYNC_WAIT_MS = 30_000;
 
 const AGENT_ID_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
@@ -112,6 +113,7 @@ const DEFAULT_TYPES = ['fact', 'preference', 'episode', 'observation', 'skill', 
 const WRITE_ENDPOINTS = new Set(['write', 'update', 'delete', 'archive', 'internal-object', 'sync']);
 const INTERNAL_OBJECT_KINDS = ['compact', 'self_record', 'context_checkpoint'];
 const WRITE_KINDS = new Set(['fact', 'preference', 'episode', 'observation', 'skill', 'entity']);
+const RECORD_NODE_TYPES = new Set(['fact', 'preference', 'episode', 'observation', 'skill', 'entity', 'meta']);
 const EPISODE_KINDS = new Set(['conversation', 'task', 'decision', 'error', 'observation', 'other']);
 const ENTITY_KINDS = new Set(['user', 'project', 'tool', 'concept', 'organization', 'location', 'other']);
 const SOURCE_VALUES = new Set(['mcp', 'runtime', 'host', 'import', 'legacy']);
@@ -915,10 +917,14 @@ function checkpointRevisionKey(node) {
   return `default:${checkpointAgentId(node) ?? ''}:${checkpointThreadId(node) ?? ''}`;
 }
 
-async function currentCheckpoint(app, { agentId, threadId, domain = null } = {}) {
+async function checkpointRevisions(app, { agentId, threadId, domain = null } = {}) {
   const nodes = await listNodesOfType(app, 'context_checkpoint');
-  const matches = nodes
-    .filter((node) => !node.deletedAt && checkpointMatches(node, agentId, threadId, domain));
+  // 包含墓碑：revision high-water 不得因过期维护删除最新 revision 而回退。
+  return nodes.filter((node) => checkpointMatches(node, agentId, threadId, domain));
+}
+
+async function currentCheckpoint(app, { agentId, threadId, domain = null } = {}) {
+  const matches = await checkpointRevisions(app, { agentId, threadId, domain });
   if (matches.length === 0) return null;
   const keyed = new Map();
   for (const node of matches) {
@@ -929,10 +935,20 @@ async function currentCheckpoint(app, { agentId, threadId, domain = null } = {})
   return [...keyed.values()].sort(compareInternalObjectNodes)[0] ?? null;
 }
 
-async function allCheckpoints(app, agentId, threadId = null) {
+async function highestCheckpointRevision(app, { agentId, threadId, domain = null } = {}) {
+  const matches = await checkpointRevisions(app, { agentId, threadId, domain });
+  let highest = 0;
+  for (const node of matches) {
+    const revision = internalObjectRevision(node);
+    if (typeof revision === 'number' && revision > highest) highest = revision;
+  }
+  return highest;
+}
+
+async function allCheckpoints(app, agentId, threadId = null, { includeDeleted = false } = {}) {
   const nodes = await listNodesOfType(app, 'context_checkpoint');
   return nodes.filter((node) => {
-    if (node.deletedAt || !isV2CheckpointNode(node)) return false;
+    if ((!includeDeleted && node.deletedAt) || !isV2CheckpointNode(node)) return false;
     const domain = domainOfNamespace(node.namespace);
     if (domain.startsWith('task:')) {
       if (threadId !== null && checkpointThreadId(node) !== threadId) return false;
@@ -965,6 +981,91 @@ async function isCompactStale(app, node) {
     }
   }
   return false;
+}
+
+/** capability 侧确定性摘要：用于离线 deferred compact 恢复，禁止占位摘要落图。 */
+function compactSourceText(node) {
+  const content = isObject(node?.content) ? node.content : {};
+  switch (node?.type) {
+    case 'fact':
+    case 'preference': {
+      const subject = typeof content.subject === 'string' ? content.subject : '';
+      const predicate = typeof content.predicate === 'string' ? content.predicate : '';
+      const object = typeof content.object === 'string' ? content.object : '';
+      if (subject && predicate && object) return `${subject} ${predicate} ${object}`.trim();
+      break;
+    }
+    case 'episode':
+      if (typeof content.title === 'string' && content.title.trim()) return content.title.trim();
+      break;
+    case 'skill':
+    case 'entity':
+      if (typeof content.name === 'string' && content.name.trim()) {
+        const description = typeof content.description === 'string' ? content.description.trim() : '';
+        return description ? `${content.name.trim()}：${description}` : content.name.trim();
+      }
+      break;
+    default:
+      break;
+  }
+  if (typeof content.content === 'string' && content.content.trim()) return content.content.trim();
+  if (typeof content.description === 'string' && content.description.trim()) return content.description.trim();
+  if (typeof content.summary === 'string' && content.summary.trim()) return content.summary.trim();
+  if (Object.keys(content).length === 0) return '';
+  try {
+    const serialized = JSON.stringify(content);
+    return serialized === '{}' ? '' : serialized;
+  } catch {
+    return '';
+  }
+}
+
+function truncateUtf8(value, maxBytes) {
+  const text = String(value ?? '');
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return { text, truncated: false };
+  let low = 0;
+  let high = text.length;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (Buffer.byteLength(text.slice(0, mid), 'utf8') <= maxBytes) low = mid;
+    else high = mid - 1;
+  }
+  let cut = Math.max(0, low);
+  // 避免把代理对切成半个字符。
+  if (cut > 0 && /[\uD800-\uDBFF]/.test(text[cut - 1])) cut -= 1;
+  const suffix = cut > 0 ? '…' : '';
+  while (cut > 0 && Buffer.byteLength(`${text.slice(0, cut)}${suffix}`, 'utf8') > maxBytes) cut -= 1;
+  return { text: `${text.slice(0, cut)}${suffix}`, truncated: true };
+}
+
+function buildCompactSummaryFromNodes(nodes, strategy = 'summary') {
+  const sorted = [...nodes].sort((a, b) => String(a.id ?? '').localeCompare(String(b.id ?? '')));
+  const lines = [];
+  const seen = new Set();
+  const kinds = new Map();
+  for (const node of sorted) {
+    const type = typeof node.type === 'string' ? node.type : 'record';
+    kinds.set(type, (kinds.get(type) ?? 0) + 1);
+    const text = compactSourceText(node).replace(/\s+/g, ' ').trim().slice(0, 240);
+    if (!text) continue;
+    if (strategy === 'dedupe') {
+      const key = text.toLocaleLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+    }
+    lines.push(`- [${type}] ${text}`);
+  }
+  const kindSummary = [...kinds.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([kind, count]) => `${kind}:${count}`)
+    .join(' ');
+  const header = `Compact · ${sorted.length} records${kindSummary ? ` · ${kindSummary}` : ''}`;
+  const rawSummary = lines.length > 0 ? `${header}\n${lines.join('\n')}` : header;
+  const summary = truncateUtf8(rawSummary, MAX_COMPACT_SUMMARY_BYTES).text;
+  return {
+    summary,
+    tokenCount: Math.max(1, Math.ceil([...summary].length / 4)),
+  };
 }
 
 export function requestIdOf(req) {
@@ -1823,6 +1924,9 @@ function versionPayload() {
  *   env?: NodeJS.ProcessEnv,
  *   now?: () => number,
  *   ttlMs?: number,
+ *   idempotencyMaintenanceIntervalMs?: number,
+ *   setIntervalFn?: typeof setInterval,
+ *   clearIntervalFn?: typeof clearInterval,
  * }} options
  */
 export function createMemoryCapabilityHandler({
@@ -1834,19 +1938,119 @@ export function createMemoryCapabilityHandler({
   env = process.env,
   now = () => Date.now(),
   ttlMs,
+  idempotencyMaintenanceIntervalMs = IDEMPOTENCY_MAINTENANCE_INTERVAL_MS,
+  setIntervalFn = setInterval,
+  clearIntervalFn = clearInterval,
 } = {}) {
   let tokenRecord = null;
   let tokenPromise = null;
   let tokenError = null;
   let disposed = false;
+  let idempotencyTimer = null;
+  let idempotencyMaintenanceRun = null;
+  let idempotencyMaintenanceStatus = {
+    running: false,
+    intervalMs: Math.max(10, Math.floor(idempotencyMaintenanceIntervalMs)),
+    lastAttemptAt: null,
+    lastSuccessAt: null,
+    lastError: null,
+    lastResult: null,
+  };
+  let checkpointMaintenanceRun = null;
+  const checkpointMaintenanceStatus = {
+    running: false,
+    batchSize: 50,
+    lastAttemptAt: null,
+    lastSuccessAt: null,
+    lastError: null,
+    lastResult: null,
+  };
+  let revoked = false;
+  let tokenGeneration = 0;
+  let activeRequests = 0;
+  // 同一 composite key 的在途单飞：并发同键请求共享一次 execute，避免超时重试
+  // 与原请求各写一份。条目随主请求 promise 结算在 finally 清理。
+  const idempotencyInFlight = new Map();
+  const activeWaiters = new Set();
+  let draining = false;
+  let closePromise = null;
   const hostId = hostIdForHome(home);
 
+  function finishActiveRequest() {
+    activeRequests = Math.max(0, activeRequests - 1);
+    if (activeRequests === 0) {
+      for (const resolve of [...activeWaiters]) resolve();
+    }
+  }
+
+  /** 有界等待已认证的在途请求退出；false 表示仍有请求未结算（调用方必须报告 incomplete）。 */
+  async function drain({ timeoutMs = 2000 } = {}) {
+    if (activeRequests === 0) return true;
+    await new Promise((resolve) => {
+      const finish = () => {
+        clearTimeout(timer);
+        activeWaiters.delete(finish);
+        resolve();
+      };
+      const timer = setTimeout(finish, Math.max(1, timeoutMs));
+      timer.unref?.();
+      activeWaiters.add(finish);
+    });
+    return activeRequests === 0;
+  }
+
+  /**
+   * 关闭能力面：先进入不可准入 draining，等待已认证请求（含真实图写）完成，
+   * 再撤销 token。drain 超时则报告 incomplete 且不撤销 token，调用方不得声明 clean。
+   */
+  async function close({ timeoutMs = 5000 } = {}) {
+    if (closePromise) return closePromise;
+    draining = true;
+    closePromise = (async () => {
+      const clean = await drain({ timeoutMs });
+      if (clean) await revoke();
+      return { clean, active: activeRequests };
+    })();
+    return closePromise;
+  }
+
+  /** drain 失败时放弃新请求，但不撤销 token / 不声明已撤销。 */
+  function abandon() {
+    draining = true;
+    disposed = true;
+  }
+
+  function beginDrain() {
+    draining = true;
+  }
+
+  function assertRequestGeneration(generation, operation = 'write') {
+    if (disposed || revoked || draining || generation !== tokenGeneration) {
+      throw new CapabilityError(409, 'mode_mismatch', '能力接口已撤销/关闭，写入未提交', {
+        operation,
+      }, false);
+    }
+  }
+
+  function isLifecycleError(error) {
+    return error instanceof CapabilityError
+      && error.status === 409
+      && error.code === 'mode_mismatch';
+  }
+
   async function ensureToken() {
+    if (disposed) {
+      throw new CapabilityError(503, 'capability_unavailable', '能力接口已关闭', undefined, true);
+    }
+    if (revoked) {
+      throw new CapabilityError(401, 'capability_token_invalid', 'capability token 已撤销');
+    }
     const current = tokenRecord;
     if (current && !(typeof current.expiresAt === 'number' && current.expiresAt > 0 && now() >= current.expiresAt)) {
       return current;
     }
     if (!tokenPromise) {
+      const generation = tokenGeneration;
       tokenPromise = ensureCapabilityToken({
         home,
         env,
@@ -1854,7 +2058,12 @@ export function createMemoryCapabilityHandler({
         mcpPid: process.pid,
         ...(ttlMs !== undefined ? { ttlMs } : {}),
       })
-        .then((record) => {
+        .then(async (record) => {
+          if (disposed || revoked || generation !== tokenGeneration) {
+            // 撤销与生成竞态：晚到的生成不得复活 token 文件。
+            await removeCapabilityToken({ home }).catch(() => undefined);
+            throw new CapabilityError(401, 'capability_token_invalid', 'capability token 已撤销');
+          }
           tokenRecord = record;
           tokenError = null;
           return record;
@@ -1871,9 +2080,19 @@ export function createMemoryCapabilityHandler({
     return tokenPromise;
   }
 
-  /** daemon 启动时调用（仅 enabled）：提前生成 token 文件，sidecar 才能发现。 */
+  /** daemon 启动时/显式恢复时调用（仅 enabled）：准备 token 文件，sidecar 才能发现。 */
   async function prepare() {
+    if (disposed) return { enabled: false, tokenId: null };
     if (!isMemoryRuntimeEnabled(getConfig())) return { enabled: false, tokenId: null };
+    startIdempotencyMaintenance();
+    // 先让上一代 token 生成收敛，再解除 revoke/draining 门闩；只有显式 prepare 能换发。
+    const pending = tokenPromise;
+    if (pending) await pending.catch(() => undefined);
+    revoked = false;
+    draining = false;
+    closePromise = null;
+    tokenError = null;
+    tokenGeneration += 1;
     try {
       const record = await ensureToken();
       return { enabled: true, tokenId: record.tokenId };
@@ -1884,14 +2103,24 @@ export function createMemoryCapabilityHandler({
 
   /** 停用/关闭：撤销进程内 token 并删除 token 文件（旧 sidecar 下一次请求 401）。 */
   async function revoke() {
+    revoked = true;
+    draining = true;
+    tokenGeneration += 1;
     tokenRecord = null;
     tokenError = null;
+    const pending = tokenPromise;
+    if (pending) await pending.catch(() => undefined);
     await removeCapabilityToken({ home });
   }
 
   async function dispose() {
     disposed = true;
+    stopIdempotencyMaintenance();
+    checkpointMaintenanceStatus.running = false;
+    await idempotencyMaintenanceRun?.catch(() => undefined);
+    await checkpointMaintenanceRun?.catch(() => undefined);
     await revoke();
+    await drain({ timeoutMs: 2000 });
   }
 
   function identitySnapshot() {
@@ -1910,6 +2139,233 @@ export function createMemoryCapabilityHandler({
       hostId,
     };
   }
+
+    // ---------- 写路径：幂等账本（24h，本地过渡数据，不进入图/同步） ----------
+
+    const ledgerDir = typeof home === 'string' && home.length > 0 ? join(home, 'memory-runtime') : null;
+    const ledgerFile = ledgerDir ? join(ledgerDir, IDEMPOTENCY_LEDGER_FILE) : null;
+    let ledger = null;
+    let ledgerLoading = null;
+    let ledgerLastPersisted = null;
+    let ledgerWriteTail = Promise.resolve();
+
+    function sanitizeLedgerValue(value, key = '') {
+      if (typeof value === 'string') {
+        if (/^(?:authorization|api[-_]?key|access[-_]?token|refresh[-_]?token|token|secret|password|passwd|credential|private[-_]?key)$/i.test(key)) {
+          return '[redacted]';
+        }
+        return value
+          .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, '[redacted]')
+          .replace(/\bBearer\s+[A-Za-z0-9._~+/-]{8,}=*/gi, 'Bearer [redacted]')
+          .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, '[redacted]')
+          .replace(/\bgh[pousr]_[A-Za-z0-9]{16,}\b/g, '[redacted]')
+          .replace(/\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g, '[redacted]')
+          .replace(/\bAKIA[0-9A-Z]{16}\b/g, '[redacted]')
+          .replace(/\bAIza[0-9A-Za-z_-]{20,}\b/g, '[redacted]')
+          .replace(/\b(api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|passwd|authorization)\b(\s*[:=]\s*)(["']?)[^\s"',;]{4,}\3/gi, '$1$2$3[redacted]$3');
+      }
+      if (value === null || typeof value !== 'object') return value;
+      if (Array.isArray(value)) return value.map((entry) => sanitizeLedgerValue(entry));
+      const out = {};
+      for (const [entryKey, entryValue] of Object.entries(value)) {
+        if (entryValue !== undefined) out[entryKey] = sanitizeLedgerValue(entryValue, entryKey);
+      }
+      return out;
+    }
+
+    function sanitizeLedgerEntry(entry) {
+      return {
+        key: entry.key,
+        requestHash: entry.requestHash,
+        at: entry.at,
+        data: sanitizeLedgerValue(entry.data),
+        warnings: sanitizeLedgerValue(entry.warnings ?? []),
+        degraded: entry.degraded === true,
+      };
+    }
+
+    async function ledgerState() {
+      if (ledger) return ledger;
+      if (!ledgerFile) {
+        ledger = new Map();
+        return ledger;
+      }
+      if (!ledgerLoading) {
+        ledgerLoading = (async () => {
+          const state = new Map();
+          try {
+            const raw = JSON.parse(await readFile(ledgerFile, 'utf-8'));
+            if (raw?.version === IDEMPOTENCY_LEDGER_VERSION && Array.isArray(raw.entries)) {
+              ledgerLastPersisted = JSON.stringify({ version: raw.version, entries: raw.entries });
+              const cutoff = now() - IDEMPOTENCY_TTL_MS;
+              for (const entry of raw.entries) {
+                if (!isObject(entry) || typeof entry.key !== 'string' || !isObject(entry.data)) continue;
+                if (typeof entry.at !== 'number' || entry.at <= cutoff) continue;
+                state.set(entry.key, sanitizeLedgerEntry(entry));
+              }
+            }
+          } catch {
+            // 账本损坏/不存在：按空处理；clientItemId 与内容 hash 仍可防重。
+          }
+          ledger = state;
+          return state;
+        })().finally(() => {
+          ledgerLoading = null;
+        });
+      }
+      return ledgerLoading;
+    }
+
+    async function saveLedgerUnlocked(state) {
+      if (!ledgerFile || !ledgerDir) return 0;
+      const cutoff = now() - IDEMPOTENCY_TTL_MS;
+      for (const [key, entry] of state) {
+        if (typeof entry.at !== 'number' || entry.at <= cutoff) state.delete(key);
+      }
+      while (state.size > IDEMPOTENCY_MAX_ENTRIES) {
+        const oldest = state.keys().next().value;
+        if (oldest === undefined) break;
+        state.delete(oldest);
+      }
+      const payload = {
+        version: IDEMPOTENCY_LEDGER_VERSION,
+        entries: [...state.values()].map(sanitizeLedgerEntry),
+      };
+      // 空账本且从未存在文件时不创建目录/文件（env-only token 与轻量启动保持零副作用）。
+      if (state.size === 0 && ledgerLastPersisted === null) return 0;
+      const serialized = JSON.stringify(payload);
+      if (serialized === ledgerLastPersisted) return Buffer.byteLength(serialized, 'utf8');
+      await mkdir(ledgerDir, { recursive: true, mode: 0o700 });
+      await chmod(ledgerDir, 0o700);
+      const tmp = `${ledgerFile}.tmp-${process.pid}-${randomUUID()}`;
+      try {
+        await writeFile(tmp, serialized, { encoding: 'utf-8', mode: 0o600 });
+        await chmod(tmp, 0o600);
+        await rename(tmp, ledgerFile);
+        await chmod(ledgerFile, 0o600);
+        ledgerLastPersisted = serialized;
+        return Buffer.byteLength(serialized, 'utf8');
+      } catch (error) {
+        await rm(tmp, { force: true }).catch(() => undefined);
+        throw error;
+      }
+    }
+
+    function saveLedger(state) {
+      const run = ledgerWriteTail.then(
+        () => saveLedgerUnlocked(state),
+        () => saveLedgerUnlocked(state),
+      );
+      ledgerWriteTail = run.then(() => undefined, () => undefined);
+      return run;
+    }
+
+    function runIdempotencyMaintenance() {
+      if (idempotencyMaintenanceRun) return idempotencyMaintenanceRun;
+      const at = now();
+      idempotencyMaintenanceStatus.lastAttemptAt = at;
+      idempotencyMaintenanceRun = (async () => {
+        try {
+          const state = await ledgerState();
+          const before = state.size;
+          const bytes = await saveLedger(state);
+          const oldestAt = state.size > 0 ? Math.min(...[...state.values()].map((entry) => entry.at)) : null;
+          idempotencyMaintenanceStatus.lastSuccessAt = at;
+          idempotencyMaintenanceStatus.lastError = null;
+          idempotencyMaintenanceStatus.lastResult = {
+            removed: Math.max(0, before - state.size),
+            count: state.size,
+            bytes,
+            oldestAgeMs: oldestAt === null ? null : Math.max(0, at - oldestAt),
+            at,
+          };
+          return idempotencyMaintenanceStatus.lastResult;
+        } catch (error) {
+          const code = typeof error?.code === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(error.code)
+            ? error.code
+            : 'idempotency_maintenance_failed';
+          idempotencyMaintenanceStatus.lastError = { code, at };
+          return idempotencyMaintenanceStatus.lastError;
+        } finally {
+          idempotencyMaintenanceRun = null;
+        }
+      })();
+      return idempotencyMaintenanceRun;
+    }
+
+    function startIdempotencyMaintenance() {
+      if (idempotencyTimer || disposed) return;
+      idempotencyTimer = setIntervalFn(() => {
+        void runIdempotencyMaintenance();
+        void runCheckpointMaintenance();
+      }, idempotencyMaintenanceStatus.intervalMs);
+      idempotencyTimer?.unref?.();
+      idempotencyMaintenanceStatus.running = true;
+      checkpointMaintenanceStatus.running = true;
+      void runIdempotencyMaintenance();
+      void runCheckpointMaintenance();
+    }
+
+    function stopIdempotencyMaintenance() {
+      if (idempotencyTimer) {
+        clearIntervalFn(idempotencyTimer);
+        idempotencyTimer = null;
+      }
+      idempotencyMaintenanceStatus.running = false;
+    }
+
+
+    // [internal-object-write] 内部对象允许直接 GraphStore 写入；普通 MemoryRecord 禁止。
+    function runCheckpointMaintenance() {
+      if (checkpointMaintenanceRun) return checkpointMaintenanceRun;
+      const at = now();
+      checkpointMaintenanceStatus.lastAttemptAt = at;
+      checkpointMaintenanceRun = (async () => {
+        try {
+          const appValue = getApp?.() ?? null;
+          if (!appValue) {
+            const result = { removed: 0, scanned: 0, checkedAt: at, skipped: 'capability_unavailable' };
+            checkpointMaintenanceStatus.lastResult = result;
+            return result;
+          }
+          const nodes = await listNodesOfType(appValue, 'context_checkpoint');
+          const expired = nodes
+            .filter((node) => node && !node.deletedAt
+              && isV2CheckpointNode(node)
+              && internalObjectKind(node) === 'context_checkpoint'
+              && checkpointExpired(node, at))
+            .slice(0, checkpointMaintenanceStatus.batchSize);
+          let removed = 0;
+          for (const node of expired) {
+            await appValue.graph.deleteNode(node.id);
+            removed += 1;
+          }
+          const result = {
+            removed,
+            scanned: nodes.length,
+            remainingExpired: Math.max(0, nodes.filter((node) => node && !node.deletedAt
+              && isV2CheckpointNode(node)
+              && internalObjectKind(node) === 'context_checkpoint'
+              && checkpointExpired(node, at)).length - removed),
+            checkedAt: at,
+          };
+          checkpointMaintenanceStatus.lastSuccessAt = at;
+          checkpointMaintenanceStatus.lastError = null;
+          checkpointMaintenanceStatus.lastResult = result;
+          return result;
+        } catch (error) {
+          const code = typeof error?.code === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(error.code)
+            ? error.code
+            : 'checkpoint_maintenance_failed';
+          checkpointMaintenanceStatus.lastError = { code, at };
+          return checkpointMaintenanceStatus.lastError;
+        } finally {
+          checkpointMaintenanceRun = null;
+        }
+      })();
+      return checkpointMaintenanceRun;
+    }
+
 
   const handle = async function handleMemoryCapabilityRequest({ req, res, url, body }) {
     const path = url?.pathname ?? '';
@@ -2026,71 +2482,6 @@ export function createMemoryCapabilityHandler({
       return parsed;
     };
 
-    // ---------- 写路径：幂等账本（24h，本地过渡数据，不进入图/同步） ----------
-
-    const ledgerDir = typeof home === 'string' && home.length > 0 ? join(home, 'memory-runtime') : null;
-    const ledgerFile = ledgerDir ? join(ledgerDir, IDEMPOTENCY_LEDGER_FILE) : null;
-    let ledger = null;
-    let ledgerLoading = null;
-
-    async function ledgerState() {
-      if (ledger) return ledger;
-      if (!ledgerFile) {
-        ledger = new Map();
-        return ledger;
-      }
-      if (!ledgerLoading) {
-        ledgerLoading = (async () => {
-          const state = new Map();
-          try {
-            const raw = JSON.parse(await readFile(ledgerFile, 'utf-8'));
-            if (raw?.version === IDEMPOTENCY_LEDGER_VERSION && Array.isArray(raw.entries)) {
-              const cutoff = now() - IDEMPOTENCY_TTL_MS;
-              for (const entry of raw.entries) {
-                if (!isObject(entry) || typeof entry.key !== 'string' || !isObject(entry.data)) continue;
-                if (typeof entry.at !== 'number' || entry.at < cutoff) continue;
-                state.set(entry.key, entry);
-              }
-            }
-          } catch {
-            // 账本损坏/不存在：按空处理；clientItemId 与内容 hash 仍可防重。
-          }
-          ledger = state;
-          return state;
-        })().finally(() => {
-          ledgerLoading = null;
-        });
-      }
-      return ledgerLoading;
-    }
-
-    async function saveLedger(state) {
-      if (!ledgerFile || !ledgerDir) return;
-      const cutoff = now() - IDEMPOTENCY_TTL_MS;
-      const entries = [...state.values()].filter((entry) => entry.at >= cutoff);
-      while (entries.length > IDEMPOTENCY_MAX_ENTRIES) {
-        const oldest = entries.shift();
-        if (oldest) state.delete(oldest.key);
-      }
-      // 重新过滤：淘汰后 entries 与 state 保持一致。
-      const payload = {
-        version: IDEMPOTENCY_LEDGER_VERSION,
-        entries: entries.filter((entry) => state.has(entry.key)),
-      };
-      await mkdir(ledgerDir, { recursive: true, mode: 0o700 });
-      await chmod(ledgerDir, 0o700);
-      const tmp = `${ledgerFile}.tmp-${process.pid}-${randomUUID()}`;
-      try {
-        await writeFile(tmp, JSON.stringify(payload), { encoding: 'utf-8', mode: 0o600 });
-        await chmod(tmp, 0o600);
-        await rename(tmp, ledgerFile);
-        await chmod(ledgerFile, 0o600);
-      } catch (error) {
-        await rm(tmp, { force: true }).catch(() => undefined);
-        throw error;
-      }
-    }
-
     function idempotencyKeyOf(req, payload) {
       const header = req?.headers?.['idempotency-key'];
       if (hasValue(header) && header !== '') {
@@ -2111,58 +2502,116 @@ export function createMemoryCapabilityHandler({
     async function withIdempotency(route, payload, tokenId, execute) {
       const key = idempotencyKeyOf(req, payload);
       if (key === null) return execute();
-      const state = await ledgerState();
       const composite = `${tokenId ?? 'none'}\u0000${route}\u0000${key}`;
       const requestHash = sha256Hex(canonicalJson(payload));
-      const existing = state.get(composite);
-      if (existing) {
-        if (existing.requestHash !== requestHash) {
+
+      const joinFlight = (flight) => {
+        if (flight.requestHash !== requestHash) {
           throw new CapabilityError(409, 'idempotency_conflict', '同一幂等键对应了不同请求体', {
             key,
             route,
           });
         }
-        return {
-          data: { ...jsonClone(existing.data), replayed: true },
-          warnings: jsonClone(existing.warnings ?? []),
-          degraded: existing.degraded === true,
-        };
-      }
-      const result = await execute();
-      // 详情批量部分失败不缓存：同一 outbox 键重放时应重新尝试失败项；
-      // 已成功项仍由 clientItemId/contentHash 去重，不会重复写。
-      if (route === 'detail:write' && result?.data?.partial === true) {
-        return result;
-      }
-      const entry = {
-        key: composite,
-        requestHash,
-        at: now(),
-        data: jsonClone({ ...(result.data ?? {}), replayed: false }),
-        warnings: jsonClone(result.warnings ?? []),
-        degraded: result.degraded === true,
+        // 等待同一在途执行，返回等价的深拷贝，避免两个响应共享可变对象。
+        return flight.promise.then((result) => jsonClone(result));
       };
-      // LRU：同键刷新到队尾。
-      state.delete(composite);
-      state.set(composite, entry);
-      const cutoff = now() - IDEMPOTENCY_TTL_MS;
-      for (const [entryKey, value] of state) {
-        if (typeof value.at !== 'number' || value.at < cutoff) state.delete(entryKey);
-      }
-      while (state.size > IDEMPOTENCY_MAX_ENTRIES) {
-        const oldest = state.keys().next().value;
-        if (oldest === undefined) break;
-        state.delete(oldest);
-      }
+
+      const inFlight = idempotencyInFlight.get(composite);
+      if (inFlight) return joinFlight(inFlight);
+
+      const flight = { requestHash, promise: null };
+      flight.promise = (async () => {
+        const state = await ledgerState();
+        let existing = state.get(composite);
+        if (existing && (typeof existing.at !== 'number' || existing.at <= now() - IDEMPOTENCY_TTL_MS)) {
+          state.delete(composite);
+          existing = null;
+        }
+        if (existing) {
+          if (existing.requestHash !== requestHash) {
+            throw new CapabilityError(409, 'idempotency_conflict', '同一幂等键对应了不同请求体', {
+              key,
+              route,
+            });
+          }
+          return {
+            data: { ...jsonClone(existing.data), replayed: true },
+            warnings: jsonClone(existing.warnings ?? []),
+            degraded: existing.degraded === true,
+          };
+        }
+        const result = await execute();
+        // 空/缺项/部分响应不进入幂等缓存：同一 outbox 键必须能重新执行未确认项。
+        // 已成功项仍由 clientItemId/contentHash 去重，不会重复写。
+        if ((route === 'write' || route === 'detail:write') && Array.isArray(payload.items)) {
+          const results = result?.data?.results;
+          const expectedIds = payload.items.map((item) => item?.clientItemId).filter((id) => typeof id === 'string');
+          const actualIds = Array.isArray(results)
+            ? results.map((entry) => entry?.clientItemId).filter((id) => typeof id === 'string')
+            : [];
+          const allHaveClientItemIds = expectedIds.length === payload.items.length;
+          const hasUnexpected = allHaveClientItemIds && actualIds.some((id) => !expectedIds.includes(id));
+          const hasMissing = allHaveClientItemIds && expectedIds.some((id) => !actualIds.includes(id));
+          const hasFailedResult = Array.isArray(results) && results.some((entry) =>
+            entry?.status !== 'created' && entry?.status !== 'duplicate');
+          // 成功状态也必须带可重放的权威字段；malformed 成功响应不得进入永久账本。
+          const hasMalformedSuccess = Array.isArray(results) && results.some((entry) => {
+            if (!isObject(entry) || (entry.status !== 'created' && entry.status !== 'duplicate')) return false;
+            if (typeof entry.id !== 'string' || entry.id.trim().length === 0) return true;
+            if ((route === 'write' || route === 'detail:write')
+              && (typeof entry.domain !== 'string' || entry.domain.trim().length === 0)) return true;
+            if (route === 'detail:write'
+              && (typeof entry.detailKind !== 'string' || entry.detailKind.trim().length === 0)) return true;
+            return false;
+          });
+          if (result?.data?.partial === true
+            || (typeof result?.data?.failed === 'number' && result.data.failed > 0)
+            || !Array.isArray(results)
+            || results.length !== payload.items.length
+            || hasUnexpected
+            || hasMissing
+            || hasFailedResult
+            || hasMalformedSuccess) {
+            return result;
+          }
+        }
+        const entry = {
+          key: composite,
+          requestHash,
+          at: now(),
+          data: jsonClone({ ...(result.data ?? {}), replayed: false }),
+          warnings: jsonClone(result.warnings ?? []),
+          degraded: result.degraded === true,
+        };
+        // LRU：同键刷新到队尾。
+        state.delete(composite);
+        state.set(composite, sanitizeLedgerEntry(entry));
+        const cutoff = now() - IDEMPOTENCY_TTL_MS;
+        for (const [entryKey, value] of state) {
+          if (typeof value.at !== 'number' || value.at <= cutoff) state.delete(entryKey);
+        }
+        while (state.size > IDEMPOTENCY_MAX_ENTRIES) {
+          const oldest = state.keys().next().value;
+          if (oldest === undefined) break;
+          state.delete(oldest);
+        }
+        try {
+          await saveLedger(state);
+        } catch {
+          result.warnings = [
+            ...(result.warnings ?? []),
+            { code: 'idempotency_ledger_unavailable', message: '幂等账本写入失败；仍可依赖内容 hash 防重' },
+          ];
+        }
+        return result;
+      })();
+      idempotencyInFlight.set(composite, flight);
       try {
-        await saveLedger(state);
-      } catch {
-        result.warnings = [
-          ...(result.warnings ?? []),
-          { code: 'idempotency_ledger_unavailable', message: '幂等账本写入失败；仍可依赖内容 hash 防重' },
-        ];
+        return await flight.promise;
+      } finally {
+        // 只清理自己的条目；主请求失败时也要释放，后续同键请求可重试。
+        if (idempotencyInFlight.get(composite) === flight) idempotencyInFlight.delete(composite);
       }
-      return result;
     }
 
     // ---------- /write ----------
@@ -2360,7 +2809,8 @@ export function createMemoryCapabilityHandler({
       };
     }
 
-    async function performWriteItem(appValue, item) {
+    async function performWriteItem(appValue, item, generation) {
+      assertRequestGeneration(generation, 'write');
       if (!appValue?.graph?.getNode) {
         throw new CapabilityError(503, 'capability_unavailable', '图存储不可用', undefined, true);
       }
@@ -2402,10 +2852,11 @@ export function createMemoryCapabilityHandler({
       return { node: stored.node, warnings };
     }
 
-    async function applyWriteSupersedes(item, newNode) {
+    async function applyWriteSupersedes(item, newNode, generation) {
       if (!Array.isArray(item.supersedes) || item.supersedes.length === 0) {
         return { superseded: [], skipped: [] };
       }
+      assertRequestGeneration(generation, 'write.supersede');
       const currentService = service();
       if (typeof currentService.supersedeRecords !== 'function') {
         throw new CapabilityError(503, 'capability_unavailable', '记忆服务不支持记录替代', undefined, true);
@@ -2417,7 +2868,7 @@ export function createMemoryCapabilityHandler({
       });
     }
 
-    async function handleWrite(payload, actor) {
+    async function handleWrite(payload, actor, generation) {
       const items = payload.items;
       if (!Array.isArray(items) || items.length === 0) {
         throw new CapabilityError(400, 'invalid_request', 'items 必须是非空数组');
@@ -2452,7 +2903,7 @@ export function createMemoryCapabilityHandler({
           ?? dedupe.hash.get(dedupeKey('hash', item.domain, item.contentHash));
         if (existing) {
           try {
-            const replaced = await applyWriteSupersedes(item, existing);
+            const replaced = await applyWriteSupersedes(item, existing, generation);
             duplicates += 1;
             results.push(recordWriteResult('duplicate', existing, item, item.owner, replaced.superseded));
             for (const id of replaced.skipped) {
@@ -2463,6 +2914,7 @@ export function createMemoryCapabilityHandler({
               });
             }
           } catch (error) {
+            if (isLifecycleError(error)) throw error;
             failed += 1;
             results.push({
               ...(item.clientItemId !== undefined ? { clientItemId: item.clientItemId } : {}),
@@ -2477,10 +2929,10 @@ export function createMemoryCapabilityHandler({
           continue;
         }
         try {
-          const written = await performWriteItem(appValue, item);
+          const written = await performWriteItem(appValue, item, generation);
           warnings.push(...written.warnings);
           const node = written.node;
-          const replaced = await applyWriteSupersedes(item, node);
+          const replaced = await applyWriteSupersedes(item, node, generation);
           for (const id of replaced.skipped) {
             warnings.push({
               code: 'supersedes_skipped',
@@ -2495,6 +2947,7 @@ export function createMemoryCapabilityHandler({
           }
           dedupe.hash.set(dedupeKey('hash', item.domain, item.contentHash), node);
         } catch (error) {
+          if (isLifecycleError(error)) throw error;
           failed += 1;
           results.push({
             ...(item.clientItemId !== undefined ? { clientItemId: item.clientItemId } : {}),
@@ -2536,7 +2989,7 @@ export function createMemoryCapabilityHandler({
       return raw;
     }
 
-    async function handleUpdate(payload, actor) {
+    async function handleUpdate(payload, actor, generation) {
       const items = payload.items;
       if (!Array.isArray(items) || items.length === 0) {
         throw new CapabilityError(400, 'invalid_request', 'items 必须是非空数组');
@@ -2682,6 +3135,7 @@ export function createMemoryCapabilityHandler({
       let failed = 0;
       for (const plan of plans) {
         try {
+          assertRequestGeneration(generation, 'update');
           const currentService = service();
           if (typeof currentService.updateRecord !== 'function') {
             throw new CapabilityError(503, 'capability_unavailable', '记忆服务不支持统一更新', undefined, true);
@@ -2718,6 +3172,7 @@ export function createMemoryCapabilityHandler({
             validTo: normalizeValidTo(node.validTo),
           });
         } catch (error) {
+          if (isLifecycleError(error)) throw error;
           failed += 1;
           results.push({
             id: plan.id,
@@ -2782,12 +3237,14 @@ export function createMemoryCapabilityHandler({
       return { appValue, nodes, allowed, notFound, forbidden, internal };
     }
 
-    async function handleDelete(payload, actor) {
+    async function handleDelete(payload, actor, generation) {
       if (payload.sync !== undefined) {
         throw new CapabilityError(400, 'legacy_sync_unsupported', '不再支持 sync 字段');
       }
+      assertRequestGeneration(generation, 'delete');
       const ids = parseIdList(payload);
       const classified = await classifyGovernanceTargets(ids, actor);
+      assertRequestGeneration(generation, 'delete.commit');
       const deleted = [];
       let detailsDeleted = [];
       if (classified.allowed.length > 0) {
@@ -2814,16 +3271,18 @@ export function createMemoryCapabilityHandler({
       };
     }
 
-    async function handleArchive(payload, actor) {
+    async function handleArchive(payload, actor, generation) {
       if (payload.sync !== undefined) {
         throw new CapabilityError(400, 'legacy_sync_unsupported', '不再支持 sync 字段');
       }
+      assertRequestGeneration(generation, 'archive');
       if (payload.archived !== undefined && typeof payload.archived !== 'boolean') {
         throw new CapabilityError(400, 'invalid_request', 'archived 必须是布尔值');
       }
       const archived = payload.archived !== false;
       const ids = parseIdList(payload);
       const classified = await classifyGovernanceTargets(ids, actor);
+      assertRequestGeneration(generation, 'archive.commit');
       const skipped = [];
       const allowed = [];
       for (const id of classified.allowed) {
@@ -2889,7 +3348,6 @@ export function createMemoryCapabilityHandler({
         && internalObjectMetadata(node).identityKey === identityKey) ?? null;
     }
 
-    // [internal-object-write] 内部对象允许直接 GraphStore 写入；普通 MemoryRecord 禁止。
     async function handleCompactObject(payload, actor) {      const op = payload.op;
       if (!['upsert', 'get', 'list', 'delete'].includes(op)) {
         throw new CapabilityError(400, 'internal_kind_invalid', 'compact op 必须是 upsert/get/list/delete');
@@ -2930,13 +3388,9 @@ export function createMemoryCapabilityHandler({
         }
         const provenanceInput = parseProvenanceInput(payload.provenance, 0);
         assertDomainWrite(actor, domain, provenanceInput, payload.threadId);
-        const summary = nonEmptyString(payload.summary, 'summary', 0);
-        if (Buffer.byteLength(summary, 'utf-8') > MAX_COMPACT_SUMMARY_BYTES) {
-          throw new CapabilityError(413, 'payload_too_large', 'summary 超过 64 KiB');
-        }
-        const tokenCount = optionalNumber(payload.tokenCount, 'tokenCount', 0);
-        if (tokenCount !== undefined && tokenCount < 0) {
-          throw validationError(0, 'tokenCount', 'tokenCount 不能为负数');
+        const deferredSummary = payload.deferredSummary === true;
+        if (!deferredSummary && payload.summary !== undefined && typeof payload.summary !== 'string') {
+          throw validationError(0, 'summary', 'summary 必须是字符串');
         }
         const model = isObject(payload.model) ? jsonClone(payload.model) : undefined;
         if (model && byteSize(model) > MAX_JSON_FIELD_BYTES) {
@@ -2960,6 +3414,32 @@ export function createMemoryCapabilityHandler({
             });
           }
           sourceNodes.push(source);
+        }
+        let summary;
+        let tokenCount;
+        if (deferredSummary) {
+          const regenerated = buildCompactSummaryFromNodes(sourceNodes, strategy);
+          if (!regenerated.summary.includes('\n')) {
+            throw new CapabilityError(422, 'compact_summary_placeholder', 'compact 来源没有可摘要正文');
+          }
+          summary = regenerated.summary;
+          if (Buffer.byteLength(summary, 'utf-8') > MAX_COMPACT_SUMMARY_BYTES) {
+            throw new CapabilityError(413, 'payload_too_large', 'summary 超过 64 KiB');
+          }
+          tokenCount = regenerated.tokenCount;
+        } else {
+          summary = nonEmptyString(payload.summary, 'summary', 0);
+          if (Buffer.byteLength(summary, 'utf-8') > MAX_COMPACT_SUMMARY_BYTES) {
+            throw new CapabilityError(413, 'payload_too_large', 'summary 超过 64 KiB');
+          }
+          // 只有标题/计数的占位摘要不得落图；恢复路径应使用 deferredSummary。
+          if (/^Compact · \d+ records(?: · [^\n]*)?$/.test(summary.trim())) {
+            throw new CapabilityError(422, 'compact_summary_placeholder', 'compact 摘要不能是占位标题');
+          }
+          tokenCount = optionalNumber(payload.tokenCount, 'tokenCount', 0);
+          if (tokenCount !== undefined && tokenCount < 0) {
+            throw validationError(0, 'tokenCount', 'tokenCount 不能为负数');
+          }
         }
         const effectiveSourceHashes = sourceHashes.length > 0
           ? [...sourceHashes]
@@ -3175,6 +3655,82 @@ export function createMemoryCapabilityHandler({
       };
     }
 
+    function checkpointGraphReferences(state, payload) {
+      const recordIds = [
+        ...(Array.isArray(payload.recordIds) ? payload.recordIds : []),
+        ...(Array.isArray(state?.references?.recordIds) ? state.references.recordIds : []),
+        ...(Array.isArray(state?.decisions) ? state.decisions.flatMap((entry) => entry?.recordIds ?? []) : []),
+        ...(isObject(state?.progress)
+          ? ['done', 'doing', 'blocked'].flatMap((key) => (
+            Array.isArray(state.progress[key]) ? state.progress[key].flatMap((entry) => entry?.recordIds ?? []) : []
+          ))
+          : []),
+      ];
+      const detailIds = [
+        ...(Array.isArray(payload.detailIds) ? payload.detailIds : []),
+        ...(Array.isArray(state?.references?.detailIds) ? state.references.detailIds : []),
+      ];
+      return {
+        recordIds: [...new Set(recordIds.filter((id) => typeof id === 'string' && id.length > 0))],
+        detailIds: [...new Set(detailIds.filter((id) => typeof id === 'string' && id.length > 0))],
+      };
+    }
+
+    async function validateCheckpointGraphReferences(appValue, checkpointDomain, { recordIds, detailIds }) {
+      let referenceDomain = null;
+      for (const id of recordIds) {
+        const node = await appValue.graph.getNode(id);
+        if (!node || node.deletedAt) {
+          throw new CapabilityError(404, 'not_found', 'checkpoint 引用的 MemoryRecord 不存在或已删除', { id });
+        }
+        if (isInternalNode(node) || !RECORD_NODE_TYPES.has(node.type)) {
+          throw new CapabilityError(400, 'invalid_reference_type', 'checkpoint recordIds 必须是 MemoryRecord', {
+            id,
+            type: node.type,
+          });
+        }
+        const domain = domainOfNamespace(node.namespace);
+        if (domain.startsWith('__')) {
+          throw new CapabilityError(400, 'invalid_reference_type', 'checkpoint 不能引用内部域对象', { id, domain });
+        }
+        if (domain !== checkpointDomain) {
+          throw new CapabilityError(400, 'domain_mismatch', 'checkpoint 引用必须与 checkpoint 同域', {
+            domain: checkpointDomain,
+            referenceDomain: domain,
+            id,
+          });
+        }
+        referenceDomain = domain;
+      }
+      for (const id of detailIds) {
+        const node = await appValue.graph.getNode(id);
+        if (!node || node.deletedAt) {
+          throw new CapabilityError(404, 'not_found', 'checkpoint 引用的 DetailRecord 不存在或已删除', { id });
+        }
+        if (node.type !== 'detail_record') {
+          throw new CapabilityError(400, 'invalid_reference_type', 'checkpoint detailIds 必须是 DetailRecord', {
+            id,
+            type: node.type,
+          });
+        }
+        const content = isObject(node.content) ? node.content : {};
+        const expiresAt = typeof content.expiresAt === 'number' ? content.expiresAt : 0;
+        if (expiresAt > 0 && expiresAt < now()) {
+          throw new CapabilityError(400, 'reference_expired', 'checkpoint 不能引用已过期 DetailRecord', { id });
+        }
+        const domain = domainOfNamespace(node.namespace);
+        if (domain !== checkpointDomain) {
+          throw new CapabilityError(400, 'domain_mismatch', 'checkpoint 引用必须与 checkpoint 同域', {
+            domain: checkpointDomain,
+            referenceDomain: domain,
+            id,
+          });
+        }
+        referenceDomain = domain;
+      }
+      return referenceDomain;
+    }
+
     async function handleCheckpointObject(payload, actor) {
       const op = payload.op;
       if (!['upsert', 'get', 'list', 'delete'].includes(op)) {
@@ -3239,15 +3795,25 @@ export function createMemoryCapabilityHandler({
         let visible = null;
         for (const domain of candidates) {
           const node = await currentCheckpoint(appValue, { agentId, threadId, domain });
-          if (!node || checkpointExpired(node, now())) continue;
+          if (!node || node.deletedAt || checkpointExpired(node, now())) continue;
           visible = node;
           break;
         }
         const view = visible ? checkpointObjectView(visible, { userId: identity.userId }) : null;
         if (view) assertCheckpointRead(view.domain);
+        let highWater = 0;
+        for (const entry of candidates) {
+          highWater = Math.max(highWater, await highestCheckpointRevision(appValue, {
+            agentId,
+            threadId,
+            domain: entry,
+          }));
+        }
         return {
           data: {
             object: view,
+            highWater,
+            latestRevision: highWater,
             replayed: false,
           },
           warnings: checkpointWarnings(view),
@@ -3259,16 +3825,17 @@ export function createMemoryCapabilityHandler({
         const threadId = payload.threadId === undefined ? null : parseThreadId(payload.threadId);
         const limit = clampLimit(payload.limit, 20);
         if (!readDomain?.startsWith('task:')) assertInternalObjectActor(actor, agentId);
-        const nodes = (await allCheckpoints(appValue, agentId, threadId))
+        const nodes = (await allCheckpoints(appValue, agentId, threadId, { includeDeleted: true }))
           .filter((node) => (readDomain ? domainOfNamespace(node.namespace) === readDomain : true))
-          .filter((node) => !checkpointExpired(node, now()))
           .sort(compareInternalObjectNodes);
         const latestByKey = new Map();
         for (const node of nodes) {
           const key = checkpointRevisionKey(node);
           if (!latestByKey.has(key)) latestByKey.set(key, node);
         }
-        const views = [...latestByKey.values()].map((node) => checkpointObjectView(node, { userId: identity.userId }));
+        const views = [...latestByKey.values()]
+          .filter((node) => !node.deletedAt && !checkpointExpired(node, now()))
+          .map((node) => checkpointObjectView(node, { userId: identity.userId }));
         return {
           data: { objects: views.slice(0, limit), total: views.length, replayed: false },
           warnings: [...new Set(views.flatMap((view) => checkpointWarnings(view)))],
@@ -3378,12 +3945,19 @@ export function createMemoryCapabilityHandler({
         }
       }
       const current = await currentCheckpoint(appValue, { agentId, threadId, domain });
-      const currentRevision = current ? internalObjectRevision(current) : 0;
+      const currentRevision = await highestCheckpointRevision(appValue, { agentId, threadId, domain });
+      const liveCurrent = current && !current.deletedAt && !checkpointExpired(current, now())
+        ? current
+        : null;
       if (hasValue(payload.expectedRevision)) {
         if (typeof payload.expectedRevision !== 'number' || !Number.isInteger(payload.expectedRevision) || payload.expectedRevision < 0) {
           throw new CapabilityError(400, 'invalid_request', 'expectedRevision 必须是非负整数');
         }
-        if (payload.expectedRevision !== currentRevision) {
+        // 兼容策略：没有 live checkpoint（显式删除或全部过期）时，宿主按
+        // existing create convention 发送 expectedRevision=0 仍允许重建；
+        // revision 仍从 high-water 前进，不复用旧 revision。
+        const createAfterNoLive = payload.expectedRevision === 0 && liveCurrent === null;
+        if (payload.expectedRevision !== currentRevision && !createAfterNoLive) {
           throw new CapabilityError(409, 'revision_mismatch', 'checkpoint revision 冲突', {
             agentId,
             threadId,
@@ -3393,7 +3967,7 @@ export function createMemoryCapabilityHandler({
           }, true);
         }
       }
-      const currentContent = isObject(current?.content) ? current.content : {};
+      const currentContent = liveCurrent && isObject(liveCurrent.content) ? liveCurrent.content : {};
       const currentLease = isObject(currentContent.lease) ? currentContent.lease : null;
       if (currentLease && typeof currentLease.until === 'number' && currentLease.until > now()
         && currentLease.hostId !== hostId) {
@@ -3407,14 +3981,21 @@ export function createMemoryCapabilityHandler({
           throw new CapabilityError(403, 'forbidden_scope', '只有 user/system 可以抢占租约');
         }
       }
-      const recordIds = stringArray(payload.recordIds, 'recordIds', 0, {
+      const payloadRecordIds = stringArray(payload.recordIds, 'recordIds', 0, {
         maxItems: MAX_COMPACT_SOURCES,
         maxChars: 128,
       }) ?? [];
-      const detailIds = stringArray(payload.detailIds, 'detailIds', 0, {
+      const payloadDetailIds = stringArray(payload.detailIds, 'detailIds', 0, {
         maxItems: MAX_COMPACT_SOURCES,
         maxChars: 128,
-      }) ?? state.references.detailIds;
+      }) ?? [];
+      const graphReferences = checkpointGraphReferences(state, {
+        recordIds: payloadRecordIds,
+        detailIds: payloadDetailIds,
+      });
+      await validateCheckpointGraphReferences(appValue, domain, graphReferences);
+      const recordIds = graphReferences.recordIds;
+      const detailIds = graphReferences.detailIds;
       const expiresAt = payload.expiresAt === undefined || payload.expiresAt === null
         ? 0
         : optionalNumber(payload.expiresAt, 'expiresAt', 0);
@@ -3491,11 +4072,14 @@ export function createMemoryCapabilityHandler({
       };
     }
 
+
+
     // [/internal-object-write]
-    async function handleInternalObject(payload, actor) {
+    async function handleInternalObject(payload, actor, generation) {
       if (payload.sync !== undefined || payload['self.sync'] !== undefined || payload['checkpoint.sync'] !== undefined) {
         throw new CapabilityError(400, 'legacy_sync_unsupported', '不再支持 sync/self.sync/checkpoint.sync 字段');
       }
+      assertRequestGeneration(generation, 'internal-object');
       const kind = payload.kind;
       if (!INTERNAL_OBJECT_KINDS.includes(kind)) {
         throw new CapabilityError(400, 'internal_kind_invalid', 'kind 必须是 compact | self_record | context_checkpoint');
@@ -3621,6 +4205,12 @@ export function createMemoryCapabilityHandler({
       if (raw.detailKind === 'raw_chunk' && !hasValue(raw.role)) {
         throw validationError(index, 'role', 'raw_chunk 需要 role');
       }
+      if (raw.role === 'tool' && raw.detailKind !== 'tool_output') {
+        throw validationError(index, 'detailKind', 'tool role 必须使用 tool_output');
+      }
+      if (raw.detailKind === 'tool_output' && hasValue(raw.role) && raw.role !== 'tool') {
+        throw validationError(index, 'role', 'tool_output 必须使用 tool role');
+      }
       if (hasValue(raw.messageId)
         && (typeof raw.messageId !== 'string' || raw.messageId.length > 256)) {
         throw validationError(index, 'messageId', 'messageId 需为 1–256 字符');
@@ -3636,7 +4226,22 @@ export function createMemoryCapabilityHandler({
       if (hasValue(raw.retentionClass) && !isDetailRetentionClass(raw.retentionClass)) {
         throw validationError(index, 'retentionClass', 'retentionClass 非法');
       }
-      const retentionClass = hasValue(raw.retentionClass) ? raw.retentionClass : 'conversation';
+      if (raw.role === 'tool' && raw.detailKind === 'document_slice') {
+        throw validationError(index, 'detailKind', 'tool role 不能使用 document_slice');
+      }
+      const expectedRetentionClass = raw.role === 'tool' || raw.detailKind === 'tool_output'
+        ? 'tool_output'
+        : raw.detailKind === 'document_slice' ? 'document_slice' : 'conversation';
+      if (raw.retentionClass === 'pinned' && actor.type !== 'user' && actor.type !== 'system') {
+        throw validationError(index, 'retentionClass', 'pinned 仅允许 user/system 显式治理');
+      }
+      if (hasValue(raw.retentionClass) && raw.retentionClass !== 'pinned'
+        && raw.retentionClass !== expectedRetentionClass) {
+        throw validationError(index, 'retentionClass', 'retentionClass 与 role/detailKind 不一致', {
+          expected: expectedRetentionClass,
+        });
+      }
+      const retentionClass = hasValue(raw.retentionClass) ? raw.retentionClass : expectedRetentionClass;
       if (hasValue(raw.expiresAt)
         && (typeof raw.expiresAt !== 'number' || !Number.isFinite(raw.expiresAt) || raw.expiresAt < 0)) {
         throw validationError(index, 'expiresAt', 'expiresAt 必须是非负数字');
@@ -3768,7 +4373,8 @@ export function createMemoryCapabilityHandler({
       };
     }
 
-    async function handleDetailWrite(payload, actor) {
+    async function handleDetailWrite(payload, actor, generation) {
+      assertRequestGeneration(generation, 'detail.write');
       const items = payload.items;
       if (!Array.isArray(items) || items.length === 0) {
         throw new CapabilityError(400, 'invalid_request', 'items 必须是非空数组');
@@ -3785,6 +4391,7 @@ export function createMemoryCapabilityHandler({
       if (typeof currentService.writeDetails !== 'function') {
         throw new CapabilityError(503, 'capability_unavailable', '记忆服务不支持详情写入', undefined, true);
       }
+      assertRequestGeneration(generation, 'detail.write.commit');
       let result;
       try {
         result = await currentService.writeDetails(validated, {
@@ -3816,6 +4423,7 @@ export function createMemoryCapabilityHandler({
           duplicates: result.duplicates,
           failed: result.failed,
           partial: result.partial,
+          evicted: Array.isArray(result.evicted) ? [...result.evicted] : [],
           replayed: false,
         },
         warnings,
@@ -3942,7 +4550,8 @@ export function createMemoryCapabilityHandler({
       return { data: result, warnings: resolved.warnings, degraded: false };
     }
 
-    async function handleDetailDelete(payload, actor) {
+    async function handleDetailDelete(payload, actor, generation) {
+      assertRequestGeneration(generation, 'detail.delete');
       const ids = parseIdList(payload);
       const reason = payload.reason === undefined ? 'user_requested' : payload.reason;
       if (!isDetailDeleteReason(reason)) {
@@ -3995,7 +4604,7 @@ export function createMemoryCapabilityHandler({
       return defaults.includes(domain);
     }
 
-    async function handleDetail(payload, actor) {
+    async function handleDetail(payload, actor, generation) {
       const op = payload.op;
       if (!['write', 'get', 'list', 'delete'].includes(op)) {
         throw new CapabilityError(400, 'invalid_request', 'detail op 必须是 write/get/list/delete');
@@ -4003,10 +4612,10 @@ export function createMemoryCapabilityHandler({
       if (payload.sync !== undefined || payload['self.sync'] !== undefined || payload['checkpoint.sync'] !== undefined) {
         throw new CapabilityError(400, 'legacy_sync_unsupported', '不再支持 sync/self.sync/checkpoint.sync 字段');
       }
-      if (op === 'write') return handleDetailWrite(payload, actor);
+      if (op === 'write') return handleDetailWrite(payload, actor, generation);
       if (op === 'get') return handleDetailGet(payload, actor);
       if (op === 'list') return handleDetailList(payload, actor);
-      return handleDetailDelete(payload, actor);
+      return handleDetailDelete(payload, actor, generation);
     }
 
     // ---------- /sync ----------
@@ -4089,8 +4698,13 @@ export function createMemoryCapabilityHandler({
       };
     }
 
+    activeRequests += 1;
     try {
       if (disposed) throw new CapabilityError(503, 'capability_unavailable', '能力接口已关闭', undefined, true);
+      if (draining && !revoked) {
+        throw new CapabilityError(409, 'mode_mismatch', '能力接口正在关闭，拒绝新的请求', undefined, false);
+      }
+      const requestGeneration = tokenGeneration;
 
       // 1) 挂载开关：轻量模式不创建目录/token/进程，直接 404。
       if (!isMemoryRuntimeEnabled(getConfig())) {
@@ -4117,8 +4731,13 @@ export function createMemoryCapabilityHandler({
       }
 
       // 4) Bearer capability token。
+      if (revoked) {
+        res.setHeader('www-authenticate', 'Bearer');
+        throw new CapabilityError(401, 'capability_token_invalid', 'capability token 已撤销');
+      }
       if (tokenError) throw new CapabilityError(503, 'capability_unavailable', '能力令牌不可用', undefined, true);
-      const record = await ensureToken().catch(() => {
+      const record = await ensureToken().catch((error) => {
+        if (error instanceof CapabilityError) throw error;
         throw new CapabilityError(503, 'capability_unavailable', '能力令牌不可用', undefined, true);
       });
       const authorization = req?.headers?.authorization;
@@ -4148,6 +4767,7 @@ export function createMemoryCapabilityHandler({
         }
         if (!isPost) throw new CapabilityError(405, 'method_not_allowed', 'sync 仅接受 GET/POST');
         const payload = requireObjectBody();
+        assertRequestGeneration(requestGeneration, 'sync');
         const result = await withIdempotency('sync', payload, record.tokenId, () => handleSyncPost(payload));
         return sendOk(result.data, result.warnings, 200, result.degraded);
       }
@@ -4157,7 +4777,8 @@ export function createMemoryCapabilityHandler({
         const payload = requireObjectBody();
         const actor = parseActor(payload.actor);
         const op = payload.op;
-        const execute = () => handleDetail(payload, actor);
+        const execute = () => handleDetail(payload, actor, requestGeneration);
+        if (op === 'write' || op === 'delete') assertRequestGeneration(requestGeneration, `detail.${String(op)}`);
         const result = (op === 'write' || op === 'delete')
           ? await withIdempotency(`detail:${op}`, payload, record.tokenId, execute)
           : await execute();
@@ -4169,12 +4790,13 @@ export function createMemoryCapabilityHandler({
         const payload = requireObjectBody();
         const actor = parseActor(payload.actor);
         let execute;
-        if (route === 'write') execute = () => handleWrite(payload, actor);
-        else if (route === 'update') execute = () => handleUpdate(payload, actor);
-        else if (route === 'delete') execute = () => handleDelete(payload, actor);
-        else if (route === 'archive') execute = () => handleArchive(payload, actor);
-        else if (route === 'internal-object') execute = () => handleInternalObject(payload, actor);
+        if (route === 'write') execute = () => handleWrite(payload, actor, requestGeneration);
+        else if (route === 'update') execute = () => handleUpdate(payload, actor, requestGeneration);
+        else if (route === 'delete') execute = () => handleDelete(payload, actor, requestGeneration);
+        else if (route === 'archive') execute = () => handleArchive(payload, actor, requestGeneration);
+        else if (route === 'internal-object') execute = () => handleInternalObject(payload, actor, requestGeneration);
         else throw new CapabilityError(404, 'not_found', '未知能力端点', { path: relative });
+        assertRequestGeneration(requestGeneration, route);
         const result = await withIdempotency(route, payload, record.tokenId, execute);
         return sendOk(result.data, result.warnings, 200, result.degraded);
       }
@@ -4203,6 +4825,14 @@ export function createMemoryCapabilityHandler({
           counts: includeCounts ? stats.counts : null,
           detailQuota: detailLimitsForConfig(),
           detailRetentionDays: { ...DETAIL_RETENTION_DAYS, pinned: 0 },
+          idempotency: {
+            running: idempotencyMaintenanceStatus.running,
+            intervalMs: idempotencyMaintenanceStatus.intervalMs,
+            lastAttemptAt: idempotencyMaintenanceStatus.lastAttemptAt,
+            lastSuccessAt: idempotencyMaintenanceStatus.lastSuccessAt,
+            lastError: idempotencyMaintenanceStatus.lastError,
+            lastResult: idempotencyMaintenanceStatus.lastResult,
+          },
           domains: includeCounts
             ? stats.domains.map((entry) => ({
               domain: entry.domain,
@@ -4721,6 +5351,8 @@ export function createMemoryCapabilityHandler({
       }
       // 不把内部错误细节（含路径/内容）回给调用方；不记录 token。
       return sendError(500, 'internal', '能力接口内部错误', undefined, true);
+    } finally {
+      finishActiveRequest();
     }
   };
 
@@ -4728,7 +5360,34 @@ export function createMemoryCapabilityHandler({
     prepare,
     revoke,
     dispose,
+    close,
+    abandon,
+    beginDrain,
+    drain,
+    isDraining: () => draining,
     isEnabled: () => isMemoryRuntimeEnabled(getConfig()),
     tokenId: () => tokenRecord?.tokenId ?? null,
+    runIdempotencyMaintenance,
+    idempotencyIdle: () => idempotencyMaintenanceRun ?? Promise.resolve(null),
+    runCheckpointMaintenance,
+    checkpointMaintenanceIdle: () => checkpointMaintenanceRun ?? Promise.resolve(null),
+    checkpointMaintenance: () => ({
+      ...checkpointMaintenanceStatus,
+      lastError: checkpointMaintenanceStatus.lastError
+        ? { ...checkpointMaintenanceStatus.lastError }
+        : null,
+      lastResult: checkpointMaintenanceStatus.lastResult
+        ? { ...checkpointMaintenanceStatus.lastResult }
+        : null,
+    }),
+    idempotencyMaintenance: () => ({
+      ...idempotencyMaintenanceStatus,
+      lastError: idempotencyMaintenanceStatus.lastError
+        ? { ...idempotencyMaintenanceStatus.lastError }
+        : null,
+      lastResult: idempotencyMaintenanceStatus.lastResult
+        ? { ...idempotencyMaintenanceStatus.lastResult }
+        : null,
+    }),
   });
 }

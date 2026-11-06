@@ -25,15 +25,15 @@
 
 ## 一键安装（Release 资产）
 
-> 0.3.0 尚未发布；下面的 GitHub Release 资产在**发布后**提供。发布前或从源码开发时，使用文末的“源码安装”。
+> 0.3.2 发布后，下面的 GitHub Release 资产可用。发布前或从源码开发时，使用文末的“源码安装”。
 
 发布后，GitHub Release 会提供 `mebular-hermes-plugins-<version>.tar.gz`，与 npm 包使用同一版本号。不需要 PyPI，也不需要手工查找 `$HERMES_HOME`：
 
 ```bash
-# 1) 下载并解压（示例版本 0.3.0）
-gh release download v0.3.0 -p 'mebular-hermes-plugins-*.tar.gz'
+# 1) 下载并解压（示例版本 0.3.2）
+gh release download v0.3.2 -p 'mebular-hermes-plugins-*.tar.gz'
 mkdir -p mebular-hermes-plugins
-tar -xzf mebular-hermes-plugins-0.3.0.tar.gz -C mebular-hermes-plugins
+tar -xzf mebular-hermes-plugins-0.3.2.tar.gz -C mebular-hermes-plugins
 cd mebular-hermes-plugins
 
 # 2) 安装到 $HERMES_HOME/plugins（默认 ~/.hermes/plugins）
@@ -120,4 +120,4 @@ node tests/integration/host-e2e/hermes-real-runtime.mjs
 - `prefetch` 首次同步召回最多等 `recall_timeout`（默认 1.5s）；后台预热可避免下一轮等待。
 - spool 是单进程 JSONL，不做跨进程锁；同一 `HERMES_HOME` 不应跑两个 Hermes 写者。
 - companion 同步调用宿主模型，增加延迟/成本，默认关闭；不做图片抽取。
-- 0.3 契约仍是草案，wire shape 可能调整；本目录以 `docs/design/0.3.0-memory-runtime-contract.md` 为准。
+- 0.3.x wire contract 以 `docs/design/0.3.0-memory-runtime-contract.md` 为准；v0.3.2 的生命周期/状态收口见 `docs/design/0.3.2-stability-contract.md`。

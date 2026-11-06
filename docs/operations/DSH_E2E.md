@@ -205,6 +205,9 @@ negative control 是 test-of-test，**不放进 nightly / release**（会让 E2E
   解析到 `mebular` 的目录；期望 `status=down`、`reason=download_required`、
   `state=download_required`、`downloadRequired=true`、无 `mcp__mebular__*` 工具，且 Agent 文本
   包含安装/`MEBULAR_CLI`/`cliPath` 与重启 DSH 的恢复动作。面板显示显式安装引导。
+  注意：macOS 插件还会按设计发现标准 App bundle（`/Applications/Mebular.app`）；如果
+  本机已安装 App，插件会优先选择它，单纯过滤 PATH 无法模拟“没有 App/CLI”。该场景应在
+  Linux/CI 干净 runner 运行；本机 macOS 有 App 时应把它记录为环境限制，而不是产品失败。
 - **Agent 文本**：全部通过 DSH 的 `systemPrompt.assemble()` 读取 `mebular:status` section；
   daemon up 时文本为空（不增加 prompt token），down 时非空且给出恢复动作。`systemPrompt`
   不可用或 `assemble()` 失败会记录为 `supported=null/false` 或 error，场景失败，不会伪造通过。
@@ -307,10 +310,12 @@ npm run verify:dsh:e2e -- --scenario security-headers --keep
 - managed 生命周期与 Agent 状态文本已覆盖；Node 22.19 的 `happy-path` smoke 已本地通过，
   CI 只在 nightly / manual 运行该档，PR 与 release gate 不含 Node 22.19。首次真实 runner
   结果属于 PR 验收的一部分。
-- `managed-cli-missing` 依赖 PATH 上没有可解析的 `mebular`。harness 会过滤包含 `mebular`
-  的 PATH 目录并保留 `node`；若宿主把 `node` 与 `mebular` 放在同一目录，场景会明确失败，
-  不会静默 SKIP。
-- GitHub Actions 的首次真实运行发生在 PR（workflow 进入默认分支后也可手动
-  `workflow_dispatch`）；PR runner 结果属于验收的一部分，本文档与本地校验不声称“CI 已绿”。
+- `managed-cli-missing` 依赖宿主机没有可发现的 `mebular`：除 PATH 外，DSH 插件还会优先发现
+  标准 App bundle（macOS 的 `/Applications/Mebular.app`）。harness 只能过滤 PATH；若本机
+  安装了 App，场景会正确地选中 App provider，不能当作 `download_required` 通过。CI 的
+  Ubuntu runner 没有 App，因此该场景在 CI 运行；本机 macOS 结果按环境限制记录。
+  若宿主把 `node` 与 `mebular` 放在同一目录，场景会明确失败，不会静默 SKIP。
+- GitHub Actions 的 PR / main / release-gate 结果属于验收的一部分；workflow 进入默认分支后
+  也可手动 `workflow_dispatch`。本文档描述运行方式，不替代具体 commit 的 CI 状态。
 - negative control 只覆盖“移除 sidebar/panel 注册”这一类破坏；工具注册、managed 生命周期
   等回归仍由正式 9 场景覆盖，不把 negative control 当作全量故障注入矩阵。

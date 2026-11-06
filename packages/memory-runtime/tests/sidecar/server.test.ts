@@ -3,7 +3,7 @@
 
 import { describe, it, expect, afterEach } from '@jest/globals';
 import { request } from 'node:http';
-import { defaultSidecarConfig } from '../../src/sidecar/config.js';
+import { defaultSidecarConfig, SIDECAR_RUNTIME_VERSION } from '../../src/sidecar/config.js';
 import {
   SidecarServer,
   isLoopbackAddress,
@@ -111,7 +111,7 @@ describe('SidecarServer', () => {
     expect(body.state).toBe('ready');
     expect(body.ready).toBe(true);
     expect(body.pid).toBe(process.pid);
-    expect(body.runtimeVersion).toBe('0.3.0');
+    expect(body.runtimeVersion).toBe(SIDECAR_RUNTIME_VERSION);
     expect(body.apiVersion).toBe(1);
     expect(JSON.stringify(body)).not.toContain('host-token');
   });
@@ -134,7 +134,7 @@ describe('SidecarServer', () => {
     const versionBody = await version.json() as any;
     expect(versionBody.ok).toBe(true);
     expect(versionBody.data).toMatchObject({
-      runtimeVersion: '0.3.0',
+      runtimeVersion: SIDECAR_RUNTIME_VERSION,
       apiVersion: 1,
       capabilityApiVersion: 1,
       minMcpVersion: '0.3.0',

@@ -23,6 +23,7 @@ const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 const ALLOWED_FILES = new Set([
   'package/package.json',
   'package/index.js',
+  'package/fleet-runner.js',
   'package/README.md',
   'package/LICENSE',
 ]);
@@ -97,6 +98,11 @@ try {
       || manifest.exports?.['.']?.import === './index.js',
     JSON.stringify(manifest.exports?.['.']),
   );
+  check(
+    'tarball exports["./fleet-runner"] 指向 fleet-runner.js',
+    manifest.exports?.['./fleet-runner'] === './fleet-runner.js',
+    JSON.stringify(manifest.exports?.['./fleet-runner']),
+  );
 
   // 内部依赖必须是版本号引用；OpenCode 插件当前应完全无依赖。
   const depSpecs = DEP_FIELDS.flatMap((field) =>
@@ -106,11 +112,11 @@ try {
   check('tarball 无 file:/workspace: 依赖', nonRange.length === 0, nonRange.map((dep) => `${dep.field}:${dep.name}`).join(', '));
   check('tarball 无运行时依赖（HTTP 薄客户端）', depSpecs.length === 0, depSpecs.map((dep) => `${dep.field}:${dep.name}`).join(', '));
 
-  // 文件集合与大小：只允许 package.json / index.js / README / LICENSE。
+  // 文件集合与大小：只允许 package.json / index.js / fleet-runner.js / README / LICENSE。
   const files = listTarball(tarball);
   const unexpected = files.filter((file) => !ALLOWED_FILES.has(file));
   const missing = [...ALLOWED_FILES].filter((file) => !files.includes(file));
-  check('tarball 只含发布文件（package.json/index.js/README/LICENSE）', unexpected.length === 0 && missing.length === 0, [
+  check('tarball 只含发布文件（package.json/index.js/fleet-runner.js/README/LICENSE）', unexpected.length === 0 && missing.length === 0, [
     unexpected.length > 0 ? `多余 ${unexpected.join(', ')}` : '',
     missing.length > 0 ? `缺少 ${missing.join(', ')}` : '',
   ].filter(Boolean).join('；'));
@@ -158,7 +164,7 @@ try {
   const installedDir = join(app, 'node_modules', '@mebular', 'opencode-plugin');
   const installedManifest = JSON.parse(await readFile(join(installedDir, 'package.json'), 'utf-8'));
   check(`tarball 安装：@mebular/opencode-plugin@${version}`, installedManifest.version === version, installedManifest.version);
-  check('tarball 安装：入口 index.js 存在', existsSync(join(installedDir, 'index.js')));
+  check('tarball 安装：入口 index.js / fleet-runner.js 存在', existsSync(join(installedDir, 'index.js')) && existsSync(join(installedDir, 'fleet-runner.js')));
   check('tarball 安装：README/LICENSE 存在', existsSync(join(installedDir, 'README.md')) && existsSync(join(installedDir, 'LICENSE')));
 
   const probe = [

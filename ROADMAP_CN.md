@@ -7,28 +7,28 @@
 
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/main/assets/roadmap-cn-light.svg">
-  <img src="https://raw.githubusercontent.com/Windsander/Mebular/main/assets/roadmap-cn.svg" alt="Mebular 星轨路线图：v0.2.0 已发布，当前聚焦共享 runtime 稳定性，下一步候选为桌面签名与受控更新，并探索协议生命周期问题">
+  <img src="https://raw.githubusercontent.com/Windsander/Mebular/main/assets/roadmap-cn.svg" alt="Mebular 星轨路线图：基础版本已发布，当前聚焦稳定性硬化，下一步候选为桌面签名与受控更新，并探索协议生命周期问题">
 </picture>
 
-## 已发布 — v0.2.0
+## 已发布 — v0.3.0
 
-已在 [v0.2.0](https://github.com/Windsander/Mebular/releases/tag/v0.2.0) 中提供。
+已在 [v0.3.0](https://github.com/Windsander/Mebular/releases/tag/v0.3.0) 中提供。
 
-- **共享 Runtime Supervisor** —— App、CLI 与 DSH 共用一套本机 runtime、service、活动 profile 和数据根目录。
-- **App 与 DSH 等权入口** —— 两个入口使用相同的 runtime 所有权、provider 发现和 service 生命周期。
-- **显式安装与更新** —— 仅使用插件时可安装固定版本 runtime；更新提示不会静默安装。
+- **Memory Runtime** —— 可选 sidecar：自动采集、召回、持久详情、检查点和本地抽取/摘要。
+- **三条宿主接入** —— DSH、Hermes 与 OpenCode/OpenChamber 适配器共用同一张图、事件日志和同步层。
+- **本地模型供应** —— 显式安装模型/引擎，固定 revision、大小和 SHA-256 校验；不会静默下载。
 
-## 当前 — v0.2.x
+## 当前 — v0.3.x
 
 现阶段的稳定化重点。优先级会根据可复现报告和首次运行反馈调整。
 
-- **共享 runtime 稳定性** —— 在真实环境中验证共存、升级、service 所有权和恢复路径。
-- **跨平台首次运行** —— 根据 macOS、Windows、Linux 以及 App、CLI、DSH 的反馈改进安装与上手引导。
-- **诊断与恢复** —— 让故障更容易定位，同时不暴露记忆内容、密钥或令牌。
+- **数据生命周期与隐私** —— 让 staging、已沉降详情、宿主副本、保留和删除边界保持明确。
+- **生命周期与恢复** —— 验证 managed/attached/manual sidecar、离线队列、Compact/Checkpoint/SelfRecord 和宿主 fail-open 行为。
+- **真实规模证据** —— 把 1k/2k/10k 审计、真实模型 canary、宿主 E2E 和升级/回滚证据作为发布门禁。
 
 ## 下一步 — 候选主题
 
-已经记录的后续工作。这些主题**不代表**已经承诺的 v0.3.0 范围或发布计划。
+已经记录的后续工作。这些主题**不代表**已经承诺的 v0.3.x 范围或发布计划。
 
 - **可信桌面分发** —— 推进现有的桌面签名与公证计划。
 - **受控更新** —— 探索自动更新，同时保留明确授权、共享 runtime 所有权和回滚能力。

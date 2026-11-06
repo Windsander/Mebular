@@ -23,7 +23,7 @@ import { basename, dirname, join, resolve, sep } from 'node:path';
 
 export const PLUGIN_ID = 'mebular.memory';
 export const PACKAGE_NAME = '@mebular/opencode-plugin';
-export const PACKAGE_VERSION = '0.3.0';
+export const PACKAGE_VERSION = '0.3.2';
 export const MIN_OPENCODE_VERSION = '2.2.0';
 export const RUNTIME_API_PREFIX = '/memory-runtime/v1';
 // 0.3 原型路径只用于拒绝旧配置，不参与任何请求构造；拆分常量避免架构守卫误判。

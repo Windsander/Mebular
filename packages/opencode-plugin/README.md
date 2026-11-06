@@ -20,7 +20,7 @@ Mebular Memory Runtime 的 OpenCode V2 服务端插件（OpenChamber 使用）�
 - `ctx.session.hook("context")` 可用；低于 2.2.0 或缺失时插件禁用并给出状态。
 - `ctx.session.generate` 缺失时插件仍可召回/采集，但当前模型抽取标记为不可用，
   不做任何伪造调用。
-- Memory Runtime HTTP 服务可用（Mebular 0.3.0）。
+- Memory Runtime HTTP 服务可用（Mebular 0.3.2）。
 
 ## 安装
 

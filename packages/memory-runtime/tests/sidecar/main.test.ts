@@ -16,6 +16,7 @@ import {
   startSidecar,
   type SidecarHandle,
 } from '../../src/sidecar/main.js';
+import { SIDECAR_RUNTIME_VERSION } from '../../src/sidecar/config.js';
 import { bearer } from './helpers.js';
 
 const homes: string[] = [];
@@ -1162,7 +1163,7 @@ describe('memory-runtime sidecar process', () => {
   it('version 命令返回 sidecar/API/capability 版本', () => {
     expect(getSidecarVersion()).toMatchObject({
       ok: true,
-      runtimeVersion: '0.3.0',
+      runtimeVersion: SIDECAR_RUNTIME_VERSION,
       apiVersion: 1,
       capabilityApiVersion: 1,
       minMcpVersion: '0.3.0',

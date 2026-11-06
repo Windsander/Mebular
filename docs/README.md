@@ -71,6 +71,7 @@ main [`README.md`](../README.md); this index only describes document structure.
 - [v0.3.2 real-model canary](quality/0.3.2-model-smoke.md) — Qwen3-4B Q4_K_M on macOS x64 with a test-only mirror; records the default-HF failure and exact boundary
 - [v0.3.2 upgrade/rollback](quality/0.3.2-upgrade-rollback.md) — sequential v0.3.0 → v0.3.2 → v0.3.0 data-safety drill
 - [v0.3.2 Fleet orchestration evidence](quality/0.3.2-fleet-orchestration.md) — executor/adapters, executable routing, checks and real/fake boundaries
+- [v0.3.2 Fleet black-box demo](quality/0.3.2-fleet-blackbox-demo.md) — runnable demo/evidence for the public orchestration path
 - [0.3.0 Memory Runtime acceptance](quality/0.3.0-memory-runtime-acceptance.md) — historical recall/security/performance evidence
 - [0.3.0 real-model smoke](quality/0.3.0-model-smoke.md) — historical Qwen3-4B + llama.cpp evidence
 - [0.3.0 Fleet P6 E2E](quality/0.3.0-fleet-orchestration-e2e.md) · [0.3.0 P7 review](quality/0.3.0-fleet-p7-review.md) — historical Fleet evidence

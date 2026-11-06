@@ -17,7 +17,7 @@
 
   <text x="40" y="46" font-family="'SF Pro Display','PingFang SC','Microsoft YaHei','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="21" fill="#e2ecff" font-weight="700" text-anchor="start" letter-spacing="1.2">MEBULAR ✦ 路线图</text>
   <text x="40" y="74" font-family="'SF Pro Text','PingFang SC','Microsoft YaHei','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="13" fill="#8aa8c8" font-weight="400" text-anchor="start">展示方向，而不是承诺日期。</text>
-  <text x="1040" y="46" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,'PingFang SC','Microsoft YaHei',monospace" font-size="10.5" fill="#6f93b6" font-weight="400" text-anchor="end" letter-spacing="0.8">v0.2.0 基线</text>
+  <text x="1040" y="46" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,'PingFang SC','Microsoft YaHei',monospace" font-size="10.5" fill="#6f93b6" font-weight="400" text-anchor="end" letter-spacing="0.8">v0.3.0 基线</text>
 
   <path d="M155 178 C245 178 305 130 422 130 S590 178 668 178" fill="none" stroke="#4a8acf" stroke-width="7" opacity="0.06"/>
   <path d="M155 178 C245 178 305 130 422 130 S590 178 668 178" fill="none" stroke="#4a8acf" stroke-width="1.4" opacity="0.65"/>
@@ -26,7 +26,7 @@
   <circle cx="155" cy="178" r="18" fill="#8ac8ff" opacity="0.10"/>
     <circle cx="155" cy="178" r="7" fill="#8ac8ff" stroke="#03050a" stroke-width="3"/>
     <text x="155" y="217" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,'PingFang SC','Microsoft YaHei',monospace" font-size="14" fill="#8ac8ff" font-weight="700" text-anchor="middle">已发布</text>
-    <text x="155" y="235" font-family="'SF Pro Text','PingFang SC','Microsoft YaHei','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="10.5" fill="#8aa8c8" font-weight="400" text-anchor="middle">v0.2.0</text>
+    <text x="155" y="235" font-family="'SF Pro Text','PingFang SC','Microsoft YaHei','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="10.5" fill="#8aa8c8" font-weight="400" text-anchor="middle">v0.3.0</text>
   <circle cx="422" cy="130" r="28" fill="#f0d58a" opacity="0.08"/>
     <circle cx="422" cy="130" r="17" fill="#f0d58a" opacity="0.14"/>
     <path d="M422 117 L425.5 126.5 L435 130 L425.5 133.5 L422 143 L418.5 133.5 L409 130 L418.5 126.5 Z" fill="#f0d58a"/>
@@ -42,7 +42,7 @@
 
   <rect x="40" y="260" width="230" height="230" rx="16" fill="#081322" stroke="#1a3a60" stroke-width="1.2"/>
     <text x="60" y="292" font-family="'SF Pro Text','PingFang SC','Microsoft YaHei','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="16" fill="#e2ecff" font-weight="700" text-anchor="start">已发布</text>
-    <text x="60" y="314" font-family="'SF Pro Text','PingFang SC','Microsoft YaHei','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="10.8" fill="#8aa8c8" font-weight="400" text-anchor="start">v0.2.0 · 已发布</text>
+    <text x="60" y="314" font-family="'SF Pro Text','PingFang SC','Microsoft YaHei','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="10.8" fill="#8aa8c8" font-weight="400" text-anchor="start">v0.3.0 · 已发布</text>
     <line x1="60" y1="330" x2="250" y2="330" stroke="#1a3a60" stroke-width="1" opacity="0.75"/>
     <circle cx="64" cy="356" r="2.6" fill="#8ac8ff"/>
     <text x="76" y="360" font-family="'SF Pro Text','PingFang SC','Microsoft YaHei','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="12.2" fill="#e2ecff" font-weight="400" text-anchor="start">共享 runtime supervisor</text>

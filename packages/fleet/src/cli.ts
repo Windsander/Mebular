@@ -20,14 +20,24 @@ import {
 import { echoResultFor, EchoExecutor, ExecutionLog } from './runtime/executor.js';
 import { FleetNode } from './runtime/node.js';
 import { FleetWorker } from './runtime/worker.js';
+import { CapabilityCardPublisher } from './runtime/card-publisher.js';
 import { FileTaskEventStore } from './store/file-store.js';
 import { MebularTaskEventStore } from './store/mebular-store.js';
 import { DaemonTaskEventStore } from './store/daemon-store.js';
+import { DaemonAgentBackend } from './store/daemon-agent-backend.js';
+import { DaemonRoleCardStore } from './store/role-card-store.js';
+import { MebularRoleCardStore, graphRoleSummaryProvider, type RoleCardStore } from './role-cards.js';
+import { DaemonTaskPlanStore, MebularTaskPlanStore, type TaskPlanStore } from './store/plan-store.js';
+import { PlanMaterializer } from './runtime/materializer.js';
+import { RoleCardJob } from './runtime/role-card-job.js';
+import { daemonRoutingProvider, embeddedRoutingProvider } from './runtime/routing-context.js';
+import type { PlanRoutingProvider } from './routing.js';
+import { AGENT_NAMESPACE } from './agentdir.js';
 import type { TaskEventStore } from './store/file-store.js';
 import { NullTransport } from './transport/null.js';
 import { SpoolTransport } from './transport/spool.js';
 import { LocalQuota } from './quota.js';
-import { fleetConfigPath, loadFleetConfig, loadToolConfig, parseAgentSpecs, readMasterKeyFile, type FleetConfig } from './config.js';
+import { fleetConfigPath, loadFleetConfig, loadToolConfig, parseAgentSpecs, readMasterKeyFile, identityPublicKeyForStorage, type FleetConfig } from './config.js';
 import {
   buildRegistry,
   declareNamespace,
@@ -495,6 +505,139 @@ async function openTaskStore(config: FleetConfig, args: Args): Promise<{ store: 
   return { store: new MebularTaskEventStore(mebular), mebular };
 }
 
+/** P2：plan 节点与任务事件同源（embedded 本地图 / daemon `/app/plans`）。 */
+function openPlanStore(config: FleetConfig, args: Args, mebular: Mebular | null): TaskPlanStore {
+  if (storeMode(config, args) === 'daemon') {
+    if (config.daemon?.endpoint === undefined) {
+      throw new Error('daemon 模式需要 config.daemon.endpoint（plan 节点读取）');
+    }
+    return new DaemonTaskPlanStore({
+      endpoint: config.daemon.endpoint,
+      namespace: config.namespace,
+      ...(config.daemon.token !== undefined ? { token: config.daemon.token } : {}),
+      ...(config.daemon.tokenFile !== undefined ? { tokenFile: config.daemon.tokenFile } : {}),
+    });
+  }
+  if (mebular === null) throw new Error('embedded 模式缺少本地 Mebular（plan 节点读取）');
+  return new MebularTaskPlanStore(mebular, { namespace: config.namespace });
+}
+
+/** P3：路由 provider。embedded 读本机卡片/在线 peer；daemon 复用 P1 卡片后端，远端卡不可验证时 fail-closed。 */
+function routingFor(
+  config: FleetConfig,
+  mebular: Mebular | null,
+  store: TaskEventStore,
+  mode: 'daemon' | 'embedded',
+): PlanRoutingProvider | undefined {
+  if (mebular !== null) {
+    return embeddedRoutingProvider({ mebular, config, store });
+  }
+  const daemon = config.daemon;
+  if (mode === 'daemon' && daemon?.endpoint !== undefined) {
+    const localPublicKey = identityPublicKeyForStorage(config.storagePath);
+    const backend = new DaemonAgentBackend({
+      endpoint: daemon.endpoint,
+      namespace: AGENT_NAMESPACE,
+      ...(daemon.token !== undefined ? { token: daemon.token } : {}),
+      ...(daemon.tokenFile !== undefined ? { tokenFile: daemon.tokenFile } : {}),
+      ...(localPublicKey !== null ? { publicKeyFor: (device: string) => (device === config.device ? localPublicKey : undefined) } : {}),
+    });
+    const roleCards = new DaemonRoleCardStore({
+      endpoint: daemon.endpoint,
+      namespace: AGENT_NAMESPACE,
+      ...(daemon.token !== undefined ? { token: daemon.token } : {}),
+      ...(daemon.tokenFile !== undefined ? { tokenFile: daemon.tokenFile } : {}),
+    });
+    console.error('[fleet:route] daemon mode: remote cards use /app/peers verified online keys; unverifiable targets fail closed');
+    return daemonRoutingProvider({
+      backend,
+      config,
+      store,
+      roleCards: () => roleCards.list(),
+      onlineDevices: () => backend.listOnlineDevices(),
+    });
+  }
+  return undefined;
+}
+
+/** P2：materializer tick 失败不得阻断普通任务执行（例如对端守护暂不可用）。 */
+async function tickPlanMaterializer(materializer: PlanMaterializer): Promise<void> {
+  try {
+    await materializer.tick();
+  } catch (error) {
+    console.error(`[fleet:plan] tick failed: ${(error as Error).message}`);
+  }
+}
+
+/** CR-002：embedded 用本地 Mebular，daemon 用 `/app/capability-cards` + `/app/nodes`。 */
+function createCardPublisher(
+  config: FleetConfig,
+  mebular: Mebular | null,
+  registry?: ReturnType<typeof buildRegistry>,
+): CapabilityCardPublisher | null {
+  const log = (message: string): void => console.error(message);
+  if (mebular !== null) {
+    return new CapabilityCardPublisher({ mebular, config, ...(registry !== undefined ? { registry } : {}), log });
+  }
+  if (config.daemon?.endpoint !== undefined) {
+    const localPublicKey = identityPublicKeyForStorage(config.storagePath);
+    return new CapabilityCardPublisher({
+      backend: new DaemonAgentBackend({
+        endpoint: config.daemon.endpoint,
+        ...(config.daemon.token !== undefined ? { token: config.daemon.token } : {}),
+        ...(config.daemon.tokenFile !== undefined ? { tokenFile: config.daemon.tokenFile } : {}),
+        publicKeyFor: (device) => (device === config.device && localPublicKey !== null ? localPublicKey : undefined),
+      }),
+      config,
+      ...(registry !== undefined ? { registry } : {}),
+      log,
+    });
+  }
+  return null;
+}
+
+/** P5：角色卡存储（embedded 本机图 / daemon `/app/role-cards`）。 */
+function createRoleCardStore(config: FleetConfig, mebular: Mebular | null): RoleCardStore | null {
+  if (mebular !== null) return new MebularRoleCardStore(mebular, { namespace: AGENT_NAMESPACE });
+  if (config.daemon?.endpoint !== undefined) {
+    return new DaemonRoleCardStore({
+      endpoint: config.daemon.endpoint,
+      namespace: AGENT_NAMESPACE,
+      ...(config.daemon.token !== undefined ? { token: config.daemon.token } : {}),
+      ...(config.daemon.tokenFile !== undefined ? { tokenFile: config.daemon.tokenFile } : {}),
+    });
+  }
+  return null;
+}
+
+/** P5：本机低频角色卡 job；默认 shadow，错误不阻塞 worker/node 主循环。 */
+function createRoleCardJob(
+  config: FleetConfig,
+  store: TaskEventStore,
+  mebular: Mebular | null,
+): RoleCardJob | null {
+  const roleStore = createRoleCardStore(config, mebular);
+  if (roleStore === null) return null;
+  const log = (message: string): void => console.error(message);
+  if (config.roleCards?.enabled === true) {
+    log('[fleet:roles] roleCards.enabled=true：需 P6 真实 shadow 报告与审核后才允许启用软排序');
+  }
+  return new RoleCardJob({
+    device: config.device,
+    agents: config.agents.map((agent) => agent.name),
+    events: store,
+    store: roleStore,
+    ...(mebular !== null
+      ? { summaries: graphRoleSummaryProvider(mebular, { namespaces: [config.namespace, AGENT_NAMESPACE] }) }
+      : {}),
+    ...(config.roleCards?.refreshEveryTasks !== undefined ? { refreshEveryTasks: config.roleCards.refreshEveryTasks } : {}),
+    ...(config.roleCards?.minIntervalMs !== undefined ? { minIntervalMs: config.roleCards.minIntervalMs } : {}),
+    ...(config.roleCards?.window !== undefined ? { window: config.roleCards.window } : {}),
+    shadow: config.roleCards?.shadow ?? (config.roleCards?.enabled !== true),
+    log,
+  });
+}
+
 /**
  * `fleet node`（任务板/发起端）。
  * `--run-forever`：常驻（服务模式），直到收到 SIGINT/SIGTERM；写 `service.heartbeat`（role=node）。
@@ -530,6 +673,18 @@ async function runFleetNode(args: Args): Promise<number> {
     console.log(JSON.stringify({ role: 'node', event: 'join-service', endpoint: `http://${bind}:${joinService.port}`, port: joinService.port }));
   }
   const node = new FleetNode({ device: config.device, store, transport: new NullTransport(), quota: new LocalQuota({ limitPerDevice: config.quotaLimitPerDevice ?? 1_000_000 }) });
+  const routing = routingFor(config, mebular, store, storeMode(config, args));
+  const materializer = new PlanMaterializer({
+    device: config.device,
+    agent: str(args.agent, 'board'),
+    plans: openPlanStore(config, args, mebular),
+    store,
+    ...(routing !== undefined ? { routing } : {}),
+  });
+  const cardPublisher = createCardPublisher(config, mebular);
+  if (cardPublisher !== null) await cardPublisher.publish();
+  else console.error('[fleet:caps] skipped: no embedded Mebular and no daemon endpoint');
+  const roleCardJob = createRoleCardJob(config, store, mebular);
   const submit = num(args.submit, 0);
   let code = 0;
   if (submit > 0) {
@@ -570,14 +725,21 @@ async function runFleetNode(args: Args): Promise<number> {
     code = ok && done.length === ids.length && resultsMatch ? 0 : 1;
     if (runForever) {
       while (!shutdown.isStopping()) {
+        await tickPlanMaterializer(materializer);
+        await cardPublisher?.tick();
+        await roleCardJob?.tick();
         await sleep(200); // 常驻：保持在线供对端同步
       }
     } else {
       const lingerMs = num(args['linger-ms'], 0);
       if (lingerMs > 0) await sleep(lingerMs);
+      await roleCardJob?.tick();
     }
   } else if (runForever) {
     while (!shutdown.isStopping()) {
+      await tickPlanMaterializer(materializer);
+      await cardPublisher?.tick();
+      await roleCardJob?.tick();
       await sleep(200);
     }
   } else {
@@ -619,11 +781,28 @@ async function runFleetWorker(args: Args): Promise<number> {
     }
   }
   const log = await ExecutionLog.open(str(args['exec-log'], join(dir, 'exec.jsonl')));
-  const worker = new FleetWorker({ device: config.device, agent: str(args.agent, 'worker'), store, transport: new NullTransport(), registry: buildRegistry(config.agents), log });
+  const registry = buildRegistry(config.agents);
+  const cardPublisher = createCardPublisher(config, mebular, registry);
+  registry.onChange(() => cardPublisher?.onRegistryChange());
+  if (cardPublisher !== null) await cardPublisher.publish();
+  else console.error('[fleet:caps] skipped: no embedded Mebular and no daemon endpoint');
+  const roleCardJob = createRoleCardJob(config, store, mebular);
+  const worker = new FleetWorker({ device: config.device, agent: str(args.agent, 'worker'), store, transport: new NullTransport(), registry, log });
+  const routing = routingFor(config, mebular, store, storeMode(config, args));
+  const materializer = new PlanMaterializer({
+    device: config.device,
+    agent: str(args.agent, 'worker'),
+    plans: openPlanStore(config, args, mebular),
+    store,
+    ...(routing !== undefined ? { routing } : {}),
+  });
   await worker.reconcile();
   const deadline = Date.now() + num(args['timeout-ms'], 60_000);
   while (runForever ? !shutdown.isStopping() : Date.now() < deadline) {
+    await tickPlanMaterializer(materializer);
     await worker.pollOnce();
+    await cardPublisher?.tick();
+    await roleCardJob?.tick();
     await sleep(num(args['interval-ms'], 10));
   }
   console.log(JSON.stringify({ role: 'worker', device: config.device, executed: log.size() }));
@@ -856,7 +1035,7 @@ async function runTaskTool(cliName: string, args: Args): Promise<number> {
   const reserved = new Set(['input', 'dir', 'namespace', 'agent', 'version']);
   for (const [key, value] of Object.entries(args)) {
     if (reserved.has(key) || value === undefined) continue;
-    if (key === 'budget' || key === 'to' || key === 'cursor') {
+    if (key === 'budget' || key === 'to' || key === 'cursor' || key === 'plan') {
       input[key] = typeof value === 'string' ? JSON.parse(value) : value;
     } else if (typeof value === 'string' && /^-?[0-9]+$/.test(value)) {
       input[key] = Number(value);

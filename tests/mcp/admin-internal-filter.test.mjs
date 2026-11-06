@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Mebular, MemoryService } from '@mebular/core';
 import { buildMemories, buildNamespaces } from '../../packages/mcp/src/admin.mjs';
+import { startHttpServer } from '../../packages/mcp/src/serve.mjs';
 
 const memoryUrl = (query = '') => new URL(`http://localhost/admin/api/memories${query}`);
 const idsOf = (rows) => rows.map((row) => row.id).sort();
@@ -161,7 +162,7 @@ describe('Console 管理读面统一走 MemoryService', () => {
     expect((await service.stats()).domains.map((entry) => entry.domain)).not.toContain('__raw__');
 
     const notes = rows.find((entry) => entry.namespace === 'notes');
-    expect(notes).toMatchObject({ count: 4, memoryRecords: 3, internalObjects: 1, declared: false });
+    expect(notes).toMatchObject({ count: 3, memoryRecords: 3, internalObjects: 1, declared: false });
 
     // 只有域公告、没有节点的域仍显示（count=0）。
     await app.declareNamespace({ namespace: 'ledger' });
@@ -177,5 +178,65 @@ describe('Console 管理读面统一走 MemoryService', () => {
       lastUpdatedAt: null,
       declared: true,
     });
+  });
+
+  it('/app/nodes 拒绝普通节点 metadata.internal=true，正常 metadata 仍可写', async () => {
+    const server = await startHttpServer({
+      home: dir,
+      app,
+      service,
+      config: {
+        deviceId: 'device-A',
+        sync: { namespaces: [] },
+        mcp: { http: { host: '127.0.0.1', port: 0, auth: 'none' } },
+      },
+      buildServer: () => ({ connect: async () => undefined, close: async () => undefined }),
+      host: '127.0.0.1',
+      port: 0,
+      auth: 'none',
+      deviceId: 'device-A',
+      namespace: 'default',
+      writesEnabled: true,
+    });
+    const base = `http://127.0.0.1:${server.port}`;
+    const request = async (path, { method = 'GET', body } = {}) => {
+      const res = await fetch(`${base}${path}`, {
+        method,
+        headers: body !== undefined ? { 'content-type': 'application/json' } : {},
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      });
+      return { status: res.status, body: await res.json().catch(() => null) };
+    };
+
+    try {
+      const before = (await app.graph.listNodes({ type: 'note', namespace: 'notes' })).length;
+      const forbidden = await request('/app/nodes', {
+        method: 'POST',
+        body: {
+          type: 'note',
+          namespace: 'notes',
+          content: { summary: '伪内部对象' },
+          metadata: { internal: true },
+        },
+      });
+      expect(forbidden.status).toBe(403);
+      expect(forbidden.body).toMatchObject({ ok: false, error: 'internal_object_write_forbidden' });
+      expect(forbidden.body.message).toMatch(/专用写入端点/);
+      expect((await app.graph.listNodes({ type: 'note', namespace: 'notes' })).length).toBe(before);
+
+      const allowed = await request('/app/nodes', {
+        method: 'POST',
+        body: {
+          type: 'note',
+          namespace: 'notes',
+          content: { summary: '普通摘要' },
+          metadata: { source: 'guard-test', confidence: 0.9 },
+        },
+      });
+      expect(allowed.status).toBe(200);
+      expect(allowed.body.node.metadata).toEqual({ source: 'guard-test', confidence: 0.9 });
+    } finally {
+      await server.close().catch(() => undefined);
+    }
   });
 });

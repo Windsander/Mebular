@@ -15,6 +15,7 @@ import {
   NullTransport,
   EchoExecutor,
   ExecutionLog,
+  findResumeArg,
   reduceTaskEvents,
 } from '../../packages/fleet/src/index.js';
 import { mkEvent } from './helpers.js';
@@ -24,8 +25,10 @@ import { useHeavyTimeout } from '../helpers/timeouts.js';
 useHeavyTimeout();
 
 const FIXTURE = join(process.cwd(), 'tests/fleet/fixtures/fake-agent.mjs');
+/** fake-agent 仍按 hermes 风格读取 `-z`；CommandAgent 本身不再默认加 `-z`。 */
+const legacyPrompt = (task: { intent: string }): string[] => ['-z', task.intent];
 const node = (args: string[]): CommandAgent =>
-  new CommandAgent({ command: process.execPath, baseArgs: [FIXTURE, ...args] });
+  new CommandAgent({ command: process.execPath, baseArgs: [FIXTURE, ...args], promptArgs: legacyPrompt });
 
 let dir: string;
 beforeEach(async () => {
@@ -61,7 +64,7 @@ describe('CommandAgent：参数数组 / 超时 / 非零退出 / 输出截断', (
   });
 
   it('超时：failed 带 TIMEOUT 原因', async () => {
-    const agent = new CommandAgent({ command: process.execPath, baseArgs: [FIXTURE, '--mode', 'sleep', '--sleep', '5000'], timeoutMs: 200 });
+    const agent = new CommandAgent({ command: process.execPath, baseArgs: [FIXTURE, '--mode', 'sleep', '--sleep', '5000'], promptArgs: legacyPrompt, timeoutMs: 200 });
     const outcome = await agent.execute(task('slow'));
     expect(outcome.ok).toBe(false);
     expect(outcome.reason).toMatch(/^TIMEOUT after \d+ms$/);
@@ -97,9 +100,22 @@ describe('CommandAgent：参数数组 / 超时 / 非零退出 / 输出截断', (
     expect(existsSync(marker)).toBe(false); // 未发生 shell 求值
   });
 
+  it('argv 不含 resume/continue/session 参数（一个任务 = 一个新 session）', async () => {
+    const agent = new CommandAgent({
+      command: process.execPath,
+      baseArgs: [FIXTURE, '--mode', 'args', '--non-interactive'],
+      promptArgs: legacyPrompt,
+    });
+    const outcome = await agent.execute(task('fresh'));
+    expect(outcome.ok).toBe(true);
+    const argv = JSON.parse(outcome.resultRef!) as string[];
+    expect(argv).toEqual(['--mode', 'args', '--non-interactive', '-z', 'fresh']);
+    expect(findResumeArg(argv)).toBeUndefined();
+  });
+
   it('并发上限可配：concurrency=1 串行、=2 并行', async () => {
     const sleepMs = 300;
-    const mk = (concurrency: number) => new CommandAgent({ command: process.execPath, baseArgs: [FIXTURE, '--mode', 'sleep', '--sleep', String(sleepMs)], concurrency });
+    const mk = (concurrency: number) => new CommandAgent({ command: process.execPath, baseArgs: [FIXTURE, '--mode', 'sleep', '--sleep', String(sleepMs)], promptArgs: legacyPrompt, concurrency });
     const serialAgent = mk(1); // 同一实例：并发闸生效
     const t0 = Date.now();
     await Promise.all([serialAgent.execute(task('a')), serialAgent.execute(task('b'))]);
@@ -147,6 +163,7 @@ describe('HermesAgent：hermes argv 构造与结果', () => {
       expect.arrayContaining(['-p', 'work', '-t', 'memory', '-m', 'm1', '--in', dir, '-z', 'summarize']),
     );
     expect(argv).toContain('--usage-file');
+    expect(findResumeArg(argv)).toBeUndefined();
   });
 
   it('成功解析 usage.session_id（reason 里回带）', async () => {
@@ -160,6 +177,13 @@ describe('HermesAgent：hermes argv 构造与结果', () => {
     const outcome = await agent.execute(task('slow'));
     expect(outcome.ok).toBe(false);
     expect(outcome.reason).toMatch(/TIMEOUT/);
+  });
+
+  it('health：hermes 命令缺失 → unavailable（不伪造 ok，也不误判为可用）', async () => {
+    const agent = new HermesAgent({ hermesPath: join(dir, 'missing-hermes-binary') });
+    const health = await agent.health(500);
+    expect(health.status).toBe('unavailable');
+    expect(health.detail).toContain('not found');
   });
 });
 

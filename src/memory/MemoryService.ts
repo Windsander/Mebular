@@ -2239,7 +2239,9 @@ function factContentFrom(content: Record<string, unknown>): {
 
 /**
  * 统一域聚合：`stats()` 与管理面 `namespaceStats()` 共用，避免两套计数规则。
- * `count` 保留历史口径（域内全部节点，含归档/墓碑）；`memoryRecords` 排除内部对象。
+ * `count` = 非内部节点数（排除所有 `metadata.internal === true` / 保留 namespace 的内部对象；
+ * 仍含归档/墓碑）；`memoryRecords` 只统计已知记忆节点类型；
+ * `internalObjects`/`internalKinds` 单独观测内部对象，不进入普通域计数。
  */
 function domainStatsFromNodes(nodes: Node[], options: { includeReserved: boolean }): MemoryDomainStats[] {
   const domains = new Map<string, MemoryDomainStats>();
@@ -2260,12 +2262,15 @@ function domainStatsFromNodes(nodes: Node[], options: { includeReserved: boolean
       };
       domains.set(domain, entry);
     }
-    entry.count += 1;
+    const internal = isInternalNode(node);
+    if (!internal) entry.count += 1;
     if (isDetailNode(node) && !node.deletedAt) entry.detailBytes += detailBytes(node);
-    if (isInternalNode(node)) {
-      entry.internalObjects += 1;
+    if (internal) {
       const kind = internalObjectKindOf(node);
-      if (kind) entry.internalKinds[kind] = (entry.internalKinds[kind] ?? 0) + 1;
+      entry.internalObjects += 1;
+      if (kind) {
+        entry.internalKinds[kind] = (entry.internalKinds[kind] ?? 0) + 1;
+      }
     } else if (MEMORY_NODE_TYPES.has(node.type)) {
       entry.memoryRecords += 1;
     }

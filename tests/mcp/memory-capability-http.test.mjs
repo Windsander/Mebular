@@ -372,7 +372,7 @@ describe('GET /status 与 /namespaces', () => {
     expect(data.subscriptions.mode).toBe('all');
     expect(data.policyDomain).toBe('__policy__');
     const notes = data.domains.find((entry) => entry.domain === 'notes');
-    expect(notes).toMatchObject({ ownerType: 'other', ownerId: 'notes', count: 2, internalObjects: 1 });
+    expect(notes).toMatchObject({ ownerType: 'other', ownerId: 'notes', count: 1, internalObjects: 1 });
     const opencode = data.domains.find((entry) => entry.domain === 'agent:opencode');
     expect(opencode).toMatchObject({ ownerType: 'agent', ownerId: 'opencode' });
     expect(opencode.internalObjects).toBe(1);

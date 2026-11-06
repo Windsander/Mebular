@@ -5,22 +5,53 @@
 
 import { Mebular } from '@mebular/core';
 import {
+  identityPublicKeyForStorage,
+  isPlanOwnerExecutableAgent,
   loadToolConfig,
   readMasterKeyFile,
+  unexecutablePlanOwnerNames,
 } from './config.js';
 import { declareNamespace, offlineMebularOptions, subscribeNamespace } from './onboard.js';
 import { MebularTaskEventStore } from './store/mebular-store.js';
+import { DaemonTaskEventStore } from './store/daemon-store.js';
+import { DaemonTaskPlanStore, MebularTaskPlanStore, type TaskPlanWriteStore } from './store/plan-store.js';
+import type { TaskEventStore } from './store/file-store.js';
 import { negotiationMessageStore, type NegotiationMessage } from './collab/negotiation.js';
 import { chatterMessageStore, FleetChatter } from './collab/chatter.js';
 import { FleetNode } from './runtime/node.js';
+import { submitTaskPlan } from './runtime/plan-submit.js';
 import { NullTransport } from './transport/null.js';
 import { LocalQuota } from './quota.js';
 import { deriveEdges } from './collab/dag.js';
 import { reduceTaskEvents, type TaskState } from './model.js';
-import { agentDirectoryStore, expandTargets } from './agentdir.js';
+import { derivePlanProgress, derivePlanSteps, parsePlanTaskId, type PlanStepRouteHint, type TaskPlan } from './plan.js';
+import {
+  AGENT_NAMESPACE,
+  agentDirectoryStore,
+  deriveAgentExecution,
+  expandTargets,
+  type TaskTarget,
+} from './agentdir.js';
+import {
+  activeCapabilityCards,
+  latestCapabilityCards,
+  listCapabilityCards,
+  summarizeCapabilityCards,
+  type AgentCapabilityCard,
+} from './cards.js';
 import type { TaskEvent, TaskEventType } from './protocol/events.js';
 import { EVENT_TO_STATUS } from './protocol/events.js';
 import { DEFAULT_ROOT_BUDGET, type TaskBudget, type TaskDispatch } from './protocol/envelope.js';
+import { DaemonAgentBackend } from './store/daemon-agent-backend.js';
+import { DaemonRoleCardStore } from './store/role-card-store.js';
+import {
+  loadRouteContext,
+  resolvePlanStepRoute,
+  routeInputFromContext,
+  type PlanRoutingProvider,
+} from './routing.js';
+import { daemonRoutingProvider, embeddedRoutingProvider } from './runtime/routing-context.js';
+import { cancelPlanVersionTasks, cancelTaskTree } from './runtime/plan-control.js';
 
 export interface ToolContext {
   dir: string;
@@ -53,12 +84,19 @@ export interface TaskTool {
 }
 
 interface Session {
-  mebular: Mebular;
-  store: MebularTaskEventStore;
+  /** daemon CLI（无 live app）时可为 null；plan/task 走 daemon store。 */
+  mebular: Mebular | null;
+  store: TaskEventStore;
+  planStore: TaskPlanWriteStore;
   node: FleetNode;
   device: string;
+  /** 普通 task 工具的旧默认 agent（保持 board 不变）。 */
   agent: string;
+  /** plan 专用 agent：ctx.agent / defaultAgent / agents[0] / board。 */
+  planAgent: string;
   namespace: string;
+  /** 本地配置（peers/namespace/daemon）；route 解释与 CLI materializer 共用。 */
+  config: Awaited<ReturnType<typeof loadToolConfig>>;
   close: () => Promise<void>;
 }
 
@@ -67,19 +105,39 @@ async function openSession(ctx: ToolContext): Promise<Session> {
   const config = await loadToolConfig(ctx.dir);
   const namespace = ctx.namespace ?? config.namespace;
   const agent = ctx.agent ?? 'board';
+  // B1：普通 task 的 board 默认保持不变；plan 的 owner/MR 执行者必须落到本机可执行 Agent。
+  const planAgent = ctx.agent ?? config.defaultAgent ?? config.agents[0]?.name ?? 'board';
   const live = ctx.mebular;
-  let mebular: Mebular;
-  if (live !== undefined) {
-    // 运行中 daemon：复用 live app（同一实例 / 同一 EventLog）——写入即本地 append，推送与 SSE 正常。
-    mebular = live;
-  } else {
+  const useDaemon = live === undefined && config.store === 'daemon';
+  let mebular: Mebular | null = live ?? null;
+  if (!useDaemon && live === undefined) {
     const encryption = await readMasterKeyFile(config.masterKeyFile);
     mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
     await mebular.initialize();
   }
-  const ownsMebular = live === undefined;
+  const ownsMebular = live === undefined && mebular !== null;
   const device = live?.deviceId ?? config.device;
-  const store = new MebularTaskEventStore(mebular, { namespace });
+
+  let store: TaskEventStore;
+  let planStore: TaskPlanWriteStore;
+  if (useDaemon) {
+    if (config.daemon?.endpoint === undefined) {
+      throw new Error('daemon 模式需要 config.daemon.endpoint');
+    }
+    const options = {
+      endpoint: config.daemon.endpoint,
+      namespace,
+      ...(config.daemon.token !== undefined ? { token: config.daemon.token } : {}),
+      ...(config.daemon.tokenFile !== undefined ? { tokenFile: config.daemon.tokenFile } : {}),
+    };
+    store = new DaemonTaskEventStore(options);
+    planStore = new DaemonTaskPlanStore(options);
+  } else {
+    if (mebular === null) throw new Error('embedded 模式缺少本地 Mebular');
+    store = new MebularTaskEventStore(mebular, { namespace });
+    planStore = new MebularTaskPlanStore(mebular, { namespace });
+  }
+
   const node = new FleetNode({
     device,
     agent,
@@ -90,15 +148,28 @@ async function openSession(ctx: ToolContext): Promise<Session> {
   return {
     mebular,
     store,
+    planStore,
     node,
     device,
     agent,
+    planAgent,
     namespace,
+    config,
     close: async () => {
       // live app 的生命周期归 daemon（MCP serve）所有：工具调用只结束会话，不关闭它。
-      if (ownsMebular) await mebular.shutdown();
+      if (ownsMebular) await mebular!.shutdown();
+      await planStore.close?.();
+      await store.close();
     },
   };
+}
+
+/** 仅 daemon CLI 无 live app 时为 null；需要本地图的能力必须显式失败，不能私自打开离线写者。 */
+function requireMebular(session: Session): Mebular {
+  if (session.mebular === null) {
+    throw new Error('daemon 模式无本地 Mebular：该工具需要 MCP 守护会话（live app）');
+  }
+  return session.mebular;
 }
 
 function strInput(input: Record<string, unknown>, key: string): string | undefined {
@@ -111,7 +182,7 @@ function requiredString(input: Record<string, unknown>, key: string): string {
   return v;
 }
 
-async function statesOf(store: MebularTaskEventStore): Promise<TaskState[]> {
+async function statesOf(store: TaskEventStore): Promise<TaskState[]> {
   const byTask = new Map<string, TaskEvent[]>();
   for (const e of await store.all()) {
     const list = byTask.get(e.taskId);
@@ -119,6 +190,127 @@ async function statesOf(store: MebularTaskEventStore): Promise<TaskState[]> {
     else byTask.set(e.taskId, [e]);
   }
   return [...byTask.keys()].sort().map((id) => reduceTaskEvents(byTask.get(id)!)).filter((s): s is TaskState => s !== null);
+}
+
+function planStoreOf(session: Session): TaskPlanWriteStore {
+  return session.planStore;
+}
+
+/** P3/P6：daemon 模式复用 P1 卡片后端；远端卡用 `/app/peers` 的已认证在线公钥验签。 */
+function routingProviderFor(session: Session): PlanRoutingProvider | null {
+  if (session.mebular !== null) {
+    return embeddedRoutingProvider({
+      mebular: session.mebular,
+      config: session.config,
+      store: session.store,
+    });
+  }
+  const daemon = session.config.daemon;
+  if (daemon?.endpoint !== undefined) {
+    const localPublicKey = identityPublicKeyForStorage(session.config.storagePath);
+    const backend = new DaemonAgentBackend({
+      endpoint: daemon.endpoint,
+      namespace: AGENT_NAMESPACE,
+      ...(daemon.token !== undefined ? { token: daemon.token } : {}),
+      ...(daemon.tokenFile !== undefined ? { tokenFile: daemon.tokenFile } : {}),
+      ...(localPublicKey !== null
+        ? { publicKeyFor: (device: string) => (device === session.config.device ? localPublicKey : undefined) }
+        : {}),
+    });
+    const roleCards = new DaemonRoleCardStore({
+      endpoint: daemon.endpoint,
+      namespace: AGENT_NAMESPACE,
+      ...(daemon.token !== undefined ? { token: daemon.token } : {}),
+      ...(daemon.tokenFile !== undefined ? { tokenFile: daemon.tokenFile } : {}),
+    });
+    return daemonRoutingProvider({
+      backend,
+      config: session.config,
+      store: session.store,
+      roleCards: () => roleCards.list(),
+      onlineDevices: () => backend.listOnlineDevices(),
+    });
+  }
+  return null;
+}
+
+/**
+ * 只对“当前已 ready 但未物化”的 route/显式 to step 计算解释；
+ * 依赖未满足的 step 不提前标 blocked。任何读失败都降级为无 why，不影响旧进度字段。
+ */
+async function routeHintsForPlan(
+  session: Session,
+  plan: TaskPlan,
+  states: readonly TaskState[],
+): Promise<PlanStepRouteHint[] | undefined> {
+  const provider = routingProviderFor(session);
+  if (provider === null) return undefined;
+  try {
+    const derived = derivePlanSteps(plan, states);
+    const context = await loadRouteContext(provider, {
+      states,
+      events: await session.store.all(),
+      asOf: Date.now(),
+      computedBy: session.device,
+    });
+    const hints: PlanStepRouteHint[] = [];
+    for (const entry of derived) {
+      const step = entry.step;
+      if (step.kind !== 'task' && step.kind !== 'join' && step.kind !== 'reduce') continue;
+      if (step.to === undefined && step.route === undefined) continue;
+      if (entry.via === 'reuse' || entry.failed) continue;
+      const materialized = entry.taskId !== undefined;
+      if (!materialized) {
+        const ready = entry.status === 'pending' && (entry.blockedBy === undefined || entry.blockedBy.length === 0);
+        const policyBlocked = entry.status === 'blocked' && entry.step.to !== undefined;
+        if (!ready && !policyBlocked) continue;
+      }
+      const decision = resolvePlanStepRoute(plan, step, routeInputFromContext(context));
+      if (materialized) {
+        // P6：已物化步骤只做 additive 审计，用当前确定性 route 解释为什么当初会选中该目标；
+        // 不改变既有 status/taskId，也不把 intent/原文写进 why。
+        if (decision.decision === 'assigned') {
+          hints.push({ stepId: step.stepId, code: decision.why.code, why: decision.why });
+        }
+        continue;
+      }
+      if (decision.decision === 'assigned') continue;
+      hints.push({
+        stepId: step.stepId,
+        code: decision.why.code,
+        ...(decision.blockedBy.length > 0 ? { blockedBy: decision.blockedBy } : {}),
+        why: decision.why,
+      });
+    }
+    return hints.length > 0 ? hints : undefined;
+  } catch {
+    // 无卡片/无守护权限等读取失败：不返回 why，旧进度字段不变。
+    return undefined;
+  }
+}
+
+/**
+ * `task_status.plan`：仅当 taskId 严格匹配 plan root/step/MR 且 plan 节点存在时返回。
+ * 进度是派生值；plan 节点不被改写。P3 只 additive 增加 step.why/blockedBy。
+ */
+async function planProgressOf(
+  session: Session,
+  taskId: string,
+): Promise<ReturnType<typeof derivePlanProgress> | null> {
+  const parsed = parsePlanTaskId(taskId);
+  if (parsed === null) return null;
+  const plans = planStoreOf(session);
+  const plan = await plans.get(parsed.planId, parsed.version);
+  if (plan === null) return null;
+  if (!parsed.root && !plan.steps.some((step) => step.stepId === parsed.stepId)) return null;
+  const states = await statesOf(session.store);
+  const routeHints = await routeHintsForPlan(session, plan, states);
+  return derivePlanProgress(
+    plan,
+    states,
+    await plans.list(),
+    routeHints !== undefined ? { routeHints } : {},
+  );
 }
 
 function summarizeState(s: TaskState): Record<string, unknown> {
@@ -157,6 +349,62 @@ function dispatchInput(input: Record<string, unknown>): TaskDispatch | undefined
   return d;
 }
 
+type PlanOwnerNormalization =
+  | { ok: true; plan: unknown }
+  | { ok: false; error: 'PLAN_POLICY'; reason: 'PLAN_OWNER_UNEXECUTABLE'; errors: string[]; created: [] };
+
+/**
+ * B1：MCP 默认 `board` 是“占位 owner”，不是可执行 Agent。plan 提交时把 owner.agent=board
+ * 归一化为本机 planAgent；非 board 的显式 owner 不改写，仍由 submitTaskPlan 校验 equals planAgent。
+ * 配置没有任何可用 Agent 时 fail closed，绝不创建 plan/root。
+ */
+function planAgentUnavailable(planAgent: string): PlanOwnerNormalization {
+  return {
+    ok: false,
+    error: 'PLAN_POLICY',
+    reason: 'PLAN_OWNER_UNEXECUTABLE',
+    errors: [`PLAN_OWNER_UNEXECUTABLE: planAgent="${planAgent}" 不在本机 config.agents[].name 中；请配置真实执行 Agent 或显式 ctx.agent`],
+    created: [],
+  };
+}
+
+function planAgentUnexecutable(planAgent: string): PlanOwnerNormalization {
+  return {
+    ok: false,
+    error: 'PLAN_POLICY',
+    reason: 'PLAN_OWNER_UNEXECUTABLE',
+    errors: [
+      `PLAN_OWNER_UNEXECUTABLE: planAgent="${planAgent}" 不是本机真实可执行 Agent；`
+      + 'echo/board 只用于 demo/看板，不能承担 plan owner 或 MR 执行',
+    ],
+    created: [],
+  };
+}
+
+function normalizePlanOwnerForSession(input: unknown, session: Session): PlanOwnerNormalization {
+  // B1-R：最终 planAgent（ctx.agent / defaultAgent / agents[0] / board fallback）必须是本机
+  // 真实注册的 Agent；ghost agent 一律在写 plan/root 前拒绝，即使 plan.owner 也是 ghost。
+  const planAgent = session.config.agents.find((agent) => agent.name === session.planAgent);
+  if (planAgent === undefined) {
+    return planAgentUnavailable(session.planAgent);
+  }
+  // WS4b：echo/demo/看板 agent 即使在 config.agents[] 中，也不能承担 plan owner/MR。
+  // 否则 plan 会“提交成功但由 echo/board 空转”。
+  if (!isPlanOwnerExecutableAgent(planAgent)) {
+    return planAgentUnexecutable(session.planAgent);
+  }
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return { ok: true, plan: input };
+  const plan = input as Record<string, unknown>;
+  const owner = plan.owner;
+  if (typeof owner !== 'object' || owner === null || Array.isArray(owner)) return { ok: true, plan: input };
+  const ownerAgent = (owner as Record<string, unknown>).agent;
+  if (ownerAgent !== 'board' || session.planAgent === 'board') return { ok: true, plan: input };
+  return {
+    ok: true,
+    plan: { ...plan, owner: { ...(owner as Record<string, unknown>), agent: session.planAgent } },
+  };
+}
+
 /** 工具描述首行 = 首要路由信号「何时用」；原始语义/约束保留在第二行。 */
 const when = (whenToUse: string, description: string): string => `何时用：${whenToUse}\n${description}`;
 
@@ -165,7 +413,7 @@ export const TASK_TOOLS: TaskTool[] = [
     name: 'task_submit',
     cli: 'task_submit',
     scope: 'task.write',
-    description: when('要把任务派给其他设备/Agent 时；先 task_targets 确认可派对象，再提交。', '提交任务（root 或 child）；root 可带预算与派发策略。**非幂等**：重试 = 新任务（需要关联请用 causedBy/chain）'),
+    description: when('要把任务派给其他设备/Agent 时；先 task_targets 确认可派对象，再提交。', '提交任务（root 或 child）；root 可带预算与派发策略。**非幂等**：重试 = 新任务（需要关联请用 causedBy/chain）。可选 plan 提交完整 plan 定义（Fleet 内部校验并创建 plan 节点 + root task）'),
     inputSchema: {
       type: 'object',
       required: ['intent', 'to'],
@@ -178,11 +426,25 @@ export const TASK_TOOLS: TaskTool[] = [
         chain: { type: 'array', items: { type: 'string' } },
         budget: { type: 'object' },
         dispatch: { type: 'string', enum: ['children-ok', 'root-only'] },
+        plan: { type: 'object', description: '完整 task_plan 定义（不是 ref）；提交时 to 必须为 __plan__ sentinel' },
       },
     },
     handler: async (input, ctx) => {
       const session = await openSession(ctx);
       try {
+        if (input.plan !== undefined) {
+          const normalized = normalizePlanOwnerForSession(input.plan, session);
+          if (!normalized.ok) return normalized;
+          return await submitTaskPlan({
+            plan: normalized.plan,
+            intent: requiredString(input, 'intent'),
+            to: input.to,
+            caller: { device: session.device, agent: session.planAgent },
+            plans: planStoreOf(session),
+            store: session.store,
+            unexecutableOwnerAgents: unexecutablePlanOwnerNames(session.config),
+          });
+        }
         const to = (input.to ?? {}) as { device?: string; agent?: string };
         const causedBy = strInput(input, 'causedBy');
         const chain = Array.isArray(input.chain) ? (input.chain as string[]) : [];
@@ -233,13 +495,42 @@ export const TASK_TOOLS: TaskTool[] = [
         const state = reduceTaskEvents(await session.store.byTask(taskId));
         if (state === null) throw new Error(`任务不存在：${taskId}`);
         if (state.terminal) return { ok: false, taskId, reason: 'already-terminal', status: state.status };
+        const parsed = parsePlanTaskId(taskId);
+        if (parsed !== null && parsed.root) {
+          // P4 plan 级取消：root failed(CANCELLED) → 停止新物化 → best-effort 清理该 version
+          // 全部非终态 step task 及其派生树；已提交（done）的 MR 不撤销。
+          const actor = { device: session.device, agent: session.agent };
+          await session.store.append({
+            v: 1,
+            eventId: `${taskId}#failed@${session.device}`,
+            taskId,
+            type: 'failed',
+            actor,
+            at: Date.now(),
+            toStatus: 'failed',
+            trace: state.trace,
+            reason: 'CANCELLED',
+          });
+          try {
+            await cancelPlanVersionTasks(session.store, parsed.planId, parsed.version, actor, 'CANCELLED');
+          } catch {
+            // best-effort；后续 materializer tick 会重试清理。
+          }
+          return { ok: true, taskId, status: 'failed', reason: 'CANCELLED' };
+        }
+        const actor = { device: session.device, agent: session.agent };
+        if (parsed !== null) {
+          // P4 step 级取消：只取消该 step task 及其派生子树；plan 状态由 materializer 派生为 failed。
+          await cancelTaskTree(session.store, taskId, actor, { subtree: true, reason: 'CANCELLED' });
+          return { ok: true, taskId, status: 'failed', reason: 'CANCELLED' };
+        }
         const reason = strInput(input, 'reason') ?? 'CANCELLED';
         const event: TaskEvent = {
           v: 1,
           eventId: `${taskId}#failed@${session.device}`,
           taskId,
           type: 'failed',
-          actor: { device: session.device, agent: session.agent },
+          actor,
           at: Date.now(),
           toStatus: 'failed',
           trace: state.trace,
@@ -262,6 +553,18 @@ export const TASK_TOOLS: TaskTool[] = [
       const session = await openSession(ctx);
       try {
         const taskId = requiredString(input, 'taskId');
+        // B3：plan-shaped root/step/MR 一律 fail closed；不依赖 plan 节点是否已同步。
+        const parsed = parsePlanTaskId(taskId);
+        if (parsed !== null) {
+          return {
+            ok: false,
+            taskId,
+            error: 'PLAN_RETRY_REQUIRED',
+            planId: parsed.planId,
+            version: parsed.version,
+            ...(!parsed.root && parsed.stepId !== null ? { stepId: parsed.stepId } : {}),
+          };
+        }
         const state = reduceTaskEvents(await session.store.byTask(taskId));
         if (state === null) throw new Error(`任务不存在：${taskId}`);
         const result = await session.node.submit({
@@ -287,7 +590,9 @@ export const TASK_TOOLS: TaskTool[] = [
       try {
         const taskId = requiredString(input, 'taskId');
         const state = reduceTaskEvents(await session.store.byTask(taskId));
-        return state === null ? { ok: false, taskId, state: null } : { ok: true, taskId, state: summarizeState(state) };
+        if (state === null) return { ok: false, taskId, state: null };
+        const plan = await planProgressOf(session, taskId);
+        return { ok: true, taskId, state: summarizeState(state), ...(plan !== null ? { plan } : {}) };
       } finally {
         await session.close();
       }
@@ -397,7 +702,7 @@ export const TASK_TOOLS: TaskTool[] = [
         if (!['clarify', 'counter', 'accept', 'reject'].includes(kind)) throw new Error('kind 非法');
         const round = Number(input.round);
         if (!Number.isInteger(round) || round < 0) throw new Error('round 必须为非负整数');
-        const store = negotiationMessageStore(session.mebular, session.namespace);
+        const store = negotiationMessageStore(requireMebular(session), session.namespace);
         const message: NegotiationMessage = {
           v: 1,
           messageId: `${taskId}#neg#${round}@${session.device}`,
@@ -424,7 +729,7 @@ export const TASK_TOOLS: TaskTool[] = [
       const session = await openSession(ctx);
       try {
         const quota = new LocalQuota({ limitPerDevice: 1000 });
-        const chatter = new FleetChatter({ device: session.device, quota, store: chatterMessageStore(session.mebular, session.namespace) });
+        const chatter = new FleetChatter({ device: session.device, quota, store: chatterMessageStore(requireMebular(session), session.namespace) });
         const messageId = strInput(input, 'messageId') ?? `${session.device}-${Date.now().toString(36)}`;
         const decision = await chatter.send({
           v: 1,
@@ -448,7 +753,7 @@ export const TASK_TOOLS: TaskTool[] = [
     handler: async (_input, ctx) => {
       const session = await openSession(ctx);
       try {
-        const chatter = new FleetChatter({ device: session.device, quota: new LocalQuota({ limitPerDevice: 1000 }), store: chatterMessageStore(session.mebular, session.namespace) });
+        const chatter = new FleetChatter({ device: session.device, quota: new LocalQuota({ limitPerDevice: 1000 }), store: chatterMessageStore(requireMebular(session), session.namespace) });
         const inbox = await chatter.inbox();
         return { ok: true, count: inbox.length, messages: inbox };
       } finally {
@@ -476,15 +781,74 @@ export const TASK_TOOLS: TaskTool[] = [
     handler: async (_input, ctx) => {
       const session = await openSession(ctx);
       try {
+        const mebular = requireMebular(session);
         const config = await loadToolConfig(ctx.dir);
         const subscribed: string[] = [];
         for (const peer of config.peers) {
-          const namespaces = await session.mebular.getSubscriptions(peer.device);
+          const namespaces = await mebular.getSubscriptions(peer.device);
           if (namespaces.includes(session.namespace)) subscribed.push(peer.device);
         }
-        const entries = await agentDirectoryStore(session.mebular, 'agents').all();
-        const targets = expandTargets(entries, subscribed);
-        return { ok: true, namespace: session.namespace, subscribed, targets };
+        const entries = await agentDirectoryStore(mebular, 'agents').all();
+        const targetKeys = new Set<string>();
+        let targets: TaskTarget[] = expandTargets(entries, subscribed);
+        let cards: ReturnType<typeof summarizeCapabilityCards> = [];
+        try {
+          const cardEntries = await listCapabilityCards(mebular, 'agents');
+          const activeCards = activeCapabilityCards(latestCapabilityCards(cardEntries));
+          const cardByTarget = new Map<string, AgentCapabilityCard>();
+          for (const card of activeCards) cardByTarget.set(`${card.device}\u0000${card.agent}`, card);
+          const states = await statesOf(session.store);
+          const inflight = new Map<string, number>();
+          for (const state of states) {
+            if (state.terminal) continue;
+            const key = `${state.to.device}\u0000${state.to.agent}`;
+            inflight.set(key, (inflight.get(key) ?? 0) + 1);
+          }
+          for (const target of targets) targetKeys.add(`${target.device}\u0000${target.agent}`);
+          // additive：把卡片上的显式 executable/executionMode/health 合并进 targets。
+          // 目录缺字段时以卡片为准（旧目录兼容）；两边都缺则保持未知。
+          targets = targets.map((target) => {
+            const card = cardByTarget.get(`${target.device}\u0000${target.agent}`);
+            if (card === undefined) return target;
+            const executable = card.executable === false
+              ? false
+              : (target.executable ?? card.executable);
+            const executionMode = target.executionMode ?? card.executionMode;
+            const unavailableReason = card.health?.status === 'unavailable' ? 'adapter-unavailable' : undefined;
+            const reason = target.reason
+              ?? unavailableReason
+              ?? (executable === false
+                ? (deriveAgentExecution({ name: target.agent, kind: target.kind }).reason ?? 'not-executable')
+                : undefined);
+            return {
+              ...target,
+              ...(executable !== undefined ? { executable } : {}),
+              ...(executionMode !== undefined ? { executionMode } : {}),
+              ...(card.health !== undefined ? { health: card.health } : {}),
+              ...(reason !== undefined ? { reason } : {}),
+            };
+          });
+          cards = summarizeCapabilityCards(cardEntries, {
+            devices: subscribed,
+            online: (device) => {
+              const withPath = mebular as { getPeerPath?: (key: string) => unknown };
+              return typeof withPath.getPeerPath === 'function' ? withPath.getPeerPath(device) !== null : false;
+            },
+            inflight: (device, agent) => inflight.get(`${device}\u0000${agent}`) ?? 0,
+          }).filter((card) => targetKeys.has(`${card.device}\u0000${card.agent}`));
+        } catch (error) {
+          cards = [];
+          // MCP surface freeze：只允许 task_targets.cards 这个 optional 输出；
+          // 卡片读取失败只在本地可观测，不把额外字段写进工具输出。
+          console.error(`[fleet:cards] task_targets card read failed: ${(error as Error).message}`);
+        }
+        return {
+          ok: true,
+          namespace: session.namespace,
+          subscribed,
+          targets,
+          cards,
+        };
       } finally {
         await session.close();
       }

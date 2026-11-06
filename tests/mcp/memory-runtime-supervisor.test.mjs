@@ -4,7 +4,7 @@
 // profile·home 不匹配拒绝接管 / 崩溃退避与重启上限 / 启动超时 / stop / token 注入不泄漏 /
 // 可执行文件解析优先级。
 
-import { describe, it, expect, afterEach } from '@jest/globals';
+import { describe, it, expect, afterEach, jest } from '@jest/globals';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { existsSync } from 'node:fs';
@@ -19,6 +19,8 @@ import {
 } from '../../packages/mcp/src/memory-runtime-supervisor.mjs';
 
 const FAKE = fileURLToPath(new URL('./fixtures/memory-runtime-fake-sidecar.mjs', import.meta.url));
+// 崩溃退避用例包含真实子进程启动/退出；覆盖率插桩与并行负载下 5s 默认预算过紧。
+jest.setTimeout(20_000);
 const cleanups = [];
 const dirs = [];
 
@@ -1226,7 +1228,7 @@ describe('MemoryRuntimeSupervisor：崩溃与超时', () => {
     const limited = await waitFor(async () => {
       const status = await supervisor.status();
       return status.error?.code === 'restart_limit' ? status : null;
-    }, { timeoutMs: 5000 });
+    }, { timeoutMs: 15_000 });
     expect(limited.state).toBe('failed');
     expect(spawns).toBe(3);
     expect((await readFile(spawnsOut, 'utf-8')).trim().split('\n')).toHaveLength(3);

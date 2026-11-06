@@ -35,7 +35,7 @@ export class GraphStore {
     type: string,
     content: Record<string, unknown>,
     labels?: string[],
-    options?: { validFrom?: number; validTo?: number; namespace?: string },
+    options?: { validFrom?: number; validTo?: number; namespace?: string; metadata?: Record<string, unknown> },
   ): Promise<Node> {
     const now = Date.now();
     const node: Node = {
@@ -51,6 +51,9 @@ export class GraphStore {
       validTo: options?.validTo ?? 9999999999999,
       tags: [],
       namespace: normalizeNamespace(options?.namespace),
+      // 可选的创建期 metadata：internal 对象（plan/card）必须在**写入事件前**带标记，
+      // 避免「先建后补 metadata」的窗口里被默认列表/同步对端当成普通记忆。
+      ...(options?.metadata !== undefined ? { metadata: { ...options.metadata } } : {}),
     };
 
     this.clock.increment(this.author);

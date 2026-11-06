@@ -870,6 +870,17 @@ export class SyncManager extends EventEmitter {
     }));
   }
 
+  /**
+   * P1/B1：已认证对端的 Ed25519 公钥（按 deviceId）。
+   * 只从握手证书登记过的在线 peer 取；未知/离线/未认证返回 undefined。
+   */
+  getPeerPublicKey(deviceId: string): Uint8Array | undefined {
+    for (const entry of this.onlinePeers.values()) {
+      if (entry.peer.deviceId === deviceId) return new Uint8Array(entry.peer.publicKey);
+    }
+    return undefined;
+  }
+
   // ---------- 同步会话 ----------
 
   /**

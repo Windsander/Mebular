@@ -60,6 +60,18 @@ describe('fleet 边界（红线）', () => {
     expect(violations).toEqual([]);
   });
 
+  it('core `src/**` 不得出现 fleet 内部类型名（只认识 metadata.internal 通用信号）', () => {
+    const forbidden = ['agent_capability_card', 'agent_role_card', 'task_plan'];
+    const violations: string[] = [];
+    for (const file of listFiles(join(ROOT, 'src'))) {
+      const text = readFileSync(file, 'utf-8');
+      for (const token of forbidden) {
+        if (text.includes(token)) violations.push(`${relative(ROOT, file)} → ${token}`);
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+
   it('fleet 只声明 @mebular/core 与 @mebular/service（无其它内部包）', () => {
     const pkg = JSON.parse(readFileSync(join(ROOT, 'packages/fleet/package.json'), 'utf-8')) as {
       dependencies?: Record<string, string>;

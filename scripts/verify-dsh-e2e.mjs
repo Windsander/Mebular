@@ -1087,7 +1087,7 @@ const scenarios = [
       const dshInfo = await world.fetchDshJson('/mebular/embed-info');
       check('/mebular/embed-info 200', dshInfo.status === 200, `status=${dshInfo.status}`);
       const allowedKeys = [
-        'ok', 'status', 'state', 'mode', 'runtimeMode', 'managed', 'panel', 'version',
+        'ok', 'status', 'state', 'mode', 'runtimeMode', 'managed', 'panel', 'version', 'pluginVersion',
         'daemonUrl', 'profile', 'provider', 'service', 'downloadRequired', 'install',
         'update', 'upgrade', 'embedProtocol', 'consoleUrl', 'embedUrl', 'mcpUrl',
         'loopback', 'reason',

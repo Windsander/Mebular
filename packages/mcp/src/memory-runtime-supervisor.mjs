@@ -30,7 +30,9 @@ export const MEMORY_RUNTIME_TOKEN_FILE = 'host-token';
 export const MEMORY_RUNTIME_CAPABILITY_TOKEN_FILE = 'capability-token';
 export const MEMORY_RUNTIME_DEFAULT_PORT = 7341;
 export const MEMORY_RUNTIME_DEFAULT_START_TIMEOUT_MS = 5000;
-export const MEMORY_RUNTIME_HEALTH_TIMEOUT_MS = 200;
+// Local loopback health probes are cheap; allow a full second so a busy host
+// (notably Windows CI) cannot turn one slow probe into a transient 503.
+export const MEMORY_RUNTIME_HEALTH_TIMEOUT_MS = 1000;
 export const MEMORY_RUNTIME_HEALTH_CHECK_MS = 5000;
 export const MEMORY_RUNTIME_DISCOVERY_STALE_MS = 15_000;
 export const MEMORY_RUNTIME_DISCOVERY_DEAD_MS = 30_000;

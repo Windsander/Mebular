@@ -81,6 +81,18 @@ function parse(result) {
   return JSON.parse(result.stdout);
 }
 
+async function waitForCliReady(env, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const result = runCli(env, 'status');
+    expect(result.status).toBe(0);
+    const json = parse(result);
+    if (json.state === 'ready') return json;
+    if (Date.now() >= deadline) return json;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+  }
+}
+
 describe('mebular memory-runtime CLI', () => {
   it('status：无 sidecar 时稳定 JSON，不创建 memory-runtime 目录', async () => {
     const home = await tempDir();
@@ -134,9 +146,18 @@ describe('mebular memory-runtime CLI', () => {
 
     const again = runCli(env, 'start');
     expect(again.status).toBe(0);
-    expect(parse(again)).toMatchObject({
+    const secondStart = parse(again);
+    expect(secondStart).toMatchObject({
       ok: true,
       action: 'start',
+      pid: first.pid,
+      managed: false,
+      attached: true,
+    });
+    // Attaching can observe one slow Windows health probe as degraded; wait
+    // for the existing sidecar to settle before asserting the status contract.
+    expect(['ready', 'degraded']).toContain(secondStart.state);
+    expect(await waitForCliReady(env)).toMatchObject({
       state: 'ready',
       pid: first.pid,
       managed: false,

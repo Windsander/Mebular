@@ -30,12 +30,12 @@ Hermes 侧 `MemoryProvider` 插件，把 Hermes 的每轮对话接到独立的 M
 
 ### 一键安装（Release 资产，发布后）
 
-0.3.0 发布后，GitHub Release 提供 `mebular-hermes-plugins-<version>.tar.gz`。它同时包含 provider 和可选 companion：
+0.3.2 发布后，GitHub Release 提供 `mebular-hermes-plugins-<version>.tar.gz`。它同时包含 provider 和可选 companion：
 
 ```bash
-gh release download v0.3.0 -p 'mebular-hermes-plugins-*.tar.gz'
+gh release download v0.3.2 -p 'mebular-hermes-plugins-*.tar.gz'
 mkdir -p mebular-hermes-plugins
-tar -xzf mebular-hermes-plugins-0.3.0.tar.gz -C mebular-hermes-plugins
+tar -xzf mebular-hermes-plugins-0.3.2.tar.gz -C mebular-hermes-plugins
 cd mebular-hermes-plugins
 
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}" ./install.sh
@@ -197,7 +197,7 @@ rm -rf "${HERMES_HOME:-$HOME/.hermes}/plugins/mebular"
 
 ## 已知限制
 
-- 依赖 Mebular 0.3.0 的独立 Memory Runtime sidecar `/memory-runtime/v1`；sidecar 未启动或端点不可用时 recall 返回空、ingest 留在 spool、checkpoint 保持 pending，不影响 Hermes 主流程。
+- 依赖 Mebular 0.3.2 的独立 Memory Runtime sidecar `/memory-runtime/v1`；sidecar 未启动或端点不可用时 recall 返回空、ingest 留在 spool、checkpoint 保持 pending，不影响 Hermes 主流程。
 - `prefetch` 首次同步召回最多等待 `recall_timeout`（默认 1.5s）；用 `queue_prefetch` 预热后通常无等待。
 - Hermes `MemoryProvider` 不暴露当前模型；本插件不伪造，`extractor=host` 的候选抽取由可选 companion 插件负责。
 - 队列是单进程文件 spool，不是跨进程锁；不要在同一 `HERMES_HOME` 跑两个 Hermes 写者（Hermes 本身也不建议）。

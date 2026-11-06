@@ -16,7 +16,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 The GitHub Release body is extracted from this file: everything between the release's
 `## [vX.Y.Z]` heading and the next `## [` heading. Keep that section self-contained.
 
-## [v0.3.2] - 2026-11-05
+## [v0.3.2] - 2026-11-06
 
 Memory Runtime stability release. It makes lifecycle, local data, detail evidence,
 checkpoint revisions, host failure states and diagnostics match the documented contract.

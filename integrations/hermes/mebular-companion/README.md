@@ -12,12 +12,12 @@
 
 ### 一键安装（Release 资产，发布后）
 
-0.3.0 发布后，GitHub Release 的 `mebular-hermes-plugins-<version>.tar.gz` 已包含本插件；同一个 `install.sh` 会把它安装到 `$HERMES_HOME/plugins/mebular-companion`：
+0.3.2 发布后，GitHub Release 的 `mebular-hermes-plugins-<version>.tar.gz` 已包含本插件；同一个 `install.sh` 会把它安装到 `$HERMES_HOME/plugins/mebular-companion`：
 
 ```bash
-gh release download v0.3.0 -p 'mebular-hermes-plugins-*.tar.gz'
+gh release download v0.3.2 -p 'mebular-hermes-plugins-*.tar.gz'
 mkdir -p mebular-hermes-plugins
-tar -xzf mebular-hermes-plugins-0.3.0.tar.gz -C mebular-hermes-plugins
+tar -xzf mebular-hermes-plugins-0.3.2.tar.gz -C mebular-hermes-plugins
 cd mebular-hermes-plugins
 
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}" ./install.sh

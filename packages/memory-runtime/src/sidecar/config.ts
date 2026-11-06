@@ -14,7 +14,7 @@ import { basename, join, resolve, sep } from 'node:path';
 import { readJsonFile } from './atomic-json.js';
 
 export const SIDECAR_PACKAGE_NAME = '@mebular/memory-runtime';
-export const SIDECAR_RUNTIME_VERSION = '0.3.0';
+export const SIDECAR_RUNTIME_VERSION = '0.3.2';
 export const SIDECAR_API_VERSION = 1;
 export const SIDECAR_CAPABILITY_API_VERSION = 1;
 export const SIDECAR_MIN_MCP_VERSION = '0.3.0';

@@ -7,28 +7,28 @@
 
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/main/assets/roadmap-en-light.svg">
-  <img src="https://raw.githubusercontent.com/Windsander/Mebular/main/assets/roadmap-en.svg" alt="Mebular constellation roadmap: v0.2.0 released, shared-runtime hardening now, trusted desktop distribution and controlled updates next, protocol lifecycle topics under exploration">
+  <img src="https://raw.githubusercontent.com/Windsander/Mebular/main/assets/roadmap-en.svg" alt="Mebular constellation roadmap: released foundation, current stability hardening, trusted desktop distribution and controlled updates next, protocol lifecycle topics under exploration">
 </picture>
 
-## Released — v0.2.0
+## Released — v0.3.0
 
-Available now in the [v0.2.0 release](https://github.com/Windsander/Mebular/releases/tag/v0.2.0).
+Available in the [v0.3.0 release](https://github.com/Windsander/Mebular/releases/tag/v0.3.0).
 
-- **Shared Runtime Supervisor** — App, CLI and DSH share one local runtime, service, active profile and data root.
-- **Equal App and DSH entries** — both entries use the same runtime ownership, provider discovery and service lifecycle.
-- **Explicit bootstrap and updates** — plugin-only installation uses a pinned runtime; update prompts never install silently.
+- **Memory Runtime** — opt-in sidecar for automatic capture, recall, durable details, checkpoints and local extraction/summary.
+- **Three host paths** — DSH, Hermes and OpenCode/OpenChamber adapters share one graph, event log and sync layer.
+- **Local model supply** — explicit model/engine installation with fixed revisions, size and SHA-256 verification; no silent download.
 
-## Now — v0.2.x
+## Now — v0.3.x
 
 The current stabilization focus. Priorities can move in response to reproducible reports and first-run feedback.
 
-- **Shared-runtime hardening** — validate coexistence, upgrades, service ownership and recovery across real setups.
-- **Cross-platform first runs** — improve installation and onboarding guidance using macOS, Windows, Linux, App, CLI and DSH feedback.
-- **Diagnostics and recovery** — make failures easier to diagnose without exposing memory content, keys or tokens.
+- **Data lifecycle and privacy** — keep staging, settled details, host copies, retention and deletion boundaries explicit.
+- **Lifecycle and recovery** — validate managed/attached/manual sidecars, offline queues, Compact/Checkpoint/SelfRecord and host fail-open behavior.
+- **Evidence at real scale** — maintain the 1k/2k/10k audit, real-model canary, host E2E and upgrade/rollback evidence as release gates.
 
 ## Next — candidate themes
 
-Known follow-up work. These themes are **not** a committed v0.3.0 scope or release schedule.
+Known follow-up work. These themes are **not** a committed v0.3.x scope or release schedule.
 
 - **Trusted desktop distribution** — advance the existing desktop signing and notarization plan.
 - **Controlled updates** — explore auto-update while preserving explicit consent, shared-runtime ownership and rollback.

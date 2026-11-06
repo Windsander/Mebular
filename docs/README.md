@@ -11,7 +11,7 @@ main [`README.md`](../README.md); this index only describes document structure.
 
 - [README](../README.md) · [中文 README](../README_CN.md)
 - [Quickstart](getting-started/QUICKSTART.md) · [快速上手](getting-started/QUICKSTART_CN.md)
-- [Memory Runtime guide (0.3.0)](guides/MEMORY_RUNTIME.md) · [Memory Runtime 用户指南（0.3.0）](guides/MEMORY_RUNTIME_CN.md)
+- [Memory Runtime guide (0.3.2)](guides/MEMORY_RUNTIME.md) · [Memory Runtime 用户指南（0.3.2）](guides/MEMORY_RUNTIME_CN.md)
 - [Roadmap](../ROADMAP.md) · [路线图](../ROADMAP_CN.md) — public themes, current focus and exploration
 - [Contributing & quality gates](../CONTRIBUTING.md)
 - [Security policy](../SECURITY.md)
@@ -57,16 +57,23 @@ main [`README.md`](../README.md); this index only describes document structure.
 
 ## Design
 
-- [Memory Runtime guide (0.3.0)](guides/MEMORY_RUNTIME.md) · [中文](guides/MEMORY_RUNTIME_CN.md) — user-facing guide to modes, models, host boundaries and privacy
-- [Memory Runtime 0.3.0 contract](design/0.3.0-memory-runtime-contract-v2.md) — frozen sidecar and capability contract (Chinese)
-- [Memory Runtime 0.3.2 stability contract](design/0.3.2-stability-contract.md) · [中文](design/0.3.2-stability-contract_CN.md) — WP0 data, failure, lifecycle and acceptance target
-- [Memory Runtime sidecar lifecycle](design/0.3.0-memory-runtime-sidecar.md) — process, discovery, tokens, local data and failure behaviour (Chinese)
-- [0.3.0 acceptance report](quality/0.3.0-memory-runtime-acceptance.md) — recall quality, security and performance evidence
-- [0.3.0 real model smoke](quality/0.3.0-model-smoke.md) — Qwen3-4B + llama.cpp verification; records the engine symlink and Qwen3 thinking blockers
-- [0.3.2 Fleet orchestration evidence](quality/0.3.2-fleet-orchestration.md) — executor/adapters, executable routing, checks and real/fake boundaries
+- [Memory Runtime 0.3.2 stability contract](design/0.3.2-stability-contract.md) · [中文](design/0.3.2-stability-contract_CN.md) — data, failure, lifecycle and acceptance target
+- [Memory Runtime 0.3.0 contract](design/0.3.0-memory-runtime-contract-v2.md) — historical sidecar and capability contract (Chinese)
+- [Memory Runtime sidecar lifecycle](design/0.3.0-memory-runtime-sidecar.md) — historical process, discovery, token and local-data design (Chinese)
 - [DSH plugin v1](design/dsh-plugin-v1.md) — historical v0.1 design; current guide is [DSH integration](integrations/DSH.md)
-- [Configuration journey v1](design/config-journey-v1.md) — Historical record of the v1 setup flow
-- [HTML prototype](design/prototype/README.md) — Historical record of the early prototype
+- [Configuration journey v1](design/config-journey-v1.md) — historical record of the v1 setup flow
+- [HTML prototype](design/prototype/README.md) — historical record of the early prototype
+
+## Quality and release evidence
+
+- [v0.3.2 verification matrix](quality/0.3.2-verification.md) — final test counts, host boundaries, scale/model evidence and explicit pending items
+- [v0.3.2 scale benchmark](quality/0.3.2-scale-benchmark.md) — 1k/2k/10k count audits, performance, resources, failure injection and preserved 10k failure history
+- [v0.3.2 real-model canary](quality/0.3.2-model-smoke.md) — Qwen3-4B Q4_K_M on macOS x64 with a test-only mirror; records the default-HF failure and exact boundary
+- [v0.3.2 upgrade/rollback](quality/0.3.2-upgrade-rollback.md) — sequential v0.3.0 → v0.3.2 → v0.3.0 data-safety drill
+- [v0.3.2 Fleet orchestration evidence](quality/0.3.2-fleet-orchestration.md) — executor/adapters, executable routing, checks and real/fake boundaries
+- [0.3.0 Memory Runtime acceptance](quality/0.3.0-memory-runtime-acceptance.md) — historical recall/security/performance evidence
+- [0.3.0 real-model smoke](quality/0.3.0-model-smoke.md) — historical Qwen3-4B + llama.cpp evidence
+- [0.3.0 Fleet P6 E2E](quality/0.3.0-fleet-orchestration-e2e.md) · [0.3.0 P7 review](quality/0.3.0-fleet-p7-review.md) — historical Fleet evidence
 
 ## Package docs
 
@@ -77,8 +84,6 @@ main [`README.md`](../README.md); this index only describes document structure.
   - [OpenChamber public runner](../packages/fleet/OPENCHAMBER-RUNNER.md)
   - [Protocol invariants](../packages/fleet/PROTOCOL-INVARIANTS.md)
   - [Orchestration contract](design/fleet-orchestration-contract.md)
-  - Historical evidence: [0.3.0 P6 E2E](quality/0.3.0-fleet-orchestration-e2e.md) ·
-    [0.3.0 P7 review](quality/0.3.0-fleet-p7-review.md)
 - [Console package](../packages/console) — console SPA and UI checks
 - [Skill](../packages/skill/SETUP.md) · [memory policy](../packages/skill/MEMORY_POLICY.md) ·
   [task playbook](../packages/skill/tasks/SKILL.md)

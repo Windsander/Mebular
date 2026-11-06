@@ -10,8 +10,8 @@ The release operations for this repository live under `docs/operations/`:
 - [Changelog](CHANGELOG.md) — release notes; the `## [vX.Y.Z]` section is the source of the
   GitHub Release body.
 
-The current release line is **v0.3.0**: a single-version umbrella with eight npm packages at
-`0.3.0` (`core`, `service`, `skill`, `mcp`, `fleet`, `memory-runtime`,
+The current release line is **v0.3.2**: a single-version umbrella with eight npm packages at
+`0.3.2` (`core`, `service`, `skill`, `mcp`, `fleet`, `memory-runtime`,
 `opencode-plugin`, `dsh-plugin`), and unsigned desktop installers for macOS, Windows and
 Linux. The DSH plugin is an isolated adapter published by its own npm job, but it follows
 the unified release train; no release ships the DSH plugin alone. `bump_version.sh` updates

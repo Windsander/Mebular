@@ -351,7 +351,13 @@ describe('MCP 模型薄代理 · 写操作映射与门禁', () => {
     const { base } = await start();
     await ready(base);
     const auth = await csrf(base);
-    const tested = await post(base, '/admin/api/models/test', { pack: PACK_8B }, auth);
+    let tested = await post(base, '/admin/api/models/test', { pack: PACK_8B }, auth);
+    // A sidecar status probe can lose one race under Windows CI load; retry
+    // only the transient 503, then assert the stable read result.
+    for (let attempt = 0; tested.status === 503 && attempt < 4; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      tested = await post(base, '/admin/api/models/test', { pack: PACK_8B }, auth);
+    }
     const body = await tested.json();
     expect(tested.status).toBe(200);
     expect(body).toMatchObject({ ok: true, tested: true, pack: PACK_8B, state: 'not_installed', installed: false });

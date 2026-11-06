@@ -306,6 +306,8 @@ HTTP 请求，不是整个 DSH 插件完全不注册 listener/timer。
 `GET /mebular/embed-info` 只接受 loopback，返回非敏感状态。v0.2.0 新增了
 `state`、`runtimeMode`、`profile`、`provider`、`service`、`downloadRequired`、
 `install`、`update`、`upgrade` 等字段；面板、MCP bridge 和 iframe 由同一份状态驱动。
+`version` 是运行中的 runtime 版本；`pluginVersion` 是已安装的 DSH 插件包版本，也是
+面板标题显示的版本。两者不一致时，标题 tooltip 会显示 runtime 版本。
 
 ```json
 {
@@ -317,6 +319,7 @@ HTTP 请求，不是整个 DSH 插件完全不注册 listener/timer。
   "managed": false,
   "panel": true,
   "version": "0.3.2",
+  "pluginVersion": "0.3.2",
   "profile": { "id": "default", "name": "我的忆云" },
   "provider": { "kind": "app", "source": "registry", "version": "0.3.2" },
   "service": { "registered": false, "running": false, "foreign": false },

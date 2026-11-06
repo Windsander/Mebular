@@ -358,7 +358,9 @@ process or sidecar HTTP request, not zero listeners/timers across the DSH plugin
 `GET /mebular/embed-info` is loopback-only and returns non-sensitive state.
 v0.2.0 adds `state`, `runtimeMode`, `profile`, `provider`, `service`,
 `downloadRequired`, `install`, `update` and `upgrade`; the panel, MCP bridge and
-iframe share this state.
+iframe share this state. `version` is the running runtime version;
+`pluginVersion` is the installed DSH plugin package version, which is what the
+panel header displays. If they differ, the header tooltip shows the runtime version.
 
 ```json
 {
@@ -370,6 +372,7 @@ iframe share this state.
   "managed": false,
   "panel": true,
   "version": "0.3.2",
+  "pluginVersion": "0.3.2",
   "profile": { "id": "default", "name": "My Cloud" },
   "provider": { "kind": "app", "source": "registry", "version": "0.3.2" },
   "service": { "registered": false, "running": false, "foreign": false },

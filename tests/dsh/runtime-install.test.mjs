@@ -1156,6 +1156,7 @@ describe('Phase 4b embed-info contract', () => {
       started: false,
       allowed: true,
     });
+    expect(info.pluginVersion).toBe(RUNTIME_INSTALL_VERSION);
     expect(JSON.stringify(info)).not.toContain('secret');
     expect(JSON.stringify(info)).not.toContain('/Users/me');
   });

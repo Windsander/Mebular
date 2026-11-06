@@ -11,6 +11,7 @@ import {
   EMBED_PROTOCOL,
   MCP_CLIENT_PACKAGE,
   PANEL_GLOBAL,
+  RUNTIME_INSTALL_VERSION,
   agentStatusText,
   apply,
   buildEmbedInfo,
@@ -670,6 +671,7 @@ describe('P2 @mebular/dsh-plugin host：纯函数', () => {
       panel: true,
       daemonUrl: BASE,
       version: '0.1.0',
+      pluginVersion: RUNTIME_INSTALL_VERSION,
       profile: null,
       provider: null,
       service: null,
@@ -686,7 +688,7 @@ describe('P2 @mebular/dsh-plugin host：纯函数', () => {
     });
     expect(Object.keys(info).sort()).toEqual([
       'consoleUrl', 'daemonUrl', 'downloadRequired', 'embedProtocol', 'embedUrl', 'install', 'loopback',
-      'managed', 'mcpUrl', 'mode', 'ok', 'panel', 'profile', 'provider', 'reason',
+      'managed', 'mcpUrl', 'mode', 'ok', 'panel', 'pluginVersion', 'profile', 'provider', 'reason',
       'runtimeMode', 'service', 'state', 'status', 'update', 'upgrade', 'version',
     ]);
     const serialized = JSON.stringify(info).toLowerCase();

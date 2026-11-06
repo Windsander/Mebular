@@ -1086,6 +1086,11 @@ window.__ModuleLoader__.load({
       const showFrame = ready && !frameFailed;
       const consoleUrl = safeHttpUrl(info?.consoleUrl) ?? DEFAULT_CONSOLE_URL;
       const version = typeof info?.version === 'string' && info.version.length > 0 ? info.version : null;
+      // Header identifies the installed plugin; `version` remains the running
+      // Mebular runtime version for diagnostics and update state.
+      const pluginVersion = typeof info?.pluginVersion === 'string' && info.pluginVersion.length > 0
+        ? info.pluginVersion
+        : version;
       const updateBanner = updateView(t, info, {
         dismissedVersion,
         pending: upgradePending ? (pendingUpgradeAction ?? 'update') : null,
@@ -1183,7 +1188,11 @@ window.__ModuleLoader__.load({
           'aria-hidden': 'true',
         }),
         h('span', { style: styles.title }, t.title),
-        version === null ? null : h('span', { style: styles.version }, `v${version.replace(/^v/, '')}`),
+        pluginVersion === null ? null : h('span', {
+          style: styles.version,
+          'data-mebular-plugin-version': pluginVersion,
+          title: version !== null && version !== pluginVersion ? `runtime ${version}` : undefined,
+        }, `v${pluginVersion.replace(/^v/, '')}`),
         h('span', { style: styles.spacer }),
         error !== null && !ready
           ? h('span', { style: styles.warn, title: error }, t.hostUnavailable)

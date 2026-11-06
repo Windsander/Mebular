@@ -189,6 +189,12 @@ describe('P2 @mebular/dsh-plugin client：静态契约', () => {
     expect(source).toContain("'data-mebular-panel-header': 'true'");
   });
 
+  it('header 版本优先插件版本，并在 tooltip 暴露 runtime 版本', () => {
+    expect(source).toContain('info?.pluginVersion');
+    expect(source).toContain('data-mebular-plugin-version');
+    expect(source).toContain('runtime ${version}');
+  });
+
   it('渲染共享更新 banner、稍后/跳过/更新与紧凑 header 操作', () => {
     expect(source).toContain('function updateView');
     expect(source).toContain("kind: 'available'");

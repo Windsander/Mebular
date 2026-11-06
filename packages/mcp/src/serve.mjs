@@ -5011,19 +5011,26 @@ export async function startHttpServer({
           Promise.resolve().then(() => entry.server.close()),
           sessionBudget,
         )));
-        // 2) 结束空闲 keep-alive 与仍活跃的 SSE/streaming 连接，避免 server.close 永久等待。
+        // 2) 只结束空闲 keep-alive；仍活跃的请求需要机会完成响应。
+        //    直接 closeAllConnections 会让已经进入 config rename 回滚的 PATCH
+        //    在慢 CI 上只看到 socket closed，而不是契约要求的 409。
         server.closeIdleConnections?.();
-        server.closeAllConnections?.();
-        // 3) 停止接受新连接；有限超时兜底，超时后强制断开并继续清理。
+        // 3) 给已接受的请求一个很短的完成窗口，再强制断开 SSE/长连接；
+        //    否则 server.close 会一直等到 5s 截止时间。
         await new Promise((resolve) => {
           let done = false;
           let timer = null;
+          let graceTimer = null;
           const finish = () => {
             if (done) return;
             done = true;
             clearTimeout(timer);
+            clearTimeout(graceTimer);
             resolve();
           };
+          graceTimer = setTimeout(() => {
+            server.closeAllConnections?.();
+          }, Math.min(500, Math.max(0, deadline - Date.now())));
           timer = setTimeout(() => {
             server.closeAllConnections?.();
             finish();

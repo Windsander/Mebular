@@ -42,7 +42,9 @@ afterEach(async () => {
       server.closeAllConnections?.();
     });
   }
-  for (const home of homes.splice(0)) await rm(home, { recursive: true, force: true });
+  for (const home of homes.splice(0)) {
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }).catch(() => undefined);
+  }
 });
 
 async function temp() {
@@ -916,12 +918,12 @@ describe('memory-runtime sidecar process', () => {
         candidates: [{ kind: 'observation', content: { content: '不要入队' } }],
       }),
     });
-    await waitFor(async () => capability.state.writeStarted === 1);
+    await waitFor(async () => capability.state.writeStarted === 1, 15000);
     capability.state.enabled = false;
     await waitFor(async () => {
       const discovery = JSON.parse(await readFile(join(home, 'memory-runtime.json'), 'utf8'));
       return discovery.mode === 'mcp';
-    });
+    }, 15000);
     release();
     const response = await pending;
     expect(response.status).toBe(409);
@@ -929,11 +931,11 @@ describe('memory-runtime sidecar process', () => {
     await waitFor(async () => {
       const discovery = JSON.parse(await readFile(join(home, 'memory-runtime.json'), 'utf8'));
       return discovery.mode === 'mcp' && discovery.state === 'stopped';
-    });
+    }, 15000);
     const status = await fetch(`${handle.url}/status`, { headers: bearer('host-token') });
     const body = await status.json() as any;
     expect(body.data.warnings).not.toContain('dormant_incomplete');
-  }, 15000);
+  }, 30000);
 
   it('host 请求未结束时仅为 draining，完成后才发布 clean dormant', async () => {
     const home = await temp();

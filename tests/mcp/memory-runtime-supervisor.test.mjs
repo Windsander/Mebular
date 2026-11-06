@@ -691,7 +691,8 @@ describe('MemoryRuntimeSupervisor：生命周期', () => {
       profileId: () => 'default',
     });
     expect(await supervisor.start()).toMatchObject({ state: 'ready', attached: true });
-    expect(await supervisor.stop({ includeAttached: false, timeoutMs: 500 }))
+    // Windows process/file notifications can exceed the default 500ms budget.
+    expect(await supervisor.stop({ includeAttached: false, timeoutMs: 3000 }))
       .toMatchObject({ state: 'stopped', error: null });
     const restarted = await supervisor.start();
     expect(restarted.state).not.toBe('failed');

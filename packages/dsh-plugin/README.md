@@ -1,6 +1,16 @@
 <div align="center">
 
-![Mebular — 分布式记忆网络](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-hero.svg)
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-hero-light.svg?v=3">
+  <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-hero-dark.svg?v=3" alt="Mebular — 分布式记忆网络">
+</picture>
+
+<details>
+<summary>系统主题备用图</summary>
+
+![Mebular — 分布式记忆网络（系统主题）](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-hero-auto.svg?v=3)
+
+</details>
 
 **一份记忆，每个助手，每台设备。**
 
@@ -35,9 +45,24 @@ App 与 DSH Plugin 是同一套本机 runtime 的两个入口。插件默认 `at
 
 <div align="center">
 
-![为什么是 Mebular：一张共享的图，不是孤岛；本地优先、点对点、可审计、MCP](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/one-graph-cn.svg?v=2)
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/one-graph-cn-light.svg?v=3">
+  <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/one-graph-cn.svg?v=3" alt="为什么是 Mebular：一张共享的图，不是孤岛；本地优先、点对点、可审计、MCP">
+</picture>
 
-![记忆运行时：轻量 MCP 与沉浸式两种接入，共用同一张图。](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/memory-runtime-cn.svg?v=2)
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/memory-runtime-cn-light.svg?v=3">
+  <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/memory-runtime-cn.svg?v=3" alt="记忆运行时：轻量 MCP 与沉浸式两种接入，共用同一张图。">
+</picture>
+
+<details>
+<summary>系统主题备用图</summary>
+
+![为什么是 Mebular：一张共享的图，不是孤岛；本地优先、点对点、可审计、MCP（系统主题）](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/one-graph-cn-auto.svg?v=3)
+
+![记忆运行时：轻量 MCP 与沉浸式两种接入，共用同一张图。（系统主题）](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/memory-runtime-cn-auto.svg?v=3)
+
+</details>
 
 *0.3 在 MCP 之上增加可选运行时。默认关闭；本地 Qwen 可选。*
 
@@ -49,9 +74,24 @@ App 与 DSH Plugin 是同一套本机 runtime 的两个入口。插件默认 `at
 
 <div align="center">
 
-![一张记忆图：两台机器，每台一个 Mebular 节点；机器 A 连接 DSH、Hermes、Codex，机器 B 连接 Pi、OpenCode、Cursor；两个节点直接同步同一张图。](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-memory-mesh-cn.svg)
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-memory-mesh-cn-light.svg?v=3">
+  <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-memory-mesh-cn-dark.svg?v=3" alt="一张记忆图：两台机器，每台一个 Mebular 节点；机器 A 连接 DSH、Hermes、Codex，机器 B 连接 Pi、OpenCode、Cursor；两个节点直接同步同一张图。">
+</picture>
 
-![DSH 里得到什么：侧边栏共享 Console、官方 MCP 工具、状态点、attach / managed / auto 生命周期与按需安装更新；panel: false 只保留 MCP。](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-capabilities-cn.svg)
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-capabilities-cn-light.svg?v=3">
+  <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-capabilities-cn-dark.svg?v=3" alt="DSH 里得到什么：侧边栏共享 Console、官方 MCP 工具、状态点、attach / managed / auto 生命周期与按需安装更新；panel: false 只保留 MCP。">
+</picture>
+
+<details>
+<summary>系统主题备用图</summary>
+
+![一张记忆图：两台机器，每台一个 Mebular 节点；机器 A 连接 DSH、Hermes、Codex，机器 B 连接 Pi、OpenCode、Cursor；两个节点直接同步同一张图。（系统主题）](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-memory-mesh-cn-auto.svg?v=3)
+
+![DSH 里得到什么：侧边栏共享 Console、官方 MCP 工具、状态点、attach / managed / auto 生命周期与按需安装更新；panel: false 只保留 MCP。（系统主题）](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-capabilities-cn-auto.svg?v=3)
+
+</details>
 
 </div>
 
@@ -59,11 +99,31 @@ App 与 DSH Plugin 是同一套本机 runtime 的两个入口。插件默认 `at
 
 <div align="center">
 
-![三步接入：安装插件、重启 DSH；已有 App/CLI 自动连接，没有 runtime 时面板显式安装共享 runtime。](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-quickstart-cn.svg)
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-quickstart-cn-light.svg?v=3">
+  <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-quickstart-cn-dark.svg?v=3" alt="三步接入：安装插件、重启 DSH；已有 App/CLI 自动连接，没有 runtime 时面板显式安装共享 runtime。">
+</picture>
 
-![DSH 接入：DSH Web 通过 iframe 加载 /console/?embed=dsh，官方 MCP client 连接同一个 daemon 的 /mcp；通过共享 runtime resolve 解析 App/CLI/shared provider 与动态 URL。](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-connection-cn.svg)
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-connection-cn-light.svg?v=3">
+  <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-connection-cn-dark.svg?v=3" alt="DSH 接入：DSH Web 通过 iframe 加载 /console/?embed=dsh，官方 MCP client 连接同一个 daemon 的 /mcp；通过共享 runtime resolve 解析 App/CLI/shared provider 与动态 URL。">
+</picture>
 
-![状态点：绿色已连接，琥珀色启动/安装/更新中，红色未运行，灰色等待首次检查。](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-status-cn.svg)
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-status-cn-light.svg?v=3">
+  <img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-status-cn-dark.svg?v=3" alt="状态点：绿色已连接，琥珀色启动/安装/更新中，红色未运行，灰色等待首次检查。">
+</picture>
+
+<details>
+<summary>系统主题备用图</summary>
+
+![三步接入：安装插件、重启 DSH；已有 App/CLI 自动连接，没有 runtime 时面板显式安装共享 runtime。（系统主题）](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-quickstart-cn-auto.svg?v=3)
+
+![DSH 接入：DSH Web 通过 iframe 加载 /console/?embed=dsh，官方 MCP client 连接同一个 daemon 的 /mcp；通过共享 runtime resolve 解析 App/CLI/shared provider 与动态 URL。（系统主题）](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-connection-cn-auto.svg?v=3)
+
+![状态点：绿色已连接，琥珀色启动/安装/更新中，红色未运行，灰色等待首次检查。（系统主题）](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-status-cn-auto.svg?v=3)
+
+</details>
 
 </div>
 

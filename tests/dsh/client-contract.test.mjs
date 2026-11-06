@@ -33,43 +33,88 @@ function fakeReact() {
   };
 }
 
-describe('DSH README theme-aware diagrams', () => {
+describe('DSH README multi-host diagrams', () => {
   const repoRoot = join(here, '..', '..');
   const readmes = [
     { text: readFileSync(join(repoRoot, 'packages', 'dsh-plugin', 'README.md'), 'utf-8'), suffix: 'cn' },
     { text: readFileSync(join(repoRoot, 'packages', 'dsh-plugin', 'README_EN.md'), 'utf-8'), suffix: 'en' },
   ];
-  const bases = [
-    'one-graph',
-    'memory-runtime',
-    'dsh-memory-mesh',
-    'dsh-capabilities',
-    'dsh-quickstart',
-    'dsh-connection',
-    'dsh-status',
+  const inline = [
+    { base: 'one-graph', dark: '' },
+    { base: 'memory-runtime', dark: '' },
+    { base: 'dsh-memory-mesh', dark: '-dark' },
+    { base: 'dsh-capabilities', dark: '-dark' },
+    { base: 'dsh-quickstart', dark: '-dark' },
+    { base: 'dsh-connection', dark: '-dark' },
+    { base: 'dsh-status', dark: '-dark' },
   ];
-  it('uses one self-adaptive SVG per language instead of <picture> light/dark pairs', () => {
+  const autoAssets = (suffix) => [
+    'dsh-plugin-hero-auto.svg',
+    ...inline.map(({ base }) => `${base}-${suffix}-auto.svg`),
+  ];
+
+  it('keeps theme-aware <picture> blocks for hosts that support HTML', () => {
     for (const { text, suffix } of readmes) {
-      expect(text).not.toContain('<picture');
-      expect(text).not.toMatch(/<img\b/);
-      expect(text).toContain('assets/dsh-plugin-hero.svg');
-      for (const base of bases) {
-        const asset = `${base}-${suffix}.svg`;
-        expect(text).toContain(`assets/${asset}`);
-        expect(text).not.toContain(`${base}-${suffix}-dark.svg`);
-        expect(text).not.toContain(`${base}-${suffix}-light.svg`);
-        const svg = readFileSync(join(repoRoot, 'assets', asset), 'utf-8');
+      expect(text.match(/<picture>/g)).toHaveLength(8);
+      expect(text).toContain('prefers-color-scheme: light');
+      expect(text).toContain('assets/dsh-plugin-hero-light.svg');
+      expect(text).toContain('assets/dsh-plugin-hero-dark.svg');
+      for (const { base, dark } of inline) {
+        expect(text).toContain(`assets/${base}-${suffix}-light.svg`);
+        expect(text).toContain(`assets/${base}-${suffix}${dark}.svg`);
+      }
+    }
+  });
+
+  it('keeps a Markdown fallback gallery for hosts that strip raw HTML', () => {
+    for (const { text, suffix } of readmes) {
+      const blocks = [...text.matchAll(/<details>\s*<summary>[^<]*<\/summary>([\s\S]*?)<\/details>/g)];
+      expect(blocks).toHaveLength(4);
+      const gallery = blocks.map((match) => match[1]).join('\n');
+      expect(gallery).not.toMatch(/<img\b/);
+      for (const asset of autoAssets(suffix)) {
+        expect(gallery).toContain(`assets/${asset}`);
+      }
+      expect(gallery.match(/!\[/g)).toHaveLength(8);
+    }
+  });
+
+  it('uses fixed dark inline fallbacks and self-adaptive gallery artwork', () => {
+    const readSvg = (name) => readFileSync(join(repoRoot, 'assets', name), 'utf-8');
+    const expectFixedDark = (name) => {
+      const svg = readSvg(name);
+      expect(svg).toContain('class="theme-dark"');
+      expect(svg).not.toContain('class="theme-light"');
+      expect(svg).not.toContain('prefers-color-scheme');
+      expect(svg).not.toContain('!important');
+    };
+    expectFixedDark('dsh-plugin-hero-dark.svg');
+    for (const suffix of ['cn', 'en']) {
+      for (const { base, dark } of inline) {
+        expectFixedDark(`${base}-${suffix}${dark}.svg`);
+      }
+      for (const asset of autoAssets(suffix)) {
+        const svg = readSvg(asset);
         expect(svg).toContain('class="theme-dark"');
         expect(svg).toContain('class="theme-light"');
         expect(svg).toContain('prefers-color-scheme');
         expect(svg).not.toContain('!important');
       }
     }
-    const hero = readFileSync(join(repoRoot, 'assets', 'dsh-plugin-hero.svg'), 'utf-8');
-    expect(hero).toContain('class="theme-dark"');
-    expect(hero).toContain('class="theme-light"');
-    expect(hero).toContain('prefers-color-scheme');
-    expect(hero).not.toContain('!important');
+  });
+
+  it('keeps the GitHub root README theme-adaptive with a fixed dark fallback', () => {
+    for (const [readme, suffix] of [['README.md', 'en'], ['README_CN.md', 'cn']]) {
+      const text = readFileSync(join(repoRoot, readme), 'utf-8');
+      for (const base of ['one-graph', 'memory-runtime']) {
+        expect(text).toContain(`assets/${base}-${suffix}-light.svg`);
+        expect(text).toContain(`assets/${base}-${suffix}.svg`);
+        const dark = readFileSync(join(repoRoot, 'assets', `${base}-${suffix}.svg`), 'utf-8');
+        expect(dark).toContain('class="theme-dark"');
+        expect(dark).not.toContain('class="theme-light"');
+        expect(dark).not.toContain('prefers-color-scheme');
+      }
+    }
   });
 });
 

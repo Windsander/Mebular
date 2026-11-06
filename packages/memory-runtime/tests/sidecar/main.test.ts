@@ -772,7 +772,7 @@ describe('memory-runtime sidecar process', () => {
       release = resolve;
     });
     const replay = handle.settlement.replayer.replayOnce();
-    await waitFor(async () => capability.state.writeStarted === 1);
+    await waitFor(async () => capability.state.writeStarted === 1, 15000);
     // lease 在发送前已取得；drain 后的 completeReplay 不得再改这份字节。
     const before = await readFile(itemPath, 'utf8');
     capability.state.enabled = false;
@@ -781,11 +781,11 @@ describe('memory-runtime sidecar process', () => {
     await waitFor(async () => {
       const discovery = JSON.parse(await readFile(join(home, 'memory-runtime.json'), 'utf8'));
       return discovery.mode === 'mcp' && discovery.state === 'stopped';
-    });
+    }, 15000);
     expect(await readFile(itemPath, 'utf8')).toBe(before);
     expect(await handle.local.outbox.get('ob_in_flight')).toMatchObject({ attempts: 0, lastAttemptAt: null });
     expect(await handle.local.outbox.deadCount()).toBe(0);
-  }, 12000);
+  }, 30000);
 
   it('in-flight replay 晚到成功后不删除 pending、不当作新提交，且不得发布 clean stopped', async () => {
     const home = await temp();

@@ -886,7 +886,11 @@ describe('MemoryRuntimeSupervisor：生命周期', () => {
 
     const dormantPath = join(home, 'memory-runtime', 'dormant.json');
     const validDormant = await readFile(dormantPath, 'utf-8');
-    expect((await stat(dormantPath)).mode & 0o777).toBe(0o600);
+    // Windows does not expose POSIX mode bits; the supervisor intentionally
+    // skips this check on win32, so the test must not require 0600 there.
+    if (process.platform !== 'win32') {
+      expect((await stat(dormantPath)).mode & 0o777).toBe(0o600);
+    }
     const makeSupervisor = () => new MemoryRuntimeSupervisor({
       home,
       config: enabledConfig({ startTimeoutMs: 500 }),
@@ -900,9 +904,11 @@ describe('MemoryRuntimeSupervisor：生命周期', () => {
     await writeFile(dormantPath, '{ not-json', { mode: 0o600 });
     expect(await makeSupervisor().start()).toMatchObject({ state: 'starting' });
 
-    await writeFile(dormantPath, validDormant, { mode: 0o600 });
-    await chmod(dormantPath, 0o644);
-    expect(await makeSupervisor().start()).toMatchObject({ state: 'starting' });
+    if (process.platform !== 'win32') {
+      await writeFile(dormantPath, validDormant, { mode: 0o600 });
+      await chmod(dormantPath, 0o644);
+      expect(await makeSupervisor().start()).toMatchObject({ state: 'starting' });
+    }
   }, 20000);
 
   it('dormant baseline 写入失败时 stop 不得报告 clean stopped', async () => {

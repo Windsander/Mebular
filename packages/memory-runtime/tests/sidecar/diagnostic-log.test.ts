@@ -86,8 +86,11 @@ describe('DiagnosticLog', () => {
     await log.append('info', 'runtime_start', { reason: 'test' });
     const fileMode = (await stat(file)).mode & 0o777;
     const dirMode = (await stat(join(home, 'logs'))).mode & 0o777;
-    expect(fileMode).toBe(0o600);
-    expect(dirMode).toBe(0o700);
+    // Windows does not expose POSIX mode bits; chmod is best-effort there.
+    if (process.platform !== 'win32') {
+      expect(fileMode).toBe(0o600);
+      expect(dirMode).toBe(0o700);
+    }
 
     const legacySecret = 'sk-legacy-SECRET_1234567890';
     await appendFile(file, `${JSON.stringify({

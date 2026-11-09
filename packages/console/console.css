@@ -1537,7 +1537,28 @@ body.modal-open { overflow: hidden; }
 .settings-panel[hidden] { display: none; }
 /* U-1：设置各区统一 section（不再卡片套卡片）；危险区只用标题色与顶部边线区分。 */
 .settings-danger { border-top-color: rgba(214, 90, 40, 0.5); }
-.settings-danger > h3 { color: #ffd27a; }
+.settings-danger > h3 { color: #ff9b9b; }
+/* E · 设置 / 安全弹框内的危险动作统一为 #ff9b9b on rgba(40,10,10,.22)。
+   只 scope 到 #settings / #security-action：审计、设备卡等语境仍用原危险色。 */
+#settings .btn-crt-danger,
+#security-action .btn-crt-danger {
+  color: #ff9b9b;
+  border-color: rgba(255, 155, 155, 0.38);
+  background: rgba(40, 10, 10, 0.22);
+  text-shadow: none;
+}
+#settings .btn-crt-danger:hover:not(:disabled),
+#security-action .btn-crt-danger:hover:not(:disabled) {
+  border-color: rgba(255, 155, 155, 0.58);
+  background: rgba(40, 10, 10, 0.32);
+}
+#settings .crt-tag-error,
+#security-action .crt-tag-error {
+  color: #ff9b9b;
+  border-color: rgba(255, 155, 155, 0.35);
+  background: rgba(40, 10, 10, 0.22);
+  text-shadow: none;
+}
 .cfg-actions { align-items: center; }
 .cfg-state { color: var(--muted); font-size: 11px; }
 
@@ -2336,13 +2357,14 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
   background: rgba(109, 255, 184, 0.5);
   box-shadow: 0 0 8px rgba(60, 255, 160, 0.35);
 }
-/* 未配置：中性底/边框，无左侧荧光条（::before 不出现） */
+/* 未配置：中性底/边框，无左侧荧光条（::before 不出现）。
+   底色不用 var(--bg-panel-2)（#0e1428 偏蓝，会破坏 CRT 绿黑表面），改用 CRT 同族深绿黑。 */
 #settings-security-slot > .settings-section.sec-card.is-off {
-  background: var(--bg-panel-2);
+  background: rgba(2, 16, 11, 0.45);
 }
 #settings-security-slot > .settings-section.sec-card.is-off::before { content: none; }
 #settings-security-slot > .settings-section.sec-card.is-off::after {
-  border-color: rgba(131, 145, 180, 0.2);
+  border-color: rgba(140, 255, 200, 0.16);
 }
 .sec-card-idx {
   padding-top: 2px;
@@ -2474,6 +2496,15 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
   line-height: 1.5;
   color: #ffd27a;
   overflow-wrap: anywhere;
+}
+
+/* E · 设置内动效收口：页签/轨/状态列/安全卡/折叠都不做过渡（激活态是静态微光）。 */
+@media (prefers-reduced-motion: reduce) {
+  .settings-tab,
+  .settings-rail,
+  .cfg-status,
+  .sec-card,
+  details.fold summary::before { transition: none; animation: none; }
 }
 
 @media (max-width: 900px) {

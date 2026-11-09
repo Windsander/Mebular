@@ -1813,6 +1813,31 @@ try {
 
     check('渲染模板无内联 width（对齐只能来自 CSS token）',
       !/style="width/.test(jsSrc), /style="width/.test(jsSrc) ? '发现内联 width' : '无内联 width');
+
+    // E · 色彩纪律 + 危险/琥珀收口 + reduced-motion
+    const dangerBtnScope = cssSrc.match(/#settings \.btn-crt-danger,\n#security-action \.btn-crt-danger \{[^}]*\}/)?.[0] ?? '';
+    const dangerTagScope = cssSrc.match(/#settings \.crt-tag-error,\n#security-action \.crt-tag-error \{[^}]*\}/)?.[0] ?? '';
+    check('E1 色彩纪律：设置壳/轨无底色（不引入蓝底）',
+      !/\.settings-shell\s*\{[^}]*background/.test(cssSrc)
+        && !/\.settings-rail\s*\{[^}]*background/.test(cssSrc),
+      'settings-shell / settings-rail 仅布局，无 background');
+    check('E1 危险语义：设置/安全弹框 #ff9b9b on rgba(40,10,10,.22)，去红字微光',
+      dangerBtnScope.includes('color: #ff9b9b;')
+        && dangerBtnScope.includes('background: rgba(40, 10, 10, 0.22);')
+        && dangerBtnScope.includes('text-shadow: none;')
+        && dangerTagScope.includes('color: #ff9b9b;')
+        && dangerTagScope.includes('background: rgba(40, 10, 10, 0.22);')
+        && cssSrc.includes('.settings-danger > h3 { color: #ff9b9b; }')
+        && /\.btn-crt\.btn-crt-danger \{[^}]*color: #ffb9b9;/.test(cssSrc)
+        && /\.crt-tag-error \{ background: #2a0f0f; border-color: #5a1a1a; color: #ffb4b4; \}/.test(cssSrc),
+      'scoped danger / 全局危险色未改');
+    check('E1 reduced-motion：设置内页签/轨/状态/安全卡/折叠过渡关闭',
+      /@media \(prefers-reduced-motion: reduce\) \{\n\s+\.settings-tab,\n\s+\.settings-rail,\n\s+\.cfg-status,\n\s+\.sec-card,\n\s+details\.fold summary::before \{ transition: none; animation: none; \}\n\}/.test(cssSrc),
+      'settings motion off');
+    check('E1 外框不变：modal-settings overflow hidden + 640 宽',
+      /\.modal-box\.modal-settings \{[^}]*overflow: hidden/.test(cssSrc)
+        && /\.modal-box-wide \{ width: min\(640px, 94vw\); \}/.test(cssSrc),
+      '640 / overflow hidden 保持');
   }
 
   // ---------- 轮 C：设置页三症状 + 呈现分级（弹层壳 / 关闭规范 / 常显-折叠-异常） ----------

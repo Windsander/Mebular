@@ -1336,24 +1336,36 @@ function reasonIsFatal(reason) {
   return /(失败|被占|占用|未生效|无法|拒绝|EADDRINUSE|缺证书|MCP_INSECURE_CONFIG)/i.test(String(reason ?? ''));
 }
 
-function runtimeCompareLine(field) {
+/**
+ * 行状态单一判定：runtimeCompareLine（异常三元组）与 runtimeStatusCell（右侧状态列）共用。
+ * status: ok=生效中 / pending=待重启 / mismatch=未生效 / none=无 effective 行（如模型来源）。
+ */
+function runtimeFieldState(field) {
   const row = effectiveRowOf(field.path);
-  if (!row) return '';
+  if (!row) return { row: null, status: 'none' };
   const configured = row.configured;
   const actual = row.actual;
   const mismatch = configured !== null && configured !== undefined
     && JSON.stringify(configured ?? null) !== JSON.stringify(actual ?? null);
   const reason = typeof row.reason === 'string' && row.reason.length > 0 ? row.reason : '';
-  const reasonText = localizeEffectiveReason(field.path, reason);
   // 「已生效：… / 已装配：…」是生效说明，不是未生效原因；其它原因才作为异常自动出现。
   // 布尔开关本就关闭时（如语义召回未启用），原因属于「为什么没开」的说明 → 收进详情，不占常显。
   const infoReason = reason.length > 0 && /^(已生效|已装配)/.test(reason);
   const boolOff = field.type === 'bool' && configured !== true && actual !== true && !reasonIsFatal(reason);
   const showReason = reason.length > 0 && !infoReason && !boolOff;
   const pendingItem = pendingRestartItems().find((item) => item.path === field.path) ?? null;
-  const normal = !mismatch && !showReason && !pendingItem;
-  // 常态不占行：没有异常就是生效；只有待重启/不一致/未生效时才在字段下展开。
-  if (normal) return '';
+  // 待重启优先于「未生效」：保存值尚未加载时，先提示需要重启。
+  const status = pendingItem ? 'pending' : (mismatch || showReason ? 'mismatch' : 'ok');
+  return { row, status, configured, actual, mismatch, showReason, pendingItem };
+}
+
+function runtimeCompareLine(field) {
+  const s = runtimeFieldState(field);
+  // 常态不占行：只有待重启/不一致/未生效时才在字段下展开。
+  if (!s.row || s.status === 'ok') return '';
+  const { configured, actual, mismatch, showReason, pendingItem } = s;
+  const reason = typeof s.row.reason === 'string' ? s.row.reason : '';
+  const reasonText = localizeEffectiveReason(field.path, reason);
   return `<p class="cfg-effective${mismatch ? ' is-mismatch' : ''}" data-cfg-state="exception">`
     + `<span><span class="cfg-eff-key">${escapeHtml(t('settings.editor.configured'))}</span> ${escapeHtml(formatRuntimeValue(configured))}</span>`
     + '<span>/</span>'
@@ -1362,6 +1374,18 @@ function runtimeCompareLine(field) {
     + (showReason ? `<span class="cfg-reason"><span class="cfg-eff-key">${escapeHtml(t('settings.editor.reasonKey'))}</span> ${escapeHtml(reasonText)}</span>` : '')
     + (mismatch && !showReason ? `<span class="cfg-warn">${escapeHtml(t('settings.editor.mismatch'))}</span>` : '')
     + '</p>';
+}
+
+/** 右侧状态列：正常=纯文字「生效中」；异常=琥珀「待重启 / 未生效」；无 effective 行留空。 */
+function runtimeStatusCell(field) {
+  const s = runtimeFieldState(field);
+  if (s.status === 'none') return '<span class="cfg-status" data-cfg-status="none"></span>';
+  const label = s.status === 'ok'
+    ? t('settings.editor.inEffect')
+    : s.status === 'pending'
+      ? t('settings.editor.pendingShort')
+      : t('settings.editor.mismatchShort');
+  return `<span class="cfg-status${s.status === 'ok' ? ' is-ok' : ' is-warn'}" data-cfg-status="${s.status}">${escapeHtml(label)}</span>`;
 }
 
 /** 收进「详情」的原因（仅布尔开关关闭时的说明；异常原因仍走常显三元组）。 */
@@ -1423,10 +1447,10 @@ function renderCfgField(field) {
   ].filter(Boolean);
   return `<div class="cfg-row">
     <label class="cfg-label" for="${id}">${escapeHtml(field.label)}${defaultTag}${warnMark}</label>
-    <div class="cfg-control">${control}
-      ${runtimeCompareLine(field)}
-      ${helpBits.join('')}
-    </div>
+    <div class="cfg-control">${control}</div>
+    ${runtimeStatusCell(field)}
+    ${runtimeCompareLine(field)}
+    ${helpBits.join('')}
   </div>`;
 }
 
@@ -1444,12 +1468,12 @@ function emptyRowOf(label, text) {
 }
 
 function kvRows(rows) {
-  const cells = rows.map((row) => `<dt>${escapeHtml(row.label)}</dt>`
+  const body = rows.map((row) => `<div class="kv-row"><dt>${escapeHtml(row.label)}</dt>`
     + `<dd class="kv-value">${row.value}</dd>`
     + `<dd class="kv-action">${row.copyPayload === null || row.copyPayload === undefined
       ? ''
-      : `<button class="btn btn-small btn-crt" type="button" data-copy="${escapeHtml(row.copyPayload)}">${escapeHtml(t('common.copy'))}</button>`}</dd>`).join('');
-  return `<dl class="settings-kv">${cells}</dl>`;
+      : `<button class="btn btn-small btn-crt" type="button" data-copy="${escapeHtml(row.copyPayload)}">${escapeHtml(t('common.copy'))}</button>`}</dd></div>`).join('');
+  return `<dl class="settings-kv">${body}</dl>`;
 }
 
 // 主值 + 次行（已配置 / 实际）；一致=暗色，不一致=警示色；长值换行悬挂在值列
@@ -1559,11 +1583,11 @@ function runtimeStatusFactsHtml(status) {
   const stateLabel = runtimeStatusStateLabel(status);
   const enabled = memoryRuntimeEnabledOf(status, currentConfigFile());
   return `<dl class="runtime-kv" data-rt-sidecar-status>
-    <dt>${escapeHtml(t('runtime.status.mode'))}</dt><dd><span class="crt-tag ${enabled ? 'crt-tag-ok' : ''}">${escapeHtml(enabled ? t('runtime.sidecar.immersive') : t('runtime.sidecar.lightweight'))}</span></dd>
-    <dt>${escapeHtml(t('runtime.sidecar.state'))}</dt><dd><span class="crt-tag ${status.state === 'ready' ? 'crt-tag-ok' : status.degraded || status.state === 'failed' ? 'crt-tag-warn' : ''}">${escapeHtml(stateLabel)}</span></dd>
-    <dt>${escapeHtml(t('runtime.sidecar.degraded'))}</dt><dd>${escapeHtml(status.degraded ? t('runtime.sidecar.degradedYes') : t('runtime.sidecar.degradedNo'))}</dd>
-    <dt>${escapeHtml(t('runtime.sidecar.error'))}</dt><dd>${error ? escapeHtml(error) : '—'}</dd>
-    <dt>${escapeHtml(t('runtime.sidecar.version'))}</dt><dd>${escapeHtml(status.runtimeVersion ?? '—')}</dd>
+    <div class="kv-row"><dt>${escapeHtml(t('runtime.status.mode'))}</dt><dd><span class="crt-tag ${enabled ? 'crt-tag-ok' : ''}">${escapeHtml(enabled ? t('runtime.sidecar.immersive') : t('runtime.sidecar.lightweight'))}</span></dd></div>
+    <div class="kv-row"><dt>${escapeHtml(t('runtime.sidecar.state'))}</dt><dd><span class="crt-tag ${status.state === 'ready' ? 'crt-tag-ok' : status.degraded || status.state === 'failed' ? 'crt-tag-warn' : ''}">${escapeHtml(stateLabel)}</span></dd></div>
+    <div class="kv-row"><dt>${escapeHtml(t('runtime.sidecar.degraded'))}</dt><dd>${escapeHtml(status.degraded ? t('runtime.sidecar.degradedYes') : t('runtime.sidecar.degradedNo'))}</dd></div>
+    <div class="kv-row"><dt>${escapeHtml(t('runtime.sidecar.error'))}</dt><dd>${error ? escapeHtml(error) : '—'}</dd></div>
+    <div class="kv-row"><dt>${escapeHtml(t('runtime.sidecar.version'))}</dt><dd>${escapeHtml(status.runtimeVersion ?? '—')}</dd></div>
   </dl>`;
 }
 
@@ -1604,7 +1628,7 @@ function runtimeModelStatusHtml(status) {
     id: 'runtime-model-status',
     title: t('settings.runtime.modelStatus.title'),
     desc: t('settings.runtime.modelStatus.desc'),
-    body: `<dl class="runtime-kv" data-rt-model-status>${rows.map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(String(value))}</dd>`).join('')}</dl>
+    body: `<dl class="runtime-kv" data-rt-model-status>${rows.map(([label, value]) => `<div class="kv-row"><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(String(value))}</dd></div>`).join('')}</dl>
       <p class="settings-section-foot muted">${escapeHtml(t('settings.runtime.modelStatus.foot'))}</p>`,
   });
 }
@@ -1901,8 +1925,9 @@ function runtimeModelSourceSectionHtml() {
       <label class="cfg-label" for="rt-model-source">${escapeHtml(t('settings.runtime.modelSource.selectLabel'))}</label>
       <div class="cfg-control">
         <select id="rt-model-source" class="crt-input" data-rt-model-source ${disabled ? 'disabled' : ''}>${options}</select>
-        <p class="cfg-help muted is-visible" data-rt-model-source-note>${escapeHtml(note)}</p>
       </div>
+      <span class="cfg-status" data-cfg-status="none"></span>
+      <p class="cfg-help muted is-visible" data-rt-model-source-note>${escapeHtml(note)}</p>
     </div>
     ${showModels ? `<div class="runtime-model-list" data-rt-model-list>${runtimeModelListBodyHtml()}</div>` : ''}
     <p class="settings-section-foot muted">${escapeHtml(t('settings.runtime.modelSource.foot'))}</p>`,
@@ -4286,7 +4311,7 @@ function renderRuntimeStatus() {
       ${!status.available && enabled ? `<p class="runtime-pending">${escapeHtml(t('runtime.sidecar.notReady'))}</p>` : ''}
     `)}
     ${enabled ? runtimeStatusCard(t('runtime.model.title'), model?.degraded ? t('runtime.sidecar.degraded') : '', `
-      <dl class="runtime-kv" data-rt-model-status>${modelRows.map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(String(value))}</dd>`).join('')}</dl>
+      <dl class="runtime-kv" data-rt-model-status>${modelRows.map(([label, value]) => `<div class="kv-row"><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(String(value))}</dd></div>`).join('')}</dl>
       <p class="muted">${escapeHtml(t('runtime.model.note'))}</p>
     `) : ''}
   `;
@@ -4323,7 +4348,7 @@ function runtimeObjectDetailHtml(memory) {
     rows.push([t('runtime.timeline.tags'), memory.tags.join(' · ')]);
   }
   return `<div class="runtime-detail" data-runtime-object="${escapeHtml(memory.id)}">
-    <dl class="runtime-kv">${rows.map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`).join('')}</dl>
+    <dl class="runtime-kv">${rows.map(([label, value]) => `<div class="kv-row"><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join('')}</dl>
     <p class="mem-preview">${escapeHtml(memory.preview || t('memories.emptyPreview'))}</p>
     ${runtimeTimelineKind(memory) !== 'memory' ? `<p class="muted">${escapeHtml(t('runtime.timeline.internalBadge'))} · ${escapeHtml(String(memory.namespace ?? '—'))}</p>` : ''}
   </div>`;

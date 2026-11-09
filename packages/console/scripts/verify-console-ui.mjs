@@ -1787,22 +1787,27 @@ async function main() {
     check('简化轮：诊断并入高级底部折叠（cfg-copy-all 就位）',
       await evalJs('(() => { document.querySelector("[data-settings-tab=advanced]")?.click(); const f = document.querySelector("#diag-fold"); return Boolean(f) && Boolean(f.querySelector("#cfg-copy-all")); })()'));
     await evalJs('document.querySelector("[data-settings-tab=mcp]").click()');
-    // 轮 C 症状③：常态不占行；异常才完整三元组；帮助聚焦出现；空值提示进 placeholder
-    check('轮 C 呈现分级：常态不占行，异常自动出现完整三元组',
+    // 轮 C / B：常态行状态列=生效中（不新增子行）；异常才完整三元组；帮助聚焦出现；空值提示进 placeholder
+    check('轮 C/B 呈现分级：常态状态列=生效中，异常自动出现完整三元组',
       await evalJs(`(() => {
         const body = document.querySelector('#settings-body');
-        const ok = body.querySelectorAll('[data-cfg-state=ok]').length;
+        const okStates = body.querySelectorAll('[data-cfg-state=ok]').length;
         // 专指 mcp.http.port 的「已配置 0 / 实际 <port>」例外：避免被 join 端点回环等其它异常行抢先
         const row = body.querySelector('[data-cfg-path="mcp.http.port"]')?.closest('.cfg-row');
         const ex = row?.querySelector('[data-cfg-state=exception]');
-        return ok === 0 && !/生效中/.test(body.textContent)
-          && Boolean(ex) && /已配置/.test(ex.textContent) && /实际/.test(ex.textContent) && /不一致/.test(ex.textContent);
+        const status = row?.querySelector('.cfg-status');
+        const okCells = [...body.querySelectorAll('[data-cfg-status=ok]')];
+        return okStates === 0
+          && okCells.length > 0
+          && okCells.every((cell) => cell.textContent.trim() === '生效中' && cell.children.length === 0)
+          && Boolean(ex) && /已配置/.test(ex.textContent) && /实际/.test(ex.textContent) && /不一致/.test(ex.textContent)
+          && Boolean(status) && /未生效|待重启/.test(status.textContent);
       })()`));
-    check('U-1 呈现分级：帮助聚焦时出现、空值默认/短提示进 placeholder',
+    check('U-1/B 呈现分级：帮助在行内聚焦时出现、空值默认/短提示进 placeholder',
       await evalJs(`(() => {
         const panel = document.querySelector('#settings-panel-mcp');
         const row = panel?.querySelector('.cfg-row');
-        const help = row?.querySelector('.cfg-control > .cfg-help');
+        const help = row?.querySelector('.cfg-row > .cfg-help');
         const input = row?.querySelector('input, select');
         if (!help || !input) return false;
         const hidden = getComputedStyle(help).display === 'none';
@@ -1813,6 +1818,26 @@ async function main() {
         return hidden && shown && Boolean(cert) && /cert\\.pem/.test(cert.placeholder)
           && !panel.querySelector('details.cfg-more') && !/这是什么/.test(panel.textContent);
       })()`));
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    check('B 统一行模板：三列栅格 / 40px / 行间虚线（首行无）/ 状态列纯文字',
+      await evalJs(`(() => {
+        const editor = document.querySelector('#settings-panel-mcp .cfg-editor');
+        const rows = editor ? [...editor.querySelectorAll('.cfg-row')] : [];
+        if (rows.length < 2) return false;
+        const first = rows[0];
+        const second = rows[1];
+        const cols = getComputedStyle(second).gridTemplateColumns.split(' ').filter(Boolean);
+        const status = second.querySelector(':scope > .cfg-status');
+        const statusStyle = status ? getComputedStyle(status) : null;
+        return cols.length === 3
+          && parseFloat(getComputedStyle(second).minHeight) >= 40
+          && getComputedStyle(first).borderTopStyle === 'none'
+          && getComputedStyle(second).borderTopStyle === 'dashed'
+          && Boolean(status) && status.children.length === 0
+          && statusStyle.fontSize === '10.5px'
+          && statusStyle.fontWeight === '400';
+      })()`));
+    await clearViewport();
     await evalJs('document.querySelector("[data-settings-tab=security]").click()');
     check('U-3 安全 tab：三段式（等级/动态码种子/恢复码）+ 当前档',
       await evalJs(`(() => {

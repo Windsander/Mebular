@@ -571,7 +571,7 @@ body.modal-open { overflow: hidden; }
 .settings-scroll > .settings-panel > .settings-section:first-child,
 .settings-scroll > .settings-panel > .settings-slot:first-child > .settings-section:first-child { border-top: 0; padding-top: 0; }
 /* U-4 设置壳：左侧 160px 固定页签轨 + 内容列；页签轨不滚，仅 .settings-scroll 滚动。 */
-.settings-shell { display: flex; align-items: stretch; gap: 12px; flex: 1 1 auto; min-width: 0; min-height: 0; max-width: 100%; }
+.settings-shell { --kv-action-w: 68px; display: flex; align-items: stretch; gap: 12px; flex: 1 1 auto; min-width: 0; min-height: 0; max-width: 100%; }
 .settings-rail { flex: 0 0 160px; width: 160px; display: flex; flex-direction: column; align-items: stretch; min-width: 0; min-height: 0; padding: 2px 10px 0 0; border-right: 1px solid var(--border); }
 .settings-rail .settings-tabs { display: flex; flex-direction: column; align-items: stretch; gap: 2px; flex: 0 0 auto; min-width: 0; max-width: 100%; margin: 0; padding: 0; border-bottom: 0; }
 .settings-rail .settings-tab {
@@ -1369,7 +1369,7 @@ body.modal-open { overflow: hidden; }
 .cfg-group h4 { margin: 0 0 var(--field-gap); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: rgba(150, 255, 205, 0.72); }
 .cfg-row {
   display: grid;
-  grid-template-columns: var(--row-label-w) minmax(0, 1fr);
+  grid-template-columns: var(--row-label-w) minmax(0, 1fr) var(--kv-action-w);
   gap: 0 var(--row-gap);
   align-items: start;
   padding: var(--row-gap-y) 0 0;
@@ -1384,6 +1384,17 @@ body.modal-open { overflow: hidden; }
 .cfg-control .crt-select-trigger { width: 100%; max-width: none; font-size: 12px; }
 .cfg-control .cfg-toggle { order: 0; }
 .cfg-help { flex: 1 1 100%; margin: 0; font-size: var(--type-help); line-height: var(--type-help-leading); }
+/* B · 右侧状态列：纯文字（正常=亮绿 / 异常=琥珀），无 chip / 圆点 / 底色 */
+.cfg-status {
+  display: flex; align-items: center; justify-content: flex-end;
+  min-height: var(--control-h); min-width: 0;
+  font-size: 10.5px; line-height: 1.4; white-space: nowrap;
+  color: var(--crt-bright);
+}
+.cfg-status.is-warn { color: #ffd27a; }
+/* 帮助/三元组跨控件+状态列，避免 640 外框下被状态列挤成多行；仅异常时由 runtimeCompareLine 输出 */
+.cfg-row > .cfg-help,
+.cfg-row > .cfg-effective { grid-column: 2 / 4; }
 .cfg-warn { color: #ffd27a; }
 /* U-1 · 设置折叠统一：只保留白名单折叠（诊断 / MCP 危险 / 关于运行状态 / 邀请详情）。 */
 .settings-note { margin: 0 0 8px; font-size: 11px; line-height: 1.6; }
@@ -1420,6 +1431,40 @@ body.modal-open { overflow: hidden; }
 .cfg-effective.is-mismatch .cfg-eff-key { color: #ffd27a; }
 .cfg-raw-block { margin: 4px 0 8px; }
 .cfg-raw-block .snippet { max-height: 260px; }
+
+/* B · 设置内统一行模板：40px 行高 + 行间虚线（首行无线），有 help/三元组时自然增高。
+   字段行 label | control | status 三列；只读行沿用 label | value | action / label | value。 */
+.settings-shell .cfg-row {
+  min-height: 40px;
+  align-items: center;
+  padding: 0;
+  border-top: 1px dashed var(--border);
+}
+.settings-shell .cfg-row:first-child,
+.settings-shell .cfg-editor > .cfg-row:first-child,
+.settings-shell .settings-section > .cfg-row:first-of-type { border-top: 0; }
+.settings-shell .cfg-control,
+.settings-shell .cfg-status { min-height: 40px; }
+.settings-shell .cfg-row > .cfg-help,
+.settings-shell .cfg-row > .cfg-effective { margin-bottom: 6px; }
+/* 只读行：行容器不改 DOM 结构（display: contents 让 dt/dd 继续参与外层栅格）。 */
+.settings-kv .kv-row,
+.runtime-kv .kv-row { display: contents; }
+.settings-shell .settings-kv,
+.settings-shell .runtime-kv { gap: 0 var(--row-gap); }
+.settings-shell .settings-kv .kv-row > *,
+.settings-shell .runtime-kv .kv-row > * {
+  min-height: 40px;
+  padding: 6px 0;
+  border-top: 1px dashed var(--border);
+}
+.settings-shell .settings-kv .kv-row:first-child > *,
+.settings-shell .runtime-kv .kv-row:first-child > * { padding-top: 0; border-top: 0; }
+.settings-shell .settings-kv dt,
+.settings-shell .settings-kv .kv-action,
+.settings-shell .runtime-kv dt,
+.settings-shell .runtime-kv dd { display: flex; align-items: center; }
+.settings-shell .settings-kv .kv-value { display: flex; flex-direction: column; justify-content: center; }
 
 .crt-input::placeholder { color: rgba(140, 255, 200, 0.26); }
 .cfg-default {
@@ -1510,6 +1555,26 @@ body.modal-open { overflow: hidden; }
   .settings-kv .kv-value { line-height: 1.5; min-height: 0; }
   .settings-kv .kv-action { justify-content: flex-start; min-height: 0; }
   .cfg-row { grid-template-columns: minmax(0, 1fr); }
+  /* B · 窄屏单列：正常「生效中」隐藏，异常「待重启/未生效」保留；帮助/三元组跨整行。 */
+  .settings-shell .cfg-row { padding-top: 8px; row-gap: 2px; align-items: start; }
+  .settings-shell .cfg-row:first-child { padding-top: 0; }
+  .settings-shell .cfg-row > .cfg-label,
+  .settings-shell .cfg-row > .cfg-control,
+  .settings-shell .cfg-row > .cfg-help,
+  .settings-shell .cfg-row > .cfg-effective { grid-column: 1 / -1; }
+  .settings-shell .cfg-row > .cfg-status { justify-content: flex-start; }
+  .settings-shell .cfg-row > .cfg-status.is-ok { display: none; }
+  .settings-shell .settings-kv,
+  .settings-shell .runtime-kv { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .settings-shell .settings-kv .kv-row > *,
+  .settings-shell .runtime-kv .kv-row > * { min-height: 0; padding: 0; border-top: 0; }
+  .settings-shell .settings-kv .kv-row + .kv-row > dt,
+  .settings-shell .runtime-kv .kv-row + .kv-row > dt { padding-top: 8px; border-top: 1px dashed var(--border); }
+  .settings-shell .settings-kv .kv-row .kv-value,
+  .settings-shell .settings-kv .kv-row .kv-action,
+  .settings-shell .runtime-kv .kv-row dd { padding-bottom: 6px; }
+  .settings-shell .settings-kv .kv-row:last-child > *,
+  .settings-shell .runtime-kv .kv-row:last-child > * { padding-bottom: 0; }
   .cfg-label { line-height: 1.4; min-height: 0; }
   .sec-tier { grid-template-columns: minmax(0, 1fr); }
   .sec-tier-action { justify-content: flex-start; }

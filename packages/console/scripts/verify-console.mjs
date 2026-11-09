@@ -1713,10 +1713,11 @@ try {
     check('排版 token 齐备（label 列宽 / 动作列宽 / 行距 / 控件高 / section 间距）',
       tokens.every((t) => cssSrc.includes(`${t}:`)), tokens.filter((t) => !cssSrc.includes(`${t}:`)).join(',') || '全部命中');
 
-    check('kv 与 cfg 共用同一 label 列宽变量（不再各写一套栅格）',
-      cssSrc.includes('grid-template-columns: var(--row-label-w) minmax(0, 1fr) var(--kv-action-w)')
-        && cssSrc.includes('grid-template-columns: var(--row-label-w) minmax(0, 1fr)'),
-      'settings-kv=3 列（label/value/action），cfg-row=2 列（label/control），label 列同为 var(--row-label-w)');
+    check('kv 与 cfg 共用同一三列栅格（label / 值·控件 / 状态·动作）',
+      (cssSrc.match(/grid-template-columns: var\(--row-label-w\) minmax\(0, 1fr\) var\(--kv-action-w\)/g) ?? []).length >= 2
+        && /\.cfg-row \{[\s\S]*?grid-template-columns: var\(--row-label-w\) minmax\(0, 1fr\) var\(--kv-action-w\);/.test(cssSrc)
+        && /\.settings-kv \{[\s\S]*?grid-template-columns: var\(--row-label-w\) minmax\(0, 1fr\) var\(--kv-action-w\);/.test(cssSrc),
+      'settings-kv 与 cfg-row 均 3 列（label/值·控件/状态·动作）');
 
     check('动作列固定宽且行高统一（button 不撑高行）',
       cssSrc.includes('.settings-kv .kv-action { display: flex; align-items: center; justify-content: flex-end; min-height: var(--control-h); }')
@@ -1733,6 +1734,52 @@ try {
     check('响应式 ≤760px：kv 与 cfg 行转上下布局（无横向滚动）',
       /@media \(max-width: 760px\) \{[\s\S]*?\.settings-kv \{\s*grid-template-columns: minmax\(0, 1fr\);[\s\S]*?\.cfg-row \{ grid-template-columns: minmax\(0, 1fr\); \}/.test(cssSrc),
       '760 断点内 kv/cfg 单列');
+
+    // B · 统一行模板 + 右侧状态列
+    check('B 行模板：设置内状态/动作列 68px（about/device 全局仍 56px）',
+      /\.settings-shell \{ --kv-action-w: 68px;/.test(cssSrc)
+        && /:root \{[\s\S]*?--kv-action-w: 56px;/.test(cssSrc),
+      'settings-shell=68 / :root=56');
+
+    check('B 状态列：纯文字生效中/待重启/未生效，无 chip/圆点/底色',
+      cssSrc.includes('.cfg-status {')
+        && cssSrc.includes('.cfg-status.is-warn { color: #ffd27a; }')
+        && jsSrc.includes('function runtimeStatusCell')
+        && jsSrc.includes("t('settings.editor.inEffect')")
+        && jsSrc.includes("t('settings.editor.pendingShort')")
+        && jsSrc.includes("t('settings.editor.mismatchShort')")
+        && jsSrc.includes('data-cfg-status="${s.status}"')
+        && !/\.cfg-status[^{]*\{[^}]*background/.test(cssSrc),
+      'span.cfg-status[data-cfg-status] 仅文字');
+
+    check('B 行高 40px + 行间虚线 + 首行无虚线；帮助/三元组跨控件+状态列',
+      /\.settings-shell \.cfg-row \{[^}]*min-height: 40px;[^}]*border-top: 1px dashed var\(--border\);/.test(cssSrc)
+        && cssSrc.includes('.settings-shell .cfg-row:first-child,')
+        && cssSrc.includes('.cfg-row > .cfg-help,')
+        && cssSrc.includes('.cfg-row > .cfg-effective { grid-column: 2 / 4; }')
+        && jsSrc.includes('${runtimeStatusCell(field)}')
+        && jsSrc.includes('<div class="cfg-control">${control}</div>'),
+      '40px / dashed / first-row / 2-4 span');
+
+    check('B 正常行不新增子行：三元组仅异常输出，状态列独立成格',
+      jsSrc.includes('if (!s.row || s.status === \'ok\') return \'\';')
+        && jsSrc.includes('if (s.status === \'none\') return \'<span class="cfg-status" data-cfg-status="none"></span>\';')
+        && jsSrc.includes('const status = pendingItem ? \'pending\' : (mismatch || showReason ? \'mismatch\' : \'ok\');'),
+      'runtimeFieldState 单一判定；ok 不展开 cfg-effective');
+
+    check('B 只读行：settings-kv 3 列 / runtime-kv 2 列，设置内 40px + 虚线、首行无虚线',
+      /\.settings-shell \.settings-kv,\n\.settings-shell \.runtime-kv \{ gap: 0 var\(--row-gap\); \}/.test(cssSrc)
+        && /\.settings-shell \.settings-kv \.kv-row > \*,\n\.settings-shell \.runtime-kv \.kv-row > \* \{[^}]*min-height: 40px;[^}]*border-top: 1px dashed var\(--border\);/.test(cssSrc)
+        && cssSrc.includes('.settings-shell .settings-kv .kv-row:first-child > *,')
+        && cssSrc.includes('.settings-shell .runtime-kv .kv-row:first-child > * {')
+        && /\.runtime-kv \{ display: grid; grid-template-columns: minmax\(88px, auto\) minmax\(0, 1fr\);/.test(cssSrc),
+      'dl 行容器 display:contents；设置内 40px/虚线');
+
+    check('B 响应式 ≤760：正常生效中隐藏，异常保留；帮助/三元组跨整行',
+      /\.settings-shell \.cfg-row > \.cfg-status\.is-ok \{ display: none; \}/.test(cssSrc)
+        && /\.settings-shell \.cfg-row > \.cfg-help,\n  \.settings-shell \.cfg-row > \.cfg-effective \{ grid-column: 1 \/ -1; \}/.test(cssSrc)
+        && /\.settings-shell \.settings-kv,\n  \.settings-shell \.runtime-kv \{ grid-template-columns: minmax\(0, 1fr\); gap: 0; \}/.test(cssSrc),
+      '760 单列 + 异常状态保留');
 
     const railActive = cssSrc.match(/\.settings-rail \.settings-tab\.is-active \{[\s\S]*?\n\}/)?.[0] ?? '';
     check('U-4 设置壳：左轨 160px + 640 外框不变 + ≤900 折叠顶部横排',

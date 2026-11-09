@@ -1,7 +1,7 @@
-// UX-2 · 设置 · AI 助手专区 + 首屏叠加层（纯字符串构建器，无 DOM 依赖，可单测）。
+// UX-2 · 设置 · Agent 集成专区 + 首屏叠加层（纯字符串构建器，无 DOM 依赖，可单测）。
 // 与 console.js 的约定：console.js 负责取数/动作/事件，本模块负责
 //   归一化（轮 A 注册表形状优先：state/evidence/hasVerify/activation/kind；旧形状 installed/connected 兜底）、
-//   单列表 HTML、行内 verify 步骤、自定义助手 CRUD 表单、常驻运行行、自动修复行、重启向导行、「需要注意」条目推导。
+//   单列表 HTML、行内 verify 步骤、自定义 Agent CRUD 表单、常驻运行行、自动修复行、重启向导行、「需要注意」条目推导。
 // 状态词投影唯一真源 = ./assistant-status.js 的 projectAssistantStatus（向导/设置页共用，快照断言守护一致）。
 //
 // i18n：用户可见文案走 console pack（t）；catalog 未加载（单测 / 静态兜底）时回退本文件的中文字面量。
@@ -263,7 +263,7 @@ function rowHtml(client, ui, status) {
     } else if (client.evidence) {
       bits.push(esc(typeof client.evidence === 'string' ? localizeServerDetail(client.evidence) : JSON.stringify(client.evidence)));
     }
-    if (!client.hasVerify && status.key === 'connected') bits.push(esc(tr('assistants.detail.configOnly', '仅配置级验证（该助手未提供验证命令）')));
+    if (!client.hasVerify && status.key === 'connected') bits.push(esc(tr('assistants.detail.configOnly', '仅配置级验证（该 Agent 未提供验证命令）')));
     const customActions = client.custom
       ? `<button class="btn btn-small" type="button" data-asst-edit="${id}">${esc(tr('assistants.action.edit', '编辑'))}</button>
          <button class="btn btn-small" type="button" data-asst-remove="${id}">${esc(tr('assistants.action.remove', '移除'))}</button>`
@@ -289,21 +289,21 @@ function rowHtml(client, ui, status) {
     <div class="asst-xp"${open ? '' : ' hidden'} data-asst-xp="${id}">${detailBits.join('')}</div>`;
 }
 
-/** ＋新增助手表单（选文件 = merge-key 自动写；粘片段 = manual 只给片段，绝不出现「接入」）。 */
+/** ＋接入 Agent 表单（选文件 = merge-key 自动写；粘片段 = manual 只给片段，绝不出现「接入」）。 */
 export function assistantAddFormHtml({ edit = null, error = '' } = {}) {
   const e = edit ?? {};
   const mode = e.writer?.strategy === 'manual' ? 'snippet' : 'file';
   return `
     <div class="asst-form" id="asst-add-form" data-edit-id="${esc(e.id ?? '')}">
       <p class="asst-line">${esc(edit
-        ? tr('assistants.form.editTitle', '编辑自定义助手「{name}」', { name: e.name ?? e.id })
-        : tr('assistants.form.addTitle', '登记一个我们还不认识的 AI 助手：给一个它的 MCP 配置文件，或粘一段配置片段。'))}</p>
+        ? tr('assistants.form.editTitle', '编辑自定义 Agent「{name}」', { name: e.name ?? e.id })
+        : tr('assistants.form.addTitle', '登记一个我们还不认识的 Agent：给一个它的 MCP 配置文件，或粘一段配置片段。'))}</p>
       <div class="asst-form-modes" role="radiogroup" aria-label="${esc(tr('assistants.form.modesAria', '登记方式'))}">
         <label class="asst-mode"><input type="radio" name="asst-mode" value="file"${mode === 'file' ? ' checked' : ''} /> ${esc(tr('assistants.form.modeFile', '选文件（自动合并写入，写前备份）'))}</label>
         <label class="asst-mode"><input type="radio" name="asst-mode" value="snippet"${mode === 'snippet' ? ' checked' : ''} /> ${esc(tr('assistants.form.modeSnippet', '粘片段（只生成片段，手动合并）'))}</label>
       </div>
       <div class="asst-form-grid">
-        <label>${esc(tr('assistants.form.name', '名称'))} <input id="asst-add-name" class="crt-input" type="text" placeholder="${esc(tr('assistants.form.namePlaceholder', '我的助手'))}" value="${esc(e.name ?? '')}" /></label>
+        <label>${esc(tr('assistants.form.name', '名称'))} <input id="asst-add-name" class="crt-input" type="text" placeholder="${esc(tr('assistants.form.namePlaceholder', '我的 Agent'))}" value="${esc(e.name ?? '')}" /></label>
         <label>${esc(tr('assistants.form.id', '标识（小写 kebab）'))} <input id="asst-add-id" class="crt-input" type="text" placeholder="my-assistant" value="${esc(e.id ?? '')}"${edit ? ' disabled' : ''} /></label>
         <label class="asst-mode-file"${mode === 'snippet' ? ' hidden' : ''}>${esc(tr('assistants.form.path', '配置文件路径'))} <input id="asst-add-path" class="crt-input" type="text" placeholder="~/.config/my-assistant/mcp.json" value="${esc(e.landing?.primaryPath ?? '')}" /></label>
         <label class="asst-mode-file"${mode === 'snippet' ? ' hidden' : ''}>${esc(tr('assistants.form.format', '配置格式'))}
@@ -321,20 +321,20 @@ export function assistantAddFormHtml({ edit = null, error = '' } = {}) {
     </div>`;
 }
 
-/** 专区主体：注脚 + ＋新增助手 + 单列表 + 底部「未安装（n）›」折叠。 */
+/** 专区主体：注脚 + ＋接入 Agent + 单列表 + 底部「未安装（n）›」折叠。 */
 export function assistantsPanelHtml({ clients, ui = {} } = {}) {
-  if (!clients) return `<p class="muted">${esc(tr('assistants.loading', 'AI 助手列表加载中…'))}</p>`;
+  if (!clients) return `<p class="muted">${esc(tr('assistants.loading', '集成列表加载中…'))}</p>`;
   const norm = clients.map(normalizeClient);
   const { actionable, missing } = sortClients(norm);
   const rows = actionable.map((c) => rowHtml(c, ui, assistantStatus(c, ui))).join('');
   const missingRows = missing.map((c) => rowHtml(c, ui, assistantStatus(c, ui))).join('');
   return `
     <div class="asst-head">
-      <p class="muted">${esc(tr('assistants.head.note', '接入只改助手的一条配置，写前自动备份；重启对应软件后生效。'))}</p>
-      <button class="btn btn-small btn-crt" type="button" id="asst-add">${esc(tr('assistants.add', '＋ 新增助手'))}</button>
+      <p class="muted">${esc(tr('assistants.head.note', '接入只改 Agent 的一条配置，写前自动备份；重启对应软件后生效。'))}</p>
+      <button class="btn btn-small btn-crt" type="button" id="asst-add">${esc(tr('assistants.add', '＋ 接入 Agent'))}</button>
     </div>
     <div class="asst-xp" id="asst-add-flow"${ui.addForm ? '' : ' hidden'}>${ui.addForm ?? ''}</div>
-    <div id="assistants-list">${rows || `<p class="muted">${esc(tr('assistants.empty', '还没有登记任何助手：点「＋ 新增助手」开始。'))}</p>`}</div>
+    <div id="assistants-list">${rows || `<p class="muted">${esc(tr('assistants.empty', '还没有接入任何 Agent：点「＋ 接入 Agent」开始。'))}</p>`}</div>
     ${missing.length > 0 ? `
       <div class="asst-row asst-fold"><span class="asst-name muted">${esc(tr('assistants.missing', '未安装（{count}）', { count: missing.length }))}</span><span class="asst-sp"></span>
         <button class="btn btn-small" type="button" id="asst-missing-toggle">${esc(tr('assistants.missing.expand', '展开 ›'))}</button></div>
@@ -403,7 +403,7 @@ export function repairRowHtml(repair = {}) {
     : '';
   return `<div class="asst-row settings-repair-row">
     <span class="asst-name">${esc(tr('settings.repair.title', '自动修复'))}</span>
-    <span class="asst-st">${esc(tr('settings.repair.note', '强制重跑已检测助手的 MCP 接入与 Skill；不动记忆/身份/订阅/任务/审计'))}</span>
+    <span class="asst-st">${esc(tr('settings.repair.note', '强制重跑已检测 Agent 的 MCP 接入与 Skill；不动记忆/身份/订阅/任务/审计'))}</span>
     <span class="asst-sp"></span>
     <button class="btn btn-small btn-crt" type="button" id="settings-repair"${busy ? ' disabled' : ''}>${esc(busy ? tr('settings.repair.busy', '修复中…') : tr('settings.repair.action', '开始修复'))}</button>
   </div>

@@ -1280,7 +1280,7 @@ async function main() {
       await waitFor('(() => { const r = document.querySelector("#settings-panel-assistants [data-asst-row=ui-test-asst]"); return Boolean(r) && /UI 测试助手改/.test(r.textContent); })()', 30000));
     await evalJs('(() => { const b = document.querySelector("#settings-panel-assistants [data-asst-remove=ui-test-asst]"); if (b) b.click(); })()');
     check('移除走应用内确认（#modal，非原生 confirm）',
-      await waitFor('(() => { const m = document.querySelector("#modal"); return Boolean(m) && m.hidden === false && /移除自定义助手/.test(document.querySelector("#modal-title")?.textContent ?? ""); })()'));
+      await waitFor('(() => { const m = document.querySelector("#modal"); return Boolean(m) && m.hidden === false && /移除自定义 Agent/.test(document.querySelector("#modal-title")?.textContent ?? ""); })()'));
     await evalJs('document.querySelector("#modal-confirm").click()');
     check('移除后行消失（POST remove 生效）',
       await waitFor('!document.querySelector("#settings-panel-assistants [data-asst-row=ui-test-asst]")', 30000));
@@ -1481,11 +1481,11 @@ async function main() {
       JSON.stringify(repoll?.beforePosition));
     await evalJs('document.querySelector("#view-nav li:nth-of-type(1) button").click()');
 
-    // 设置弹窗（E1 IA：常用/安全/AI 助手/MCP 接入/高级 + 关于本机）
+    // 设置弹窗（E1 IA：常用/安全/记忆/集成/MCP 接入/高级 + 关于本机）
     await evalJs('document.querySelector("#open-settings").click()');
-    check('E1 设置弹窗打开（6 页签：常用 / 安全 / AI 助手 / 记忆运行时 / MCP 接入 / 高级）', await waitFor(`(() => {
+    check('E1 设置弹窗打开（6 页签：常用 / 安全 / 记忆 / 集成 / MCP 接入 / 高级）', await waitFor(`(() => {
       const tabs = [...document.querySelectorAll('#settings-body .settings-tab:not(.settings-tab-extra)')].map((el) => el.textContent.trim());
-      return tabs.join(',') === '常用,安全,AI 助手,记忆运行时,MCP 接入,高级' && document.querySelector('#settings')?.hidden === false;
+      return tabs.join(',') === '常用,安全,记忆,集成,MCP 接入,高级' && document.querySelector('#settings')?.hidden === false;
     })()`));
     await evalJs('document.querySelector("[data-settings-tab=common]").click()');
     check('E1 常用页：保留只读状态 + 自动修复 + 重启向导；无重复邀请入口', await waitFor(`(() => {
@@ -1780,7 +1780,7 @@ async function main() {
       JSON.stringify(mcpDropdown));
 
     // E1 · 设置分层：5 tab；诊断并入高级；订阅域移出；反熵细节不出屏；无「保存」按钮
-    check('E1 设置 6 页签（常用/安全/AI 助手/记忆运行时/MCP 接入/高级）且无诊断页签/保存按钮',
+    check('E1 设置 6 页签（常用/安全/记忆/集成/MCP 接入/高级）且无诊断页签/保存按钮',
       await evalJs('document.querySelectorAll("#settings-body .settings-tab:not(.settings-tab-extra)").length === 6 && !document.querySelector("#settings-panel-diagnostics") && !document.querySelector("[data-cfg-action=save]")'));
     check('简化轮：订阅域与反熵细节不出设置页（grep 断言面）',
       await evalJs(`(() => { const body = document.querySelector("#settings-body"); return !body.querySelector('[data-cfg-path="sync.namespaces"]') && !body.querySelector('[data-cfg-path="sync.antiEntropy.intervalMs"]') && !body.querySelector('[data-cfg-path="sync.antiEntropy.jitterRatio"]') && !body.querySelector('[data-cfg-path="sync.snapshotThreshold"]') && !body.querySelector('[data-cfg-path="semantic.minScore"]') && Boolean(body.querySelector('[data-cfg-path="sync.antiEntropy.enabled"]')); })()`));
@@ -3313,7 +3313,7 @@ async function main() {
     await captureNow('i18n-en-language-390.jpg');
     await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
 
-    // B · 设置深度页（常用 / 安全 / AI 助手 / MCP / 高级 / 诊断）：英文文案 + 无中文兜底。
+    // B · 设置深度页（常用 / 安全 / 记忆 / 集成 / MCP / 高级 / 诊断）：英文文案 + 无中文兜底。
     const settingsPanelsProbe = `(() => {
       const panel = (id) => document.querySelector('#settings-panel-' + id)?.innerText ?? '';
       const hasCjk = (text) => /[\\u3400-\\u9fff]/.test(text ?? '');

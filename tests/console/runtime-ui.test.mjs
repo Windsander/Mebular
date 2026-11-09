@@ -69,9 +69,10 @@ describe('Console 首帧暗色（DSH 暗色刷新不白闪）', () => {
 });
 
 describe('0.3 设置 IA：只有两个产品增量', () => {
-  it('tab 顺序稳定：常用/安全/AI 助手/记忆运行时/MCP 接入/高级', () => {
-    expect(IA_TABS.map((tab) => tab.id)).toEqual(['common', 'security', 'assistants', 'runtime', 'mcp', 'advanced']);
+  it('tab 顺序稳定：常用/安全/记忆/集成/MCP 接入/高级', () => {
+    expect(IA_TABS.map((tab) => tab.id)).toEqual(['common', 'security', 'runtime', 'assistants', 'mcp', 'advanced']);
     expect(IA_TABS.find((tab) => tab.id === 'runtime')?.labelKey).toBe('settings.tab.runtime');
+    expect(IA_TABS.find((tab) => tab.id === 'assistants')?.labelKey).toBe('settings.tab.assistants');
   });
 
   it('增量 1：memoryRuntime.enabled 是唯一模式控制键；不再映射旧 runtime.* 设置', () => {

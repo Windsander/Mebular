@@ -177,7 +177,7 @@ describe('英文界面 · 代码兜底中文清理', () => {
         },
       };
       const html = assistantsPanelHtml({ clients, ui });
-      expect(html).toContain('Other AI assistant (copy snippet)');
+      expect(html).toContain('Other agent (copy snippet)');
       expect(html).toContain('Readback check');
       expect(html).toContain('CLI check');
       expect(html).toContain('Not passed (rc=1)');

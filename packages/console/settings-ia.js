@@ -5,7 +5,7 @@
 //  - `sync.autoSync` / `sync.pushOnWrite` 从 GUI 彻底移除（默认常开，不需暴露），仅在「关于本机 · 运行状态」以只读行展示真值；
 //  - `joinService.bind/port` 进「高级」，与启用开关聚成「常驻服务」卡；
 //  - 只读信息统一进「关于本机」（顶栏状态徽章入口）；
-//  - Tab 命名：常用 / 安全 / AI 助手 / MCP 接入 / 高级。
+//  - Tab 命名：常用 / 安全 / 记忆 / 集成 / MCP 接入 / 高级。
 //
 // E1 · 入口收口（产品拍板）：
 //  - 「邀请设备」「让别的设备能连上我」「Agent 怎么连我」三卡从「常用」迁出；
@@ -15,7 +15,7 @@
 //  - 安全卡（S3）从「常用」迁入独立「安全」Tab。
 //
 // UX-2 简化轮（用户拍板「自动的东西不保留在 GUI」延伸）：
-//  - Tab 4 → **3** 后再由 E1 增回 **安全 / MCP 接入**（常用 / 安全 / AI 助手 / MCP 接入 / 高级；诊断并入高级底部只读折叠）；
+//  - Tab 4 → **3** 后再由 E1 增回 **安全 / MCP 接入**（常用 / 安全 / 记忆 / 集成 / MCP 接入 / 高级；诊断并入高级底部只读折叠）；
 //  - 「订阅域」属**内容管理** → 移出设置页，归主页「记忆共享」（IA_MIGRATION home = 'domains'）；
 //  - 反熵间隔/抖动、快照阈值、召回阈值 → internal（config.json 文档级，GUI 只留「自动对账」总开关）；
 //  - 保存即生效（toggle 点击即写、文本/数字失焦即写；保存后守护自动重启生效）——「保存」按钮从用户路径消失。
@@ -27,8 +27,8 @@
 export const IA_TABS = [
   { id: 'common', label: '常用', labelKey: 'settings.tab.common' },
   { id: 'security', label: '安全', labelKey: 'settings.tab.security' },
-  { id: 'assistants', label: 'AI 助手', labelKey: 'settings.tab.assistants' },
-  { id: 'runtime', label: '记忆运行时', labelKey: 'settings.tab.runtime' },
+  { id: 'runtime', label: '记忆', labelKey: 'settings.tab.runtime' },
+  { id: 'assistants', label: '集成', labelKey: 'settings.tab.assistants' },
   { id: 'mcp', label: 'MCP 接入', labelKey: 'settings.tab.mcp' },
   { id: 'advanced', label: '高级', labelKey: 'settings.tab.advanced' },
 ];

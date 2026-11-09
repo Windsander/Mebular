@@ -559,7 +559,7 @@ body.modal-open { overflow: hidden; }
 .modal-x:hover { color: var(--crt-bright, #9dffcf); border-color: var(--border); background: rgba(10, 16, 32, 0.55); }
 .modal-x:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .modal-box.modal-settings { display: flex; flex-direction: column; overflow: hidden; padding: 18px 0 18px 20px; scrollbar-gutter: auto; }
-.modal-settings .modal-head, .modal-settings .settings-tabs { padding-right: 20px; }
+.modal-settings .modal-head { padding-right: 20px; }
 .modal-settings #settings-body { display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; min-height: 0; max-width: 100%; }
 .modal-settings .settings-tabs { flex: 0 0 auto; min-width: 0; max-width: 100%; margin: 0; }
 /* 滚动条贴设置框右边缘：滚动容器贴边，内容右侧留 20px；thumb 收细。 */
@@ -570,6 +570,39 @@ body.modal-open { overflow: hidden; }
 .settings-scroll::-webkit-scrollbar-thumb:hover { border: 0; background: rgba(140, 255, 200, 0.32); }
 .settings-scroll > .settings-panel > .settings-section:first-child,
 .settings-scroll > .settings-panel > .settings-slot:first-child > .settings-section:first-child { border-top: 0; padding-top: 0; }
+/* U-4 设置壳：左侧 160px 固定页签轨 + 内容列；页签轨不滚，仅 .settings-scroll 滚动。 */
+.settings-shell { display: flex; align-items: stretch; gap: 12px; flex: 1 1 auto; min-width: 0; min-height: 0; max-width: 100%; }
+.settings-rail { flex: 0 0 160px; width: 160px; display: flex; flex-direction: column; align-items: stretch; min-width: 0; min-height: 0; padding: 2px 10px 0 0; border-right: 1px solid var(--border); }
+.settings-rail .settings-tabs { display: flex; flex-direction: column; align-items: stretch; gap: 2px; flex: 0 0 auto; min-width: 0; max-width: 100%; margin: 0; padding: 0; border-bottom: 0; }
+.settings-rail .settings-tab {
+  display: flex; align-items: center; width: 100%; height: 34px; min-width: 0;
+  padding: 0 12px 0 14px; border: 1px solid transparent; border-radius: 6px;
+  color: var(--muted); font-size: 12px; text-align: left; white-space: nowrap;
+}
+.settings-rail .settings-tab:hover { color: var(--crt-bright); background: rgba(80, 255, 170, 0.04); }
+.settings-rail .settings-tab.is-active {
+  color: var(--crt-bright); background: rgba(80, 255, 170, 0.06);
+  border-color: transparent; box-shadow: inset 2px 0 0 var(--crt); text-shadow: var(--crt-text-glow);
+}
+.settings-rail .settings-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.settings-rail-foot { margin-top: auto; padding-top: 10px; border-top: 1px solid var(--border); }
+.settings-rail-foot .settings-tab { width: 100%; }
+.settings-rail-foot .settings-tab-extra { margin-left: 0; }
+/* ≤900：回退为顶部横排（≤760 继续沿用 .settings-tabs 的换行规则）。 */
+@media (max-width: 900px) {
+  .settings-shell { flex-direction: column; gap: 0; }
+  .settings-rail {
+    flex: 0 0 auto; width: auto; flex-direction: row; flex-wrap: wrap; align-items: center; row-gap: 4px;
+    padding: 0 20px 0 0; border-right: 0; border-bottom: 1px solid var(--border);
+  }
+  .settings-rail .settings-tabs { flex-direction: row; align-items: center; gap: 6px; padding: 0; }
+  .settings-rail .settings-tab { width: auto; height: auto; padding: 6px 12px; border-radius: 8px 8px 0 0; border-bottom: none; }
+  .settings-rail .settings-tab.is-active {
+    border-color: var(--border); background: rgba(10, 16, 32, 0.55); text-shadow: none; box-shadow: none;
+  }
+  .settings-rail-foot { margin-top: 0; margin-left: auto; padding-top: 0; border-top: 0; }
+  .settings-rail-foot .settings-tab { width: auto; }
+}
 /* 字段帮助默认收起；聚焦/警告时再出现，空值提示由 placeholder 承担。 */
 .cfg-row .cfg-help { display: none; }
 .cfg-row:focus-within .cfg-help,

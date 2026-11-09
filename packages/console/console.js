@@ -2043,6 +2043,21 @@ function settingsFoldKey(el) {
   return key ?? null;
 }
 
+// U-4 设置壳：宽屏为左侧 160px 竖轨，≤900 折叠回顶部横排。
+// 布局由 CSS 断点承担；这里只同步 tablist 的 aria-orientation（不触发重渲染）。
+const settingsRailMedia = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+  ? window.matchMedia('(max-width: 900px)')
+  : null;
+
+function settingsTabsOrientation() {
+  return settingsRailMedia?.matches ? 'horizontal' : 'vertical';
+}
+
+settingsRailMedia?.addEventListener?.('change', () => {
+  const list = document.querySelector('#settings-body .settings-tabs');
+  if (list) list.setAttribute('aria-orientation', settingsTabsOrientation());
+});
+
 function renderSettings(activeTab = state.settingsTab ?? 'common') {
   const prevTab = state.settingsTab ?? 'common';
   state.settingsTab = activeTab;
@@ -2081,22 +2096,24 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
   const extraButton = (item) => `<button class="settings-tab settings-tab-extra" type="button" data-settings-extra="${escapeHtml(item.opens)}">${escapeHtml(item.labelKey ? t(item.labelKey) : item.label)}</button>`;
   const panel = (id, inner) => `<section id="settings-panel-${id}" class="settings-panel" data-settings-panel="${id}" role="tabpanel"`
     + ` aria-labelledby="settings-tab-${id}"${id === activeTab ? '' : ' hidden'}>${inner}</section>`;
+  // 页签轨（竖轨）+ 底部「关于本机」foot；正常分支与 ?mock=1 分支共用。
+  const railHtml = `
+    <div class="settings-rail">
+      <div class="settings-tabs" role="tablist" aria-orientation="${settingsTabsOrientation()}" aria-label="${escapeHtml(t('settings.tabsAria'))}" data-i18n-aria-label="settings.tabsAria">${IA_TABS.map(tabButton).join('')}</div>
+      <div class="settings-rail-foot">${IA_SETTINGS_EXTRA.map(extraButton).join('')}</div>
+    </div>`;
+  const shellHtml = (inner) => `<div class="settings-shell">${railHtml}<div class="settings-scroll">${inner}</div></div>`;
   if (!s) {
     // ?mock=1 无 settings 载荷：仍渲染五页签与安全卡（无网络验收路径；其余设置保持加载态）
     if (MOCK && state.security) {
-      body.innerHTML = `
-        <div class="settings-tabs" role="tablist" aria-label="${escapeHtml(t('settings.tabsAria'))}" data-i18n-aria-label="settings.tabsAria">${IA_TABS.map(tabButton).join('')}${
-          IA_SETTINGS_EXTRA.map(extraButton).join('')
-        }</div>
-        <div class="settings-scroll">
-          ${panel('common', `<section class="settings-section" data-settings-common-status><h3>${escapeHtml(t('settings.mock.commonTitle'))} <span class="badge badge-muted">${escapeHtml(t('settings.common.readonly'))}</span></h3><p class="muted">${escapeHtml(t('settings.mock.commonNote'))}</p></section>`)}
-          ${panel('security', `<section id="settings-security-slot" class="settings-slot" data-settings-slot="security" data-security-level="${escapeHtml(state.security?.level ?? 'low')}" tabindex="-1">${securityCardHtml()}</section>`)}
-          ${panel('assistants', `<p class="muted">${escapeHtml(t('settings.mock.assistants'))}</p>`)}
-          ${panel('runtime', renderRuntimeSettings())}
-          ${panel('mcp', `<p class="muted">${escapeHtml(t('settings.mock.config'))}</p>`)}
-          ${panel('advanced', `<p class="muted">${escapeHtml(t('settings.mock.config'))}</p>`)}
-        </div>
-      `;
+      body.innerHTML = shellHtml(`
+        ${panel('common', `<section class="settings-section" data-settings-common-status><h3>${escapeHtml(t('settings.mock.commonTitle'))} <span class="badge badge-muted">${escapeHtml(t('settings.common.readonly'))}</span></h3><p class="muted">${escapeHtml(t('settings.mock.commonNote'))}</p></section>`)}
+        ${panel('security', `<section id="settings-security-slot" class="settings-slot" data-settings-slot="security" data-security-level="${escapeHtml(state.security?.level ?? 'low')}" tabindex="-1">${securityCardHtml()}</section>`)}
+        ${panel('assistants', `<p class="muted">${escapeHtml(t('settings.mock.assistants'))}</p>`)}
+        ${panel('runtime', renderRuntimeSettings())}
+        ${panel('mcp', `<p class="muted">${escapeHtml(t('settings.mock.config'))}</p>`)}
+        ${panel('advanced', `<p class="muted">${escapeHtml(t('settings.mock.config'))}</p>`)}
+      `);
       bindSecurityCard(body);
       return;
     }
@@ -2109,10 +2126,7 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
   body.innerHTML = `
     ${pendingRestartBanner()}
     ${applyResultBanner()}
-    <div class="settings-tabs" role="tablist" aria-label="${escapeHtml(t('settings.tabsAria'))}" data-i18n-aria-label="settings.tabsAria">${IA_TABS.map(tabButton).join('')}${
-      IA_SETTINGS_EXTRA.map(extraButton).join('')
-    }</div>
-    <div class="settings-scroll">
+    ${shellHtml(`
     ${panel('common', `
       ${languageSettingsRowHtml()}
       <div class="settings-resident" id="settings-resident">${serviceRowHtml(state.service, state.serviceMsg)}</div>
@@ -2147,7 +2161,7 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
         ${renderDiagnostics()}
       </details>
     `)}
-    </div>
+    `)}
   `;
 
   // 恢复折叠展开态（仅设置页的字段/卡片/机制折叠）

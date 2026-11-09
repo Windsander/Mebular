@@ -1734,6 +1734,25 @@ try {
       /@media \(max-width: 760px\) \{[\s\S]*?\.settings-kv \{\s*grid-template-columns: minmax\(0, 1fr\);[\s\S]*?\.cfg-row \{ grid-template-columns: minmax\(0, 1fr\); \}/.test(cssSrc),
       '760 断点内 kv/cfg 单列');
 
+    const railActive = cssSrc.match(/\.settings-rail \.settings-tab\.is-active \{[\s\S]*?\n\}/)?.[0] ?? '';
+    check('U-4 设置壳：左轨 160px + 640 外框不变 + ≤900 折叠顶部横排',
+      /\.settings-shell \{[^}]*display: flex;/.test(cssSrc)
+        && /\.settings-rail \{[^}]*flex: 0 0 160px;[^}]*width: 160px;/.test(cssSrc)
+        && /\.modal-box-wide \{ width: min\(640px, 94vw\); \}/.test(cssSrc)
+        && /\.modal-box\.modal-settings \{[^}]*overflow: hidden/.test(cssSrc)
+        && /@media \(max-width: 900px\) \{[\s\S]*?\.settings-shell \{ flex-direction: column;[\s\S]*?\.settings-rail \{/.test(cssSrc)
+        && /\.settings-rail-foot \{[^}]*border-top: 1px solid var\(--border\);/.test(cssSrc)
+        && jsSrc.includes('settings-rail-foot') && jsSrc.includes('data-settings-extra="${escapeHtml(item.opens)}"'),
+      'shell/rail 160/foot/900 折叠就位');
+
+    check('U-4 页签激活态：左 2px 荧光条 + 6% 底 + crt-bright 文字 + 微光 token；未激活 muted',
+      railActive.includes('box-shadow: inset 2px 0 0 var(--crt);')
+        && railActive.includes('background: rgba(80, 255, 170, 0.06);')
+        && railActive.includes('color: var(--crt-bright);')
+        && railActive.includes('text-shadow: var(--crt-text-glow);')
+        && /\.settings-rail \.settings-tab \{[\s\S]*?color: var\(--muted\);/.test(cssSrc),
+      railActive.trim().split('\n')[0] || '缺少 rail 激活态规则');
+
     check('渲染模板无内联 width（对齐只能来自 CSS token）',
       !/style="width/.test(jsSrc), /style="width/.test(jsSrc) ? '发现内联 width' : '无内联 width');
   }

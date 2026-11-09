@@ -3361,26 +3361,32 @@ async function main() {
       JSON.stringify({ cjk: settingsPanels.diagCjk, sample: settingsPanels.diag?.slice(0, 200) }));
     await captureNow('i18n-en-settings-deep-1440.jpg');
 
-    // 英文设置页签：每个标签必须单行（不被空格拆成两行），三档视口都不横向溢出。
+    // 英文设置页签：宽屏为左侧竖轨（160px），≤900 折叠回顶部横排；标签必须单行、不横向溢出。
     const settingsTabsProbe = `(() => {
-      const tabs = [...document.querySelectorAll('#settings-body .settings-tab')];
-      const container = document.querySelector('#settings-body .settings-tabs');
-      if (!container || tabs.length === 0) return { ok: false, why: 'missing' };
-      const box = container.getBoundingClientRect();
+      const rail = document.querySelector('#settings-body .settings-rail');
+      const list = document.querySelector('#settings-body .settings-tabs');
+      if (!rail || !list) return { ok: false, why: 'missing' };
+      const tabs = [...list.querySelectorAll('.settings-tab')];
+      const listBox = list.getBoundingClientRect();
       return {
         ok: true,
+        orientation: list.getAttribute('aria-orientation'),
+        vertical: getComputedStyle(list).flexDirection === 'column',
+        railWidth: Math.round(rail.getBoundingClientRect().width),
         labels: tabs.map((el) => {
           const rect = el.getBoundingClientRect();
           return {
             text: el.textContent.trim(),
             height: Math.round(rect.height),
-            width: Math.round(rect.width),
-            wrapped: rect.height > 32 || el.scrollWidth > el.clientWidth + 1,
-            outside: rect.right > box.right + 1 || rect.left < box.left - 1,
+            left: Math.round(rect.left),
+            top: Math.round(rect.top),
+            wrapped: rect.height > 40 || el.scrollWidth > el.clientWidth + 1,
+            outside: rect.right > listBox.right + 1 || rect.left < listBox.left - 1,
           };
         }),
         rows: new Set(tabs.map((el) => Math.round(el.getBoundingClientRect().top))).size,
-        containerOverflow: container.scrollWidth > container.clientWidth + 1,
+        columns: new Set(tabs.map((el) => Math.round(el.getBoundingClientRect().left))).size,
+        listOverflow: list.scrollWidth > list.clientWidth + 1,
         pageOverflow: document.documentElement.scrollWidth > window.innerWidth + 1,
       };
     })()`;
@@ -3391,11 +3397,17 @@ async function main() {
     ]) {
       await setViewport(viewport);
       const tabsLayout = await evalJs(settingsTabsProbe);
-      check(`i18n 设置页签英文 ${label}：每个标签单行、页签条不溢出（1440/1024 同排）`,
+      const vertical = label !== '390';
+      check(`i18n 设置页签英文 ${label}：${vertical ? '宽屏竖轨（160px）' : '≤900 顶部横排'}、标签单行且不溢出`,
         tabsLayout.ok
+          && tabsLayout.orientation === (vertical ? 'vertical' : 'horizontal')
+          && tabsLayout.vertical === vertical
+          && tabsLayout.labels.length === 6
           && tabsLayout.labels.every((item) => item.wrapped === false && item.outside === false)
-          && tabsLayout.containerOverflow === false && tabsLayout.pageOverflow === false
-          && (label === '390' || tabsLayout.rows === 1),
+          && tabsLayout.listOverflow === false && tabsLayout.pageOverflow === false
+          && (vertical
+            ? tabsLayout.railWidth === 160 && tabsLayout.columns === 1 && tabsLayout.rows === 6
+            : tabsLayout.rows <= 2),
         JSON.stringify(tabsLayout));
       await captureNow(`i18n-en-settings-tabs-${label}.jpg`);
     }

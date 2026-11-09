@@ -1777,8 +1777,8 @@ try {
 
     check('B 响应式 ≤760：正常生效中隐藏，异常保留；帮助/三元组跨整行',
       /\.settings-shell \.cfg-row > \.cfg-status\.is-ok \{ display: none; \}/.test(cssSrc)
-        && /\.settings-shell \.cfg-row > \.cfg-help,\n  \.settings-shell \.cfg-row > \.cfg-effective \{ grid-column: 1 \/ -1; \}/.test(cssSrc)
-        && /\.settings-shell \.settings-kv,\n  \.settings-shell \.runtime-kv \{ grid-template-columns: minmax\(0, 1fr\); gap: 0; \}/.test(cssSrc),
+        && /\.settings-shell \.cfg-row > \.cfg-help,\n {2}\.settings-shell \.cfg-row > \.cfg-effective \{ grid-column: 1 \/ -1; \}/.test(cssSrc)
+        && /\.settings-shell \.settings-kv,\n {2}\.settings-shell \.runtime-kv \{ grid-template-columns: minmax\(0, 1fr\); gap: 0; \}/.test(cssSrc),
       '760 单列 + 异常状态保留');
 
     const railActive = cssSrc.match(/\.settings-rail \.settings-tab\.is-active \{[\s\S]*?\n\}/)?.[0] ?? '';
@@ -2610,6 +2610,24 @@ try {
       /aria-live="polite"/.test(consoleSrcSec) && /tabindex="-1"/.test(consoleSrcSec)
         && /prefers-reduced-motion/.test(cssSec) && /settings-security-slot/.test(cssSec)
         && /@media \(max-width: 900px\)/.test(cssSec));
+    check('C 安全卡状态：三卡 is-effective/is-off + 标题前状态点 + 19px/700 大数值',
+      /state: 'effective'/.test(consoleSrcSec)
+        && /state: seedImported \? 'effective' : 'off'/.test(consoleSrcSec)
+        && /state: registered \? 'effective' : 'off'/.test(consoleSrcSec)
+        && /class="settings-section sec-card \$\{off \? 'is-off' : 'is-effective'\}"/.test(consoleSrcSec)
+        && /class="sec-dot\$\{off \? ' is-off' : ''\}"/.test(consoleSrcSec)
+        && /\.sec-card-value strong \{[\s\S]*?font-size: 19px[\s\S]*?font-weight: 700[\s\S]*?\}/.test(cssSec));
+    check('C 安全卡状态：off 中性底/无 ::before + 空心点 + 大数值 var(--muted)',
+      /\.sec-card\.is-effective::before\s*\{/.test(cssSec)
+        && !/\.sec-card::before\s*\{/.test(cssSec)
+        && /\.sec-card\.is-off::before\s*\{\s*content: none;\s*\}/.test(cssSec)
+        && /\.sec-card\.is-off \.sec-card-value strong\s*\{\s*color: var\(--muted\);\s*\}/.test(cssSec)
+        && /\.sec-card\.is-off \.sec-dot\s*\{[\s\S]*?background: transparent[\s\S]*?box-shadow: none/.test(cssSec)
+        && /\.sec-card\.is-effective \.sec-dot\s*\{[\s\S]*?background: #6dffb8/.test(cssSec));
+    check('C 安全卡状态：一行说明用 totp/recovery.desc + 待批准琥珀置顶',
+      consoleSrcSec.includes("t('settings.security.totp.desc')")
+        && consoleSrcSec.includes("t('settings.security.recovery.desc')")
+        && /\.sec-pending \{[\s\S]*?border-left: 2px solid #ffd27a[\s\S]*?background: rgba\(60, 42, 8, 0\.26\)/.test(cssSec));
   }
 
   // ---------- 未知 API ----------

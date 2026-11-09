@@ -1854,6 +1854,31 @@ async function main() {
           && !/totp_not_configured/.test(t);
       })()`));
     // B 方案：三档差异/边界/降级入口收进「更改等级」弹框（不内联展开）
+    check('C 安全卡状态（低档）：等级 effective + TOTP/恢复码 off + 空心点/无荧光条',
+      await evalJs(`(() => {
+        const s = document.querySelector('#settings-security-slot');
+        const cards = [...s.querySelectorAll(':scope > .settings-section')];
+        if (cards.length !== 3) return false;
+        const [level, seed, recovery] = cards;
+        const headDot = (card) => card.querySelector('.sec-card-head > .sec-dot');
+        const effBefore = getComputedStyle(level, '::before');
+        const offBefore = getComputedStyle(seed, '::before');
+        const offStrong = getComputedStyle(seed.querySelector('.sec-card-value strong'));
+        const effStrong = getComputedStyle(level.querySelector('.sec-card-value strong'));
+        return level.classList.contains('is-effective') && !level.classList.contains('is-off')
+          && seed.classList.contains('is-off') && recovery.classList.contains('is-off')
+          && cards.every((card) => Boolean(headDot(card)))
+          && level.querySelector('.sec-card-value strong')?.textContent === '低'
+          && seed.querySelector('.sec-card-value strong')?.textContent === '未导入'
+          && recovery.querySelector('.sec-card-value strong')?.textContent === '未生成'
+          && !seed.querySelector('.crt-tag') && !recovery.querySelector('.crt-tag')
+          && /6 位动态码/.test(seed.querySelector('.sec-card-line')?.textContent ?? '')
+          && /离线钥匙/.test(recovery.querySelector('.sec-card-line')?.textContent ?? '')
+          && effBefore.content !== 'none' && parseFloat(effBefore.width) === 2
+          && offBefore.content === 'none'
+          && offStrong.color === 'rgb(131, 145, 180)'
+          && effStrong.fontSize === '19px' && effStrong.fontWeight === '700';
+      })()`));
     await evalJs('document.querySelector("[data-security-change-level]").click()');
     check('U-3 安全 tab：更改等级弹框含三档 + 当前档 + 边界警告',
       await waitFor(`(() => {
@@ -2884,6 +2909,25 @@ async function main() {
         return s?.dataset.securityLevel === 'high' && /当前/.test(s.querySelector('[data-security-current]')?.textContent ?? '')
           && /恢复码/.test(t) && /a1b2c3d4/.test(t);
       })()`));
+    check('C mock 高档：三卡 effective + 大数值 + 待批准琥珀置顶',
+      await evalJs(`(() => {
+        const s = document.querySelector('#settings-security-slot');
+        const cards = [...s.querySelectorAll(':scope > .settings-section')];
+        if (cards.length !== 3) return false;
+        const [level, seed, recovery] = cards;
+        const pending = s.querySelector('[data-security-pending]');
+        const ps = pending ? getComputedStyle(pending) : null;
+        return cards.every((card) => card.classList.contains('is-effective')
+            && getComputedStyle(card, '::before').content !== 'none'
+            && Boolean(card.querySelector('.sec-card-head > .sec-dot')))
+          && level.querySelector('.sec-card-value strong')?.textContent === '高'
+          && seed.querySelector('.sec-card-value strong')?.textContent === '已导入'
+          && recovery.querySelector('.sec-card-value strong')?.textContent === '已生成'
+          && /6 位动态码/.test(seed.querySelector('.sec-card-line')?.textContent ?? '')
+          && /离线钥匙/.test(recovery.querySelector('.sec-card-line')?.textContent ?? '')
+          && s.firstElementChild === pending && ps.backgroundColor === 'rgba(60, 42, 8, 0.26)'
+          && ps.borderLeftWidth === '2px' && ps.borderLeftColor === 'rgb(255, 210, 122)';
+      })()`));
     await evalJs('document.querySelector("[data-security-change-level]").click()');
     check('S3 mock：更改等级弹框 = 当前高档 + 可会签设备',
       await waitFor(`(() => {
@@ -2933,9 +2977,40 @@ async function main() {
           && tabs.scrollWidth <= tabs.clientWidth + 1
           && document.documentElement.scrollWidth <= window.innerWidth + 1;
       })()`));
+    check('C 窄屏 390：三张安全卡状态点/大数值/动作不横向溢出',
+      await evalJs(`(() => {
+        const cards = [...document.querySelectorAll('#settings-security-slot > .settings-section')];
+        if (cards.length !== 3) return false;
+        return cards.every((card) => card.scrollWidth <= card.clientWidth + 1
+          && Boolean(card.querySelector('.sec-card-head > .sec-dot'))
+          && Boolean(card.querySelector('.sec-card-value strong')));
+      })()`));
     await capture('e1-after-settings-security-narrow-390.jpg', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
     await evalJs('document.querySelector("#settings-close").click()');
     await send('Emulation.clearDeviceMetricsOverride');
+
+    // C 安全卡状态（mock 低档 / 英文）：三卡状态、空心点与 en-US 一行说明
+    await send('Page.navigate', { url: `${base}/console/?mock=1&security=low&lang=en-US` });
+    await waitFor(`document.documentElement?.dataset?.consoleReady === '1' && Boolean(document.querySelector('#open-settings'))`, 30000);
+    await evalJs('document.querySelector("#open-settings").click()');
+    await evalJs('document.querySelector("[data-settings-tab=security]").click()');
+    check('C mock 低档（en-US）：等级 effective / TOTP 与恢复码 off + 英文一行说明',
+      await waitFor(`(() => {
+        const s = document.querySelector('#settings-security-slot');
+        const cards = [...s.querySelectorAll(':scope > .settings-section')];
+        if (!s || cards.length !== 3) return false;
+        const [level, seed, recovery] = cards;
+        return level.classList.contains('is-effective')
+          && seed.classList.contains('is-off') && recovery.classList.contains('is-off')
+          && level.querySelector('.sec-card-value strong')?.textContent === 'Low'
+          && seed.querySelector('.sec-card-value strong')?.textContent === 'Not imported'
+          && recovery.querySelector('.sec-card-value strong')?.textContent === 'Not generated'
+          && /Medium-risk actions need a 6-digit code/.test(seed.querySelector('.sec-card-line')?.textContent ?? '')
+          && /Offline key for the High tier/.test(recovery.querySelector('.sec-card-line')?.textContent ?? '')
+          && getComputedStyle(seed, '::before').content === 'none'
+          && getComputedStyle(recovery.querySelector('.sec-card-head > .sec-dot')).backgroundColor === 'rgba(0, 0, 0, 0)'
+          && getComputedStyle(seed.querySelector('.sec-card-head > .sec-dot')).borderTopWidth === '1px';
+      })()`));
 
     // 设备卡（对端）：interop 段为订阅事实、无批准/撤回（?select= 深链选中）
     await send('Page.navigate', { url: `${base}/console/?mock=1&select=device-B` });

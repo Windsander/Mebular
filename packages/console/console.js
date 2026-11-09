@@ -2277,13 +2277,15 @@ function securitySelfId() {
   return state.overview?.device?.deviceId ?? state.settings?.identity?.deviceId ?? null;
 }
 
-/** 安全状态卡外壳（section 保持 data-settings-section，E2 断言按顺序查询）。 */
-function securitySectionCard({ id, index, titleId, title, chip = '', body = '', actions = '' }) {
+/** 安全状态卡外壳（section 保持 data-settings-section，E2 断言按顺序查询）。
+ *  state：effective = 已生效/已配置（实心状态点 + 左侧荧光条）；off = 未配置（空心点 + 中性底）。 */
+function securitySectionCard({ id, index, titleId, title, state: cardState = 'effective', chip = '', body = '', actions = '' }) {
+  const off = cardState === 'off';
   return `
-    <section class="settings-section sec-card" data-settings-section="${escapeHtml(id)}" aria-labelledby="${escapeHtml(titleId)}">
+    <section class="settings-section sec-card ${off ? 'is-off' : 'is-effective'}" data-settings-section="${escapeHtml(id)}" aria-labelledby="${escapeHtml(titleId)}">
       <span class="sec-card-idx" aria-hidden="true">${escapeHtml(index)}</span>
       <div class="sec-card-main">
-        <div class="sec-card-head"><h3 id="${escapeHtml(titleId)}">${escapeHtml(title)}</h3>${chip}</div>
+        <div class="sec-card-head"><span class="sec-dot${off ? ' is-off' : ''}" aria-hidden="true"></span><h3 id="${escapeHtml(titleId)}">${escapeHtml(title)}</h3>${chip}</div>
         ${body}
       </div>
       ${actions ? `<div class="sec-card-actions">${actions}</div>` : ''}
@@ -2421,6 +2423,7 @@ function securityCardHtml() {
     index: '01',
     titleId: 'settings-security-level-title',
     title: t(IA_SECURITY_SECTIONS.level.titleKey),
+    state: 'effective',
     chip: `<span class="crt-tag sec-tag-current" data-security-current>${escapeHtml(t('settings.security.current'))}</span>`,
     body: `<p class="sec-card-value"><strong>${escapeHtml(securityLevelLabel(level))}</strong><span>${escapeHtml(t(`settings.security.card.level.mech.${level}`))}</span></p>
       <p class="sec-card-line">${escapeHtml(t(`settings.security.card.level.line.${level}`))}</p>`,
@@ -2429,9 +2432,9 @@ function securityCardHtml() {
 
   const fingerprint = totp.fingerprint ?? null;
   const seedImported = totp.imported === true;
-  const seedChip = seedImported
-    ? `<span class="crt-tag crt-tag-ok"><span class="sec-dot" aria-hidden="true"></span>${escapeHtml(t('settings.security.totp.imported'))}</span>${mismatch ? `<span class="crt-tag crt-tag-error">${escapeHtml(t('settings.security.totp.mismatchTag'))}</span>` : ''}`
-    : `<span class="crt-tag"><span class="sec-dot is-off" aria-hidden="true"></span>${escapeHtml(t('settings.security.totp.notImported'))}</span>`;
+  const seedChip = mismatch
+    ? `<span class="crt-tag crt-tag-error">${escapeHtml(t('settings.security.totp.mismatchTag'))}</span>`
+    : '';
   const seedMeta = seedImported
     ? `<p class="sec-card-meta"><code>${escapeHtml(fingerprint ?? '—')}</code><span class="sec-sep" aria-hidden="true">·</span><span>${escapeHtml(t('settings.security.card.seed.meta'))}</span></p>`
     : `<p class="sec-card-meta"><span class="sec-card-warn">${escapeHtml(t('settings.security.totp.notImported'))}</span><span class="sec-sep" aria-hidden="true">·</span><span>${escapeHtml(t('settings.security.totp.notImportedNote'))}</span></p>`;
@@ -2440,8 +2443,11 @@ function securityCardHtml() {
     index: '02',
     titleId: 'settings-security-totp-title',
     title: t(IA_SECURITY_SECTIONS.totp.titleKey),
+    state: seedImported ? 'effective' : 'off',
     chip: seedChip,
-    body: seedMeta,
+    body: `<p class="sec-card-value"><strong>${escapeHtml(t(seedImported ? 'settings.security.totp.imported' : 'settings.security.totp.notImported'))}</strong></p>
+      <p class="sec-card-line">${escapeHtml(t('settings.security.totp.desc'))}</p>
+      ${seedMeta}`,
     actions: `${seedImported
       ? `<button class="btn btn-small btn-crt" type="button" data-security-action="totp-show" ${disabled}>${escapeHtml(t('settings.security.totp.show'))}</button>`
       : ''}
@@ -2449,9 +2455,6 @@ function securityCardHtml() {
   });
 
   const registered = recovery.registered === true;
-  const recoveryChip = registered
-    ? `<span class="crt-tag crt-tag-ok"><span class="sec-dot" aria-hidden="true"></span>${escapeHtml(t('settings.security.recovery.generated'))}</span>`
-    : `<span class="crt-tag"><span class="sec-dot is-off" aria-hidden="true"></span>${escapeHtml(t('settings.security.recovery.notGeneratedShort'))}</span>`;
   const recoveryMeta = registered
     ? `<p class="sec-card-meta"><code>${escapeHtml(String(recovery.keyId ?? '').slice(0, 8))}</code><span class="sec-sep" aria-hidden="true">·</span><span>${escapeHtml(t('settings.security.card.recovery.meta', { time: formatLocaleDate(recovery.createdAt) }))}</span>${recovery.current === false ? `<span class="crt-tag crt-tag-warn">${escapeHtml(t('settings.security.recovery.keyMismatch'))}</span>` : ''}</p>`
     : `<p class="sec-card-meta"><span>${escapeHtml(t('settings.security.recovery.whenHigh'))}</span></p>`;
@@ -2465,8 +2468,10 @@ function securityCardHtml() {
     index: '03',
     titleId: 'settings-security-recovery-title',
     title: t(IA_SECURITY_SECTIONS.recovery.titleKey),
-    chip: recoveryChip,
-    body: recoveryMeta,
+    state: registered ? 'effective' : 'off',
+    body: `<p class="sec-card-value"><strong>${escapeHtml(t(registered ? 'settings.security.recovery.generated' : 'settings.security.recovery.notGeneratedShort'))}</strong></p>
+      <p class="sec-card-line">${escapeHtml(t('settings.security.recovery.desc'))}</p>
+      ${recoveryMeta}`,
     actions: recoveryActions,
   });
 
@@ -7391,7 +7396,23 @@ const MOCK_MEMORIES = [
   { id: '01MOCKMEMORY000000000000003', type: 'fact', namespace: 'default', preview: '第三条演示记忆', createdAt: 0, archived: false, deleted: false },
 ];
 
-function mockSecurity(now) {
+function mockSecurity(now, low = false) {
+  if (low) {
+    return {
+      ok: true,
+      level: 'low',
+      changedAt: now - 240_000,
+      changedBy: 'device-A',
+      admitted: ['device-A', 'device-B'],
+      recoveryKeyId: null,
+      coreTierAvailable: true,
+      totp: { imported: false, fingerprint: null, createdAt: 0, failures: 0, lockedUntil: 0, backoffUntil: 0, lastAcceptedAt: null },
+      recovery: { registered: false, keyId: null, mode: null, createdAt: null, lastUsedAt: null, current: false },
+      pendingApprovals: [],
+      recentApprovals: [],
+      rejections: [],
+    };
+  }
   return {
     ok: true,
     level: 'high',
@@ -7613,7 +7634,7 @@ async function mockData() {
         { id: 'p_demo0001', name: '忆云 2', home: 'profiles/p_demo0001', kind: 'delegated', createdAt: now - 5 * 86_400_000, lastUsedAt: now - 2 * 86_400_000, masterFingerprint: 'sha256:9f8e7d6c5b4a', deviceId: 'device-A', current: false },
       ],
     },
-    security: mockSecurity(now),
+    security: mockSecurity(now, params.get('security') === 'low'),
     policy: [
       { eventId: 'e5', type: 'namespace_subscription', issuer: 'device-C', subject: 'device-C', namespace: 'work', namespaces: ['work'], active: true, at: now - 300_000, valid: true },
       { eventId: 'e6', type: 'namespace_subscription', issuer: 'device-B', subject: 'device-B', namespace: 'notes', namespaces: ['notes'], active: true, at: now - 320_000, valid: true },

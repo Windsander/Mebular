@@ -16,7 +16,7 @@ describe('设置页签：英文单行 + 精简文案', () => {
   });
 
   it('英文页签文案精简但不含中文，且含义完整', () => {
-    expect(en['settings.tab.assistants']).toBe('Assistants');
+    expect(en['settings.tab.assistants']).toBe('Integrations');
     expect(en['settings.tab.mcp']).toBe('MCP');
     expect(en['settings.extra.about']).toBe('About device');
     for (const key of ['settings.tab.assistants', 'settings.tab.mcp', 'settings.extra.about']) {

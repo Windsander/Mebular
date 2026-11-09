@@ -1630,8 +1630,8 @@ try {
       '草稿机制已退场');
     const tabIds = ia.IA_TABS.map((tab) => tab.id).join(',');
     const tabLabels = ia.IA_TABS.map((tab) => tab.label).join(',');
-    check('E1 IA Tab 结构（常用/安全/AI 助手/记忆运行时/MCP 接入/高级；诊断并入高级）与「关于本机」入口齐备',
-      tabIds === 'common,security,assistants,runtime,mcp,advanced' && tabLabels === '常用,安全,AI 助手,记忆运行时,MCP 接入,高级'
+    check('E1 IA Tab 结构（常用/安全/记忆/集成/MCP 接入/高级；诊断并入高级）与「关于本机」入口齐备',
+      tabIds === 'common,security,runtime,assistants,mcp,advanced' && tabLabels === '常用,安全,记忆,集成,MCP 接入,高级'
         && (ia.IA_SETTINGS_EXTRA ?? []).some((item) => item.id === 'about' && item.opens === 'about-modal')
         && htmlSrc.includes('id="self-badge"') && htmlSrc.includes('id="about"') && htmlSrc.includes('关于本机')
         && consoleSrc2.includes('data-settings-tab') && consoleSrc2.includes('IA_ADVANCED_SECTIONS') && consoleSrc2.includes('IA_MCP_SECTIONS')

@@ -1572,20 +1572,20 @@ function runtimeModeSettingsHtml() {
   const mode = memoryRuntimeModeOf(status, currentConfigFile());
   const enabled = mode === 'immersive';
   const disabled = !state.features.writes || MOCK;
-  const option = (value, labelKey, descKey) => `<button class="btn btn-small btn-crt" type="button" data-rt-mode="${value}" aria-pressed="${mode === value}" ${disabled ? 'disabled' : ''}>
-    <span>${escapeHtml(t(labelKey))}</span>
-    <span class="runtime-model-desc">${escapeHtml(t(descKey))}</span>
-  </button>`;
+  const option = (value, labelKey) => {
+    const selected = mode === value;
+    return `<button class="btn btn-small btn-crt runtime-mode-option" type="button" data-rt-mode="${value}" aria-pressed="${selected}" ${disabled ? 'disabled' : ''}>${escapeHtml(t(labelKey))}${selected ? ' <span class="runtime-mode-check" aria-hidden="true">✓</span>' : ''}</button>`;
+  };
   return settingsSectionHtml({
     id: 'runtime-mode',
     title: t('settings.runtime.mode.title'),
     desc: t('settings.runtime.mode.desc'),
     chip: `<span class="crt-tag ${enabled ? 'crt-tag-ok' : ''}" data-rt-mode-chip>${escapeHtml(enabled ? t('runtime.sidecar.immersive') : t('runtime.sidecar.lightweight'))}</span>`,
     body: `<div class="runtime-mode-actions" role="group" aria-label="${escapeHtml(t('settings.runtime.mode.title'))}" data-rt-mode-group>
-      ${option('lightweight', 'settings.runtime.mode.lightweight', 'settings.runtime.mode.lightDesc')}
-      ${option('immersive', 'settings.runtime.mode.immersive', 'settings.runtime.mode.immersiveDesc')}
+      ${option('lightweight', 'settings.runtime.mode.lightweight')}
+      ${option('immersive', 'settings.runtime.mode.immersive')}
     </div>
-    <p class="settings-section-foot muted">${escapeHtml(enabled ? t('settings.runtime.mode.onHint') : t('settings.runtime.mode.offHint'))}</p>`,
+    <p class="settings-section-foot muted" data-rt-mode-hint>${escapeHtml(t(enabled ? 'settings.runtime.mode.immersiveDesc' : 'settings.runtime.mode.lightDesc'))}</p>`,
   });
 }
 

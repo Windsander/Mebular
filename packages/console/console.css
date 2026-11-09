@@ -1891,6 +1891,13 @@ body.modal-open { overflow: hidden; }
 .asst-detail-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .asst-output { margin-top: 4px; }
 .settings-resident { margin-bottom: 4px; }
+/* U-4 收口：640 外框 − 160px 竖轨后内容列约 420px；英文「Not resident (temporary)」等长状态
+   会把动作按钮挤出可视区。常驻行与重启向导/自动修行同一策略：名称不占固定宽、说明可收缩换行、
+   动作按钮永不收缩；≤760 的整行换行规则继续生效。 */
+.settings-resident .asst-name { flex: 0 1 auto; min-width: 0; }
+.settings-resident .asst-st { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.settings-resident .asst-sp { flex: 0 1 0; min-width: 0; }
+.settings-resident .asst-row .btn { flex: 0 0 auto; white-space: nowrap; }
 /* 语言行：专用单行控件 + 虚线分隔（不复用 .asst-row，不另起卡片）。
    控件外观对齐 .crt-input：同高、同边框/圆角/底色/focus ring；原生箭头隐藏后
    由 wrapper 的固定 chevron 承担，避免各平台 select 外观漂移。 */

@@ -229,7 +229,7 @@ export const IA_MCP_FIELDS = IA_MCP_SECTIONS.flatMap((section) => section.fields
 /**
  * 0.3 记忆运行时：普通用户只面对两个产品增量：
  * 1. 设置 · 记忆模式 = MCP 配置 memoryRuntime.enabled（轻量 MCP / 沉浸式）；
- * 2. 高级 · 模型来源 = sidecar config.json 的 model.source（仅此一个下拉）。
+ * 2. 记忆 · 模型来源 = sidecar config.json 的 model.source（仅此一个下拉）。
  * 旧 runtime.* 字段不再属于 Console 设置面。
  */
 export const IA_RUNTIME_CONTROL_PATHS = ['memoryRuntime.enabled'];

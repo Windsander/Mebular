@@ -58,9 +58,9 @@ const state = {
   // 0.3：记忆运行时（状态 / 治理 / 模型 / 轨迹）；数据只在相关视图/设置页按需加载。
   runtime: {
     status: null,
-    // 高级 · 模型来源（GET /admin/api/memory-runtime/model-source；浏览器不接触 sidecar 配置）
+    // 记忆 · 模型来源（GET /admin/api/memory-runtime/model-source；浏览器不接触 sidecar 配置）
     modelSource: null,
-    // 高级 · 本地模型目录 / 当前安装任务 / 行内错误（GET /admin/api/models）
+    // 记忆 · 本地模型目录 / 当前安装任务 / 行内错误（GET /admin/api/models）
     models: null,
     modelJob: null,
     modelError: null,
@@ -1543,7 +1543,7 @@ function renderMcpSections() {
   }).join('');
 }
 
-// ---------- 0.3 · 设置 · 记忆模式 / 高级模型来源 ----------
+// ---------- 0.3 · 设置 · 记忆 · 记忆模式 / 模型来源 ----------
 
 function runtimeStatusStateLabel(status) {
   if (!status) return t('runtime.loadingShort');
@@ -1942,13 +1942,14 @@ function renderRuntimeSettings() {
     ${!status && statusError ? `<p class="crt-warn" role="alert">${escapeHtml(t('settings.runtime.error', { message: statusError }))}</p>` : ''}
     ${!status && !statusError ? `<p class="muted">${escapeHtml(t('settings.runtime.loading'))}</p>` : ''}
     ${runtimeModeSettingsHtml()}
+    ${runtimeModelSourceSectionHtml()}
+    ${enabled ? runtimeModelStatusHtml(status) : ''}
     ${settingsSectionHtml({
       id: 'runtime-status-card',
       title: t('runtime.status.title'),
       desc: t('runtime.status.desc'),
       body: runtimeStatusFactsHtml(status),
     })}
-    ${enabled ? runtimeModelStatusHtml(status) : ''}
     <p class="settings-note muted">${escapeHtml(t('settings.runtime.scope.desc'))}</p>
   `;
 }
@@ -1999,8 +2000,9 @@ let lastSettingsSignature = null;
 // 覆盖渲染依赖：activeTab（即 settingsTab）、settings、rawConfig、writes、healthz、本机 deviceId、
 // AI 助手专区依赖（clients / service / 行内动作消息与展开态）。
 function settingsSignature(activeTab) {
-  // Runtime 状态只影响「记忆运行时 / 高级」面板；MCP/常用/安全 tab 不应因
-  // 模型状态/轨迹轮询而重建 DOM（否则原生 select 弹层会被销毁）。
+  // Runtime 状态会影响「记忆」面板（模式/模型来源/模型状态/运行状态）与「高级」
+  // （诊断折叠仍读状态）；MCP/常用/安全 tab 不应因模型状态/轨迹轮询而重建 DOM
+  // （否则原生 select 弹层会被销毁）。
   const runtimeRelevant = activeTab === 'runtime' || activeTab === 'advanced';
   return JSON.stringify([
     activeTab,
@@ -2086,7 +2088,7 @@ settingsRailMedia?.addEventListener?.('change', () => {
 function renderSettings(activeTab = state.settingsTab ?? 'common') {
   const prevTab = state.settingsTab ?? 'common';
   state.settingsTab = activeTab;
-  if (activeTab !== 'advanced') stopRuntimeModelPolling();
+  if (activeTab !== 'runtime') stopRuntimeModelPolling();
   const body = $('#settings-body');
   if (state.locked) {
     renderLockedSettings(body);
@@ -2180,7 +2182,6 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
     `)}
     ${panel('advanced', `
       ${renderAdvancedSections()}
-      ${runtimeModelSourceSectionHtml()}
       <details class="settings-fold" id="diag-fold" data-settings-fold="diagnostics">
         <summary>${escapeHtml(foldLabel('diagnostics'))}</summary>
         ${renderDiagnostics()}
@@ -2222,7 +2223,7 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
   }
   const nextScroller = body.querySelector('.settings-scroll');
   if (nextScroller && prevScrollTop > 0) nextScroller.scrollTop = prevScrollTop;
-  if (activeTab === 'advanced' && runtimeModelJobActive(state.runtime.modelJob)) startRuntimeModelPolling();
+  if (activeTab === 'runtime' && runtimeModelJobActive(state.runtime.modelJob)) startRuntimeModelPolling();
 }
 
 // ---------- S3 · 安全三档（安全卡 / 三操作改道 / 批准侧 / 恢复码） ----------
@@ -3740,11 +3741,11 @@ function runtimeWantsModelCatalog() {
   return !$('#settings')?.hidden && ['runtime', 'advanced'].includes(state.settingsTab ?? '');
 }
 
-/** 轮询只在「设置 · 高级」且正在浏览本地模型、页面可见时进行。 */
+/** 轮询只在「设置 · 记忆」且正在浏览本地模型、页面可见时进行。 */
 function runtimeModelPollingWanted() {
   if (MOCK || document.hidden) return false;
   if ($('#settings')?.hidden) return false;
-  if (state.settingsTab !== 'advanced') return false;
+  if (state.settingsTab !== 'runtime') return false;
   if (memoryRuntimeModeOf(state.runtime.status, currentConfigFile()) !== 'immersive') return false;
   return runtimeModelSourceSelected() === 'local';
 }
@@ -4028,7 +4029,7 @@ async function changeRuntimeModelSource(value) {
   state.runtime.modelSourceBrowse = 'local';
   state.runtime.modelError = null;
   lastSettingsSignature = null;
-  if (!$('#settings')?.hidden && state.settingsTab === 'advanced') renderSettings('advanced');
+  if (!$('#settings')?.hidden && state.settingsTab === 'runtime') renderSettings('runtime');
   const models = await reloadRuntimeModels({ patch: false });
   if (models) {
     const installed = runtimeModelPacks().filter((pack) => pack.installed === true);
@@ -4040,9 +4041,9 @@ async function changeRuntimeModelSource(value) {
 }
 
 function patchRuntimeModelList() {
-  const host = document.querySelector('#settings-panel-advanced [data-rt-model-list]');
+  const host = document.querySelector('#settings-panel-runtime [data-rt-model-list]');
   if (host) host.innerHTML = runtimeModelListBodyHtml();
-  const note = document.querySelector('#settings-panel-advanced [data-rt-model-source-note]');
+  const note = document.querySelector('#settings-panel-runtime [data-rt-model-source-note]');
   if (note) note.textContent = runtimeModelSourceNote();
 }
 
@@ -4172,7 +4173,7 @@ async function setMemoryRuntimeMode(mode) {
   }
 }
 
-/** 高级 · 模型来源：只写 sidecar config.json 的 model.source；失败只降级，不影响对话。 */
+/** 记忆 · 模型来源：只写 sidecar config.json 的 model.source；失败只降级，不影响对话。 */
 async function setRuntimeModelSource(value) {
   if (MOCK) { showToast(t('common.mockReadOnly')); return; }
   if (!state.features.writes) { showToast(t('settings.runtime.readonly')); return; }
@@ -6147,7 +6148,7 @@ $('#settings-body').addEventListener('click', (event) => {
   const tab = event.target.closest('[data-settings-tab]');
   if (tab) {
     const next = tab.dataset.settingsTab;
-    if (next !== 'advanced') stopRuntimeModelPolling();
+    if (next !== 'runtime') stopRuntimeModelPolling();
     renderSettings(next);
     if (next === 'runtime' || next === 'advanced') {
       void ensureRuntimeData({ force: true }).then(() => {

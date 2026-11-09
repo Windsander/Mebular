@@ -822,14 +822,15 @@ async function main() {
     check('设置弹层打开', await waitFor('document.querySelector("#settings")?.hidden === false'));
     // 0.3 · 设置 · 记忆模式：唯一新增控件 1；轻量模式不显示模型配置。
     await evalJs('document.querySelector("[data-settings-tab=runtime]").click()');
-    check('设置·记忆运行时：记忆模式 / 运行状态 / 模型状态；无本地模型包与旧 runtime.* 字段',
+    check('设置·记忆运行时：记忆模式 / 模型来源 / 运行状态 / 模型状态；无本地模型包与旧 runtime.* 字段',
       await waitFor(`(() => {
         const p = document.querySelector('#settings-panel-runtime');
         if (!p || p.hidden) return false;
         return /记忆模式/.test(p.textContent) && /轻量 MCP/.test(p.textContent) && /沉浸式/.test(p.textContent)
-          && /运行状态/.test(p.textContent) && /模型状态/.test(p.textContent)
+          && /模型来源/.test(p.textContent) && /运行状态/.test(p.textContent) && /模型状态/.test(p.textContent)
           && Boolean(p.querySelector('[data-rt-mode=lightweight]'))
           && Boolean(p.querySelector('[data-rt-mode=immersive]'))
+          && Boolean(p.querySelector('#rt-model-source'))
           && !p.querySelector('[data-rt-enabled]') && !p.querySelector('.runtime-pack')
           && p.querySelectorAll('[data-rt-path]').length === 0
           && !/Sidecar 健康|PID|由 Mebular 管理|token/i.test(p.textContent);
@@ -850,7 +851,7 @@ async function main() {
         return !/capture|本机采集|host|token|逐宿主/i.test(p.textContent);
       })()`));
     await capture('c6-settings-runtime.jpg');
-    // 轻量模式：模型状态卡消失，高级模型来源禁用并说明。
+    // 轻量模式：模型状态卡消失，记忆页模型来源禁用并说明。
     await evalJs('document.querySelector("[data-rt-mode=lightweight]").click()');
     check('切回轻量 MCP 走品牌确认（不迁移、不删除）',
       await waitFor('document.querySelector("#modal")?.hidden === false && /切回|轻量|保留|删除/.test(document.querySelector("#modal-body")?.textContent ?? "")'));
@@ -861,10 +862,10 @@ async function main() {
         return /轻量 MCP/.test(p?.querySelector('[data-rt-mode-chip]')?.textContent ?? '')
           && !p?.querySelector('[data-rt-model-status]');
       })()`, 30000));
-    await evalJs('document.querySelector("[data-settings-tab=advanced]").click()');
-    check('轻量模式：高级模型来源禁用并说明',
+    await evalJs('document.querySelector("[data-settings-tab=runtime]").click()');
+    check('轻量模式：记忆页模型来源禁用并说明',
       await waitFor(`(() => {
-        const section = document.querySelector('#settings-panel-advanced [data-settings-section=model-source]');
+        const section = document.querySelector('#settings-panel-runtime [data-settings-section=model-source]');
         const s = section?.querySelector('[data-rt-model-source]');
         const note = section?.querySelector('[data-rt-model-source-note]');
         return Boolean(s) && s.disabled === true && /轻量 MCP/.test(section.textContent)
@@ -894,11 +895,11 @@ async function main() {
           && Boolean(p?.querySelector('[data-rt-model-status]'));
       })()`, 30000));
     await waitFor(`/就绪/.test(document.querySelector('#settings-panel-runtime [data-rt-sidecar-status]')?.textContent ?? '')`, 30000);
-    // 唯一新增控件 2：高级 · 模型来源（仅下拉；不显示 endpoint/key/path）。
-    await evalJs('document.querySelector("[data-settings-tab=advanced]").click()');
-    check('高级模型来源：5 个来源、默认 heuristic、无 endpoint/key/path 明文',
+    // 唯一新增控件 2：记忆 · 模型来源（仅下拉；不显示 endpoint/key/path）。
+    await evalJs('document.querySelector("[data-settings-tab=runtime]").click()');
+    check('记忆模型来源：5 个来源、默认 heuristic、无 endpoint/key/path 明文',
       await waitFor(`(() => {
-        const section = document.querySelector('#settings-panel-advanced [data-settings-section=model-source]');
+        const section = document.querySelector('#settings-panel-runtime [data-settings-section=model-source]');
         const s = section?.querySelector('[data-rt-model-source]');
         if (!s || s.disabled) return false;
         const values = [...s.options].map((o) => o.value);
@@ -907,7 +908,7 @@ async function main() {
           && /模型来源/.test(section.textContent) && /立即应用|下次启动/.test(section.textContent)
           && !/endpoint|keyRef|api key|token|Raw|模型路径|capture|host/i.test(section.textContent);
       })()`, 30000));
-    await capture('c6-settings-advanced.jpg');
+    await capture('c6-settings-memory-model-source.jpg');
     // C8f · 本地模型：列表 / 下载进度 / 取消 / 失败 / 自动启用 / 停用 / 删除
     const modelAdminPath = join(home, 'ui-model-admin.jsonl');
     const modelPosts = () => {
@@ -928,7 +929,7 @@ async function main() {
     })()`);
     check('C8f local 选中：同一模型来源设置项内出现 4 个模型（名称/tier/量化/大小/状态/推荐/硬件）',
       await waitFor(`(() => {
-        const section = document.querySelector('#settings-panel-advanced [data-settings-section=model-source]');
+        const section = document.querySelector('#settings-panel-runtime [data-settings-section=model-source]');
         const list = section?.querySelector('[data-rt-model-list]');
         const cards = list ? [...list.querySelectorAll('[data-rt-model-card]')] : [];
         const c8 = list?.querySelector('[data-rt-model-card="${PACK_8B}"]');
@@ -951,12 +952,12 @@ async function main() {
           && /选择|下载|启用/.test(document.querySelector('[data-rt-model-source-note]')?.textContent ?? '');
       })()`) && modelPosts().length === postsBeforeLocal);
     await capture('c8f-models-local.jpg');
-    await evalJs(`document.querySelector('#settings-panel-advanced [data-settings-section=model-source]')?.scrollIntoView({ block: 'start' })`);
+    await evalJs(`document.querySelector('#settings-panel-runtime [data-settings-section=model-source]')?.scrollIntoView({ block: 'start' })`);
     await setViewport({ width: 760, height: 900, deviceScaleFactor: 1, mobile: false });
     check('C8f 模型列表 760px：单列卡片、无横向滚动',
       await evalJs(`(() => {
         const box = document.querySelector('#settings .modal-box');
-        const cards = [...document.querySelectorAll('#settings-panel-advanced [data-rt-model-card]')];
+        const cards = [...document.querySelectorAll('#settings-panel-runtime [data-rt-model-card]')];
         const columns = new Set(cards.map((card) => Math.round(card.getBoundingClientRect().left)));
         return cards.length === 4 && columns.size === 1
           && box.scrollWidth <= box.clientWidth + 1
@@ -967,7 +968,7 @@ async function main() {
     check('C8f 模型列表 390px：无横向滚动，动作按钮不挤压',
       await evalJs(`(() => {
         const box = document.querySelector('#settings .modal-box');
-        const actions = [...document.querySelectorAll('#settings-panel-advanced [data-rt-model-action]')];
+        const actions = [...document.querySelectorAll('#settings-panel-runtime [data-rt-model-action]')];
         return box.scrollWidth <= box.clientWidth + 1
           && document.documentElement.scrollWidth <= window.innerWidth + 1
           && actions.every((button) => button.getBoundingClientRect().width > 0);
@@ -988,7 +989,7 @@ async function main() {
           && Boolean(card.querySelector('[data-rt-model-action=cancel]'));
       })()`, 15000));
     await evalJs(`(() => {
-      const section = document.querySelector('#settings-panel-advanced [data-settings-section=model-source]');
+      const section = document.querySelector('#settings-panel-runtime [data-settings-section=model-source]');
       const scroller = document.querySelector('#settings .settings-scroll');
       const fold = document.querySelector('#diag-fold');
       if (fold) fold.open = true;
@@ -999,7 +1000,7 @@ async function main() {
     check('C8f 轮询重渲染保留滚动 / 来源选中 / 折叠展开',
       await evalJs(`(() => {
         const scroller = document.querySelector('#settings .settings-scroll');
-        const section = document.querySelector('#settings-panel-advanced [data-settings-section=model-source]');
+        const section = document.querySelector('#settings-panel-runtime [data-settings-section=model-source]');
         return Math.abs(scroller.scrollTop - window.__c8fPollState.scrollTop) <= 2
           && document.querySelector('#rt-model-source')?.value === 'local'
           && document.querySelector('#diag-fold')?.open === true
@@ -1014,7 +1015,7 @@ async function main() {
       })()`));
     await send('Emulation.setEmulatedMedia', { features: [] });
     await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
-    await evalJs(`document.querySelector('#settings-panel-advanced [data-settings-section=model-source]')?.scrollIntoView({ block: 'start' })`);
+    await evalJs(`document.querySelector('#settings-panel-runtime [data-settings-section=model-source]')?.scrollIntoView({ block: 'start' })`);
     await captureNow('c8f-models-progress.jpg');
     await clearViewport();
     check('C8f 完成后自动启用：当前使用 + 停用；不重启 sidecar',
@@ -1030,7 +1031,7 @@ async function main() {
         return res?.source === 'local' && res?.model?.active === 'local';
       })()`, 20000));
     await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
-    await evalJs(`document.querySelector('#settings-panel-advanced [data-settings-section=model-source]')?.scrollIntoView({ block: 'start' })`);
+    await evalJs(`document.querySelector('#settings-panel-runtime [data-settings-section=model-source]')?.scrollIntoView({ block: 'start' })`);
     await captureNow('c8f-models-active.jpg');
     await clearViewport();
 
@@ -1038,7 +1039,7 @@ async function main() {
     check('C8f 停用：回到 heuristic，本地列表收起（不直接重启 sidecar）',
       await waitFor(`(async () => {
         const res = await fetch('/admin/api/memory-runtime/model-source').then((r) => r.json()).catch(() => null);
-        const section = document.querySelector('#settings-panel-advanced [data-settings-section=model-source]');
+        const section = document.querySelector('#settings-panel-runtime [data-settings-section=model-source]');
         return res?.source === 'heuristic'
           && document.querySelector('#rt-model-source')?.value === 'heuristic'
           && !section?.querySelector('[data-rt-model-list]');
@@ -1093,7 +1094,7 @@ async function main() {
     })()`);
     check('C8f local 且无已安装包：提示先安装，绝不 POST model-source',
       await waitFor(`(() => {
-        const section = document.querySelector('#settings-panel-advanced [data-settings-section=model-source]');
+        const section = document.querySelector('#settings-panel-runtime [data-settings-section=model-source]');
         return /先下载并启用一个模型/.test(section?.textContent ?? '')
           && !section?.querySelector('[data-rt-model-active]');
       })()`, 20000));
@@ -1101,7 +1102,7 @@ async function main() {
     check('C8f local 无已安装包不写 model-source（无 pack_required）',
       modelPosts().length === postsBeforeEmptyLocal);
     await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
-    await evalJs(`document.querySelector('#settings-panel-advanced [data-settings-section=model-source]')?.scrollIntoView({ block: 'start' })`);
+    await evalJs(`document.querySelector('#settings-panel-runtime [data-settings-section=model-source]')?.scrollIntoView({ block: 'start' })`);
     await captureNow('c8f-models-empty.jpg');
     await clearViewport();
 
@@ -1111,7 +1112,7 @@ async function main() {
     check('C8f 取消：行内显示已取消，保留模型列表且不自动启用',
       await waitFor(`(() => {
         const card = document.querySelector('[data-rt-model-card="${PACK_14B}"]');
-        const section = document.querySelector('#settings-panel-advanced [data-settings-section=model-source]');
+        const section = document.querySelector('#settings-panel-runtime [data-settings-section=model-source]');
         return /已取消/.test(card?.textContent ?? '')
           && /安装已取消/.test(card?.textContent ?? '')
           && section.querySelectorAll('[data-rt-model-card]').length === 4
@@ -1122,7 +1123,7 @@ async function main() {
     check('C8f 失败：toast/行内错误 + 保留其他模型（30B 引擎失败）',
       await waitFor(`(() => {
         const card = document.querySelector('[data-rt-model-card="${PACK_30B}"]');
-        const section = document.querySelector('#settings-panel-advanced [data-settings-section=model-source]');
+        const section = document.querySelector('#settings-panel-runtime [data-settings-section=model-source]');
         return /失败/.test(card?.textContent ?? '')
           && /推理引擎准备失败/.test(card?.textContent ?? '')
           && section.querySelectorAll('[data-rt-model-card]').length === 4
@@ -1662,19 +1663,20 @@ async function main() {
     await capture('e2a2-after-cloud-switch-fallback.jpg');
     await evalJs('document.querySelector("#cloud-switch-close").click()');
 
-    // 高级页：3 组（常驻服务/网络/自动化）+ 诊断折叠；MCP 六项独立 tab
+    // 高级页：3 组（常驻服务/网络/自动化）+ 诊断折叠；模型来源已迁到记忆 tab
     await evalJs('document.querySelector("[data-settings-tab=advanced]").click()');
-    check('U-3 高级页：三组就位（常驻服务/网络/自动化），MCP 字段不再混入',
+    check('U-3 高级页：三组就位（常驻服务/网络/自动化），模型来源与 MCP 字段不再混入',
       await waitFor(`(() => {
         const p = document.querySelector('#settings-panel-advanced');
         const sections = [...(p?.querySelectorAll(':scope > .settings-section') ?? [])];
         const ids = sections.map((s) => s.dataset.settingsSection).join(',');
-        return Boolean(p) && ids === 'resident,network,automation,model-source'
+        return Boolean(p) && ids === 'resident,network,automation'
           && sections.every((s) => Boolean(s.querySelector('h3')) && Boolean(s.querySelector('.settings-section-desc')))
           && Boolean(p.querySelector('[data-cfg-path="joinService.enabled"]'))
           && Boolean(p.querySelector('[data-cfg-path="network.enabled"]'))
           && Boolean(p.querySelector('[data-cfg-path="sync.antiEntropy.enabled"]'))
-          && Boolean(p.querySelector('#rt-model-source'))
+          && !p.querySelector('#rt-model-source')
+          && !p.querySelector('[data-settings-section=model-source]')
           && !p.querySelector('[data-task]') && !p.querySelector('[data-cfg-path="mcp.http.host"]')
           && !p.querySelector('[data-cfg-path="sync.peerWhitelist"]');
       })()`));
@@ -3421,7 +3423,7 @@ async function main() {
       const extra = document.querySelector('#settings-body .settings-tab-extra')?.textContent.trim() ?? '';
       const out = { lang: document.documentElement.lang, tabs, extra, panels: {}, cjk: {}, open: {} };
       const full = {};
-      for (const id of ['common', 'security', 'assistants', 'runtime', 'mcp', 'advanced']) {
+      for (const id of ['common', 'security', 'runtime', 'assistants', 'mcp', 'advanced']) {
         document.querySelector('[data-settings-tab=' + id + ']')?.click();
         const text = panel(id);
         full[id] = text;
@@ -3439,9 +3441,9 @@ async function main() {
         service: /Resident/.test(full.common),
         securitySections: /Security level/.test(full.security) && /Authenticator seed/.test(full.security) && /Recovery code/.test(full.security),
         assistants: /Add agent/.test(full.assistants),
-        runtime: /Memory mode/.test(full.runtime) && /Lightweight MCP/.test(full.runtime) && /Immersive/.test(full.runtime) && /Model status/.test(full.runtime) && !/Third-party API/.test(full.runtime),
+        runtime: /Memory mode/.test(full.runtime) && /Lightweight MCP/.test(full.runtime) && /Immersive/.test(full.runtime) && /Model source/.test(full.runtime) && /Model status/.test(full.runtime) && !/Third-party API/.test(full.runtime),
         mcp: /Connection/.test(full.mcp) && /TLS/.test(full.mcp) && /Risks and recovery/.test(full.mcp),
-        advanced: /Resident service/.test(full.advanced) && /Network/.test(full.advanced) && /Automation/.test(full.advanced) && /Model source/.test(full.advanced) && /Diagnostics and recovery/.test(full.advanced),
+        advanced: /Resident service/.test(full.advanced) && /Network/.test(full.advanced) && /Automation/.test(full.advanced) && !/Model source/.test(full.advanced) && /Diagnostics and recovery/.test(full.advanced),
         diagnostics: /Version and service status/.test(diag) && /Recovery guide/.test(diag) && /Full configuration/.test(diag),
       };
       document.querySelector('[data-settings-tab=common]')?.click();

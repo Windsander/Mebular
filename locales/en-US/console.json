@@ -1351,7 +1351,7 @@
     "settings.runtime.modelStatus.sources": "Available sources",
     "settings.runtime.modelStatus.state": "State",
     "settings.runtime.modelStatus.unavailable": "Not available yet",
-    "settings.runtime.modelStatus.foot": "Change the model source in Advanced; failures degrade only and never block chat.",
+    "settings.runtime.modelStatus.foot": "Change the model source above; failures degrade only and never block chat.",
     "settings.runtime.modelSource.title": "Model source",
     "settings.runtime.modelSource.desc": "Affects memory extraction and summaries only; selecting a local model opens download and enable controls below.",
     "settings.runtime.modelSource.selectLabel": "Model source",

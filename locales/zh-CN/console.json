@@ -1351,7 +1351,7 @@
     "settings.runtime.modelStatus.sources": "可用来源",
     "settings.runtime.modelStatus.state": "状态",
     "settings.runtime.modelStatus.unavailable": "暂无模型状态",
-    "settings.runtime.modelStatus.foot": "模型来源可在「高级」中调整；切换失败只降级，不影响对话。",
+    "settings.runtime.modelStatus.foot": "模型来源可在上方调整；失败只降级，不影响对话。",
     "settings.runtime.modelSource.title": "模型来源",
     "settings.runtime.modelSource.desc": "仅影响记忆的抽取与摘要；选择本地模型后可在下方下载与启用。",
     "settings.runtime.modelSource.selectLabel": "模型来源",

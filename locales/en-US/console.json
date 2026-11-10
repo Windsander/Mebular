@@ -456,7 +456,7 @@
     "settings.service.msg.uninstalled": "No longer running as a resident service.",
     "settings.service.msg.failed": "Could not finish: {message}. Try Recheck or copy the diagnostics.",
     "settings.wizard.title": "Setup wizard",
-    "settings.wizard.note": "Re-run setup; existing config kept",
+    "settings.wizard.note": "Re-run setup; config is kept",
     "settings.wizard.action": "Restart wizard ›",
     "settings.repair.title": "Auto repair",
     "settings.repair.note": "Re-run MCP & Skills",

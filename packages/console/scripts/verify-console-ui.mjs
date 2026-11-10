@@ -3436,15 +3436,15 @@ async function main() {
       out.diag = diag.slice(0, 600);
       out.diagCjk = hasCjk(diag);
       out.has = {
-        language: /Language/.test(full.common),
-        commonStatus: /This device/.test(full.common),
-        service: /Resident/.test(full.common),
-        securitySections: /Security level/.test(full.security) && /Authenticator seed/.test(full.security) && /Recovery code/.test(full.security),
-        assistants: /Add agent/.test(full.assistants),
-        runtime: /Memory mode/.test(full.runtime) && /Lightweight MCP/.test(full.runtime) && /Immersive/.test(full.runtime) && /Model source/.test(full.runtime) && /Model status/.test(full.runtime) && !/Third-party API/.test(full.runtime),
-        mcp: /Connection/.test(full.mcp) && /TLS/.test(full.mcp) && /Risks and recovery/.test(full.mcp),
-        advanced: /Resident service/.test(full.advanced) && /Network/.test(full.advanced) && /Automation/.test(full.advanced) && !/Model source/.test(full.advanced) && /Diagnostics and recovery/.test(full.advanced),
-        diagnostics: /Version and service status/.test(diag) && /Recovery guide/.test(diag) && /Full configuration/.test(diag),
+        language: /Language/i.test(full.common),
+        commonStatus: /This device/i.test(full.common),
+        service: /Resident/i.test(full.common),
+        securitySections: /Security level/i.test(full.security) && /Authenticator seed/i.test(full.security) && /Recovery code/i.test(full.security),
+        assistants: /Add agent/i.test(full.assistants),
+        runtime: /Memory mode/i.test(full.runtime) && /Lightweight MCP/i.test(full.runtime) && /Immersive/i.test(full.runtime) && /Model source/i.test(full.runtime) && /Model status/i.test(full.runtime) && !/Third-party API/i.test(full.runtime),
+        mcp: /Connection/i.test(full.mcp) && /TLS/i.test(full.mcp) && /Risks and recovery/i.test(full.mcp),
+        advanced: /Resident service/i.test(full.advanced) && /Network/i.test(full.advanced) && /Automation/i.test(full.advanced) && !/Model source/i.test(full.advanced) && /Diagnostics and recovery/i.test(full.advanced),
+        diagnostics: /Version and service status/i.test(diag) && /Recovery guide/i.test(diag) && /Full configuration/i.test(diag),
       };
       document.querySelector('[data-settings-tab=common]')?.click();
       return out;

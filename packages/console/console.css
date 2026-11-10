@@ -684,28 +684,46 @@ body.modal-open { overflow: hidden; }
 .settings-diag-block:first-child { border-top: 0; padding-top: 0; }
 .settings-diag-block h4 { margin: 0 0 6px; font-size: 12px; display: flex; align-items: center; gap: 6px; }
 .cfg-diag-path { margin: 0 0 6px; font-size: 11px; }
-/* E2-A2：忆云卡（设置 · 常用） */
+/* 视觉隐藏但保留给读屏/断言（如归档切换提示） */
+.sr-only {
+  position: absolute !important; width: 1px !important; height: 1px !important;
+  padding: 0 !important; margin: -1px !important; overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important; clip-path: inset(50%) !important;
+  white-space: nowrap !important; border: 0 !important;
+}
+/* E2-A2：忆云卡（设置 · 常用）
+   U-4 收口：行固定 58px 两行（名称/状态 + 指纹/最近使用），动作一列；
+   名称更新/改名说明不再逐行铺开，改由 title / section foot 承担。 */
 .cloud-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
-.cloud-intro { margin: 0 0 8px; font-size: 11.5px; }
+.cloud-intro { margin: 0 0 8px; font-size: 11.5px; line-height: 1.55; }
 .cloud-rows { display: grid; gap: 8px; }
 .cloud-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 4px 12px;
+  gap: 8px 12px;
   align-items: center;
-  padding: 9px 10px;
+  min-height: 58px;
+  padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: rgba(8, 14, 28, 0.45);
   min-width: 0;
 }
 .cloud-row.is-current { border-color: rgba(80, 255, 170, 0.32); background: rgba(80, 255, 170, 0.05); }
-.cloud-main { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
-.cloud-name { font-weight: 600; overflow-wrap: anywhere; }
 .cloud-row.is-duplicate { border-color: rgba(255, 210, 122, 0.45); }
+.cloud-main { display: grid; gap: 3px; min-width: 0; }
+.cloud-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.cloud-name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cloud-sub {
+  display: flex; align-items: center; gap: 6px; min-width: 0; margin: 0;
+  font-size: 10.5px; line-height: 1.4; color: var(--crt-dim); text-shadow: none;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* .modal-box p 默认 pre-wrap（帮助文本换行）；行内元信息需要单行省略 */
+.settings-scroll .cloud-sub { white-space: nowrap; }
+.cloud-sub code { color: var(--accent); font: inherit; }
+.cloud-sep { color: var(--crt-faint); }
 .cloud-dup-badge, .cloud-suggest-badge { white-space: nowrap; }
-.cloud-rename-hint { font-size: 11px; }
-.cloud-rename-note { grid-column: 1 / -1; margin: 0; font-size: 11px; }
 /* 顶栏忆云徽章：当前忆云被判定重名时的警告点 */
 .cloud-warning-dot {
   width: 7px; height: 7px; border-radius: 50%;
@@ -713,10 +731,10 @@ body.modal-open { overflow: hidden; }
   box-shadow: 0 0 0 2px rgba(255, 210, 122, 0.18);
   flex: 0 0 auto;
 }
-.cloud-meta { grid-column: 1; display: flex; gap: 6px 14px; flex-wrap: wrap; font-size: 11px; color: var(--muted); min-width: 0; }
-.cloud-meta code { color: var(--accent); overflow-wrap: anywhere; }
-.cloud-actions { grid-column: 2; grid-row: 1 / span 2; display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex-wrap: wrap; min-width: 0; }
-.cloud-actions .cloud-rename-input { width: 150px; min-width: 0; }
+.cloud-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.cloud-actions .cloud-rename-input { flex: 1 1 160px; width: auto; min-width: 0; }
+.cloud-row.is-renaming { grid-template-columns: minmax(0, 1fr); align-items: start; }
+.cloud-row.is-renaming .cloud-actions { grid-column: 1; justify-content: flex-start; }
 .cloud-rename-error { grid-column: 1 / -1; margin: 2px 0 0; font-size: 11px; }
 .cloud-unavailable { margin: 0 0 4px; font-size: 12px; color: #ffd27a; line-height: 1.6; }
 .cloud-inspect { margin: 8px 0 0; font-size: 11.5px; line-height: 1.7; min-height: 0; }
@@ -764,6 +782,7 @@ body.modal-open { overflow: hidden; }
   .cloud-row { grid-template-columns: minmax(0, 1fr); }
   .cloud-actions { grid-column: 1; grid-row: auto; justify-content: flex-start; }
   .cloud-actions .cloud-rename-input { flex: 1 1 100%; width: 100%; }
+  .settings-scroll .cloud-name, .settings-scroll .cloud-sub { white-space: normal; overflow: visible; text-overflow: clip; }
 }
 .settings-kv {
   display: grid;
@@ -1891,6 +1910,14 @@ body.modal-open { overflow: hidden; }
 .asst-detail-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .asst-output { margin-top: 4px; }
 .settings-resident { margin-bottom: 4px; }
+/* U-4 常用收口：常驻行只保留一行状态 + 一行说明 + 动作组；家目录移入「关于本机」 */
+.settings-resident .asst-service-xp {
+  display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; gap: 4px 8px; padding: 0 2px 4px;
+}
+.settings-resident .asst-service-note { margin: 0; font-size: 11px; line-height: 1.5; }
+.settings-resident .asst-detail-actions { margin-top: 0; }
+.settings-resident #service-msg { flex: 1 1 100%; margin: 4px 0 0; }
 /* U-4 收口：640 外框 − 160px 竖轨后内容列约 420px；英文「Not resident (temporary)」等长状态
    会把动作按钮挤出可视区。常驻行与重启向导/自动修行同一策略：名称不占固定宽、说明可收缩换行、
    动作按钮永不收缩；≤760 的整行换行规则继续生效。 */

@@ -6722,9 +6722,15 @@ function cloudRowHtml(entry) {
   const fingerprint = entry.masterFingerprint
     ? `<code>${escapeHtml(entry.masterFingerprint)}</code>`
     : `<span class="kv-empty">${escapeHtml(t('settings.cloud.row.unknownRepair'))}</span>`;
-  const lastUsed = entry.lastUsedAt ? formatTime(entry.lastUsedAt) : '—';
+  const lastUsed = entry.lastUsedAt ? formatShortDate(entry.lastUsedAt) : '—';
+  const lastUsedFull = entry.lastUsedAt ? formatTime(entry.lastUsedAt) : '—';
+  const fingerprintText = entry.masterFingerprint ?? t('settings.cloud.row.unknownRepair');
+  const metaTitle = `${t('settings.cloud.row.rootFingerprint', { fingerprint: fingerprintText })} · ${t('settings.cloud.row.lastUsed', { time: lastUsedFull })}`;
   const conflictBadges = duplicate
     ? `<span class="badge badge-warn cloud-dup-badge">${escapeHtml(t('settings.cloud.row.duplicate'))}</span>${suggested ? `<span class="badge badge-warn cloud-suggest-badge">${escapeHtml(t('settings.cloud.row.suggestRename'))}</span>` : ''}`
+    : '';
+  const nameTitle = entry.nameUpdatedAt
+    ? ` title="${escapeHtml(t('settings.cloud.row.nameUpdated', { time: formatTime(entry.nameUpdatedAt) }))}"`
     : '';
   // 第一版：只有当前忆云能写网络级名字；归档项提示切换后再改。
   const renameUi = current
@@ -6733,22 +6739,19 @@ function cloudRowHtml(entry) {
            value="${escapeHtml(state.cloudRename?.name ?? entry.name)}" aria-label="${escapeHtml(t('settings.cloud.rename.aria'))}" />
          <button class="btn btn-small btn-crt" data-cloud-rename-save type="button" ${cloudRenameBusy ? 'disabled' : ''}>${escapeHtml(t('settings.cloud.rename.save'))}</button>
          <button class="btn btn-small" data-cloud-rename-cancel type="button">${escapeHtml(t('common.cancel'))}</button>`
-      : `<button class="btn btn-small btn-crt" data-cloud-rename="${id}" type="button">${escapeHtml(t('settings.cloud.rename.action'))}</button>`)
-    : `<button class="btn btn-small btn-crt btn-crt-danger" data-cloud-switch="${id}" type="button">${escapeHtml(t('settings.cloud.row.switch'))}</button>
-       <span class="cloud-rename-hint muted">${escapeHtml(t('settings.cloud.row.switchHint'))}</span>`;
-  return `<div class="cloud-row${current ? ' is-current' : ''}${duplicate ? ' is-duplicate' : ''}" data-cloud-row="${id}">
+      : `<button class="btn btn-small btn-crt" data-cloud-rename="${id}" type="button" title="${escapeHtml(t('settings.cloud.row.renameNote'))}">${escapeHtml(t('settings.cloud.rename.action'))}</button>`)
+    : `<button class="btn btn-small btn-crt" data-cloud-switch="${id}" type="button" title="${escapeHtml(t('settings.cloud.row.switchHint'))}">${escapeHtml(t('settings.cloud.row.switch'))}</button>
+       <span class="sr-only">${escapeHtml(t('settings.cloud.row.switchHint'))}</span>`;
+  return `<div class="cloud-row${current ? ' is-current' : ''}${duplicate ? ' is-duplicate' : ''}${renaming ? ' is-renaming' : ''}" data-cloud-row="${id}">
     <div class="cloud-main">
-      <span class="cloud-name">${escapeHtml(entry.name)}</span>
-      <span class="badge ${current ? 'badge-ok' : 'badge-muted'}">${escapeHtml(t(current ? 'settings.cloud.row.current' : 'settings.cloud.row.archived'))}</span>
-      ${conflictBadges}
-    </div>
-    <div class="cloud-meta">
-      <span>${t('settings.cloud.row.rootFingerprint', { fingerprint })}</span>
-      <span>${escapeHtml(t('settings.cloud.row.lastUsed', { time: lastUsed }))}</span>
-      ${entry.nameUpdatedAt ? `<span>${escapeHtml(t('settings.cloud.row.nameUpdated', { time: formatTime(entry.nameUpdatedAt) }))}</span>` : ''}
+      <div class="cloud-title">
+        <span class="cloud-name"${nameTitle}>${escapeHtml(entry.name)}</span>
+        <span class="badge ${current ? 'badge-ok' : 'badge-muted'}">${escapeHtml(t(current ? 'settings.cloud.row.current' : 'settings.cloud.row.archived'))}</span>
+        ${conflictBadges}
+      </div>
+      <p class="cloud-sub" title="${escapeHtml(metaTitle)}">${t('settings.cloud.row.rootFingerprint', { fingerprint })}<span class="cloud-sep" aria-hidden="true">·</span>${escapeHtml(t('settings.cloud.row.lastUsed', { time: lastUsed }))}</p>
     </div>
     <div class="cloud-actions">${renameUi}</div>
-    ${current ? `<p class="cfg-help muted cloud-rename-note">${escapeHtml(t('settings.cloud.row.renameNote'))}</p>` : ''}
     ${renaming && state.cloudRenameError ? `<p class="crt-warn cloud-rename-error" role="alert">${escapeHtml(state.cloudRenameError)}</p>` : ''}
   </div>`;
 }
@@ -6760,7 +6763,6 @@ function cloudCardHtml() {
     const rows = (state.clouds.profiles ?? []).map(cloudRowHtml).join('');
     body = `${state.clouds.warning ? `<p class="crt-warn">${escapeHtml(localizeReasonText(state.clouds.warning, 'errors.unknown'))}</p>` : ''}
       <div class="cloud-rows">${rows || `<p class="muted">${escapeHtml(t('settings.cloud.empty'))}</p>`}</div>
-      <p class="cfg-help muted">${escapeHtml(t('settings.cloud.note'))}</p>
       ${state.clouds.nameConflicts?.currentDuplicate
         ? `<p class="crt-warn">${escapeHtml(t('settings.cloud.duplicate'))}</p>`
         : ''}`;
@@ -6771,9 +6773,10 @@ function cloudCardHtml() {
     body = `<p class="muted">${escapeHtml(t('settings.cloud.loading'))}</p>`;
   }
   return `<section id="settings-cloud-card" class="settings-section cloud-card" data-settings-clouds tabindex="-1">
-    <h3>${escapeHtml(t('settings.cloud.title'))} <span class="badge badge-muted">${escapeHtml(t('settings.cloud.keepArchived'))}</span></h3>
+    <h3>${escapeHtml(t('settings.cloud.title'))}</h3>
     <p class="muted cloud-intro">${escapeHtml(t('settings.cloud.intro'))}</p>
     ${body}
+    <p class="settings-section-foot muted">${escapeHtml(t('settings.cloud.note'))} ${escapeHtml(t('settings.cloud.keepArchived'))}。</p>
   </section>`;
 }
 
@@ -7380,6 +7383,16 @@ async function wizardNext() {
 function formatTime(ts) {
   if (!ts) return '—';
   return formatLocaleDateTime(ts);
+}
+
+/** 忆云行内短日期（月/日）；完整时间在 title。 */
+function formatShortDate(ts) {
+  if (!ts) return '—';
+  try {
+    return new Intl.DateTimeFormat(getLocale(), { month: '2-digit', day: '2-digit' }).format(new Date(ts));
+  } catch {
+    return formatLocaleDate(ts);
+  }
 }
 
 function escapeHtml(value) {

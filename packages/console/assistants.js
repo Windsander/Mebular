@@ -358,15 +358,12 @@ export function serviceRowHtml(service, serviceMsg = '') {
         : `<button class="btn btn-small btn-crt" type="button" data-svc-action="install">${esc(tr('settings.service.install', '让 Mebular 常驻'))}</button>`}
     </div>
     <div class="asst-xp asst-service-xp">
-      <p class="muted">${tr('settings.service.note', '开机自启、崩溃自动拉起。家目录 {home}（服务文件路径见「关于本机」）。', {
-        home: `<code>${esc(service.home ?? '—')}</code>`,
-      })}</p>
+      <p class="muted asst-service-note">${esc(tr('settings.service.note', '开机自启、崩溃自动拉起。'))}</p>
       <div class="asst-detail-actions">
         <button class="btn btn-small" type="button" data-svc-action="restart">${esc(tr('settings.service.restart', '立即重启'))}</button>
-        <button class="btn btn-small" type="button" data-svc-action="recheck">${esc(tr('settings.service.recheck', '重新检测'))}</button>
-        <button class="btn btn-small" type="button" data-svc-action="uninstall" ${registered ? '' : 'disabled'}>${esc(tr('settings.service.uninstall', '取消常驻'))}</button>
+        ${registered ? `<button class="btn btn-small" type="button" data-svc-action="uninstall">${esc(tr('settings.service.uninstall', '取消常驻'))}</button>` : ''}
       </div>
-      <p class="asst-line" id="service-msg">${esc(serviceMsg)}</p>
+      ${serviceMsg ? `<p class="asst-line" id="service-msg">${esc(serviceMsg)}</p>` : ''}
     </div>`;
 }
 

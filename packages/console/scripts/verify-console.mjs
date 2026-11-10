@@ -1800,8 +1800,8 @@ try {
         && /\.modal-box\.modal-settings \{[^}]*overflow: hidden/.test(cssSrc)
         && /\.modal-box\.modal-settings \{[^}]*height: min\(720px, calc\(100vh - 48px\)\);/.test(cssSrc)
         && /@media \(max-width: 900px\) \{[\s\S]*?\.settings-shell \{ flex-direction: column;[\s\S]*?\.settings-rail \{/.test(cssSrc)
-        && /\.settings-rail-foot \{[^}]*padding-top: 6px;/.test(cssSrc)
-        && /\.settings-rail-foot::before \{[^}]*left: 12px; right: 12px;/.test(cssSrc)
+        && /\.settings-rail-foot \{[^}]*padding-top: 0;/.test(cssSrc)
+        && !/\.settings-rail-foot::before/.test(cssSrc)
         && /\.settings-rail-foot \.settings-tab-extra::after \{[^}]*content: "ⓘ"/.test(cssSrc)
         && jsSrc.includes('settings-rail-foot') && jsSrc.includes('data-settings-extra="${escapeHtml(item.opens)}"'),
       'shell/rail 160/foot/900 折叠就位');

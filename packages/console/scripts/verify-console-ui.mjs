@@ -3007,8 +3007,8 @@ async function main() {
           && level.querySelector('.sec-card-value strong')?.textContent === 'Low'
           && seed.querySelector('.sec-card-value strong')?.textContent === 'Not imported'
           && recovery.querySelector('.sec-card-value strong')?.textContent === 'Not generated'
-          && /Medium-risk actions need a 6-digit code/.test(seed.querySelector('.sec-card-line')?.textContent ?? '')
-          && /Offline key for the High tier/.test(recovery.querySelector('.sec-card-line')?.textContent ?? '')
+          && /6-digit code for medium-risk actions/.test(seed.querySelector('.sec-card-line')?.textContent ?? '')
+          && /Offline High-tier key/.test(recovery.querySelector('.sec-card-line')?.textContent ?? '')
           && getComputedStyle(seed, '::before').content === 'none'
           && getComputedStyle(recovery.querySelector('.sec-card-head > .sec-dot')).backgroundColor === 'rgba(0, 0, 0, 0)'
           && getComputedStyle(seed.querySelector('.sec-card-head > .sec-dot')).borderTopWidth === '1px';

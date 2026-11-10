@@ -542,7 +542,7 @@
     "settings.security.card.level.mech.low": "无额外门槛",
     "settings.security.card.level.mech.medium": "6 位动态码",
     "settings.security.card.level.mech.high": "设备会签",
-    "settings.security.card.level.line.low": "无额外门槛。",
+    "settings.security.card.level.line.low": "敏感操作直接执行，不做二次确认。",
     "settings.security.card.level.line.medium": "6 位码只防随手；设备被拿走，种子也会被拿走。",
     "settings.security.card.level.line.high": "另一台设备核对配对号；不在场用离线恢复码。",
     "settings.security.card.level.change": "更改等级",

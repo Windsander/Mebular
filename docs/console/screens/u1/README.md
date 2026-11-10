@@ -2,7 +2,7 @@
 
 基线：main `f1a1219`。截图由 `verify-console-ui.mjs`（真实 serve + headless Chrome）与同一临时 home 的 Playwright 截图生成。
 
-> **U-4 刷新（2026-11-09）**：设置弹层改为「左侧竖轨 + 固定外壳 + 统一行模板」，常用页基线已刷新为 `u1-after-settings-common.jpg`、`u1-after-settings-common-390.jpg`（脚本原始输出名 `u1-after-settings-common*`）。旧 `after-settings-common*.jpg` 已移除。安全 / MCP / 高级的后续基线以 `../u3/` 为准，U-4 全量基线见 `../u4-settings-redesign/`。
+> **U-4 刷新（2026-11-10）**：设置弹层改为「左侧竖轨 + 固定外壳 + 统一行模板」，常用页基线已刷新为 `u1-after-settings-common.jpg`、`u1-after-settings-common-390.jpg`（脚本原始输出名 `u1-after-settings-common*`）。旧 `after-settings-common*.jpg` 已移除。安全 / MCP / 高级的后续基线以 `../u3/` 为准，U-4 全量基线见 `../u4-settings-redesign/`。同日按 Kimi 设置稿对齐：分组标题 10px / 1.5 字距，状态/常驻/忆云组内只加一层 CRT 内嵌面板（设计稿的 card），不引入第二层卡片或蓝底。
 
 ## 折叠预算
 
@@ -17,7 +17,7 @@
 
 | 文件 | 说明 |
 |---|---|
-| `before-settings-common.jpg` / `u1-after-settings-common.jpg` | 设置·常用（U-4 竖轨版已刷新）：删除重复「邀请设备」入口；统一 section 标题/间距；无卡片套卡片；语言行 + 常驻/修复行 |
+| `before-settings-common.jpg` / `u1-after-settings-common.jpg` | 设置·常用（U-4 竖轨版已刷新）：删除重复「邀请设备」入口；统一 section 标题/间距；外框单卡，状态/常驻/忆云组内仅一层 CRT 内嵌面板；语言行 + 常驻/修复行 |
 | `before-settings-advanced.jpg` / `after-settings-advanced.jpg` | 高级：页级说明改为一行；字段帮助内联；底部诊断折叠 |
 | `before-settings-mcp.jpg` / `after-settings-mcp.jpg` | MCP 接入：六字段 + 一个「危险与自救」折叠 |
 | `before-settings-security.jpg` / `after-settings-security.jpg` | 安全：有资格设备一行计数；档位边界内联 |

@@ -1455,8 +1455,8 @@ function renderCfgField(field) {
 }
 
 // 单一行模板：label | value | action 三列固定（动作列不撑高行；空值统一 muted 占位）
-function kvRow(label, value, copyPayload = null) {
-  return { label, value, copyPayload };
+function kvRow(label, value, copyPayload = null, options = {}) {
+  return { label, value, copyPayload, ...options };
 }
 
 function copyRowOf(label, value) {
@@ -1469,7 +1469,7 @@ function emptyRowOf(label, text) {
 
 function kvRows(rows) {
   const body = rows.map((row) => `<div class="kv-row"><dt>${escapeHtml(row.label)}</dt>`
-    + `<dd class="kv-value">${row.value}</dd>`
+    + `<dd class="kv-value">${row.tone ? `<span class="kv-inline"><span class="kv-dot ${escapeHtml(row.tone)}" aria-hidden="true"></span>${row.value}</span>` : row.value}</dd>`
     + `<dd class="kv-action">${row.copyPayload === null || row.copyPayload === undefined
       ? ''
       : `<button class="btn btn-small btn-crt" type="button" data-copy="${escapeHtml(row.copyPayload)}">${escapeHtml(t('common.copy'))}</button>`}</dd></div>`).join('');
@@ -2120,7 +2120,10 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
   const tabLabel = (tab) => t(tab.labelKey ?? `settings.tab.${tab.id}`);
   const tabButton = (tab) => `<button id="settings-tab-${tab.id}" class="settings-tab${tab.id === activeTab ? ' is-active' : ''}"`
     + ` data-settings-tab="${tab.id}" type="button" role="tab" aria-selected="${tab.id === activeTab}" aria-controls="settings-panel-${tab.id}">${escapeHtml(tabLabel(tab))}</button>`;
-  const extraButton = (item) => `<button class="settings-tab settings-tab-extra" type="button" data-settings-extra="${escapeHtml(item.opens)}">${escapeHtml(item.labelKey ? t(item.labelKey) : item.label)}</button>`;
+  const extraButton = (item) => {
+    const label = item.labelKey ? t(item.labelKey) : item.label;
+    return `<button class="settings-tab settings-tab-extra" type="button" data-settings-extra="${escapeHtml(item.opens)}" aria-label="${escapeHtml(label)}">${escapeHtml(label)}</button>`;
+  };
   const panel = (id, inner) => `<section id="settings-panel-${id}" class="settings-panel" data-settings-panel="${id}" role="tabpanel"`
     + ` aria-labelledby="settings-tab-${id}"${id === activeTab ? '' : ' hidden'}>${inner}</section>`;
   // 页签轨（竖轨）+ 底部「关于本机」foot；正常分支与 ?mock=1 分支共用。
@@ -2161,11 +2164,11 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
       ${wizardRowHtml(host.capabilities.openWizard)}
       <section class="settings-section" data-settings-common-status>
         <h3>${escapeHtml(t('settings.common.statusTitle'))} <span class="badge badge-muted">${escapeHtml(t('settings.common.readonly'))}</span></h3>
-        ${kvRows([
-          kvRow('P2P', s.network.enabled ? t('settings.common.enabled') : t('settings.common.disabled')),
-          kvRow(t('settings.common.inviteService'), s.join?.enabled ? t('settings.common.enabled') : t('settings.common.inviteDisabled')),
-          kvRow(t('settings.common.securityLevel'), securityLevel ? securityLevelLabel(securityLevel) : '—'),
-        ])}
+        <div class="settings-status-card">${kvRows([
+          kvRow('P2P', s.network.enabled ? t('settings.common.enabled') : t('settings.common.disabled'), null, { tone: s.network.enabled ? 'ok' : 'off' }),
+          kvRow(t('settings.common.inviteService'), s.join?.enabled ? t('settings.common.enabled') : t('settings.common.inviteDisabled'), null, { tone: s.join?.enabled ? 'ok' : 'off' }),
+          kvRow(t('settings.common.securityLevel'), securityLevel ? securityLevelLabel(securityLevel) : '—', null, { tone: securityLevel ? (securityLevel === 'medium' ? 'warn' : 'ok') : 'off' }),
+        ])}</div>
         <p class="settings-note muted">${escapeHtml(t('settings.common.note'))}</p>
       </section>
       ${cloudCardHtml()}
@@ -2286,10 +2289,9 @@ function securitySectionCard({ id, index, titleId, title, state: cardState = 'ef
     <section class="settings-section sec-card ${off ? 'is-off' : 'is-effective'}" data-settings-section="${escapeHtml(id)}" aria-labelledby="${escapeHtml(titleId)}">
       <span class="sec-card-idx" aria-hidden="true">${escapeHtml(index)}</span>
       <div class="sec-card-main">
-        <div class="sec-card-head"><span class="sec-dot${off ? ' is-off' : ''}" aria-hidden="true"></span><h3 id="${escapeHtml(titleId)}">${escapeHtml(title)}</h3>${chip}</div>
+        <div class="sec-card-head"><span class="sec-dot${off ? ' is-off' : ''}" aria-hidden="true"></span><h3 id="${escapeHtml(titleId)}">${escapeHtml(title)}</h3>${chip}${actions ? `<div class="sec-card-actions">${actions}</div>` : ''}</div>
         ${body}
       </div>
-      ${actions ? `<div class="sec-card-actions">${actions}</div>` : ''}
     </section>`;
 }
 
@@ -2438,7 +2440,7 @@ function securityCardHtml() {
     : '';
   const seedMeta = seedImported
     ? `<p class="sec-card-meta"><code>${escapeHtml(fingerprint ?? '—')}</code><span class="sec-sep" aria-hidden="true">·</span><span>${escapeHtml(t('settings.security.card.seed.meta'))}</span></p>`
-    : `<p class="sec-card-meta"><span class="sec-card-warn">${escapeHtml(t('settings.security.totp.notImported'))}</span><span class="sec-sep" aria-hidden="true">·</span><span>${escapeHtml(t('settings.security.totp.notImportedNote'))}</span></p>`;
+    : `<p class="sec-card-meta"><span class="sec-card-warn">${escapeHtml(t('settings.security.totp.notImportedNote'))}</span></p>`;
   const seedCard = securitySectionCard({
     id: 'security-totp',
     index: '02',

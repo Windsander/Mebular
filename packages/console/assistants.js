@@ -350,6 +350,7 @@ export function serviceRowHtml(service, serviceMsg = '') {
       service.running ? '已常驻·运行中' : '已常驻·未运行')
     : tr('settings.service.badge.temporary', '未常驻（临时运行）');
   return `<div class="asst-row">
+      <span class="kv-dot ${registered ? (service.running ? 'ok' : 'warn') : 'off'}" aria-hidden="true"></span>
       <span class="asst-name">${esc(tr('settings.service.title', '常驻运行'))}</span>
       <span class="asst-st">${esc(badge)}</span>
       <span class="asst-sp"></span>

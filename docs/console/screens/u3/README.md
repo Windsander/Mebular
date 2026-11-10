@@ -2,7 +2,7 @@
 
 基线：`openchamber/ui-consistency` `6475131`（#145，含 `f08091f` 新建域弹窗与 `6475131` 小弹窗居中）。本分支只改 `packages/console/**`、`tests/console/**`、`docs/console/**`；不改配置能力、行为或协议。
 
-> **U-4 刷新（2026-11-09）**：设置弹层改为「左侧 160px 竖轨（≤900 折顶部横排）+ 固定外壳 + 统一行模板」后，本目录 `u3-after-settings-advanced*.jpg`、`u3-after-settings-mcp*.jpg`、`u3-after-settings-security*.jpg` 已按同一脚本重新生成；下方「主 section 数 / 文本量」等 U-3 结论不变，仅视觉外壳变化。U-4 全量基线见 `../u4-settings-redesign/`。
+> **U-4 刷新（2026-11-10）**：设置弹层改为「左侧 160px 竖轨（≤900 折顶部横排）+ 固定外壳 + 统一行模板」后，本目录 `u3-after-settings-advanced*.jpg`、`u3-after-settings-mcp*.jpg`、`u3-after-settings-security*.jpg` 已按同一脚本重新生成；同日按 Kimi 设置稿对齐分组标题（10px / 1.5 字距）与安全卡动作位置（移入标题行右侧，正文整行宽）。下方「主 section 数 / 文本量」等 U-3 结论不变，仅视觉外壳变化。U-4 全量基线见 `../u4-settings-redesign/`。
 
 ## 1. 现状 sections → 目标 sections
 

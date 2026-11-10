@@ -591,10 +591,10 @@ body.modal-open { overflow: hidden; }
 .settings-rail .settings-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .settings-rail-foot { margin-top: auto; padding-top: 0; border-top: 0; }
 .settings-rail-foot .settings-tab { width: 100%; }
-.settings-rail-foot .settings-tab-extra { margin-left: 0; padding: 0 16px; color: var(--crt-dim); }
+.settings-rail-foot .settings-tab-extra { margin-left: 0; padding: 0 16px; gap: 6px; color: var(--crt-dim); }
 .settings-rail-foot .settings-tab-extra:hover { color: var(--crt-bright); background: rgba(80, 255, 170, 0.04); }
 .settings-rail-foot .settings-tab-extra::after {
-  content: "ⓘ"; margin-left: auto;
+  content: "ⓘ"; margin-left: 0;
   color: var(--crt-dim); font-size: 11px; line-height: 1;
   letter-spacing: 0; flex: none;
 }

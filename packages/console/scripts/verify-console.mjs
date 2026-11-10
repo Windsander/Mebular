@@ -1793,11 +1793,12 @@ try {
       '760 单列 + 异常状态保留');
 
     const railActive = cssSrc.match(/\.settings-rail \.settings-tab\.is-active \{[\s\S]*?\n\}/)?.[0] ?? '';
-    check('U-4 设置壳：左轨 160px + 640 外框不变 + ≤900 折叠顶部横排',
+    check('U-4 设置壳：左轨 160px + 640 外框不变 + 固定 720px 高 + ≤900 折叠顶部横排',
       /\.settings-shell \{[^}]*display: flex;/.test(cssSrc)
         && /\.settings-rail \{[^}]*flex: 0 0 160px;[^}]*width: 160px;/.test(cssSrc)
         && /\.modal-box-wide \{ width: min\(640px, 94vw\); \}/.test(cssSrc)
         && /\.modal-box\.modal-settings \{[^}]*overflow: hidden/.test(cssSrc)
+        && /\.modal-box\.modal-settings \{[^}]*height: min\(720px, calc\(100vh - 48px\)\);/.test(cssSrc)
         && /@media \(max-width: 900px\) \{[\s\S]*?\.settings-shell \{ flex-direction: column;[\s\S]*?\.settings-rail \{/.test(cssSrc)
         && /\.settings-rail-foot \{[^}]*border-top: 1px solid var\(--border\);/.test(cssSrc)
         && jsSrc.includes('settings-rail-foot') && jsSrc.includes('data-settings-extra="${escapeHtml(item.opens)}"'),

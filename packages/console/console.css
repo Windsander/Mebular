@@ -717,8 +717,8 @@ body.modal-open { overflow: hidden; }
 /* 设计稿对齐：忆云是一个整体面板，行间用虚线分隔，而不是两张浮动卡片 */
 .cloud-rows {
   display: grid; gap: 0; overflow: hidden;
-  border: 1px solid var(--border); border-radius: 10px;
-  background: rgba(8, 14, 28, 0.45);
+  border: 1px solid var(--crt-border-soft); border-radius: 10px;
+  background: rgba(2, 16, 11, 0.28);
 }
 .cloud-row {
   display: grid;
@@ -732,7 +732,7 @@ body.modal-open { overflow: hidden; }
   background: transparent;
   min-width: 0;
 }
-.cloud-row + .cloud-row { border-top: 1px dashed var(--border); }
+.cloud-row + .cloud-row { border-top: 1px dashed var(--crt-border-soft); }
 .cloud-row.is-current { background: rgba(80, 255, 170, 0.05); }
 .cloud-row.is-duplicate { box-shadow: inset 2px 0 0 rgba(255, 210, 122, 0.6); }
 .cloud-main { display: grid; gap: 3px; min-width: 0; }

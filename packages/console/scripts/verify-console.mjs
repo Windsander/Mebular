@@ -1867,6 +1867,15 @@ try {
         && cssSrc.includes('.cfg-row + .cfg-effective {')
         && /\.cfg-row \+ \.cfg-effective \{[^}]*position: static;[^}]*display: flex;/s.test(cssSrc),
       'compare line sibling + static');
+    check('v2.1 排印/尺寸：标题 15、标签 13、按钮 27、分组大写、卡序号与审计一行',
+      cssSrc.includes('font-size: 15px; line-height: 20px; font-weight: 700;')
+        && cssSrc.includes('grid-template-columns: 150px minmax(0, 1fr) 68px;')
+        && cssSrc.includes('height: 27px; min-height: 27px;')
+        && cssSrc.includes('text-transform: uppercase;')
+        && cssSrc.includes('.sec-card-idx {')
+        && jsSrc.includes('data-security-audit')
+        && jsSrc.includes('settings.group.interface'),
+      '15/13/27/uppercase/index/audit');
   }
 
   // ---------- 轮 C：设置页三症状 + 呈现分级（弹层壳 / 关闭规范 / 常显-折叠-异常） ----------

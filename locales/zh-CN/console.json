@@ -295,6 +295,7 @@
     "settings.common.statusTitle": "本机状态",
     "settings.common.readonly": "只读",
     "settings.common.group.runs": "本机运行",
+    "settings.group.interface": "界面",
     "settings.assistants.group": "已接入助手",
     "settings.common.enabled": "已启用",
     "settings.common.disabled": "未启用",

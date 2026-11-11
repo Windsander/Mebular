@@ -295,6 +295,7 @@
     "settings.common.statusTitle": "This device",
     "settings.common.readonly": "Read-only",
     "settings.common.group.runs": "Runs on this device",
+    "settings.group.interface": "Interface",
     "settings.assistants.group": "Connected assistants",
     "settings.common.enabled": "Enabled",
     "settings.common.disabled": "Disabled",

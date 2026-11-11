@@ -2161,7 +2161,10 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
     ${applyResultBanner()}
     ${shellHtml(`
     ${panel('common', `
-      ${languageSettingsRowHtml()}
+      <section class="settings-group" data-settings-group="interface">
+        <div class="settings-group-head"><h3>${escapeHtml(t('settings.group.interface'))}</h3></div>
+        <div class="settings-group-body">${languageSettingsRowHtml()}</div>
+      </section>
       <section class="settings-group" data-settings-group="resident">
         <div class="settings-group-head"><h3>${escapeHtml(t('settings.common.group.runs'))}</h3></div>
         <div class="settings-group-body" id="settings-resident">${serviceRowHtml(state.service, state.serviceMsg)}${repairRowHtml(state.repair)}${wizardRowHtml(host.capabilities.openWizard)}</div>
@@ -2294,10 +2297,12 @@ function securitySectionCard({ id, index, titleId, title, state: cardState = 'ef
   const off = cardState === 'off';
   return `
     <section class="settings-section sec-card ${off ? 'is-off' : 'is-effective'}" data-settings-section="${escapeHtml(id)}" aria-labelledby="${escapeHtml(titleId)}">
+      <span class="sec-card-idx" aria-hidden="true">${escapeHtml(index)}</span>
       <div class="sec-card-main">
-        <div class="sec-card-head"><span class="sec-dot${off ? ' is-off' : ''}" aria-hidden="true"></span><h3 id="${escapeHtml(titleId)}">${escapeHtml(title)}</h3>${chip}${actions ? `<div class="sec-card-actions">${actions}</div>` : ''}</div>
+        <div class="sec-card-head"><span class="sec-dot${off ? ' is-off' : ''}" aria-hidden="true"></span><h3 id="${escapeHtml(titleId)}">${escapeHtml(title)}</h3>${chip}</div>
         ${body}
       </div>
+      <div class="sec-card-actions">${actions}</div>
     </section>`;
 }
 
@@ -2400,6 +2405,21 @@ function securityPendingStrip({ incoming, outgoing }) {
     </div>`;
 }
 
+/** 安全审计一行流：取既有 security_* 事件的最新一条；没有就完全隐藏（不造数据）。 */
+function securityAuditLine() {
+  const types = ['security_tier', 'security_approval', 'security_recovery', 'security_totp'];
+  const event = (state.policy ?? [])
+    .filter((item) => item && types.includes(item.type))
+    .sort((a, b) => (Number(b.at) || 0) - (Number(a.at) || 0))[0];
+  if (!event) return '';
+  const when = event.at ? formatTime(event.at) : '';
+  return `<p class="sec-audit-line" data-security-audit>
+    ${when ? `<span class="sec-audit-time">${escapeHtml(when)}</span>` : ''}
+    <span class="sec-audit-type">${escapeHtml(actionLabel(event.type))}</span>
+    <span class="sec-audit-desc">${describeEvent(event)}</span>
+  </p>`;
+}
+
 /** 安全 tab：待批准条 + 三张状态卡（不内联展开；详情/危险动作统一进弹框）。 */
 function securityCardHtml() {
   const sec = state.security;
@@ -2499,6 +2519,7 @@ function securityCardHtml() {
     ${levelCard}
     ${seedCard}
     ${recoveryCard}
+    ${securityAuditLine()}
     ${rejectionFoot}`;
 }
 

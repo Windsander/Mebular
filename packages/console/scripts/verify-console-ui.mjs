@@ -827,6 +827,7 @@ async function main() {
     await sleep(250);
     const rows900 = await evalJs(`(() => {
       const read = (root, label) => {
+        if (!root) return { label, n: 0, badH: 1, badTop: 1 };
         const cells = [...root.querySelectorAll('.settings-kv dt')].map((dt) => {
           const dd = dt.nextElementSibling;
           if (!dd) return null;
@@ -839,6 +840,25 @@ async function main() {
       return { common: read(document.querySelector('#settings-panel-common'), 'common'),
         docW: document.documentElement.scrollWidth, vw: innerWidth, modalW: box ? Math.round(box.getBoundingClientRect().width) : 0 };
     })()`);
+    await waitFor('Boolean(document.querySelector("#settings-panel-common"))', 10000);
+    const v21 = await evalJs(`(() => {
+      const title = document.querySelector('#settings-panel-common') ? document.querySelector('#settings .modal-head h2') : null;
+      const ts = title ? getComputedStyle(title) : null;
+      const grp = document.querySelector('#settings-panel-common .settings-group-head h3');
+      const gs = grp ? getComputedStyle(grp) : null;
+      const face = document.querySelector('#settings-panel-common [data-settings-group=interface]');
+      const btn = document.querySelector('#settings-panel-common .btn');
+      return { title: { fs: ts?.fontSize, fw: ts?.fontWeight },
+        group: { fs: gs?.fontSize, ls: gs?.letterSpacing, tt: gs?.textTransform },
+        face: Boolean(face) && /界面|Interface/.test(face.textContent),
+        btnH: btn ? Math.round(btn.getBoundingClientRect().height) : 0,
+        docW: document.documentElement.scrollWidth, vw: innerWidth };
+    })()`);
+    check('v2.1 排印/尺寸：标题 15/700、分组 10/1.5 大写、按钮 27、界面组就位', Boolean(v21)
+      && v21.title.fs === '15px' && v21.title.fw === '700'
+      && v21.group.fs === '10px' && v21.group.ls === '1.5px' && v21.group.tt === 'uppercase'
+      && v21.face && v21.btnH === 27 && v21.docW <= v21.vw + 1,
+      JSON.stringify(v21));
     check('U-4 900 常用行模板：40 高 + label/value 同行（top 差 ≤2）+ 无横向溢出',
       Boolean(rows900) && rows900.common.n >= 3 && rows900.common.badH === 0 && rows900.common.badTop === 0
         && rows900.docW <= rows900.vw + 1 && rows900.modalW === 760,
@@ -1906,12 +1926,14 @@ async function main() {
         const second = rows[1];
         const status = second.querySelector(':scope > .cfg-status');
         const statusStyle = status ? getComputedStyle(status) : null;
-        return getComputedStyle(second).display === 'flex'
+        const cols = getComputedStyle(second).gridTemplateColumns.split(' ').filter(Boolean).map((v) => Math.round(parseFloat(v)));
+        return getComputedStyle(second).display === 'grid'
+          && cols.length === 3 && cols[0] === 150 && cols[2] === 68
           && Math.round(second.getBoundingClientRect().height) === 40
           && getComputedStyle(first).borderTopStyle === 'none'
           && getComputedStyle(second).borderTopStyle === 'dashed'
           && Boolean(status) && status.children.length === 0
-          && statusStyle.fontSize === '12px'
+          && statusStyle.fontSize === '13px'
           && statusStyle.fontWeight === '400';
       })()`));
     await clearViewport();
@@ -2009,6 +2031,11 @@ async function main() {
       'UI 待重启：设置弹窗出现「待重启」并含变更项（反熵间隔）',
       await waitFor('(() => { const el = document.querySelector("[data-pending-restart]"); return Boolean(el) && /待重启/.test(el.textContent) && /反熵间隔/.test(el.textContent) && /sync\\.antiEntropy\\.intervalMs/.test(el.getAttribute("title") ?? ""); })()'),
     );
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await evalJs('document.querySelector("[data-settings-tab=common]")?.click()');
+    await sleep(250);
+    check('720 + 40 条：常用内容不滚动（含界面组）',
+      await evalJs(`(() => { const sc = document.querySelector('#settings .settings-scroll'); const box = document.querySelector('#settings .modal-box'); return Boolean(sc) && Math.round(box.getBoundingClientRect().height) === 720 && sc.scrollHeight <= sc.clientHeight + 1; })()`));
     check(
       'UI 待重启：设置入口徽标标注「待重启 N 项」',
       await waitFor('/待重启/.test(document.querySelector("#settings-pending-badge")?.textContent ?? "")'),
@@ -3007,7 +3034,9 @@ async function main() {
           && /6 位动态码/.test(seed.querySelector('.sec-card-line')?.textContent ?? '')
           && /离线钥匙/.test(recovery.querySelector('.sec-card-line')?.textContent ?? '')
           && s.firstElementChild === pending && ps.backgroundColor === 'rgba(60, 42, 8, 0.24)'
-          && ps.borderLeftWidth === '2px' && ps.borderLeftColor === 'rgb(255, 210, 122)';
+          && ps.borderLeftWidth === '2px' && ps.borderLeftColor === 'rgb(255, 210, 122)'
+          && cards.map((c) => c.querySelector('.sec-card-idx')?.textContent.trim()).join(',') === '01,02,03'
+          && (() => { const a = s.querySelector('[data-security-audit]'); return Boolean(a) && Math.round(a.getBoundingClientRect().height) <= 20 && a.textContent.trim().length > 0; })();
       })()`));
     await evalJs('document.querySelector("[data-security-change-level]").click()');
     check('S3 mock：更改等级弹框 = 当前高档 + 可会签设备',
@@ -3172,7 +3201,8 @@ async function main() {
       const select = row?.querySelector('select[data-language-select]');
       const trigger = row?.querySelector('#settings-language-select-trigger');
       return Boolean(row) && Boolean(resident) && panel?.hidden === false
-        && row.parentElement === panel && row === panel.querySelector('.settings-language-row')
+        && row.closest('#settings-panel-common') === panel && Boolean(row.closest('.settings-group-body'))
+        && row === panel.querySelector('.settings-language-row')
         && !row.classList.contains('asst-row') && !row.querySelector('.asst-name, .asst-sp')
         && Boolean(control) && control.querySelector('.crt-select > select[data-language-select]') === select
         && Boolean(trigger) && trigger.getAttribute('role') === 'combobox'
@@ -3458,7 +3488,8 @@ async function main() {
         oneLine: Math.abs((labelRect.top + labelRect.height / 2) - (controlRect.top + controlRect.height / 2)) <= 1
           && rowRect.height <= 44,
         order: rowRect.top < resident.getBoundingClientRect().top,
-        divider: rowStyle.borderBottomStyle === 'dashed' && parseFloat(rowStyle.borderBottomWidth) >= 1,
+        divider: (rowStyle.borderBottomStyle === 'dashed' && parseFloat(rowStyle.borderBottomWidth) >= 1)
+          || Boolean(row.closest('.settings-group-body')),
         appearance: selectStyle.appearance,
         nativeHidden: selectStyle.position === 'absolute' && select.getAttribute('aria-hidden') === 'true'
           && select.tabIndex === -1,
@@ -3986,14 +4017,14 @@ async function main() {
       && probe.tokens['--type-micro'] === '10.5px'
       && probe.tokens['--type-label-leading'] === '1.35'
       && /0\.55\)$/.test(probe.tokens['--crt-muted'])
-      && Boolean(probe.label) && probe.label.fontSize === '12px'
+      && Boolean(probe.label) && probe.label.fontSize === '13px'
       && nearPx(probe.label.lineHeight, labelLh)
       && (!probe.kvSub || (probe.kvSub.fontSize === '11px' && nearPx(probe.kvSub.lineHeight, 16)))
       && Boolean(probe.cfgHelp) && probe.cfgHelp.fontSize === '11px'
       && nearPx(probe.cfgHelp.lineHeight, 16)
       && Boolean(probe.cfgEffective) && probe.cfgEffective.fontSize === '11px'
       && nearPx(probe.cfgEffective.lineHeight, 16)
-      && Boolean(probe.cfgLabel) && probe.cfgLabel.fontSize === '12px'
+      && Boolean(probe.cfgLabel) && probe.cfgLabel.fontSize === '13px'
       && nearPx(probe.cfgLabel.lineHeight, labelLh)
       && (!probe.cfgDefault || probe.cfgDefault.fontSize === '10px')
       && Boolean(probe.smallBtn) && probe.smallBtn.fontSize === '12px'
@@ -4072,7 +4103,7 @@ async function main() {
       await setViewport(viewport);
       const settingsType = await evalJs(settingsTypeProbe());
       check(`i18n 排版 A ${label}：辅助文本 11/16 / 微文本 10.5 / 标签 12/18，无横向溢出且无中文兜底`,
-        settingsTypeOk(settingsType, { labelLh: 18, lang: 'en-US' }), JSON.stringify(settingsType));
+        settingsTypeOk(settingsType, { labelLh: 19, lang: 'en-US' }), JSON.stringify(settingsType));
       await captureNow(`i18n-en-type-settings-${label}.jpg`);
     }
     await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
@@ -4216,7 +4247,7 @@ async function main() {
         && zhSettingsType.tokens['--type-micro'] === '10px'
         && zhSettingsType.tokens['--type-label-leading'] === '26px'
         && /0\.45\)$/.test(zhSettingsType.tokens['--crt-muted'])
-        && Boolean(zhSettingsType.label) && nearPx(zhSettingsType.label.lineHeight, 18)
+        && Boolean(zhSettingsType.label) && zhSettingsType.label.fontSize === '13px' && nearPx(zhSettingsType.label.lineHeight, 19)
         && (!zhSettingsType.kvSub || zhSettingsType.kvSub.fontSize === '11px')
         && Boolean(zhSettingsType.cfgHelp) && zhSettingsType.cfgHelp.fontSize === '11px' && nearPx(zhSettingsType.cfgHelp.lineHeight, 16)
         && (!zhSettingsType.cfgDefault || zhSettingsType.cfgDefault.fontSize === '10px')
@@ -4892,7 +4923,7 @@ async function main() {
       const panel = document.querySelector('#settings-panel-common');
       if (!row || !resident || !panel) return false;
       const s = getComputedStyle(row);
-      return panel.hidden === false && row.parentElement === panel
+      return panel.hidden === false && row.closest('#settings-panel-common') === panel && Boolean(row.closest('.settings-group-body'))
         && row === panel.querySelector('.settings-language-row')
         && !row.classList.contains('asst-row')
         && Boolean(row.querySelector('.settings-language-control .crt-select > select[data-language-select]'))
@@ -4903,7 +4934,7 @@ async function main() {
         && row.querySelector('select').value === 'en-US'
         && getComputedStyle(row.querySelector('select')).appearance === 'none'
         && row.getBoundingClientRect().top < resident.getBoundingClientRect().top
-        && parseFloat(s.borderBottomWidth) >= 1;
+        && (parseFloat(s.borderBottomWidth) >= 1 || Boolean(row.closest('.settings-group-body')));
     })()`));
     const navsBeforeLocale = cdp.events.filter((event) => event.method === 'Page.frameNavigated').length;
     await evalJs(`(() => { const s = document.querySelector('[data-language-select]'); s.value = 'zh-CN'; s.dispatchEvent(new Event('change', { bubbles: true })); })()`);

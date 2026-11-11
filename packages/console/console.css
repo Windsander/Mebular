@@ -24,7 +24,7 @@
   --danger: #d55e00;
   --revoked: #7a8399;
   --radius: 10px;
-  --font: "SF Mono", "JetBrains Mono", "Fira Code", ui-monospace, Menlo, Consolas, monospace;
+  --font: "JetBrains Mono", "SF Mono", "Fira Code", ui-monospace, Menlo, Consolas, monospace;
   /* 辅助文本层级（默认值 = 中文现状；英文覆盖见下方 html[lang="en-US"]） */
   --type-help: 10.5px;
   --type-help-leading: 1.5;
@@ -3165,7 +3165,7 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
 .cfg-row + .cfg-warn-line + .cfg-effective { margin-top: 0; }
 
 /* v2 英文同样 12/18：压掉旧 en 的 1.35 标签行距对 .cfg-label 的覆盖 */
-html[lang="en-US"] .modal-settings .cfg-label { line-height: 18px; }
+html[lang="en-US"] .modal-settings .cfg-label { line-height: 19px; }
 
 /* 加入忆云仍是 560 宽（cloud-join-box 覆盖 modal-box-wide） */
 #join-cloud-modal .modal-box, .modal-box.cloud-join-box { width: min(560px, 94vw); }
@@ -3204,3 +3204,96 @@ html[lang="en-US"] .modal-settings .cfg-label { line-height: 18px; }
   .sec-pending .btn { flex: 0 0 auto; }
   #settings-security-slot > .settings-section.sec-card { min-width: 0; }
 }
+
+/* ===== v2.1 规格对齐（仅设置弹层；关于/其它弹层不受影响） ===== */
+.modal-settings .modal-head { height: 38px; }
+.modal-settings .modal-head h2 { font-size: 15px; line-height: 20px; font-weight: 700; letter-spacing: 0.02em; }
+.modal-settings .modal-head .settings-apply-note { margin-top: 2px; }
+.modal-settings .settings-group-head h3 { text-transform: uppercase; }
+.modal-settings .settings-kv dt,
+.modal-settings .settings-kv .kv-value,
+.modal-settings .cfg-label,
+.modal-settings .cfg-status,
+.modal-settings .cfg-control .crt-input { font-size: 13px; line-height: 19px; }
+.modal-settings .btn,
+.settings-more > .btn,
+.settings-more-panel .btn { height: 27px; min-height: 27px; }
+.modal-settings .cfg-row {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr) 68px;
+  column-gap: 10px;
+  align-items: center;
+  height: 40px; min-height: 40px;
+  padding: 0 14px;
+}
+.modal-settings .cfg-label { flex: none; }
+.modal-settings .cfg-control { margin-left: 0; justify-self: end; justify-content: flex-end; }
+.modal-settings .cfg-status { justify-self: end; }
+.modal-settings .settings-kv .kv-action .btn { height: 27px; }
+
+/* v2.1 · 常用「界面」组：语言行在面板内不再自带下虚线 */
+.settings-group-body .settings-language-row {
+  height: 40px; min-height: 40px; padding: 0 14px; border-bottom: 0;
+}
+
+/* v2.1 · 安全卡：22px 序号 + 主列 + 动作列（仍 114） */
+#settings-security-slot > .settings-section.sec-card {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  column-gap: 10px;
+  align-items: start;
+  height: 114px;
+  padding: 14px 16px 14px 12px;
+}
+.sec-card-idx {
+  display: block; padding-top: 3px;
+  font-size: 10px; line-height: 15px; letter-spacing: 1.2px;
+  color: var(--crt-dim); font-variant-numeric: tabular-nums;
+}
+.sec-card-main { grid-column: 2; min-width: 0; }
+.sec-card-actions {
+  grid-column: 3; justify-self: end;
+  display: flex; align-items: flex-start; justify-content: flex-end;
+  gap: 6px; flex-wrap: wrap; min-width: 0;
+}
+.sec-card-actions .btn { height: 27px; padding: 0 10px; }
+
+/* 安全审计一行流（无事件时不渲染） */
+.modal-settings .sec-audit-line, #settings .sec-audit-line {
+  margin: 2px 0 0;
+  display: flex; align-items: baseline; gap: 8px;
+  line-height: 16px; white-space: nowrap;
+  min-width: 0;
+  font-size: 11px; line-height: 16px; color: var(--crt-dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sec-audit-time { flex: none; font-variant-numeric: tabular-nums; }
+.sec-audit-type { flex: none; color: var(--crt-bright); }
+.sec-audit-desc { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.sec-audit-desc b { font-weight: 400; color: var(--crt-bright); }
+
+/* v2.1 · 窄屏：字段行仍两行（标签上、控件下），安全卡动作换到主列下方 */
+@media (max-width: 760px) {
+  .modal-settings .cfg-row {
+    display: grid; grid-template-columns: minmax(0, 1fr);
+    height: auto; min-height: 40px; row-gap: 2px; padding: 6px 14px;
+  }
+  .modal-settings .cfg-label { white-space: normal; }
+  .modal-settings .cfg-control { justify-self: start; justify-content: flex-start; }
+  .modal-settings .cfg-status { justify-self: start; }
+}
+@media (max-width: 560px) {
+  #settings-security-slot > .settings-section.sec-card {
+    grid-template-columns: 22px minmax(0, 1fr);
+    height: auto; min-height: 114px;
+  }
+  .sec-card-actions { grid-column: 2; grid-row: 2; justify-self: start; margin-top: 2px; }
+  .sec-card-main { grid-column: 2; grid-row: 1; }
+}
+
+/* v2.1 · 为「界面」组腾出 720 + 40 条的空间：只压组间距（内容不隐藏） */
+.modal-settings .modal-head { height: 36px; }
+.modal-settings .modal-head .settings-apply-note { margin-top: 0; }
+.modal-settings .settings-group { margin-top: 5px; }
+.modal-settings .settings-group-head { margin-bottom: 4px; }
+.modal-settings .settings-scroll { padding-top: 8px; }

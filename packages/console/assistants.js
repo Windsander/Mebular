@@ -373,14 +373,11 @@ export function serviceRowHtml(service, serviceMsg = '') {
     </div>`;
 }
 
-/** 重启向导行（设置 · 常用；web 无 preload 桥时隐藏）。 */
-export function wizardRowHtml(hasBridge) {
+/** 重启向导动作（设置 · 常用「本机运行」组头右侧；web 无 preload 桥时隐藏）。 */
+export function wizardHeadActionHtml(hasBridge) {
   if (!hasBridge) return '';
-  return `<div class="asst-row settings-wizard-row">
-    <span class="asst-name">${esc(tr('settings.wizard.title', '重启向导'))}</span>
-    <span class="asst-st" title="${esc(tr('settings.wizard.note', '重新走一遍首次设置（不动已有配置）'))}">${esc(tr('settings.wizard.note', '重新走一遍首次设置（不动已有配置）'))}</span>
-    <button class="btn btn-small" type="button" id="settings-open-wizard">${esc(tr('settings.wizard.action', '重启向导 ›'))}</button>
-  </div>`;
+  return `<button class="btn btn-small btn-ghost settings-wizard-action" type="button" id="settings-open-wizard"
+    title="${esc(tr('settings.wizard.note', '重新走一遍首次设置（不动已有配置）'))}">${esc(tr('settings.wizard.action', '重启向导 ›'))}</button>`;
 }
 
 /**

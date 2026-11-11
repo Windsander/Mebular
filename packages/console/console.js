@@ -10,7 +10,7 @@ import { StarStage, namespaceColor, shortId, buildHoverRoutes, buildNetworkScene
 import { initialViewFromSearch } from './deep-link.js';
 import { createWizardState, wizardReduce, WIZARD_STEPS } from './wizard.js';
 import { IA_TABS, IA_ADVANCED_SECTIONS, IA_MCP_SECTIONS, IA_FIELD_COPY, IA_SETTINGS_EXTRA, IA_SETTINGS_FOLDS, IA_SECURITY_SECTIONS, IA_MCP_DANGER_LINE_KEYS, INVITE_TTL_OPTIONS, INVITE_TTL_DEFAULT_MS, SECURITY_LEVEL_LABEL, SECURITY_LEVEL_TITLE_KEY, SECURITY_LEVEL_NOTE_KEY, SECURITY_BOUNDARY_KEY, SCHEMA_CONFIGURED_VALUE, localizeSchemaReason, refreshCsrfToken, withCsrfRetry, filterRuntimeTimeline, runtimeTimelineKind, memoryRuntimeEnabledOf, runtimeSidecarStateKey, memoryRuntimeModeOf, runtimeShowsModelSettings, runtimeModelSourceOf, runtimeModelSourceAvailable, runtimeModelSourceReady, runtimeModelJobActive, runtimeModelStatusOf, runtimeModelActionOf, formatBytes, IA_RUNTIME_MODEL_SOURCES, IA_RUNTIME_MODEL_SOURCE_DEFAULT } from './settings-ia.js';
-import { assistantsPanelHtml, serviceRowHtml, wizardRowHtml, repairRowHtml, statusPillHtml, attentionItems, assistantAddFormHtml } from './assistants.js';
+import { assistantsPanelHtml, serviceRowHtml, wizardHeadActionHtml, repairRowHtml, statusPillHtml, attentionItems, assistantAddFormHtml } from './assistants.js';
 import { reconcileAssistantUi } from './assistant-status.js';
 import { createConsoleHost, markEmbeddedDocument } from './host.js';
 import { t, getLocale, setLocale, onLocaleChange, applyStaticI18n, languageSettingsRowHtml, initI18n, reconcileDesktopLocale, LOCALE_STORAGE_KEY, formatDate as formatLocaleDate, formatDateTime as formatLocaleDateTime, formatExpiry } from './i18n.mjs';
@@ -2166,8 +2166,8 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
         <div class="settings-group-body">${languageSettingsRowHtml()}</div>
       </section>
       <section class="settings-group" data-settings-group="resident">
-        <div class="settings-group-head"><h3>${escapeHtml(t('settings.common.group.runs'))}</h3></div>
-        <div class="settings-group-body" id="settings-resident">${serviceRowHtml(state.service, state.serviceMsg)}${repairRowHtml(state.repair)}${wizardRowHtml(host.capabilities.openWizard)}</div>
+        <div class="settings-group-head${host.capabilities.openWizard ? ' has-action' : ''}"><h3>${escapeHtml(t('settings.common.group.runs'))}</h3>${wizardHeadActionHtml(host.capabilities.openWizard)}</div>
+        <div class="settings-group-body" id="settings-resident">${serviceRowHtml(state.service, state.serviceMsg)}${repairRowHtml(state.repair)}</div>
       </section>
       <section class="settings-group" data-settings-common-status>
         <div class="settings-group-head"><h3>${escapeHtml(t('settings.common.statusTitle'))}</h3><span class="settings-group-suffix">· ${escapeHtml(t('settings.common.readonly'))}</span></div>

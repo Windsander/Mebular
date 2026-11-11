@@ -3297,3 +3297,17 @@ html[lang="en-US"] .modal-settings .cfg-label { line-height: 19px; }
 .modal-settings .settings-group { margin-top: 5px; }
 .modal-settings .settings-group-head { margin-bottom: 4px; }
 .modal-settings .settings-scroll { padding-top: 8px; }
+
+/* v2.1 · 常用 spacing 回到 4/8/12/16 阶梯；重启向导改为组头右侧 27 ghost 动作 */
+.modal-settings .settings-group { margin-top: 12px; }
+.modal-settings .settings-group-head { margin-bottom: 8px; }
+.settings-group-head.has-action { align-items: center; }
+.settings-group-head.has-action h3 { flex: 0 1 auto; }
+.settings-wizard-action {
+  flex: none; margin-left: auto;
+  margin-top: -6px; margin-bottom: -6px; /* 27 高落在 15 行 + 8 间隙内，不抬组头 */
+}
+@media (max-width: 560px) {
+  .settings-group-head.has-action { height: auto; flex-wrap: wrap; row-gap: 4px; }
+  .settings-wizard-action { margin-top: 0; margin-bottom: 0; }
+}

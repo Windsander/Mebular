@@ -4037,37 +4037,30 @@ async function main() {
     // 设置·常用「Setup wizard」行：英文说明不得把按钮挤出可视区。host adapter 在
     // console.js 模块加载时定型，因此先注入 preload 桩，再重新加载页面（而不是加载后改 window）。
     const wizardProbe = `(() => {
-      const row = document.querySelector('#settings-panel-common .settings-wizard-row');
-      const name = row?.querySelector('.asst-name');
-      const note = row?.querySelector('.asst-st');
-      const button = row?.querySelector('#settings-open-wizard');
-      if (!row || !name || !note || !button) return { ok: false, why: 'missing' };
-      const rowRect = row.getBoundingClientRect();
-      const noteRect = note.getBoundingClientRect();
+      const head = document.querySelector('#settings-panel-common [data-settings-group=resident] .settings-group-head');
+      const button = head?.querySelector('#settings-open-wizard');
+      if (!head || !button) return { ok: false, why: 'missing' };
+      const headRect = head.getBoundingClientRect();
       const btnRect = button.getBoundingClientRect();
       const boxRect = document.querySelector('#settings .modal-box')?.getBoundingClientRect() ?? null;
-      const noteStyle = getComputedStyle(note);
-      const nameStyle = getComputedStyle(name);
+      const panelRect = document.querySelector('#settings-resident')?.getBoundingClientRect() ?? null;
       const btnStyle = getComputedStyle(button);
       return {
         ok: true,
-        text: row.innerText.replace(/\\s+/g, ' ').trim(),
+        text: head.innerText.replace(/\\s+/g, ' ').trim(),
+        title: button.getAttribute('title') ?? '',
         visible: btnStyle.display !== 'none' && btnStyle.visibility !== 'hidden'
           && btnRect.width > 0 && btnRect.height > 0,
         button: { left: Math.round(btnRect.left), right: Math.round(btnRect.right), height: Math.round(btnRect.height) },
-        row: { left: Math.round(rowRect.left), right: Math.round(rowRect.right) },
+        head: { left: Math.round(headRect.left), right: Math.round(headRect.right), height: Math.round(headRect.height) },
         boxRight: boxRect ? Math.round(boxRect.right) : null,
-        insideRow: btnRect.left >= rowRect.left - 1 && btnRect.right <= rowRect.right + 1,
+        insideHead: btnRect.left >= headRect.left - 1 && btnRect.right <= headRect.right + 1,
         insideBox: !boxRect || btnRect.right <= boxRect.right + 1,
-        overlap: noteRect.right > btnRect.left + 1 && noteRect.bottom > btnRect.top + 1
-          && noteRect.top < btnRect.bottom - 1,
-        noteFlexGrow: noteStyle.flexGrow,
-        noteMinWidth: noteStyle.minWidth,
-        noteOverflowWrap: noteStyle.overflowWrap,
-        nameMinWidth: nameStyle.minWidth,
-        sp: Boolean(row.querySelector('.asst-sp')),
+        abovePanel: !panelRect || btnRect.bottom <= panelRect.top + 1,
+        inRow: Boolean(button.closest('.asst-row')),
+        height27: Math.round(btnRect.height) === 27,
         pageOver: document.documentElement.scrollWidth - window.innerWidth,
-        cjk: /[\\u3400-\\u9fff]/.test(row.innerText),
+        cjk: /[\u3400-\u9fff]/.test(head.innerText),
       };
     })()`;
     const wizardPreload = await send('Page.addScriptToEvaluateOnNewDocument', {
@@ -4077,18 +4070,16 @@ async function main() {
     await waitFor('document.documentElement?.dataset?.consoleReady === "1" && Boolean(document.querySelector("#open-settings"))');
     await evalJs('document.querySelector("#open-settings").click()');
     await waitFor('document.querySelector("#settings")?.hidden === false');
-    check('i18n 设置向导行：桌面桥下渲染 .settings-wizard-row（专用行类）',
-      await waitFor('Boolean(document.querySelector("#settings-panel-common .settings-wizard-row #settings-open-wizard"))'));
+    check('i18n 设置向导动作：桌面桥下渲染在「本机运行」组头（27 ghost，不再是整行）',
+      await waitFor('Boolean(document.querySelector("#settings-panel-common [data-settings-group=resident] .settings-group-head #settings-open-wizard"))'));
     for (const [label, viewport] of densityViewports) {
       await setViewport(viewport);
       const wizard = await evalJs(wizardProbe);
-      check(`i18n 设置向导行 ${label}：英文说明可收缩，按钮可见且在行/弹框内、无横向溢出`,
-        wizard.ok && wizard.visible && wizard.insideRow && wizard.insideBox
-          && wizard.overlap === false && wizard.sp === false
-          && wizard.noteFlexGrow === '1' && wizard.noteMinWidth === '0px'
-          && wizard.nameMinWidth === '0px' && wizard.noteOverflowWrap === 'anywhere'
-          && /Setup wizard/.test(wizard.text) && /Re-run setup/.test(wizard.text)
-          && /config is kept/.test(wizard.text) && /Restart wizard/.test(wizard.text)
+      check(`i18n 设置向导动作 ${label}：27 ghost 在组头内、面板之上、无横向溢出`,
+        wizard.ok && wizard.visible && wizard.insideHead && wizard.insideBox
+          && wizard.abovePanel && wizard.inRow === false && wizard.height27
+          && wizard.pageOver <= 1
+          && /Restart wizard/.test(wizard.text) && /setup/i.test(wizard.title) && /config is kept/i.test(wizard.title)
           && wizard.pageOver <= 1 && wizard.cjk === false,
         JSON.stringify(wizard));
       await captureNow(`i18n-en-wizard-row-${label}.jpg`);

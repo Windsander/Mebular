@@ -81,6 +81,6 @@
 - 统一外壳：所有 `.modal-box` 都带 `crt-surface crt-corners`；没有裸 `modal-box`。
 - 小弹窗（`modal-center`，520px）：邀请、新建记忆域、切换忆云、安全操作/批准、手动连接、handoff、通用确认、bearer 令牌输入。
 - 大面板（顶部对齐 + 内部滚动）：设置、关于本机、加入忆云（640px）、首启引导（640px）。
-- 设置面板：标题下常驻一行「改动即生效」；页签固定；只有页签下的内容滚动；滚动条 6px 贴设置框右边缘；关闭收进右上角 X，底部关闭移除。
+- 设置面板：标题下常驻一行「改动即生效；重启项自动重启。」；页签固定；只有页签下的内容滚动；滚动条 6px 贴设置框右边缘；关闭收进右上角 X，底部关闭移除。
 - 标题/说明/字段/动作：标题（可带 `crt-tag`）+ 一句 `.modal-note` + `.field` 整行输入 + 右对齐 `.modal-actions`。
 - 落地位置：`packages/console/index.html` 的 `.modal` 标记 + `packages/console/console.css` 的 `.modal.modal-center` / `.modal-box-wide` / `.modal-settings` / `.settings-scroll` / `.field`；`verify-console-ui.mjs` 断言对齐、宽度与滚动区不漂移。

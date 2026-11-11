@@ -1532,7 +1532,7 @@ function renderAdvancedSections() {
 }
 
 function renderMcpSections() {
-  const pending = pendingRestartItems().filter((item) => String(item.path).startsWith('mcp.'));
+  const pending = pendingRestartItems().filter((item) => String(item.path) === 'mcp.http.port');
   const warning = pending.length > 0
     ? `<p class="settings-warn-line">${pending.map((item) => escapeHtml(t('settings.mcp.pendingLine', {
       configured: formatRestartValue(item.file),
@@ -1610,7 +1610,6 @@ function runtimeModeSettingsHtml() {
   return settingsSectionHtml({
     id: 'runtime-mode',
     title: t('settings.runtime.mode.title'),
-    desc: t('settings.runtime.mode.desc'),
     chip: `<span class="crt-tag ${enabled ? 'crt-tag-ok' : ''}" data-rt-mode-chip>${escapeHtml(enabled ? t('runtime.sidecar.immersive') : t('runtime.sidecar.lightweight'))}</span>`,
     body: `<div class="runtime-mode-actions" role="group" aria-label="${escapeHtml(t('settings.runtime.mode.title'))}" data-rt-mode-group>
       ${option('lightweight', 'settings.runtime.mode.lightweight')}
@@ -1635,8 +1634,7 @@ function runtimeModelStatusHtml(status) {
     id: 'runtime-model-status',
     title: t('settings.runtime.modelStatus.title'),
     desc: t('settings.runtime.modelStatus.desc'),
-    body: `<dl class="runtime-kv" data-rt-model-status>${rows.map(([label, value]) => `<div class="kv-row"><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(String(value))}</dd></div>`).join('')}</dl>
-      <p class="settings-section-foot muted">${escapeHtml(t('settings.runtime.modelStatus.foot'))}</p>`,
+    body: `<dl class="runtime-kv" data-rt-model-status>${rows.map(([label, value]) => `<div class="kv-row"><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(String(value))}</dd></div>`).join('')}</dl>`,
   });
 }
 
@@ -1924,20 +1922,19 @@ function runtimeModelSourceSectionHtml() {
     const unavailable = !runtimeModelSourceAvailable(normalized, model) && normalized !== source;
     return `<option value="${escapeHtml(normalized)}" ${normalized === source ? 'selected' : ''} ${unavailable ? 'disabled' : ''}>${escapeHtml(runtimeModelSourceLabel(normalized))}${unavailable ? ` · ${escapeHtml(t('settings.runtime.modelSource.unavailableOption'))}` : ''}</option>`;
   }).join('');
+  const noteTitle = `${t('settings.runtime.modelSource.desc')} ${t('settings.runtime.modelSource.foot')}`;
   return settingsSectionHtml({
     id: 'model-source',
     title: t('settings.runtime.modelSource.title'),
-    desc: t('settings.runtime.modelSource.desc'),
     body: `<div class="cfg-row">
       <label class="cfg-label" for="rt-model-source">${escapeHtml(t('settings.runtime.modelSource.rowLabel'))}</label>
       <div class="cfg-control">
-        <select id="rt-model-source" class="crt-input" data-rt-model-source ${disabled ? 'disabled' : ''}>${options}</select>
+        <select id="rt-model-source" class="crt-input" data-rt-model-source ${disabled ? 'disabled' : ''} title="${escapeHtml(noteTitle)}">${options}</select>
       </div>
       <span class="cfg-status" data-cfg-status="none"></span>
     </div>
-    <p class="settings-group-note" data-rt-model-source-note>${escapeHtml(note)}</p>
-    ${showModels ? `<div class="runtime-model-list" data-rt-model-list>${runtimeModelListBodyHtml()}</div>` : ''}
-    <p class="settings-section-foot muted">${escapeHtml(t('settings.runtime.modelSource.foot'))}</p>`,
+    <p class="settings-group-note" data-rt-model-source-note title="${escapeHtml(noteTitle)}">${escapeHtml(note)}</p>
+    ${showModels ? `<div class="runtime-model-list" data-rt-model-list>${runtimeModelListBodyHtml()}</div>` : ''}`,
   });
 }
 
@@ -1954,7 +1951,6 @@ function renderRuntimeSettings() {
     ${settingsSectionHtml({
       id: 'runtime-status-card',
       title: t('runtime.status.title'),
-      desc: t('runtime.status.desc'),
       body: runtimeStatusFactsHtml(status),
     })}
     <p class="settings-note muted">${escapeHtml(t('settings.runtime.scope.desc'))}</p>

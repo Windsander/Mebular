@@ -50,7 +50,7 @@
     "settings.title": "本机设置",
     "settings.aria": "本机设置",
     "settings.closeAria": "关闭设置",
-    "settings.applyNote": "改动即生效：需重启的项会自动重启，即时项就地生效。",
+    "settings.applyNote": "改动即生效；重启项自动重启。",
     "settings.tabsAria": "设置页签",
     "settings.tab.common": "常用",
     "settings.tab.security": "安全",

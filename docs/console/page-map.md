@@ -24,7 +24,7 @@ IA 单一真源在 [`packages/console/settings-ia.js`](../../packages/console/se
 
 **术语**：用户可见文案中表示本机所处共享网络的「网络 / Mebular」统一为「**忆云**」；产品名「Mebular 控制台」不变，「记忆域 / 记忆」不变。
 
-E1 前后对比截图：[`screens/e1/`](screens/e1/)。U-1 设置/共享页收口前后对比：[`screens/u1/`](screens/u1/)。U-3 设置页设计收口（安全 / MCP / 高级）前后对比：[`screens/u3/`](screens/u3/)。U-4 设置弹层改版（竖轨 + 统一行模板 + 安全卡状态）基线：[`screens/u4-settings-redesign/`](screens/u4-settings-redesign/)。
+E1 前后对比截图：[`screens/e1/`](screens/e1/)。U-1 设置/共享页收口前后对比：[`screens/u1/`](screens/u1/)。U-3 设置页设计收口（安全 / MCP / 高级）前后对比：[`screens/u3/`](screens/u3/)。U-4 设置弹层 v2 基线（760×720 / 关于 760×680 / 188 竖轨 / 34-40-58 行 / 安全卡 114+19px）：[`screens/u4-settings-redesign/`](screens/u4-settings-redesign/)。900 档顶部横排，允许竖向滚动；390 行堆叠、无横向溢出。
 
 **顶栏（E1/E2-A2）**：品牌后是当前**忆云**徽章（名字只取 `overview.cloud.name`；旧守护没有该字段时隐藏，绝不按端口/目录猜）。操作为对称的「加入忆云」（次要）与「邀请设备」（主），窄屏折叠为图标；「连接已有地址」已撤下——它实际是**网内传输修复**，入口移到「高级 → 诊断与恢复 → 手动连接已知设备…」与设备卡「连不上？手动连接…」（不改变入网信任、不签发授权）。
 

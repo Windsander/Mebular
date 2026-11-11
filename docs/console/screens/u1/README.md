@@ -1,3 +1,5 @@
+> **v2 刷新（2026-11-11）**：设置外框 640 → **760**、左轨 160 → **188**，设置高 **720**、关于 **680**；行 **34/40/58**、分组标签 10px/1.5、安全卡 114 + 19px。本目录 `u1-after-settings-common.jpg` / `u1-after-settings-common-390.jpg` 已按 v2 重新生成（常用页：语言 + 常驻 58 + 修复 40 + 只读 3×40 + 忆云 2×58）。900 档顶部横排、允许竖向滚动；390 只读行两行、无横向溢出。全量基线见 `../u4-settings-redesign/`。
+
 # U-1 · 设置/共享页 UI 收口（前后对比）
 
 基线：main `f1a1219`。截图由 `verify-console-ui.mjs`（真实 serve + headless Chrome）与同一临时 home 的 Playwright 截图生成。

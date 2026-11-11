@@ -1,3 +1,5 @@
+> **v2 刷新（2026-11-11）**：设置壳改为 760×720（关于 760×680）、左轨 188；安全三卡统一 114 + 19px 状态值，MCP 端口不一致改为独立警告行，高级保留真实 checkbox/输入（26px）。本目录 `u3-after-settings-security*.jpg`、`u3-after-settings-mcp*.jpg`、`u3-after-settings-advanced*.jpg`（含 900/390 与展开态）已按 v2 重新生成；全量基线见 `../u4-settings-redesign/`。
+
 # U-3 · 设置页设计收口（安全 / MCP / 高级）
 
 基线：`openchamber/ui-consistency` `6475131`（#145，含 `f08091f` 新建域弹窗与 `6475131` 小弹窗居中）。本分支只改 `packages/console/**`、`tests/console/**`、`docs/console/**`；不改配置能力、行为或协议。

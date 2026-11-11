@@ -820,6 +820,48 @@ async function main() {
     // H-1/UX-2：设置 · AI 助手专区（连接页已收编进设置；单列表 + 行内闭环）
     await evalJs('document.querySelector("#open-settings").click()');
     check('设置弹层打开', await waitFor('document.querySelector("#settings")?.hidden === false'));
+
+    // 900：轨折顶部横排，但只读行必须仍是 40 高、label/value 同一行（不得套 390 堆叠）
+    await setViewport({ width: 900, height: 900, deviceScaleFactor: 1, mobile: false });
+    await evalJs(`document.querySelector('#settings-tab-common')?.click()`);
+    await sleep(250);
+    const rows900 = await evalJs(`(() => {
+      const read = (root, label) => {
+        const cells = [...root.querySelectorAll('.settings-kv dt')].map((dt) => {
+          const dd = dt.nextElementSibling;
+          if (!dd) return null;
+          const a = dt.getBoundingClientRect(); const b = dd.getBoundingClientRect();
+          return { h: Math.round(a.height), diff: Math.round(Math.abs(a.top - b.top)) };
+        }).filter(Boolean);
+        return { label, n: cells.length, badH: cells.filter((c) => c.h !== 40).length, badTop: cells.filter((c) => c.diff > 2).length };
+      };
+      const box = document.querySelector('#settings .modal-box');
+      return { common: read(document.querySelector('#settings-panel-common'), 'common'),
+        docW: document.documentElement.scrollWidth, vw: innerWidth, modalW: box ? Math.round(box.getBoundingClientRect().width) : 0 };
+    })()`);
+    check('U-4 900 常用行模板：40 高 + label/value 同行（top 差 ≤2）+ 无横向溢出',
+      Boolean(rows900) && rows900.common.n >= 3 && rows900.common.badH === 0 && rows900.common.badTop === 0
+        && rows900.docW <= rows900.vw + 1 && rows900.modalW === 760,
+      JSON.stringify(rows900));
+    await evalJs(`document.querySelector('[data-settings-extra="about-modal"]')?.click()`);
+    await sleep(300);
+    const about900 = await evalJs(`(() => {
+      const box = document.querySelector('#about .modal-box');
+      const cells = [...document.querySelectorAll('#about .settings-kv dt')].map((dt) => {
+        const dd = dt.nextElementSibling;
+        if (!dd) return null;
+        const a = dt.getBoundingClientRect(); const b = dd.getBoundingClientRect();
+        return { h: Math.round(a.height), diff: Math.round(Math.abs(a.top - b.top)) };
+      }).filter(Boolean);
+      return { n: cells.length, badH: cells.filter((c) => c.h !== 40).length, badTop: cells.filter((c) => c.diff > 2).length,
+        docW: document.documentElement.scrollWidth, vw: innerWidth, w: box ? Math.round(box.getBoundingClientRect().width) : 0 };
+    })()`);
+    check('U-4 900 关于行模板：40 高 + label/value 同行（top 差 ≤2）+ 无横向溢出',
+      Boolean(about900) && about900.n >= 2 && about900.badH === 0 && about900.badTop === 0
+        && about900.docW <= about900.vw + 1 && about900.w === 760,
+      JSON.stringify(about900));
+    await evalJs(`document.querySelector('#about-close')?.click()`);
+    await clearViewport();
     // 0.3 · 设置 · 记忆模式：唯一新增控件 1；轻量模式不显示模型配置。
     await evalJs('document.querySelector("[data-settings-tab=runtime]").click()');
     check('设置·记忆运行时：记忆模式 / 模型来源 / 运行状态 / 模型状态；无本地模型包与旧 runtime.* 字段',

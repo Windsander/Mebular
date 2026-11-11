@@ -2937,16 +2937,15 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
   }
   .modal-settings .settings-rail-foot { margin-left: 0; }
   .modal-settings .settings-scroll { padding-top: 10px; }
-  .settings-kv, .about-group .settings-kv { grid-template-columns: minmax(0, 1fr) auto; gap: 0 10px; }
-  .settings-kv .kv-row > * { min-height: 40px; }
-  .settings-kv dt { padding-left: 0; }
-  .settings-kv .kv-action { padding-right: 0; }
-  .settings-kv .kv-row > .kv-value { grid-column: 1; }
-  .cfg-row { flex-wrap: nowrap; }
-  .cfg-label { flex-basis: auto; }
-  .pending-restart { height: auto; min-height: 40px; flex-wrap: wrap; padding: 6px 10px; }
-  .pending-restart-list { display: none; }
   #about .modal-box { height: calc(100vh - 24px); }
+}
+
+/* 900：轨已横排，但行仍保持 label/value 同一行、40px；堆叠只在 ≤760 */
+@media (max-width: 900px) and (min-width: 761px) {
+  .settings-kv, .about-group .settings-kv {
+    grid-template-columns: var(--row-label-w) minmax(0, 1fr) var(--kv-action-w);
+    gap: 0 10px;
+  }
 }
 
 @media (max-width: 560px) {
@@ -2957,7 +2956,6 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
   }
   .modal-settings .settings-rail .settings-tab { padding: 0 8px; }
   .settings-group { margin-top: 12px; }
-  .settings-kv, .about-group .settings-kv { grid-template-columns: minmax(0, 1fr) auto; }
   .about-actions-row, .settings-actions-row { padding: 0 12px; }
   #about .modal-actions { flex-wrap: wrap; }
 }

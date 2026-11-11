@@ -1862,6 +1862,11 @@ try {
         && assistantsSrcV2.includes('data-settings-more') && assistantsSrcV2.includes('aria-haspopup="menu"')
         && assistantsSrcV2.includes('aria-expanded="false"') && cssSrc.includes('.settings-more-panel {'),
       'banner 40 / more menu');
+    check('v2 异常三元组默认可见：行下静态 11px 警告行（不依赖 focus / 不撑高 40 行）',
+      jsSrc.includes('${warnLine}${runtimeCompareLine(field)}')
+        && cssSrc.includes('.cfg-row + .cfg-effective {')
+        && /\.cfg-row \+ \.cfg-effective \{[^}]*position: static;[^}]*display: flex;/s.test(cssSrc),
+      'compare line sibling + static');
   }
 
   // ---------- 轮 C：设置页三症状 + 呈现分级（弹层壳 / 关闭规范 / 常显-折叠-异常） ----------

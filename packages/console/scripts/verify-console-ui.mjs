@@ -862,6 +862,31 @@ async function main() {
       JSON.stringify(about900));
     await evalJs(`document.querySelector('#about-close')?.click()`);
     await clearViewport();
+    // 异常状态必须默认可见：切到 MCP（种子 config 端口 0 vs 运行时端口 → 未生效）
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await evalJs(`document.querySelector('[data-settings-tab=mcp]')?.click()`);
+    await sleep(300);
+    const anomaly = await evalJs(`(() => {
+      const body = document.querySelector('#settings-body');
+      const row = body.querySelector('[data-cfg-path="mcp.http.port"]')?.closest('.cfg-row');
+      const ex = row?.nextElementSibling?.matches('[data-cfg-state=exception]') ? row.nextElementSibling : null;
+      if (!row || !ex) return { ok: false, why: 'missing' };
+      const status = row.querySelector('.cfg-status');
+      const cs = getComputedStyle(ex);
+      return {
+        ok: /未生效|待重启/.test(status?.textContent ?? '') && /已配置/.test(ex.textContent) && /实际/.test(ex.textContent)
+          && cs.display !== 'none' && ex.getBoundingClientRect().height > 0
+          && Math.round(row.getBoundingClientRect().height) === 40
+          && document.documentElement.scrollWidth <= window.innerWidth + 1,
+        rowH: Math.round(row.getBoundingClientRect().height), vw: innerWidth,
+        warn: status?.textContent?.trim() ?? '',
+        display: cs.display,
+        h: Math.round(ex.getBoundingClientRect().height),
+        text: ex.textContent.replace(/\\s+/g, ' ').trim().slice(0, 60),
+      };
+    })()`);
+    check('U-4 异常默认可见：warn 状态 + 行下 11px 三元组可见 + 行仍 40 + 无横向溢出', Boolean(anomaly?.ok), JSON.stringify(anomaly));
+    await clearViewport();
     // 0.3 · 设置 · 记忆模式：唯一新增控件 1；轻量模式不显示模型配置。
     await evalJs('document.querySelector("[data-settings-tab=runtime]").click()');
     check('设置·记忆运行时：记忆模式 / 模型来源 / 运行状态 / 模型状态；无本地模型包与旧 runtime.* 字段',
@@ -1838,14 +1863,18 @@ async function main() {
         const okStates = body.querySelectorAll('[data-cfg-state=ok]').length;
         // 专指 mcp.http.port 的「已配置 0 / 实际 <port>」例外：避免被 join 端点回环等其它异常行抢先
         const row = body.querySelector('[data-cfg-path="mcp.http.port"]')?.closest('.cfg-row');
-        const ex = row?.querySelector('[data-cfg-state=exception]');
+        const ex = row?.nextElementSibling?.matches('[data-cfg-state=exception]') ? row.nextElementSibling : null;
+        const exStyle = ex ? getComputedStyle(ex) : null;
         const status = row?.querySelector('.cfg-status');
         const okCells = [...body.querySelectorAll('[data-cfg-status=ok]')];
         return okStates === 0
           && okCells.length > 0
           && okCells.every((cell) => cell.textContent.trim() === '生效中' && cell.children.length === 0)
-          && Boolean(ex) && /已配置/.test(ex.textContent) && /实际/.test(ex.textContent) && /不一致/.test(ex.textContent)
-          && Boolean(status) && /未生效|待重启/.test(status.textContent);
+          && Boolean(ex) && exStyle.display !== 'none' && ex.getBoundingClientRect().height > 0
+          && /已配置/.test(ex.textContent) && /实际/.test(ex.textContent) && /不一致/.test(ex.textContent)
+          && Boolean(status) && /未生效|待重启/.test(status.textContent)
+          && Math.round(row.getBoundingClientRect().height) === 40
+          && document.documentElement.scrollWidth <= window.innerWidth + 1;
       })()`));
     check('U-1/B 呈现分级：帮助在行内聚焦时出现、空值默认/短提示进 placeholder',
       await evalJs(`(() => {
@@ -3946,16 +3975,16 @@ async function main() {
       && /0\.55\)$/.test(probe.tokens['--crt-muted'])
       && Boolean(probe.label) && probe.label.fontSize === '12px'
       && nearPx(probe.label.lineHeight, labelLh)
-      && (!probe.kvSub || (probe.kvSub.fontSize === '11px' && nearPx(probe.kvSub.lineHeight, 17.05)))
+      && (!probe.kvSub || (probe.kvSub.fontSize === '11px' && nearPx(probe.kvSub.lineHeight, 16)))
       && Boolean(probe.cfgHelp) && probe.cfgHelp.fontSize === '11px'
-      && nearPx(probe.cfgHelp.lineHeight, 17.05)
+      && nearPx(probe.cfgHelp.lineHeight, 16)
       && Boolean(probe.cfgEffective) && probe.cfgEffective.fontSize === '11px'
-      && nearPx(probe.cfgEffective.lineHeight, 17.05)
+      && nearPx(probe.cfgEffective.lineHeight, 16)
       && Boolean(probe.cfgLabel) && probe.cfgLabel.fontSize === '12px'
       && nearPx(probe.cfgLabel.lineHeight, labelLh)
       && (!probe.cfgDefault || probe.cfgDefault.fontSize === '10px')
       && Boolean(probe.smallBtn) && probe.smallBtn.fontSize === '12px'
-      && nearPx(probe.smallBtn.lineHeight, 18)
+      && nearPx(probe.smallBtn.lineHeight, 12)
       && probe.pageOver <= 1 && probe.cjk === false;
     await send('Page.navigate', { url: `${base}/console/?lang=en-US` });
     await waitFor('document.documentElement?.dataset?.consoleReady === "1" && Boolean(document.querySelector("#open-settings"))');
@@ -4029,8 +4058,8 @@ async function main() {
     for (const [label, viewport] of densityViewports) {
       await setViewport(viewport);
       const settingsType = await evalJs(settingsTypeProbe());
-      check(`i18n 排版 A ${label}：辅助文本 11px / 微文本 10.5px / 标签行距 1.35，无横向溢出且无中文兜底`,
-        settingsTypeOk(settingsType, { labelLh: 16.2, lang: 'en-US' }), JSON.stringify(settingsType));
+      check(`i18n 排版 A ${label}：辅助文本 11/16 / 微文本 10.5 / 标签 12/18，无横向溢出且无中文兜底`,
+        settingsTypeOk(settingsType, { labelLh: 18, lang: 'en-US' }), JSON.stringify(settingsType));
       await captureNow(`i18n-en-type-settings-${label}.jpg`);
     }
     await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });

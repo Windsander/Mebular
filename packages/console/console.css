@@ -2746,8 +2746,7 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
   box-shadow: 0 10px 24px rgba(0, 0, 0, 0.45);
 }
 .cfg-row:focus-within > .cfg-help,
-.cfg-row:focus-within > .cfg-effective,
-.cfg-row > .cfg-help.cfg-warn { display: block; }
+.cfg-row:focus-within > .cfg-effective { display: block; }
 .cfg-row > .cfg-effective { flex-wrap: wrap; gap: 0 8px; }
 .cfg-row > .cfg-help.cfg-warn { position: static; margin: 4px 0 0; border: 0; background: none; box-shadow: none; padding: 0; }
 .cfg-row .cfg-warn-mark { margin-left: 4px; }
@@ -3139,3 +3138,30 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
 /* 常用页在 720 + 40 提示条下要留余量：组间距 12、滚动区上内边距 8 */
 .modal-settings .settings-scroll { padding-top: 8px; }
 .settings-group { margin-top: 12px; }
+
+/* 异常三元组：行下静态 11px 警告行（默认可见，不依赖 focus / 不藏 popover）。
+   .cfg-row 仍是 40；说明行独立占高，无异常时不存在。 */
+.cfg-row + .cfg-effective {
+  position: static;
+  display: flex; flex-wrap: wrap; gap: 2px 10px;
+  margin: 0 14px 6px; padding: 3px 0 3px 10px;
+  border-left: 2px solid rgba(255, 210, 122, 0.55);
+  background: linear-gradient(90deg, rgba(255, 210, 122, 0.06), transparent 70%);
+  font-size: 11px; line-height: 16px; color: #ffd27a;
+  overflow-wrap: anywhere;
+}
+.cfg-row + .cfg-effective .cfg-eff-key { color: #ffd27a; opacity: 0.8; }
+.cfg-row + .cfg-effective .cfg-reason { display: inline; margin: 0; font-size: 11px; color: #ffd27a; }
+.cfg-row + .cfg-effective .cfg-pending { color: #ffd27a; }
+.cfg-row + .cfg-effective .cfg-warn { color: #ffd27a; }
+.cfg-row + .cfg-effective.is-mismatch { color: #ffd27a; }
+
+/* 字段风险说明：行下静态 11px（与异常三元组同视觉，默认可见） */
+.cfg-row + .cfg-warn-line {
+  margin: 0 14px 6px; padding: 3px 0 3px 10px;
+  border-left: 2px solid rgba(255, 210, 122, 0.55);
+  background: linear-gradient(90deg, rgba(255, 210, 122, 0.06), transparent 70%);
+  font-size: 11px; line-height: 16px; color: #ffd27a;
+  overflow-wrap: anywhere;
+}
+.cfg-row + .cfg-warn-line + .cfg-effective { margin-top: 0; }

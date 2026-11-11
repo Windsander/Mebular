@@ -1439,15 +1439,15 @@ function renderCfgField(field) {
   const helpBits = [
     field.help ? `<p class="cfg-help muted">${escapeHtml(field.help)}</p>` : '',
     foldedReason ? `<p class="cfg-help muted">${escapeHtml(foldedReason)}</p>` : '',
-    field.warn ? `<p class="cfg-help cfg-warn">⚠ ${escapeHtml(field.warn)}</p>` : '',
   ].filter(Boolean);
+  // 风险说明与异常三元组都放在 40px 行之外：行下静态 11px 警告，默认可见、不依赖 focus。
+  const warnLine = field.warn ? `<p class="settings-warn-line cfg-warn-line">⚠ ${escapeHtml(field.warn)}</p>` : '';
   return `<div class="cfg-row">
     <label class="cfg-label" for="${id}">${escapeHtml(field.label)}${defaultTag}${warnMark}</label>
     <div class="cfg-control">${control}</div>
     ${runtimeStatusCell(field)}
-    ${runtimeCompareLine(field)}
     ${helpBits.join('')}
-  </div>`;
+  </div>${warnLine}${runtimeCompareLine(field)}`;
 }
 
 // 单一行模板：label | value | action 三列固定（动作列不撑高行；空值统一 muted 占位）

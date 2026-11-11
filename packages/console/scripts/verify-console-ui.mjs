@@ -937,6 +937,34 @@ async function main() {
         if (!p || p.hidden) return false;
         return !/capture|本机采集|host|token|逐宿主/i.test(p.textContent);
       })()`));
+    check('v2.2 记忆模式：单框分段（两格等宽无间隙、active .10 + ✓、无标题 chip）', await evalJs(`(() => {
+      const seg = document.querySelector('#settings-panel-runtime .runtime-mode-seg');
+      const btns = [...document.querySelectorAll('#settings-panel-runtime [data-rt-mode]')];
+      if (!seg || btns.length !== 2) return false;
+      const s = getComputedStyle(seg);
+      const [a, b] = btns.map((el) => el.getBoundingClientRect());
+      const active = btns.find((el) => el.getAttribute('aria-pressed') === 'true');
+      const ast = active ? getComputedStyle(active) : null;
+      return s.borderTopWidth === '1px' && s.borderTopStyle === 'solid'
+        && Math.round(b.left - a.right) === 0
+        && Math.abs(a.width - b.width) <= 1
+        && Math.round(a.height) === 27 && Math.round(b.height) === 27
+        && ast?.backgroundColor === 'rgba(80, 255, 170, 0.1)'
+        && /✓/.test(active?.textContent ?? '')
+        && !document.querySelector('#settings-panel-runtime [data-rt-mode-chip]');
+    })()`));
+    check('v2.2 运行状态：模式/状态纯文字右对齐、无 crt-tag、空值 faint', await evalJs(`(() => {
+      const s = document.querySelector('#settings-panel-runtime [data-rt-sidecar-status]');
+      if (!s) return false;
+      const values = [...s.querySelectorAll('dd.rt-value')];
+      const empty = values.find((el) => el.textContent.trim() === '—');
+      const dd = s.querySelector('dd');
+      return values.length === 5
+        && s.querySelectorAll('.crt-tag').length === 0
+        && getComputedStyle(dd).justifyContent === 'flex-end'
+        && getComputedStyle(dd).textAlign === 'right'
+        && (!empty || getComputedStyle(empty).color === 'rgba(140, 255, 200, 0.35)');
+    })()`));
     await capture('c6-settings-runtime.jpg');
     // 轻量模式：模型状态卡消失，记忆页模型来源禁用并说明。
     await evalJs('document.querySelector("[data-rt-mode=lightweight]").click()');
@@ -946,7 +974,7 @@ async function main() {
     check('轻量模式：状态为轻量 MCP，模型配置隐藏',
       await waitFor(`(() => {
         const p = document.querySelector('#settings-panel-runtime');
-        return /轻量 MCP/.test(p?.querySelector('[data-rt-mode-chip]')?.textContent ?? '')
+        return /轻量 MCP/.test(p?.querySelector('[data-rt-mode=lightweight][aria-pressed=true]')?.textContent ?? '')
           && !p?.querySelector('[data-rt-model-status]');
       })()`, 30000));
     await evalJs('document.querySelector("[data-settings-tab=runtime]").click()');
@@ -978,7 +1006,7 @@ async function main() {
     check('重新开启沉浸式：模式热生效，模型状态卡恢复',
       await waitFor(`(() => {
         const p = document.querySelector('#settings-panel-runtime');
-        return /沉浸式/.test(p?.querySelector('[data-rt-mode-chip]')?.textContent ?? '')
+        return /沉浸式/.test(p?.querySelector('[data-rt-mode=immersive][aria-pressed=true]')?.textContent ?? '')
           && Boolean(p?.querySelector('[data-rt-model-status]'));
       })()`, 30000));
     await waitFor(`/就绪/.test(document.querySelector('#settings-panel-runtime [data-rt-sidecar-status]')?.textContent ?? '')`, 30000);
@@ -1240,40 +1268,73 @@ async function main() {
       })()`, 30000));
     await evalJs('document.querySelector("[data-settings-tab=assistants]").click()');
     // U-3 症状①：背板/设置框不滚，只有页签下的 .settings-scroll 滚动；页面滚动锁定
-    check('U-3 设置壳：提示在标题下 + 仅内容区滚动 + 右上角 X + 滚动条贴边',
-      await evalJs(`(() => {
-        const modal = document.querySelector('#settings');
-        const box = modal.querySelector('.modal-box');
-        const scroller = modal.querySelector('.settings-scroll');
-        const close = modal.querySelector('.modal-head #settings-close.modal-x');
-        const m = getComputedStyle(modal);
-        const b = getComputedStyle(box);
-        const s = getComputedStyle(scroller);
-        const securityFirst = modal.querySelector('#settings-panel-security .settings-section');
-        const spacer = document.createElement('div');
-        spacer.style.height = '900px';
-        scroller.appendChild(spacer);
-        scroller.scrollTop = 120;
-        const out = {
-          modalOverflow: m.overflowY,
-          boxOverflow: b.overflowY,
-          scrollOverflow: s.overflowY,
-          noteInHead: Boolean(modal.querySelector('.modal-head .settings-apply-note')),
-          scrollEdge: Math.abs((box.getBoundingClientRect().right - 20) - scroller.getBoundingClientRect().right) <= 1,
-          securityTop: securityFirst ? getComputedStyle(securityFirst).borderTopWidth : 'missing',
-          scrolled: scroller.scrollTop > 0,
-          boxStill: box.scrollTop === 0,
-          backdropStill: modal.scrollTop === 0,
-          bodyLocked: document.body.classList.contains('modal-open'),
-          hasX: Boolean(close) && !modal.querySelector('.modal-actions'),
-        };
-        spacer.remove();
-        scroller.scrollTop = 0;
-        return out.modalOverflow === 'hidden' && out.boxOverflow === 'hidden'
-          && out.scrollOverflow === 'auto' && out.noteInHead && out.scrollEdge
-          && out.securityTop === '1px'
-          && out.scrolled && out.boxStill && out.backdropStill && out.bodyLocked && out.hasX;
-      })()`));
+    const prevShellViewport = await evalJs('({ w: window.innerWidth, h: window.innerHeight })');
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await sleep(350);
+    const settingsShellProbe = await evalJs(`(() => {
+      const modal = document.querySelector('#settings');
+      const box = modal.querySelector('.modal-box');
+      const scroller = modal.querySelector('.settings-scroll');
+      const rail = modal.querySelector('.settings-rail');
+      const close = modal.querySelector('.modal-head #settings-close.modal-x');
+      const title = modal.querySelector('.modal-head h2');
+      const note = modal.querySelector('.modal-head .settings-apply-note');
+      const panel = modal.querySelector('[data-settings-panel]:not([hidden]) .settings-group-body');
+      const m = getComputedStyle(modal);
+      const b = getComputedStyle(box);
+      const sc = getComputedStyle(scroller);
+      const active = modal.querySelector('.settings-rail .settings-tab.is-active');
+      const activeStyle = active ? getComputedStyle(active) : null;
+      const securityFirst = modal.querySelector('#settings-panel-security .settings-section');
+      const boxRect = box.getBoundingClientRect();
+      const scrollRect = scroller.getBoundingClientRect();
+      const railRect = rail.getBoundingClientRect();
+      const titleRect = title.getBoundingClientRect();
+      const noteRect = note.getBoundingClientRect();
+      const headRect = modal.querySelector('.modal-head').getBoundingClientRect();
+      const panelRect = panel ? panel.getBoundingClientRect() : null;
+      const out = {
+        modalOverflow: m.overflowY,
+        boxOverflow: b.overflowY,
+        scrollOverflow: sc.overflowY,
+        noteInHead: Boolean(note),
+        scrollEdge: Math.abs(boxRect.right - scrollRect.right) <= 1,
+        railWidth: Math.round(railRect.width),
+        railGap: panelRect ? Math.abs((panelRect.left - railRect.right) - 20) <= 1 : false,
+        contentGap: panelRect ? Math.abs(panelRect.left - (scrollRect.left + 20)) <= 1 : false,
+        headerInline: noteRect.left >= titleRect.right - 1
+          && noteRect.top < titleRect.bottom && noteRect.bottom > titleRect.top,
+        headerH: Math.round(headRect.bottom - boxRect.top),
+        activeBg: activeStyle?.backgroundColor ?? '',
+        activeInset: activeStyle?.boxShadow ?? '',
+        securityTop: securityFirst ? getComputedStyle(securityFirst).borderTopWidth : 'missing',
+        hasX: Boolean(close) && !modal.querySelector('.modal-actions'),
+      };
+      const spacer = document.createElement('div');
+      spacer.style.height = '900px';
+      scroller.appendChild(spacer);
+      scroller.scrollTop = 120;
+      out.scrolled = scroller.scrollTop > 0;
+      out.boxStill = box.scrollTop === 0;
+      out.backdropStill = modal.scrollTop === 0;
+      out.bodyLocked = document.body.classList.contains('modal-open');
+      spacer.remove();
+      scroller.scrollTop = 0;
+      return out;
+    })()`);
+    check('U-3 设置壳：header 同行 + 20 呼吸 + 仅内容区滚动 + 右上角 X',
+      settingsShellProbe.modalOverflow === 'hidden' && settingsShellProbe.boxOverflow === 'hidden'
+        && settingsShellProbe.scrollOverflow === 'auto' && settingsShellProbe.noteInHead && settingsShellProbe.scrollEdge
+        && settingsShellProbe.railWidth === 160 && settingsShellProbe.railGap && settingsShellProbe.contentGap
+        && settingsShellProbe.headerInline && settingsShellProbe.headerH === 57
+        && settingsShellProbe.activeBg === 'rgba(80, 255, 170, 0.06)'
+        && /inset/.test(settingsShellProbe.activeInset) && /2px/.test(settingsShellProbe.activeInset)
+        && settingsShellProbe.securityTop === '1px'
+        && settingsShellProbe.scrolled && settingsShellProbe.boxStill && settingsShellProbe.backdropStill
+        && settingsShellProbe.bodyLocked && settingsShellProbe.hasX,
+      JSON.stringify(settingsShellProbe));
+    await setViewport({ width: prevShellViewport.w, height: prevShellViewport.h, deviceScaleFactor: 1, mobile: prevShellViewport.w <= 560 });
+    await sleep(300);
     check('常驻运行行归设置 · 常用（状态 + 动作按钮）',
       await waitFor('(() => { const r = document.querySelector("#settings-resident"); return Boolean(r) && /常驻/.test(r.textContent) && r.querySelectorAll("[data-svc-action]").length >= 1; })()'));
     await evalJs('document.querySelector("[data-settings-tab=assistants]").click()');
@@ -1589,6 +1650,43 @@ async function main() {
         && Boolean(topbarInvite)
         && /本机运行|本机状态/.test(common.textContent);
     })()`));
+    const prevGridViewport = await evalJs('({ w: window.innerWidth, h: window.innerHeight })');
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await sleep(350);
+    const gridProbe = await evalJs(`(() => {
+      const modal = document.querySelector('#settings');
+      const box = modal.querySelector('.modal-box').getBoundingClientRect();
+      const head = modal.querySelector('.modal-head');
+      const title = head.querySelector('h2').getBoundingClientRect();
+      const note = head.querySelector('.settings-apply-note').getBoundingClientRect();
+      const rail = modal.querySelector('.settings-rail').getBoundingClientRect();
+      const scroll = modal.querySelector('.settings-scroll').getBoundingClientRect();
+      const panel = modal.querySelector('#settings-panel-common .settings-group-body').getBoundingClientRect();
+      const active = modal.querySelector('.settings-rail .settings-tab.is-active');
+      const as = active ? getComputedStyle(active) : null;
+      const more = modal.querySelector('[data-settings-more-trigger]');
+      const ms = more ? getComputedStyle(more) : null;
+      return {
+        railW: Math.round(rail.width),
+        railGap: Math.abs((panel.left - rail.right) - 20) <= 1,
+        contentGap: Math.abs(panel.left - (scroll.left + 20)) <= 1,
+        rightGap: Math.abs(panel.right - (box.right - 20)) <= 2,
+        headerH: Math.round(head.getBoundingClientRect().bottom - box.top),
+        inline: note.left >= title.right - 1 && note.top < title.bottom && note.bottom > title.top,
+        bg: as?.backgroundColor ?? '',
+        inset: as?.boxShadow ?? '',
+        moreBg: ms?.backgroundColor ?? '',
+        moreColor: ms?.color ?? '',
+      };
+    })()`);
+    check('v2.2 常用栅格：160 轨 + 20 呼吸；header 同行 57；active 实底 + 2px；更多 ghost',
+      gridProbe.railW === 160 && gridProbe.railGap && gridProbe.contentGap && gridProbe.rightGap
+        && gridProbe.headerH === 57 && gridProbe.inline
+        && gridProbe.bg === 'rgba(80, 255, 170, 0.06)' && /inset/.test(gridProbe.inset) && /2px/.test(gridProbe.inset)
+        && gridProbe.moreBg === 'rgba(8, 38, 26, 0.6)' && gridProbe.moreColor === 'rgb(169, 255, 212)',
+      JSON.stringify(gridProbe));
+    await setViewport({ width: prevGridViewport.w, height: prevGridViewport.h, deviceScaleFactor: 1, mobile: prevGridViewport.w <= 560 });
+    await sleep(300);
     // 自动修复：browser 无 preload 桥也渲染；点击先二次确认（取消不写）。
     await evalJs('document.querySelector("#settings-repair").click()');
     check('自动修复（browser）：二次确认明确覆盖 MCP/Skill、不碰记忆/身份/订阅/任务/审计', await waitFor(`(() => {
@@ -1641,6 +1739,20 @@ async function main() {
           && Boolean(common.querySelector('[data-settings-common-status]'))
           && (common.querySelector('[data-settings-common-status]').compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
       })()`));
+    check('v2.2 忆云状态 tag：当前绿描边微光 / 已归档透明描边 dim（非填充 ns-chip）', await evalJs(`(() => {
+      const current = document.querySelector('#settings-cloud-card .sec-tag-current');
+      const archived = document.querySelector('#settings-cloud-card .sec-tag-archived');
+      if (!current || !archived) return false;
+      const c = getComputedStyle(current);
+      const a = getComputedStyle(archived);
+      return !current.classList.contains('ns-chip') && !archived.classList.contains('ns-chip')
+        && c.borderTopColor === 'rgba(109, 255, 184, 0.55)'
+        && c.backgroundColor === 'rgba(109, 255, 184, 0.08)'
+        && c.color === 'rgb(200, 255, 227)'
+        && a.borderTopColor === 'rgba(80, 255, 170, 0.22)'
+        && a.backgroundColor === 'rgba(0, 0, 0, 0)'
+        && a.color === 'rgba(140, 255, 200, 0.52)';
+    })()`));
     await capture('e2a2-after-settings-clouds.jpg');
 
     // 改名即时生效（不重启）：当前忆云 忆云 1 → 工作室；顶栏徽章同步；守护进程仍存活
@@ -1975,9 +2087,22 @@ async function main() {
           && /离线钥匙/.test(recovery.querySelector('.sec-card-line')?.textContent ?? '')
           && effBefore.content !== 'none' && parseFloat(effBefore.width) === 2
           && offBefore.content === 'none'
-          && offStrong.color === 'rgb(131, 145, 180)'
+          && offStrong.color === 'rgba(140, 255, 200, 0.52)'
           && effStrong.fontSize === '19px' && effStrong.fontWeight === '700';
       })()`));
+    check('v2.2 安全卡警告行：inset 2px 琥珀 left-bar + 8px 左内距', await evalJs(`(() => {
+      const seed = document.querySelector('#settings-security-slot .sec-card.is-off');
+      if (!seed) return false;
+      const probe = document.createElement('span');
+      probe.className = 'sec-card-warn';
+      seed.appendChild(probe);
+      const s = getComputedStyle(probe);
+      const ok = s.color === 'rgb(255, 210, 122)'
+        && /inset/.test(s.boxShadow) && /2px/.test(s.boxShadow)
+        && s.paddingLeft === '8px';
+      probe.remove();
+      return ok;
+    })()`));
     await evalJs('document.querySelector("[data-security-change-level]").click()');
     check('U-3 安全 tab：更改等级弹框含三档 + 当前档 + 边界警告',
       await waitFor(`(() => {
@@ -1996,6 +2121,26 @@ async function main() {
     await evalJs('document.querySelector("[data-settings-tab=advanced]").click()');
     const toggleSel = '#settings-body input[data-cfg-path="joinService.enabled"]';
     check('即时生效：joinService 开关在高级 · 常驻服务组', await waitFor(`Boolean(document.querySelector('${toggleSel}'))`));
+    check('v2.2 开关 off 去蓝：轨道 .12 绿、滑块 .45 绿；on 仍 --ok + 白滑块', await evalJs(`(() => {
+      const host = document.querySelector('#settings-panel-advanced');
+      const probe = (checked) => {
+        const wrap = document.createElement('label');
+        wrap.className = 'toggle';
+        wrap.innerHTML = '<input type="checkbox"' + (checked ? ' checked' : '') + '><span class="slider"></span>';
+        host.appendChild(wrap);
+        const slider = wrap.querySelector('.slider');
+        const out = {
+          track: getComputedStyle(slider).backgroundColor,
+          knob: getComputedStyle(slider, '::before').backgroundColor,
+        };
+        wrap.remove();
+        return out;
+      };
+      const off = probe(false);
+      const on = probe(true);
+      return off.track === 'rgba(140, 255, 200, 0.12)' && off.knob === 'rgba(140, 255, 200, 0.45)'
+        && on.track === 'rgb(0, 158, 115)' && on.knob === 'rgb(255, 255, 255)';
+    })()`));
     const tgOriginal = await evalJs(`document.querySelector('${toggleSel}').checked`);
     await evalJs(`(() => { const el = document.querySelector('${toggleSel}'); el.checked = !el.checked; el.dispatchEvent(new Event('change', { bubbles: true })); })()`);
     await sleep(1200);
@@ -3614,7 +3759,7 @@ async function main() {
       await setViewport(viewport);
       const tabsLayout = await evalJs(settingsTabsProbe);
       const vertical = label !== '390';
-      check(`i18n 设置页签英文 ${label}：${vertical ? '宽屏竖轨（188px）' : '≤900 顶部横排'}、标签单行且不溢出`,
+      check(`i18n 设置页签英文 ${label}：${vertical ? '宽屏竖轨（160px）' : '≤900 顶部横排'}、标签单行且不溢出`,
         tabsLayout.ok
           && tabsLayout.orientation === (vertical ? 'vertical' : 'horizontal')
           && tabsLayout.vertical === vertical
@@ -3622,7 +3767,7 @@ async function main() {
           && tabsLayout.labels.every((item) => item.wrapped === false && item.outside === false)
           && tabsLayout.listOverflow === false && tabsLayout.pageOverflow === false
           && (vertical
-            ? tabsLayout.railWidth === 188 && tabsLayout.columns === 1 && tabsLayout.rows === 6
+            ? tabsLayout.railWidth === 160 && tabsLayout.columns === 1 && tabsLayout.rows === 6
             : tabsLayout.rows <= 2),
         JSON.stringify(tabsLayout));
       await captureNow(`i18n-en-settings-tabs-${label}.jpg`);

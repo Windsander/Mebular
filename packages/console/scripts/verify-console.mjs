@@ -1841,15 +1841,16 @@ try {
       /\.modal-box\.modal-settings \{[^}]*overflow: hidden/.test(cssSrc)
         && /\.modal-box-wide \{ width: min\(640px, 94vw\); \}/.test(cssSrc),
       '640 / overflow hidden 保持');
-    // v2：760×720 / 188 轨 / 关于 680 / 40 行 / 10+1.5 标签 / 19px 值 / 114 卡 / 40 条
-    check('v2 设置外框与轨：760×720、188、关于 760×680',
+    // v2：760×720 / 160 轨 / 关于 680 / 40 行 / 10+1.5 标签 / 19px 值 / 114 卡 / 40 条
+    check('v2 设置外框与轨：760×720、160、关于 760×680',
       cssSrc.includes('.modal-box.modal-settings {')
         && cssSrc.includes('width: min(760px, calc(100vw - 32px));')
         && cssSrc.includes('height: min(720px, calc(100vh - 32px));')
-        && cssSrc.includes('flex: 0 0 188px; width: 188px;')
+        && cssSrc.includes('padding: 18px 0 18px 20px;')
+        && cssSrc.includes('flex: 0 0 160px; width: 160px;')
         && cssSrc.includes('#about .modal-box {')
         && cssSrc.includes('height: min(680px, calc(100vh - 32px));'),
-      '760/720/188/680');
+      '760/720/160/680');
     check('v2 行/字号/安全卡：40 行、10+1.5 分组标签、19px 状态值、114 卡',
       cssSrc.includes('.settings-kv .kv-row > * {') && cssSrc.includes('min-height: 40px;')
         && cssSrc.includes('font-size: 10px; line-height: 15px; font-weight: 600; letter-spacing: 1.5px;')
@@ -1876,6 +1877,35 @@ try {
         && jsSrc.includes('data-security-audit')
         && jsSrc.includes('settings.group.interface'),
       '15/13/27/uppercase/index/audit');
+    // v2.2 校准：160 轨 + 20 呼吸 / header 同行 / active 实底 / 分段单框 / 状态去 pill
+    check('v2.2 栅格与 header：160 轨、内容 20 呼吸、header 38+18=57、标题与说明同行',
+      cssSrc.includes('flex: 0 0 160px; width: 160px;')
+        && cssSrc.includes('.modal-settings .settings-scroll { padding: 16px 20px 0;')
+        && /\.modal-settings \.modal-head \{[^}]*height: 38px;[^}]*align-items: center;/s.test(cssSrc)
+        && /\.modal-settings \.modal-heading \{[^}]*display: flex;[^}]*align-items: baseline;/s.test(cssSrc)
+        && cssSrc.includes('.modal-settings .modal-head h2::before')
+        && /\.modal-settings \.modal-head \.settings-apply-note \{[^}]*margin: 0;[^}]*line-height: 16px;/s.test(cssSrc),
+      '160 / 20 / 57 / inline header');
+    check('v2.2 轨激活实底 + 记忆分段单框 + 运行状态无 pill',
+      /\.modal-settings \.settings-rail \.settings-tab\.is-active \{[^}]*background: rgba\(80, 255, 170, 0\.06\);/s.test(cssSrc)
+        && cssSrc.includes('box-shadow: inset 2px 0 0 var(--crt);')
+        && cssSrc.includes('.runtime-mode-seg {')
+        && cssSrc.includes('grid-template-columns: repeat(2, minmax(0, 1fr));')
+        && cssSrc.includes('.runtime-mode-seg .btn + .btn { border-left: 1px solid rgba(80, 255, 170, 0.32); }')
+        && !jsSrc.includes('data-rt-mode-chip')
+        && !jsSrc.slice(jsSrc.indexOf('function runtimeStatusFactsHtml'), jsSrc.indexOf('function runtimeModeSettingsHtml')).includes('crt-tag')
+        && jsSrc.includes('class="rt-value')
+        && cssSrc.includes('.runtime-kv dd.rt-value.is-warn { color: #ffd27a; }'),
+      'active solid / segmented / no pill');
+    check('v2.2 细节：off 开关/安全值、忆云 tag、更多 ghost、警告 left-bar',
+      cssSrc.includes('.toggle .slider { background: rgba(140, 255, 200, 0.12); }')
+        && cssSrc.includes('.toggle .slider::before { background: rgba(140, 255, 200, 0.45); }')
+        && cssSrc.includes('#settings-security-slot > .settings-section.sec-card.is-off .sec-card-value strong { color: var(--crt-dim); }')
+        && cssSrc.includes('.sec-tag-archived {')
+        && jsSrc.includes("current ? 'sec-tag-current' : 'sec-tag-archived'")
+        && assistantsSrcV2.includes('btn btn-small btn-crt') && assistantsSrcV2.includes('data-settings-more-trigger')
+        && /\.sec-card-warn \{[^}]*box-shadow: inset 2px 0 0 #ffd27a;[^}]*padding-left: 8px;/s.test(cssSrc),
+      'toggle/off/sec-tag/more/warn');
   }
 
   // ---------- 轮 C：设置页三症状 + 呈现分级（弹层壳 / 关闭规范 / 常显-折叠-异常） ----------

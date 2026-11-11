@@ -1,4 +1,4 @@
-> **v2 刷新（2026-11-11）**：设置壳改为 760×720（关于 760×680）、左轨 188；安全三卡恢复 22px 序号 01–03 + 114 高 + 19px 状态值，卡下 11px 审计一行流（无事件隐藏）；MCP 端口不一致在行下给出默认可见的 11px 三元组；高级保留真实 checkbox/输入，开关 38×20。本目录 `u3-after-settings-security*.jpg`、`u3-after-settings-mcp*.jpg`、`u3-after-settings-advanced*.jpg`（含 900/390 与展开态）已按 v2 重新生成；全量基线见 `../u4-settings-redesign/`。
+> **v2 刷新（2026-11-11）**：设置壳改为 760×720（关于 760×680）、左轨 160（v2.2 校准）；安全三卡恢复 22px 序号 01–03 + 114 高 + 19px 状态值，卡下 11px 审计一行流（无事件隐藏）；MCP 端口不一致在行下给出默认可见的 11px 三元组；高级保留真实 checkbox/输入，开关 38×20。本目录 `u3-after-settings-security*.jpg`、`u3-after-settings-mcp*.jpg`、`u3-after-settings-advanced*.jpg`（含 900/390 与展开态）已按 v2 重新生成；全量基线见 `../u4-settings-redesign/`。
 
 # U-3 · 设置页设计收口（安全 / MCP / 高级）
 

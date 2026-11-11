@@ -1589,12 +1589,15 @@ function runtimeStatusFactsHtml(status) {
   const error = runtimeStatusErrorText(status);
   const stateLabel = runtimeStatusStateLabel(status);
   const enabled = memoryRuntimeEnabledOf(status, currentConfigFile());
+  const value = (text, tone = '') => `<dd class="rt-value${tone ? ` ${tone}` : ''}">${escapeHtml(text)}</dd>`;
+  const stateWarn = status.degraded || status.state === 'failed';
+  const version = status.runtimeVersion ?? '';
   return `<dl class="runtime-kv" data-rt-sidecar-status>
-    <div class="kv-row"><dt>${escapeHtml(t('runtime.status.mode'))}</dt><dd><span class="crt-tag ${enabled ? 'crt-tag-ok' : ''}">${escapeHtml(enabled ? t('runtime.sidecar.immersive') : t('runtime.sidecar.lightweight'))}</span></dd></div>
-    <div class="kv-row"><dt>${escapeHtml(t('runtime.sidecar.state'))}</dt><dd><span class="crt-tag ${status.state === 'ready' ? 'crt-tag-ok' : status.degraded || status.state === 'failed' ? 'crt-tag-warn' : ''}">${escapeHtml(stateLabel)}</span></dd></div>
-    <div class="kv-row"><dt>${escapeHtml(t('runtime.sidecar.degraded'))}</dt><dd>${escapeHtml(status.degraded ? t('runtime.sidecar.degradedYes') : t('runtime.sidecar.degradedNo'))}</dd></div>
-    <div class="kv-row"><dt>${escapeHtml(t('runtime.sidecar.error'))}</dt><dd>${error ? escapeHtml(error) : '—'}</dd></div>
-    <div class="kv-row"><dt>${escapeHtml(t('runtime.sidecar.version'))}</dt><dd>${escapeHtml(status.runtimeVersion ?? '—')}</dd></div>
+    <div class="kv-row"><dt>${escapeHtml(t('runtime.status.mode'))}</dt>${value(enabled ? t('runtime.sidecar.immersive') : t('runtime.sidecar.lightweight'))}</div>
+    <div class="kv-row"><dt>${escapeHtml(t('runtime.sidecar.state'))}</dt>${value(stateLabel, stateWarn ? 'is-warn' : '')}</div>
+    <div class="kv-row"><dt>${escapeHtml(t('runtime.sidecar.degraded'))}</dt>${value(status.degraded ? t('runtime.sidecar.degradedYes') : t('runtime.sidecar.degradedNo'), status.degraded ? 'is-warn' : '')}</div>
+    <div class="kv-row"><dt>${escapeHtml(t('runtime.sidecar.error'))}</dt>${error ? value(error, 'is-warn') : value('—', 'is-empty')}</div>
+    <div class="kv-row"><dt>${escapeHtml(t('runtime.sidecar.version'))}</dt>${version ? value(version) : value('—', 'is-empty')}</div>
   </dl>`;
 }
 
@@ -1610,10 +1613,11 @@ function runtimeModeSettingsHtml() {
   return settingsSectionHtml({
     id: 'runtime-mode',
     title: t('settings.runtime.mode.title'),
-    chip: `<span class="crt-tag ${enabled ? 'crt-tag-ok' : ''}" data-rt-mode-chip>${escapeHtml(enabled ? t('runtime.sidecar.immersive') : t('runtime.sidecar.lightweight'))}</span>`,
     body: `<div class="runtime-mode-actions" role="group" aria-label="${escapeHtml(t('settings.runtime.mode.title'))}" data-rt-mode-group>
-      ${option('lightweight', 'settings.runtime.mode.lightweight')}
-      ${option('immersive', 'settings.runtime.mode.immersive')}
+      <div class="runtime-mode-seg">
+        ${option('lightweight', 'settings.runtime.mode.lightweight')}
+        ${option('immersive', 'settings.runtime.mode.immersive')}
+      </div>
     </div>
     <p class="settings-section-foot muted" data-rt-mode-hint>${escapeHtml(t(enabled ? 'settings.runtime.mode.immersiveDesc' : 'settings.runtime.mode.lightDesc'))}</p>`,
   });
@@ -6806,7 +6810,7 @@ function cloudRowHtml(entry) {
     <div class="cloud-main">
       <div class="cloud-title">
         <span class="cloud-name"${nameTitle}>${escapeHtml(entry.name)}</span>
-        <span class="badge ${current ? 'badge-ok' : 'badge-muted'}">${escapeHtml(t(current ? 'settings.cloud.row.current' : 'settings.cloud.row.archived'))}</span>
+        <span class="crt-tag ${current ? 'sec-tag-current' : 'sec-tag-archived'}">${escapeHtml(t(current ? 'settings.cloud.row.current' : 'settings.cloud.row.archived'))}</span>
         ${conflictBadges}
       </div>
       <p class="cloud-sub" title="${escapeHtml(metaTitle)}">${t('settings.cloud.row.rootFingerprint', { fingerprint })}<span class="cloud-sep" aria-hidden="true">·</span>${escapeHtml(t('settings.cloud.row.lastUsed', { time: lastUsed }))}</p>

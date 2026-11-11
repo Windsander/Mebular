@@ -3311,3 +3311,7 @@ html[lang="en-US"] .modal-settings .cfg-label { line-height: 19px; }
   .settings-group-head.has-action { height: auto; flex-wrap: wrap; row-gap: 4px; }
   .settings-wizard-action { margin-top: 0; margin-bottom: 0; }
 }
+
+/* 组头动作：ghost（27 高，无描边；hover 才出现微弱边框） */
+.settings-wizard-action { border-color: transparent; background: none; color: var(--crt-dim); }
+.settings-wizard-action:hover { color: var(--crt-bright); border-color: var(--crt-line); background: rgba(80, 255, 170, 0.05); }

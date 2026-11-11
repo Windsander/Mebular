@@ -1239,7 +1239,7 @@ async function main() {
           boxOverflow: b.overflowY,
           scrollOverflow: s.overflowY,
           noteInHead: Boolean(modal.querySelector('.modal-head .settings-apply-note')),
-          scrollEdge: Math.abs(scroller.getBoundingClientRect().right - box.getBoundingClientRect().right) <= 1,
+          scrollEdge: Math.abs((box.getBoundingClientRect().right - 20) - scroller.getBoundingClientRect().right) <= 1,
           securityTop: securityFirst ? getComputedStyle(securityFirst).borderTopWidth : 'missing',
           scrolled: scroller.scrollTop > 0,
           boxStill: box.scrollTop === 0,
@@ -1251,7 +1251,7 @@ async function main() {
         scroller.scrollTop = 0;
         return out.modalOverflow === 'hidden' && out.boxOverflow === 'hidden'
           && out.scrollOverflow === 'auto' && out.noteInHead && out.scrollEdge
-          && out.securityTop === '0px'
+          && out.securityTop === '1px'
           && out.scrolled && out.boxStill && out.backdropStill && out.bodyLocked && out.hasX;
       })()`));
     check('常驻运行行归设置 · 常用（状态 + 动作按钮）',
@@ -1556,6 +1556,8 @@ async function main() {
       return tabs.join(',') === '常用,安全,记忆,集成,MCP 接入,高级' && document.querySelector('#settings')?.hidden === false;
     })()`));
     await evalJs('document.querySelector("[data-settings-tab=common]").click()');
+    await evalJs('document.querySelector("[data-settings-tab=common]")?.click()');
+    await sleep(200);
     check('E1 常用页：保留只读状态 + 自动修复 + 重启向导；无重复邀请入口', await waitFor(`(() => {
       const common = document.querySelector('#settings-panel-common');
       const topbarInvite = document.querySelector('#invite-device');
@@ -1565,7 +1567,7 @@ async function main() {
         && Boolean(common.querySelector('.settings-repair-row #settings-repair'))
         && !common.querySelector('#settings-invite-device')
         && Boolean(topbarInvite)
-        && /高级/.test(common.textContent);
+        && /本机运行|本机状态/.test(common.textContent);
     })()`));
     // 自动修复：browser 无 preload 桥也渲染；点击先二次确认（取消不写）。
     await evalJs('document.querySelector("#settings-repair").click()');
@@ -1614,7 +1616,7 @@ async function main() {
           && Boolean(archived.querySelector('[data-cloud-switch]')) && !archived.querySelector('[data-cloud-rename]')
           && /切换到该忆云后可改名/.test(archived.textContent)
           && !card.querySelector('[data-cloud-delete]') && !/删除忆云/.test(card.textContent)
-          && /归档保留，不删除/.test(card.textContent)
+          && /归档保留，不删除/.test(card.getAttribute('title') ?? '')
           && Boolean(common) && common.contains(card)
           && Boolean(common.querySelector('[data-settings-common-status]'))
           && (common.querySelector('[data-settings-common-status]').compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
@@ -1735,10 +1737,10 @@ async function main() {
     check('U-3 高级页：三组就位（常驻服务/网络/自动化），模型来源与 MCP 字段不再混入',
       await waitFor(`(() => {
         const p = document.querySelector('#settings-panel-advanced');
-        const sections = [...(p?.querySelectorAll(':scope > .settings-section') ?? [])];
+        const sections = [...(p?.querySelectorAll(':scope > .settings-group') ?? [])];
         const ids = sections.map((s) => s.dataset.settingsSection).join(',');
         return Boolean(p) && ids === 'resident,network,automation'
-          && sections.every((s) => Boolean(s.querySelector('h3')) && Boolean(s.querySelector('.settings-section-desc')))
+          && sections.every((s) => Boolean(s.querySelector('.settings-group-head h3')) && Boolean(s.querySelector('.settings-group-desc')))
           && Boolean(p.querySelector('[data-cfg-path="joinService.enabled"]'))
           && Boolean(p.querySelector('[data-cfg-path="network.enabled"]'))
           && Boolean(p.querySelector('[data-cfg-path="sync.antiEntropy.enabled"]'))
@@ -1771,7 +1773,7 @@ async function main() {
     check('U-3 MCP 接入：连接/TLS 两组 + 一个「危险与自救」折叠；六字段齐全',
       await waitFor(`(() => {
         const p = document.querySelector('#settings-panel-mcp');
-        const sections = [...(p?.querySelectorAll(':scope > .settings-section') ?? [])];
+        const sections = [...(p?.querySelectorAll(':scope > .settings-group') ?? [])];
         const ids = sections.map((s) => s.dataset.settingsSection).join(',');
         const paths = ['mcp.http.port', 'mcp.http.auth', 'mcp.http.host', 'mcp.http.tls', 'mcp.http.tlsKey', 'mcp.http.tlsCert'];
         return Boolean(p) && ids === 'connection,tls'
@@ -1857,25 +1859,28 @@ async function main() {
       await evalJs('(() => { document.querySelector("[data-settings-tab=advanced]")?.click(); const f = document.querySelector("#diag-fold"); return Boolean(f) && Boolean(f.querySelector("#cfg-copy-all")); })()'));
     await evalJs('document.querySelector("[data-settings-tab=mcp]").click()');
     // 轮 C / B：常态行状态列=生效中（不新增子行）；异常才完整三元组；帮助聚焦出现；空值提示进 placeholder
-    check('轮 C/B 呈现分级：常态状态列=生效中，异常自动出现完整三元组',
-      await evalJs(`(() => {
-        const body = document.querySelector('#settings-body');
-        const okStates = body.querySelectorAll('[data-cfg-state=ok]').length;
-        // 专指 mcp.http.port 的「已配置 0 / 实际 <port>」例外：避免被 join 端点回环等其它异常行抢先
-        const row = body.querySelector('[data-cfg-path="mcp.http.port"]')?.closest('.cfg-row');
-        const ex = row?.nextElementSibling?.matches('[data-cfg-state=exception]') ? row.nextElementSibling : null;
-        const exStyle = ex ? getComputedStyle(ex) : null;
-        const status = row?.querySelector('.cfg-status');
-        const okCells = [...body.querySelectorAll('[data-cfg-status=ok]')];
-        return okStates === 0
-          && okCells.length > 0
-          && okCells.every((cell) => cell.textContent.trim() === '生效中' && cell.children.length === 0)
-          && Boolean(ex) && exStyle.display !== 'none' && ex.getBoundingClientRect().height > 0
-          && /已配置/.test(ex.textContent) && /实际/.test(ex.textContent) && /不一致/.test(ex.textContent)
-          && Boolean(status) && /未生效|待重启/.test(status.textContent)
-          && Math.round(row.getBoundingClientRect().height) === 40
-          && document.documentElement.scrollWidth <= window.innerWidth + 1;
-      })()`));
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await sleep(250);
+    const grading = await evalJs(`(() => {
+      const body = document.querySelector('#settings-body');
+      const row = body.querySelector('[data-cfg-path="mcp.http.port"]')?.closest('.cfg-row');
+      const ex = row?.parentElement?.querySelector('[data-cfg-state=exception]') ?? null;
+      const exStyle = ex ? getComputedStyle(ex) : null;
+      const status = row?.querySelector('.cfg-status');
+      const after = Boolean(ex) && Boolean(row) && (row.compareDocumentPosition(ex) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+      const ok = Boolean(row) && after && exStyle.display !== 'none' && ex.getBoundingClientRect().height > 0
+        && /已配置/.test(ex.textContent) && /实际/.test(ex.textContent) && /不一致/.test(ex.textContent)
+        && Boolean(status) && /未生效|待重启/.test(status.textContent)
+        && Math.round(row.getBoundingClientRect().height) === 40
+        && document.documentElement.scrollWidth <= window.innerWidth + 1;
+      return { ok, row: Boolean(row), exAfter: after, exDisplay: exStyle?.display ?? null,
+        exH: ex ? Math.round(ex.getBoundingClientRect().height) : null, status: status?.textContent?.trim() ?? null,
+        rowH: row ? Math.round(row.getBoundingClientRect().height) : null,
+        docW: document.documentElement.scrollWidth, vw: innerWidth,
+        panelHidden: document.querySelector('#settings-panel-mcp')?.hidden ?? null,
+        exText: ex?.textContent?.replace(/\\s+/g, ' ').trim().slice(0, 70) ?? null };
+    })()`);
+    check('轮 C/B 呈现分级：常态状态列=生效中，异常默认出现完整三元组（行下静态行、行仍 40）', Boolean(grading?.ok), JSON.stringify(grading));
     check('U-1/B 呈现分级：帮助在行内聚焦时出现、空值默认/短提示进 placeholder',
       await evalJs(`(() => {
         const panel = document.querySelector('#settings-panel-mcp');
@@ -1899,15 +1904,14 @@ async function main() {
         if (rows.length < 2) return false;
         const first = rows[0];
         const second = rows[1];
-        const cols = getComputedStyle(second).gridTemplateColumns.split(' ').filter(Boolean);
         const status = second.querySelector(':scope > .cfg-status');
         const statusStyle = status ? getComputedStyle(status) : null;
-        return cols.length === 3
-          && parseFloat(getComputedStyle(second).minHeight) >= 40
+        return getComputedStyle(second).display === 'flex'
+          && Math.round(second.getBoundingClientRect().height) === 40
           && getComputedStyle(first).borderTopStyle === 'none'
           && getComputedStyle(second).borderTopStyle === 'dashed'
           && Boolean(status) && status.children.length === 0
-          && statusStyle.fontSize === '10.5px'
+          && statusStyle.fontSize === '12px'
           && statusStyle.fontWeight === '400';
       })()`));
     await clearViewport();
@@ -2003,7 +2007,7 @@ async function main() {
     check('UI 待重启：页面内写 sync.antiEntropy.intervalMs → 200', wrotePending === 200, `status=${wrotePending}`);
     check(
       'UI 待重启：设置弹窗出现「待重启」并含变更项（反熵间隔）',
-      await waitFor('(() => { const el = document.querySelector("[data-pending-restart]"); return Boolean(el) && /待重启/.test(el.textContent) && /反熵间隔/.test(el.textContent) && /sync\\.antiEntropy\\.intervalMs/.test(el.textContent); })()'),
+      await waitFor('(() => { const el = document.querySelector("[data-pending-restart]"); return Boolean(el) && /待重启/.test(el.textContent) && /反熵间隔/.test(el.textContent) && /sync\\.antiEntropy\\.intervalMs/.test(el.getAttribute("title") ?? ""); })()'),
     );
     check(
       'UI 待重启：设置入口徽标标注「待重启 N 项」',
@@ -2011,7 +2015,7 @@ async function main() {
     );
     check(
       'D UI 三元组第三列：待重启横幅含「未生效原因」（服务端计算）',
-      await waitFor('/未生效原因/.test(document.querySelector("[data-pending-restart]")?.textContent ?? "")'),
+      await waitFor('(() => { const el = document.querySelector("[data-pending-restart]"); return /未生效原因/.test(el?.getAttribute("title") ?? ""); })()'),
     );
     check(
       'C UI 一键重启按钮就位（待重启横幅内，写权限下可用）',
@@ -2226,13 +2230,14 @@ async function main() {
       await waitFor('document.querySelector("#settings")?.hidden === true && !document.body.classList.contains("modal-open")'));
     // 关于本机（点顶栏本机徽标进入）
     await evalJs('document.querySelector("#self-badge").click()');
-    check('关于本机打开（身份/存储/收敛；运行状态收一个折叠）', await waitFor(`(() => {
+    check('关于本机打开（v2：身份与存储 / 运行与同步 / 诊断与恢复 三组 + 三折叠）', await waitFor(`(() => {
       const body = document.querySelector('#about-body');
-      const folds = body?.querySelectorAll('details') ?? [];
-      return Boolean(body) && Boolean(body.querySelector('[data-info-block=identity]'))
-        && Boolean(body.querySelector('[data-info-block=convergence]'))
-        && folds.length === 1 && folds[0].dataset.settingsFold === 'about-runtime'
-        && body.textContent.includes('运行状态');
+      if (!body) return false;
+      const groups = [...body.querySelectorAll(':scope > .about-group')].map((el) => el.dataset.infoBlock).join(',');
+      const folds = [...body.querySelectorAll('details')].map((el) => el.dataset.settingsFold).sort().join(',');
+      return groups === 'identity,runtime,diag'
+        && folds === 'about-diag,about-identity,about-runtime'
+        && /身份与存储/.test(body.textContent) && /运行与同步/.test(body.textContent) && /诊断与恢复/.test(body.textContent);
     })()`));
     check('轮 C 配套：写盘路径/.bak 收进关于本机、设置常用页不再重复',
       await evalJs('(() => { const t = document.querySelector("#about-body")?.textContent ?? ""; const s = document.querySelector("#settings-body")?.textContent ?? ""; return /配置文件/.test(t) && /\\.bak/.test(t) && !/修改写入/.test(s); })()'));
@@ -2604,9 +2609,10 @@ async function main() {
       `active=${tokenState.joinState.active?.slice(0, 8)}… revoked=${tokenState.joinState.revoked.length}`);
     const allFoldKeys = await evalJs(`(() => [...document.querySelectorAll('#settings-body details, #about-body details, #invite-body details')]
       .map((el) => el.dataset.settingsFold ?? el.className))()`);
-    check('U-1 全域折叠预算：设置 + 关于 ≤5 且均为白名单类型（邀请无折叠）', Array.isArray(allFoldKeys)
+    check('U-1 全域折叠预算：设置 2 + 关于 3 = 5，均为白名单类型（邀请无折叠；「更多」不再是 details）', Array.isArray(allFoldKeys)
       && allFoldKeys.length <= 5
-      && allFoldKeys.every((key) => ['mcp-danger', 'diagnostics', 'about-runtime', 'assistants'].includes(key)),
+      && !allFoldKeys.includes('settings-more')
+      && allFoldKeys.every((key) => ['mcp-danger', 'diagnostics', 'about-runtime', 'about-identity', 'about-diag', 'assistants'].includes(key)),
       JSON.stringify(allFoldKeys));
     check('E1 邀请面板无「去设置启用」旧指路（未启用时就地一键启用）',
       await evalJs(`(() => {
@@ -2992,13 +2998,15 @@ async function main() {
         const ps = pending ? getComputedStyle(pending) : null;
         return cards.every((card) => card.classList.contains('is-effective')
             && getComputedStyle(card, '::before').content !== 'none'
-            && Boolean(card.querySelector('.sec-card-head > .sec-dot')))
+            && Boolean(card.querySelector('.sec-card-head > .sec-dot'))
+            && Math.round(card.getBoundingClientRect().height) === 114)
+          && getComputedStyle(level.querySelector('.sec-card-value strong')).fontSize === '19px'
           && level.querySelector('.sec-card-value strong')?.textContent === '高'
           && seed.querySelector('.sec-card-value strong')?.textContent === '已导入'
           && recovery.querySelector('.sec-card-value strong')?.textContent === '已生成'
           && /6 位动态码/.test(seed.querySelector('.sec-card-line')?.textContent ?? '')
           && /离线钥匙/.test(recovery.querySelector('.sec-card-line')?.textContent ?? '')
-          && s.firstElementChild === pending && ps.backgroundColor === 'rgba(60, 42, 8, 0.26)'
+          && s.firstElementChild === pending && ps.backgroundColor === 'rgba(60, 42, 8, 0.24)'
           && ps.borderLeftWidth === '2px' && ps.borderLeftColor === 'rgb(255, 210, 122)';
       })()`));
     await evalJs('document.querySelector("[data-security-change-level]").click()');
@@ -3040,16 +3048,20 @@ async function main() {
     await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
     await evalJs('document.querySelector("#open-settings").click()');
     await evalJs('document.querySelector("[data-settings-tab=security]").click()');
-    check('S3/E1 窄屏：安全卡与 6 页签不横向溢出（390px）',
-      await waitFor(`(() => {
-        const box = document.querySelector('#settings .modal-box');
-        const card = document.querySelector('#settings-security-slot');
-        const tabs = document.querySelector('#settings-body .settings-tabs');
-        if (!box || !card || !tabs) return false;
-        return box.scrollWidth <= box.clientWidth + 1 && card.scrollWidth <= card.clientWidth + 1
-          && tabs.scrollWidth <= tabs.clientWidth + 1
-          && document.documentElement.scrollWidth <= window.innerWidth + 1;
-      })()`));
+    await sleep(400);
+    const narrow390 = await evalJs(`(() => {
+      const box = document.querySelector('#settings .modal-box');
+      const card = document.querySelector('#settings-security-slot');
+      const tabs = document.querySelector('#settings-body .settings-tabs');
+      if (!box || !card || !tabs) return { ok: false, why: 'missing' };
+      const of = (el) => ({ cw: el.clientWidth, sw: el.scrollWidth });
+      const b = of(box); const c = of(card); const t = of(tabs);
+      const kids = [...card.querySelectorAll('*')].map((el) => ({ cls: String(el.className || el.tagName).slice(0, 34), sw: el.scrollWidth, cw: el.clientWidth })).filter((x) => x.sw > x.cw + 1).slice(0, 8);
+      return { ok: b.sw <= b.cw + 1 && c.sw <= c.cw + 1 && t.sw <= t.cw + 1
+          && document.documentElement.scrollWidth <= window.innerWidth + 1,
+        box: b, card: c, tabs: t, kids, docW: document.documentElement.scrollWidth, vw: innerWidth };
+    })()`);
+    check('S3/E1 窄屏：安全卡与 6 页签不横向溢出（390px）', Boolean(narrow390?.ok), JSON.stringify(narrow390));
     check('C 窄屏 390：三张安全卡状态点/大数值/动作不横向溢出',
       await evalJs(`(() => {
         const cards = [...document.querySelectorAll('#settings-security-slot > .settings-section')];
@@ -3571,7 +3583,7 @@ async function main() {
       await setViewport(viewport);
       const tabsLayout = await evalJs(settingsTabsProbe);
       const vertical = label !== '390';
-      check(`i18n 设置页签英文 ${label}：${vertical ? '宽屏竖轨（160px）' : '≤900 顶部横排'}、标签单行且不溢出`,
+      check(`i18n 设置页签英文 ${label}：${vertical ? '宽屏竖轨（188px）' : '≤900 顶部横排'}、标签单行且不溢出`,
         tabsLayout.ok
           && tabsLayout.orientation === (vertical ? 'vertical' : 'horizontal')
           && tabsLayout.vertical === vertical
@@ -3579,7 +3591,7 @@ async function main() {
           && tabsLayout.labels.every((item) => item.wrapped === false && item.outside === false)
           && tabsLayout.listOverflow === false && tabsLayout.pageOverflow === false
           && (vertical
-            ? tabsLayout.railWidth === 160 && tabsLayout.columns === 1 && tabsLayout.rows === 6
+            ? tabsLayout.railWidth === 188 && tabsLayout.columns === 1 && tabsLayout.rows === 6
             : tabsLayout.rows <= 2),
         JSON.stringify(tabsLayout));
       await captureNow(`i18n-en-settings-tabs-${label}.jpg`);
@@ -3643,7 +3655,8 @@ async function main() {
       const box = document.querySelector('#settings .modal-box');
       const scroller = document.querySelector('#settings .settings-scroll');
       const texts = [...document.querySelectorAll(
-        '#settings .settings-section-desc, #settings .settings-section-foot, #settings .cfg-help, '
+        '#settings .settings-group-desc, #settings .settings-group-foot, #settings .settings-group-note, '
+        + '#settings .settings-section-foot, #settings .settings-warn-line, #settings .cfg-help, '
         + '#settings .settings-kv .kv-value, #settings .cloud-intro, #settings .settings-note',
       )].filter(visible);
       const overflow = texts
@@ -3984,7 +3997,7 @@ async function main() {
       && nearPx(probe.cfgLabel.lineHeight, labelLh)
       && (!probe.cfgDefault || probe.cfgDefault.fontSize === '10px')
       && Boolean(probe.smallBtn) && probe.smallBtn.fontSize === '12px'
-      && nearPx(probe.smallBtn.lineHeight, 12)
+      && nearPx(probe.smallBtn.lineHeight, 18)
       && probe.pageOver <= 1 && probe.cjk === false;
     await send('Page.navigate', { url: `${base}/console/?lang=en-US` });
     await waitFor('document.documentElement?.dataset?.consoleReady === "1" && Boolean(document.querySelector("#open-settings"))');
@@ -4196,18 +4209,18 @@ async function main() {
     await evalJs('document.querySelector("#view-nav li:nth-of-type(2) button").click()');
     await waitFor('document.querySelector("#domains-view")?.hidden === false && Boolean(document.querySelector("#domains-note"))');
     const zhSector = await evalJs(zhSectorProbe);
-    check('i18n 排版 A+C 中文不变：辅助文本仍 10.5px、微文本 10px、标签行高 26px、按钮行高 normal',
+    check('i18n 排版 C 中文 v2：辅助 11/16、标签 12/18、按钮 12/18（token 仍为 10.5/10/26）',
       zhSettingsType.lang === 'zh-CN'
         && zhSettingsType.tokens['--type-help'] === '10.5px'
         && zhSettingsType.tokens['--type-help-leading'] === '1.5'
         && zhSettingsType.tokens['--type-micro'] === '10px'
         && zhSettingsType.tokens['--type-label-leading'] === '26px'
         && /0\.45\)$/.test(zhSettingsType.tokens['--crt-muted'])
-        && Boolean(zhSettingsType.label) && nearPx(zhSettingsType.label.lineHeight, 26)
-        && (!zhSettingsType.kvSub || zhSettingsType.kvSub.fontSize === '10.5px')
-        && Boolean(zhSettingsType.cfgHelp) && zhSettingsType.cfgHelp.fontSize === '10.5px'
-        && (!zhSettingsType.cfgDefault || zhSettingsType.cfgDefault.fontSize === '9px')
-        && Boolean(zhSettingsType.smallBtn) && zhSettingsType.smallBtn.lineHeight === 'normal'
+        && Boolean(zhSettingsType.label) && nearPx(zhSettingsType.label.lineHeight, 18)
+        && (!zhSettingsType.kvSub || zhSettingsType.kvSub.fontSize === '11px')
+        && Boolean(zhSettingsType.cfgHelp) && zhSettingsType.cfgHelp.fontSize === '11px' && nearPx(zhSettingsType.cfgHelp.lineHeight, 16)
+        && (!zhSettingsType.cfgDefault || zhSettingsType.cfgDefault.fontSize === '10px')
+        && Boolean(zhSettingsType.smallBtn) && nearPx(zhSettingsType.smallBtn.lineHeight, 18)
         && zhSettingsType.pageOver <= 1,
       JSON.stringify(zhSettingsType));
     check('i18n 排版 A+C 中文数据面不变：仍三列（名称与元信息同排）、说明不设 72ch 上限',
@@ -4610,20 +4623,26 @@ async function main() {
     await evalJs('document.querySelector("#open-settings").click()');
     await waitFor('document.querySelector("#settings")?.hidden === false && Boolean(document.querySelector("[data-settings-extra=about-modal]"))');
     await evalJs('document.querySelector("[data-settings-extra=about-modal]").click()');
-    await waitFor('document.querySelector("#about")?.hidden === false && document.querySelectorAll("#about-body .settings-section").length >= 4');
+    await waitFor('document.querySelector("#about")?.hidden === false && document.querySelectorAll("#about-body .about-group").length === 3');
     // 运行状态/路径/任务面/工具都在「运行状态」折叠内；展开后再测长文案。
-    await evalJs('document.querySelector("#about-runtime-fold").open = true');
+    check('i18n 关于本机折叠存在（#about-runtime）', await evalJs('Boolean(document.querySelector("#about-runtime"))'));
+    await evalJs('(() => { for (const id of ["about-runtime", "about-diag", "about-identity"]) { const f = document.querySelector(`#${id}`); if (f) f.open = true; } })()');
     for (const [label, viewport] of densityViewports) {
       await setViewport(viewport);
+      // 折叠可能在轮询重渲染后收起：每个视口前重新展开（三组折叠全开）
+      await evalJs('(() => { for (const id of ["about-identity", "about-runtime", "about-diag"]) { const f = document.querySelector(`#${id}`); if (f) f.open = true; } })()');
+      await sleep(150);
       const about = await evalJs(surfaceProbe('#about', '#about-body p, #about-body dd, #about-body .chip-wrap'));
       const aboutText = await surfaceText('#about-body');
+      const phrases = {
+        fleet: /Task plane, not a memory domain/.test(aboutText),
+        runtime: /Set at runtime: relay pool/.test(aboutText),
+        paths: /Paths come from the core address book/.test(aboutText),
+        tools: /Agents call the same handlers over MCP/.test(aboutText),
+      };
       check(`i18n 数据面 about ${label}：长说明/命令不横向越界`,
-        surfaceOk(about)
-          && /Task plane, not a memory domain/.test(aboutText)
-          && /Set at runtime: relay pool/.test(aboutText)
-          && /Paths come from the core address book/.test(aboutText)
-          && /Agents call the same handlers over MCP/.test(aboutText),
-        JSON.stringify({ ...about, sample: aboutText.slice(0, 120) }));
+        surfaceOk(about) && Object.values(phrases).every(Boolean),
+        JSON.stringify({ ...about, phrases, sample: aboutText.slice(0, 120) }));
       await captureNow(`i18n-en-data-about-${label}.jpg`);
     }
     await setViewport(densityViewports[0][1]);

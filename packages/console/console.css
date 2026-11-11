@@ -2903,8 +2903,6 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
 
 /* 行内「更多」popover：零高度，菜单 fixed 不裁切 */
 .settings-more { position: relative; display: inline-flex; }
-.settings-more > summary { list-style: none; }
-.settings-more > summary::-webkit-details-marker { display: none; }
 .settings-more > .btn { height: 26px; }
 .settings-more-panel {
   position: fixed; z-index: 90;
@@ -3033,7 +3031,7 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
 .settings-more-panel .btn {
   height: 26px; min-height: 26px; padding: 0 10px;
   display: inline-flex; align-items: center; justify-content: center;
-  font-size: 12px; line-height: 1; border-radius: 6px;
+  font-size: 12px; line-height: 18px; border-radius: 6px;
 }
 .runtime-kv { grid-template-columns: var(--row-label-w) minmax(0, 1fr); }
 
@@ -3165,3 +3163,44 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
   overflow-wrap: anywhere;
 }
 .cfg-row + .cfg-warn-line + .cfg-effective { margin-top: 0; }
+
+/* v2 英文同样 12/18：压掉旧 en 的 1.35 标签行距对 .cfg-label 的覆盖 */
+html[lang="en-US"] .modal-settings .cfg-label { line-height: 18px; }
+
+/* 加入忆云仍是 560 宽（cloud-join-box 覆盖 modal-box-wide） */
+#join-cloud-modal .modal-box, .modal-box.cloud-join-box { width: min(560px, 94vw); }
+
+/* 窄屏只读值仍 62% 上限：覆盖 v2 的全局 max-width:100% */
+@media (max-width: 760px) {
+  .settings-kv .kv-row > .kv-value, .runtime-kv .kv-row > dd { max-width: 62%; }
+}
+
+/* 关于本机 390：长路径/地址换行，不用省略号（避免 scrollWidth 溢出） */
+@media (max-width: 760px) {
+  .about-group .settings-kv .kv-value {
+    white-space: normal; overflow: visible; text-overflow: clip;
+    overflow-wrap: anywhere; word-break: break-word;
+  }
+}
+
+/* 390：安全卡允许换行（宽度不足时不再横向溢出；桌面仍是 114 定高） */
+@media (max-width: 560px) {
+  #settings-security-slot > .settings-section.sec-card { height: auto; min-height: 114px; }
+  .sec-card-head { height: auto; min-height: 20px; flex-wrap: wrap; row-gap: 6px; }
+  .sec-card-head .sec-card-actions { flex-wrap: wrap; }
+  .sec-card-line, .sec-card-meta {
+    white-space: normal; overflow: visible; text-overflow: clip;
+    overflow-wrap: anywhere; word-break: break-word;
+  }
+}
+
+/* 390：待批准条件条必须在 356 内收缩（长设备名走 ellipsis，不撑宽 slot） */
+@media (max-width: 560px) {
+  #settings-security-slot { min-width: 0; }
+  .sec-pending { min-width: 0; overflow: hidden; }
+  .sec-pending-copy { min-width: 0; overflow: hidden; }
+  .sec-pending-copy b { flex: 0 0 auto; }
+  .sec-pending-copy span { flex: 1 1 auto; min-width: 0; }
+  .sec-pending .btn { flex: 0 0 auto; }
+  #settings-security-slot > .settings-section.sec-card { min-width: 0; }
+}

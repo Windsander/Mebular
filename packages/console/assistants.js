@@ -350,13 +350,13 @@ export function serviceRowHtml(service, serviceMsg = '') {
       service.running ? '已常驻·运行中' : '已常驻·未运行')
     : tr('settings.service.badge.temporary', '未常驻（临时运行）');
   const note = tr('settings.service.note', '开机自启、崩溃自动拉起。');
-  const more = `<details class="settings-more" data-settings-more>
-      <summary class="btn btn-small" aria-haspopup="menu" aria-expanded="false">${esc(tr('settings.service.more', '更多'))}</summary>
-      <div class="settings-more-panel" role="menu" aria-label="${esc(tr('settings.service.more', '更多'))}">
+  const more = `<span class="settings-more" data-settings-more>
+      <button class="btn btn-small" type="button" data-settings-more-trigger aria-haspopup="menu" aria-expanded="false">${esc(tr('settings.service.more', '更多'))}</button>
+      <div class="settings-more-panel" role="menu" aria-label="${esc(tr('settings.service.more', '更多'))}" hidden>
         <button class="btn" type="button" role="menuitem" data-svc-action="restart">${esc(tr('settings.service.restart', '立即重启'))}</button>
         ${registered ? `<button class="btn" type="button" role="menuitem" data-svc-action="uninstall">${esc(tr('settings.service.uninstall', '取消常驻'))}</button>` : ''}
       </div>
-    </details>`;
+    </span>`;
   const primary = registered
     ? `<button class="btn" type="button" data-svc-action="recheck">${esc(tr('settings.service.recheck', '重新检测'))}</button>`
     : `<button class="btn btn-crt" type="button" data-svc-action="install">${esc(tr('settings.service.install', '让 Mebular 常驻'))}</button>`;

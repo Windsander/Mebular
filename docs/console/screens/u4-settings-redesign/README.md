@@ -13,7 +13,7 @@
 - **异常可见性**：`pending` / `mismatch` 的完整三元组（已配置 / 实际 / 原因）默认作为行下静态 11px 警告行显示，不依赖 focus、不藏 popover；行本身仍 40px，无异常时没有这行。
 - **安全卡**：三张同构 114px（安全等级 / 动态码种子 / 恢复码），19px 状态值；`is-effective` 实心点 + 左侧荧光条，`is-off` 空心点；待批准条只在有记录时置顶（40px）。
 - **关于本机**：三组（身份与存储 / 运行与同步 / 诊断与恢复）+ 三折叠，40px 行；旧 about 的 43 项字段全量保留（见 `../../../console/ABOUT-PARITY` 对应原型清单），不新增日志路径。
-- **常驻「更多」**：行内 `summary` + 浮层菜单（`aria-haspopup="menu"` / `aria-expanded`，Esc / 点外关闭，`position: fixed` 不被弹层裁切）；主操作仍直接可见。
+- **常驻「更多」**：行内 button + 浮层菜单（`aria-haspopup="menu"` / `aria-expanded`，Esc / 点外关闭，`position: fixed` 不被弹层裁切）；主操作仍直接可见。
 - **集成**：保持 40 行 + 原有详情/表单，不做 58 行版本；58 只用于常驻/忆云。
 - **说明密度**：每组最多 1 行 11px 说明（长解释进 title / 折叠）。记忆页为「模式提示 / 来源条件说明 / 运行范围说明」各 1 行；常用与安全无独立说明行；MCP 为连接 / TLS 各 1 行 + 端口 mismatch 时 1 行警告。
 
@@ -87,7 +87,7 @@ MEBULAR_CLOUD_ROOT=/tmp/mebular-v2-home node packages/mcp/bin/mebular.mjs serve 
 4. `C8f 模型列表 760px：单列卡片、无横向滚动`
 5. `UI 冒烟执行（页面求值失败：TypeError: Cannot read properties of null (reading 'click')）`
 
-该失败在改动前的 HEAD 上同样复现（stash 后连跑两次一致），与 v2 无关；其余 **51/56** 通过（含 900 行模板与异常可见性两条新断言）。
+该失败在改动前的 HEAD 上同样复现，与 v2 无关。用临时副本跳过该段后：**418 / 419 通过**（唯一失败仍是同段的「模型来源」fake-sidecar 检查），900 行模板、异常可见性、关于三组、安全卡 v2、i18n v2 token 全绿；官方脚本仍只报这 5 条。
 
 ## 人工走查结论
 

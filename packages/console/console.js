@@ -1231,10 +1231,10 @@ function pendingRestartBanner() {
   const cmd = restartCommand();
   const managed = state.settings?.restart?.serviceManaged === true;
   const names = items.map((item) => restartLabel(item.path)).join(t('common.listSeparator'));
-  const detail = items.map((item) => `${restartLabel(item.path)} ${t('settings.apply.fieldDetail', {
+  const detail = items.map((item) => `${item.path} · ${restartLabel(item.path)} ${t('settings.apply.fieldDetail', {
     configured: formatRestartValue(item.file),
     actual: formatRestartValue(item.running),
-  })}`).join('；')
+  })} · ${t('settings.pending.reason', { reason: String(localizeEffectiveReason(item.path, item.reason) || t('settings.pending.reasonFallback')) })}`).join('；')
     + (envOverrides.length > 0 ? ` · ${t('settings.pending.noteEnv', { vars: envOverrides.join(', ') })}` : '')
     + (managed ? '' : ` · ${t('settings.pending.manual')}`);
   return `<div class="pending-restart" data-pending-restart="1" title="${escapeHtml(detail)}">
@@ -2209,6 +2209,7 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
     button.addEventListener('click', () => copyText(button.dataset.copy, button));
   });
   bindSecurityCard(body);
+  bindMoreMenus(body);
   bindConfigEditor();
   // 设置页整体重建后重新增强：语言行 / MCP auth select / 助手配置格式等动态控件。
   enhanceSelects(body);
@@ -2502,6 +2503,52 @@ function securityCardHtml() {
 }
 
 /** 安全卡事件（settings 每次重建都重新绑定；全部委托在本节点内）。 */
+/** 常驻「更多」popover：button + 面板（fixed 不裁切）；Esc / 点外关闭并回焦。 */
+function bindMoreMenus(root) {
+  root.querySelectorAll('[data-settings-more]').forEach((wrap) => {
+    const trigger = wrap.querySelector('[data-settings-more-trigger]');
+    const panel = wrap.querySelector('.settings-more-panel');
+    if (!trigger || !panel) return;
+    const close = (focusBack) => {
+      if (panel.hidden) return;
+      panel.hidden = true;
+      trigger.setAttribute('aria-expanded', 'false');
+      if (focusBack) trigger.focus();
+    };
+    const open = () => {
+      document.querySelectorAll('.settings-more-panel:not([hidden])').forEach((other) => { other.hidden = true; });
+      panel.hidden = false;
+      const rect = trigger.getBoundingClientRect();
+      const width = panel.offsetWidth;
+      panel.style.top = `${Math.round(rect.bottom + 4)}px`;
+      panel.style.left = `${Math.round(Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8)))}px`;
+      trigger.setAttribute('aria-expanded', 'true');
+      panel.querySelector('.btn')?.focus();
+    };
+    trigger.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (panel.hidden) open(); else close(true);
+    });
+    wrap.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        close(true);
+      }
+    });
+    panel.addEventListener('click', () => close(false));
+  });
+}
+
+document.addEventListener('click', (event) => {
+  if (event.target.closest?.('[data-settings-more]')) return;
+  document.querySelectorAll('[data-settings-more] [data-settings-more-trigger][aria-expanded="true"]').forEach((trigger) => {
+    const panel = trigger.closest('[data-settings-more]')?.querySelector('.settings-more-panel');
+    if (panel) panel.hidden = true;
+    trigger.setAttribute('aria-expanded', 'false');
+  });
+});
+
 function bindSecurityCard(root) {
   root.querySelectorAll('[data-security-change-level]').forEach((button) => {
     button.addEventListener('click', () => securityLevelChooser());
@@ -3469,6 +3516,7 @@ function renderAbout() {
       <p class="about-note">${t('about.fleet.note')}${s.fleet?.configured ? '' : t('about.fleet.onboard')}</p>
       ${sub(t('about.tools.title'))}
       ${toolsBlock}
+      <p class="about-note">${t('about.tools.note')}</p>
     `)}`)}
   `;
   body.querySelectorAll('[data-copy]').forEach((button) => {

@@ -283,7 +283,7 @@ describe('i18n locale pack · 语言行与就绪开关', () => {
 
   it('设置页接线：语言行在 #settings-resident 之前；选择只 setLocale + 重渲染，不 reload', () => {
     const rowAt = consoleJs.indexOf('${languageSettingsRowHtml()}');
-    const residentAt = consoleJs.indexOf('<div class="settings-resident" id="settings-resident">');
+    const residentAt = consoleJs.indexOf('id="settings-resident"');
     expect(rowAt).toBeGreaterThan(-1);
     expect(residentAt).toBeGreaterThan(-1);
     expect(rowAt).toBeLessThan(residentAt);

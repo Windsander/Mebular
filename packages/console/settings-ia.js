@@ -48,7 +48,9 @@ export const IA_SETTINGS_EXTRA = [
 export const IA_SETTINGS_FOLDS = [
   { id: 'mcp-danger', label: 'MCP 接入 · 危险与自救', labelKey: 'settings.fold.mcpDanger', home: 'mcp' },
   { id: 'diagnostics', label: '诊断与恢复', labelKey: 'settings.fold.diagnostics', home: 'advanced' },
-  { id: 'about-runtime', label: '运行状态（只读）', labelKey: 'settings.fold.aboutRuntime', home: 'about' },
+  { id: 'about-runtime', label: '收敛健康、同步节奏与运行状态', labelKey: 'about.fold.runtime', home: 'about' },
+  { id: 'about-identity', label: '身份、地址与加密', labelKey: 'about.fold.identity', home: 'about' },
+  { id: 'about-diag', label: '对端路径、舰队与能力清单', labelKey: 'about.fold.diag', home: 'about' },
 ];
 
 /**

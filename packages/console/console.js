@@ -1185,35 +1185,35 @@ function applyResultBanner() {
   const fields = Array.isArray(apply.fields) ? apply.fields : [];
   const fieldText = fields.length ? fields.map(labelOf).join(t('common.listSeparator')) : t('settings.apply.fieldsNone');
   if (apply.status === 'in-progress') {
-    return `<div class="pending-restart" data-apply-result="in-progress">
-      <div class="pending-restart-head"><span class="crt-tag crt-tag-warn">${escapeHtml(t('settings.apply.inProgress.tag'))}</span><span class="muted">${escapeHtml(t('settings.apply.inProgress.short'))}</span></div>
-      <p class="muted pending-restart-note">${escapeHtml(t('settings.apply.inProgress.note', { fields: fields.join(', ') }))}</p>
+    return `<div class="pending-restart" data-apply-result="in-progress" title="${escapeHtml(`${t('settings.apply.inProgress.note', { fields: fields.join(', ') })}`)}">
+      <span class="crt-tag crt-tag-warn">${escapeHtml(t('settings.apply.inProgress.tag'))}</span>
+      <span class="pending-restart-head"><span class="muted">${escapeHtml(t('settings.apply.inProgress.short'))}</span></span>
     </div>`;
   }
   if (apply.status === 'applied') {
     const verify = Array.isArray(apply.verify) ? apply.verify : [];
     const failed = verify.filter((row) => row.ok === false);
     if (failed.length > 0) {
-      const detail = failed.map((row) => `<li><b>${escapeHtml(labelOf(row.path))}</b> <code>${escapeHtml(row.path)}</code>`
-        + `<span class="muted">${escapeHtml(t('settings.apply.fieldDetail', { configured: formatRestartValue(row.configured), actual: formatRestartValue(row.actual) }))}</span>`
-        + (row.reason ? `<span class="pending-restart-reason">${escapeHtml(t('settings.apply.reason', { reason: localizeEffectiveReason(row.path, String(row.reason)) }))}</span>` : '')
-        + '</li>').join('');
-      return `<div class="pending-restart is-error" data-apply-result="mismatch">
-        <div class="pending-restart-head"><span class="crt-tag crt-tag-error">${escapeHtml(t('settings.apply.mismatch.tag'))}</span><span class="muted">${escapeHtml(t('settings.apply.mismatch.summary', { count: failed.length }))}</span></div>
-        <ul class="pending-restart-list">${detail}</ul>
+      const detail = failed.map((row) => `${labelOf(row.path)} (${row.path}) ${t('settings.apply.fieldDetail', {
+        configured: formatRestartValue(row.configured),
+        actual: formatRestartValue(row.actual),
+      })}${row.reason ? ` · ${localizeEffectiveReason(row.path, String(row.reason))}` : ''}`).join('；');
+      return `<div class="pending-restart is-error" data-apply-result="mismatch" title="${escapeHtml(detail)}">
+        <span class="crt-tag crt-tag-error">${escapeHtml(t('settings.apply.mismatch.tag'))}</span>
+        <span class="pending-restart-head"><span class="muted">${escapeHtml(t('settings.apply.mismatch.summary', { count: failed.length }))}</span></span>
+        <span class="pending-restart-list">${escapeHtml(failed.map((row) => labelOf(row.path)).join(t('common.listSeparator')))}</span>
       </div>`;
     }
-    return `<div class="pending-restart is-ok" data-apply-result="applied">
-      <div class="pending-restart-head"><span class="crt-tag crt-tag-ok">${escapeHtml(t('settings.apply.applied.tag'))}</span><span class="muted">${escapeHtml(fieldText)}</span></div>
-      <p class="muted pending-restart-note">${escapeHtml(t('settings.apply.applied.note', { time: String(apply.at ?? '') }))}</p>
+    return `<div class="pending-restart is-ok" data-apply-result="applied" title="${escapeHtml(t('settings.apply.applied.note', { time: String(apply.at ?? '') }))}">
+      <span class="crt-tag crt-tag-ok">${escapeHtml(t('settings.apply.applied.tag'))}</span>
+      <span class="pending-restart-head"><span class="muted">${escapeHtml(fieldText)}</span></span>
     </div>`;
   }
   if (apply.status === 'rolled-back' || apply.status === 'rollback-failed' || apply.status === 'failed') {
     const rolled = apply.status === 'rolled-back';
     return `<div class="pending-restart is-error" data-apply-result="${escapeHtml(apply.status)}">
-      <div class="pending-restart-head"><span class="crt-tag crt-tag-error">${escapeHtml(t('settings.apply.mismatch.tag'))}</span><span class="muted">${escapeHtml(t(rolled ? 'settings.apply.rolledBack' : 'settings.apply.rollbackFailed'))}</span></div>
-      <p class="muted pending-restart-note">${escapeHtml(t('settings.apply.reason', { reason: localizeReasonText(apply.reason) || t('settings.apply.unknownReason') }))}</p>
-      <p class="muted pending-restart-note">${escapeHtml(t('settings.apply.fieldsInvolved', { fields: fieldText }))}${apply.backup ? `；${escapeHtml(t('settings.apply.backupLabel'))}<code>${escapeHtml(String(apply.backup))}</code>` : ''}</p>
+      <span class="crt-tag crt-tag-error">${escapeHtml(t('settings.apply.mismatch.tag'))}</span>
+      <span class="pending-restart-head"><span class="muted">${escapeHtml(t(rolled ? 'settings.apply.rolledBack' : 'settings.apply.rollbackFailed'))}</span></span>
     </div>`;
   }
   return '';
@@ -1230,24 +1230,20 @@ function pendingRestartBanner() {
   const envOverrides = Array.isArray(state.settings?.pendingRestartEnvOverrides) ? state.settings.pendingRestartEnvOverrides : [];
   const cmd = restartCommand();
   const managed = state.settings?.restart?.serviceManaged === true;
-  const rows = items.map((item) => `<li><b>${escapeHtml(restartLabel(item.path))}</b>`
-    + ` <code>${escapeHtml(item.path)}</code>`
-    + `<span class="muted">${escapeHtml(t('settings.apply.fieldDetail', { configured: formatRestartValue(item.file), actual: formatRestartValue(item.running) }))}</span>`
-    + `<span class="pending-restart-reason">${escapeHtml(t('settings.pending.reason', { reason: String(localizeEffectiveReason(item.path, item.reason) || t('settings.pending.reasonFallback')) }))}</span></li>`).join('');
-  return `<div class="pending-restart" data-pending-restart="1">
-    <div class="pending-restart-head">
-      <span class="crt-tag crt-tag-warn">${escapeHtml(t('settings.pending.count', { count: items.length }))}</span>
-      <span class="muted">${escapeHtml(t('settings.pending.head'))}</span>
-    </div>
-    <p class="muted pending-restart-note">${escapeHtml(t('settings.pending.note'))}${envOverrides.length > 0 ? escapeHtml(t('settings.pending.noteEnv', { vars: envOverrides.join(', ') })) : ''}</p>
-    <ul class="pending-restart-list">${rows}</ul>
+  const names = items.map((item) => restartLabel(item.path)).join(t('common.listSeparator'));
+  const detail = items.map((item) => `${restartLabel(item.path)} ${t('settings.apply.fieldDetail', {
+    configured: formatRestartValue(item.file),
+    actual: formatRestartValue(item.running),
+  })}`).join('；')
+    + (envOverrides.length > 0 ? ` · ${t('settings.pending.noteEnv', { vars: envOverrides.join(', ') })}` : '')
+    + (managed ? '' : ` · ${t('settings.pending.manual')}`);
+  return `<div class="pending-restart" data-pending-restart="1" title="${escapeHtml(detail)}">
+    <span class="crt-tag crt-tag-warn">${escapeHtml(t('settings.pending.count', { count: items.length }))}</span>
+    <span class="pending-restart-head"><span class="muted">${escapeHtml(`${names} ${t('settings.pending.head')}`)}</span></span>
     <div class="pending-restart-cmd">
       <button class="btn btn-small btn-crt" type="button" data-cfg-action="restart" ${state.features?.writes && !MOCK ? '' : 'disabled'}>${escapeHtml(t('settings.pending.restart'))}</button>
-      <code>${escapeHtml(cmd)}</code>
       <button class="btn btn-small btn-crt" type="button" data-copy="${escapeHtml(cmd)}">${escapeHtml(t('settings.pending.copyCommand'))}</button>
-      <span class="cfg-restart-state muted"></span>
     </div>
-    ${managed ? '' : `<p class="muted" style="font-size:11px">${escapeHtml(t('settings.pending.manual'))}</p>`}
   </div>`;
 }
 
@@ -1499,14 +1495,18 @@ function renderEditor(paths) {
   return `<div class="cfg-editor">${paths.map((path) => renderCfgField(fieldOf(path))).join('')}</div>`;
 }
 
-/** 统一 section：标题 + 一行说明 + 字段行（设置内唯一版式，不再卡片套卡片）。 */
-function settingsSectionHtml({ id, title, desc = '', chip = '', body = '', foot = '' }) {
+/** v2 分组：10px 标签在面板外 + 一层内嵌面板；只读用后缀，不再挂 pill。 */
+function settingsSectionHtml({ id, title, desc = '', chip = '', body = '', foot = '', suffix = '' }) {
   return `
-    <section class="settings-section" data-settings-section="${escapeHtml(id)}">
-      <h3>${escapeHtml(title)}${chip}</h3>
-      ${desc ? `<p class="settings-section-desc muted">${escapeHtml(desc)}</p>` : ''}
-      ${body}
-      ${foot ? `<p class="settings-section-foot muted">${escapeHtml(foot)}</p>` : ''}
+    <section class="settings-group" data-settings-section="${escapeHtml(id)}">
+      <div class="settings-group-head">
+        <h3>${escapeHtml(title)}</h3>
+        ${suffix ? `<span class="settings-group-suffix">· ${escapeHtml(suffix)}</span>` : ''}
+        ${chip || ''}
+      </div>
+      <div class="settings-group-body">${body}</div>
+      ${desc ? `<p class="settings-group-desc">${escapeHtml(desc)}</p>` : ''}
+      ${foot ? `<p class="settings-group-foot">${escapeHtml(foot)}</p>` : ''}
     </section>`;
 }
 
@@ -1532,13 +1532,20 @@ function renderAdvancedSections() {
 }
 
 function renderMcpSections() {
+  const pending = pendingRestartItems().filter((item) => String(item.path).startsWith('mcp.'));
+  const warning = pending.length > 0
+    ? `<p class="settings-warn-line">${pending.map((item) => escapeHtml(t('settings.mcp.pendingLine', {
+      configured: formatRestartValue(item.file),
+      running: formatRestartValue(item.running),
+    }))).join(' ')}</p>`
+    : '';
   return IA_MCP_SECTIONS.map((section) => {
     const copy = localizedSection(section);
     return settingsSectionHtml({
       id: copy.id,
       title: copy.title,
       desc: copy.desc,
-      body: renderEditor(copy.fields),
+      body: `${renderEditor(copy.fields)}${section.id === 'connection' ? warning : ''}`,
     });
   }).join('');
 }
@@ -1922,13 +1929,13 @@ function runtimeModelSourceSectionHtml() {
     title: t('settings.runtime.modelSource.title'),
     desc: t('settings.runtime.modelSource.desc'),
     body: `<div class="cfg-row">
-      <label class="cfg-label" for="rt-model-source">${escapeHtml(t('settings.runtime.modelSource.selectLabel'))}</label>
+      <label class="cfg-label" for="rt-model-source">${escapeHtml(t('settings.runtime.modelSource.rowLabel'))}</label>
       <div class="cfg-control">
         <select id="rt-model-source" class="crt-input" data-rt-model-source ${disabled ? 'disabled' : ''}>${options}</select>
       </div>
       <span class="cfg-status" data-cfg-status="none"></span>
-      <p class="cfg-help muted is-visible" data-rt-model-source-note>${escapeHtml(note)}</p>
     </div>
+    <p class="settings-group-note" data-rt-model-source-note>${escapeHtml(note)}</p>
     ${showModels ? `<div class="runtime-model-list" data-rt-model-list>${runtimeModelListBodyHtml()}</div>` : ''}
     <p class="settings-section-foot muted">${escapeHtml(t('settings.runtime.modelSource.foot'))}</p>`,
   });
@@ -2159,22 +2166,25 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
     ${shellHtml(`
     ${panel('common', `
       ${languageSettingsRowHtml()}
-      <div class="settings-resident" id="settings-resident">${serviceRowHtml(state.service, state.serviceMsg)}</div>
-      ${repairRowHtml(state.repair)}
-      ${wizardRowHtml(host.capabilities.openWizard)}
-      <section class="settings-section" data-settings-common-status>
-        <h3>${escapeHtml(t('settings.common.statusTitle'))} <span class="badge badge-muted">${escapeHtml(t('settings.common.readonly'))}</span></h3>
-        <div class="settings-status-card">${kvRows([
+      <section class="settings-group" data-settings-group="resident">
+        <div class="settings-group-head"><h3>${escapeHtml(t('settings.common.group.runs'))}</h3></div>
+        <div class="settings-group-body" id="settings-resident">${serviceRowHtml(state.service, state.serviceMsg)}${repairRowHtml(state.repair)}${wizardRowHtml(host.capabilities.openWizard)}</div>
+      </section>
+      <section class="settings-group" data-settings-common-status>
+        <div class="settings-group-head"><h3>${escapeHtml(t('settings.common.statusTitle'))}</h3><span class="settings-group-suffix">· ${escapeHtml(t('settings.common.readonly'))}</span></div>
+        <div class="settings-group-body">${kvRows([
           kvRow('P2P', s.network.enabled ? t('settings.common.enabled') : t('settings.common.disabled'), null, { tone: s.network.enabled ? 'ok' : 'off' }),
           kvRow(t('settings.common.inviteService'), s.join?.enabled ? t('settings.common.enabled') : t('settings.common.inviteDisabled'), null, { tone: s.join?.enabled ? 'ok' : 'off' }),
           kvRow(t('settings.common.securityLevel'), securityLevel ? securityLevelLabel(securityLevel) : '—', null, { tone: securityLevel ? (securityLevel === 'medium' ? 'warn' : 'ok') : 'off' }),
         ])}</div>
-        <p class="settings-note muted">${escapeHtml(t('settings.common.note'))}</p>
       </section>
       ${cloudCardHtml()}
     `)}
     ${panel('security', `<section id="settings-security-slot" class="settings-slot" data-settings-slot="security" data-security-level="${escapeHtml(state.security?.level ?? 'low')}" tabindex="-1">${securityCardHtml()}</section>`)}
-    ${panel('assistants', `<div id="assistants-panel">${assistantsPanelHtml({ clients: state.clients, ui: { ...state, addForm: state.addForm ? assistantAddFormHtml(state.addForm) : '' } })}</div>`)}
+    ${panel('assistants', `<section class="settings-group" data-settings-section="assistants">
+      <div class="settings-group-head"><h3>${escapeHtml(t('settings.assistants.group'))}</h3></div>
+      <div class="settings-group-body"><div id="assistants-panel">${assistantsPanelHtml({ clients: state.clients, ui: { ...state, addForm: state.addForm ? assistantAddFormHtml(state.addForm) : '' } })}</div></div>
+    </section>`)}
     ${panel('runtime', renderRuntimeSettings())}
     ${panel('mcp', `
       ${renderMcpSections()}
@@ -2287,7 +2297,6 @@ function securitySectionCard({ id, index, titleId, title, state: cardState = 'ef
   const off = cardState === 'off';
   return `
     <section class="settings-section sec-card ${off ? 'is-off' : 'is-effective'}" data-settings-section="${escapeHtml(id)}" aria-labelledby="${escapeHtml(titleId)}">
-      <span class="sec-card-idx" aria-hidden="true">${escapeHtml(index)}</span>
       <div class="sec-card-main">
         <div class="sec-card-head"><span class="sec-dot${off ? ' is-off' : ''}" aria-hidden="true"></span><h3 id="${escapeHtml(titleId)}">${escapeHtml(title)}</h3>${chip}${actions ? `<div class="sec-card-actions">${actions}</div>` : ''}</div>
         ${body}
@@ -2427,9 +2436,10 @@ function securityCardHtml() {
     titleId: 'settings-security-level-title',
     title: t(IA_SECURITY_SECTIONS.level.titleKey),
     state: 'effective',
-    chip: `<span class="crt-tag sec-tag-current" data-security-current>${escapeHtml(t('settings.security.current'))}</span>`,
+    chip: '',
     body: `<p class="sec-card-value"><strong>${escapeHtml(securityLevelLabel(level))}</strong><span>${escapeHtml(t(`settings.security.card.level.mech.${level}`))}</span></p>
-      <p class="sec-card-line">${escapeHtml(t(`settings.security.card.level.line.${level}`))}</p>`,
+      <p class="sec-card-line">${escapeHtml(t(`settings.security.card.level.line.${level}`))}</p>
+      <p class="sec-card-meta"><span data-security-current>${escapeHtml(t('settings.security.current'))}</span></p>`,
     actions: `<button class="btn btn-small btn-crt" type="button" data-security-change-level>${escapeHtml(t('settings.security.card.level.change'))}</button>`,
   });
 
@@ -3239,6 +3249,12 @@ async function saveDeviceRename() {
   }
 }
 
+/** 关于本机 · 收敛健康（对端各自一句话；空态 = 说明）。 */
+function convergenceAboutSection(rows = []) {
+  return `${rows.length ? kvRows(rows) : `<p class="about-note">${escapeHtml(t('about.convergence.empty'))}</p>`}
+    <p class="about-note">${escapeHtml(t('about.convergence.note'))}</p>`;
+}
+
 function renderAbout() {
   const body = $('#about-body');
   if (state.locked) {
@@ -3299,145 +3315,165 @@ function renderAbout() {
         <button class="btn btn-small btn-crt" data-device-rename-save type="button" ${writes ? '' : 'disabled'}>${escapeHtml(t('common.save'))}</button>
         <button class="btn btn-small" data-device-rename-cancel type="button">${escapeHtml(t('common.cancel'))}</button>
       </span>${state.deviceRenameError ? `<span class="crt-warn device-rename-error" role="alert">${escapeHtml(state.deviceRenameError)}</span>` : ''}`)
-    : kvRow(t('about.identity.deviceName'), `${deviceName
+    : kvRow(t('about.identity.deviceName'), `<span class="device-name-inline" title="${escapeHtml(t('about.identity.renameNote'))}">${deviceName
       ? `<span class="device-name-value">${escapeHtml(deviceName)}</span>`
       : `<span class="kv-empty">${escapeHtml(t('about.identity.nameUnset'))}</span>`}
-      <button class="btn btn-small btn-crt" data-device-rename type="button" ${writes ? '' : 'disabled'}>${escapeHtml(t('about.identity.rename'))}</button>
-      <span class="cfg-help muted">${escapeHtml(t('about.identity.renameNote'))}</span>`);
-  body.innerHTML = `
-    <section class="settings-section" data-info-block="identity">
-      <h3>${escapeHtml(t('about.identity.title'))} <span class="badge badge-muted">${escapeHtml(t('about.identity.tag'))}</span></h3>
-      ${kvRows([
-        copyRowOf('deviceId', s.identity.deviceId),
-        deviceNameRow,
-        kvRow(t('about.identity.mode'), s.identity.mode === 'delegated'
-          ? t('about.identity.modeDelegated')
-          : t('about.identity.modeRoot')),
-        ...(s.identity.peerId ? [copyRowOf('peerId', s.identity.peerId)] : []),
-        ...addrRows,
-        copyRowOf('storagePath', s.storage.path ?? '—'),
-        copyRowOf(t('about.identity.configFile'), configPath),
-        kvRow(t('about.identity.backup'), `<code>${escapeHtml(configPath)}.bak</code><span class="muted">${escapeHtml(t('about.identity.backupNote'))}</span>`),
-        kvRow('storageAdapter', escapeHtml(s.storage.adapter)),
-        kvRow(t('about.identity.encryption'), `${escapeHtml(s.encryption.level)}${s.encryption.atRest ? escapeHtml(t('about.identity.atRest')) : ''}`),
-      ])}
-    </section>
-
-    ${convergenceAboutSection()}
-
-    <details class="settings-fold fold-about-runtime" id="about-runtime-fold" data-settings-fold="about-runtime">
-      <summary>${escapeHtml(foldLabel('about-runtime'))}</summary>
-      <div class="settings-fold-body">
-    <section class="settings-section" data-info-block="syncRate">
-      <h3>${escapeHtml(t('about.syncRate.title'))} <span class="badge badge-muted">${escapeHtml(t('about.syncRate.tag'))}</span></h3>
-      ${kvRows(statusRows().filter((row) => row.path === 'sync.autoSync' || row.path === 'sync.pushOnWrite').map((row) => kvRow(
-        row.label ?? row.path,
-        valueWithEffective(escapeHtml(formatRuntimeValue(row.actual)), {
-          configured: row.configured,
-          effective: row.actual,
-          reason: row.reason,
-        }),
-      )))}
-      <p class="muted" style="font-size:11px">${t('about.syncRate.note')}</p>
-    </section>
-
-    <section class="settings-section" data-info-block="statusOnly">
-      <h3>${escapeHtml(t('about.statusOnly.title'))} <span class="badge badge-muted">${escapeHtml(t('settings.common.readonly'))}</span></h3>
-      <p class="muted" style="font-size:11px;margin:0 0 8px">${escapeHtml(t('about.statusOnly.desc'))}</p>
-      ${kvRows(statusRows().filter((row) => row.path !== 'sync.autoSync' && row.path !== 'sync.pushOnWrite').map((row) => kvRow(
-        row.label ?? row.path,
-        `${escapeHtml(formatRuntimeValue(row.actual))}${row.reason && row.reason !== '已生效' ? `<span class="cfg-reason"><span class="cfg-eff-key">${escapeHtml(t('settings.editor.reasonKey'))}</span> ${escapeHtml(row.reasonText ?? row.reason)}</span>` : ''}`,
-      )))}
-    </section>
-
-    <section class="settings-section" data-info-block="runtime">
-      <h3>${escapeHtml(t('about.runtime.title'))} <span class="badge badge-muted">${escapeHtml(t('settings.common.readonly'))}</span>${pendingRestartBadge()}${listenAlarm.length ? `<span class="crt-tag crt-tag-warn">${escapeHtml(t('about.runtime.publicListen'))}</span>` : ''}</h3>
-      ${kvRows([
-        ...(pendingRestartItems().length > 0
-          ? [kvRow(t('about.runtime.pendingRestart'), t('about.runtime.pendingRestartBody', { count: pendingRestartItems().length }))]
-          : []),
-        kvRow('P2P', s.network.enabled ? t('settings.common.enabled') : t('settings.common.disabled')),
-        kvRow(t('about.runtime.listen'), escapeHtml(s.network.listen.join(', ') || '—')),
-        kvRow(t('about.runtime.mcpListen'), `${escapeHtml(s.mcp.host)}:${escapeHtml(String(s.mcp.port))} · auth=${escapeHtml(s.mcp.auth)}`),
-        // R-1 中-5：常驻 plist 全路径从连接页卡片收编到这里
-        ...(state.service?.unitPath ? [kvRow(t('about.runtime.serviceUnit'), `<code>${escapeHtml(state.service.unitPath)}</code>`)] : []),
-        kvRow('TLS', s.mcp.tls
-          ? t('about.runtime.tlsOn', {
-            key: s.mcp.tlsKeyConfigured ? t('about.runtime.present') : t('about.runtime.missing'),
-            cert: s.mcp.tlsCertConfigured ? t('about.runtime.present') : t('about.runtime.missing'),
-          })
-          : t('about.runtime.tlsOff')),
-        kvRow(t('about.runtime.joinService'), s.join?.enabled
-          ? t('about.runtime.joinOn', { bind: escapeHtml(String(s.join.bind)), port: escapeHtml(String(s.join.port)) })
-          : t('settings.common.disabled')),
-        kvRow(t('about.runtime.semantic'), t('about.runtime.semanticValue', {
-          state: s.semantic.enabled ? t('settings.common.enabled') : t('settings.common.disabled'),
-          score: s.semantic.minScore,
-        })),
-        // C6：内建 relay 角色（只读；桥的选举自动完成，此处仅展示）
-        kvRow(t('about.runtime.relay'), s.relay
-          ? t('about.runtime.relayValue', {
-            state: s.relay.serving ? t('about.runtime.on') : t('about.runtime.off'),
-            reason: escapeHtml(localizeReasonText(s.relay.reason, 'settings.schema.reason.dynamicFallback') || '—'),
-          })
-          : '—'),
-        kvRow(t('about.runtime.bridge'), s.relay?.bridge
-          ? `<code>${escapeHtml(String(s.relay.bridge.address))}</code> <span class="muted">· ${escapeHtml(String(s.relay.bridge.peer))}</span>`
-          : t('about.runtime.bridgeNone')),
-        kvRow(t('about.runtime.bridgeAllowed'), s.relay
-          ? t('about.runtime.bridgeAllowedValue', { count: s.relay.allowedClients ?? 0 })
-          : '—'),
-        // C5：地址自动广播（只读；提示类信息，不影响订阅）
-        kvRow(t('about.runtime.broadcast'), s.net
-          ? `${s.net.enabled ? t('about.runtime.broadcastMode', { mode: escapeHtml(String(s.net.mode)) }) : t('about.runtime.broadcastOff')}${t('about.runtime.broadcastStats', { published: s.net.published, applied: s.net.applied })}`
-          : '—'),
-        // C4：NAT 穿透（只读）
-        kvRow(t('about.runtime.nat'), s.nat
-          ? `${s.nat.dcutrEnabled ? t('about.runtime.dcutrOn') : t('about.runtime.dcutrOff')} · ${s.nat.autonatEnabled ? t('about.runtime.autonatOn') : t('about.runtime.autonatOff')} · ${t('about.runtime.natUpgrades', { count: s.nat.directUpgrades ?? 0 })}${s.nat.loadError ? ` ⚠ ${escapeHtml(String(s.nat.loadError))}` : ''}`
-          : t('about.runtime.natOff')),
-        kvRow(t('about.runtime.ignored'), s.net && Object.values(s.net.ignored ?? {}).some((v) => v > 0)
-          ? escapeHtml(Object.entries(s.net.ignored).filter(([, v]) => v > 0).map(([k, v]) => `${k} ${v}`).join(' / '))
-          : t('common.none')),
-      ])}
-      ${listenAlarm.length ? `<p class="crt-warn">${escapeHtml(t('about.runtime.listenAlarm', { addresses: listenAlarm.join(', ') }))}</p>` : ''}
-    </section>
-
-    <section class="settings-section" data-info-block="paths">
-      <h3>${escapeHtml(t('about.paths.title'))} <span class="badge badge-muted">${escapeHtml(t('about.paths.tag'))}</span></h3>
-      ${(() => {
-        const peers = s.peers ?? { enabled: false, paths: [] };
-        if (!peers.enabled) return `<p class="muted" style="font-size:11px">${escapeHtml(t('about.paths.disabled'))}</p>`;
-        if (peers.paths.length === 0) return `<p class="muted" style="font-size:11px">${escapeHtml(t('about.paths.empty'))}</p>`;
-        return `<ul class="path-list">${peers.paths.map((p) => `<li class="path-row">
+      <button class="btn btn-small btn-crt" data-device-rename type="button" ${writes ? '' : 'disabled'}>${escapeHtml(t('about.identity.rename'))}</button></span>`);
+  const convSummary = state.overview?.convergence?.summary;
+  const convPeers = (state.devices ?? [])
+    .filter((d) => d.deviceId !== state.overview?.device?.deviceId && d.convergence)
+    .sort((a, b) => (a.deviceId < b.deviceId ? -1 : 1));
+  const convRows = convPeers.map((d) => {
+    const conv = d.convergence;
+    const meta = convergenceStateMeta(conv.state);
+    const detail = [
+      convergencePrimaryText(conv),
+      conv.state === 'ok' && conv.lastConvergedAt ? t('convergence.chipReconciled', { time: fmtClock(conv.lastConvergedAt) }) : '',
+    ].filter(Boolean).join(' · ');
+    return kvRow(d.deviceId, `<span class="crt-tag ${meta.cls}">${meta.text}</span>${detail ? ` <span class="muted">${escapeHtml(detail)}</span>` : ''}`);
+  });
+  const convValue = convSummary
+    ? t('about.convergence.summary', {
+      peers: convSummary.peers,
+      ok: convSummary.ok,
+      stalled: convSummary.stalled,
+      diverged: convSummary.diverged,
+      unverifiable: convSummary.unverifiable,
+      offline: convSummary.offline,
+    })
+    : t('about.convergence.tag');
+  const syncRows = statusRows()
+    .filter((row) => row.path === 'sync.autoSync' || row.path === 'sync.pushOnWrite')
+    .map((row) => {
+      const main = escapeHtml(formatRuntimeValue(row.actual));
+      const detail = `${t('settings.editor.configured')} ${formatRuntimeValue(row.configured)} / ${t('settings.editor.actual')} ${formatRuntimeValue(row.actual)}${row.reason && row.reason !== '已生效' ? ` · ${row.reasonText ?? row.reason}` : ''}`;
+      return kvRow(row.label ?? row.path, `<span title="${escapeHtml(detail)}">${main}</span>`);
+    });
+  const statusOnlyRows = statusRows()
+    .filter((row) => row.path !== 'sync.autoSync' && row.path !== 'sync.pushOnWrite')
+    .map((row) => kvRow(
+      row.label ?? row.path,
+      `${escapeHtml(formatRuntimeValue(row.actual))}${row.reason && row.reason !== '已生效' ? `<span class="cfg-reason"><span class="cfg-eff-key">${escapeHtml(t('settings.editor.reasonKey'))}</span> ${escapeHtml(row.reasonText ?? row.reason)}</span>` : ''}`,
+    ));
+  const runtimeRows = [
+    ...(pendingRestartItems().length > 0
+      ? [kvRow(t('about.runtime.pendingRestart'), t('about.runtime.pendingRestartBody', { count: pendingRestartItems().length }))]
+      : []),
+    kvRow('P2P', s.network.enabled ? t('settings.common.enabled') : t('settings.common.disabled')),
+    kvRow(t('about.runtime.listen'), escapeHtml(s.network.listen.join(', ') || '—')),
+    kvRow(t('about.runtime.mcpListen'), `${escapeHtml(s.mcp.host)}:${escapeHtml(String(s.mcp.port))} · auth=${escapeHtml(s.mcp.auth)}`),
+    ...(state.service?.unitPath ? [kvRow(t('about.runtime.serviceUnit'), `<code>${escapeHtml(state.service.unitPath)}</code>`, state.service.unitPath)] : []),
+    kvRow('TLS', s.mcp.tls
+      ? t('about.runtime.tlsOn', {
+        key: s.mcp.tlsKeyConfigured ? t('about.runtime.present') : t('about.runtime.missing'),
+        cert: s.mcp.tlsCertConfigured ? t('about.runtime.present') : t('about.runtime.missing'),
+      })
+      : t('about.runtime.tlsOff')),
+    kvRow(t('about.runtime.joinService'), s.join?.enabled
+      ? t('about.runtime.joinOn', { bind: escapeHtml(String(s.join.bind)), port: escapeHtml(String(s.join.port)) })
+      : t('settings.common.disabled')),
+    kvRow(t('about.runtime.semantic'), t('about.runtime.semanticValue', {
+      state: s.semantic.enabled ? t('settings.common.enabled') : t('settings.common.disabled'),
+      score: s.semantic.minScore,
+    })),
+    kvRow(t('about.runtime.relay'), s.relay
+      ? t('about.runtime.relayValue', {
+        state: s.relay.serving ? t('about.runtime.on') : t('about.runtime.off'),
+        reason: escapeHtml(localizeReasonText(s.relay.reason, 'settings.schema.reason.dynamicFallback') || '—'),
+      })
+      : '—'),
+    kvRow(t('about.runtime.bridge'), s.relay?.bridge
+      ? `<code>${escapeHtml(String(s.relay.bridge.address))}</code> <span class="muted">· ${escapeHtml(String(s.relay.bridge.peer))}</span>`
+      : t('about.runtime.bridgeNone')),
+    kvRow(t('about.runtime.bridgeAllowed'), s.relay
+      ? t('about.runtime.bridgeAllowedValue', { count: s.relay.allowedClients ?? 0 })
+      : '—'),
+    kvRow(t('about.runtime.broadcast'), s.net
+      ? `${s.net.enabled ? t('about.runtime.broadcastMode', { mode: escapeHtml(String(s.net.mode)) }) : t('about.runtime.broadcastOff')}${t('about.runtime.broadcastStats', { published: s.net.published, applied: s.net.applied })}`
+      : '—'),
+    kvRow(t('about.runtime.nat'), s.nat
+      ? `${s.nat.dcutrEnabled ? t('about.runtime.dcutrOn') : t('about.runtime.dcutrOff')} · ${s.nat.autonatEnabled ? t('about.runtime.autonatOn') : t('about.runtime.autonatOff')} · ${t('about.runtime.natUpgrades', { count: s.nat.directUpgrades ?? 0 })}${s.nat.loadError ? ` ⚠ ${escapeHtml(String(s.nat.loadError))}` : ''}`
+      : t('about.runtime.natOff')),
+    kvRow(t('about.runtime.ignored'), s.net && Object.values(s.net.ignored ?? {}).some((v) => v > 0)
+      ? escapeHtml(Object.entries(s.net.ignored).filter(([, v]) => v > 0).map(([k, v]) => `${k} ${v}`).join(' / '))
+      : t('common.none')),
+  ];
+  const peerPaths = s.peers ?? { enabled: false, paths: [] };
+  const pathsBlock = !peerPaths.enabled
+    ? `<p class="about-note">${escapeHtml(t('about.paths.disabled'))}</p>`
+    : peerPaths.paths.length === 0
+      ? `<p class="about-note">${escapeHtml(t('about.paths.empty'))}</p>`
+      : `<ul class="path-list">${peerPaths.paths.map((p) => `<li class="path-row">
           <span class="path-key"><code>${escapeHtml(p.key)}</code></span>
           <span class="path-value">${p.connected
             ? `<span class="path-kind path-kind-${escapeHtml(String(p.kind ?? 'unknown'))}">${escapeHtml(String(p.kind ?? t('common.unknown')))}</span> <code>${escapeHtml(String(p.address ?? '—'))}</code> <span class="muted">${p.since ? escapeHtml(t('about.paths.switched', { time: formatTime(p.since) })) : ''}</span>`
             : `<span class="muted">${escapeHtml(t('common.notConnected'))}</span>${p.lastError ? ` <span class="crt-warn">⚠ ${escapeHtml(String(p.lastError))}</span>` : ''}`} <span class="muted">· ${escapeHtml(t('about.paths.candidates', { count: p.candidates }))}</span></span>
         </li>`).join('')}</ul>`;
-      })()}
-      <p class="muted" style="font-size:11px">${escapeHtml(t('about.paths.note'))}</p>
-    </section>
+  const fleetBlock = s.fleet?.configured
+    ? kvRows([
+      kvRow(t('about.fleet.namespace'), s.fleet.namespace ? `<code>${escapeHtml(s.fleet.namespace)}</code>` : t('about.fleet.unset')),
+      kvRow(t('about.fleet.peers'), String(s.fleet.peers ?? 0)),
+      kvRow(t('about.fleet.agents'), String(s.fleet.agents ?? 0)),
+      kvRow(t('about.fleet.config'), escapeHtml(s.fleet.path ?? 'fleet.config.json')),
+    ])
+    : `<p class="about-note">${escapeHtml(t('about.fleet.empty'))}</p>`;
+  const toolsBlock = `<div class="chip-wrap about-tools">${(s.tools ?? []).map((tool) => `<span class="crt-tag">${escapeHtml(tool)}</span>`).join(' ')}</div>`;
+  const sub = (label) => `<p class="about-sub">${escapeHtml(label)}</p>`;
+  const aboutGroup = (id, title, inner) => `
+    <section class="about-group settings-group" data-info-block="${id}">
+      <div class="settings-group-head"><h3>${escapeHtml(title)}</h3></div>
+      <div class="settings-group-body">${inner}</div>
+    </section>`;
+  const aboutFold = (id, label, inner) => `
+    <details class="settings-fold" id="${id}" data-settings-fold="${id}">
+      <summary>${escapeHtml(label)}</summary>
+      <div class="settings-fold-body">${inner}</div>
+    </details>`;
+  body.innerHTML = `
+    ${aboutGroup('identity', t('about.identity.title'), `${kvRows([
+      copyRowOf(t('about.identity.deviceId'), s.identity.deviceId),
+      deviceNameRow,
+    ])}${aboutFold('about-identity', t('about.fold.identity'), `${kvRows([
+      kvRow(t('about.identity.mode'), s.identity.mode === 'delegated'
+        ? t('about.identity.modeDelegated')
+        : t('about.identity.modeRoot')),
+      ...(s.identity.peerId ? [copyRowOf('peerId', s.identity.peerId)] : []),
+      ...addrRows,
+      copyRowOf('storagePath', s.storage.path ?? '—'),
+      kvRow('storageAdapter', escapeHtml(s.storage.adapter)),
+      kvRow(t('about.identity.encryption'), `${escapeHtml(s.encryption.level)}${s.encryption.atRest ? escapeHtml(t('about.identity.atRest')) : ''}`),
+    ])}<p class="about-note">${escapeHtml(t('about.identity.renameNote'))}</p>`)}`)}
 
-    <section class="settings-section" data-info-block="fleet">
-      <h3>${escapeHtml(t('about.fleet.title'))} <span class="badge badge-muted">${escapeHtml(t('settings.common.readonly'))}</span></h3>
-      ${s.fleet?.configured
-        ? kvRows([
-          kvRow(t('about.fleet.namespace'), s.fleet.namespace ? `<code>${escapeHtml(s.fleet.namespace)}</code>` : t('about.fleet.unset')),
-          kvRow(t('about.fleet.peers'), String(s.fleet.peers ?? 0)),
-          kvRow(t('about.fleet.agents'), String(s.fleet.agents ?? 0)),
-          kvRow(t('about.fleet.config'), escapeHtml(s.fleet.path ?? 'fleet.config.json')),
-        ])
-        : `<p class="muted" style="font-size:11px">${escapeHtml(t('about.fleet.empty'))}</p>`}
-      <p class="muted" style="font-size:11px">${t('about.fleet.note')}${s.fleet?.configured ? '' : t('about.fleet.onboard')}</p>
-    </section>
+    ${aboutGroup('runtime', t('about.group.runtime'), `${kvRows([
+      kvRow(t('about.convergence.title'), `<span title="${escapeHtml(convValue)}">${escapeHtml(convValue)}</span>`, null, {
+        tone: convSummary && convSummary.ok === convSummary.peers ? 'ok' : 'warn',
+      }),
+      ...syncRows,
+    ])}${aboutFold('about-runtime', t('about.fold.runtime'), `
+      ${sub(t('about.convergence.title'))}
+      ${convergenceAboutSection(convRows)}
+      <p class="about-note">${escapeHtml(t('about.syncRate.note'))}</p>
+      ${sub(t('about.statusOnly.title'))}
+      <p class="about-note">${escapeHtml(t('about.statusOnly.desc'))}</p>
+      ${kvRows(statusOnlyRows)}
+      ${sub(t('about.runtime.title'))}
+      ${kvRows(runtimeRows)}
+      ${listenAlarm.length ? `<p class="crt-warn about-note">${escapeHtml(t('about.runtime.listenAlarm', { addresses: listenAlarm.join(', ') }))}</p>` : ''}
+    `)}`)}
 
-    <section class="settings-section" data-info-block="tools">
-      <h3>${escapeHtml(t('about.tools.title'))} <span class="badge badge-muted">${escapeHtml(t('about.tools.tag', { count: (s.tools ?? []).length }))}</span></h3>
-      <p class="muted" style="font-size:11px;margin:0 0 8px">${t('about.tools.note')}</p>
-      <div class="chip-wrap">${(s.tools ?? []).map((tool) => `<span class="crt-tag">${escapeHtml(tool)}</span>`).join(' ')}</div>
-    </section>
-      </div>
-    </details>
+    ${aboutGroup('diag', t('about.group.diag'), `${kvRows([
+      copyRowOf(t('about.identity.configFile'), configPath),
+      kvRow(t('about.identity.backup'), `<span title="${escapeHtml(t('about.identity.backupNote'))}"><code>${escapeHtml(configPath)}.bak</code></span>`, `${configPath}.bak`),
+    ])}${aboutFold('about-diag', t('about.fold.diag'), `
+      ${sub(t('about.paths.title'))}
+      ${pathsBlock}
+      <p class="about-note">${escapeHtml(t('about.paths.note'))}</p>
+      ${sub(t('about.fleet.title'))}
+      ${fleetBlock}
+      <p class="about-note">${t('about.fleet.note')}${s.fleet?.configured ? '' : t('about.fleet.onboard')}</p>
+      ${sub(t('about.tools.title'))}
+      ${toolsBlock}
+    `)}`)}
   `;
   body.querySelectorAll('[data-copy]').forEach((button) => {
     button.addEventListener('click', () => copyText(button.dataset.copy, button));
@@ -5146,49 +5182,6 @@ function convergenceChipRows(conv, shortTimeFn) {
   return rows.join('');
 }
 
-/** 「关于本机」：收敛健康汇总段（对端各自一句话；未启用 = 说明 + 关掉入口） */
-function convergenceAboutSection() {
-  const peers = (state.devices ?? [])
-    .filter((d) => d.deviceId !== state.overview?.device?.deviceId && d.convergence)
-    .sort((a, b) => (a.deviceId < b.deviceId ? -1 : 1));
-  const s = state.overview?.convergence?.summary;
-  if (!s && peers.length === 0) {
-    return `
-    <section class="settings-section" data-info-block="convergence">
-      <h3>${escapeHtml(t('about.convergence.title'))} <span class="badge badge-muted">${escapeHtml(t('settings.common.readonly'))}</span></h3>
-      <p class="muted" style="font-size:11px;margin:0">${t('about.convergence.disabled')}</p>
-    </section>`;
-  }
-  const summary = s
-    ? t('about.convergence.summary', {
-      peers: s.peers,
-      ok: s.ok,
-      stalled: s.stalled,
-      diverged: s.diverged,
-      unverifiable: s.unverifiable,
-      offline: s.offline,
-    })
-    : '';
-  const rows = peers.map((d) => {
-    const conv = d.convergence;
-    const meta = convergenceStateMeta(conv.state);
-    const detail = [
-      convergencePrimaryText(conv),
-      conv.state === 'ok' && conv.lastConvergedAt ? t('convergence.chipReconciled', { time: fmtClock(conv.lastConvergedAt) }) : '',
-    ]
-      .filter(Boolean)
-      .join(' · ');
-    return kvRow(d.deviceId, `<span class="crt-tag ${meta.cls}">${meta.text}</span>${detail ? ` <span class="muted">${escapeHtml(detail)}</span>` : ''}`);
-  });
-  return `
-    <section class="settings-section" data-info-block="convergence">
-      <h3>${escapeHtml(t('about.convergence.title'))} <span class="badge badge-muted">${escapeHtml(t('about.convergence.tag'))}</span></h3>
-      ${summary ? `<p class="muted" style="font-size:11px;margin:0 0 8px">${escapeHtml(summary)}</p>` : ''}
-      ${peers.length ? kvRows(rows) : `<p class="muted" style="font-size:11px;margin:0">${escapeHtml(t('about.convergence.empty'))}</p>`}
-      <p class="muted" style="font-size:11px;margin:8px 0 0">${escapeHtml(t('about.convergence.note'))}</p>
-    </section>`;
-}
-
 function renderDeviceCard() {
   const asideEl = document.querySelector('.aside');
   // 走查修复（用户指认：卡片「分区」区在首次轮询补全文案 → 内容变高 → 贴底抽屉顶边瞬跳）：
@@ -6774,11 +6767,9 @@ function cloudCardHtml() {
   } else {
     body = `<p class="muted">${escapeHtml(t('settings.cloud.loading'))}</p>`;
   }
-  return `<section id="settings-cloud-card" class="settings-section cloud-card" data-settings-clouds tabindex="-1">
-    <h3>${escapeHtml(t('settings.cloud.title'))}</h3>
-    <p class="muted cloud-intro">${escapeHtml(t('settings.cloud.intro'))}</p>
-    ${body}
-    <p class="settings-section-foot muted">${escapeHtml(t('settings.cloud.note'))} ${escapeHtml(t('settings.cloud.keepArchived'))}。</p>
+  return `<section id="settings-cloud-card" class="settings-group cloud-card" data-settings-clouds tabindex="-1" title="${escapeHtml(`${t('settings.cloud.intro')} ${t('settings.cloud.note')} ${t('settings.cloud.keepArchived')}。`)}">
+    <div class="settings-group-head"><h3>${escapeHtml(t('settings.cloud.title'))}</h3></div>
+    <div class="settings-group-body">${body}</div>
   </section>`;
 }
 

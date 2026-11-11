@@ -341,7 +341,7 @@ export function assistantsPanelHtml({ clients, ui = {} } = {}) {
       <div class="asst-xp" id="asst-missing" hidden>${missingRows}</div>` : ''}`;
 }
 
-/** 常驻运行行（归设置 · 常用；状态行 + 按状态唯一主操作，次级入详情）。 */
+/** 常驻运行行（设置 · 常用）：58 行 = 状态 + 唯一主操作 + 「更多」popover（立即重启 / 取消常驻）。 */
 export function serviceRowHtml(service, serviceMsg = '') {
   if (!service) return `<p class="muted">${esc(tr('settings.service.loading', '常驻状态加载中…'))}</p>`;
   const registered = Boolean(service.registered);
@@ -349,22 +349,27 @@ export function serviceRowHtml(service, serviceMsg = '') {
     ? tr(service.running ? 'settings.service.badge.running' : 'settings.service.badge.registered',
       service.running ? '已常驻·运行中' : '已常驻·未运行')
     : tr('settings.service.badge.temporary', '未常驻（临时运行）');
-  return `<div class="asst-row">
-      <span class="kv-dot ${registered ? (service.running ? 'ok' : 'warn') : 'off'}" aria-hidden="true"></span>
-      <span class="asst-name">${esc(tr('settings.service.title', '常驻运行'))}</span>
-      <span class="asst-st">${esc(badge)}</span>
-      <span class="asst-sp"></span>
-      ${registered
-        ? `<button class="btn btn-small" type="button" data-svc-action="recheck">${esc(tr('settings.service.recheck', '重新检测'))}</button>`
-        : `<button class="btn btn-small btn-crt" type="button" data-svc-action="install">${esc(tr('settings.service.install', '让 Mebular 常驻'))}</button>`}
-    </div>
-    <div class="asst-xp asst-service-xp">
-      <p class="muted asst-service-note">${esc(tr('settings.service.note', '开机自启、崩溃自动拉起。'))}</p>
-      <div class="asst-detail-actions">
-        <button class="btn btn-small" type="button" data-svc-action="restart">${esc(tr('settings.service.restart', '立即重启'))}</button>
-        ${registered ? `<button class="btn btn-small" type="button" data-svc-action="uninstall">${esc(tr('settings.service.uninstall', '取消常驻'))}</button>` : ''}
+  const note = tr('settings.service.note', '开机自启、崩溃自动拉起。');
+  const more = `<details class="settings-more" data-settings-more>
+      <summary class="btn btn-small" aria-haspopup="menu" aria-expanded="false">${esc(tr('settings.service.more', '更多'))}</summary>
+      <div class="settings-more-panel" role="menu" aria-label="${esc(tr('settings.service.more', '更多'))}">
+        <button class="btn" type="button" role="menuitem" data-svc-action="restart">${esc(tr('settings.service.restart', '立即重启'))}</button>
+        ${registered ? `<button class="btn" type="button" role="menuitem" data-svc-action="uninstall">${esc(tr('settings.service.uninstall', '取消常驻'))}</button>` : ''}
       </div>
-      ${serviceMsg ? `<p class="asst-line" id="service-msg">${esc(serviceMsg)}</p>` : ''}
+    </details>`;
+  const primary = registered
+    ? `<button class="btn" type="button" data-svc-action="recheck">${esc(tr('settings.service.recheck', '重新检测'))}</button>`
+    : `<button class="btn btn-crt" type="button" data-svc-action="install">${esc(tr('settings.service.install', '让 Mebular 常驻'))}</button>`;
+  return `<div class="settings-row-2" data-service-row>
+      <div class="settings-row-stack">
+        <div class="settings-row-title"><span class="kv-dot ${registered ? (service.running ? 'ok' : 'warn') : 'off'}" aria-hidden="true"></span>${esc(tr('settings.service.title', '常驻运行'))}</div>
+        <div class="settings-row-meta" title="${esc(`${note}${serviceMsg ? ` ${serviceMsg}` : ''}`)}">${esc(note)}${serviceMsg ? ` · ${esc(serviceMsg)}` : ''}</div>
+      </div>
+      <div class="settings-row-actions">
+        <span class="settings-row-status">${esc(badge)}</span>
+        ${primary}
+        ${more}
+      </div>
     </div>`;
 }
 
@@ -373,7 +378,7 @@ export function wizardRowHtml(hasBridge) {
   if (!hasBridge) return '';
   return `<div class="asst-row settings-wizard-row">
     <span class="asst-name">${esc(tr('settings.wizard.title', '重启向导'))}</span>
-    <span class="asst-st">${esc(tr('settings.wizard.note', '重新走一遍首次设置（不动已有配置）'))}</span>
+    <span class="asst-st" title="${esc(tr('settings.wizard.note', '重新走一遍首次设置（不动已有配置）'))}">${esc(tr('settings.wizard.note', '重新走一遍首次设置（不动已有配置）'))}</span>
     <button class="btn btn-small" type="button" id="settings-open-wizard">${esc(tr('settings.wizard.action', '重启向导 ›'))}</button>
   </div>`;
 }
@@ -401,7 +406,7 @@ export function repairRowHtml(repair = {}) {
     : '';
   return `<div class="asst-row settings-repair-row">
     <span class="asst-name">${esc(tr('settings.repair.title', '自动修复'))}</span>
-    <span class="asst-st">${esc(tr('settings.repair.note', '强制重跑已检测 Agent 的 MCP 接入与 Skill；不动记忆/身份/订阅/任务/审计'))}</span>
+    <span class="asst-st" title="${esc(tr('settings.repair.note', '强制重跑已检测 Agent 的 MCP 接入与 Skill；不动记忆/身份/订阅/任务/审计'))}">${esc(tr('settings.repair.note', '强制重跑已检测 Agent 的 MCP 接入与 Skill；不动记忆/身份/订阅/任务/审计'))}</span>
     <span class="asst-sp"></span>
     <button class="btn btn-small btn-crt" type="button" id="settings-repair"${busy ? ' disabled' : ''}>${esc(busy ? tr('settings.repair.busy', '修复中…') : tr('settings.repair.action', '开始修复'))}</button>
   </div>

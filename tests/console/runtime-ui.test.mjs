@@ -92,7 +92,7 @@ describe('0.3 设置 IA：只有两个产品增量', () => {
   });
 
   it('设置折叠白名单不含 runtime-advanced（旧运行时诊断 UI 已删除）', () => {
-    expect(IA_SETTINGS_FOLDS.map((fold) => fold.id)).toEqual(['mcp-danger', 'diagnostics', 'about-runtime']);
+    expect(IA_SETTINGS_FOLDS.map((fold) => fold.id)).toEqual(['mcp-danger', 'diagnostics', 'about-runtime', 'about-identity', 'about-diag']);
     expect(IA_SETTINGS_FOLDS.length).toBeLessThanOrEqual(5);
   });
 

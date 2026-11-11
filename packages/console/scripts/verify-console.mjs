@@ -1841,6 +1841,27 @@ try {
       /\.modal-box\.modal-settings \{[^}]*overflow: hidden/.test(cssSrc)
         && /\.modal-box-wide \{ width: min\(640px, 94vw\); \}/.test(cssSrc),
       '640 / overflow hidden 保持');
+    // v2：760×720 / 188 轨 / 关于 680 / 40 行 / 10+1.5 标签 / 19px 值 / 114 卡 / 40 条
+    check('v2 设置外框与轨：760×720、188、关于 760×680',
+      cssSrc.includes('.modal-box.modal-settings {')
+        && cssSrc.includes('width: min(760px, calc(100vw - 32px));')
+        && cssSrc.includes('height: min(720px, calc(100vh - 32px));')
+        && cssSrc.includes('flex: 0 0 188px; width: 188px;')
+        && cssSrc.includes('#about .modal-box {')
+        && cssSrc.includes('height: min(680px, calc(100vh - 32px));'),
+      '760/720/188/680');
+    check('v2 行/字号/安全卡：40 行、10+1.5 分组标签、19px 状态值、114 卡',
+      cssSrc.includes('.settings-kv .kv-row > * {') && cssSrc.includes('min-height: 40px;')
+        && cssSrc.includes('font-size: 10px; line-height: 15px; font-weight: 600; letter-spacing: 1.5px;')
+        && cssSrc.includes('font-size: 19px; line-height: 22px; font-weight: 700; letter-spacing: 0.5px;')
+        && cssSrc.includes('height: 114px;'),
+      '40/10/19/114');
+    const assistantsSrcV2 = await readFile(join(consoleDir, 'assistants.js'), 'utf-8');
+    check('v2 待重启条 40 + 常驻「更多」菜单 a11y',
+      cssSrc.includes('.pending-restart {') && cssSrc.includes('height: 40px; min-height: 40px;')
+        && assistantsSrcV2.includes('data-settings-more') && assistantsSrcV2.includes('aria-haspopup="menu"')
+        && assistantsSrcV2.includes('aria-expanded="false"') && cssSrc.includes('.settings-more-panel {'),
+      'banner 40 / more menu');
   }
 
   // ---------- 轮 C：设置页三症状 + 呈现分级（弹层壳 / 关闭规范 / 常显-折叠-异常） ----------
@@ -1882,12 +1903,12 @@ try {
 
     const iaFolds = (await import('../settings-ia.js')).IA_SETTINGS_FOLDS;
     const foldIds = iaFolds.map((fold) => fold.id);
-    const renderedFolds = ['mcp-danger', 'diagnostics', 'about-runtime'].filter((id) => jsSrc.includes(`data-settings-fold="${id}"`));
+    const renderedFolds = foldIds.filter((id) => jsSrc.includes(`data-settings-fold="${id}"`) || jsSrc.includes(`aboutFold('${id}'`));
     check('U-1 折叠白名单：≤5 且设置/关于只渲染白名单内类型（邀请无详情）',
-      iaFolds.length <= 5 && renderedFolds.length === 3
+      iaFolds.length <= 5 && renderedFolds.length === foldIds.length
         && !jsSrc.includes('cfg-more') && !jsSrc.includes('task-card-more') && !jsSrc.includes('page-more')
         && !/<details/.test(jsSrc.slice(jsSrc.indexOf('function renderCfgField'), jsSrc.indexOf('function fieldOf')))
-        && foldIds.every((id) => ['mcp-danger', 'diagnostics', 'about-runtime', 'assistants'].includes(id)),
+        && foldIds.every((id) => ['mcp-danger', 'diagnostics', 'about-runtime', 'about-identity', 'about-diag', 'assistants'].includes(id)),
       `folds=${JSON.stringify(foldIds)} rendered=${JSON.stringify(renderedFolds)}`);
 
     const codeOnly = jsSrc.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').map((line) => line.replace(/\/\/.*$/, '')).join('\n');

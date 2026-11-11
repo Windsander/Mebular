@@ -3137,3 +3137,7 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
   .pending-restart-cmd { margin-left: auto; gap: 6px; }
   .pending-restart-cmd .btn { padding: 0 8px; }
 }
+
+/* 常用页在 720 + 40 提示条下要留余量：组间距 12、滚动区上内边距 8 */
+.modal-settings .settings-scroll { padding-top: 8px; }
+.settings-group { margin-top: 12px; }

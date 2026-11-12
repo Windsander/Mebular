@@ -1897,6 +1897,16 @@ try {
         && jsSrc.includes('class="rt-value')
         && cssSrc.includes('.runtime-kv dd.rt-value.is-warn { color: #ffd27a; }'),
       'active solid / segmented / no pill');
+    check('v2.3 共享控件 token：27 高 / 8 圆角；group body 无上下 padding、首末行 40/58；说明占满面板',
+      cssSrc.includes('--settings-control-h: 27px;')
+        && cssSrc.includes('--settings-control-radius: 8px;')
+        && /\.modal-settings \.btn,\n\.modal-settings \.crt-select-trigger,\n\.modal-settings \.crt-input,\n\.modal-settings select\.crt-input \{[^}]*height: var\(--settings-control-h\) !important;[^}]*border-radius: var\(--settings-control-radius\) !important;/s.test(cssSrc)
+        && cssSrc.includes('.modal-settings .btn { padding: 0 10px !important; }')
+        && cssSrc.includes('.modal-settings .crt-input,\n.modal-settings .crt-select-trigger { padding: 0 8px !important; }')
+        && /\.settings-group-body \{[^}]*padding: 0;[^}]*overflow: hidden;/s.test(cssSrc)
+        && /\.modal-settings \.settings-group-note,[^}]*width: 100%; max-width: none;[^}]*padding: 0 14px;[^}]*line-height: 16px;/s.test(cssSrc),
+      '27/8 + body 0 + notes full width');
+
     check('v2.2 细节：off 开关/安全值、忆云 tag、更多 ghost、警告 left-bar',
       cssSrc.includes('.toggle .slider { background: rgba(140, 255, 200, 0.12); }')
         && cssSrc.includes('.toggle .slider::before { background: rgba(140, 255, 200, 0.45); }')

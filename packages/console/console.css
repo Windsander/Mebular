@@ -2615,6 +2615,11 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
   /* 左内距给页签；右侧留给滚动条贴边，内容列自己补 20（v2.2） */
   padding: 18px 0 18px 20px;
   border-radius: 12px;
+  /* v2.3 共享控件 token：设置内 input / select trigger / button 同一套 */
+  --settings-control-h: 27px;
+  --settings-control-radius: 8px;
+  --control-h: var(--settings-control-h);
+  --select-h: var(--settings-control-h);
 }
 /* Header 一行：✦ 本机设置 + 改动即生效；从弹层顶边算 57（18 顶距 + 38 行） */
 .modal-settings .modal-head {
@@ -2690,12 +2695,15 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
   border: 1px solid rgba(80, 255, 170, 0.22);
   border-radius: 10px;
   background: rgba(2, 16, 11, 0.34);
-  padding: 7px 0;
+  /* 首/末行严格 40/58：不再用上下 padding 制造视觉 47/65；圆角由 overflow 裁切 */
+  padding: 0;
+  overflow: hidden;
   min-width: 0;
 }
 .settings-group-desc,
 .settings-group-foot {
-  margin: 6px 0 0; padding: 0 2px;
+  margin: 6px 0 0; padding: 0 14px;
+  width: 100%; max-width: none;
   font-size: 11px; line-height: 16px; color: var(--crt-dim);
   overflow-wrap: anywhere;
 }
@@ -3381,4 +3389,48 @@ html[lang="en-US"] .modal-settings .cfg-label { line-height: 19px; }
 .sec-card-warn {
   box-shadow: inset 2px 0 0 #ffd27a;
   padding-left: 8px;
+}
+
+/* ===== v2.3 设置控件 token 收口（27 高 / 8 圆角；只作用于设置弹层） ===== */
+.modal-settings .btn,
+.modal-settings .crt-select-trigger,
+.modal-settings .crt-input,
+.modal-settings select.crt-input {
+  height: var(--settings-control-h) !important;
+  min-height: var(--settings-control-h) !important;
+  border-radius: var(--settings-control-radius) !important;
+}
+.modal-settings .btn { padding: 0 10px !important; }
+.modal-settings .crt-input,
+.modal-settings .crt-select-trigger { padding: 0 8px !important; }
+.modal-settings .cfg-control { min-height: var(--settings-control-h); }
+.modal-settings .runtime-mode-seg { height: var(--settings-control-h); border-radius: var(--settings-control-radius); }
+.modal-settings .runtime-mode-seg .btn { border-radius: 0 !important; }
+
+/* 组内说明/分组说明/段脚：占满面板、16 行高、左右 14；彻底去掉 62ch 截短 */
+.modal-settings .settings-group-note,
+.modal-settings .settings-group-desc,
+.modal-settings .settings-group-foot,
+.modal-settings .settings-section-foot {
+  width: 100%; max-width: none;
+  padding: 0 14px;
+  font-size: 11px; line-height: 16px;
+}
+.modal-settings .settings-section-foot { margin: 4px 0 6px; }
+
+/* 行下异常/警告行：同样取消 62ch；保留既有 left-bar 与缩进 */
+.modal-settings .cfg-row + .cfg-effective,
+.modal-settings .cfg-row + .cfg-warn-line,
+.modal-settings .settings-warn-line {
+  max-width: none;
+  line-height: 16px;
+}
+.modal-settings .settings-warn-line { width: 100%; }
+
+/* ≤760：自动修复行允许两行（名称+动作 / 说明），行高随内容增长；1440 仍严格 40 */
+@media (max-width: 760px) {
+  #settings-resident > .asst-row.settings-repair-row {
+    height: auto; min-height: 40px;
+    padding: 6px 14px; row-gap: 2px;
+  }
 }

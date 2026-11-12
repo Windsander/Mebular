@@ -1687,6 +1687,89 @@ async function main() {
       JSON.stringify(gridProbe));
     await setViewport({ width: prevGridViewport.w, height: prevGridViewport.h, deviceScaleFactor: 1, mobile: prevGridViewport.w <= 560 });
     await sleep(300);
+    // v2.3 全局 token 审计：控件 27/8、行 40/58、说明占满面板、无 62ch；1440 与 390 各跑一遍。
+    const settingsTokenProbe = (checkRows) => `(() => {
+      const root = document.querySelector('#settings .modal-box');
+      const visible = (el) => {
+        const st = getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return st.display !== 'none' && st.visibility !== 'hidden' && st.opacity !== '0'
+          && rect.width > 1 && rect.height > 1 && el.getClientRects().length > 0 && el.offsetParent !== null;
+      };
+      const controls = [...root.querySelectorAll('.btn, .crt-select-trigger, .crt-input')]
+        .filter((el) => visible(el) && !el.classList.contains('crt-select-native'))
+        .map((el) => {
+          const st = getComputedStyle(el);
+          const rect = el.getBoundingClientRect();
+          return {
+            cls: String(el.className).slice(0, 40),
+            isBtn: el.classList.contains('btn'),
+            segCell: Boolean(el.closest('.runtime-mode-seg')),
+            h: Math.round(rect.height * 10) / 10,
+            radius: st.borderTopLeftRadius,
+            padL: st.paddingLeft,
+          };
+        });
+      const badControls = controls.filter((c) => Math.abs(c.h - 27) > 0.6
+        || (c.segCell ? c.radius !== '0px' : c.radius !== '8px')
+        || c.padL !== (c.isBtn ? '10px' : '8px'));
+      const rows = [];
+      for (const el of root.querySelectorAll('.cfg-row, .settings-row-2, .settings-language-row, .runtime-mode-actions, .asst-head, .asst-row, .cloud-row, .settings-actions-row')) {
+        if (visible(el)) rows.push(Math.round(el.getBoundingClientRect().height * 10) / 10);
+      }
+      for (const kv of root.querySelectorAll('.settings-kv')) {
+        if (!visible(kv)) continue;
+        const byTop = new Map();
+        for (const cell of kv.querySelectorAll('.kv-row > *')) {
+          if (!visible(cell)) continue;
+          const top = Math.round(cell.getBoundingClientRect().top);
+          if (!byTop.has(top)) byTop.set(top, Math.round(cell.getBoundingClientRect().height * 10) / 10);
+        }
+        rows.push(...byTop.values());
+      }
+      const badRows = ${checkRows ? 'rows.filter((h) => h !== 40 && h !== 58)' : '[]'};
+      const notes = [];
+      for (const el of root.querySelectorAll('.settings-group-note, .settings-group-desc, .settings-group-foot, .settings-section-foot')) {
+        if (!visible(el)) continue;
+        const st = getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        const panel = el.closest('.settings-group-body') || el.closest('.settings-group');
+        const panelW = panel ? Math.round(panel.getBoundingClientRect().width) : null;
+        notes.push({ cls: String(el.className).slice(0, 30), w: Math.round(rect.width), panelW, max: st.maxWidth, lh: st.lineHeight, pl: st.paddingLeft, pr: st.paddingRight });
+      }
+      const badNotes = notes.filter((n) => n.max !== 'none' || n.lh !== '16px' || n.pl !== '14px'
+        || n.pr !== '14px' || !n.panelW || n.w < n.panelW - 2);
+      const seg = root.querySelector('.runtime-mode-seg');
+      const segStyle = seg ? getComputedStyle(seg) : null;
+      const segOk = !seg || !visible(seg) || (Math.abs(seg.getBoundingClientRect().height - 27) < 0.6 && segStyle.borderTopLeftRadius === '8px');
+      return { controls: controls.length, badControls: badControls.slice(0, 8), rows: [...new Set(rows)].sort((a, b) => a - b), badRows: badRows.slice(0, 8), notes: notes.length, badNotes: badNotes.slice(0, 6), segOk };
+    })()`;
+    const prevTokenViewport = await evalJs('({ w: window.innerWidth, h: window.innerHeight })');
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await sleep(350);
+    const tokenAudit = {};
+    for (const tab of ['common', 'security', 'runtime', 'mcp', 'advanced', 'assistants']) {
+      await evalJs(`document.querySelector('[data-settings-tab=${tab}]')?.click()`);
+      await sleep(250);
+      tokenAudit[tab] = await evalJs(settingsTokenProbe(true));
+    }
+    const tokenBad = Object.entries(tokenAudit).filter(([, a]) => !a || a.badControls.length || a.badRows.length || a.badNotes.length || !a.segOk);
+    check('v2.3 1440 共享 token：控件 27/8、行 40/58、说明占满面板且无 62ch',
+      tokenBad.length === 0, JSON.stringify(tokenBad).slice(0, 1200));
+    await setViewport({ width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    await sleep(350);
+    const tokenAudit390 = {};
+    for (const tab of ['common', 'security', 'runtime', 'mcp', 'advanced', 'assistants']) {
+      await evalJs(`document.querySelector('[data-settings-tab=${tab}]')?.click()`);
+      await sleep(250);
+      tokenAudit390[tab] = await evalJs(settingsTokenProbe(false));
+    }
+    const tokenBad390 = Object.entries(tokenAudit390).filter(([, a]) => !a || a.badControls.length || a.badNotes.length || !a.segOk);
+    check('v2.3 390 共享 token：控件 27/8、说明占满面板且无 62ch',
+      tokenBad390.length === 0, JSON.stringify(tokenBad390).slice(0, 1200));
+    await evalJs('document.querySelector("[data-settings-tab=common]")?.click()');
+    await setViewport({ width: prevTokenViewport.w, height: prevTokenViewport.h, deviceScaleFactor: 1, mobile: prevTokenViewport.w <= 560 });
+    await sleep(300);
     // 自动修复：browser 无 preload 桥也渲染；点击先二次确认（取消不写）。
     await evalJs('document.querySelector("#settings-repair").click()');
     check('自动修复（browser）：二次确认明确覆盖 MCP/Skill、不碰记忆/身份/订阅/任务/审计', await waitFor(`(() => {
@@ -3654,7 +3737,7 @@ async function main() {
         && language1440.dedicated && language1440.wrapper && language1440.oneLine
         && language1440.order && language1440.divider
         && language1440.appearance === 'none' && language1440.nativeHidden
-        && language1440.triggerRole === 'combobox' && language1440.triggerHeight === 26
+        && language1440.triggerRole === 'combobox' && language1440.triggerHeight === 27
         && language1440.radius === '8px' && language1440.focusShadow !== 'none'
         && language1440.options === 2 && language1440.value === 'en-US'
         && language1440.inRow && language1440.overflow === false,
@@ -4583,9 +4666,9 @@ async function main() {
       await evalJs('document.querySelector("[data-view=map]").click()');
 
       const expected = {
-        settingsLanguage: 26,
-        mcpAuth: 26,
-        assistantFormat: 26,
+        settingsLanguage: 27,
+        mcpAuth: 27,
+        assistantFormat: 27,
         auditAction: 32,
         auditDevice: 32,
         auditNamespace: 32,

@@ -1920,6 +1920,20 @@ try {
         && jsSrc.includes('settings.common.securityMeta.'),
       '2px/12-18/16-20/2-12-0/meta 11');
 
+    const serviceFnFinal = assistantsSrcV2.slice(
+      assistantsSrcV2.indexOf('export function serviceRowHtml'),
+      assistantsSrcV2.indexOf('export function restartRowHtml'),
+    );
+    check('v2.4 最终交互布局：常用四行、重启不入菜单、模型下拉右对齐、普通 hint 隐藏',
+      serviceFnFinal.includes('data-svc-action="uninstall"') && !serviceFnFinal.includes('data-svc-action="restart"')
+        && assistantsSrcV2.includes('export function restartRowHtml') && assistantsSrcV2.includes('export function wizardRowHtml')
+        && !assistantsSrcV2.includes('wizardHeadActionHtml')
+        && jsSrc.includes('${restartRowHtml()}${repairRowHtml(state.repair)}${wizardRowHtml(host.capabilities.openWizard)}')
+        && cssSrc.includes('[data-settings-section="model-source"] .cfg-control { justify-content: flex-end; justify-self: stretch; width: 100%; }')
+        && cssSrc.includes('[data-settings-section="model-source"] .cfg-control .crt-select { width: min(280px, 100%); flex: none; }')
+        && /\.settings-shell \.settings-group-note,[\s\S]*?#assistants-panel \.asst-head > \.muted \{ display: none; \}/.test(cssSrc),
+      '4 rows / direct restart / dropdown right / hints in title');
+
     check('v2.2 细节：off 开关/安全值、忆云 tag、更多 ghost、警告 left-bar',
       cssSrc.includes('.toggle .slider { background: rgba(140, 255, 200, 0.12); }')
         && cssSrc.includes('.toggle .slider::before { background: rgba(140, 255, 200, 0.45); }')

@@ -10,7 +10,7 @@ import { StarStage, namespaceColor, shortId, buildHoverRoutes, buildNetworkScene
 import { initialViewFromSearch } from './deep-link.js';
 import { createWizardState, wizardReduce, WIZARD_STEPS } from './wizard.js';
 import { IA_TABS, IA_ADVANCED_SECTIONS, IA_MCP_SECTIONS, IA_FIELD_COPY, IA_SETTINGS_EXTRA, IA_SETTINGS_FOLDS, IA_SECURITY_SECTIONS, IA_MCP_DANGER_LINE_KEYS, INVITE_TTL_OPTIONS, INVITE_TTL_DEFAULT_MS, SECURITY_LEVEL_LABEL, SECURITY_LEVEL_TITLE_KEY, SECURITY_LEVEL_NOTE_KEY, SECURITY_BOUNDARY_KEY, SCHEMA_CONFIGURED_VALUE, localizeSchemaReason, refreshCsrfToken, withCsrfRetry, filterRuntimeTimeline, runtimeTimelineKind, memoryRuntimeEnabledOf, runtimeSidecarStateKey, memoryRuntimeModeOf, runtimeShowsModelSettings, runtimeModelSourceOf, runtimeModelSourceAvailable, runtimeModelSourceReady, runtimeModelJobActive, runtimeModelStatusOf, runtimeModelActionOf, formatBytes, settingsListenHostPort, settingsEndpointHostPort, IA_RUNTIME_MODEL_SOURCES, IA_RUNTIME_MODEL_SOURCE_DEFAULT } from './settings-ia.js';
-import { assistantsPanelHtml, serviceRowHtml, wizardHeadActionHtml, repairRowHtml, statusPillHtml, attentionItems, assistantAddFormHtml } from './assistants.js';
+import { assistantsPanelHtml, serviceRowHtml, restartRowHtml, wizardRowHtml, repairRowHtml, statusPillHtml, attentionItems, assistantAddFormHtml } from './assistants.js';
 import { reconcileAssistantUi } from './assistant-status.js';
 import { createConsoleHost, markEmbeddedDocument } from './host.js';
 import { t, getLocale, setLocale, onLocaleChange, applyStaticI18n, languageSettingsRowHtml, initI18n, reconcileDesktopLocale, LOCALE_STORAGE_KEY, formatDate as formatLocaleDate, formatDateTime as formatLocaleDateTime, formatExpiry } from './i18n.mjs';
@@ -1505,9 +1505,10 @@ function renderEditor(paths) {
 }
 
 /** v2 分组：10px 标签在面板外 + 一层内嵌面板；只读用后缀，不再挂 pill。 */
-function settingsSectionHtml({ id, title, desc = '', chip = '', body = '', foot = '', suffix = '' }) {
+function settingsSectionHtml({ id, title, desc = '', chip = '', body = '', foot = '', suffix = '', hint = '' }) {
+  const contextTitle = [hint, desc, foot].filter(Boolean).join(' ');
   return `
-    <section class="settings-group" data-settings-section="${escapeHtml(id)}">
+    <section class="settings-group" data-settings-section="${escapeHtml(id)}"${contextTitle ? ` title="${escapeHtml(contextTitle)}"` : ''}>
       <div class="settings-group-head">
         <h3>${escapeHtml(title)}</h3>
         ${suffix ? `<span class="settings-group-suffix">· ${escapeHtml(suffix)}</span>` : ''}
@@ -1622,6 +1623,7 @@ function runtimeModeSettingsHtml() {
   return settingsSectionHtml({
     id: 'runtime-mode',
     title: t('settings.runtime.mode.title'),
+    hint: t(enabled ? 'settings.runtime.mode.immersiveDesc' : 'settings.runtime.mode.lightDesc'),
     body: `<div class="runtime-mode-actions" role="group" aria-label="${escapeHtml(t('settings.runtime.mode.title'))}" data-rt-mode-group>
       <div class="runtime-mode-seg">
         ${option('lightweight', 'settings.runtime.mode.lightweight')}
@@ -1939,6 +1941,7 @@ function runtimeModelSourceSectionHtml() {
   return settingsSectionHtml({
     id: 'model-source',
     title: t('settings.runtime.modelSource.title'),
+    hint: noteTitle,
     body: `<div class="cfg-row">
       <label class="cfg-label" for="rt-model-source">${escapeHtml(t('settings.runtime.modelSource.rowLabel'))}</label>
       <div class="cfg-control">
@@ -2179,8 +2182,8 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
         <div class="settings-group-body">${languageSettingsRowHtml()}</div>
       </section>
       <section class="settings-group" data-settings-group="resident">
-        <div class="settings-group-head${host.capabilities.openWizard ? ' has-action' : ''}"><h3>${escapeHtml(t('settings.common.group.runs'))}</h3>${wizardHeadActionHtml(host.capabilities.openWizard)}</div>
-        <div class="settings-group-body" id="settings-resident">${serviceRowHtml(state.service, state.serviceMsg)}${repairRowHtml(state.repair)}</div>
+        <div class="settings-group-head"><h3>${escapeHtml(t('settings.common.group.runs'))}</h3></div>
+        <div class="settings-group-body" id="settings-resident">${serviceRowHtml(state.service, state.serviceMsg)}${restartRowHtml()}${repairRowHtml(state.repair)}${wizardRowHtml(host.capabilities.openWizard)}</div>
       </section>
       <section class="settings-group" data-settings-common-status>
         <div class="settings-group-head"><h3>${escapeHtml(t('settings.common.statusTitle'))}</h3><span class="settings-group-suffix">· ${escapeHtml(t('settings.common.readonly'))}</span></div>

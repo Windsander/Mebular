@@ -863,6 +863,21 @@ async function main() {
       Boolean(rows900) && rows900.common.n >= 3 && rows900.common.badH === 0 && rows900.common.badTop === 0
         && rows900.docW <= rows900.vw + 1 && rows900.modalW === 760,
       JSON.stringify(rows900));
+    await evalJs(`document.querySelector('[data-settings-tab="advanced"]')?.click()`);
+    const cfg900 = await evalJs(`(() => {
+      const rows = [...document.querySelectorAll('#settings-panel-advanced .cfg-row')].filter((el) => el.getClientRects().length);
+      const center = (el) => { const r = el.getBoundingClientRect(); return r.top + r.height / 2; };
+      const bad = rows.filter((row) => Math.round(row.getBoundingClientRect().height) !== 40
+        || getComputedStyle(row).gridTemplateColumns.split(' ').filter(Boolean).length !== 3
+        || ['.cfg-label', '.cfg-control', '.cfg-status'].some((selector) => {
+          const cell = row.querySelector(selector);
+          return cell && Math.abs(center(cell) - center(row)) > 1;
+        }));
+      return { count: rows.length, bad: bad.length, vw: innerWidth };
+    })()`);
+    check('900 高级字段：150/1fr/68 横排 + 40 行 + label/control/status 中线对齐',
+      cfg900.count >= 3 && cfg900.bad === 0 && cfg900.vw === 900, JSON.stringify(cfg900));
+    await evalJs(`document.querySelector('[data-settings-tab="common"]')?.click()`);
     await evalJs(`document.querySelector('[data-settings-extra="about-modal"]')?.click()`);
     await sleep(300);
     const about900 = await evalJs(`(() => {
@@ -985,7 +1000,7 @@ async function main() {
         const s = section?.querySelector('[data-rt-model-source]');
         const note = section?.querySelector('[data-rt-model-source-note]');
         return Boolean(s) && s.disabled === true && /轻量 MCP/.test(section.textContent)
-          && getComputedStyle(note).display !== 'none'
+          && getComputedStyle(note).display === 'none' && (note.getAttribute('title') ?? '').length > 0
           && !section.querySelector('[data-rt-model-list]')
           && !/endpoint|keyRef|token|Raw/i.test(section.textContent);
       })()`, 30000));
@@ -1651,6 +1666,36 @@ async function main() {
         && Boolean(topbarInvite)
         && /本机运行|本机状态/.test(common.textContent);
     })()`));
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    const commonItems = await evalJs(`(() => {
+      const root = document.querySelector('#settings-resident');
+      const group = root?.closest('[data-settings-group=resident]');
+      const items = [...(root?.children ?? [])].filter((el) => el.matches('.settings-row-2, .asst-row'));
+      const restart = root?.querySelector('.settings-restart-row');
+      const wizard = root?.querySelector('.settings-wizard-row');
+      const repair = root?.querySelector('.settings-repair-row');
+      const heights = items.map((el) => Math.round(el.getBoundingClientRect().height));
+      const order = items.map((el) => el.classList.contains('settings-row-2') ? 'resident'
+        : el.classList.contains('settings-restart-row') ? 'restart'
+          : el.classList.contains('settings-repair-row') ? 'repair' : 'wizard');
+      const expectedOrder = wizard ? ['resident', 'restart', 'repair', 'wizard'] : ['resident', 'restart', 'repair'];
+      const expectedHeights = wizard ? [58, 40, 40, 40] : [58, 40, 40];
+      return {
+        ok: JSON.stringify(order) === JSON.stringify(expectedOrder)
+          && JSON.stringify(heights) === JSON.stringify(expectedHeights)
+          && Boolean(restart?.querySelector(':scope > [data-svc-action="restart"]'))
+          && !root.querySelector('.settings-more-panel [data-svc-action="restart"]')
+          && Boolean(repair?.querySelector('#settings-repair'))
+          && (!wizard || Boolean(wizard.querySelector('#settings-open-wizard')))
+          && !group?.querySelector('.settings-group-head #settings-open-wizard')
+          && (!repair || getComputedStyle(repair.querySelector('.asst-st')).display === 'none'),
+        order, heights,
+        restartInMenu: Boolean(root?.querySelector('.settings-more-panel [data-svc-action="restart"]')),
+        wizardInHead: Boolean(group?.querySelector('.settings-group-head #settings-open-wizard')),
+      };
+    })()`);
+    check('常用四项：常驻 58 → 立即重启 40 → 自动修复 40 → 重启向导 40；钩子与 title 保留',
+      commonItems.ok === true, JSON.stringify(commonItems));
     const prevGridViewport = await evalJs('({ w: window.innerWidth, h: window.innerHeight })');
     await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
     await sleep(350);
@@ -1667,7 +1712,11 @@ async function main() {
       const as = active ? getComputedStyle(active) : null;
       const more = modal.querySelector('[data-settings-more-trigger]');
       const ms = more ? getComputedStyle(more) : null;
+      const restart = modal.querySelector('#settings-resident > [data-svc-action="restart"], #settings-resident [data-svc-action="restart"]');
+      const restartRect = restart?.getBoundingClientRect();
       return {
+        restartVisible: Boolean(restartRect && restartRect.height === 27 && restartRect.width > 0),
+        restartInMenu: Boolean(restart?.closest('.settings-more-panel')),
         railW: Math.round(rail.width),
         railGap: Math.abs((panel.left - rail.right) - 20) <= 1,
         contentGap: Math.abs(panel.left - (scroll.left + 20)) <= 1,
@@ -1680,11 +1729,12 @@ async function main() {
         moreColor: ms?.color ?? '',
       };
     })()`);
-    check('v2.2 常用栅格：160 轨 + 20 呼吸；header 同行 57；active 实底 + 2px；更多 ghost',
+    check('v2.2 常用栅格：160 轨 + 20 呼吸；header 同行 57；active 实底 + 2px；重启独立可见',
       gridProbe.railW === 160 && gridProbe.railGap && gridProbe.contentGap && gridProbe.rightGap
         && gridProbe.headerH === 57 && gridProbe.inline
         && gridProbe.bg === 'rgba(80, 255, 170, 0.06)' && /inset/.test(gridProbe.inset) && /2px/.test(gridProbe.inset)
-        && gridProbe.moreBg === 'rgba(8, 38, 26, 0.6)' && gridProbe.moreColor === 'rgb(169, 255, 212)',
+        && gridProbe.restartVisible && !gridProbe.restartInMenu
+        && (gridProbe.moreBg === '' || (gridProbe.moreBg === 'rgba(8, 38, 26, 0.6)' && gridProbe.moreColor === 'rgb(169, 255, 212)')),
       JSON.stringify(gridProbe));
     await setViewport({ width: prevGridViewport.w, height: prevGridViewport.h, deviceScaleFactor: 1, mobile: prevGridViewport.w <= 560 });
     await sleep(300);
@@ -1781,7 +1831,24 @@ async function main() {
       });
       const badMeta = metas.filter((m) => m.fs !== '11px' || m.lh !== '16px' || !m.text
         || m.text.includes('://') || m.text.startsWith('/'));
+      const hints = [...root.querySelectorAll('.settings-shell .settings-group-note, .settings-shell .settings-group-desc, .settings-shell .settings-group-foot, .settings-shell .settings-section-foot, #settings-panel-runtime > .settings-note, #assistants-panel .asst-head > .muted')];
+      const hintsHidden = hints.every((el) => getComputedStyle(el).display === 'none');
+      const modelControl = root.querySelector('[data-settings-section="model-source"] .cfg-control');
+      const modelWrap = modelControl?.querySelector('.crt-select');
+      const modelTrigger = modelControl?.querySelector('.crt-select-trigger');
+      const dropdownOk = !modelControl || !visible(modelControl) || (Boolean(modelWrap && modelTrigger)
+        && getComputedStyle(modelControl).justifyContent === 'flex-end'
+        && getComputedStyle(modelWrap).flexGrow === '0' && getComputedStyle(modelWrap).flexShrink === '0'
+        && Math.abs(modelWrap.getBoundingClientRect().width - Math.min(280, modelControl.getBoundingClientRect().width)) <= 1
+        && Math.abs(modelTrigger.getBoundingClientRect().right - modelControl.getBoundingClientRect().right) <= 1
+        && Math.abs(modelTrigger.getBoundingClientRect().width - modelWrap.getBoundingClientRect().width) <= 1);
+      const cfgAlignOk = ${checkRows ? `[...root.querySelectorAll('.cfg-row')].filter(visible).every((row) => {
+        const cells = ['.cfg-label', '.cfg-control', '.cfg-status'].map((selector) => row.querySelector(selector)).filter((el) => el && visible(el));
+        const center = (el) => { const rect = el.getBoundingClientRect(); return rect.top + rect.height / 2; };
+        return cells.every((el) => Math.abs(center(el) - center(row)) <= 1);
+      })` : 'true'};
       return { controls: controls.length, badControls: badControls.slice(0, 8), rows: [...new Set(rows)].sort((a, b) => a - b), badRows: badRows.slice(0, 8), notes: notes.length, badNotes: badNotes.slice(0, 6), segOk,
+        layout: { hintsHidden, dropdownOk, cfgAlignOk },
         typo: { tabLs, scrollTop: scrollStyle.paddingTop, scrollLeft: scrollStyle.paddingLeft, scrollRight: scrollStyle.paddingRight, kvOk, kvInsetOk, detailTypeOk, badBodies: badBodies.slice(0, 6), metas: metas.length, badMeta: badMeta.slice(0, 6) } };
     })()`;
     const prevTokenViewport = await evalJs('({ w: window.innerWidth, h: window.innerHeight })');
@@ -1794,6 +1861,7 @@ async function main() {
       tokenAudit[tab] = await evalJs(settingsTokenProbe(true));
     }
     const tokenBad = Object.entries(tokenAudit).filter(([, a]) => !a || a.badControls.length || a.badRows.length || a.badNotes.length || !a.segOk
+      || !a.layout.hintsHidden || !a.layout.dropdownOk || !a.layout.cfgAlignOk
       || a.typo.tabLs !== '2px' || a.typo.scrollTop !== '16px' || a.typo.scrollLeft !== '20px' || a.typo.scrollRight !== '20px'
       || !a.typo.kvOk || !a.typo.kvInsetOk || !a.typo.detailTypeOk || a.typo.badBodies.length || a.typo.badMeta.length
       || (a.typo.metas > 0 && a.typo.metas !== 3));
@@ -1808,6 +1876,7 @@ async function main() {
       tokenAudit390[tab] = await evalJs(settingsTokenProbe(false));
     }
     const tokenBad390 = Object.entries(tokenAudit390).filter(([, a]) => !a || a.badControls.length || a.badNotes.length || !a.segOk
+      || !a.layout.hintsHidden || !a.layout.dropdownOk
       || a.typo.tabLs !== '2px' || a.typo.scrollTop !== '16px' || a.typo.scrollLeft !== '20px' || a.typo.scrollRight !== '20px'
       || !a.typo.kvOk || !a.typo.detailTypeOk || a.typo.badBodies.length || a.typo.badMeta.length);
     check('v2.4 390 字体/间距：页签 2px、只读行 12/18、滚动区 16/20、面板 2/12/0、meta 11 + 控件 27/8',
@@ -4311,30 +4380,32 @@ async function main() {
     // 设置·常用「Setup wizard」行：英文说明不得把按钮挤出可视区。host adapter 在
     // console.js 模块加载时定型，因此先注入 preload 桩，再重新加载页面（而不是加载后改 window）。
     const wizardProbe = `(() => {
-      const head = document.querySelector('#settings-panel-common [data-settings-group=resident] .settings-group-head');
-      const button = head?.querySelector('#settings-open-wizard');
-      if (!head || !button) return { ok: false, why: 'missing' };
-      const headRect = head.getBoundingClientRect();
+      const group = document.querySelector('#settings-panel-common [data-settings-group=resident]');
+      const row = group?.querySelector('.settings-wizard-row');
+      const button = row?.querySelector('#settings-open-wizard');
+      if (!group || !row || !button) return { ok: false, why: 'missing' };
+      const rowRect = row.getBoundingClientRect();
       const btnRect = button.getBoundingClientRect();
       const boxRect = document.querySelector('#settings .modal-box')?.getBoundingClientRect() ?? null;
-      const panelRect = document.querySelector('#settings-resident')?.getBoundingClientRect() ?? null;
       const btnStyle = getComputedStyle(button);
       return {
         ok: true,
-        text: head.innerText.replace(/\\s+/g, ' ').trim(),
+        text: row.innerText.replace(/\\s+/g, ' ').trim(),
         title: button.getAttribute('title') ?? '',
         visible: btnStyle.display !== 'none' && btnStyle.visibility !== 'hidden'
           && btnRect.width > 0 && btnRect.height > 0,
         button: { left: Math.round(btnRect.left), right: Math.round(btnRect.right), height: Math.round(btnRect.height) },
-        head: { left: Math.round(headRect.left), right: Math.round(headRect.right), height: Math.round(headRect.height) },
+        row: { left: Math.round(rowRect.left), right: Math.round(rowRect.right), height: Math.round(rowRect.height) },
         boxRight: boxRect ? Math.round(boxRect.right) : null,
-        insideHead: btnRect.left >= headRect.left - 1 && btnRect.right <= headRect.right + 1,
+        insideRow: btnRect.left >= rowRect.left - 1 && btnRect.right <= rowRect.right + 1
+          && btnRect.top >= rowRect.top - 1 && btnRect.bottom <= rowRect.bottom + 1,
         insideBox: !boxRect || btnRect.right <= boxRect.right + 1,
-        abovePanel: !panelRect || btnRect.bottom <= panelRect.top + 1,
-        inRow: Boolean(button.closest('.asst-row')),
+        inRow: button.closest('.asst-row') === row,
+        inHead: Boolean(group.querySelector('.settings-group-head #settings-open-wizard')),
+        row40: Math.round(rowRect.height) === 40,
         height27: Math.round(btnRect.height) === 27,
         pageOver: document.documentElement.scrollWidth - window.innerWidth,
-        cjk: /[\u3400-\u9fff]/.test(head.innerText),
+        cjk: /[\u3400-\u9fff]/.test(row.innerText),
       };
     })()`;
     const wizardPreload = await send('Page.addScriptToEvaluateOnNewDocument', {
@@ -4344,14 +4415,14 @@ async function main() {
     await waitFor('document.documentElement?.dataset?.consoleReady === "1" && Boolean(document.querySelector("#open-settings"))');
     await evalJs('document.querySelector("#open-settings").click()');
     await waitFor('document.querySelector("#settings")?.hidden === false');
-    check('i18n 设置向导动作：桌面桥下渲染在「本机运行」组头（27 ghost，不再是整行）',
-      await waitFor('Boolean(document.querySelector("#settings-panel-common [data-settings-group=resident] .settings-group-head #settings-open-wizard"))'));
+    check('i18n 设置向导动作：桌面桥下渲染为「本机运行」最后一个 40px 行',
+      await waitFor('Boolean(document.querySelector("#settings-panel-common [data-settings-group=resident] .settings-wizard-row #settings-open-wizard"))'));
     for (const [label, viewport] of densityViewports) {
       await setViewport(viewport);
       const wizard = await evalJs(wizardProbe);
-      check(`i18n 设置向导动作 ${label}：27 ghost 在组头内、面板之上、无横向溢出`,
-        wizard.ok && wizard.visible && wizard.insideHead && wizard.insideBox
-          && wizard.abovePanel && wizard.inRow === false && wizard.height27
+      check(`i18n 设置向导动作 ${label}：独立 40 行 + 27 按钮在行内、无横向溢出`,
+        wizard.ok && wizard.visible && wizard.insideRow && wizard.insideBox
+          && wizard.inRow && !wizard.inHead && wizard.row40 && wizard.height27
           && wizard.pageOver <= 1
           && /Restart wizard/.test(wizard.text) && /setup/i.test(wizard.title) && /config is kept/i.test(wizard.title)
           && wizard.pageOver <= 1 && wizard.cjk === false,
@@ -4359,6 +4430,28 @@ async function main() {
       await captureNow(`i18n-en-wizard-row-${label}.jpg`);
     }
     await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    check('常用四项 + 40px 待重启条：720 设置框内不滚动', await evalJs(`(() => {
+      const body = document.querySelector('#settings-body');
+      const root = document.querySelector('#settings-resident');
+      const sc = document.querySelector('#settings .settings-scroll');
+      if (!body || !root || !sc) return false;
+      const items = [...root.children].filter((el) => el.matches('.settings-row-2, .asst-row'));
+      const heights = items.map((el) => Math.round(el.getBoundingClientRect().height));
+      let banner = body.querySelector('[data-pending-restart]');
+      let created = false;
+      if (!banner) {
+        banner = document.createElement('div');
+        banner.className = 'pending-restart';
+        banner.dataset.pendingRestart = '1';
+        banner.textContent = '待重启 1 项';
+        body.prepend(banner);
+        created = true;
+      }
+      const ok = items.length === 4 && JSON.stringify(heights) === JSON.stringify([58, 40, 40, 40])
+        && sc.scrollHeight <= sc.clientHeight + 1;
+      if (created) banner.remove();
+      return ok;
+    })()`));
     await send('Page.removeScriptToEvaluateOnNewDocument', { identifier: wizardPreload.identifier });
     await evalJs('delete window.mebularDesktop');
 

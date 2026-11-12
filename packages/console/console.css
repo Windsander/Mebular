@@ -3015,13 +3015,9 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
   flex: 0 0 auto; font-size: 12px; line-height: 18px; color: var(--crt-bright);
   white-space: nowrap;
 }
-#settings-resident > .asst-row .asst-st {
-  flex: 1 1 auto; min-width: 0;
-  font-size: 11px; line-height: 16px; color: var(--crt-dim);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
+#settings-resident > .asst-row > .asst-st { display: none; }
 #settings-resident > .asst-row .asst-sp { display: none; }
-#settings-resident > .asst-row .btn { height: 26px; flex: 0 0 auto; }
+#settings-resident > .asst-row > .btn { height: 26px; flex: 0 0 auto; margin-left: auto; }
 
 /* 忆云：组内直接铺 58 行，不再卡片套卡片 */
 .settings-group-body > .cloud-rows { border: 0; background: none; border-radius: 0; }
@@ -3275,6 +3271,9 @@ html[lang="en-US"] .modal-settings .cfg-label { line-height: 19px; }
 .modal-settings .cfg-label { flex: none; }
 .modal-settings .cfg-control { margin-left: 0; justify-self: end; justify-content: flex-end; }
 .modal-settings .cfg-status { justify-self: end; }
+.modal-settings [data-settings-section="model-source"] .cfg-control { justify-content: flex-end; justify-self: stretch; width: 100%; }
+[data-settings-section="model-source"] .cfg-control .crt-select { width: min(280px, 100%); flex: none; }
+[data-settings-section="model-source"] .cfg-control .crt-select-trigger { width: 100%; }
 .modal-settings .settings-kv .kv-action .btn { height: 27px; }
 
 /* v2.1 · 常用「界面」组：语言行在面板内不再自带下虚线 */
@@ -3337,23 +3336,14 @@ html[lang="en-US"] .modal-settings .cfg-label { line-height: 19px; }
   .sec-card-main { grid-column: 2; grid-row: 1; }
 }
 
-/* v2.1 · 常用 spacing 回到 4/8/12/16 阶梯；重启向导改为组头右侧 27 ghost 动作 */
+/* v2.1 · 常用 spacing 回到 4/8/12/16 阶梯；向导是组内独立 40px 行 */
 .modal-settings .settings-group { margin-top: 12px; }
 .modal-settings .settings-group-head { margin-bottom: 8px; }
-.settings-group-head.has-action { align-items: center; }
-.settings-group-head.has-action h3 { flex: 0 1 auto; }
-.settings-wizard-action {
-  flex: none; margin-left: auto;
-  margin-top: -6px; margin-bottom: -6px; /* 27 高落在 15 行 + 8 间隙内，不抬组头 */
-}
-@media (max-width: 560px) {
-  .settings-group-head.has-action { height: auto; flex-wrap: wrap; row-gap: 4px; }
-  .settings-wizard-action { margin-top: 0; margin-bottom: 0; }
-}
-
-/* 组头动作：ghost（27 高，无描边；hover 才出现微弱边框） */
-.settings-wizard-action { border-color: transparent; background: none; color: var(--crt-dim); }
-.settings-wizard-action:hover { color: var(--crt-bright); border-color: var(--crt-line); background: rgba(80, 255, 170, 0.05); }
+/* 常用四行 + 40px banner 仍需不滚动：语言已有 label，不重复显示「界面」组头。 */
+#settings-panel-common > .settings-group { margin-top: 8px; }
+#settings-panel-common > .settings-group:first-child { margin-top: 0; }
+#settings-panel-common .settings-group-head { margin-bottom: 4px; }
+#settings-panel-common [data-settings-group="interface"] .settings-group-head { display: none; }
 
 /* ===== v2.2 校准（PR #315 任务书：160 轨 / 20 呼吸 / 分段 / 去 pill） ===== */
 
@@ -3432,6 +3422,13 @@ html[lang="en-US"] .modal-settings .cfg-label { line-height: 19px; }
   font-size: 11px; line-height: 16px;
 }
 .modal-settings .settings-section-foot { margin: 4px 0 6px; }
+/* 普通 hint 默认不占布局；全文由所在组 / 控件的 title 承载。锁定态指引不在此作用域。 */
+.settings-shell .settings-group-note,
+.settings-shell .settings-group-desc,
+.settings-shell .settings-group-foot,
+.settings-shell .settings-section-foot,
+#settings-panel-runtime > .settings-note,
+#assistants-panel .asst-head > .muted { display: none; }
 
 /* 行下异常/警告行：同样取消 62ch；保留既有 left-bar 与缩进 */
 .modal-settings .cfg-row + .cfg-effective,
@@ -3442,11 +3439,11 @@ html[lang="en-US"] .modal-settings .cfg-label { line-height: 19px; }
 }
 .modal-settings .settings-warn-line { width: 100%; }
 
-/* ≤760：自动修复行允许两行（名称+动作 / 说明），行高随内容增长；1440 仍严格 40 */
+/* 普通说明已移到 title；重启 / 修复 / 向导行在窄屏也保持 40px。 */
 @media (max-width: 760px) {
   #settings-resident > .asst-row.settings-repair-row {
-    height: auto; min-height: 40px;
-    padding: 6px 14px; row-gap: 2px;
+    height: 40px; min-height: 40px;
+    padding: 0 14px; row-gap: 0;
   }
 }
 

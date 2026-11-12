@@ -330,7 +330,7 @@ export function assistantsPanelHtml({ clients, ui = {} } = {}) {
   const missingRows = missing.map((c) => rowHtml(c, ui, assistantStatus(c, ui))).join('');
   return `
     <div class="asst-head">
-      <p class="muted">${esc(tr('assistants.head.note', '接入只改 Agent 的一条配置，写前自动备份；重启对应软件后生效。'))}</p>
+      <p class="muted" title="${esc(tr('assistants.head.note', '接入只改 Agent 的一条配置，写前自动备份；重启对应软件后生效。'))}">${esc(tr('assistants.head.note', '接入只改 Agent 的一条配置，写前自动备份；重启对应软件后生效。'))}</p>
       <button class="btn btn-small btn-crt" type="button" id="asst-add">${esc(tr('assistants.add', '＋ 接入 Agent'))}</button>
     </div>
     <div class="asst-xp" id="asst-add-flow"${ui.addForm ? '' : ' hidden'}>${ui.addForm ?? ''}</div>
@@ -341,7 +341,7 @@ export function assistantsPanelHtml({ clients, ui = {} } = {}) {
       <div class="asst-xp" id="asst-missing" hidden>${missingRows}</div>` : ''}`;
 }
 
-/** 常驻运行行（设置 · 常用）：58 行 = 状态 + 唯一主操作 + 「更多」popover（立即重启 / 取消常驻）。 */
+/** 常驻运行行（设置 · 常用）：58 行 = 状态 + 主操作；「更多」只保留取消常驻。 */
 export function serviceRowHtml(service, serviceMsg = '') {
   if (!service) return `<p class="muted">${esc(tr('settings.service.loading', '常驻状态加载中…'))}</p>`;
   const registered = Boolean(service.registered);
@@ -350,13 +350,12 @@ export function serviceRowHtml(service, serviceMsg = '') {
       service.running ? '已常驻·运行中' : '已常驻·未运行')
     : tr('settings.service.badge.temporary', '未常驻（临时运行）');
   const note = tr('settings.service.note', '开机自启、崩溃自动拉起。');
-  const more = `<span class="settings-more" data-settings-more>
+  const more = registered ? `<span class="settings-more" data-settings-more>
       <button class="btn btn-small btn-crt" type="button" data-settings-more-trigger aria-haspopup="menu" aria-expanded="false">${esc(tr('settings.service.more', '更多'))}</button>
       <div class="settings-more-panel" role="menu" aria-label="${esc(tr('settings.service.more', '更多'))}" hidden>
-        <button class="btn" type="button" role="menuitem" data-svc-action="restart">${esc(tr('settings.service.restart', '立即重启'))}</button>
-        ${registered ? `<button class="btn" type="button" role="menuitem" data-svc-action="uninstall">${esc(tr('settings.service.uninstall', '取消常驻'))}</button>` : ''}
+        <button class="btn" type="button" role="menuitem" data-svc-action="uninstall">${esc(tr('settings.service.uninstall', '取消常驻'))}</button>
       </div>
-    </span>`;
+    </span>` : '';
   const primary = registered
     ? `<button class="btn" type="button" data-svc-action="recheck">${esc(tr('settings.service.recheck', '重新检测'))}</button>`
     : `<button class="btn btn-crt" type="button" data-svc-action="install">${esc(tr('settings.service.install', '让 Mebular 常驻'))}</button>`;
@@ -373,11 +372,23 @@ export function serviceRowHtml(service, serviceMsg = '') {
     </div>`;
 }
 
-/** 重启向导动作（设置 · 常用「本机运行」组头右侧；web 无 preload 桥时隐藏）。 */
-export function wizardHeadActionHtml(hasBridge) {
+/** 立即重启是独立 40px 行；不进入「更多」菜单。 */
+export function restartRowHtml() {
+  const label = tr('settings.service.restart', '立即重启');
+  return `<div class="asst-row settings-restart-row" title="${esc(label)}">
+    <span class="asst-name">${esc(label)}</span>
+    <button class="btn btn-small btn-crt" type="button" data-svc-action="restart">${esc(label)}</button>
+  </div>`;
+}
+
+/** 重启向导是常驻组最后一个 40px 行；web 无 preload 桥时不渲染不可用动作。 */
+export function wizardRowHtml(hasBridge) {
   if (!hasBridge) return '';
-  return `<button class="btn btn-small btn-ghost settings-wizard-action" type="button" id="settings-open-wizard"
-    title="${esc(tr('settings.wizard.note', '重新走一遍首次设置（不动已有配置）'))}">${esc(tr('settings.wizard.action', '重启向导 ›'))}</button>`;
+  const note = tr('settings.wizard.note', '重新走一遍首次设置（不动已有配置）');
+  return `<div class="asst-row settings-wizard-row" title="${esc(note)}">
+    <span class="asst-name">${esc(tr('settings.wizard.title', '重启向导'))}</span>
+    <button class="btn btn-small btn-crt" type="button" id="settings-open-wizard" title="${esc(note)}">${esc(tr('settings.wizard.action', '重启向导 ›'))}</button>
+  </div>`;
 }
 
 /**

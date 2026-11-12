@@ -1742,7 +1742,32 @@ async function main() {
       const seg = root.querySelector('.runtime-mode-seg');
       const segStyle = seg ? getComputedStyle(seg) : null;
       const segOk = !seg || !visible(seg) || (Math.abs(seg.getBoundingClientRect().height - 27) < 0.6 && segStyle.borderTopLeftRadius === '8px');
-      return { controls: controls.length, badControls: badControls.slice(0, 8), rows: [...new Set(rows)].sort((a, b) => a - b), badRows: badRows.slice(0, 8), notes: notes.length, badNotes: badNotes.slice(0, 6), segOk };
+      const tab = root.querySelector('.settings-rail .settings-tab.is-active');
+      const tabLs = tab ? getComputedStyle(tab).letterSpacing : '';
+      const scrollStyle = getComputedStyle(root.querySelector('.settings-scroll'));
+      const kvDt = root.querySelector('.settings-kv dt');
+      const kvVal = root.querySelector('.settings-kv .kv-value');
+      const rtDt = root.querySelector('.runtime-kv dt');
+      const rtDd = root.querySelector('.runtime-kv dd');
+      const fontOk = (el) => !el || (getComputedStyle(el).fontSize === '12px' && getComputedStyle(el).lineHeight === '18px');
+      const kvOk = fontOk(kvDt) && fontOk(kvVal) && fontOk(rtDt) && fontOk(rtDd);
+      const bodies = [...root.querySelectorAll('.settings-group-body')].filter(visible).map((el) => {
+        const st = getComputedStyle(el);
+        const group = el.closest('.settings-group');
+        const kind = el.id === 'settings-resident' ? 'resident' : (group && group.id === 'settings-cloud-card' ? 'cloud' : 'normal');
+        return { kind, pt: st.paddingTop, pb: st.paddingBottom };
+      });
+      const badBodies = bodies.filter((b) => {
+        const expected = b.kind === 'resident' ? '12px' : b.kind === 'cloud' ? '0px' : '2px';
+        return b.pt !== expected || b.pb !== expected;
+      });
+      const metas = [...root.querySelectorAll('.settings-kv .kv-meta')].filter(visible).map((el) => {
+        const st = getComputedStyle(el);
+        return { text: el.textContent.trim(), fs: st.fontSize, lh: st.lineHeight };
+      });
+      const badMeta = metas.filter((m) => m.fs !== '11px' || m.lh !== '16px' || !m.text);
+      return { controls: controls.length, badControls: badControls.slice(0, 8), rows: [...new Set(rows)].sort((a, b) => a - b), badRows: badRows.slice(0, 8), notes: notes.length, badNotes: badNotes.slice(0, 6), segOk,
+        typo: { tabLs, scrollTop: scrollStyle.paddingTop, scrollLeft: scrollStyle.paddingLeft, scrollRight: scrollStyle.paddingRight, kvOk, badBodies: badBodies.slice(0, 6), metas: metas.length, badMeta: badMeta.slice(0, 6) } };
     })()`;
     const prevTokenViewport = await evalJs('({ w: window.innerWidth, h: window.innerHeight })');
     await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
@@ -1753,9 +1778,12 @@ async function main() {
       await sleep(250);
       tokenAudit[tab] = await evalJs(settingsTokenProbe(true));
     }
-    const tokenBad = Object.entries(tokenAudit).filter(([, a]) => !a || a.badControls.length || a.badRows.length || a.badNotes.length || !a.segOk);
-    check('v2.3 1440 共享 token：控件 27/8、行 40/58、说明占满面板且无 62ch',
-      tokenBad.length === 0, JSON.stringify(tokenBad).slice(0, 1200));
+    const tokenBad = Object.entries(tokenAudit).filter(([, a]) => !a || a.badControls.length || a.badRows.length || a.badNotes.length || !a.segOk
+      || a.typo.tabLs !== '2px' || a.typo.scrollTop !== '16px' || a.typo.scrollLeft !== '20px' || a.typo.scrollRight !== '20px'
+      || !a.typo.kvOk || a.typo.badBodies.length || a.typo.badMeta.length
+      || (a.typo.metas > 0 && a.typo.metas !== 3));
+    check('v2.4 1440 字体/间距：页签 2px、只读行 12/18、滚动区 16/20、面板 2/12/0、meta 11 + 控件 27/8 + 行 40/58',
+      tokenBad.length === 0, JSON.stringify(tokenBad).slice(0, 1400));
     await setViewport({ width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
     await sleep(350);
     const tokenAudit390 = {};
@@ -1764,9 +1792,11 @@ async function main() {
       await sleep(250);
       tokenAudit390[tab] = await evalJs(settingsTokenProbe(false));
     }
-    const tokenBad390 = Object.entries(tokenAudit390).filter(([, a]) => !a || a.badControls.length || a.badNotes.length || !a.segOk);
-    check('v2.3 390 共享 token：控件 27/8、说明占满面板且无 62ch',
-      tokenBad390.length === 0, JSON.stringify(tokenBad390).slice(0, 1200));
+    const tokenBad390 = Object.entries(tokenAudit390).filter(([, a]) => !a || a.badControls.length || a.badNotes.length || !a.segOk
+      || a.typo.tabLs !== '2px' || a.typo.scrollTop !== '16px' || a.typo.scrollLeft !== '20px' || a.typo.scrollRight !== '20px'
+      || !a.typo.kvOk || a.typo.badBodies.length || a.typo.badMeta.length);
+    check('v2.4 390 字体/间距：页签 2px、只读行 12/18、滚动区 16/20、面板 2/12/0、meta 11 + 控件 27/8',
+      tokenBad390.length === 0, JSON.stringify(tokenBad390).slice(0, 1400));
     await evalJs('document.querySelector("[data-settings-tab=common]")?.click()');
     await setViewport({ width: prevTokenViewport.w, height: prevTokenViewport.h, deviceScaleFactor: 1, mobile: prevTokenViewport.w <= 560 });
     await sleep(300);
@@ -4239,21 +4269,21 @@ async function main() {
         ${extra}
       };
     })()`;
-    const settingsTypeOk = (probe, { labelLh, lang }) => probe.lang === lang
+    const settingsTypeOk = (probe, { lang }) => probe.lang === lang
       && probe.tokens['--type-help'] === '11px'
       && probe.tokens['--type-help-leading'] === '1.55'
       && probe.tokens['--type-micro'] === '10.5px'
       && probe.tokens['--type-label-leading'] === '1.35'
       && /0\.55\)$/.test(probe.tokens['--crt-muted'])
-      && Boolean(probe.label) && probe.label.fontSize === '13px'
-      && nearPx(probe.label.lineHeight, labelLh)
+      && Boolean(probe.label) && probe.label.fontSize === '12px'
+      && nearPx(probe.label.lineHeight, 18)
       && (!probe.kvSub || (probe.kvSub.fontSize === '11px' && nearPx(probe.kvSub.lineHeight, 16)))
       && Boolean(probe.cfgHelp) && probe.cfgHelp.fontSize === '11px'
       && nearPx(probe.cfgHelp.lineHeight, 16)
       && Boolean(probe.cfgEffective) && probe.cfgEffective.fontSize === '11px'
       && nearPx(probe.cfgEffective.lineHeight, 16)
       && Boolean(probe.cfgLabel) && probe.cfgLabel.fontSize === '13px'
-      && nearPx(probe.cfgLabel.lineHeight, labelLh)
+      && nearPx(probe.cfgLabel.lineHeight, 19)
       && (!probe.cfgDefault || probe.cfgDefault.fontSize === '10px')
       && Boolean(probe.smallBtn) && probe.smallBtn.fontSize === '12px'
       && nearPx(probe.smallBtn.lineHeight, 18)
@@ -4322,7 +4352,7 @@ async function main() {
       await setViewport(viewport);
       const settingsType = await evalJs(settingsTypeProbe());
       check(`i18n 排版 A ${label}：辅助文本 11/16 / 微文本 10.5 / 标签 12/18，无横向溢出且无中文兜底`,
-        settingsTypeOk(settingsType, { labelLh: 19, lang: 'en-US' }), JSON.stringify(settingsType));
+        settingsTypeOk(settingsType, { lang: 'en-US' }), JSON.stringify(settingsType));
       await captureNow(`i18n-en-type-settings-${label}.jpg`);
     }
     await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
@@ -4466,7 +4496,7 @@ async function main() {
         && zhSettingsType.tokens['--type-micro'] === '10px'
         && zhSettingsType.tokens['--type-label-leading'] === '26px'
         && /0\.45\)$/.test(zhSettingsType.tokens['--crt-muted'])
-        && Boolean(zhSettingsType.label) && zhSettingsType.label.fontSize === '13px' && nearPx(zhSettingsType.label.lineHeight, 19)
+        && Boolean(zhSettingsType.label) && zhSettingsType.label.fontSize === '12px' && nearPx(zhSettingsType.label.lineHeight, 18)
         && (!zhSettingsType.kvSub || zhSettingsType.kvSub.fontSize === '11px')
         && Boolean(zhSettingsType.cfgHelp) && zhSettingsType.cfgHelp.fontSize === '11px' && nearPx(zhSettingsType.cfgHelp.lineHeight, 16)
         && (!zhSettingsType.cfgDefault || zhSettingsType.cfgDefault.fontSize === '10px')

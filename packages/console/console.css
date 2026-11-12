@@ -2655,7 +2655,7 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
 .modal-settings .settings-rail .settings-tab {
   height: 34px; padding: 0 10px 0 14px;
   border-radius: 0 6px 6px 0;
-  font-size: 12px; letter-spacing: 0.06em; color: var(--crt-dim);
+  font-size: 12px; letter-spacing: 2px; color: var(--crt-dim);
 }
 .modal-settings .settings-rail .settings-tab.is-active {
   border-radius: 0 6px 6px 0;
@@ -2695,11 +2695,13 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
   border: 1px solid rgba(80, 255, 170, 0.22);
   border-radius: 10px;
   background: rgba(2, 16, 11, 0.34);
-  /* 首/末行严格 40/58：不再用上下 padding 制造视觉 47/65；圆角由 overflow 裁切 */
-  padding: 0;
+  /* 状态卡 2px 呼吸；常驻组 12；忆云 0。行高本身仍严格 40/58。 */
+  padding: 2px 0;
   overflow: hidden;
   min-width: 0;
 }
+#settings-resident { padding: 12px 0; }
+#settings-cloud-card .settings-group-body { padding: 0; }
 .settings-group-desc,
 .settings-group-foot {
   margin: 6px 0 0; padding: 0 14px;
@@ -2963,7 +2965,7 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
     background: rgba(80, 255, 170, 0.06);
   }
   .modal-settings .settings-rail-foot { margin-left: 0; }
-  .modal-settings .settings-scroll { padding-top: 10px; }
+  .modal-settings .settings-scroll { padding-top: 16px; }
   #about .modal-box { height: calc(100vh - 24px); }
 }
 
@@ -3165,7 +3167,7 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
 }
 
 /* 常用页在 720 + 40 提示条下要留余量：组间距 12、滚动区上内边距 8 */
-.modal-settings .settings-scroll { padding-top: 8px; }
+.modal-settings .settings-scroll { padding-top: 16px; }
 .settings-group { margin-top: 12px; }
 
 /* 异常三元组：行下静态 11px 警告行（默认可见，不依赖 focus / 不藏 popover）。
@@ -3241,11 +3243,14 @@ html[lang="en-US"] .modal-settings .cfg-label { line-height: 19px; }
 .modal-settings .modal-head h2 { font-size: 15px; line-height: 20px; font-weight: 700; letter-spacing: 0.02em; }
 .modal-settings .modal-head .settings-apply-note { margin-top: 0; }
 .modal-settings .settings-group-head h3 { text-transform: uppercase; }
-.modal-settings .settings-kv dt,
-.modal-settings .settings-kv .kv-value,
 .modal-settings .cfg-label,
 .modal-settings .cfg-status,
 .modal-settings .cfg-control .crt-input { font-size: 13px; line-height: 19px; }
+/* 只读行（本机状态 / 运行状态 / settings-kv / runtime-kv）：12/18，不用 13 挤占 */
+.modal-settings .settings-kv dt,
+.modal-settings .settings-kv .kv-value,
+.modal-settings .runtime-kv dt,
+.modal-settings .runtime-kv dd { font-size: 12px; line-height: 18px; }
 .modal-settings .btn,
 .settings-more > .btn,
 .settings-more-panel .btn { height: 27px; min-height: 27px; }
@@ -3433,4 +3438,19 @@ html[lang="en-US"] .modal-settings .cfg-label { line-height: 19px; }
     height: auto; min-height: 40px;
     padding: 6px 14px; row-gap: 2px;
   }
+}
+
+/* ===== v2.4 字体/间距校准（按设计原稿） ===== */
+/* 本机状态右上 meta：11px 纯文字右对齐，无 chip；无数据 — */
+.modal-settings .settings-kv .kv-value.has-meta {
+  flex-direction: row; align-items: baseline; gap: 8px; justify-content: flex-end;
+}
+.modal-settings .settings-kv .kv-meta {
+  max-width: 62%; min-width: 0;
+  font-size: 11px; line-height: 16px; color: var(--crt-dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+@media (max-width: 560px) {
+  .modal-settings .settings-kv .kv-value.has-meta { flex-wrap: wrap; row-gap: 0; }
+  .modal-settings .settings-kv .kv-meta { max-width: 100%; }
 }

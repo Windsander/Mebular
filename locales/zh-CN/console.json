@@ -1473,6 +1473,9 @@
     "settings.runtime.models.error.engine": "推理引擎准备失败；模型文件已保留，可稍后重试。",
     "settings.runtime.models.error.cancelled": "安装已取消。",
     "settings.runtime.models.error.interrupted": "安装被中断；可重新下载并继续。",
-    "settings.runtime.models.error.generic": "本地模型操作失败，请稍后重试。"
+    "settings.runtime.models.error.generic": "本地模型操作失败，请稍后重试。",
+    "settings.common.securityMeta.low": "无额外门槛 · 可升级到中档",
+    "settings.common.securityMeta.medium": "6 位动态码 · 可升级到高档",
+    "settings.common.securityMeta.high": "设备会签"
   }
 }

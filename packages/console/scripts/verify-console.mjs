@@ -1897,15 +1897,28 @@ try {
         && jsSrc.includes('class="rt-value')
         && cssSrc.includes('.runtime-kv dd.rt-value.is-warn { color: #ffd27a; }'),
       'active solid / segmented / no pill');
-    check('v2.3 共享控件 token：27 高 / 8 圆角；group body 无上下 padding、首末行 40/58；说明占满面板',
+    check('v2.3 共享控件 token：27 高 / 8 圆角；group body 2px 内缩、首末行 40/58；说明占满面板',
       cssSrc.includes('--settings-control-h: 27px;')
         && cssSrc.includes('--settings-control-radius: 8px;')
         && /\.modal-settings \.btn,\n\.modal-settings \.crt-select-trigger,\n\.modal-settings \.crt-input,\n\.modal-settings select\.crt-input \{[^}]*height: var\(--settings-control-h\) !important;[^}]*border-radius: var\(--settings-control-radius\) !important;/s.test(cssSrc)
         && cssSrc.includes('.modal-settings .btn { padding: 0 10px !important; }')
         && cssSrc.includes('.modal-settings .crt-input,\n.modal-settings .crt-select-trigger { padding: 0 8px !important; }')
-        && /\.settings-group-body \{[^}]*padding: 0;[^}]*overflow: hidden;/s.test(cssSrc)
+        && /\.settings-group-body \{[^}]*padding: 2px 0;[^}]*overflow: hidden;/s.test(cssSrc)
         && /\.modal-settings \.settings-group-note,[^}]*width: 100%; max-width: none;[^}]*padding: 0 14px;[^}]*line-height: 16px;/s.test(cssSrc),
       '27/8 + body 0 + notes full width');
+
+    check('v2.4 字体/间距：页签 2px 字距、只读行 12/18、滚动区 16/20、面板 2/12/0 内缩、状态 meta 11px',
+      cssSrc.includes('font-size: 12px; letter-spacing: 2px; color: var(--crt-dim);')
+        && cssSrc.includes('.modal-settings .settings-kv dt,')
+        && cssSrc.includes('.modal-settings .runtime-kv dd { font-size: 12px; line-height: 18px; }')
+        && cssSrc.includes('.modal-settings .settings-scroll { padding: 16px 20px 0;')
+        && cssSrc.includes('#settings-resident { padding: 12px 0; }')
+        && cssSrc.includes('#settings-cloud-card .settings-group-body { padding: 0; }')
+        && cssSrc.includes('padding: 2px 0;')
+        && cssSrc.includes('.modal-settings .settings-kv .kv-meta {')
+        && jsSrc.includes(" has-meta") && jsSrc.includes("kv-meta")
+        && jsSrc.includes('settings.common.securityMeta.'),
+      '2px/12-18/16-20/2-12-0/meta 11');
 
     check('v2.2 细节：off 开关/安全值、忆云 tag、更多 ghost、警告 left-bar',
       cssSrc.includes('.toggle .slider { background: rgba(140, 255, 200, 0.12); }')

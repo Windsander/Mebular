@@ -1464,11 +1464,19 @@ function emptyRowOf(label, text) {
 }
 
 function kvRows(rows) {
-  const body = rows.map((row) => `<div class="kv-row"><dt>${escapeHtml(row.label)}</dt>`
-    + `<dd class="kv-value">${row.tone ? `<span class="kv-inline"><span class="kv-dot ${escapeHtml(row.tone)}" aria-hidden="true"></span>${row.value}</span>` : row.value}</dd>`
-    + `<dd class="kv-action">${row.copyPayload === null || row.copyPayload === undefined
-      ? ''
-      : `<button class="btn btn-small btn-crt" type="button" data-copy="${escapeHtml(row.copyPayload)}">${escapeHtml(t('common.copy'))}</button>`}</dd></div>`).join('');
+  const body = rows.map((row) => {
+    const meta = row.meta
+      ? `<span class="kv-meta" title="${escapeHtml(row.meta)}">${escapeHtml(row.meta)}</span>`
+      : '';
+    const value = row.tone
+      ? `<span class="kv-inline"><span class="kv-dot ${escapeHtml(row.tone)}" aria-hidden="true"></span>${row.value}</span>`
+      : row.value;
+    return `<div class="kv-row"><dt>${escapeHtml(row.label)}</dt>`
+      + `<dd class="kv-value${row.meta ? ' has-meta' : ''}">${meta}${value}</dd>`
+      + `<dd class="kv-action">${row.copyPayload === null || row.copyPayload === undefined
+        ? ''
+        : `<button class="btn btn-small btn-crt" type="button" data-copy="${escapeHtml(row.copyPayload)}">${escapeHtml(t('common.copy'))}</button>`}</dd></div>`;
+  }).join('');
   return `<dl class="settings-kv">${body}</dl>`;
 }
 
@@ -2176,9 +2184,9 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
       <section class="settings-group" data-settings-common-status>
         <div class="settings-group-head"><h3>${escapeHtml(t('settings.common.statusTitle'))}</h3><span class="settings-group-suffix">· ${escapeHtml(t('settings.common.readonly'))}</span></div>
         <div class="settings-group-body">${kvRows([
-          kvRow('P2P', s.network.enabled ? t('settings.common.enabled') : t('settings.common.disabled'), null, { tone: s.network.enabled ? 'ok' : 'off' }),
-          kvRow(t('settings.common.inviteService'), s.join?.enabled ? t('settings.common.enabled') : t('settings.common.inviteDisabled'), null, { tone: s.join?.enabled ? 'ok' : 'off' }),
-          kvRow(t('settings.common.securityLevel'), securityLevel ? securityLevelLabel(securityLevel) : '—', null, { tone: securityLevel ? (securityLevel === 'medium' ? 'warn' : 'ok') : 'off' }),
+          kvRow('P2P', s.network.enabled ? t('settings.common.enabled') : t('settings.common.disabled'), null, { tone: s.network.enabled ? 'ok' : 'off', meta: (Array.isArray(s.network.listen) && s.network.listen.length ? String(s.network.listen[0]).replace(/\/p2p\/.*$/, '') : '—') }),
+          kvRow(t('settings.common.inviteService'), s.join?.enabled ? t('settings.common.enabled') : t('settings.common.inviteDisabled'), null, { tone: s.join?.enabled ? 'ok' : 'off', meta: s.join?.endpoint || '—' }),
+          kvRow(t('settings.common.securityLevel'), securityLevel ? securityLevelLabel(securityLevel) : '—', null, { tone: securityLevel ? (securityLevel === 'medium' ? 'warn' : 'ok') : 'off', meta: securityLevel ? t(`settings.common.securityMeta.${securityLevel}`) : '—' }),
         ])}</div>
       </section>
       ${cloudCardHtml()}

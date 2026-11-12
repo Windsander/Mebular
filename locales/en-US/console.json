@@ -1473,6 +1473,9 @@
     "settings.runtime.models.error.engine": "The inference engine could not be prepared; the model files are kept for a later retry.",
     "settings.runtime.models.error.cancelled": "The install was cancelled.",
     "settings.runtime.models.error.interrupted": "The install was interrupted; download again to continue.",
-    "settings.runtime.models.error.generic": "The local model action failed. Try again later."
+    "settings.runtime.models.error.generic": "The local model action failed. Try again later.",
+    "settings.common.securityMeta.low": "No extra gate · Upgrade to Medium",
+    "settings.common.securityMeta.medium": "6-digit code · Upgrade to High",
+    "settings.common.securityMeta.high": "Device co-sign"
   }
 }

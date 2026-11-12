@@ -3338,7 +3338,7 @@ async function main() {
         commonStatus: /This device/.test(full.common),
         service: /Resident/.test(full.common),
         securitySections: /Security level/.test(full.security) && /Authenticator seed/.test(full.security) && /Recovery code/.test(full.security),
-        assistants: /Add assistant/.test(full.assistants),
+        assistants: /Add agent/.test(full.assistants),
         runtime: /Memory mode/.test(full.runtime) && /Lightweight MCP/.test(full.runtime) && /Immersive/.test(full.runtime) && /Model status/.test(full.runtime) && !/Third-party API/.test(full.runtime),
         mcp: /Connection/.test(full.mcp) && /TLS/.test(full.mcp) && /Risks and recovery/.test(full.mcp),
         advanced: /Resident service/.test(full.advanced) && /Network/.test(full.advanced) && /Automation/.test(full.advanced) && /Model source/.test(full.advanced) && /Diagnostics and recovery/.test(full.advanced),
@@ -3348,9 +3348,9 @@ async function main() {
       return out;
     })()`;
     const settingsPanels = await evalJs(settingsPanelsProbe);
-    check('i18n 设置深度页英文：六个页签 + 通用/安全/AI 助手/运行时/MCP/高级 段落文案全英文',
+    check('i18n 设置深度页英文：六个页签 + 通用/安全/记忆/集成/MCP/高级 段落文案全英文',
       settingsPanels.lang === 'en-US'
-        && settingsPanels.tabs.join(',') === 'General,Security,Assistants,Memory,MCP,Advanced'
+        && settingsPanels.tabs.join(',') === 'General,Security,Memory,Integrations,MCP,Advanced'
         && settingsPanels.extra === 'About device'
         && Object.values(settingsPanels.has).every(Boolean)
         && settingsPanels.cjk.security === false,

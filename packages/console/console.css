@@ -1445,7 +1445,7 @@ body.modal-open { overflow: hidden; }
 /* ---------- 设置页 IA：Tab / 任务卡 / 关于本机 ---------- */
 .badge-button { cursor: pointer; font: inherit; background: transparent; }
 .badge-button:hover { border-color: #2c5c8f; color: #dbe9ff; }
-.settings-tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--border); margin: 4px 0 10px; }
+.settings-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin: 4px 0 10px; }
 .settings-tab {
   background: transparent; border: 1px solid transparent; border-bottom: none;
   color: var(--muted); font: inherit; font-size: 12px; padding: 6px 12px; cursor: pointer; border-radius: 8px 8px 0 0;

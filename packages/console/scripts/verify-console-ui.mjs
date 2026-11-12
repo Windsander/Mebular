@@ -871,13 +871,14 @@ async function main() {
         const dd = dt.nextElementSibling;
         if (!dd) return null;
         const a = dt.getBoundingClientRect(); const b = dd.getBoundingClientRect();
-        return { h: Math.round(a.height), diff: Math.round(Math.abs(a.top - b.top)) };
+        return { h: Math.round(a.height), diff: Math.round(Math.abs(a.top - b.top)), padL: getComputedStyle(dt).paddingLeft };
       }).filter(Boolean);
       return { n: cells.length, badH: cells.filter((c) => c.h !== 40).length, badTop: cells.filter((c) => c.diff > 2).length,
+        badPad: cells.filter((c) => c.padL !== '14px').length,
         docW: document.documentElement.scrollWidth, vw: innerWidth, w: box ? Math.round(box.getBoundingClientRect().width) : 0 };
     })()`);
-    check('U-4 900 关于行模板：40 高 + label/value 同行（top 差 ≤2）+ 无横向溢出',
-      Boolean(about900) && about900.n >= 2 && about900.badH === 0 && about900.badTop === 0
+    check('U-4 900 关于行模板：40 高 + label/value 同行（top 差 ≤2）+ 14px 内缩 + 无横向溢出',
+      Boolean(about900) && about900.n >= 2 && about900.badH === 0 && about900.badTop === 0 && about900.badPad === 0
         && about900.docW <= about900.vw + 1 && about900.w === 760,
       JSON.stringify(about900));
     await evalJs(`document.querySelector('#about-close')?.click()`);
@@ -1708,11 +1709,13 @@ async function main() {
             h: Math.round(rect.height * 10) / 10,
             radius: st.borderTopLeftRadius,
             padL: st.paddingLeft,
+            fontSize: st.fontSize,
           };
         });
       const badControls = controls.filter((c) => Math.abs(c.h - 27) > 0.6
         || (c.segCell ? c.radius !== '0px' : c.radius !== '8px')
-        || c.padL !== (c.isBtn ? '10px' : '8px'));
+        || c.padL !== (c.isBtn ? '10px' : '8px')
+        || c.fontSize !== '12px');
       const rows = [];
       for (const el of root.querySelectorAll('.cfg-row, .settings-row-2, .settings-language-row, .runtime-mode-actions, .asst-head, .asst-row, .cloud-row, .settings-actions-row')) {
         if (visible(el)) rows.push(Math.round(el.getBoundingClientRect().height * 10) / 10);
@@ -1751,6 +1754,17 @@ async function main() {
       const rtDd = root.querySelector('.runtime-kv dd');
       const fontOk = (el) => !el || (getComputedStyle(el).fontSize === '12px' && getComputedStyle(el).lineHeight === '18px');
       const kvOk = fontOk(kvDt) && fontOk(kvVal) && fontOk(rtDt) && fontOk(rtDd);
+      const kvInsetOk = ${checkRows ? `(!kvDt || (getComputedStyle(kvDt).paddingLeft === '14px'
+        && (!kvDt.closest('.settings-kv-no-action') || getComputedStyle(kvVal).paddingRight === '14px')))
+        && (!rtDt || (getComputedStyle(rtDt).paddingLeft === '14px' && getComputedStyle(rtDd).paddingRight === '14px'))` : 'true'};
+      const detailTypeOk = [
+        [root.querySelector('#settings-cloud-card .cloud-name'), '13px', '19px'],
+        [root.querySelector('#settings-cloud-card .cloud-sub'), '11px', '16px'],
+        [root.querySelector('#settings-security-slot .sec-card-line'), '12px', '17px'],
+        [root.querySelector('#settings-security-slot .sec-card-meta'), '11px', '16px'],
+        [root.querySelector('#settings-panel-runtime > .settings-note'), '11px', '16px'],
+      ].every(([el, fontSize, lineHeight]) => !el
+        || (getComputedStyle(el).fontSize === fontSize && getComputedStyle(el).lineHeight === lineHeight));
       const bodies = [...root.querySelectorAll('.settings-group-body')].filter(visible).map((el) => {
         const st = getComputedStyle(el);
         const group = el.closest('.settings-group');
@@ -1765,9 +1779,10 @@ async function main() {
         const st = getComputedStyle(el);
         return { text: el.textContent.trim(), fs: st.fontSize, lh: st.lineHeight };
       });
-      const badMeta = metas.filter((m) => m.fs !== '11px' || m.lh !== '16px' || !m.text);
+      const badMeta = metas.filter((m) => m.fs !== '11px' || m.lh !== '16px' || !m.text
+        || m.text.includes('://') || m.text.startsWith('/'));
       return { controls: controls.length, badControls: badControls.slice(0, 8), rows: [...new Set(rows)].sort((a, b) => a - b), badRows: badRows.slice(0, 8), notes: notes.length, badNotes: badNotes.slice(0, 6), segOk,
-        typo: { tabLs, scrollTop: scrollStyle.paddingTop, scrollLeft: scrollStyle.paddingLeft, scrollRight: scrollStyle.paddingRight, kvOk, badBodies: badBodies.slice(0, 6), metas: metas.length, badMeta: badMeta.slice(0, 6) } };
+        typo: { tabLs, scrollTop: scrollStyle.paddingTop, scrollLeft: scrollStyle.paddingLeft, scrollRight: scrollStyle.paddingRight, kvOk, kvInsetOk, detailTypeOk, badBodies: badBodies.slice(0, 6), metas: metas.length, badMeta: badMeta.slice(0, 6) } };
     })()`;
     const prevTokenViewport = await evalJs('({ w: window.innerWidth, h: window.innerHeight })');
     await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
@@ -1780,7 +1795,7 @@ async function main() {
     }
     const tokenBad = Object.entries(tokenAudit).filter(([, a]) => !a || a.badControls.length || a.badRows.length || a.badNotes.length || !a.segOk
       || a.typo.tabLs !== '2px' || a.typo.scrollTop !== '16px' || a.typo.scrollLeft !== '20px' || a.typo.scrollRight !== '20px'
-      || !a.typo.kvOk || a.typo.badBodies.length || a.typo.badMeta.length
+      || !a.typo.kvOk || !a.typo.kvInsetOk || !a.typo.detailTypeOk || a.typo.badBodies.length || a.typo.badMeta.length
       || (a.typo.metas > 0 && a.typo.metas !== 3));
     check('v2.4 1440 字体/间距：页签 2px、只读行 12/18、滚动区 16/20、面板 2/12/0、meta 11 + 控件 27/8 + 行 40/58',
       tokenBad.length === 0, JSON.stringify(tokenBad).slice(0, 1400));
@@ -1794,7 +1809,7 @@ async function main() {
     }
     const tokenBad390 = Object.entries(tokenAudit390).filter(([, a]) => !a || a.badControls.length || a.badNotes.length || !a.segOk
       || a.typo.tabLs !== '2px' || a.typo.scrollTop !== '16px' || a.typo.scrollLeft !== '20px' || a.typo.scrollRight !== '20px'
-      || !a.typo.kvOk || a.typo.badBodies.length || a.typo.badMeta.length);
+      || !a.typo.kvOk || !a.typo.detailTypeOk || a.typo.badBodies.length || a.typo.badMeta.length);
     check('v2.4 390 字体/间距：页签 2px、只读行 12/18、滚动区 16/20、面板 2/12/0、meta 11 + 控件 27/8',
       tokenBad390.length === 0, JSON.stringify(tokenBad390).slice(0, 1400));
     await evalJs('document.querySelector("[data-settings-tab=common]")?.click()');
@@ -2158,7 +2173,8 @@ async function main() {
           && getComputedStyle(first).borderTopStyle === 'none'
           && getComputedStyle(second).borderTopStyle === 'dashed'
           && Boolean(status) && status.children.length === 0
-          && statusStyle.fontSize === '13px'
+          && statusStyle.fontSize === '12px'
+          && statusStyle.lineHeight === '18px'
           && statusStyle.fontWeight === '400';
       })()`));
     await clearViewport();
@@ -5541,6 +5557,7 @@ async function main() {
         })()`));
 
         // 设置 = 锁定态排错入口（不白屏）
+        await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
         await evalJs('document.querySelector("#open-settings").click()');
         check('P3 锁定设置：不白屏，锁定说明 + 顶栏引导 + 诊断信息，且不再重复两个入口', await waitFor(`(() => {
           const body = document.querySelector('#settings-body');
@@ -5552,6 +5569,17 @@ async function main() {
             && Boolean(create) && create.hidden === false
             && Boolean(join) && join.hidden === false
             && /诊断信息/.test(body.textContent);
+        })()`));
+        check('v2.5 锁定设置只读行：无空动作列 + 左右 14px 内缩', await evalJs(`(() => {
+          const list = document.querySelector('[data-locked-diagnostics] .settings-kv.settings-kv-no-action');
+          const dt = list?.querySelector('dt');
+          const value = list?.querySelector('.kv-value');
+          const action = list?.querySelector('.kv-action');
+          if (!list || !dt || !value || !action) return false;
+          const columns = getComputedStyle(list).gridTemplateColumns.split(' ').filter(Boolean);
+          return columns.length === 2 && getComputedStyle(action).display === 'none'
+            && getComputedStyle(dt).paddingLeft === '14px' && getComputedStyle(value).paddingRight === '14px'
+            && document.documentElement.scrollWidth <= innerWidth + 1;
         })()`));
         await evalJs('document.querySelector("#settings-close").click()');
 

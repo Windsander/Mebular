@@ -738,13 +738,14 @@ body.modal-open { overflow: hidden; }
 .cloud-main { display: grid; gap: 3px; min-width: 0; }
 .cloud-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
 .cloud-name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.settings-scroll .cloud-name { font-size: 13px; line-height: 19px; }
 .cloud-sub {
   display: flex; align-items: center; gap: 6px; min-width: 0; margin: 0;
   font-size: 10.5px; line-height: 1.4; color: var(--crt-dim); text-shadow: none;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 /* .modal-box p 默认 pre-wrap（帮助文本换行）；行内元信息需要单行省略 */
-.settings-scroll .cloud-sub { white-space: nowrap; }
+.settings-scroll .cloud-sub { white-space: nowrap; font-size: 11px; line-height: 16px; }
 .cloud-sub code { color: var(--accent); font: inherit; }
 .cloud-sep { color: var(--crt-faint); }
 .cloud-dup-badge, .cloud-suggest-badge { white-space: nowrap; }
@@ -1507,11 +1508,10 @@ body.modal-open { overflow: hidden; }
 .settings-shell .settings-kv .kv-row > *,
 .settings-shell .runtime-kv .kv-row > * {
   min-height: 40px;
-  padding: 6px 0;
   border-top: 1px dashed var(--border);
 }
 .settings-shell .settings-kv .kv-row:first-child > *,
-.settings-shell .runtime-kv .kv-row:first-child > * { padding-top: 0; border-top: 0; }
+.settings-shell .runtime-kv .kv-row:first-child > * { border-top: 0; }
 .settings-shell .settings-kv dt,
 .settings-shell .settings-kv .kv-action,
 .settings-shell .runtime-kv dt,
@@ -2570,11 +2570,11 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
 .sec-approval-meta { margin: 0; font-size: 11px; line-height: 1.5; color: rgba(255, 226, 166, 0.72); }
 .sec-approval-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
 .sec-outgoing { margin: 6px 0 0; font-size: 11.5px; line-height: 1.5; color: rgba(255, 226, 166, 0.72); overflow-wrap: anywhere; }
-.sec-rejections-line {
+#settings-security-slot .sec-rejections-line {
   margin: 0;
   max-width: none;
-  font-size: 11.5px;
-  line-height: 1.5;
+  font-size: 11px;
+  line-height: 16px;
   color: #ffd27a;
   overflow-wrap: anywhere;
 }
@@ -2724,7 +2724,7 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
 }
 .settings-kv .kv-row { display: contents; }
 .settings-kv .kv-row > * {
-  min-height: 40px; padding: 0;
+  min-height: 40px;
   border-top: 1px dashed rgba(80, 255, 170, 0.14);
   display: flex; align-items: center; min-width: 0;
 }
@@ -2745,6 +2745,15 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
 .settings-kv .kv-action .btn { height: 26px; padding: 0 10px; line-height: 1; }
 .settings-kv .kv-empty { color: var(--crt-dim); }
 .settings-kv .kv-inline { display: inline-flex; align-items: center; gap: 6px; }
+/* 纯只读组没有复制动作：不为空 dd 保留 56px，值/meta 使用完整剩余宽度。 */
+.modal-settings .settings-kv.settings-kv-no-action .kv-action,
+#about .settings-kv.settings-kv-no-action .kv-action { display: none; }
+@media (min-width: 761px) {
+  .modal-settings .settings-kv.settings-kv-no-action,
+  #about .settings-kv.settings-kv-no-action { grid-template-columns: var(--row-label-w) minmax(0, 1fr); }
+  .modal-settings .settings-kv.settings-kv-no-action .kv-row > .kv-value,
+  #about .settings-kv.settings-kv-no-action .kv-row > .kv-value { padding-right: 14px; }
+}
 
 /* 字段行：label / control / status；40 行固定，帮助浮层不撑高 */
 .cfg-row {
@@ -2827,11 +2836,11 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .sec-card-value span { font-size: 12px; line-height: 18px; color: var(--crt-dim); white-space: nowrap; }
-.sec-card-line {
-  margin: 3px 0 0; font-size: 12px; line-height: 18px; color: var(--crt-dim);
+#settings-security-slot .sec-card-line {
+  margin: 3px 0 0; font-size: 12px; line-height: 17px; color: var(--crt-dim);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.sec-card-meta {
+#settings-security-slot .sec-card-meta {
   margin: 3px 0 0; display: flex; align-items: center; gap: 6px;
   font-size: 11px; line-height: 16px; color: var(--crt-dim);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -2915,9 +2924,9 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
   padding: 16px 20px;
   border-radius: 12px;
 }
-#about .modal-box > h2 { font-size: 13px; line-height: 19px; font-weight: 600; letter-spacing: 0.04em; margin: 0; }
+#about .modal-box > h2 { font-size: 15px; line-height: 20px; font-weight: 700; letter-spacing: 0.02em; margin: 0; }
 #about .modal-box > h2 .crt-tag { display: none; }
-#about-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; padding-top: 12px; }
+#about-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; padding-top: 16px; }
 #about .modal-actions { flex: 0 0 auto; margin-top: 10px; padding-top: 8px; border-top: 1px solid rgba(80, 255, 170, 0.14); }
 #about .modal-actions .btn { height: 26px; }
 .about-group { margin-top: 14px; }
@@ -3048,10 +3057,11 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
 }
 .settings-group-body .settings-section-foot { margin: 4px 0 6px; padding: 0 14px; font-size: 11px; line-height: 16px; }
 .settings-group-note { margin: 4px 0 6px; padding: 0 14px; font-size: 11px; line-height: 16px; color: var(--crt-dim); }
+.modal-settings .settings-note { width: 100%; max-width: none; font-size: 11px; line-height: 16px; }
 .runtime-kv { display: grid; grid-template-columns: var(--row-label-w) minmax(0, 1fr) var(--kv-action-w); gap: 0 10px; margin: 0; }
 .runtime-kv .kv-row { display: contents; }
 .runtime-kv .kv-row > * {
-  min-height: 40px; padding: 0; border-top: 1px dashed rgba(80, 255, 170, 0.14);
+  min-height: 40px; border-top: 1px dashed rgba(80, 255, 170, 0.14);
   display: flex; align-items: center; min-width: 0;
 }
 .runtime-kv .kv-row:first-child > * { border-top: 0; }
@@ -3243,9 +3253,9 @@ html[lang="en-US"] .modal-settings .cfg-label { line-height: 19px; }
 .modal-settings .modal-head h2 { font-size: 15px; line-height: 20px; font-weight: 700; letter-spacing: 0.02em; }
 .modal-settings .modal-head .settings-apply-note { margin-top: 0; }
 .modal-settings .settings-group-head h3 { text-transform: uppercase; }
-.modal-settings .cfg-label,
+.modal-settings .cfg-label { font-size: 13px; line-height: 19px; }
 .modal-settings .cfg-status,
-.modal-settings .cfg-control .crt-input { font-size: 13px; line-height: 19px; }
+.modal-settings .cfg-control .crt-input { font-size: 12px; line-height: 18px; }
 /* 只读行（本机状态 / 运行状态 / settings-kv / runtime-kv）：12/18，不用 13 挤占 */
 .modal-settings .settings-kv dt,
 .modal-settings .settings-kv .kv-value,
@@ -3443,11 +3453,11 @@ html[lang="en-US"] .modal-settings .cfg-label { line-height: 19px; }
 /* ===== v2.4 字体/间距校准（按设计原稿） ===== */
 /* 本机状态右上 meta：11px 纯文字右对齐，无 chip；无数据 — */
 .modal-settings .settings-kv .kv-value.has-meta {
-  flex-direction: row; align-items: baseline; gap: 8px; justify-content: flex-end;
+  flex-direction: row; align-items: center; gap: 8px; justify-content: space-between;
 }
 .modal-settings .settings-kv .kv-meta {
-  max-width: 62%; min-width: 0;
-  font-size: 11px; line-height: 16px; color: var(--crt-dim);
+  flex: 0 1 auto; max-width: 62%; min-width: 0; margin-left: auto;
+  font-size: 11px; line-height: 16px; color: var(--crt-dim); text-align: right;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 @media (max-width: 560px) {

@@ -9,7 +9,7 @@
 import { StarStage, namespaceColor, shortId, buildHoverRoutes, buildNetworkScene, normalizeFleetEvent, resolveTaskNamespace, summarizeHoverRoutes } from './starfield.js';
 import { initialViewFromSearch } from './deep-link.js';
 import { createWizardState, wizardReduce, WIZARD_STEPS } from './wizard.js';
-import { IA_TABS, IA_ADVANCED_SECTIONS, IA_MCP_SECTIONS, IA_FIELD_COPY, IA_SETTINGS_EXTRA, IA_SETTINGS_FOLDS, IA_SECURITY_SECTIONS, IA_MCP_DANGER_LINE_KEYS, INVITE_TTL_OPTIONS, INVITE_TTL_DEFAULT_MS, SECURITY_LEVEL_LABEL, SECURITY_LEVEL_TITLE_KEY, SECURITY_LEVEL_NOTE_KEY, SECURITY_BOUNDARY_KEY, SCHEMA_CONFIGURED_VALUE, localizeSchemaReason, refreshCsrfToken, withCsrfRetry, filterRuntimeTimeline, runtimeTimelineKind, memoryRuntimeEnabledOf, runtimeSidecarStateKey, memoryRuntimeModeOf, runtimeShowsModelSettings, runtimeModelSourceOf, runtimeModelSourceAvailable, runtimeModelSourceReady, runtimeModelJobActive, runtimeModelStatusOf, runtimeModelActionOf, formatBytes, IA_RUNTIME_MODEL_SOURCES, IA_RUNTIME_MODEL_SOURCE_DEFAULT } from './settings-ia.js';
+import { IA_TABS, IA_ADVANCED_SECTIONS, IA_MCP_SECTIONS, IA_FIELD_COPY, IA_SETTINGS_EXTRA, IA_SETTINGS_FOLDS, IA_SECURITY_SECTIONS, IA_MCP_DANGER_LINE_KEYS, INVITE_TTL_OPTIONS, INVITE_TTL_DEFAULT_MS, SECURITY_LEVEL_LABEL, SECURITY_LEVEL_TITLE_KEY, SECURITY_LEVEL_NOTE_KEY, SECURITY_BOUNDARY_KEY, SCHEMA_CONFIGURED_VALUE, localizeSchemaReason, refreshCsrfToken, withCsrfRetry, filterRuntimeTimeline, runtimeTimelineKind, memoryRuntimeEnabledOf, runtimeSidecarStateKey, memoryRuntimeModeOf, runtimeShowsModelSettings, runtimeModelSourceOf, runtimeModelSourceAvailable, runtimeModelSourceReady, runtimeModelJobActive, runtimeModelStatusOf, runtimeModelActionOf, formatBytes, settingsListenHostPort, settingsEndpointHostPort, IA_RUNTIME_MODEL_SOURCES, IA_RUNTIME_MODEL_SOURCE_DEFAULT } from './settings-ia.js';
 import { assistantsPanelHtml, serviceRowHtml, wizardHeadActionHtml, repairRowHtml, statusPillHtml, attentionItems, assistantAddFormHtml } from './assistants.js';
 import { reconcileAssistantUi } from './assistant-status.js';
 import { createConsoleHost, markEmbeddedDocument } from './host.js';
@@ -1464,6 +1464,7 @@ function emptyRowOf(label, text) {
 }
 
 function kvRows(rows) {
+  const hasActions = rows.some((row) => row.copyPayload !== null && row.copyPayload !== undefined);
   const body = rows.map((row) => {
     const meta = row.meta
       ? `<span class="kv-meta" title="${escapeHtml(row.meta)}">${escapeHtml(row.meta)}</span>`
@@ -1472,12 +1473,12 @@ function kvRows(rows) {
       ? `<span class="kv-inline"><span class="kv-dot ${escapeHtml(row.tone)}" aria-hidden="true"></span>${row.value}</span>`
       : row.value;
     return `<div class="kv-row"><dt>${escapeHtml(row.label)}</dt>`
-      + `<dd class="kv-value${row.meta ? ' has-meta' : ''}">${meta}${value}</dd>`
+      + `<dd class="kv-value${row.meta ? ' has-meta' : ''}">${value}${meta}</dd>`
       + `<dd class="kv-action">${row.copyPayload === null || row.copyPayload === undefined
         ? ''
         : `<button class="btn btn-small btn-crt" type="button" data-copy="${escapeHtml(row.copyPayload)}">${escapeHtml(t('common.copy'))}</button>`}</dd></div>`;
   }).join('');
-  return `<dl class="settings-kv">${body}</dl>`;
+  return `<dl class="settings-kv${hasActions ? '' : ' settings-kv-no-action'}">${body}</dl>`;
 }
 
 // 主值 + 次行（已配置 / 实际）；一致=暗色，不一致=警示色；长值换行悬挂在值列
@@ -2184,8 +2185,8 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
       <section class="settings-group" data-settings-common-status>
         <div class="settings-group-head"><h3>${escapeHtml(t('settings.common.statusTitle'))}</h3><span class="settings-group-suffix">· ${escapeHtml(t('settings.common.readonly'))}</span></div>
         <div class="settings-group-body">${kvRows([
-          kvRow('P2P', s.network.enabled ? t('settings.common.enabled') : t('settings.common.disabled'), null, { tone: s.network.enabled ? 'ok' : 'off', meta: (Array.isArray(s.network.listen) && s.network.listen.length ? String(s.network.listen[0]).replace(/\/p2p\/.*$/, '') : '—') }),
-          kvRow(t('settings.common.inviteService'), s.join?.enabled ? t('settings.common.enabled') : t('settings.common.inviteDisabled'), null, { tone: s.join?.enabled ? 'ok' : 'off', meta: s.join?.endpoint || '—' }),
+          kvRow('P2P', s.network.enabled ? t('settings.common.enabled') : t('settings.common.disabled'), null, { tone: s.network.enabled ? 'ok' : 'off', meta: settingsListenHostPort(s.network.listen?.[0]) }),
+          kvRow(t('settings.common.inviteService'), s.join?.enabled ? t('settings.common.enabled') : t('settings.common.inviteDisabled'), null, { tone: s.join?.enabled ? 'ok' : 'off', meta: settingsEndpointHostPort(s.join?.endpoint) }),
           kvRow(t('settings.common.securityLevel'), securityLevel ? securityLevelLabel(securityLevel) : '—', null, { tone: securityLevel ? (securityLevel === 'medium' ? 'warn' : 'ok') : 'off', meta: securityLevel ? t(`settings.common.securityMeta.${securityLevel}`) : '—' }),
         ])}</div>
       </section>

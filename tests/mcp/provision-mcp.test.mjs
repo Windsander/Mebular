@@ -246,7 +246,9 @@ try {
   }
 }
 
-await rm(workspace, { recursive: true, force: true });
+// Windows can still hold the harness files briefly after the servers close.
+// Cleanup is best-effort; a transient ENOTEMPTY must not fail the suite.
+await rm(workspace, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }).catch(() => undefined);
 console.log('P2_RESULT ' + JSON.stringify(out));
 `;
 

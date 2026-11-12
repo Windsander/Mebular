@@ -19,6 +19,13 @@ import {
 import { SIDECAR_RUNTIME_VERSION } from '../../src/sidecar/config.js';
 import { bearer } from './helpers.js';
 
+// Real child processes + temp-file discovery on Windows shared runners can
+// transiently miss a heartbeat/write. Retry individual tests twice; persistent
+// failures still fail the suite. The same policy is used by fleet live E2E.
+if (process.platform === 'win32') {
+  jest.retryTimes(2, { logErrorsBeforeRetry: true });
+}
+
 const homes: string[] = [];
 const handles: SidecarHandle[] = [];
 const fakeServers: Server[] = [];

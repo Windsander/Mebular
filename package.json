@@ -213,6 +213,9 @@
   "jest": {
     "preset": "ts-jest",
     "testEnvironment": "node",
+    "setupFilesAfterEnv": [
+      "<rootDir>/tests/jest.setup.mjs"
+    ],
     "transform": {
       "^.+\\.tsx?$": [
         "ts-jest",

@@ -1,6 +1,6 @@
 {
   "name": "@mebular/mcp",
-  "version": "0.3.2",
+  "version": "0.3.4",
   "description": "Mebular MCP server (stdio + Streamable HTTP): exposes Mebular memory and task capabilities to any MCP client. | Mebular MCP server（stdio + Streamable HTTP）：把 Mebular 的记忆与任务能力暴露给任意 MCP client。",
   "license": "MIT",
   "author": {

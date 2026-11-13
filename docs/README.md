@@ -53,7 +53,8 @@ main [`README.md`](../README.md); this index only describes document structure.
   [E2a2](console/screens/e2a2/README.md) ·
   [security tiers](console/screens/security-tiers/README.md) ·
   [U1](console/screens/u1/README.md) ·
-  [U3](console/screens/u3/README.md)
+  [U3](console/screens/u3/README.md) ·
+  [U4 settings v2](console/screens/u4-settings-redesign/README.md)
 
 ## Design
 

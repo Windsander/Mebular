@@ -1,6 +1,6 @@
 {
   "name": "@mebular/dsh-plugin",
-  "version": "0.3.2",
+  "version": "0.3.4",
   "description": "Mebular memory, task graph, and shared Console for DeepSeek Harness. | Mebular 为 DeepSeek Harness 提供记忆、任务图与共享 Console。",
   "license": "MIT",
   "author": {

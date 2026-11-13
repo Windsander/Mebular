@@ -25,15 +25,15 @@
 
 ## 一键安装（Release 资产）
 
-> 0.3.2 发布后，下面的 GitHub Release 资产可用。发布前或从源码开发时，使用文末的“源码安装”。
+> 0.3.4 发布后，下面的 GitHub Release 资产可用。发布前或从源码开发时，使用文末的“源码安装”。
 
 发布后，GitHub Release 会提供 `mebular-hermes-plugins-<version>.tar.gz`，与 npm 包使用同一版本号。不需要 PyPI，也不需要手工查找 `$HERMES_HOME`：
 
 ```bash
-# 1) 下载并解压（示例版本 0.3.2）
-gh release download v0.3.2 -p 'mebular-hermes-plugins-*.tar.gz'
+# 1) 下载并解压（示例版本 0.3.4）
+gh release download v0.3.4 -p 'mebular-hermes-plugins-*.tar.gz'
 mkdir -p mebular-hermes-plugins
-tar -xzf mebular-hermes-plugins-0.3.2.tar.gz -C mebular-hermes-plugins
+tar -xzf mebular-hermes-plugins-0.3.4.tar.gz -C mebular-hermes-plugins
 cd mebular-hermes-plugins
 
 # 2) 安装到 $HERMES_HOME/plugins（默认 ~/.hermes/plugins）

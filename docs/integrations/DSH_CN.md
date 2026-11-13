@@ -31,7 +31,7 @@ supervisor 的 `runtime resolve`/`supervise` 和 daemon HTTP 端点工作。
 从 npm 安装到 DSH 的 Web profile：
 
 ```bash
-dsh plugin --profile web add @mebular/dsh-plugin@0.3.2
+dsh plugin --profile web add @mebular/dsh-plugin@0.3.4
 ```
 
 开发时从工作树安装：
@@ -318,10 +318,10 @@ HTTP 请求，不是整个 DSH 插件完全不注册 listener/timer。
   "runtimeMode": "reused",
   "managed": false,
   "panel": true,
-  "version": "0.3.2",
-  "pluginVersion": "0.3.2",
+  "version": "0.3.4",
+  "pluginVersion": "0.3.4",
   "profile": { "id": "default", "name": "我的忆云" },
-  "provider": { "kind": "app", "source": "registry", "version": "0.3.2" },
+  "provider": { "kind": "app", "source": "registry", "version": "0.3.4" },
   "service": { "registered": false, "running": false, "foreign": false },
   "downloadRequired": false,
   "install": { "state": "idle", "allowed": true },
@@ -417,11 +417,11 @@ npm run verify:runtime:coexistence
 
 ## 发布与版本
 
-- 版本：`0.3.2`，随统一 Mebular v0.3.2 release train（七个 lockstep npm 包加独立的 `dsh-plugin` 同版本）
-- npm：`@mebular/dsh-plugin@0.3.2`
+- 版本：`0.3.4`，随统一 Mebular v0.3.4 release train（七个 lockstep npm 包加独立的 `dsh-plugin` 同版本）
+- npm：`@mebular/dsh-plugin@0.3.4`
 - 插件是独立适配器：代码隔离在 `packages/dsh-plugin`，由独立 npm job 发布；插件运行时从
   自己的 `package.json` 读取 pinned runtime 版本，发布 bump 不需要改插件源码。
-- 发布先 `@mebular/core@0.3.2`，再 `@mebular/dsh-plugin@0.3.2`；详见
+- 发布先 `@mebular/core@0.3.4`，再 `@mebular/dsh-plugin@0.3.4`；详见
   [发布 SOP](../operations/RELEASE.md)。
 - 插件已收录于
   [awesome-dsh-plugin](https://awesome-dsh-plugin.com/zh/p/Windsander/Mebular--packages-dsh-plugin/)

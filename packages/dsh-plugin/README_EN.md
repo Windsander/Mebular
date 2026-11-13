@@ -135,7 +135,7 @@ An existing Mebular app or CLI attaches automatically; when no runtime exists, o
 
 ```bash
 # Install the plugin (it never starts or downloads Mebular silently)
-dsh plugin --profile web add @mebular/dsh-plugin@0.3.2
+dsh plugin --profile web add @mebular/dsh-plugin@0.3.4
 
 # Development install
 dsh plugin --profile web add ./packages/dsh-plugin
@@ -179,6 +179,6 @@ DSH reaches the same daemon at `/mcp` through the official MCP client; tools app
 
 <div align="center">
 
-v0.3.2 · early · MIT · © 2026 Sobert Li
+v0.3.4 · early · MIT · © 2026 Sobert Li
 
 </div>

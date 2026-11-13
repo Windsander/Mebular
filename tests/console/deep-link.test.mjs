@@ -249,7 +249,7 @@ describe('UX-2 设置 · AI 助手专区（单列表，静态契约）', () => {
 describe('UX-2 常驻卡归设置 · 常用 + 重启向导', () => {
   it('常驻运行行进 common 面板（settings-resident），按状态唯一主操作', () => {
     expect(consoleJs).toContain('settings-resident');
-    expect(consoleJs).toMatch(/panel\('common'[\s\S]{0,400}serviceRowHtml/);
+    expect(consoleJs).toMatch(/panel\('common'[\s\S]{0,900}serviceRowHtml/);
     expect(assistantsJs).toContain('让 Mebular 常驻');
   });
 

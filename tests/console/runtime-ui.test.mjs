@@ -1,4 +1,4 @@
-// C5 · Console 单一 UI：记忆模式（唯一产品增量 1）+ 高级模型来源（唯一产品增量 2）。
+// C5 · Console 单一 UI：记忆模式（唯一产品增量 1）+ 记忆模型来源（唯一产品增量 2）。
 // 纯逻辑单测 + 源码/文案契约（不启浏览器、不引依赖）。
 
 import { readFileSync } from 'node:fs';
@@ -54,6 +54,7 @@ const functionSource = (name, nextName) => {
 
 const statusFactsSource = functionSource('runtimeStatusFactsHtml', 'runtimeModeSettingsHtml');
 const modelSourceSectionSource = functionSource('runtimeModelSourceSectionHtml', 'renderRuntimeSettings');
+const runtimeSettingsSource = functionSource('renderRuntimeSettings', 'renderLockedSettings');
 const modelUiStart = consoleJs.indexOf('const RUNTIME_MODEL_POLL_MS');
 const modelUiEnd = consoleJs.indexOf('function renderRuntimeSettings(', modelUiStart);
 const modelUiSource = modelUiStart >= 0 && modelUiEnd > modelUiStart
@@ -91,7 +92,7 @@ describe('0.3 设置 IA：只有两个产品增量', () => {
   });
 
   it('设置折叠白名单不含 runtime-advanced（旧运行时诊断 UI 已删除）', () => {
-    expect(IA_SETTINGS_FOLDS.map((fold) => fold.id)).toEqual(['mcp-danger', 'diagnostics', 'about-runtime']);
+    expect(IA_SETTINGS_FOLDS.map((fold) => fold.id)).toEqual(['mcp-danger', 'diagnostics', 'about-runtime', 'about-identity', 'about-diag']);
     expect(IA_SETTINGS_FOLDS.length).toBeLessThanOrEqual(5);
   });
 
@@ -207,8 +208,9 @@ describe('0.3 静态 DOM / 数据面契约', () => {
     expect(statusFactsSource).not.toMatch(/status\.pid|tokenFile|hostToken|host-token|token/i);
   });
 
-  it('轻量模式不渲染模型配置；高级模型来源禁用并说明', () => {
+  it('轻量模式不渲染模型配置；记忆页模型来源禁用并说明；模型来源区在记忆面板', () => {
     expect(consoleJs).toContain('${enabled ? runtimeModelStatusHtml(status) : \'\'}');
+    expect(runtimeSettingsSource).toContain('${runtimeModelSourceSectionHtml()}');
     expect(consoleJs).toContain("t('settings.runtime.modelSource.light')");
     expect(consoleJs).toContain('meta.available !== true');
     expect(modelSourceSectionSource.length).toBeGreaterThan(0);
@@ -289,7 +291,7 @@ describe('C8f · 本地模型列表与自动部署', () => {
     for (const key of ['tier', 'quantization', 'supported']) expect(modelUiSource).toContain(key);
   });
 
-  it('未安装 → 下载 → 进度 → 完成后自动启用；轮询 2s 只在前台高级页进行', () => {
+  it('未安装 → 下载 → 进度 → 完成后自动启用；轮询 2s 只在前台记忆页进行', () => {
     expect(consoleJs).toContain("api('/admin/api/models/download'");
     expect(consoleJs).toContain('RUNTIME_MODEL_POLL_MS = 2000');
     expect(consoleJs).toContain("api('/admin/api/models/status')");
@@ -297,7 +299,7 @@ describe('C8f · 本地模型列表与自动部署', () => {
     expect(consoleJs).toContain('runtimeModelJobActive');
     expect(consoleJs).toContain('state.runtime.pendingActivatePack = packId');
     expect(consoleJs).toContain('activateRuntimeModel(packId, { afterInstall: true })');
-    expect(consoleJs).toContain('state.settingsTab !== \'advanced\'');
+    expect(consoleJs).toContain('state.settingsTab !== \'runtime\'');
     expect(consoleJs).toContain('document.hidden');
     expect(modelUiSource).toContain('role="progressbar"');
     expect(modelUiSource).toContain('aria-live="polite"');

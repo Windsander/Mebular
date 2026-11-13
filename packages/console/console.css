@@ -24,7 +24,7 @@
   --danger: #d55e00;
   --revoked: #7a8399;
   --radius: 10px;
-  --font: "SF Mono", "JetBrains Mono", "Fira Code", ui-monospace, Menlo, Consolas, monospace;
+  --font: "JetBrains Mono", "SF Mono", "Fira Code", ui-monospace, Menlo, Consolas, monospace;
   /* 辅助文本层级（默认值 = 中文现状；英文覆盖见下方 html[lang="en-US"]） */
   --type-help: 10.5px;
   --type-help-leading: 1.5;
@@ -558,8 +558,12 @@ body.modal-open { overflow: hidden; }
 }
 .modal-x:hover { color: var(--crt-bright, #9dffcf); border-color: var(--border); background: rgba(10, 16, 32, 0.55); }
 .modal-x:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.modal-box.modal-settings { display: flex; flex-direction: column; overflow: hidden; padding: 18px 0 18px 20px; scrollbar-gutter: auto; }
-.modal-settings .modal-head, .modal-settings .settings-tabs { padding-right: 20px; }
+.modal-box.modal-settings {
+  display: flex; flex-direction: column; overflow: hidden;
+  height: min(720px, calc(100vh - 48px));
+  padding: 18px 0 18px 20px; scrollbar-gutter: auto;
+}
+.modal-settings .modal-head { padding-right: 20px; }
 .modal-settings #settings-body { display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; min-height: 0; max-width: 100%; }
 .modal-settings .settings-tabs { flex: 0 0 auto; min-width: 0; max-width: 100%; margin: 0; }
 /* 滚动条贴设置框右边缘：滚动容器贴边，内容右侧留 20px；thumb 收细。 */
@@ -570,6 +574,46 @@ body.modal-open { overflow: hidden; }
 .settings-scroll::-webkit-scrollbar-thumb:hover { border: 0; background: rgba(140, 255, 200, 0.32); }
 .settings-scroll > .settings-panel > .settings-section:first-child,
 .settings-scroll > .settings-panel > .settings-slot:first-child > .settings-section:first-child { border-top: 0; padding-top: 0; }
+/* U-4 设置壳：左侧 160px 固定页签轨 + 内容列；页签轨不滚，仅 .settings-scroll 滚动。 */
+.settings-shell { --kv-action-w: 68px; display: flex; align-items: stretch; gap: 12px; flex: 1 1 auto; min-width: 0; min-height: 0; max-width: 100%; }
+.settings-rail { flex: 0 0 160px; width: 160px; display: flex; flex-direction: column; align-items: stretch; min-width: 0; min-height: 0; padding: 2px 10px 0 0; border-right: 1px solid var(--border); }
+.settings-rail .settings-tabs { display: flex; flex-direction: column; align-items: stretch; gap: 2px; flex: 0 0 auto; min-width: 0; max-width: 100%; margin: 0; padding: 0; border-bottom: 0; }
+.settings-rail .settings-tab {
+  display: flex; align-items: center; width: 100%; height: 34px; min-width: 0;
+  padding: 0 12px 0 14px; border: 1px solid transparent; border-radius: 6px;
+  color: var(--muted); font-size: 12px; letter-spacing: 2px; text-align: left; white-space: nowrap;
+}
+.settings-rail .settings-tab:hover { color: var(--crt-bright); background: rgba(80, 255, 170, 0.04); }
+.settings-rail .settings-tab.is-active {
+  color: var(--crt-bright); background: rgba(80, 255, 170, 0.06);
+  border-color: transparent; box-shadow: inset 2px 0 0 var(--crt); text-shadow: var(--crt-text-glow);
+}
+.settings-rail .settings-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.settings-rail-foot { margin-top: auto; padding-top: 0; border-top: 0; }
+.settings-rail-foot .settings-tab { width: 100%; }
+.settings-rail-foot .settings-tab-extra { margin-left: 0; padding: 0 16px; gap: 6px; color: var(--crt-dim); }
+.settings-rail-foot .settings-tab-extra:hover { color: var(--crt-bright); background: rgba(80, 255, 170, 0.04); }
+.settings-rail-foot .settings-tab-extra::after {
+  content: "ⓘ"; margin-left: 0;
+  color: var(--crt-dim); font-size: 11px; line-height: 1;
+  letter-spacing: 0; flex: none;
+}
+/* ≤900：回退为顶部横排（≤760 继续沿用 .settings-tabs 的换行规则）。 */
+@media (max-width: 900px) {
+  .settings-shell { flex-direction: column; gap: 0; }
+  .settings-rail {
+    flex: 0 0 auto; width: auto; flex-direction: row; flex-wrap: wrap; align-items: center; row-gap: 4px;
+    padding: 0 20px 0 0; border-right: 0; border-bottom: 1px solid var(--border);
+  }
+  .settings-rail .settings-tabs { flex-direction: row; align-items: center; gap: 6px; padding: 0; }
+  .settings-rail .settings-tab { width: auto; height: auto; padding: 6px 12px; border-radius: 8px 8px 0 0; border-bottom: none; }
+  .settings-rail .settings-tab.is-active {
+    border-color: var(--border); background: rgba(10, 16, 32, 0.55); text-shadow: none; box-shadow: none;
+  }
+  .settings-rail-foot { margin-top: 0; margin-left: auto; padding-top: 0; border-top: 0; }
+  .settings-rail-foot .settings-tab { width: auto; }
+  .settings-rail-foot .settings-tab-extra { padding: 6px 12px; }
+}
 /* 字段帮助默认收起；聚焦/警告时再出现，空值提示由 placeholder 承担。 */
 .cfg-row .cfg-help { display: none; }
 .cfg-row:focus-within .cfg-help,
@@ -639,6 +683,13 @@ body.modal-open { overflow: hidden; }
 .modal-note { font-size: 12px; line-height: 1.6; margin: 6px 0 10px; }
 .settings-section { border-top: 1px solid var(--border); padding: 10px 0; }
 .settings-section h3 { margin: 0 0 8px; font-size: 13px; display: flex; align-items: center; gap: 8px; }
+/* 设计稿对齐：页内分组标题用 10px 字距标签，而不是重 h3（安全卡内标题仍 13px） */
+.settings-panel > .settings-section > h3 {
+  margin-bottom: 6px; font-size: 10px; font-weight: 600;
+  letter-spacing: 1.5px; color: var(--crt-dim); text-transform: uppercase;
+}
+.settings-panel > .settings-section > h3 .badge { font-size: 9.5px; letter-spacing: 0.5px; }
+.settings-panel > .settings-section { padding: 12px 0 14px; }
 .settings-section-desc { margin: -2px 0 8px; font-size: 11px; line-height: 1.6; }
 .settings-section-foot { margin: 8px 0 0; font-size: 11px; line-height: 1.6; }
 /* 英文文案较长：设置区容器允许收缩到可用宽度，长命令/长路径任意断行，不撑出横向滚动。 */
@@ -651,28 +702,53 @@ body.modal-open { overflow: hidden; }
 .settings-diag-block:first-child { border-top: 0; padding-top: 0; }
 .settings-diag-block h4 { margin: 0 0 6px; font-size: 12px; display: flex; align-items: center; gap: 6px; }
 .cfg-diag-path { margin: 0 0 6px; font-size: 11px; }
-/* E2-A2：忆云卡（设置 · 常用） */
+/* 视觉隐藏但保留给读屏/断言（如归档切换提示） */
+.sr-only {
+  position: absolute !important; width: 1px !important; height: 1px !important;
+  padding: 0 !important; margin: -1px !important; overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important; clip-path: inset(50%) !important;
+  white-space: nowrap !important; border: 0 !important;
+}
+/* E2-A2：忆云卡（设置 · 常用）
+   U-4 收口：行固定 58px 两行（名称/状态 + 指纹/最近使用），动作一列；
+   名称更新/改名说明不再逐行铺开，改由 title / section foot 承担。 */
 .cloud-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
-.cloud-intro { margin: 0 0 8px; font-size: 11.5px; }
-.cloud-rows { display: grid; gap: 8px; }
+.cloud-intro { margin: 0 0 8px; font-size: 11.5px; line-height: 1.55; }
+/* 设计稿对齐：忆云是一个整体面板，行间用虚线分隔，而不是两张浮动卡片 */
+.cloud-rows {
+  display: grid; gap: 0; overflow: hidden;
+  border: 1px solid var(--crt-border-soft); border-radius: 10px;
+  background: rgba(2, 16, 11, 0.28);
+}
 .cloud-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 4px 12px;
+  gap: 8px 12px;
   align-items: center;
-  padding: 9px 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: rgba(8, 14, 28, 0.45);
+  min-height: 58px;
+  padding: 8px 14px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   min-width: 0;
 }
-.cloud-row.is-current { border-color: rgba(80, 255, 170, 0.32); background: rgba(80, 255, 170, 0.05); }
-.cloud-main { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
-.cloud-name { font-weight: 600; overflow-wrap: anywhere; }
-.cloud-row.is-duplicate { border-color: rgba(255, 210, 122, 0.45); }
+.cloud-row + .cloud-row { border-top: 1px dashed var(--crt-border-soft); }
+.cloud-row.is-current { background: rgba(80, 255, 170, 0.05); }
+.cloud-row.is-duplicate { box-shadow: inset 2px 0 0 rgba(255, 210, 122, 0.6); }
+.cloud-main { display: grid; gap: 3px; min-width: 0; }
+.cloud-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.cloud-name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.settings-scroll .cloud-name { font-size: 13px; line-height: 19px; }
+.cloud-sub {
+  display: flex; align-items: center; gap: 6px; min-width: 0; margin: 0;
+  font-size: 10.5px; line-height: 1.4; color: var(--crt-dim); text-shadow: none;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* .modal-box p 默认 pre-wrap（帮助文本换行）；行内元信息需要单行省略 */
+.settings-scroll .cloud-sub { white-space: nowrap; font-size: 11px; line-height: 16px; }
+.cloud-sub code { color: var(--accent); font: inherit; }
+.cloud-sep { color: var(--crt-faint); }
 .cloud-dup-badge, .cloud-suggest-badge { white-space: nowrap; }
-.cloud-rename-hint { font-size: 11px; }
-.cloud-rename-note { grid-column: 1 / -1; margin: 0; font-size: 11px; }
 /* 顶栏忆云徽章：当前忆云被判定重名时的警告点 */
 .cloud-warning-dot {
   width: 7px; height: 7px; border-radius: 50%;
@@ -680,10 +756,10 @@ body.modal-open { overflow: hidden; }
   box-shadow: 0 0 0 2px rgba(255, 210, 122, 0.18);
   flex: 0 0 auto;
 }
-.cloud-meta { grid-column: 1; display: flex; gap: 6px 14px; flex-wrap: wrap; font-size: 11px; color: var(--muted); min-width: 0; }
-.cloud-meta code { color: var(--accent); overflow-wrap: anywhere; }
-.cloud-actions { grid-column: 2; grid-row: 1 / span 2; display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex-wrap: wrap; min-width: 0; }
-.cloud-actions .cloud-rename-input { width: 150px; min-width: 0; }
+.cloud-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.cloud-actions .cloud-rename-input { flex: 1 1 160px; width: auto; min-width: 0; }
+.cloud-row.is-renaming { grid-template-columns: minmax(0, 1fr); align-items: start; }
+.cloud-row.is-renaming .cloud-actions { grid-column: 1; justify-content: flex-start; }
 .cloud-rename-error { grid-column: 1 / -1; margin: 2px 0 0; font-size: 11px; }
 .cloud-unavailable { margin: 0 0 4px; font-size: 12px; color: #ffd27a; line-height: 1.6; }
 .cloud-inspect { margin: 8px 0 0; font-size: 11.5px; line-height: 1.7; min-height: 0; }
@@ -731,6 +807,7 @@ body.modal-open { overflow: hidden; }
   .cloud-row { grid-template-columns: minmax(0, 1fr); }
   .cloud-actions { grid-column: 1; grid-row: auto; justify-content: flex-start; }
   .cloud-actions .cloud-rename-input { flex: 1 1 100%; width: 100%; }
+  .settings-scroll .cloud-name, .settings-scroll .cloud-sub { white-space: normal; overflow: visible; text-overflow: clip; }
 }
 .settings-kv {
   display: grid;
@@ -763,6 +840,15 @@ body.modal-open { overflow: hidden; }
 .settings-kv .kv-sub.is-mismatch .cfg-warn { color: #ffd27a; }
 .crt-surface .settings-kv .kv-sub { color: var(--crt-muted); }
 .crt-surface .settings-kv .kv-sub.is-mismatch { color: #ffd27a; }
+/* U-4 设计稿对齐：状态点（本机状态 / 常驻 / 安全卡共用） */
+.kv-dot {
+  width: 6px; height: 6px; flex: none; display: inline-block;
+  border-radius: 50%; background: var(--crt);
+  box-shadow: 0 0 6px rgba(109, 255, 184, 0.7);
+}
+.kv-dot.warn { background: var(--warn); box-shadow: none; }
+.kv-dot.off { background: transparent; border: 1px solid rgba(160, 255, 205, 0.45); box-shadow: none; }
+.kv-inline { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
 .snippet { background: rgba(5, 8, 16, 0.85); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 11px; line-height: 1.5; overflow: auto; max-height: 200px; }
 .badge-issuer { border-color: rgba(230, 159, 0, 0.55); color: #ffd27a; }
 
@@ -1336,7 +1422,7 @@ body.modal-open { overflow: hidden; }
 .cfg-group h4 { margin: 0 0 var(--field-gap); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: rgba(150, 255, 205, 0.72); }
 .cfg-row {
   display: grid;
-  grid-template-columns: var(--row-label-w) minmax(0, 1fr);
+  grid-template-columns: var(--row-label-w) minmax(0, 1fr) var(--kv-action-w);
   gap: 0 var(--row-gap);
   align-items: start;
   padding: var(--row-gap-y) 0 0;
@@ -1351,6 +1437,17 @@ body.modal-open { overflow: hidden; }
 .cfg-control .crt-select-trigger { width: 100%; max-width: none; font-size: 12px; }
 .cfg-control .cfg-toggle { order: 0; }
 .cfg-help { flex: 1 1 100%; margin: 0; font-size: var(--type-help); line-height: var(--type-help-leading); }
+/* B · 右侧状态列：纯文字（正常=亮绿 / 异常=琥珀），无 chip / 圆点 / 底色 */
+.cfg-status {
+  display: flex; align-items: center; justify-content: flex-end;
+  min-height: var(--control-h); min-width: 0;
+  font-size: 10.5px; line-height: 1.4; white-space: nowrap;
+  color: var(--crt-bright);
+}
+.cfg-status.is-warn { color: #ffd27a; }
+/* 帮助/三元组跨控件+状态列，避免 640 外框下被状态列挤成多行；仅异常时由 runtimeCompareLine 输出 */
+.cfg-row > .cfg-help,
+.cfg-row > .cfg-effective { grid-column: 2 / 4; }
 .cfg-warn { color: #ffd27a; }
 /* U-1 · 设置折叠统一：只保留白名单折叠（诊断 / MCP 危险 / 关于运行状态 / 邀请详情）。 */
 .settings-note { margin: 0 0 8px; font-size: 11px; line-height: 1.6; }
@@ -1387,6 +1484,39 @@ body.modal-open { overflow: hidden; }
 .cfg-effective.is-mismatch .cfg-eff-key { color: #ffd27a; }
 .cfg-raw-block { margin: 4px 0 8px; }
 .cfg-raw-block .snippet { max-height: 260px; }
+
+/* B · 设置内统一行模板：40px 行高 + 行间虚线（首行无线），有 help/三元组时自然增高。
+   字段行 label | control | status 三列；只读行沿用 label | value | action / label | value。 */
+.settings-shell .cfg-row {
+  min-height: 40px;
+  align-items: center;
+  padding: 0;
+  border-top: 1px dashed var(--border);
+}
+.settings-shell .cfg-row:first-child,
+.settings-shell .cfg-editor > .cfg-row:first-child,
+.settings-shell .settings-section > .cfg-row:first-of-type { border-top: 0; }
+.settings-shell .cfg-control,
+.settings-shell .cfg-status { min-height: 40px; }
+.settings-shell .cfg-row > .cfg-help,
+.settings-shell .cfg-row > .cfg-effective { margin-bottom: 6px; }
+/* 只读行：行容器不改 DOM 结构（display: contents 让 dt/dd 继续参与外层栅格）。 */
+.settings-kv .kv-row,
+.runtime-kv .kv-row { display: contents; }
+.settings-shell .settings-kv,
+.settings-shell .runtime-kv { gap: 0 var(--row-gap); }
+.settings-shell .settings-kv .kv-row > *,
+.settings-shell .runtime-kv .kv-row > * {
+  min-height: 40px;
+  border-top: 1px dashed var(--border);
+}
+.settings-shell .settings-kv .kv-row:first-child > *,
+.settings-shell .runtime-kv .kv-row:first-child > * { border-top: 0; }
+.settings-shell .settings-kv dt,
+.settings-shell .settings-kv .kv-action,
+.settings-shell .runtime-kv dt,
+.settings-shell .runtime-kv dd { display: flex; align-items: center; }
+.settings-shell .settings-kv .kv-value { display: flex; flex-direction: column; justify-content: center; }
 
 .crt-input::placeholder { color: rgba(140, 255, 200, 0.26); }
 .cfg-default {
@@ -1459,7 +1589,28 @@ body.modal-open { overflow: hidden; }
 .settings-panel[hidden] { display: none; }
 /* U-1：设置各区统一 section（不再卡片套卡片）；危险区只用标题色与顶部边线区分。 */
 .settings-danger { border-top-color: rgba(214, 90, 40, 0.5); }
-.settings-danger > h3 { color: #ffd27a; }
+.settings-danger > h3 { color: #ff9b9b; }
+/* E · 设置 / 安全弹框内的危险动作统一为 #ff9b9b on rgba(40,10,10,.22)。
+   只 scope 到 #settings / #security-action：审计、设备卡等语境仍用原危险色。 */
+#settings .btn-crt-danger,
+#security-action .btn-crt-danger {
+  color: #ff9b9b;
+  border-color: rgba(255, 155, 155, 0.38);
+  background: rgba(40, 10, 10, 0.22);
+  text-shadow: none;
+}
+#settings .btn-crt-danger:hover:not(:disabled),
+#security-action .btn-crt-danger:hover:not(:disabled) {
+  border-color: rgba(255, 155, 155, 0.58);
+  background: rgba(40, 10, 10, 0.32);
+}
+#settings .crt-tag-error,
+#security-action .crt-tag-error {
+  color: #ff9b9b;
+  border-color: rgba(255, 155, 155, 0.35);
+  background: rgba(40, 10, 10, 0.22);
+  text-shadow: none;
+}
 .cfg-actions { align-items: center; }
 .cfg-state { color: var(--muted); font-size: 11px; }
 
@@ -1477,6 +1628,26 @@ body.modal-open { overflow: hidden; }
   .settings-kv .kv-value { line-height: 1.5; min-height: 0; }
   .settings-kv .kv-action { justify-content: flex-start; min-height: 0; }
   .cfg-row { grid-template-columns: minmax(0, 1fr); }
+  /* B · 窄屏单列：正常「生效中」隐藏，异常「待重启/未生效」保留；帮助/三元组跨整行。 */
+  .settings-shell .cfg-row { padding-top: 8px; row-gap: 2px; align-items: start; }
+  .settings-shell .cfg-row:first-child { padding-top: 0; }
+  .settings-shell .cfg-row > .cfg-label,
+  .settings-shell .cfg-row > .cfg-control,
+  .settings-shell .cfg-row > .cfg-help,
+  .settings-shell .cfg-row > .cfg-effective { grid-column: 1 / -1; }
+  .settings-shell .cfg-row > .cfg-status { justify-content: flex-start; }
+  .settings-shell .cfg-row > .cfg-status.is-ok { display: none; }
+  .settings-shell .settings-kv,
+  .settings-shell .runtime-kv { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .settings-shell .settings-kv .kv-row > *,
+  .settings-shell .runtime-kv .kv-row > * { min-height: 0; padding: 0; border-top: 0; }
+  .settings-shell .settings-kv .kv-row + .kv-row > dt,
+  .settings-shell .runtime-kv .kv-row + .kv-row > dt { padding-top: 8px; border-top: 1px dashed var(--border); }
+  .settings-shell .settings-kv .kv-row .kv-value,
+  .settings-shell .settings-kv .kv-row .kv-action,
+  .settings-shell .runtime-kv .kv-row dd { padding-bottom: 6px; }
+  .settings-shell .settings-kv .kv-row:last-child > *,
+  .settings-shell .runtime-kv .kv-row:last-child > * { padding-bottom: 0; }
   .cfg-label { line-height: 1.4; min-height: 0; }
   .sec-tier { grid-template-columns: minmax(0, 1fr); }
   .sec-tier-action { justify-content: flex-start; }
@@ -1771,7 +1942,34 @@ body.modal-open { overflow: hidden; }
 .asst-detail-panel p { margin: 2px 0; }
 .asst-detail-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .asst-output { margin-top: 4px; }
-.settings-resident { margin-bottom: 4px; }
+/* 设计稿对齐：常驻组 / 本机状态组用 CRT 内嵌面板承载，避免裸行散落 */
+.settings-resident {
+  margin-bottom: 10px; padding: 6px 12px 4px;
+  border: 1px solid var(--crt-border-soft); border-radius: 10px;
+  background: rgba(2, 16, 11, 0.28);
+}
+.settings-resident .asst-row { border-bottom: 0; }
+.settings-status-card {
+  padding: 2px 12px;
+  border: 1px solid var(--crt-border-soft); border-radius: 10px;
+  background: rgba(2, 16, 11, 0.28);
+}
+.settings-status-card .settings-kv { gap: 0 var(--row-gap); }
+/* U-4 常用收口：常驻行只保留一行状态 + 一行说明 + 动作组；家目录移入「关于本机」 */
+.settings-resident .asst-service-xp {
+  display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; gap: 4px 8px; padding: 0 2px 4px;
+}
+.settings-resident .asst-service-note { margin: 0; font-size: 11px; line-height: 1.5; }
+.settings-resident .asst-detail-actions { margin-top: 0; }
+.settings-resident #service-msg { flex: 1 1 100%; margin: 4px 0 0; }
+/* U-4 收口：640 外框 − 160px 竖轨后内容列约 420px；英文「Not resident (temporary)」等长状态
+   会把动作按钮挤出可视区。常驻行与重启向导/自动修行同一策略：名称不占固定宽、说明可收缩换行、
+   动作按钮永不收缩；≤760 的整行换行规则继续生效。 */
+.settings-resident .asst-name { flex: 0 1 auto; min-width: 0; }
+.settings-resident .asst-st { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.settings-resident .asst-sp { flex: 0 1 0; min-width: 0; }
+.settings-resident .asst-row .btn { flex: 0 0 auto; white-space: nowrap; }
 /* 语言行：专用单行控件 + 虚线分隔（不复用 .asst-row，不另起卡片）。
    控件外观对齐 .crt-input：同高、同边框/圆角/底色/focus ring；原生箭头隐藏后
    由 wrapper 的固定 chevron 承担，避免各平台 select 外观漂移。 */
@@ -2211,7 +2409,7 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
 #settings-security-slot > .settings-section.sec-card {
   position: relative;
   display: grid;
-  grid-template-columns: 22px minmax(0, 1fr) auto;
+  grid-template-columns: 22px minmax(0, 1fr);
   gap: 0 11px;
   align-items: start;
   border: 0;
@@ -2227,7 +2425,7 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
   border-radius: inherit;
   pointer-events: none;
 }
-#settings-security-slot > .settings-section.sec-card::before {
+#settings-security-slot > .settings-section.sec-card.is-effective::before {
   content: "";
   position: absolute;
   left: 0;
@@ -2238,6 +2436,15 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
   background: rgba(109, 255, 184, 0.5);
   box-shadow: 0 0 8px rgba(60, 255, 160, 0.35);
 }
+/* 未配置：中性底/边框，无左侧荧光条（::before 不出现）。
+   底色不用 var(--bg-panel-2)（#0e1428 偏蓝，会破坏 CRT 绿黑表面），改用 CRT 同族深绿黑。 */
+#settings-security-slot > .settings-section.sec-card.is-off {
+  background: rgba(2, 16, 11, 0.45);
+}
+#settings-security-slot > .settings-section.sec-card.is-off::before { content: none; }
+#settings-security-slot > .settings-section.sec-card.is-off::after {
+  border-color: rgba(140, 255, 200, 0.16);
+}
 .sec-card-idx {
   padding-top: 2px;
   font-size: 10px;
@@ -2247,6 +2454,8 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
 }
 .sec-card-main { min-width: 0; }
 .sec-card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-height: 19px; }
+/* 动作按钮放在标题行右侧：正文获得整行宽度，英文卡片不再被按钮挤成窄柱 */
+.sec-card-head .sec-card-actions { margin-left: auto; align-self: center; }
 .sec-card-head h3 { margin: 0; font-size: 13px; text-shadow: none; }
 .sec-card-value { display: flex; align-items: baseline; gap: 8px; margin: 5px 0 0; }
 .sec-card-value strong {
@@ -2298,6 +2507,18 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
   box-shadow: 0 0 6px rgba(109, 255, 184, 0.7);
 }
 .sec-dot.is-off { background: transparent; border: 1px solid rgba(160, 255, 205, 0.45); box-shadow: none; }
+/* 卡片级状态点：effective 实心绿 / off 空心无 glow（标题前） */
+#settings-security-slot > .settings-section.sec-card.is-effective .sec-dot {
+  background: #6dffb8;
+  border: 0;
+  box-shadow: 0 0 6px rgba(109, 255, 184, 0.7);
+}
+#settings-security-slot > .settings-section.sec-card.is-off .sec-dot {
+  background: transparent;
+  border: 1px solid rgba(160, 255, 205, 0.45);
+  box-shadow: none;
+}
+#settings-security-slot > .settings-section.sec-card.is-off .sec-card-value strong { color: var(--muted); }
 .sec-tag-current {
   border-color: rgba(109, 255, 184, 0.55);
   background: rgba(109, 255, 184, 0.08);
@@ -2349,13 +2570,22 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
 .sec-approval-meta { margin: 0; font-size: 11px; line-height: 1.5; color: rgba(255, 226, 166, 0.72); }
 .sec-approval-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
 .sec-outgoing { margin: 6px 0 0; font-size: 11.5px; line-height: 1.5; color: rgba(255, 226, 166, 0.72); overflow-wrap: anywhere; }
-.sec-rejections-line {
+#settings-security-slot .sec-rejections-line {
   margin: 0;
   max-width: none;
-  font-size: 11.5px;
-  line-height: 1.5;
+  font-size: 11px;
+  line-height: 16px;
   color: #ffd27a;
   overflow-wrap: anywhere;
+}
+
+/* E · 设置内动效收口：页签/轨/状态列/安全卡/折叠都不做过渡（激活态是静态微光）。 */
+@media (prefers-reduced-motion: reduce) {
+  .settings-tab,
+  .settings-rail,
+  .cfg-status,
+  .sec-card,
+  details.fold summary::before { transition: none; animation: none; }
 }
 
 @media (max-width: 900px) {
@@ -2363,12 +2593,911 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
     grid-template-columns: 20px minmax(0, 1fr);
     padding: 9px 11px 8px 9px;
   }
-  .sec-card-actions {
-    grid-column: 2 / -1;
+  .sec-card-head .sec-card-actions {
+    grid-column: auto;
     justify-content: flex-start;
-    padding-top: 9px;
+    padding-top: 0;
   }
   .sec-card-actions .btn { flex: 0 0 auto; }
   .sec-pending { grid-template-columns: auto minmax(0, 1fr); }
   .sec-pending .btn { grid-column: 1 / -1; justify-self: start; margin-left: 20px; }
+}
+
+/* =========================================================================
+   设置 v2（760×720 / 188 轨 / ~530 列）
+   高度：34 导航·折叠头 / 40 行 / 58 两行行 / 26 控件；面板 = 16 + 行数
+   文字：10 分组 / 11 辅助 / 12 标签·值 / 13 标题 / 19 数据大值
+   ========================================================================= */
+.modal-box-wide { width: min(760px, calc(100vw - 32px)); }
+.modal-box.modal-settings {
+  width: min(760px, calc(100vw - 32px));
+  height: min(720px, calc(100vh - 32px));
+  /* 左内距给页签；右侧留给滚动条贴边，内容列自己补 20（v2.2） */
+  padding: 18px 0 18px 20px;
+  border-radius: 12px;
+  /* v2.3 共享控件 token：设置内 input / select trigger / button 同一套 */
+  --settings-control-h: 27px;
+  --settings-control-radius: 8px;
+  --control-h: var(--settings-control-h);
+  --select-h: var(--settings-control-h);
+}
+/* Header 一行：✦ 本机设置 + 改动即生效；从弹层顶边算 57（18 顶距 + 38 行） */
+.modal-settings .modal-head {
+  height: 38px; margin: 0; padding-right: 20px; flex: 0 0 auto;
+  align-items: center;
+}
+.modal-settings .modal-heading {
+  display: flex; align-items: baseline; gap: 10px;
+  flex: 1 1 auto; min-width: 0;
+}
+.modal-settings .modal-head h2 {
+  display: flex; align-items: baseline; gap: 8px;
+  font-size: 15px; line-height: 20px; font-weight: 700; letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.modal-settings .modal-head h2::before {
+  content: "✦"; flex: none;
+  color: var(--ok); font-size: 14px; line-height: 1; font-weight: 400;
+}
+.modal-settings .modal-head .settings-apply-note {
+  margin: 0; max-width: none;
+  font-size: 11px; line-height: 16px; color: var(--crt-dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.modal-settings .modal-x { width: 26px; height: 26px; font-size: 13px; }
+.modal-settings .settings-shell { --kv-action-w: 56px; gap: 0; }
+.modal-settings .settings-rail {
+  flex: 0 0 160px; width: 160px;
+  padding: 0;
+  border-right: 1px solid rgba(80, 255, 170, 0.14);
+}
+.modal-settings .settings-rail .settings-tabs { gap: 2px; }
+.modal-settings .settings-rail .settings-tab {
+  height: 34px; padding: 0 10px 0 14px;
+  border-radius: 0 6px 6px 0;
+  font-size: 12px; letter-spacing: 2px; color: var(--crt-dim);
+}
+.modal-settings .settings-rail .settings-tab.is-active {
+  border-radius: 0 6px 6px 0;
+  background: rgba(80, 255, 170, 0.06);
+  border-color: transparent;
+  color: var(--crt-bright);
+}
+@media (min-width: 901px) {
+  .modal-settings .settings-rail .settings-tab.is-active { box-shadow: inset 2px 0 0 var(--crt); }
+}
+.modal-settings .settings-rail-foot { padding-top: 8px; }
+.modal-settings .settings-rail-foot .settings-tab-extra::after {
+  content: "ⓘ"; margin-left: 6px; margin-right: 0;
+  color: var(--crt-dim); font-size: 11px; line-height: 1; letter-spacing: 0;
+}
+.modal-settings .settings-scroll { padding: 16px 20px 0; scrollbar-gutter: auto; }
+
+/* 分组：标签在面板外；只一层内嵌面板，无卡片套卡片 */
+.settings-group { margin-top: 14px; }
+.settings-scroll > .settings-panel > .settings-group:first-child { margin-top: 0; }
+.settings-group-head {
+  height: 15px; margin: 0 0 8px;
+  display: flex; align-items: baseline; gap: 8px; min-width: 0;
+}
+.settings-group-head h3 {
+  margin: 0; min-width: 0;
+  font-size: 10px; line-height: 15px; font-weight: 600; letter-spacing: 1.5px;
+  text-transform: none; color: var(--crt-dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.settings-group-suffix {
+  flex: none;
+  font-size: 10px; line-height: 15px; letter-spacing: 0.5px;
+  font-weight: 400; color: var(--crt-dim);
+}
+.settings-group-body {
+  border: 1px solid rgba(80, 255, 170, 0.22);
+  border-radius: 10px;
+  background: rgba(2, 16, 11, 0.34);
+  /* 面板自身承担圆角贴边；首/末行与中间行一致，不再添加上下呼吸。 */
+  padding: 0;
+  overflow: hidden;
+  min-width: 0;
+}
+#settings-resident { padding: 0; }
+#settings-cloud-card .settings-group-body { padding: 0; }
+.settings-group-desc,
+.settings-group-foot {
+  margin: 6px 0 0; padding: 0 14px;
+  width: 100%; max-width: none;
+  font-size: 11px; line-height: 16px; color: var(--crt-dim);
+  overflow-wrap: anywhere;
+}
+.settings-actions-row {
+  height: 40px; display: flex; align-items: center; gap: 10px;
+  padding: 0 14px; border-top: 1px dashed rgba(80, 255, 170, 0.14);
+  font-size: 12px; color: var(--crt-bright);
+}
+.settings-actions-row:first-child { border-top: 0; }
+
+/* 只读行：label | value | action；40 行 + 虚线 */
+.settings-kv {
+  display: grid;
+  grid-template-columns: var(--row-label-w) minmax(0, 1fr) var(--kv-action-w);
+  gap: 0 10px; margin: 0;
+}
+.settings-kv .kv-row { display: contents; }
+.settings-kv .kv-row > * {
+  min-height: 40px;
+  border-top: 1px dashed rgba(80, 255, 170, 0.14);
+  display: flex; align-items: center; min-width: 0;
+}
+.settings-kv .kv-row:first-child > * { border-top: 0; }
+.settings-kv dt {
+  padding-left: 14px;
+  font-size: 12px; line-height: 18px; color: var(--crt-bright);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.settings-kv .kv-value {
+  flex-direction: column; align-items: flex-end; justify-content: center;
+  font-size: 12px; line-height: 18px; color: var(--crt-dim);
+  text-align: right; overflow-wrap: anywhere;
+}
+.settings-kv .kv-main { display: block; }
+.settings-kv .kv-sub { font-size: 11px; line-height: 16px; }
+.settings-kv .kv-action { padding-right: 14px; justify-content: flex-end; }
+.settings-kv .kv-action .btn { height: 26px; padding: 0 10px; line-height: 1; }
+.settings-kv .kv-empty { color: var(--crt-dim); }
+.settings-kv .kv-inline { display: inline-flex; align-items: center; gap: 6px; }
+/* 纯只读组没有复制动作：不为空 dd 保留 56px，值/meta 使用完整剩余宽度。 */
+.modal-settings .settings-kv.settings-kv-no-action .kv-action,
+#about .settings-kv.settings-kv-no-action .kv-action { display: none; }
+@media (min-width: 761px) {
+  .modal-settings .settings-kv.settings-kv-no-action,
+  #about .settings-kv.settings-kv-no-action { grid-template-columns: var(--row-label-w) minmax(0, 1fr); }
+  .modal-settings .settings-kv.settings-kv-no-action .kv-row > .kv-value,
+  #about .settings-kv.settings-kv-no-action .kv-row > .kv-value { padding-right: 14px; }
+}
+
+/* 字段行：label / control / status；40 行固定，帮助浮层不撑高 */
+.cfg-row {
+  position: relative;
+  height: 40px; min-height: 40px;
+  display: flex; align-items: center; gap: 10px;
+  padding: 0 14px;
+  border-top: 1px dashed rgba(80, 255, 170, 0.14);
+}
+.cfg-row:first-child, .cfg-editor > .cfg-row:first-child { border-top: 0; }
+.cfg-label {
+  flex: 0 0 var(--row-label-w); min-width: 0;
+  font-size: 12px; line-height: 18px; color: var(--crt-bright);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.cfg-control { margin-left: auto; min-height: 26px; display: flex; align-items: center; justify-content: flex-end; }
+.cfg-control .crt-input { height: 26px; min-height: 26px; padding: 0 8px; font-size: 12px; }
+.cfg-control select.crt-input { height: 26px; }
+.cfg-status {
+  flex: none; font-size: 12px; line-height: 18px; color: var(--crt-dim);
+}
+.cfg-status.is-warn { color: #ffd27a; }
+.cfg-default { margin-left: 6px; font-size: 10px; line-height: 15px; color: var(--crt-dim); letter-spacing: 0.5px; }
+.cfg-row > .cfg-help,
+.cfg-row > .cfg-effective {
+  position: absolute; top: 100%; left: 14px; right: 14px; z-index: 24;
+  display: none; margin: 0; padding: 6px 8px;
+  border: 1px solid rgba(80, 255, 170, 0.22); border-radius: 6px;
+  background: rgba(4, 22, 15, 0.98);
+  font-size: 11px; line-height: 16px; color: var(--crt-dim);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.45);
+}
+.cfg-row:focus-within > .cfg-help,
+.cfg-row:focus-within > .cfg-effective { display: block; }
+.cfg-row > .cfg-effective { flex-wrap: wrap; gap: 0 8px; }
+.cfg-row > .cfg-help.cfg-warn { position: static; margin: 4px 0 0; border: 0; background: none; box-shadow: none; padding: 0; }
+.cfg-row .cfg-warn-mark { margin-left: 4px; }
+
+/* 两行行：常驻 / 忆云 / 数据 */
+.settings-row-2 {
+  height: 40px; min-height: 40px;
+  display: flex; align-items: center; gap: 10px;
+  padding: 0 14px;
+  border-top: 1px dashed rgba(80, 255, 170, 0.14);
+}
+.settings-row-2:first-child { border-top: 0; }
+.settings-row-2 .settings-row-stack { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.settings-row-2 .settings-row-title {
+  display: flex; align-items: center; gap: 8px; min-width: 0;
+  font-size: 13px; line-height: 18px; font-weight: 600; color: var(--crt-bright);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.settings-row-2 .settings-row-meta {
+  font-size: 11px; line-height: 16px; color: var(--crt-dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.settings-row-actions { flex: none; display: flex; align-items: center; gap: 10px; }
+
+/* 安全卡：三张同构 114（14 + 20 标题 + 4 + 22 值 + 3 + 18 说明 + 3 + 16 meta） */
+#settings-security-slot { display: grid; gap: 8px; align-content: start; }
+#settings-security-slot > .settings-section.sec-card {
+  height: 114px;
+  padding: 14px 16px 14px 18px;
+  display: block;
+  border: 1px solid rgba(80, 255, 170, 0.22);
+  border-radius: 10px;
+  background: linear-gradient(90deg, rgba(109, 255, 184, 0.035), rgba(2, 16, 11, 0.28));
+}
+#settings-security-slot > .settings-section.sec-card::after { border-color: rgba(80, 255, 170, 0.2); border-radius: 10px; }
+.sec-card-idx { display: none; }
+.sec-card-main { min-width: 0; }
+.sec-card-head { height: 20px; display: flex; align-items: center; gap: 8px; min-width: 0; }
+.sec-card-head h3 { font-size: 13px; line-height: 19px; font-weight: 600; margin: 0; }
+.sec-card-head .sec-card-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+.sec-card-head .btn { height: 26px; padding: 0 10px; }
+.sec-card-value { display: flex; align-items: center; gap: 8px; margin: 4px 0 0; min-width: 0; }
+.sec-card-value strong {
+  font-size: 19px; line-height: 22px; font-weight: 700; letter-spacing: 0.5px;
+  color: #d6ffea; text-shadow: none; font-variant-numeric: tabular-nums;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sec-card-value span { font-size: 12px; line-height: 18px; color: var(--crt-dim); white-space: nowrap; }
+#settings-security-slot .sec-card-line {
+  margin: 3px 0 0; font-size: 12px; line-height: 17px; color: var(--crt-dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#settings-security-slot .sec-card-meta {
+  margin: 3px 0 0; display: flex; align-items: center; gap: 6px;
+  font-size: 11px; line-height: 16px; color: var(--crt-dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sec-card-meta code { font: inherit; color: rgba(140, 255, 200, 0.78); border: 1px solid rgba(80, 255, 170, 0.14); border-radius: 3px; padding: 0 4px; }
+.sec-pending {
+  height: 40px; min-height: 40px; margin-bottom: 8px; padding: 0 10px 0 12px;
+  display: flex; align-items: center; gap: 10px;
+  border: 1px solid rgba(255, 210, 122, 0.3);
+  border-left: 2px solid #ffd27a;
+  border-radius: 8px;
+  background: rgba(60, 42, 8, 0.24);
+}
+.sec-pending-ico { flex: none; color: #ffd27a; font-size: 12px; line-height: 1; }
+.sec-pending-copy { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 8px; }
+.sec-pending-copy b { font-size: 12px; line-height: 18px; font-weight: 600; color: #ffe2a6; white-space: nowrap; }
+.sec-pending-copy span { font-size: 11px; line-height: 16px; color: rgba(255, 226, 166, 0.72); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sec-pending .btn { flex: none; height: 26px; }
+
+/* 折叠：摘要 40，与内容行同高 */
+.fold, .settings-fold { margin-top: 14px; border-top: 0; padding-top: 0; box-shadow: inset 0 1px 0 rgba(80, 255, 170, 0.22); }
+.settings-group-body > .fold, .settings-group-body > .settings-fold { margin-top: 0; box-shadow: inset 0 1px 0 rgba(80, 255, 170, 0.14); }
+.fold > summary, .settings-fold > summary {
+  height: 40px; min-height: 40px; padding: 0 2px;
+  display: flex; align-items: center; align-self: center; gap: 8px;
+  font-size: 11px; line-height: 16px; letter-spacing: 0;
+  color: var(--crt-dim); cursor: pointer; list-style: none;
+  width: auto; margin: 0;
+}
+.settings-group-body > .fold > summary,
+.settings-group-body > .settings-fold > summary { padding: 0 14px; }
+.fold > summary::-webkit-details-marker, .settings-fold > summary::-webkit-details-marker { display: none; }
+.fold > summary::before, .settings-fold > summary::before {
+  content: ""; width: 5px; height: 5px; flex: none;
+  border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg); transition: transform 0.12s ease;
+}
+.fold[open] > summary::before, .settings-fold[open] > summary::before { transform: rotate(45deg); }
+.fold > summary:hover, .settings-fold > summary:hover { color: var(--crt-bright); }
+.fold > summary:focus-visible, .settings-fold > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.fold-body, .settings-fold-body { display: grid; gap: 0; }
+.settings-fold[open] > summary { margin-bottom: 0; }
+.settings-fold-body { padding-bottom: 6px; }
+
+/* 待重启 / 应用结果：40px 定高条 */
+.pending-restart {
+  flex: 0 0 auto;
+  height: 40px; min-height: 40px;
+  margin: 0 0 8px;
+  padding: 0 10px 0 12px;
+  display: flex; align-items: center; gap: 10px;
+  border: 1px solid rgba(255, 210, 122, 0.26);
+  border-left: 2px solid rgba(255, 210, 122, 0.6);
+  border-radius: 8px;
+  background: rgba(255, 210, 122, 0.05);
+  overflow: visible;
+}
+.pending-restart-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.pending-restart-head .muted { font-size: 12px; line-height: 18px; color: var(--crt-bright); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pending-restart-note { display: none; }
+.pending-restart-list {
+  display: flex; align-items: center; gap: 8px; margin: 0; padding: 0; list-style: none;
+  font-size: 11px; line-height: 16px; color: var(--crt-dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
+}
+.pending-restart-list li { display: inline-flex; align-items: baseline; gap: 6px; }
+.pending-restart-list li code { display: none; }
+.pending-restart-cmd { margin-left: auto; display: flex; align-items: center; gap: 8px; flex: none; }
+.pending-restart-cmd code { display: none; }
+.pending-restart-cmd .btn { height: 26px; }
+.pending-restart-cmd .cfg-restart-state { display: none; }
+.pending-restart.is-error { border-color: rgba(255, 155, 155, 0.32); border-left-color: #ff9b9b; background: rgba(40, 10, 10, 0.22); }
+.pending-restart.is-ok { border-color: rgba(109, 255, 184, 0.24); border-left-color: rgba(109, 255, 184, 0.6); background: rgba(6, 36, 24, 0.35); }
+.pending-restart .crt-tag { height: 18px; padding: 0 6px; font-size: 10px; letter-spacing: 0.5px; }
+
+/* 关于本机 760×680 */
+#about .modal-box {
+  width: min(760px, calc(100vw - 32px));
+  height: min(680px, calc(100vh - 32px));
+  display: flex; flex-direction: column;
+  padding: 16px 20px;
+  border-radius: 12px;
+}
+#about .modal-box > h2 { font-size: 15px; line-height: 20px; font-weight: 700; letter-spacing: 0.02em; margin: 0; }
+#about .modal-box > h2 .crt-tag { display: none; }
+#about-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; padding-top: 16px; }
+#about .modal-actions { flex: 0 0 auto; margin-top: 10px; padding-top: 8px; border-top: 1px solid rgba(80, 255, 170, 0.14); }
+#about .modal-actions .btn { height: 26px; }
+.about-group { margin-top: 14px; }
+#about-body > .about-group:first-child { margin-top: 0; }
+.about-group .settings-kv { grid-template-columns: 150px minmax(0, 1fr) 56px; }
+.about-group .settings-kv dt { color: var(--crt-dim); }
+.about-group .settings-kv .kv-value { align-items: flex-end; }
+.about-actions-row { height: 40px; display: flex; align-items: center; gap: 10px; padding: 0 14px; border-top: 1px dashed rgba(80, 255, 170, 0.14); font-size: 12px; color: var(--crt-bright); }
+.about-actions-row:first-child { border-top: 0; }
+
+/* 语言行：40 行，不套面板 */
+.settings-language-row { height: 40px; min-height: 40px; padding: 0 2px; border-bottom: 1px dashed rgba(80, 255, 170, 0.22); }
+.settings-language-label { font-size: 12px; color: var(--crt-bright); }
+.settings-language-control .crt-select-trigger { height: 26px; min-width: 118px; font-size: 12px; }
+
+/* 行内「更多」popover：零高度，菜单 fixed 不裁切 */
+.settings-more { position: relative; display: inline-flex; }
+.settings-more > .btn { height: 26px; }
+.settings-more-panel {
+  position: fixed; z-index: 90;
+  min-width: 148px; padding: 4px;
+  display: grid; gap: 2px;
+  border: 1px solid rgba(80, 255, 170, 0.38);
+  border-radius: 8px;
+  background: rgba(4, 22, 15, 0.98);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.55);
+}
+.settings-more-panel .btn { width: 100%; justify-content: flex-start; border-color: transparent; background: none; height: 26px; font-size: 12px; }
+.settings-more-panel .btn:hover { background: rgba(80, 255, 170, 0.07); }
+
+@media (max-width: 900px) {
+  .modal-settings .settings-shell { flex-direction: column; }
+  .modal-settings .settings-rail {
+    flex: 0 0 auto; width: auto; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 6px;
+    padding: 0 0 8px; margin-bottom: 4px;
+    border-right: 0; border-bottom: 1px solid rgba(80, 255, 170, 0.14);
+  }
+  .modal-settings .settings-rail .settings-tabs { flex-direction: row; flex-wrap: wrap; gap: 6px; }
+  .modal-settings .settings-rail .settings-tab {
+    width: auto; height: 34px; padding: 0 10px;
+    border-radius: 5px; border-left: 0; border-bottom: 2px solid transparent;
+  }
+  .modal-settings .settings-rail .settings-tab.is-active {
+    border-radius: 5px; border-bottom-color: var(--crt);
+    background: rgba(80, 255, 170, 0.06);
+  }
+  .modal-settings .settings-rail-foot { margin-left: 0; }
+  .modal-settings .settings-scroll { padding-top: 16px; }
+  #about .modal-box { height: calc(100vh - 24px); }
+}
+
+/* 900：轨已横排，但行仍保持 label/value 同一行、40px；堆叠只在 ≤760 */
+@media (max-width: 900px) and (min-width: 761px) {
+  .settings-kv, .about-group .settings-kv {
+    grid-template-columns: var(--row-label-w) minmax(0, 1fr) var(--kv-action-w);
+    gap: 0 10px;
+  }
+}
+
+@media (max-width: 560px) {
+  .modal-box.modal-settings, #about .modal-box {
+    width: 100%; height: 100vh; height: 100dvh;
+    max-height: none; border-radius: 0; border: 0;
+    padding: 14px;
+  }
+  .modal-settings .modal-head { padding-right: 0; }
+  .modal-settings .settings-rail .settings-tab { padding: 0 8px; }
+  .settings-group { margin-top: 12px; }
+  .about-actions-row, .settings-actions-row { padding: 0 12px; }
+  #about .modal-actions { flex-wrap: wrap; }
+}
+
+/* 常用 · 本机运行组内的行（常驻 / 重启 / 自动修复 / 重启向导均 40） */
+.settings-row-status {
+  flex: none; display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; line-height: 18px; color: var(--crt-bright);
+  white-space: nowrap;
+}
+#settings-resident > .asst-row {
+  height: 40px; min-height: 40px;
+  display: flex; align-items: center; gap: 10px;
+  padding: 0 14px;
+  border-top: 1px dashed rgba(80, 255, 170, 0.14);
+}
+#settings-resident > .asst-row .asst-name {
+  flex: 0 0 auto; font-size: 12px; line-height: 18px; color: var(--crt-bright);
+  white-space: nowrap;
+}
+#settings-resident > .asst-row > .asst-st { display: none; }
+#settings-resident > .asst-row .asst-sp { display: none; }
+#settings-resident > .asst-row > .btn { height: 26px; flex: 0 0 auto; margin-left: auto; }
+
+/* 忆云：组内直接铺 58 行，不再卡片套卡片 */
+.settings-group-body > .cloud-rows { border: 0; background: none; border-radius: 0; }
+.settings-group-body > .cloud-row { min-height: 58px; padding: 0 14px; border-top: 1px dashed rgba(80, 255, 170, 0.14); }
+.settings-group-body > .cloud-row:first-child { border-top: 0; }
+.settings-group-body > .cloud-rows > .cloud-row:first-child { border-top: 0; }
+
+/* 关于折叠内的分区小标题（10px，与分组标签同层） */
+.about-sub {
+  height: 15px; margin: 10px 0 4px; padding: 0 14px;
+  font-size: 10px; line-height: 15px; font-weight: 600; letter-spacing: 1.5px;
+  color: var(--crt-dim);
+}
+.about-sub:first-child { margin-top: 4px; }
+.about-note { margin: 6px 0 0; padding: 0 14px; font-size: 11px; line-height: 16px; color: var(--crt-dim); }
+.about-tools { padding: 4px 14px 6px; }
+
+/* MCP 端口不一致：独立警告行，不撑高 40 行 */
+.settings-warn-line {
+  margin: 8px 0 0; padding: 3px 0 3px 10px;
+  border-left: 2px solid rgba(255, 210, 122, 0.55);
+  background: linear-gradient(90deg, rgba(255, 210, 122, 0.06), transparent 70%);
+  font-size: 11px; line-height: 16px; color: #ffd27a;
+}
+
+/* 记忆运行时：模式是 40 行里的两枚 26 按钮；说明是组内独立行 */
+.settings-group-body .runtime-mode-actions {
+  height: 40px; margin: 0; padding: 0 14px;
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; align-items: center;
+}
+.settings-group-body .runtime-mode-actions .btn {
+  height: 26px; padding: 0 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.settings-group-body .settings-section-foot { margin: 4px 0 6px; padding: 0 14px; font-size: 11px; line-height: 16px; }
+.settings-group-note { margin: 4px 0 6px; padding: 0 14px; font-size: 11px; line-height: 16px; color: var(--crt-dim); }
+.modal-settings .settings-note { width: 100%; max-width: none; font-size: 11px; line-height: 16px; }
+.runtime-kv { display: grid; grid-template-columns: var(--row-label-w) minmax(0, 1fr) var(--kv-action-w); gap: 0 10px; margin: 0; }
+.runtime-kv .kv-row { display: contents; }
+.runtime-kv .kv-row > * {
+  min-height: 40px; border-top: 1px dashed rgba(80, 255, 170, 0.14);
+  display: flex; align-items: center; min-width: 0;
+}
+.runtime-kv .kv-row:first-child > * { border-top: 0; }
+.runtime-kv dt { padding-left: 14px; font-size: 12px; color: var(--crt-bright); }
+.runtime-kv dd { justify-content: flex-end; padding-right: 14px; font-size: 12px; color: var(--crt-dim); text-align: right; overflow-wrap: anywhere; }
+
+/* 设置内所有按钮统一 26（含行内动作 / 更多 / 语言控件由 select token 管） */
+.modal-settings .btn,
+.settings-more > .btn,
+.settings-more-panel .btn {
+  height: 26px; min-height: 26px; padding: 0 10px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 12px; line-height: 18px; border-radius: 6px;
+}
+.runtime-kv { grid-template-columns: var(--row-label-w) minmax(0, 1fr); }
+
+.device-name-inline { display: inline-flex; align-items: center; gap: 8px; min-width: 0; justify-content: flex-end; }
+.device-name-inline .device-name-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.settings-kv .kv-value .device-rename-inline { display: inline-flex; align-items: center; gap: 6px; }
+.settings-kv .kv-value .device-rename-input { height: 26px; width: 160px; }
+
+/* 集成：组内助手行 40（详情/表单仍按原组件展开） */
+#assistants-panel .asst-head {
+  min-height: 40px; margin: 0; padding: 0 14px;
+  display: flex; align-items: center; gap: 10px; flex-wrap: nowrap;
+}
+#assistants-panel .asst-head .muted {
+  flex: 1 1 auto; min-width: 0; margin: 0;
+  font-size: 11px; line-height: 16px; color: var(--crt-dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#assistants-panel .asst-head .btn { flex: 0 0 auto; }
+#assistants-panel .asst-row {
+  min-height: 40px; padding: 0 14px;
+  display: flex; align-items: center; gap: 10px;
+  border-top: 1px dashed rgba(80, 255, 170, 0.14);
+}
+#assistants-panel .asst-name { font-size: 12px; line-height: 18px; color: var(--crt-bright); }
+#assistants-panel .asst-st { font-size: 11px; line-height: 16px; color: var(--crt-dim); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#assistants-panel .asst-row .btn { height: 26px; flex: 0 0 auto; }
+
+/* 窄屏：kv 行保持三列但压缩 label；字段行改为两行（label 上、控件下），无横向溢出 */
+@media (max-width: 760px) {
+  .settings-kv, .about-group .settings-kv { grid-template-columns: minmax(64px, auto) minmax(0, 1fr) auto; gap: 0 8px; }
+  .settings-kv dt { padding-left: 0; white-space: normal; }
+  .settings-kv .kv-value { text-align: right; }
+  .settings-kv .kv-action { padding-right: 0; }
+  .cfg-row { height: auto; min-height: 40px; flex-wrap: wrap; padding: 6px 14px; row-gap: 2px; }
+  .cfg-label { flex: 1 1 100%; white-space: normal; }
+  .cfg-control { flex: 1 1 100%; margin-left: 0; justify-content: flex-start; }
+  .cfg-control .crt-input { width: 100%; min-width: 0; }
+  .cfg-status { margin-left: auto; }
+  .settings-row-2 { height: 40px; min-height: 40px; flex-wrap: nowrap; padding: 0 14px; row-gap: 0; }
+  .settings-row-2 .settings-row-actions { width: auto; justify-content: flex-end; flex-wrap: nowrap; }
+  #assistants-panel .asst-row { flex-wrap: wrap; padding: 6px 14px; row-gap: 4px; }
+  #assistants-panel .asst-row .btn { margin-left: auto; }
+}
+
+@media (max-width: 560px) {
+  #settings.modal, #about.modal { padding: 0; }
+}
+
+/* 窄屏只读行：改为单行 flex（避开 grid 自动放置的换行），40 行不溢出 */
+@media (max-width: 760px) {
+  .settings-kv, .runtime-kv, .about-group .settings-kv { display: block; }
+  .settings-kv .kv-row, .runtime-kv .kv-row {
+    display: flex; align-items: center; gap: 10px;
+    min-height: 40px; padding: 0 12px;
+    border-top: 1px dashed rgba(80, 255, 170, 0.14);
+  }
+  .settings-kv .kv-row:first-child, .runtime-kv .kv-row:first-child { border-top: 0; }
+  .settings-kv .kv-row > *, .runtime-kv .kv-row > * {
+    min-height: 0; padding: 0; border-top: 0; display: block;
+  }
+  .settings-kv dt, .runtime-kv dt {
+    flex: 1 1 auto; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .settings-kv .kv-value, .runtime-kv dd {
+    flex: 0 1 auto; max-width: 62%; display: block; text-align: right;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .settings-kv .kv-action { flex: none; }
+}
+
+/* 窄屏：压掉旧 760 断点给 dt/dd 的 padding/border（行分隔只由 .kv-row 承担） */
+@media (max-width: 760px) {
+  .settings-shell .settings-kv .kv-row > dt,
+  .settings-shell .settings-kv .kv-row > .kv-value,
+  .settings-shell .settings-kv .kv-row > .kv-action,
+  .settings-shell .runtime-kv .kv-row > * {
+    padding: 0; border-top: 0; min-height: 0;
+  }
+}
+
+/* 40px 提示条：摘要可截断；动作右对齐 */
+.pending-restart-head { flex: 1 1 auto; min-width: 0; }
+.pending-restart-list { flex: 0 1 auto; min-width: 0; max-width: 46%; }
+
+/* 只读值单行：长值走 title，不把 40 撑成多行 */
+.settings-kv .kv-value { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.settings-kv .kv-value .device-name-inline { max-width: 100%; overflow: hidden; }
+
+/* 390：提示条仍是 40 行（摘要进 title；两个动作保留） */
+@media (max-width: 560px) {
+  .pending-restart {
+    height: 40px; min-height: 40px; flex-wrap: nowrap;
+    padding: 0 8px 0 10px; gap: 8px;
+  }
+  .pending-restart-head { display: none; }
+  .pending-restart-cmd { margin-left: auto; gap: 6px; }
+  .pending-restart-cmd .btn { padding: 0 8px; }
+}
+
+/* 常用页在 720 + 40 提示条下要留余量：组间距 12、滚动区上内边距 8 */
+.modal-settings .settings-scroll { padding-top: 16px; }
+.settings-group { margin-top: 12px; }
+
+/* 异常三元组：行下静态 11px 警告行（默认可见，不依赖 focus / 不藏 popover）。
+   .cfg-row 仍是 40；说明行独立占高，无异常时不存在。 */
+.cfg-row + .cfg-effective {
+  position: static;
+  display: flex; flex-wrap: wrap; gap: 2px 10px;
+  margin: 0 14px 6px; padding: 3px 0 3px 10px;
+  border-left: 2px solid rgba(255, 210, 122, 0.55);
+  background: linear-gradient(90deg, rgba(255, 210, 122, 0.06), transparent 70%);
+  font-size: 11px; line-height: 16px; color: #ffd27a;
+  overflow-wrap: anywhere;
+}
+.cfg-row + .cfg-effective .cfg-eff-key { color: #ffd27a; opacity: 0.8; }
+.cfg-row + .cfg-effective .cfg-reason { display: inline; margin: 0; font-size: 11px; color: #ffd27a; }
+.cfg-row + .cfg-effective .cfg-pending { color: #ffd27a; }
+.cfg-row + .cfg-effective .cfg-warn { color: #ffd27a; }
+.cfg-row + .cfg-effective.is-mismatch { color: #ffd27a; }
+
+/* 字段风险说明：行下静态 11px（与异常三元组同视觉，默认可见） */
+.cfg-row + .cfg-warn-line {
+  margin: 0 14px 6px; padding: 3px 0 3px 10px;
+  border-left: 2px solid rgba(255, 210, 122, 0.55);
+  background: linear-gradient(90deg, rgba(255, 210, 122, 0.06), transparent 70%);
+  font-size: 11px; line-height: 16px; color: #ffd27a;
+  overflow-wrap: anywhere;
+}
+.cfg-row + .cfg-warn-line + .cfg-effective { margin-top: 0; }
+
+/* v2 英文同样 12/18：压掉旧 en 的 1.35 标签行距对 .cfg-label 的覆盖 */
+html[lang="en-US"] .modal-settings .cfg-label { line-height: 19px; }
+
+/* 加入忆云仍是 560 宽（cloud-join-box 覆盖 modal-box-wide） */
+#join-cloud-modal .modal-box, .modal-box.cloud-join-box { width: min(560px, 94vw); }
+
+/* 窄屏只读值仍 62% 上限：覆盖 v2 的全局 max-width:100% */
+@media (max-width: 760px) {
+  .settings-kv .kv-row > .kv-value, .runtime-kv .kv-row > dd { max-width: 62%; }
+}
+
+/* 关于本机 390：长路径/地址换行，不用省略号（避免 scrollWidth 溢出） */
+@media (max-width: 760px) {
+  .about-group .settings-kv .kv-value {
+    white-space: normal; overflow: visible; text-overflow: clip;
+    overflow-wrap: anywhere; word-break: break-word;
+  }
+}
+
+/* 390：安全卡允许换行（宽度不足时不再横向溢出；桌面仍是 114 定高） */
+@media (max-width: 560px) {
+  #settings-security-slot > .settings-section.sec-card { height: auto; min-height: 114px; }
+  .sec-card-head { height: auto; min-height: 20px; flex-wrap: wrap; row-gap: 6px; }
+  .sec-card-head .sec-card-actions { flex-wrap: wrap; }
+  .sec-card-line, .sec-card-meta {
+    white-space: normal; overflow: visible; text-overflow: clip;
+    overflow-wrap: anywhere; word-break: break-word;
+  }
+}
+
+/* 390：待批准条件条必须在 356 内收缩（长设备名走 ellipsis，不撑宽 slot） */
+@media (max-width: 560px) {
+  #settings-security-slot { min-width: 0; }
+  .sec-pending { min-width: 0; overflow: hidden; }
+  .sec-pending-copy { min-width: 0; overflow: hidden; }
+  .sec-pending-copy b { flex: 0 0 auto; }
+  .sec-pending-copy span { flex: 1 1 auto; min-width: 0; }
+  .sec-pending .btn { flex: 0 0 auto; }
+  #settings-security-slot > .settings-section.sec-card { min-width: 0; }
+}
+
+/* ===== v2.1 规格对齐（仅设置弹层；关于/其它弹层不受影响） ===== */
+.modal-settings .modal-head { height: 38px; }
+.modal-settings .modal-head h2 { font-size: 15px; line-height: 20px; font-weight: 700; letter-spacing: 0.02em; }
+.modal-settings .modal-head .settings-apply-note { margin-top: 0; }
+.modal-settings .settings-group-head h3 { text-transform: uppercase; }
+.modal-settings .cfg-label { font-size: 13px; line-height: 19px; }
+.modal-settings .cfg-status,
+.modal-settings .cfg-control .crt-input { font-size: 12px; line-height: 18px; }
+/* 只读行（本机状态 / 运行状态 / settings-kv / runtime-kv）：12/18，不用 13 挤占 */
+.modal-settings .settings-kv dt,
+.modal-settings .settings-kv .kv-value,
+.modal-settings .runtime-kv dt,
+.modal-settings .runtime-kv dd { font-size: 12px; line-height: 18px; }
+.modal-settings .btn,
+.settings-more > .btn,
+.settings-more-panel .btn { height: 27px; min-height: 27px; }
+.modal-settings .cfg-row {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr) 68px;
+  column-gap: 10px;
+  align-items: center;
+  height: 40px; min-height: 40px;
+  padding: 0 14px;
+}
+.modal-settings .cfg-label { flex: none; }
+.modal-settings .cfg-control { margin-left: 0; justify-self: end; justify-content: flex-end; }
+.modal-settings .cfg-status { justify-self: end; }
+/* 主要 cell 的中线显式居中；多行值保留 column + justify-center。窄屏堆叠不套此规则。 */
+@media (min-width: 761px) {
+  .modal-settings :is(.cfg-row, .settings-kv .kv-row, .runtime-kv .kv-row, .asst-row, .asst-head, .settings-language-row) > *,
+  #about .settings-kv .kv-row > * { align-self: center; }
+  .modal-settings .cfg-row > :where(.cfg-label, .cfg-control, .cfg-status),
+  #settings-resident > .asst-row > :where(.asst-name, .settings-row-status, .settings-row-actions) {
+    min-height: 40px; display: flex; align-items: center; align-self: center;
+  }
+  #assistants-panel :is(.asst-row, .asst-head) > :where(.asst-name, .asst-st, .settings-row-actions) {
+    display: flex; align-items: center; align-self: center;
+  }
+  .modal-settings .settings-kv .kv-value { justify-content: center; }
+}
+.modal-settings [data-settings-section="model-source"] .cfg-row { grid-template-columns: 150px minmax(0, 1fr); }
+.modal-settings [data-settings-section="model-source"] .cfg-row > .cfg-status:empty { display: none; }
+.modal-settings [data-settings-section="model-source"] .cfg-control { justify-content: flex-end; justify-self: end; width: 100%; }
+[data-settings-section="model-source"] .cfg-control .crt-select { width: min(280px, 100%); flex: none; }
+[data-settings-section="model-source"] .cfg-control .crt-select-trigger { width: 100%; }
+@media (max-width: 760px) {
+  .modal-settings [data-settings-section="model-source"] .cfg-row { grid-template-columns: minmax(0, 1fr); }
+}
+.modal-settings .settings-kv .kv-action .btn { height: 27px; }
+
+/* v2.1 · 常用「界面」组：语言行在面板内不再自带下虚线 */
+.settings-group-body .settings-language-row {
+  height: 40px; min-height: 40px; padding: 0 14px; border-bottom: 0;
+}
+
+/* v2.1 · 安全卡：22px 序号 + 主列 + 动作列（仍 114） */
+#settings-security-slot > .settings-section.sec-card {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  column-gap: 10px;
+  align-items: start;
+  height: 114px;
+  padding: 14px 16px 14px 12px;
+}
+.sec-card-idx {
+  display: block; padding-top: 3px;
+  font-size: 10px; line-height: 15px; letter-spacing: 1.2px;
+  color: var(--crt-dim); font-variant-numeric: tabular-nums;
+}
+.sec-card-main { grid-column: 2; min-width: 0; }
+.sec-card-actions {
+  grid-column: 3; justify-self: end; align-self: start;
+  height: 20px; min-height: 20px;
+  display: flex; align-items: center; justify-content: flex-end;
+  gap: 6px; flex-wrap: wrap; min-width: 0;
+}
+.sec-card-actions .btn { height: 27px; padding: 0 10px; }
+
+/* 安全审计一行流（无事件时不渲染） */
+.modal-settings .sec-audit-line, #settings .sec-audit-line {
+  margin: 2px 0 0;
+  display: flex; align-items: center; gap: 8px;
+  line-height: 16px; white-space: nowrap;
+  min-width: 0;
+  font-size: 11px; line-height: 16px; color: var(--crt-dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sec-audit-time { flex: none; font-variant-numeric: tabular-nums; }
+.sec-audit-type { flex: none; color: var(--crt-bright); }
+.sec-audit-desc { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.sec-audit-desc b { font-weight: 400; color: var(--crt-bright); }
+
+/* v2.1 · 窄屏：字段行仍两行（标签上、控件下），安全卡动作换到主列下方 */
+@media (max-width: 760px) {
+  .modal-settings .cfg-row {
+    display: grid; grid-template-columns: minmax(0, 1fr);
+    height: auto; min-height: 40px; row-gap: 2px; padding: 6px 14px;
+  }
+  .modal-settings .cfg-label { white-space: normal; }
+  .modal-settings .cfg-control { justify-self: start; justify-content: flex-start; }
+  .modal-settings .cfg-status { justify-self: start; }
+}
+@media (max-width: 560px) {
+  #settings-security-slot > .settings-section.sec-card {
+    grid-template-columns: 22px minmax(0, 1fr);
+    height: auto; min-height: 114px;
+  }
+  .sec-card-actions { grid-column: 2; grid-row: 2; justify-self: start; margin-top: 2px; }
+  .sec-card-main { grid-column: 2; grid-row: 1; }
+}
+
+/* v2.1 · 常用 spacing 回到 4/8/12/16 阶梯；向导是组内独立 40px 行 */
+.modal-settings .settings-group { margin-top: 12px; }
+.modal-settings .settings-group-head { margin-bottom: 8px; }
+/* 常用四行 + 40px banner 仍需不滚动：语言已有 label，不重复显示「界面」组头。 */
+#settings-panel-common > .settings-group { margin-top: 8px; }
+#settings-panel-common > .settings-group:first-child { margin-top: 0; }
+#settings-panel-common .settings-group-head { margin-bottom: 4px; }
+#settings-panel-common [data-settings-group="interface"] .settings-group-head { display: none; }
+/* 常用动作共享同一宽度；文字仍 12、控件 27/8，不随文案长度跳动。 */
+#settings-panel-common { --settings-action-btn-w: 116px; }
+#settings-panel-common .settings-row-actions .btn,
+#settings-resident > .asst-row > .btn,
+#settings-panel-common .cloud-actions .btn {
+  width: var(--settings-action-btn-w); min-width: var(--settings-action-btn-w);
+  flex: 0 0 var(--settings-action-btn-w);
+}
+.settings-resident-row .settings-row-status {
+  flex: 0 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.settings-resident-row .settings-row-actions { margin-left: auto; flex: none; }
+@media (max-width: 760px) {
+  #settings-resident > .asst-row.settings-resident-row {
+    height: auto; min-height: 40px; padding: 0 14px; row-gap: 0;
+  }
+}
+
+/* ===== v2.2 校准（PR #315 任务书：160 轨 / 20 呼吸 / 分段 / 去 pill） ===== */
+
+/* 记忆模式：单个外框分段控件，两格等宽、无间隙 */
+.settings-group-body .runtime-mode-actions {
+  height: 40px; margin: 0; padding: 0 14px;
+  display: flex; align-items: center;
+}
+.runtime-mode-seg {
+  width: 100%; height: 27px;
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  border: 1px solid rgba(80, 255, 170, 0.32);
+  border-radius: 6px; overflow: hidden;
+}
+.runtime-mode-seg .btn {
+  height: 27px; min-height: 27px; padding: 0 10px;
+  border: 0; border-radius: 0; background: transparent;
+  justify-content: center;
+}
+.runtime-mode-seg .btn + .btn { border-left: 1px solid rgba(80, 255, 170, 0.32); }
+.runtime-mode-seg .btn[aria-pressed="true"] {
+  background: rgba(80, 255, 170, 0.10);
+  color: #9dffcf;
+}
+
+/* 运行状态：右对齐纯文字，异常才琥珀，空值 — 用 faint */
+.runtime-kv dd.rt-value { color: var(--crt-dim); }
+.runtime-kv dd.rt-value.is-warn { color: #ffd27a; }
+.runtime-kv dd.rt-value.is-empty { color: var(--crt-faint); }
+
+/* 忆云状态：当前 = 绿描边微光；已归档 = 透明描边 + dim（不再用列表填充 chip） */
+.sec-tag-archived {
+  border-color: var(--crt-border-soft);
+  background: transparent;
+  color: var(--crt-dim);
+}
+
+/* 开关 off：去蓝，回收站色；on 仍是 --ok + 白滑块 */
+.toggle .slider { background: rgba(140, 255, 200, 0.12); }
+.toggle .slider::before { background: rgba(140, 255, 200, 0.45); }
+.toggle input:checked + .slider { background: var(--ok); }
+.toggle input:checked + .slider::before { background: #fff; }
+
+/* 安全卡未启用：大数值用 crt-dim（不再用偏蓝的 muted） */
+#settings-security-slot > .settings-section.sec-card.is-off .sec-card-value strong { color: var(--crt-dim); }
+
+/* 安全卡警告行：与 MCP 同款 left-bar */
+.sec-card-warn {
+  box-shadow: inset 2px 0 0 #ffd27a;
+  padding-left: 8px;
+}
+
+/* ===== v2.3 设置控件 token 收口（27 高 / 8 圆角；只作用于设置弹层） ===== */
+.modal-settings .btn,
+.modal-settings .crt-select-trigger,
+.modal-settings .crt-input,
+.modal-settings select.crt-input {
+  height: var(--settings-control-h) !important;
+  min-height: var(--settings-control-h) !important;
+  border-radius: var(--settings-control-radius) !important;
+}
+.modal-settings .btn { padding: 0 10px !important; }
+.modal-settings .crt-input,
+.modal-settings .crt-select-trigger { padding: 0 8px !important; }
+.modal-settings .cfg-control { min-height: var(--settings-control-h); }
+.modal-settings .runtime-mode-seg { height: var(--settings-control-h); border-radius: var(--settings-control-radius); }
+.modal-settings .runtime-mode-seg .btn {
+  height: 100% !important; min-height: 0 !important;
+  box-sizing: border-box; border-radius: 0 !important;
+}
+
+/* 组内说明/分组说明/段脚：占满面板、16 行高、左右 14；彻底去掉 62ch 截短 */
+.modal-settings .settings-group-note,
+.modal-settings .settings-group-desc,
+.modal-settings .settings-group-foot,
+.modal-settings .settings-section-foot {
+  width: 100%; max-width: none;
+  padding: 0 14px;
+  font-size: 11px; line-height: 16px;
+}
+.modal-settings .settings-section-foot { margin: 4px 0 6px; }
+/* 普通 hint 默认不占布局；全文由所在组 / 控件的 title 承载。锁定态指引不在此作用域。 */
+.settings-shell .settings-group-note,
+.settings-shell .settings-group-desc,
+.settings-shell .settings-group-foot,
+.settings-shell .settings-section-foot,
+#settings-panel-runtime > .settings-note,
+#assistants-panel .asst-head > .muted { display: none; }
+
+/* 行下异常/警告行：同样取消 62ch；保留既有 left-bar 与缩进 */
+.modal-settings .cfg-row + .cfg-effective,
+.modal-settings .cfg-row + .cfg-warn-line,
+.modal-settings .settings-warn-line {
+  max-width: none;
+  line-height: 16px;
+}
+.modal-settings .settings-warn-line { width: 100%; }
+
+/* 普通说明已移到 title；重启 / 修复 / 向导行在窄屏也保持 40px。 */
+@media (max-width: 760px) {
+  #settings-resident > .asst-row.settings-repair-row {
+    height: 40px; min-height: 40px;
+    padding: 0 14px; row-gap: 0;
+  }
+}
+
+/* ===== v2.4 字体/间距校准（按设计原稿） ===== */
+/* 本机状态右上 meta：11px 纯文字右对齐，无 chip；无数据 — */
+.modal-settings .settings-kv .kv-value.has-meta {
+  flex-direction: row; align-items: center; gap: 8px; justify-content: space-between;
+}
+.modal-settings .settings-kv .kv-meta {
+  flex: 0 1 auto; max-width: 62%; min-width: 0; margin-left: auto;
+  font-size: 11px; line-height: 16px; color: var(--crt-dim); text-align: right;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+@media (max-width: 560px) {
+  .modal-settings .settings-kv .kv-value.has-meta { flex-wrap: wrap; row-gap: 0; }
+  .modal-settings .settings-kv .kv-meta { max-width: 100%; }
 }

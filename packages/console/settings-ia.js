@@ -48,7 +48,9 @@ export const IA_SETTINGS_EXTRA = [
 export const IA_SETTINGS_FOLDS = [
   { id: 'mcp-danger', label: 'MCP 接入 · 危险与自救', labelKey: 'settings.fold.mcpDanger', home: 'mcp' },
   { id: 'diagnostics', label: '诊断与恢复', labelKey: 'settings.fold.diagnostics', home: 'advanced' },
-  { id: 'about-runtime', label: '运行状态（只读）', labelKey: 'settings.fold.aboutRuntime', home: 'about' },
+  { id: 'about-runtime', label: '收敛健康、同步节奏与运行状态', labelKey: 'about.fold.runtime', home: 'about' },
+  { id: 'about-identity', label: '身份、地址与加密', labelKey: 'about.fold.identity', home: 'about' },
+  { id: 'about-diag', label: '对端路径、舰队与能力清单', labelKey: 'about.fold.diag', home: 'about' },
 ];
 
 /**
@@ -229,7 +231,7 @@ export const IA_MCP_FIELDS = IA_MCP_SECTIONS.flatMap((section) => section.fields
 /**
  * 0.3 记忆运行时：普通用户只面对两个产品增量：
  * 1. 设置 · 记忆模式 = MCP 配置 memoryRuntime.enabled（轻量 MCP / 沉浸式）；
- * 2. 高级 · 模型来源 = sidecar config.json 的 model.source（仅此一个下拉）。
+ * 2. 记忆 · 模型来源 = sidecar config.json 的 model.source（仅此一个下拉）。
  * 旧 runtime.* 字段不再属于 Console 设置面。
  */
 export const IA_RUNTIME_CONTROL_PATHS = ['memoryRuntime.enabled'];
@@ -342,6 +344,24 @@ export function formatBytes(value, { locale = 'zh-CN' } = {}) {
     formatted = amount.toFixed(digits).replace(/\.0+$/, '');
   }
   return `${formatted} ${units[index]}`;
+}
+
+/** 设置 · 常用只读 meta：multiaddr 只保留实际 host:port；无法解析时不回显长地址。 */
+export function settingsListenHostPort(value) {
+  const text = String(value ?? '').trim();
+  const match = text.match(/\/(ip4|ip6|dns4|dns6|dns)\/([^/]+)\/tcp\/(\d+)(?:\/|$)/i);
+  if (!match || Number(match[3]) > 65535) return '—';
+  const host = match[1].toLowerCase() === 'ip6' ? `[${match[2]}]` : match[2];
+  return `${host}:${Number(match[3])}`;
+}
+
+/** 邀请 endpoint 去协议 / 路径 / 凭据，只显示 host:port；非 host:port 数据统一为 —。 */
+export function settingsEndpointHostPort(value) {
+  const text = String(value ?? '').trim();
+  const authority = text.replace(/^[a-z][a-z\d+.-]*:\/\//i, '').split(/[/?#]/, 1)[0].split('@').pop() ?? '';
+  const match = authority.match(/^(\[[\da-f:.%]+\]|[a-z\d.-]+):(\d+)$/i);
+  if (!match || Number(match[2]) > 65535) return '—';
+  return `${match[1]}:${Number(match[2])}`;
 }
 
 /** sidecar 生命周期状态 → Console 文案 key（未知状态按 stopped 展示，不暴露原始码）。 */

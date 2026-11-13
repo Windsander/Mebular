@@ -1644,6 +1644,15 @@ try {
       `tabs=${tabIds} labels=${tabLabels}`);
     const runtimeFieldsMapped = ia.IA_RUNTIME_FIELDS.every((path) => ia.IA_MIGRATION[path] === 'runtime');
     const memQueryBlock = consoleSrc2.match(/function memQuery\(\) \{[\s\S]*?\n\}/)?.[0] ?? '';
+    const runtimeRenderBlock = consoleSrc2.slice(
+      consoleSrc2.indexOf('function renderRuntimeSettings('),
+      consoleSrc2.indexOf('function renderLockedSettings('),
+    );
+    const advancedPanelStart = consoleSrc2.lastIndexOf("${panel('advanced', `");
+    const advancedPanelEnd = consoleSrc2.indexOf('`)}', advancedPanelStart);
+    const advancedPanelBlock = advancedPanelStart >= 0 && advancedPanelEnd > advancedPanelStart
+      ? consoleSrc2.slice(advancedPanelStart, advancedPanelEnd)
+      : '';
     check('0.3 记忆运行时：仅 memoryRuntime.enabled 模式开关 + 模型来源两个产品增量（含本地模型列表）',
       ia.IA_RUNTIME_CONTROL_PATHS.join(',') === 'memoryRuntime.enabled'
         && ia.IA_RUNTIME_MODEL_SOURCES.join(',') === 'heuristic,local,host,api,auto'
@@ -1662,6 +1671,8 @@ try {
         && consoleSrc2.includes('data-rt-mode')
         && consoleSrc2.includes('data-rt-model-source')
         && consoleSrc2.includes('data-rt-model-list')
+        && runtimeRenderBlock.includes('${runtimeModelSourceSectionHtml()}')
+        && advancedPanelBlock.length > 0 && !advancedPanelBlock.includes('runtimeModelSourceSectionHtml')
         && !/runtimePack|data-rt-pack|settings\.runtime\.local/.test(consoleSrc2)
         && !consoleSrc2.includes('/runtime/v1')
         && memQueryBlock.length > 0 && !memQueryBlock.includes('includeInternal')
@@ -1713,10 +1724,11 @@ try {
     check('排版 token 齐备（label 列宽 / 动作列宽 / 行距 / 控件高 / section 间距）',
       tokens.every((t) => cssSrc.includes(`${t}:`)), tokens.filter((t) => !cssSrc.includes(`${t}:`)).join(',') || '全部命中');
 
-    check('kv 与 cfg 共用同一 label 列宽变量（不再各写一套栅格）',
-      cssSrc.includes('grid-template-columns: var(--row-label-w) minmax(0, 1fr) var(--kv-action-w)')
-        && cssSrc.includes('grid-template-columns: var(--row-label-w) minmax(0, 1fr)'),
-      'settings-kv=3 列（label/value/action），cfg-row=2 列（label/control），label 列同为 var(--row-label-w)');
+    check('kv 与 cfg 共用同一三列栅格（label / 值·控件 / 状态·动作）',
+      (cssSrc.match(/grid-template-columns: var\(--row-label-w\) minmax\(0, 1fr\) var\(--kv-action-w\)/g) ?? []).length >= 2
+        && /\.cfg-row \{[\s\S]*?grid-template-columns: var\(--row-label-w\) minmax\(0, 1fr\) var\(--kv-action-w\);/.test(cssSrc)
+        && /\.settings-kv \{[\s\S]*?grid-template-columns: var\(--row-label-w\) minmax\(0, 1fr\) var\(--kv-action-w\);/.test(cssSrc),
+      'settings-kv 与 cfg-row 均 3 列（label/值·控件/状态·动作）');
 
     check('动作列固定宽且行高统一（button 不撑高行）',
       cssSrc.includes('.settings-kv .kv-action { display: flex; align-items: center; justify-content: flex-end; min-height: var(--control-h); }')
@@ -1734,8 +1746,209 @@ try {
       /@media \(max-width: 760px\) \{[\s\S]*?\.settings-kv \{\s*grid-template-columns: minmax\(0, 1fr\);[\s\S]*?\.cfg-row \{ grid-template-columns: minmax\(0, 1fr\); \}/.test(cssSrc),
       '760 断点内 kv/cfg 单列');
 
+    // B · 统一行模板 + 右侧状态列
+    check('B 行模板：设置内状态/动作列 68px（about/device 全局仍 56px）',
+      /\.settings-shell \{ --kv-action-w: 68px;/.test(cssSrc)
+        && /:root \{[\s\S]*?--kv-action-w: 56px;/.test(cssSrc),
+      'settings-shell=68 / :root=56');
+
+    check('B 状态列：纯文字生效中/待重启/未生效，无 chip/圆点/底色',
+      cssSrc.includes('.cfg-status {')
+        && cssSrc.includes('.cfg-status.is-warn { color: #ffd27a; }')
+        && jsSrc.includes('function runtimeStatusCell')
+        && jsSrc.includes("t('settings.editor.inEffect')")
+        && jsSrc.includes("t('settings.editor.pendingShort')")
+        && jsSrc.includes("t('settings.editor.mismatchShort')")
+        && jsSrc.includes('data-cfg-status="${s.status}"')
+        && !/\.cfg-status[^{]*\{[^}]*background/.test(cssSrc),
+      'span.cfg-status[data-cfg-status] 仅文字');
+
+    check('B 行高 40px + 行间虚线 + 首行无虚线；帮助/三元组跨控件+状态列',
+      /\.settings-shell \.cfg-row \{[^}]*min-height: 40px;[^}]*border-top: 1px dashed var\(--border\);/.test(cssSrc)
+        && cssSrc.includes('.settings-shell .cfg-row:first-child,')
+        && cssSrc.includes('.cfg-row > .cfg-help,')
+        && cssSrc.includes('.cfg-row > .cfg-effective { grid-column: 2 / 4; }')
+        && jsSrc.includes('${runtimeStatusCell(field)}')
+        && jsSrc.includes('<div class="cfg-control">${control}</div>'),
+      '40px / dashed / first-row / 2-4 span');
+
+    check('B 正常行不新增子行：三元组仅异常输出，状态列独立成格',
+      jsSrc.includes('if (!s.row || s.status === \'ok\') return \'\';')
+        && jsSrc.includes('if (s.status === \'none\') return \'<span class="cfg-status" data-cfg-status="none"></span>\';')
+        && jsSrc.includes('const status = pendingItem ? \'pending\' : (mismatch || showReason ? \'mismatch\' : \'ok\');'),
+      'runtimeFieldState 单一判定；ok 不展开 cfg-effective');
+
+    check('B 只读行：settings-kv 3 列 / runtime-kv 2 列，设置内 40px + 虚线、首行无虚线',
+      /\.settings-shell \.settings-kv,\n\.settings-shell \.runtime-kv \{ gap: 0 var\(--row-gap\); \}/.test(cssSrc)
+        && /\.settings-shell \.settings-kv \.kv-row > \*,\n\.settings-shell \.runtime-kv \.kv-row > \* \{[^}]*min-height: 40px;[^}]*border-top: 1px dashed var\(--border\);/.test(cssSrc)
+        && cssSrc.includes('.settings-shell .settings-kv .kv-row:first-child > *,')
+        && cssSrc.includes('.settings-shell .runtime-kv .kv-row:first-child > * {')
+        && /\.runtime-kv \{ display: grid; grid-template-columns: minmax\(88px, auto\) minmax\(0, 1fr\);/.test(cssSrc),
+      'dl 行容器 display:contents；设置内 40px/虚线');
+
+    check('B 响应式 ≤760：正常生效中隐藏，异常保留；帮助/三元组跨整行',
+      /\.settings-shell \.cfg-row > \.cfg-status\.is-ok \{ display: none; \}/.test(cssSrc)
+        && /\.settings-shell \.cfg-row > \.cfg-help,\n {2}\.settings-shell \.cfg-row > \.cfg-effective \{ grid-column: 1 \/ -1; \}/.test(cssSrc)
+        && /\.settings-shell \.settings-kv,\n {2}\.settings-shell \.runtime-kv \{ grid-template-columns: minmax\(0, 1fr\); gap: 0; \}/.test(cssSrc),
+      '760 单列 + 异常状态保留');
+
+    const railActive = cssSrc.match(/\.settings-rail \.settings-tab\.is-active \{[\s\S]*?\n\}/)?.[0] ?? '';
+    check('U-4 设置壳：左轨 160px + 640 外框不变 + 固定 720px 高 + ≤900 折叠顶部横排',
+      /\.settings-shell \{[^}]*display: flex;/.test(cssSrc)
+        && /\.settings-rail \{[^}]*flex: 0 0 160px;[^}]*width: 160px;/.test(cssSrc)
+        && /\.modal-box-wide \{ width: min\(640px, 94vw\); \}/.test(cssSrc)
+        && /\.modal-box\.modal-settings \{[^}]*overflow: hidden/.test(cssSrc)
+        && /\.modal-box\.modal-settings \{[^}]*height: min\(720px, calc\(100vh - 48px\)\);/.test(cssSrc)
+        && /@media \(max-width: 900px\) \{[\s\S]*?\.settings-shell \{ flex-direction: column;[\s\S]*?\.settings-rail \{/.test(cssSrc)
+        && /\.settings-rail-foot \{[^}]*padding-top: 0;/.test(cssSrc)
+        && !/\.settings-rail-foot::before/.test(cssSrc)
+        && /\.settings-rail-foot \.settings-tab-extra::after \{[^}]*content: "ⓘ"/.test(cssSrc)
+        && jsSrc.includes('settings-rail-foot') && jsSrc.includes('data-settings-extra="${escapeHtml(item.opens)}"'),
+      'shell/rail 160/foot/900 折叠就位');
+
+    check('U-4 页签激活态：左 2px 荧光条 + 6% 底 + crt-bright 文字 + 微光 token；未激活 muted',
+      railActive.includes('box-shadow: inset 2px 0 0 var(--crt);')
+        && railActive.includes('background: rgba(80, 255, 170, 0.06);')
+        && railActive.includes('color: var(--crt-bright);')
+        && railActive.includes('text-shadow: var(--crt-text-glow);')
+        && /\.settings-rail \.settings-tab \{[\s\S]*?color: var\(--muted\);/.test(cssSrc),
+      railActive.trim().split('\n')[0] || '缺少 rail 激活态规则');
+
     check('渲染模板无内联 width（对齐只能来自 CSS token）',
       !/style="width/.test(jsSrc), /style="width/.test(jsSrc) ? '发现内联 width' : '无内联 width');
+
+    // E · 色彩纪律 + 危险/琥珀收口 + reduced-motion
+    const dangerBtnScope = cssSrc.match(/#settings \.btn-crt-danger,\n#security-action \.btn-crt-danger \{[^}]*\}/)?.[0] ?? '';
+    const dangerTagScope = cssSrc.match(/#settings \.crt-tag-error,\n#security-action \.crt-tag-error \{[^}]*\}/)?.[0] ?? '';
+    check('E1 色彩纪律：设置壳/轨无底色（不引入蓝底）',
+      !/\.settings-shell\s*\{[^}]*background/.test(cssSrc)
+        && !/\.settings-rail\s*\{[^}]*background/.test(cssSrc),
+      'settings-shell / settings-rail 仅布局，无 background');
+    check('E1 危险语义：设置/安全弹框 #ff9b9b on rgba(40,10,10,.22)，去红字微光',
+      dangerBtnScope.includes('color: #ff9b9b;')
+        && dangerBtnScope.includes('background: rgba(40, 10, 10, 0.22);')
+        && dangerBtnScope.includes('text-shadow: none;')
+        && dangerTagScope.includes('color: #ff9b9b;')
+        && dangerTagScope.includes('background: rgba(40, 10, 10, 0.22);')
+        && cssSrc.includes('.settings-danger > h3 { color: #ff9b9b; }')
+        && /\.btn-crt\.btn-crt-danger \{[^}]*color: #ffb9b9;/.test(cssSrc)
+        && /\.crt-tag-error \{ background: #2a0f0f; border-color: #5a1a1a; color: #ffb4b4; \}/.test(cssSrc),
+      'scoped danger / 全局危险色未改');
+    check('E1 reduced-motion：设置内页签/轨/状态/安全卡/折叠过渡关闭',
+      /@media \(prefers-reduced-motion: reduce\) \{\n\s+\.settings-tab,\n\s+\.settings-rail,\n\s+\.cfg-status,\n\s+\.sec-card,\n\s+details\.fold summary::before \{ transition: none; animation: none; \}\n\}/.test(cssSrc),
+      'settings motion off');
+    check('E1 外框不变：modal-settings overflow hidden + 640 宽',
+      /\.modal-box\.modal-settings \{[^}]*overflow: hidden/.test(cssSrc)
+        && /\.modal-box-wide \{ width: min\(640px, 94vw\); \}/.test(cssSrc),
+      '640 / overflow hidden 保持');
+    // v2：760×720 / 160 轨 / 关于 680 / 40 行 / 10+1.5 标签 / 19px 值 / 114 卡 / 40 条
+    check('v2 设置外框与轨：760×720、160、关于 760×680',
+      cssSrc.includes('.modal-box.modal-settings {')
+        && cssSrc.includes('width: min(760px, calc(100vw - 32px));')
+        && cssSrc.includes('height: min(720px, calc(100vh - 32px));')
+        && cssSrc.includes('padding: 18px 0 18px 20px;')
+        && cssSrc.includes('flex: 0 0 160px; width: 160px;')
+        && cssSrc.includes('#about .modal-box {')
+        && cssSrc.includes('height: min(680px, calc(100vh - 32px));'),
+      '760/720/160/680');
+    check('v2 行/字号/安全卡：40 行、10+1.5 分组标签、19px 状态值、114 卡',
+      cssSrc.includes('.settings-kv .kv-row > * {') && cssSrc.includes('min-height: 40px;')
+        && cssSrc.includes('font-size: 10px; line-height: 15px; font-weight: 600; letter-spacing: 1.5px;')
+        && cssSrc.includes('font-size: 19px; line-height: 22px; font-weight: 700; letter-spacing: 0.5px;')
+        && cssSrc.includes('height: 114px;'),
+      '40/10/19/114');
+    const assistantsSrcV2 = await readFile(join(consoleDir, 'assistants.js'), 'utf-8');
+    check('v2 待重启条 40 + 常驻「更多」菜单 a11y',
+      cssSrc.includes('.pending-restart {') && cssSrc.includes('height: 40px; min-height: 40px;')
+        && assistantsSrcV2.includes('data-settings-more') && assistantsSrcV2.includes('aria-haspopup="menu"')
+        && assistantsSrcV2.includes('aria-expanded="false"') && cssSrc.includes('.settings-more-panel {'),
+      'banner 40 / more menu');
+    check('v2 异常三元组默认可见：行下静态 11px 警告行（不依赖 focus / 不撑高 40 行）',
+      jsSrc.includes('${warnLine}${runtimeCompareLine(field)}')
+        && cssSrc.includes('.cfg-row + .cfg-effective {')
+        && /\.cfg-row \+ \.cfg-effective \{[^}]*position: static;[^}]*display: flex;/s.test(cssSrc),
+      'compare line sibling + static');
+    check('v2.1 排印/尺寸：标题 15、标签 13、按钮 27、分组大写、卡序号与审计一行',
+      cssSrc.includes('font-size: 15px; line-height: 20px; font-weight: 700;')
+        && cssSrc.includes('grid-template-columns: 150px minmax(0, 1fr) 68px;')
+        && cssSrc.includes('height: 27px; min-height: 27px;')
+        && cssSrc.includes('text-transform: uppercase;')
+        && cssSrc.includes('.sec-card-idx {')
+        && jsSrc.includes('data-security-audit')
+        && jsSrc.includes('settings.group.interface'),
+      '15/13/27/uppercase/index/audit');
+    // v2.2 校准：160 轨 + 20 呼吸 / header 同行 / active 实底 / 分段单框 / 状态去 pill
+    check('v2.2 栅格与 header：160 轨、内容 20 呼吸、header 38+18=57、标题与说明同行',
+      cssSrc.includes('flex: 0 0 160px; width: 160px;')
+        && cssSrc.includes('.modal-settings .settings-scroll { padding: 16px 20px 0;')
+        && /\.modal-settings \.modal-head \{[^}]*height: 38px;[^}]*align-items: center;/s.test(cssSrc)
+        && /\.modal-settings \.modal-heading \{[^}]*display: flex;[^}]*align-items: baseline;/s.test(cssSrc)
+        && cssSrc.includes('.modal-settings .modal-head h2::before')
+        && /\.modal-settings \.modal-head \.settings-apply-note \{[^}]*margin: 0;[^}]*line-height: 16px;/s.test(cssSrc),
+      '160 / 20 / 57 / inline header');
+    check('v2.2 轨激活实底 + 记忆分段单框 + 运行状态无 pill',
+      /\.modal-settings \.settings-rail \.settings-tab\.is-active \{[^}]*background: rgba\(80, 255, 170, 0\.06\);/s.test(cssSrc)
+        && cssSrc.includes('box-shadow: inset 2px 0 0 var(--crt);')
+        && cssSrc.includes('.runtime-mode-seg {')
+        && cssSrc.includes('grid-template-columns: repeat(2, minmax(0, 1fr));')
+        && cssSrc.includes('.runtime-mode-seg .btn + .btn { border-left: 1px solid rgba(80, 255, 170, 0.32); }')
+        && !jsSrc.includes('data-rt-mode-chip')
+        && !jsSrc.slice(jsSrc.indexOf('function runtimeStatusFactsHtml'), jsSrc.indexOf('function runtimeModeSettingsHtml')).includes('crt-tag')
+        && jsSrc.includes('class="rt-value')
+        && cssSrc.includes('.runtime-kv dd.rt-value.is-warn { color: #ffd27a; }'),
+      'active solid / segmented / no pill');
+    check('v2.3 共享控件 token：27 高 / 8 圆角；group body 0 内缩、首末行 40/58；说明由 title 承载',
+      cssSrc.includes('--settings-control-h: 27px;')
+        && cssSrc.includes('--settings-control-radius: 8px;')
+        && /\.modal-settings \.btn,\n\.modal-settings \.crt-select-trigger,\n\.modal-settings \.crt-input,\n\.modal-settings select\.crt-input \{[^}]*height: var\(--settings-control-h\) !important;[^}]*border-radius: var\(--settings-control-radius\) !important;/s.test(cssSrc)
+        && cssSrc.includes('.modal-settings .btn { padding: 0 10px !important; }')
+        && cssSrc.includes('.modal-settings .crt-input,\n.modal-settings .crt-select-trigger { padding: 0 8px !important; }')
+        && /\.settings-group-body \{[^}]*padding: 0;[^}]*overflow: hidden;/s.test(cssSrc)
+        && /\.modal-settings \.settings-group-note,[^}]*width: 100%; max-width: none;[^}]*padding: 0 14px;[^}]*line-height: 16px;/s.test(cssSrc),
+      '27/8 + body 0 + notes full width');
+
+    check('v2.4 字体/间距：页签 2px 字距、只读行 12/18、滚动区 16/20、面板 0 内缩、状态 meta 11px',
+      cssSrc.includes('font-size: 12px; letter-spacing: 2px; color: var(--crt-dim);')
+        && cssSrc.includes('.modal-settings .settings-kv dt,')
+        && cssSrc.includes('.modal-settings .runtime-kv dd { font-size: 12px; line-height: 18px; }')
+        && cssSrc.includes('.modal-settings .settings-scroll { padding: 16px 20px 0;')
+        && cssSrc.includes('#settings-resident { padding: 0; }')
+        && cssSrc.includes('#settings-cloud-card .settings-group-body { padding: 0; }')
+        && /\.settings-group-body \{[^}]*padding: 0;[^}]*overflow: hidden;/s.test(cssSrc)
+        && cssSrc.includes('.modal-settings .settings-kv .kv-meta {')
+        && jsSrc.includes(" has-meta") && jsSrc.includes("kv-meta")
+        && jsSrc.includes('settings.common.securityMeta.'),
+      '2px/12-18/16-20/panel-0/meta 11');
+
+    const serviceFnFinal = assistantsSrcV2.slice(
+      assistantsSrcV2.indexOf('export function serviceRowHtml'),
+      assistantsSrcV2.indexOf('export function restartRowHtml'),
+    );
+    check('v2.4 最终交互布局：常用四行、重启不入菜单、模型下拉右对齐、普通 hint 隐藏',
+      serviceFnFinal.includes('data-svc-action="uninstall"') && !serviceFnFinal.includes('data-svc-action="restart"')
+        && serviceFnFinal.includes('asst-row settings-resident-row')
+        && serviceFnFinal.includes('settings-row-status')
+        && !serviceFnFinal.includes('kv-dot') && !serviceFnFinal.includes('settings-row-meta')
+        && cssSrc.includes('--settings-action-btn-w: 116px;')
+        && assistantsSrcV2.includes('export function restartRowHtml') && assistantsSrcV2.includes('export function wizardRowHtml')
+        && !assistantsSrcV2.includes('wizardHeadActionHtml')
+        && jsSrc.includes('${restartRowHtml()}${repairRowHtml(state.repair)}${wizardRowHtml(host.capabilities.openWizard)}')
+        && cssSrc.includes('[data-settings-section="model-source"] .cfg-row { grid-template-columns: 150px minmax(0, 1fr); }')
+        && cssSrc.includes('[data-settings-section="model-source"] .cfg-control { justify-content: flex-end; justify-self: end; width: 100%; }')
+        && cssSrc.includes('[data-settings-section="model-source"] .cfg-control .crt-select { width: min(280px, 100%); flex: none; }')
+        && /\.modal-settings \.runtime-mode-seg \.btn \{[^}]*height: 100% !important;[^}]*box-sizing: border-box;/s.test(cssSrc)
+        && /\.settings-shell \.settings-group-note,[\s\S]*?#assistants-panel \.asst-head > \.muted \{ display: none; \}/.test(cssSrc),
+      '4 rows / direct restart / dropdown right / hints in title');
+
+    check('v2.2 细节：off 开关/安全值、忆云 tag、更多 ghost、警告 left-bar',
+      cssSrc.includes('.toggle .slider { background: rgba(140, 255, 200, 0.12); }')
+        && cssSrc.includes('.toggle .slider::before { background: rgba(140, 255, 200, 0.45); }')
+        && cssSrc.includes('#settings-security-slot > .settings-section.sec-card.is-off .sec-card-value strong { color: var(--crt-dim); }')
+        && cssSrc.includes('.sec-tag-archived {')
+        && jsSrc.includes("current ? 'sec-tag-current' : 'sec-tag-archived'")
+        && assistantsSrcV2.includes('btn btn-small btn-crt') && assistantsSrcV2.includes('data-settings-more-trigger')
+        && /\.sec-card-warn \{[^}]*box-shadow: inset 2px 0 0 #ffd27a;[^}]*padding-left: 8px;/s.test(cssSrc),
+      'toggle/off/sec-tag/more/warn');
   }
 
   // ---------- 轮 C：设置页三症状 + 呈现分级（弹层壳 / 关闭规范 / 常显-折叠-异常） ----------
@@ -1777,12 +1990,12 @@ try {
 
     const iaFolds = (await import('../settings-ia.js')).IA_SETTINGS_FOLDS;
     const foldIds = iaFolds.map((fold) => fold.id);
-    const renderedFolds = ['mcp-danger', 'diagnostics', 'about-runtime'].filter((id) => jsSrc.includes(`data-settings-fold="${id}"`));
+    const renderedFolds = foldIds.filter((id) => jsSrc.includes(`data-settings-fold="${id}"`) || jsSrc.includes(`aboutFold('${id}'`));
     check('U-1 折叠白名单：≤5 且设置/关于只渲染白名单内类型（邀请无详情）',
-      iaFolds.length <= 5 && renderedFolds.length === 3
+      iaFolds.length <= 5 && renderedFolds.length === foldIds.length
         && !jsSrc.includes('cfg-more') && !jsSrc.includes('task-card-more') && !jsSrc.includes('page-more')
         && !/<details/.test(jsSrc.slice(jsSrc.indexOf('function renderCfgField'), jsSrc.indexOf('function fieldOf')))
-        && foldIds.every((id) => ['mcp-danger', 'diagnostics', 'about-runtime', 'assistants'].includes(id)),
+        && foldIds.every((id) => ['mcp-danger', 'diagnostics', 'about-runtime', 'about-identity', 'about-diag', 'assistants'].includes(id)),
       `folds=${JSON.stringify(foldIds)} rendered=${JSON.stringify(renderedFolds)}`);
 
     const codeOnly = jsSrc.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').map((line) => line.replace(/\/\/.*$/, '')).join('\n');
@@ -2544,6 +2757,24 @@ try {
       /aria-live="polite"/.test(consoleSrcSec) && /tabindex="-1"/.test(consoleSrcSec)
         && /prefers-reduced-motion/.test(cssSec) && /settings-security-slot/.test(cssSec)
         && /@media \(max-width: 900px\)/.test(cssSec));
+    check('C 安全卡状态：三卡 is-effective/is-off + 标题前状态点 + 19px/700 大数值',
+      /state: 'effective'/.test(consoleSrcSec)
+        && /state: seedImported \? 'effective' : 'off'/.test(consoleSrcSec)
+        && /state: registered \? 'effective' : 'off'/.test(consoleSrcSec)
+        && /class="settings-section sec-card \$\{off \? 'is-off' : 'is-effective'\}"/.test(consoleSrcSec)
+        && /class="sec-dot\$\{off \? ' is-off' : ''\}"/.test(consoleSrcSec)
+        && /\.sec-card-value strong \{[\s\S]*?font-size: 19px[\s\S]*?font-weight: 700[\s\S]*?\}/.test(cssSec));
+    check('C 安全卡状态：off 中性底/无 ::before + 空心点 + 大数值 var(--muted)',
+      /\.sec-card\.is-effective::before\s*\{/.test(cssSec)
+        && !/\.sec-card::before\s*\{/.test(cssSec)
+        && /\.sec-card\.is-off::before\s*\{\s*content: none;\s*\}/.test(cssSec)
+        && /\.sec-card\.is-off \.sec-card-value strong\s*\{\s*color: var\(--muted\);\s*\}/.test(cssSec)
+        && /\.sec-card\.is-off \.sec-dot\s*\{[\s\S]*?background: transparent[\s\S]*?box-shadow: none/.test(cssSec)
+        && /\.sec-card\.is-effective \.sec-dot\s*\{[\s\S]*?background: #6dffb8/.test(cssSec));
+    check('C 安全卡状态：一行说明用 totp/recovery.desc + 待批准琥珀置顶',
+      consoleSrcSec.includes("t('settings.security.totp.desc')")
+        && consoleSrcSec.includes("t('settings.security.recovery.desc')")
+        && /\.sec-pending \{[\s\S]*?border-left: 2px solid #ffd27a[\s\S]*?background: rgba\(60, 42, 8, 0\.26\)/.test(cssSec));
   }
 
   // ---------- 未知 API ----------

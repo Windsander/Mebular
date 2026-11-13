@@ -9,8 +9,8 @@
 import { StarStage, namespaceColor, shortId, buildHoverRoutes, buildNetworkScene, normalizeFleetEvent, resolveTaskNamespace, summarizeHoverRoutes } from './starfield.js';
 import { initialViewFromSearch } from './deep-link.js';
 import { createWizardState, wizardReduce, WIZARD_STEPS } from './wizard.js';
-import { IA_TABS, IA_ADVANCED_SECTIONS, IA_MCP_SECTIONS, IA_FIELD_COPY, IA_SETTINGS_EXTRA, IA_SETTINGS_FOLDS, IA_SECURITY_SECTIONS, IA_MCP_DANGER_LINE_KEYS, INVITE_TTL_OPTIONS, INVITE_TTL_DEFAULT_MS, SECURITY_LEVEL_LABEL, SECURITY_LEVEL_TITLE_KEY, SECURITY_LEVEL_NOTE_KEY, SECURITY_BOUNDARY_KEY, SCHEMA_CONFIGURED_VALUE, localizeSchemaReason, refreshCsrfToken, withCsrfRetry, filterRuntimeTimeline, runtimeTimelineKind, memoryRuntimeEnabledOf, runtimeSidecarStateKey, memoryRuntimeModeOf, runtimeShowsModelSettings, runtimeModelSourceOf, runtimeModelSourceAvailable, runtimeModelSourceReady, runtimeModelJobActive, runtimeModelStatusOf, runtimeModelActionOf, formatBytes, IA_RUNTIME_MODEL_SOURCES, IA_RUNTIME_MODEL_SOURCE_DEFAULT } from './settings-ia.js';
-import { assistantsPanelHtml, serviceRowHtml, wizardRowHtml, repairRowHtml, statusPillHtml, attentionItems, assistantAddFormHtml } from './assistants.js';
+import { IA_TABS, IA_ADVANCED_SECTIONS, IA_MCP_SECTIONS, IA_FIELD_COPY, IA_SETTINGS_EXTRA, IA_SETTINGS_FOLDS, IA_SECURITY_SECTIONS, IA_MCP_DANGER_LINE_KEYS, INVITE_TTL_OPTIONS, INVITE_TTL_DEFAULT_MS, SECURITY_LEVEL_LABEL, SECURITY_LEVEL_TITLE_KEY, SECURITY_LEVEL_NOTE_KEY, SECURITY_BOUNDARY_KEY, SCHEMA_CONFIGURED_VALUE, localizeSchemaReason, refreshCsrfToken, withCsrfRetry, filterRuntimeTimeline, runtimeTimelineKind, memoryRuntimeEnabledOf, runtimeSidecarStateKey, memoryRuntimeModeOf, runtimeShowsModelSettings, runtimeModelSourceOf, runtimeModelSourceAvailable, runtimeModelSourceReady, runtimeModelJobActive, runtimeModelStatusOf, runtimeModelActionOf, formatBytes, settingsListenHostPort, settingsEndpointHostPort, IA_RUNTIME_MODEL_SOURCES, IA_RUNTIME_MODEL_SOURCE_DEFAULT } from './settings-ia.js';
+import { assistantsPanelHtml, serviceRowHtml, restartRowHtml, wizardRowHtml, repairRowHtml, statusPillHtml, attentionItems, assistantAddFormHtml } from './assistants.js';
 import { reconcileAssistantUi } from './assistant-status.js';
 import { createConsoleHost, markEmbeddedDocument } from './host.js';
 import { t, getLocale, setLocale, onLocaleChange, applyStaticI18n, languageSettingsRowHtml, initI18n, reconcileDesktopLocale, LOCALE_STORAGE_KEY, formatDate as formatLocaleDate, formatDateTime as formatLocaleDateTime, formatExpiry } from './i18n.mjs';
@@ -58,9 +58,9 @@ const state = {
   // 0.3：记忆运行时（状态 / 治理 / 模型 / 轨迹）；数据只在相关视图/设置页按需加载。
   runtime: {
     status: null,
-    // 高级 · 模型来源（GET /admin/api/memory-runtime/model-source；浏览器不接触 sidecar 配置）
+    // 记忆 · 模型来源（GET /admin/api/memory-runtime/model-source；浏览器不接触 sidecar 配置）
     modelSource: null,
-    // 高级 · 本地模型目录 / 当前安装任务 / 行内错误（GET /admin/api/models）
+    // 记忆 · 本地模型目录 / 当前安装任务 / 行内错误（GET /admin/api/models）
     models: null,
     modelJob: null,
     modelError: null,
@@ -1185,35 +1185,35 @@ function applyResultBanner() {
   const fields = Array.isArray(apply.fields) ? apply.fields : [];
   const fieldText = fields.length ? fields.map(labelOf).join(t('common.listSeparator')) : t('settings.apply.fieldsNone');
   if (apply.status === 'in-progress') {
-    return `<div class="pending-restart" data-apply-result="in-progress">
-      <div class="pending-restart-head"><span class="crt-tag crt-tag-warn">${escapeHtml(t('settings.apply.inProgress.tag'))}</span><span class="muted">${escapeHtml(t('settings.apply.inProgress.short'))}</span></div>
-      <p class="muted pending-restart-note">${escapeHtml(t('settings.apply.inProgress.note', { fields: fields.join(', ') }))}</p>
+    return `<div class="pending-restart" data-apply-result="in-progress" title="${escapeHtml(`${t('settings.apply.inProgress.note', { fields: fields.join(', ') })}`)}">
+      <span class="crt-tag crt-tag-warn">${escapeHtml(t('settings.apply.inProgress.tag'))}</span>
+      <span class="pending-restart-head"><span class="muted">${escapeHtml(t('settings.apply.inProgress.short'))}</span></span>
     </div>`;
   }
   if (apply.status === 'applied') {
     const verify = Array.isArray(apply.verify) ? apply.verify : [];
     const failed = verify.filter((row) => row.ok === false);
     if (failed.length > 0) {
-      const detail = failed.map((row) => `<li><b>${escapeHtml(labelOf(row.path))}</b> <code>${escapeHtml(row.path)}</code>`
-        + `<span class="muted">${escapeHtml(t('settings.apply.fieldDetail', { configured: formatRestartValue(row.configured), actual: formatRestartValue(row.actual) }))}</span>`
-        + (row.reason ? `<span class="pending-restart-reason">${escapeHtml(t('settings.apply.reason', { reason: localizeEffectiveReason(row.path, String(row.reason)) }))}</span>` : '')
-        + '</li>').join('');
-      return `<div class="pending-restart is-error" data-apply-result="mismatch">
-        <div class="pending-restart-head"><span class="crt-tag crt-tag-error">${escapeHtml(t('settings.apply.mismatch.tag'))}</span><span class="muted">${escapeHtml(t('settings.apply.mismatch.summary', { count: failed.length }))}</span></div>
-        <ul class="pending-restart-list">${detail}</ul>
+      const detail = failed.map((row) => `${labelOf(row.path)} (${row.path}) ${t('settings.apply.fieldDetail', {
+        configured: formatRestartValue(row.configured),
+        actual: formatRestartValue(row.actual),
+      })}${row.reason ? ` · ${localizeEffectiveReason(row.path, String(row.reason))}` : ''}`).join('；');
+      return `<div class="pending-restart is-error" data-apply-result="mismatch" title="${escapeHtml(detail)}">
+        <span class="crt-tag crt-tag-error">${escapeHtml(t('settings.apply.mismatch.tag'))}</span>
+        <span class="pending-restart-head"><span class="muted">${escapeHtml(t('settings.apply.mismatch.summary', { count: failed.length }))}</span></span>
+        <span class="pending-restart-list">${escapeHtml(failed.map((row) => labelOf(row.path)).join(t('common.listSeparator')))}</span>
       </div>`;
     }
-    return `<div class="pending-restart is-ok" data-apply-result="applied">
-      <div class="pending-restart-head"><span class="crt-tag crt-tag-ok">${escapeHtml(t('settings.apply.applied.tag'))}</span><span class="muted">${escapeHtml(fieldText)}</span></div>
-      <p class="muted pending-restart-note">${escapeHtml(t('settings.apply.applied.note', { time: String(apply.at ?? '') }))}</p>
+    return `<div class="pending-restart is-ok" data-apply-result="applied" title="${escapeHtml(t('settings.apply.applied.note', { time: String(apply.at ?? '') }))}">
+      <span class="crt-tag crt-tag-ok">${escapeHtml(t('settings.apply.applied.tag'))}</span>
+      <span class="pending-restart-head"><span class="muted">${escapeHtml(fieldText)}</span></span>
     </div>`;
   }
   if (apply.status === 'rolled-back' || apply.status === 'rollback-failed' || apply.status === 'failed') {
     const rolled = apply.status === 'rolled-back';
     return `<div class="pending-restart is-error" data-apply-result="${escapeHtml(apply.status)}">
-      <div class="pending-restart-head"><span class="crt-tag crt-tag-error">${escapeHtml(t('settings.apply.mismatch.tag'))}</span><span class="muted">${escapeHtml(t(rolled ? 'settings.apply.rolledBack' : 'settings.apply.rollbackFailed'))}</span></div>
-      <p class="muted pending-restart-note">${escapeHtml(t('settings.apply.reason', { reason: localizeReasonText(apply.reason) || t('settings.apply.unknownReason') }))}</p>
-      <p class="muted pending-restart-note">${escapeHtml(t('settings.apply.fieldsInvolved', { fields: fieldText }))}${apply.backup ? `；${escapeHtml(t('settings.apply.backupLabel'))}<code>${escapeHtml(String(apply.backup))}</code>` : ''}</p>
+      <span class="crt-tag crt-tag-error">${escapeHtml(t('settings.apply.mismatch.tag'))}</span>
+      <span class="pending-restart-head"><span class="muted">${escapeHtml(t(rolled ? 'settings.apply.rolledBack' : 'settings.apply.rollbackFailed'))}</span></span>
     </div>`;
   }
   return '';
@@ -1230,24 +1230,20 @@ function pendingRestartBanner() {
   const envOverrides = Array.isArray(state.settings?.pendingRestartEnvOverrides) ? state.settings.pendingRestartEnvOverrides : [];
   const cmd = restartCommand();
   const managed = state.settings?.restart?.serviceManaged === true;
-  const rows = items.map((item) => `<li><b>${escapeHtml(restartLabel(item.path))}</b>`
-    + ` <code>${escapeHtml(item.path)}</code>`
-    + `<span class="muted">${escapeHtml(t('settings.apply.fieldDetail', { configured: formatRestartValue(item.file), actual: formatRestartValue(item.running) }))}</span>`
-    + `<span class="pending-restart-reason">${escapeHtml(t('settings.pending.reason', { reason: String(localizeEffectiveReason(item.path, item.reason) || t('settings.pending.reasonFallback')) }))}</span></li>`).join('');
-  return `<div class="pending-restart" data-pending-restart="1">
-    <div class="pending-restart-head">
-      <span class="crt-tag crt-tag-warn">${escapeHtml(t('settings.pending.count', { count: items.length }))}</span>
-      <span class="muted">${escapeHtml(t('settings.pending.head'))}</span>
-    </div>
-    <p class="muted pending-restart-note">${escapeHtml(t('settings.pending.note'))}${envOverrides.length > 0 ? escapeHtml(t('settings.pending.noteEnv', { vars: envOverrides.join(', ') })) : ''}</p>
-    <ul class="pending-restart-list">${rows}</ul>
+  const names = items.map((item) => restartLabel(item.path)).join(t('common.listSeparator'));
+  const detail = items.map((item) => `${item.path} · ${restartLabel(item.path)} ${t('settings.apply.fieldDetail', {
+    configured: formatRestartValue(item.file),
+    actual: formatRestartValue(item.running),
+  })} · ${t('settings.pending.reason', { reason: String(localizeEffectiveReason(item.path, item.reason) || t('settings.pending.reasonFallback')) })}`).join('；')
+    + (envOverrides.length > 0 ? ` · ${t('settings.pending.noteEnv', { vars: envOverrides.join(', ') })}` : '')
+    + (managed ? '' : ` · ${t('settings.pending.manual')}`);
+  return `<div class="pending-restart" data-pending-restart="1" title="${escapeHtml(detail)}">
+    <span class="crt-tag crt-tag-warn">${escapeHtml(t('settings.pending.count', { count: items.length }))}</span>
+    <span class="pending-restart-head"><span class="muted">${escapeHtml(`${names} ${t('settings.pending.head')}`)}</span></span>
     <div class="pending-restart-cmd">
       <button class="btn btn-small btn-crt" type="button" data-cfg-action="restart" ${state.features?.writes && !MOCK ? '' : 'disabled'}>${escapeHtml(t('settings.pending.restart'))}</button>
-      <code>${escapeHtml(cmd)}</code>
       <button class="btn btn-small btn-crt" type="button" data-copy="${escapeHtml(cmd)}">${escapeHtml(t('settings.pending.copyCommand'))}</button>
-      <span class="cfg-restart-state muted"></span>
     </div>
-    ${managed ? '' : `<p class="muted" style="font-size:11px">${escapeHtml(t('settings.pending.manual'))}</p>`}
   </div>`;
 }
 
@@ -1336,24 +1332,36 @@ function reasonIsFatal(reason) {
   return /(失败|被占|占用|未生效|无法|拒绝|EADDRINUSE|缺证书|MCP_INSECURE_CONFIG)/i.test(String(reason ?? ''));
 }
 
-function runtimeCompareLine(field) {
+/**
+ * 行状态单一判定：runtimeCompareLine（异常三元组）与 runtimeStatusCell（右侧状态列）共用。
+ * status: ok=生效中 / pending=待重启 / mismatch=未生效 / none=无 effective 行（如模型来源）。
+ */
+function runtimeFieldState(field) {
   const row = effectiveRowOf(field.path);
-  if (!row) return '';
+  if (!row) return { row: null, status: 'none' };
   const configured = row.configured;
   const actual = row.actual;
   const mismatch = configured !== null && configured !== undefined
     && JSON.stringify(configured ?? null) !== JSON.stringify(actual ?? null);
   const reason = typeof row.reason === 'string' && row.reason.length > 0 ? row.reason : '';
-  const reasonText = localizeEffectiveReason(field.path, reason);
   // 「已生效：… / 已装配：…」是生效说明，不是未生效原因；其它原因才作为异常自动出现。
   // 布尔开关本就关闭时（如语义召回未启用），原因属于「为什么没开」的说明 → 收进详情，不占常显。
   const infoReason = reason.length > 0 && /^(已生效|已装配)/.test(reason);
   const boolOff = field.type === 'bool' && configured !== true && actual !== true && !reasonIsFatal(reason);
   const showReason = reason.length > 0 && !infoReason && !boolOff;
   const pendingItem = pendingRestartItems().find((item) => item.path === field.path) ?? null;
-  const normal = !mismatch && !showReason && !pendingItem;
-  // 常态不占行：没有异常就是生效；只有待重启/不一致/未生效时才在字段下展开。
-  if (normal) return '';
+  // 待重启优先于「未生效」：保存值尚未加载时，先提示需要重启。
+  const status = pendingItem ? 'pending' : (mismatch || showReason ? 'mismatch' : 'ok');
+  return { row, status, configured, actual, mismatch, showReason, pendingItem };
+}
+
+function runtimeCompareLine(field) {
+  const s = runtimeFieldState(field);
+  // 常态不占行：只有待重启/不一致/未生效时才在字段下展开。
+  if (!s.row || s.status === 'ok') return '';
+  const { configured, actual, mismatch, showReason, pendingItem } = s;
+  const reason = typeof s.row.reason === 'string' ? s.row.reason : '';
+  const reasonText = localizeEffectiveReason(field.path, reason);
   return `<p class="cfg-effective${mismatch ? ' is-mismatch' : ''}" data-cfg-state="exception">`
     + `<span><span class="cfg-eff-key">${escapeHtml(t('settings.editor.configured'))}</span> ${escapeHtml(formatRuntimeValue(configured))}</span>`
     + '<span>/</span>'
@@ -1362,6 +1370,18 @@ function runtimeCompareLine(field) {
     + (showReason ? `<span class="cfg-reason"><span class="cfg-eff-key">${escapeHtml(t('settings.editor.reasonKey'))}</span> ${escapeHtml(reasonText)}</span>` : '')
     + (mismatch && !showReason ? `<span class="cfg-warn">${escapeHtml(t('settings.editor.mismatch'))}</span>` : '')
     + '</p>';
+}
+
+/** 右侧状态列：正常=纯文字「生效中」；异常=琥珀「待重启 / 未生效」；无 effective 行留空。 */
+function runtimeStatusCell(field) {
+  const s = runtimeFieldState(field);
+  if (s.status === 'none') return '<span class="cfg-status" data-cfg-status="none"></span>';
+  const label = s.status === 'ok'
+    ? t('settings.editor.inEffect')
+    : s.status === 'pending'
+      ? t('settings.editor.pendingShort')
+      : t('settings.editor.mismatchShort');
+  return `<span class="cfg-status${s.status === 'ok' ? ' is-ok' : ' is-warn'}" data-cfg-status="${s.status}">${escapeHtml(label)}</span>`;
 }
 
 /** 收进「详情」的原因（仅布尔开关关闭时的说明；异常原因仍走常显三元组）。 */
@@ -1419,20 +1439,20 @@ function renderCfgField(field) {
   const helpBits = [
     field.help ? `<p class="cfg-help muted">${escapeHtml(field.help)}</p>` : '',
     foldedReason ? `<p class="cfg-help muted">${escapeHtml(foldedReason)}</p>` : '',
-    field.warn ? `<p class="cfg-help cfg-warn">⚠ ${escapeHtml(field.warn)}</p>` : '',
   ].filter(Boolean);
+  // 风险说明与异常三元组都放在 40px 行之外：行下静态 11px 警告，默认可见、不依赖 focus。
+  const warnLine = field.warn ? `<p class="settings-warn-line cfg-warn-line">⚠ ${escapeHtml(field.warn)}</p>` : '';
   return `<div class="cfg-row">
     <label class="cfg-label" for="${id}">${escapeHtml(field.label)}${defaultTag}${warnMark}</label>
-    <div class="cfg-control">${control}
-      ${runtimeCompareLine(field)}
-      ${helpBits.join('')}
-    </div>
-  </div>`;
+    <div class="cfg-control">${control}</div>
+    ${runtimeStatusCell(field)}
+    ${helpBits.join('')}
+  </div>${warnLine}${runtimeCompareLine(field)}`;
 }
 
 // 单一行模板：label | value | action 三列固定（动作列不撑高行；空值统一 muted 占位）
-function kvRow(label, value, copyPayload = null) {
-  return { label, value, copyPayload };
+function kvRow(label, value, copyPayload = null, options = {}) {
+  return { label, value, copyPayload, ...options };
 }
 
 function copyRowOf(label, value) {
@@ -1444,12 +1464,21 @@ function emptyRowOf(label, text) {
 }
 
 function kvRows(rows) {
-  const cells = rows.map((row) => `<dt>${escapeHtml(row.label)}</dt>`
-    + `<dd class="kv-value">${row.value}</dd>`
-    + `<dd class="kv-action">${row.copyPayload === null || row.copyPayload === undefined
-      ? ''
-      : `<button class="btn btn-small btn-crt" type="button" data-copy="${escapeHtml(row.copyPayload)}">${escapeHtml(t('common.copy'))}</button>`}</dd>`).join('');
-  return `<dl class="settings-kv">${cells}</dl>`;
+  const hasActions = rows.some((row) => row.copyPayload !== null && row.copyPayload !== undefined);
+  const body = rows.map((row) => {
+    const meta = row.meta
+      ? `<span class="kv-meta" title="${escapeHtml(row.meta)}">${escapeHtml(row.meta)}</span>`
+      : '';
+    const value = row.tone
+      ? `<span class="kv-inline"><span class="kv-dot ${escapeHtml(row.tone)}" aria-hidden="true"></span>${row.value}</span>`
+      : row.value;
+    return `<div class="kv-row"><dt>${escapeHtml(row.label)}</dt>`
+      + `<dd class="kv-value${row.meta ? ' has-meta' : ''}">${value}${meta}</dd>`
+      + `<dd class="kv-action">${row.copyPayload === null || row.copyPayload === undefined
+        ? ''
+        : `<button class="btn btn-small btn-crt" type="button" data-copy="${escapeHtml(row.copyPayload)}">${escapeHtml(t('common.copy'))}</button>`}</dd></div>`;
+  }).join('');
+  return `<dl class="settings-kv${hasActions ? '' : ' settings-kv-no-action'}">${body}</dl>`;
 }
 
 // 主值 + 次行（已配置 / 实际）；一致=暗色，不一致=警示色；长值换行悬挂在值列
@@ -1475,14 +1504,19 @@ function renderEditor(paths) {
   return `<div class="cfg-editor">${paths.map((path) => renderCfgField(fieldOf(path))).join('')}</div>`;
 }
 
-/** 统一 section：标题 + 一行说明 + 字段行（设置内唯一版式，不再卡片套卡片）。 */
-function settingsSectionHtml({ id, title, desc = '', chip = '', body = '', foot = '' }) {
+/** v2 分组：10px 标签在面板外 + 一层内嵌面板；只读用后缀，不再挂 pill。 */
+function settingsSectionHtml({ id, title, desc = '', chip = '', body = '', foot = '', suffix = '', hint = '' }) {
+  const contextTitle = [hint, desc, foot].filter(Boolean).join(' ');
   return `
-    <section class="settings-section" data-settings-section="${escapeHtml(id)}">
-      <h3>${escapeHtml(title)}${chip}</h3>
-      ${desc ? `<p class="settings-section-desc muted">${escapeHtml(desc)}</p>` : ''}
-      ${body}
-      ${foot ? `<p class="settings-section-foot muted">${escapeHtml(foot)}</p>` : ''}
+    <section class="settings-group" data-settings-section="${escapeHtml(id)}"${contextTitle ? ` title="${escapeHtml(contextTitle)}"` : ''}>
+      <div class="settings-group-head">
+        <h3>${escapeHtml(title)}</h3>
+        ${suffix ? `<span class="settings-group-suffix">· ${escapeHtml(suffix)}</span>` : ''}
+        ${chip || ''}
+      </div>
+      <div class="settings-group-body">${body}</div>
+      ${desc ? `<p class="settings-group-desc">${escapeHtml(desc)}</p>` : ''}
+      ${foot ? `<p class="settings-group-foot">${escapeHtml(foot)}</p>` : ''}
     </section>`;
 }
 
@@ -1508,18 +1542,25 @@ function renderAdvancedSections() {
 }
 
 function renderMcpSections() {
+  const pending = pendingRestartItems().filter((item) => String(item.path) === 'mcp.http.port');
+  const warning = pending.length > 0
+    ? `<p class="settings-warn-line">${pending.map((item) => escapeHtml(t('settings.mcp.pendingLine', {
+      configured: formatRestartValue(item.file),
+      running: formatRestartValue(item.running),
+    }))).join(' ')}</p>`
+    : '';
   return IA_MCP_SECTIONS.map((section) => {
     const copy = localizedSection(section);
     return settingsSectionHtml({
       id: copy.id,
       title: copy.title,
       desc: copy.desc,
-      body: renderEditor(copy.fields),
+      body: `${renderEditor(copy.fields)}${section.id === 'connection' ? warning : ''}`,
     });
   }).join('');
 }
 
-// ---------- 0.3 · 设置 · 记忆模式 / 高级模型来源 ----------
+// ---------- 0.3 · 设置 · 记忆 · 记忆模式 / 模型来源 ----------
 
 function runtimeStatusStateLabel(status) {
   if (!status) return t('runtime.loadingShort');
@@ -1558,12 +1599,15 @@ function runtimeStatusFactsHtml(status) {
   const error = runtimeStatusErrorText(status);
   const stateLabel = runtimeStatusStateLabel(status);
   const enabled = memoryRuntimeEnabledOf(status, currentConfigFile());
+  const value = (text, tone = '') => `<dd class="rt-value${tone ? ` ${tone}` : ''}">${escapeHtml(text)}</dd>`;
+  const stateWarn = status.degraded || status.state === 'failed';
+  const version = status.runtimeVersion ?? '';
   return `<dl class="runtime-kv" data-rt-sidecar-status>
-    <dt>${escapeHtml(t('runtime.status.mode'))}</dt><dd><span class="crt-tag ${enabled ? 'crt-tag-ok' : ''}">${escapeHtml(enabled ? t('runtime.sidecar.immersive') : t('runtime.sidecar.lightweight'))}</span></dd>
-    <dt>${escapeHtml(t('runtime.sidecar.state'))}</dt><dd><span class="crt-tag ${status.state === 'ready' ? 'crt-tag-ok' : status.degraded || status.state === 'failed' ? 'crt-tag-warn' : ''}">${escapeHtml(stateLabel)}</span></dd>
-    <dt>${escapeHtml(t('runtime.sidecar.degraded'))}</dt><dd>${escapeHtml(status.degraded ? t('runtime.sidecar.degradedYes') : t('runtime.sidecar.degradedNo'))}</dd>
-    <dt>${escapeHtml(t('runtime.sidecar.error'))}</dt><dd>${error ? escapeHtml(error) : '—'}</dd>
-    <dt>${escapeHtml(t('runtime.sidecar.version'))}</dt><dd>${escapeHtml(status.runtimeVersion ?? '—')}</dd>
+    <div class="kv-row"><dt>${escapeHtml(t('runtime.status.mode'))}</dt>${value(enabled ? t('runtime.sidecar.immersive') : t('runtime.sidecar.lightweight'))}</div>
+    <div class="kv-row"><dt>${escapeHtml(t('runtime.sidecar.state'))}</dt>${value(stateLabel, stateWarn ? 'is-warn' : '')}</div>
+    <div class="kv-row"><dt>${escapeHtml(t('runtime.sidecar.degraded'))}</dt>${value(status.degraded ? t('runtime.sidecar.degradedYes') : t('runtime.sidecar.degradedNo'), status.degraded ? 'is-warn' : '')}</div>
+    <div class="kv-row"><dt>${escapeHtml(t('runtime.sidecar.error'))}</dt>${error ? value(error, 'is-warn') : value('—', 'is-empty')}</div>
+    <div class="kv-row"><dt>${escapeHtml(t('runtime.sidecar.version'))}</dt>${version ? value(version) : value('—', 'is-empty')}</div>
   </dl>`;
 }
 
@@ -1579,11 +1623,12 @@ function runtimeModeSettingsHtml() {
   return settingsSectionHtml({
     id: 'runtime-mode',
     title: t('settings.runtime.mode.title'),
-    desc: t('settings.runtime.mode.desc'),
-    chip: `<span class="crt-tag ${enabled ? 'crt-tag-ok' : ''}" data-rt-mode-chip>${escapeHtml(enabled ? t('runtime.sidecar.immersive') : t('runtime.sidecar.lightweight'))}</span>`,
+    hint: t(enabled ? 'settings.runtime.mode.immersiveDesc' : 'settings.runtime.mode.lightDesc'),
     body: `<div class="runtime-mode-actions" role="group" aria-label="${escapeHtml(t('settings.runtime.mode.title'))}" data-rt-mode-group>
-      ${option('lightweight', 'settings.runtime.mode.lightweight')}
-      ${option('immersive', 'settings.runtime.mode.immersive')}
+      <div class="runtime-mode-seg">
+        ${option('lightweight', 'settings.runtime.mode.lightweight')}
+        ${option('immersive', 'settings.runtime.mode.immersive')}
+      </div>
     </div>
     <p class="settings-section-foot muted" data-rt-mode-hint>${escapeHtml(t(enabled ? 'settings.runtime.mode.immersiveDesc' : 'settings.runtime.mode.lightDesc'))}</p>`,
   });
@@ -1604,8 +1649,7 @@ function runtimeModelStatusHtml(status) {
     id: 'runtime-model-status',
     title: t('settings.runtime.modelStatus.title'),
     desc: t('settings.runtime.modelStatus.desc'),
-    body: `<dl class="runtime-kv" data-rt-model-status>${rows.map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(String(value))}</dd>`).join('')}</dl>
-      <p class="settings-section-foot muted">${escapeHtml(t('settings.runtime.modelStatus.foot'))}</p>`,
+    body: `<dl class="runtime-kv" data-rt-model-status>${rows.map(([label, value]) => `<div class="kv-row"><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(String(value))}</dd></div>`).join('')}</dl>`,
   });
 }
 
@@ -1893,19 +1937,20 @@ function runtimeModelSourceSectionHtml() {
     const unavailable = !runtimeModelSourceAvailable(normalized, model) && normalized !== source;
     return `<option value="${escapeHtml(normalized)}" ${normalized === source ? 'selected' : ''} ${unavailable ? 'disabled' : ''}>${escapeHtml(runtimeModelSourceLabel(normalized))}${unavailable ? ` · ${escapeHtml(t('settings.runtime.modelSource.unavailableOption'))}` : ''}</option>`;
   }).join('');
+  const noteTitle = `${t('settings.runtime.modelSource.desc')} ${t('settings.runtime.modelSource.foot')}`;
   return settingsSectionHtml({
     id: 'model-source',
     title: t('settings.runtime.modelSource.title'),
-    desc: t('settings.runtime.modelSource.desc'),
+    hint: noteTitle,
     body: `<div class="cfg-row">
-      <label class="cfg-label" for="rt-model-source">${escapeHtml(t('settings.runtime.modelSource.selectLabel'))}</label>
+      <label class="cfg-label" for="rt-model-source">${escapeHtml(t('settings.runtime.modelSource.rowLabel'))}</label>
       <div class="cfg-control">
-        <select id="rt-model-source" class="crt-input" data-rt-model-source ${disabled ? 'disabled' : ''}>${options}</select>
-        <p class="cfg-help muted is-visible" data-rt-model-source-note>${escapeHtml(note)}</p>
+        <select id="rt-model-source" class="crt-input" data-rt-model-source ${disabled ? 'disabled' : ''} title="${escapeHtml(noteTitle)}">${options}</select>
       </div>
+      <span class="cfg-status" data-cfg-status="none"></span>
     </div>
-    ${showModels ? `<div class="runtime-model-list" data-rt-model-list>${runtimeModelListBodyHtml()}</div>` : ''}
-    <p class="settings-section-foot muted">${escapeHtml(t('settings.runtime.modelSource.foot'))}</p>`,
+    <p class="settings-group-note" data-rt-model-source-note title="${escapeHtml(noteTitle)}">${escapeHtml(note)}</p>
+    ${showModels ? `<div class="runtime-model-list" data-rt-model-list>${runtimeModelListBodyHtml()}</div>` : ''}`,
   });
 }
 
@@ -1917,13 +1962,13 @@ function renderRuntimeSettings() {
     ${!status && statusError ? `<p class="crt-warn" role="alert">${escapeHtml(t('settings.runtime.error', { message: statusError }))}</p>` : ''}
     ${!status && !statusError ? `<p class="muted">${escapeHtml(t('settings.runtime.loading'))}</p>` : ''}
     ${runtimeModeSettingsHtml()}
+    ${runtimeModelSourceSectionHtml()}
+    ${enabled ? runtimeModelStatusHtml(status) : ''}
     ${settingsSectionHtml({
       id: 'runtime-status-card',
       title: t('runtime.status.title'),
-      desc: t('runtime.status.desc'),
       body: runtimeStatusFactsHtml(status),
     })}
-    ${enabled ? runtimeModelStatusHtml(status) : ''}
     <p class="settings-note muted">${escapeHtml(t('settings.runtime.scope.desc'))}</p>
   `;
 }
@@ -1974,8 +2019,9 @@ let lastSettingsSignature = null;
 // 覆盖渲染依赖：activeTab（即 settingsTab）、settings、rawConfig、writes、healthz、本机 deviceId、
 // AI 助手专区依赖（clients / service / 行内动作消息与展开态）。
 function settingsSignature(activeTab) {
-  // Runtime 状态只影响「记忆运行时 / 高级」面板；MCP/常用/安全 tab 不应因
-  // 模型状态/轨迹轮询而重建 DOM（否则原生 select 弹层会被销毁）。
+  // Runtime 状态会影响「记忆」面板（模式/模型来源/模型状态/运行状态）与「高级」
+  // （诊断折叠仍读状态）；MCP/常用/安全 tab 不应因模型状态/轨迹轮询而重建 DOM
+  // （否则原生 select 弹层会被销毁）。
   const runtimeRelevant = activeTab === 'runtime' || activeTab === 'advanced';
   return JSON.stringify([
     activeTab,
@@ -2043,10 +2089,25 @@ function settingsFoldKey(el) {
   return key ?? null;
 }
 
+// U-4 设置壳：宽屏为左侧 160px 竖轨，≤900 折叠回顶部横排。
+// 布局由 CSS 断点承担；这里只同步 tablist 的 aria-orientation（不触发重渲染）。
+const settingsRailMedia = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+  ? window.matchMedia('(max-width: 900px)')
+  : null;
+
+function settingsTabsOrientation() {
+  return settingsRailMedia?.matches ? 'horizontal' : 'vertical';
+}
+
+settingsRailMedia?.addEventListener?.('change', () => {
+  const list = document.querySelector('#settings-body .settings-tabs');
+  if (list) list.setAttribute('aria-orientation', settingsTabsOrientation());
+});
+
 function renderSettings(activeTab = state.settingsTab ?? 'common') {
   const prevTab = state.settingsTab ?? 'common';
   state.settingsTab = activeTab;
-  if (activeTab !== 'advanced') stopRuntimeModelPolling();
+  if (activeTab !== 'runtime') stopRuntimeModelPolling();
   const body = $('#settings-body');
   if (state.locked) {
     renderLockedSettings(body);
@@ -2078,25 +2139,30 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
   const tabLabel = (tab) => t(tab.labelKey ?? `settings.tab.${tab.id}`);
   const tabButton = (tab) => `<button id="settings-tab-${tab.id}" class="settings-tab${tab.id === activeTab ? ' is-active' : ''}"`
     + ` data-settings-tab="${tab.id}" type="button" role="tab" aria-selected="${tab.id === activeTab}" aria-controls="settings-panel-${tab.id}">${escapeHtml(tabLabel(tab))}</button>`;
-  const extraButton = (item) => `<button class="settings-tab settings-tab-extra" type="button" data-settings-extra="${escapeHtml(item.opens)}">${escapeHtml(item.labelKey ? t(item.labelKey) : item.label)}</button>`;
+  const extraButton = (item) => {
+    const label = item.labelKey ? t(item.labelKey) : item.label;
+    return `<button class="settings-tab settings-tab-extra" type="button" data-settings-extra="${escapeHtml(item.opens)}" aria-label="${escapeHtml(label)}">${escapeHtml(label)}</button>`;
+  };
   const panel = (id, inner) => `<section id="settings-panel-${id}" class="settings-panel" data-settings-panel="${id}" role="tabpanel"`
     + ` aria-labelledby="settings-tab-${id}"${id === activeTab ? '' : ' hidden'}>${inner}</section>`;
+  // 页签轨（竖轨）+ 底部「关于本机」foot；正常分支与 ?mock=1 分支共用。
+  const railHtml = `
+    <div class="settings-rail">
+      <div class="settings-tabs" role="tablist" aria-orientation="${settingsTabsOrientation()}" aria-label="${escapeHtml(t('settings.tabsAria'))}" data-i18n-aria-label="settings.tabsAria">${IA_TABS.map(tabButton).join('')}</div>
+      <div class="settings-rail-foot">${IA_SETTINGS_EXTRA.map(extraButton).join('')}</div>
+    </div>`;
+  const shellHtml = (inner) => `<div class="settings-shell">${railHtml}<div class="settings-scroll">${inner}</div></div>`;
   if (!s) {
     // ?mock=1 无 settings 载荷：仍渲染五页签与安全卡（无网络验收路径；其余设置保持加载态）
     if (MOCK && state.security) {
-      body.innerHTML = `
-        <div class="settings-tabs" role="tablist" aria-label="${escapeHtml(t('settings.tabsAria'))}" data-i18n-aria-label="settings.tabsAria">${IA_TABS.map(tabButton).join('')}${
-          IA_SETTINGS_EXTRA.map(extraButton).join('')
-        }</div>
-        <div class="settings-scroll">
-          ${panel('common', `<section class="settings-section" data-settings-common-status><h3>${escapeHtml(t('settings.mock.commonTitle'))} <span class="badge badge-muted">${escapeHtml(t('settings.common.readonly'))}</span></h3><p class="muted">${escapeHtml(t('settings.mock.commonNote'))}</p></section>`)}
-          ${panel('security', `<section id="settings-security-slot" class="settings-slot" data-settings-slot="security" data-security-level="${escapeHtml(state.security?.level ?? 'low')}" tabindex="-1">${securityCardHtml()}</section>`)}
-          ${panel('assistants', `<p class="muted">${escapeHtml(t('settings.mock.assistants'))}</p>`)}
-          ${panel('runtime', renderRuntimeSettings())}
-          ${panel('mcp', `<p class="muted">${escapeHtml(t('settings.mock.config'))}</p>`)}
-          ${panel('advanced', `<p class="muted">${escapeHtml(t('settings.mock.config'))}</p>`)}
-        </div>
-      `;
+      body.innerHTML = shellHtml(`
+        ${panel('common', `<section class="settings-section" data-settings-common-status><h3>${escapeHtml(t('settings.mock.commonTitle'))} <span class="badge badge-muted">${escapeHtml(t('settings.common.readonly'))}</span></h3><p class="muted">${escapeHtml(t('settings.mock.commonNote'))}</p></section>`)}
+        ${panel('security', `<section id="settings-security-slot" class="settings-slot" data-settings-slot="security" data-security-level="${escapeHtml(state.security?.level ?? 'low')}" tabindex="-1">${securityCardHtml()}</section>`)}
+        ${panel('assistants', `<p class="muted">${escapeHtml(t('settings.mock.assistants'))}</p>`)}
+        ${panel('runtime', renderRuntimeSettings())}
+        ${panel('mcp', `<p class="muted">${escapeHtml(t('settings.mock.config'))}</p>`)}
+        ${panel('advanced', `<p class="muted">${escapeHtml(t('settings.mock.config'))}</p>`)}
+      `);
       bindSecurityCard(body);
       return;
     }
@@ -2109,28 +2175,31 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
   body.innerHTML = `
     ${pendingRestartBanner()}
     ${applyResultBanner()}
-    <div class="settings-tabs" role="tablist" aria-label="${escapeHtml(t('settings.tabsAria'))}" data-i18n-aria-label="settings.tabsAria">${IA_TABS.map(tabButton).join('')}${
-      IA_SETTINGS_EXTRA.map(extraButton).join('')
-    }</div>
-    <div class="settings-scroll">
+    ${shellHtml(`
     ${panel('common', `
-      ${languageSettingsRowHtml()}
-      <div class="settings-resident" id="settings-resident">${serviceRowHtml(state.service, state.serviceMsg)}</div>
-      ${repairRowHtml(state.repair)}
-      ${wizardRowHtml(host.capabilities.openWizard)}
-      <section class="settings-section" data-settings-common-status>
-        <h3>${escapeHtml(t('settings.common.statusTitle'))} <span class="badge badge-muted">${escapeHtml(t('settings.common.readonly'))}</span></h3>
-        ${kvRows([
-          kvRow('P2P', s.network.enabled ? t('settings.common.enabled') : t('settings.common.disabled')),
-          kvRow(t('settings.common.inviteService'), s.join?.enabled ? t('settings.common.enabled') : t('settings.common.inviteDisabled')),
-          kvRow(t('settings.common.securityLevel'), securityLevel ? securityLevelLabel(securityLevel) : '—'),
-        ])}
-        <p class="settings-note muted">${escapeHtml(t('settings.common.note'))}</p>
+      <section class="settings-group" data-settings-group="interface">
+        <div class="settings-group-head"><h3>${escapeHtml(t('settings.group.interface'))}</h3></div>
+        <div class="settings-group-body">${languageSettingsRowHtml()}</div>
+      </section>
+      <section class="settings-group" data-settings-group="resident">
+        <div class="settings-group-head"><h3>${escapeHtml(t('settings.common.group.runs'))}</h3></div>
+        <div class="settings-group-body" id="settings-resident">${serviceRowHtml(state.service, state.serviceMsg)}${restartRowHtml()}${repairRowHtml(state.repair)}${wizardRowHtml(host.capabilities.openWizard)}</div>
+      </section>
+      <section class="settings-group" data-settings-common-status>
+        <div class="settings-group-head"><h3>${escapeHtml(t('settings.common.statusTitle'))}</h3><span class="settings-group-suffix">· ${escapeHtml(t('settings.common.readonly'))}</span></div>
+        <div class="settings-group-body">${kvRows([
+          kvRow('P2P', s.network.enabled ? t('settings.common.enabled') : t('settings.common.disabled'), null, { tone: s.network.enabled ? 'ok' : 'off', meta: settingsListenHostPort(s.network.listen?.[0]) }),
+          kvRow(t('settings.common.inviteService'), s.join?.enabled ? t('settings.common.enabled') : t('settings.common.inviteDisabled'), null, { tone: s.join?.enabled ? 'ok' : 'off', meta: settingsEndpointHostPort(s.join?.endpoint) }),
+          kvRow(t('settings.common.securityLevel'), securityLevel ? securityLevelLabel(securityLevel) : '—', null, { tone: securityLevel ? (securityLevel === 'medium' ? 'warn' : 'ok') : 'off', meta: securityLevel ? t(`settings.common.securityMeta.${securityLevel}`) : '—' }),
+        ])}</div>
       </section>
       ${cloudCardHtml()}
     `)}
     ${panel('security', `<section id="settings-security-slot" class="settings-slot" data-settings-slot="security" data-security-level="${escapeHtml(state.security?.level ?? 'low')}" tabindex="-1">${securityCardHtml()}</section>`)}
-    ${panel('assistants', `<div id="assistants-panel">${assistantsPanelHtml({ clients: state.clients, ui: { ...state, addForm: state.addForm ? assistantAddFormHtml(state.addForm) : '' } })}</div>`)}
+    ${panel('assistants', `<section class="settings-group" data-settings-section="assistants">
+      <div class="settings-group-head"><h3>${escapeHtml(t('settings.assistants.group'))}</h3></div>
+      <div class="settings-group-body"><div id="assistants-panel">${assistantsPanelHtml({ clients: state.clients, ui: { ...state, addForm: state.addForm ? assistantAddFormHtml(state.addForm) : '' } })}</div></div>
+    </section>`)}
     ${panel('runtime', renderRuntimeSettings())}
     ${panel('mcp', `
       ${renderMcpSections()}
@@ -2141,13 +2210,12 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
     `)}
     ${panel('advanced', `
       ${renderAdvancedSections()}
-      ${runtimeModelSourceSectionHtml()}
       <details class="settings-fold" id="diag-fold" data-settings-fold="diagnostics">
         <summary>${escapeHtml(foldLabel('diagnostics'))}</summary>
         ${renderDiagnostics()}
       </details>
     `)}
-    </div>
+    `)}
   `;
 
   // 恢复折叠展开态（仅设置页的字段/卡片/机制折叠）
@@ -2160,6 +2228,7 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
     button.addEventListener('click', () => copyText(button.dataset.copy, button));
   });
   bindSecurityCard(body);
+  bindMoreMenus(body);
   bindConfigEditor();
   // 设置页整体重建后重新增强：语言行 / MCP auth select / 助手配置格式等动态控件。
   enhanceSelects(body);
@@ -2183,7 +2252,7 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
   }
   const nextScroller = body.querySelector('.settings-scroll');
   if (nextScroller && prevScrollTop > 0) nextScroller.scrollTop = prevScrollTop;
-  if (activeTab === 'advanced' && runtimeModelJobActive(state.runtime.modelJob)) startRuntimeModelPolling();
+  if (activeTab === 'runtime' && runtimeModelJobActive(state.runtime.modelJob)) startRuntimeModelPolling();
 }
 
 // ---------- S3 · 安全三档（安全卡 / 三操作改道 / 批准侧 / 恢复码） ----------
@@ -2238,16 +2307,18 @@ function securitySelfId() {
   return state.overview?.device?.deviceId ?? state.settings?.identity?.deviceId ?? null;
 }
 
-/** 安全状态卡外壳（section 保持 data-settings-section，E2 断言按顺序查询）。 */
-function securitySectionCard({ id, index, titleId, title, chip = '', body = '', actions = '' }) {
+/** 安全状态卡外壳（section 保持 data-settings-section，E2 断言按顺序查询）。
+ *  state：effective = 已生效/已配置（实心状态点 + 左侧荧光条）；off = 未配置（空心点 + 中性底）。 */
+function securitySectionCard({ id, index, titleId, title, state: cardState = 'effective', chip = '', body = '', actions = '' }) {
+  const off = cardState === 'off';
   return `
-    <section class="settings-section sec-card" data-settings-section="${escapeHtml(id)}" aria-labelledby="${escapeHtml(titleId)}">
+    <section class="settings-section sec-card ${off ? 'is-off' : 'is-effective'}" data-settings-section="${escapeHtml(id)}" aria-labelledby="${escapeHtml(titleId)}">
       <span class="sec-card-idx" aria-hidden="true">${escapeHtml(index)}</span>
       <div class="sec-card-main">
-        <div class="sec-card-head"><h3 id="${escapeHtml(titleId)}">${escapeHtml(title)}</h3>${chip}</div>
+        <div class="sec-card-head"><span class="sec-dot${off ? ' is-off' : ''}" aria-hidden="true"></span><h3 id="${escapeHtml(titleId)}">${escapeHtml(title)}</h3>${chip}</div>
         ${body}
       </div>
-      ${actions ? `<div class="sec-card-actions">${actions}</div>` : ''}
+      <div class="sec-card-actions">${actions}</div>
     </section>`;
 }
 
@@ -2350,6 +2421,21 @@ function securityPendingStrip({ incoming, outgoing }) {
     </div>`;
 }
 
+/** 安全审计一行流：取既有 security_* 事件的最新一条；没有就完全隐藏（不造数据）。 */
+function securityAuditLine() {
+  const types = ['security_tier', 'security_approval', 'security_recovery', 'security_totp'];
+  const event = (state.policy ?? [])
+    .filter((item) => item && types.includes(item.type))
+    .sort((a, b) => (Number(b.at) || 0) - (Number(a.at) || 0))[0];
+  if (!event) return '';
+  const when = event.at ? formatTime(event.at) : '';
+  return `<p class="sec-audit-line" data-security-audit>
+    ${when ? `<span class="sec-audit-time">${escapeHtml(when)}</span>` : ''}
+    <span class="sec-audit-type">${escapeHtml(actionLabel(event.type))}</span>
+    <span class="sec-audit-desc">${describeEvent(event)}</span>
+  </p>`;
+}
+
 /** 安全 tab：待批准条 + 三张状态卡（不内联展开；详情/危险动作统一进弹框）。 */
 function securityCardHtml() {
   const sec = state.security;
@@ -2382,27 +2468,32 @@ function securityCardHtml() {
     index: '01',
     titleId: 'settings-security-level-title',
     title: t(IA_SECURITY_SECTIONS.level.titleKey),
-    chip: `<span class="crt-tag sec-tag-current" data-security-current>${escapeHtml(t('settings.security.current'))}</span>`,
+    state: 'effective',
+    chip: '',
     body: `<p class="sec-card-value"><strong>${escapeHtml(securityLevelLabel(level))}</strong><span>${escapeHtml(t(`settings.security.card.level.mech.${level}`))}</span></p>
-      <p class="sec-card-line">${escapeHtml(t(`settings.security.card.level.line.${level}`))}</p>`,
+      <p class="sec-card-line">${escapeHtml(t(`settings.security.card.level.line.${level}`))}</p>
+      <p class="sec-card-meta"><span data-security-current>${escapeHtml(t('settings.security.current'))}</span></p>`,
     actions: `<button class="btn btn-small btn-crt" type="button" data-security-change-level>${escapeHtml(t('settings.security.card.level.change'))}</button>`,
   });
 
   const fingerprint = totp.fingerprint ?? null;
   const seedImported = totp.imported === true;
-  const seedChip = seedImported
-    ? `<span class="crt-tag crt-tag-ok"><span class="sec-dot" aria-hidden="true"></span>${escapeHtml(t('settings.security.totp.imported'))}</span>${mismatch ? `<span class="crt-tag crt-tag-error">${escapeHtml(t('settings.security.totp.mismatchTag'))}</span>` : ''}`
-    : `<span class="crt-tag"><span class="sec-dot is-off" aria-hidden="true"></span>${escapeHtml(t('settings.security.totp.notImported'))}</span>`;
+  const seedChip = mismatch
+    ? `<span class="crt-tag crt-tag-error">${escapeHtml(t('settings.security.totp.mismatchTag'))}</span>`
+    : '';
   const seedMeta = seedImported
     ? `<p class="sec-card-meta"><code>${escapeHtml(fingerprint ?? '—')}</code><span class="sec-sep" aria-hidden="true">·</span><span>${escapeHtml(t('settings.security.card.seed.meta'))}</span></p>`
-    : `<p class="sec-card-meta"><span class="sec-card-warn">${escapeHtml(t('settings.security.totp.notImported'))}</span><span class="sec-sep" aria-hidden="true">·</span><span>${escapeHtml(t('settings.security.totp.notImportedNote'))}</span></p>`;
+    : `<p class="sec-card-meta"><span class="sec-card-warn">${escapeHtml(t('settings.security.totp.notImportedNote'))}</span></p>`;
   const seedCard = securitySectionCard({
     id: 'security-totp',
     index: '02',
     titleId: 'settings-security-totp-title',
     title: t(IA_SECURITY_SECTIONS.totp.titleKey),
+    state: seedImported ? 'effective' : 'off',
     chip: seedChip,
-    body: seedMeta,
+    body: `<p class="sec-card-value"><strong>${escapeHtml(t(seedImported ? 'settings.security.totp.imported' : 'settings.security.totp.notImported'))}</strong></p>
+      <p class="sec-card-line">${escapeHtml(t('settings.security.totp.desc'))}</p>
+      ${seedMeta}`,
     actions: `${seedImported
       ? `<button class="btn btn-small btn-crt" type="button" data-security-action="totp-show" ${disabled}>${escapeHtml(t('settings.security.totp.show'))}</button>`
       : ''}
@@ -2410,9 +2501,6 @@ function securityCardHtml() {
   });
 
   const registered = recovery.registered === true;
-  const recoveryChip = registered
-    ? `<span class="crt-tag crt-tag-ok"><span class="sec-dot" aria-hidden="true"></span>${escapeHtml(t('settings.security.recovery.generated'))}</span>`
-    : `<span class="crt-tag"><span class="sec-dot is-off" aria-hidden="true"></span>${escapeHtml(t('settings.security.recovery.notGeneratedShort'))}</span>`;
   const recoveryMeta = registered
     ? `<p class="sec-card-meta"><code>${escapeHtml(String(recovery.keyId ?? '').slice(0, 8))}</code><span class="sec-sep" aria-hidden="true">·</span><span>${escapeHtml(t('settings.security.card.recovery.meta', { time: formatLocaleDate(recovery.createdAt) }))}</span>${recovery.current === false ? `<span class="crt-tag crt-tag-warn">${escapeHtml(t('settings.security.recovery.keyMismatch'))}</span>` : ''}</p>`
     : `<p class="sec-card-meta"><span>${escapeHtml(t('settings.security.recovery.whenHigh'))}</span></p>`;
@@ -2426,8 +2514,10 @@ function securityCardHtml() {
     index: '03',
     titleId: 'settings-security-recovery-title',
     title: t(IA_SECURITY_SECTIONS.recovery.titleKey),
-    chip: recoveryChip,
-    body: recoveryMeta,
+    state: registered ? 'effective' : 'off',
+    body: `<p class="sec-card-value"><strong>${escapeHtml(t(registered ? 'settings.security.recovery.generated' : 'settings.security.recovery.notGeneratedShort'))}</strong></p>
+      <p class="sec-card-line">${escapeHtml(t('settings.security.recovery.desc'))}</p>
+      ${recoveryMeta}`,
     actions: recoveryActions,
   });
 
@@ -2445,10 +2535,57 @@ function securityCardHtml() {
     ${levelCard}
     ${seedCard}
     ${recoveryCard}
+    ${securityAuditLine()}
     ${rejectionFoot}`;
 }
 
 /** 安全卡事件（settings 每次重建都重新绑定；全部委托在本节点内）。 */
+/** 常驻「更多」popover：button + 面板（fixed 不裁切）；Esc / 点外关闭并回焦。 */
+function bindMoreMenus(root) {
+  root.querySelectorAll('[data-settings-more]').forEach((wrap) => {
+    const trigger = wrap.querySelector('[data-settings-more-trigger]');
+    const panel = wrap.querySelector('.settings-more-panel');
+    if (!trigger || !panel) return;
+    const close = (focusBack) => {
+      if (panel.hidden) return;
+      panel.hidden = true;
+      trigger.setAttribute('aria-expanded', 'false');
+      if (focusBack) trigger.focus();
+    };
+    const open = () => {
+      document.querySelectorAll('.settings-more-panel:not([hidden])').forEach((other) => { other.hidden = true; });
+      panel.hidden = false;
+      const rect = trigger.getBoundingClientRect();
+      const width = panel.offsetWidth;
+      panel.style.top = `${Math.round(rect.bottom + 4)}px`;
+      panel.style.left = `${Math.round(Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8)))}px`;
+      trigger.setAttribute('aria-expanded', 'true');
+      panel.querySelector('.btn')?.focus();
+    };
+    trigger.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (panel.hidden) open(); else close(true);
+    });
+    wrap.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        close(true);
+      }
+    });
+    panel.addEventListener('click', () => close(false));
+  });
+}
+
+document.addEventListener('click', (event) => {
+  if (event.target.closest?.('[data-settings-more]')) return;
+  document.querySelectorAll('[data-settings-more] [data-settings-more-trigger][aria-expanded="true"]').forEach((trigger) => {
+    const panel = trigger.closest('[data-settings-more]')?.querySelector('.settings-more-panel');
+    if (panel) panel.hidden = true;
+    trigger.setAttribute('aria-expanded', 'false');
+  });
+});
+
 function bindSecurityCard(root) {
   root.querySelectorAll('[data-security-change-level]').forEach((button) => {
     button.addEventListener('click', () => securityLevelChooser());
@@ -3192,6 +3329,12 @@ async function saveDeviceRename() {
   }
 }
 
+/** 关于本机 · 收敛健康（对端各自一句话；空态 = 说明）。 */
+function convergenceAboutSection(rows = []) {
+  return `${rows.length ? kvRows(rows) : `<p class="about-note">${escapeHtml(t('about.convergence.empty'))}</p>`}
+    <p class="about-note">${escapeHtml(t('about.convergence.note'))}</p>`;
+}
+
 function renderAbout() {
   const body = $('#about-body');
   if (state.locked) {
@@ -3252,145 +3395,166 @@ function renderAbout() {
         <button class="btn btn-small btn-crt" data-device-rename-save type="button" ${writes ? '' : 'disabled'}>${escapeHtml(t('common.save'))}</button>
         <button class="btn btn-small" data-device-rename-cancel type="button">${escapeHtml(t('common.cancel'))}</button>
       </span>${state.deviceRenameError ? `<span class="crt-warn device-rename-error" role="alert">${escapeHtml(state.deviceRenameError)}</span>` : ''}`)
-    : kvRow(t('about.identity.deviceName'), `${deviceName
+    : kvRow(t('about.identity.deviceName'), `<span class="device-name-inline" title="${escapeHtml(t('about.identity.renameNote'))}">${deviceName
       ? `<span class="device-name-value">${escapeHtml(deviceName)}</span>`
       : `<span class="kv-empty">${escapeHtml(t('about.identity.nameUnset'))}</span>`}
-      <button class="btn btn-small btn-crt" data-device-rename type="button" ${writes ? '' : 'disabled'}>${escapeHtml(t('about.identity.rename'))}</button>
-      <span class="cfg-help muted">${escapeHtml(t('about.identity.renameNote'))}</span>`);
-  body.innerHTML = `
-    <section class="settings-section" data-info-block="identity">
-      <h3>${escapeHtml(t('about.identity.title'))} <span class="badge badge-muted">${escapeHtml(t('about.identity.tag'))}</span></h3>
-      ${kvRows([
-        copyRowOf('deviceId', s.identity.deviceId),
-        deviceNameRow,
-        kvRow(t('about.identity.mode'), s.identity.mode === 'delegated'
-          ? t('about.identity.modeDelegated')
-          : t('about.identity.modeRoot')),
-        ...(s.identity.peerId ? [copyRowOf('peerId', s.identity.peerId)] : []),
-        ...addrRows,
-        copyRowOf('storagePath', s.storage.path ?? '—'),
-        copyRowOf(t('about.identity.configFile'), configPath),
-        kvRow(t('about.identity.backup'), `<code>${escapeHtml(configPath)}.bak</code><span class="muted">${escapeHtml(t('about.identity.backupNote'))}</span>`),
-        kvRow('storageAdapter', escapeHtml(s.storage.adapter)),
-        kvRow(t('about.identity.encryption'), `${escapeHtml(s.encryption.level)}${s.encryption.atRest ? escapeHtml(t('about.identity.atRest')) : ''}`),
-      ])}
-    </section>
-
-    ${convergenceAboutSection()}
-
-    <details class="settings-fold fold-about-runtime" id="about-runtime-fold" data-settings-fold="about-runtime">
-      <summary>${escapeHtml(foldLabel('about-runtime'))}</summary>
-      <div class="settings-fold-body">
-    <section class="settings-section" data-info-block="syncRate">
-      <h3>${escapeHtml(t('about.syncRate.title'))} <span class="badge badge-muted">${escapeHtml(t('about.syncRate.tag'))}</span></h3>
-      ${kvRows(statusRows().filter((row) => row.path === 'sync.autoSync' || row.path === 'sync.pushOnWrite').map((row) => kvRow(
-        row.label ?? row.path,
-        valueWithEffective(escapeHtml(formatRuntimeValue(row.actual)), {
-          configured: row.configured,
-          effective: row.actual,
-          reason: row.reason,
-        }),
-      )))}
-      <p class="muted" style="font-size:11px">${t('about.syncRate.note')}</p>
-    </section>
-
-    <section class="settings-section" data-info-block="statusOnly">
-      <h3>${escapeHtml(t('about.statusOnly.title'))} <span class="badge badge-muted">${escapeHtml(t('settings.common.readonly'))}</span></h3>
-      <p class="muted" style="font-size:11px;margin:0 0 8px">${escapeHtml(t('about.statusOnly.desc'))}</p>
-      ${kvRows(statusRows().filter((row) => row.path !== 'sync.autoSync' && row.path !== 'sync.pushOnWrite').map((row) => kvRow(
-        row.label ?? row.path,
-        `${escapeHtml(formatRuntimeValue(row.actual))}${row.reason && row.reason !== '已生效' ? `<span class="cfg-reason"><span class="cfg-eff-key">${escapeHtml(t('settings.editor.reasonKey'))}</span> ${escapeHtml(row.reasonText ?? row.reason)}</span>` : ''}`,
-      )))}
-    </section>
-
-    <section class="settings-section" data-info-block="runtime">
-      <h3>${escapeHtml(t('about.runtime.title'))} <span class="badge badge-muted">${escapeHtml(t('settings.common.readonly'))}</span>${pendingRestartBadge()}${listenAlarm.length ? `<span class="crt-tag crt-tag-warn">${escapeHtml(t('about.runtime.publicListen'))}</span>` : ''}</h3>
-      ${kvRows([
-        ...(pendingRestartItems().length > 0
-          ? [kvRow(t('about.runtime.pendingRestart'), t('about.runtime.pendingRestartBody', { count: pendingRestartItems().length }))]
-          : []),
-        kvRow('P2P', s.network.enabled ? t('settings.common.enabled') : t('settings.common.disabled')),
-        kvRow(t('about.runtime.listen'), escapeHtml(s.network.listen.join(', ') || '—')),
-        kvRow(t('about.runtime.mcpListen'), `${escapeHtml(s.mcp.host)}:${escapeHtml(String(s.mcp.port))} · auth=${escapeHtml(s.mcp.auth)}`),
-        // R-1 中-5：常驻 plist 全路径从连接页卡片收编到这里
-        ...(state.service?.unitPath ? [kvRow(t('about.runtime.serviceUnit'), `<code>${escapeHtml(state.service.unitPath)}</code>`)] : []),
-        kvRow('TLS', s.mcp.tls
-          ? t('about.runtime.tlsOn', {
-            key: s.mcp.tlsKeyConfigured ? t('about.runtime.present') : t('about.runtime.missing'),
-            cert: s.mcp.tlsCertConfigured ? t('about.runtime.present') : t('about.runtime.missing'),
-          })
-          : t('about.runtime.tlsOff')),
-        kvRow(t('about.runtime.joinService'), s.join?.enabled
-          ? t('about.runtime.joinOn', { bind: escapeHtml(String(s.join.bind)), port: escapeHtml(String(s.join.port)) })
-          : t('settings.common.disabled')),
-        kvRow(t('about.runtime.semantic'), t('about.runtime.semanticValue', {
-          state: s.semantic.enabled ? t('settings.common.enabled') : t('settings.common.disabled'),
-          score: s.semantic.minScore,
-        })),
-        // C6：内建 relay 角色（只读；桥的选举自动完成，此处仅展示）
-        kvRow(t('about.runtime.relay'), s.relay
-          ? t('about.runtime.relayValue', {
-            state: s.relay.serving ? t('about.runtime.on') : t('about.runtime.off'),
-            reason: escapeHtml(localizeReasonText(s.relay.reason, 'settings.schema.reason.dynamicFallback') || '—'),
-          })
-          : '—'),
-        kvRow(t('about.runtime.bridge'), s.relay?.bridge
-          ? `<code>${escapeHtml(String(s.relay.bridge.address))}</code> <span class="muted">· ${escapeHtml(String(s.relay.bridge.peer))}</span>`
-          : t('about.runtime.bridgeNone')),
-        kvRow(t('about.runtime.bridgeAllowed'), s.relay
-          ? t('about.runtime.bridgeAllowedValue', { count: s.relay.allowedClients ?? 0 })
-          : '—'),
-        // C5：地址自动广播（只读；提示类信息，不影响订阅）
-        kvRow(t('about.runtime.broadcast'), s.net
-          ? `${s.net.enabled ? t('about.runtime.broadcastMode', { mode: escapeHtml(String(s.net.mode)) }) : t('about.runtime.broadcastOff')}${t('about.runtime.broadcastStats', { published: s.net.published, applied: s.net.applied })}`
-          : '—'),
-        // C4：NAT 穿透（只读）
-        kvRow(t('about.runtime.nat'), s.nat
-          ? `${s.nat.dcutrEnabled ? t('about.runtime.dcutrOn') : t('about.runtime.dcutrOff')} · ${s.nat.autonatEnabled ? t('about.runtime.autonatOn') : t('about.runtime.autonatOff')} · ${t('about.runtime.natUpgrades', { count: s.nat.directUpgrades ?? 0 })}${s.nat.loadError ? ` ⚠ ${escapeHtml(String(s.nat.loadError))}` : ''}`
-          : t('about.runtime.natOff')),
-        kvRow(t('about.runtime.ignored'), s.net && Object.values(s.net.ignored ?? {}).some((v) => v > 0)
-          ? escapeHtml(Object.entries(s.net.ignored).filter(([, v]) => v > 0).map(([k, v]) => `${k} ${v}`).join(' / '))
-          : t('common.none')),
-      ])}
-      ${listenAlarm.length ? `<p class="crt-warn">${escapeHtml(t('about.runtime.listenAlarm', { addresses: listenAlarm.join(', ') }))}</p>` : ''}
-    </section>
-
-    <section class="settings-section" data-info-block="paths">
-      <h3>${escapeHtml(t('about.paths.title'))} <span class="badge badge-muted">${escapeHtml(t('about.paths.tag'))}</span></h3>
-      ${(() => {
-        const peers = s.peers ?? { enabled: false, paths: [] };
-        if (!peers.enabled) return `<p class="muted" style="font-size:11px">${escapeHtml(t('about.paths.disabled'))}</p>`;
-        if (peers.paths.length === 0) return `<p class="muted" style="font-size:11px">${escapeHtml(t('about.paths.empty'))}</p>`;
-        return `<ul class="path-list">${peers.paths.map((p) => `<li class="path-row">
+      <button class="btn btn-small btn-crt" data-device-rename type="button" ${writes ? '' : 'disabled'}>${escapeHtml(t('about.identity.rename'))}</button></span>`);
+  const convSummary = state.overview?.convergence?.summary;
+  const convPeers = (state.devices ?? [])
+    .filter((d) => d.deviceId !== state.overview?.device?.deviceId && d.convergence)
+    .sort((a, b) => (a.deviceId < b.deviceId ? -1 : 1));
+  const convRows = convPeers.map((d) => {
+    const conv = d.convergence;
+    const meta = convergenceStateMeta(conv.state);
+    const detail = [
+      convergencePrimaryText(conv),
+      conv.state === 'ok' && conv.lastConvergedAt ? t('convergence.chipReconciled', { time: fmtClock(conv.lastConvergedAt) }) : '',
+    ].filter(Boolean).join(' · ');
+    return kvRow(d.deviceId, `<span class="crt-tag ${meta.cls}">${meta.text}</span>${detail ? ` <span class="muted">${escapeHtml(detail)}</span>` : ''}`);
+  });
+  const convValue = convSummary
+    ? t('about.convergence.summary', {
+      peers: convSummary.peers,
+      ok: convSummary.ok,
+      stalled: convSummary.stalled,
+      diverged: convSummary.diverged,
+      unverifiable: convSummary.unverifiable,
+      offline: convSummary.offline,
+    })
+    : t('about.convergence.tag');
+  const syncRows = statusRows()
+    .filter((row) => row.path === 'sync.autoSync' || row.path === 'sync.pushOnWrite')
+    .map((row) => {
+      const main = escapeHtml(formatRuntimeValue(row.actual));
+      const detail = `${t('settings.editor.configured')} ${formatRuntimeValue(row.configured)} / ${t('settings.editor.actual')} ${formatRuntimeValue(row.actual)}${row.reason && row.reason !== '已生效' ? ` · ${row.reasonText ?? row.reason}` : ''}`;
+      return kvRow(row.label ?? row.path, `<span title="${escapeHtml(detail)}">${main}</span>`);
+    });
+  const statusOnlyRows = statusRows()
+    .filter((row) => row.path !== 'sync.autoSync' && row.path !== 'sync.pushOnWrite')
+    .map((row) => kvRow(
+      row.label ?? row.path,
+      `${escapeHtml(formatRuntimeValue(row.actual))}${row.reason && row.reason !== '已生效' ? `<span class="cfg-reason"><span class="cfg-eff-key">${escapeHtml(t('settings.editor.reasonKey'))}</span> ${escapeHtml(row.reasonText ?? row.reason)}</span>` : ''}`,
+    ));
+  const runtimeRows = [
+    ...(pendingRestartItems().length > 0
+      ? [kvRow(t('about.runtime.pendingRestart'), t('about.runtime.pendingRestartBody', { count: pendingRestartItems().length }))]
+      : []),
+    kvRow('P2P', s.network.enabled ? t('settings.common.enabled') : t('settings.common.disabled')),
+    kvRow(t('about.runtime.listen'), escapeHtml(s.network.listen.join(', ') || '—')),
+    kvRow(t('about.runtime.mcpListen'), `${escapeHtml(s.mcp.host)}:${escapeHtml(String(s.mcp.port))} · auth=${escapeHtml(s.mcp.auth)}`),
+    ...(state.service?.unitPath ? [kvRow(t('about.runtime.serviceUnit'), `<code>${escapeHtml(state.service.unitPath)}</code>`, state.service.unitPath)] : []),
+    kvRow('TLS', s.mcp.tls
+      ? t('about.runtime.tlsOn', {
+        key: s.mcp.tlsKeyConfigured ? t('about.runtime.present') : t('about.runtime.missing'),
+        cert: s.mcp.tlsCertConfigured ? t('about.runtime.present') : t('about.runtime.missing'),
+      })
+      : t('about.runtime.tlsOff')),
+    kvRow(t('about.runtime.joinService'), s.join?.enabled
+      ? t('about.runtime.joinOn', { bind: escapeHtml(String(s.join.bind)), port: escapeHtml(String(s.join.port)) })
+      : t('settings.common.disabled')),
+    kvRow(t('about.runtime.semantic'), t('about.runtime.semanticValue', {
+      state: s.semantic.enabled ? t('settings.common.enabled') : t('settings.common.disabled'),
+      score: s.semantic.minScore,
+    })),
+    kvRow(t('about.runtime.relay'), s.relay
+      ? t('about.runtime.relayValue', {
+        state: s.relay.serving ? t('about.runtime.on') : t('about.runtime.off'),
+        reason: escapeHtml(localizeReasonText(s.relay.reason, 'settings.schema.reason.dynamicFallback') || '—'),
+      })
+      : '—'),
+    kvRow(t('about.runtime.bridge'), s.relay?.bridge
+      ? `<code>${escapeHtml(String(s.relay.bridge.address))}</code> <span class="muted">· ${escapeHtml(String(s.relay.bridge.peer))}</span>`
+      : t('about.runtime.bridgeNone')),
+    kvRow(t('about.runtime.bridgeAllowed'), s.relay
+      ? t('about.runtime.bridgeAllowedValue', { count: s.relay.allowedClients ?? 0 })
+      : '—'),
+    kvRow(t('about.runtime.broadcast'), s.net
+      ? `${s.net.enabled ? t('about.runtime.broadcastMode', { mode: escapeHtml(String(s.net.mode)) }) : t('about.runtime.broadcastOff')}${t('about.runtime.broadcastStats', { published: s.net.published, applied: s.net.applied })}`
+      : '—'),
+    kvRow(t('about.runtime.nat'), s.nat
+      ? `${s.nat.dcutrEnabled ? t('about.runtime.dcutrOn') : t('about.runtime.dcutrOff')} · ${s.nat.autonatEnabled ? t('about.runtime.autonatOn') : t('about.runtime.autonatOff')} · ${t('about.runtime.natUpgrades', { count: s.nat.directUpgrades ?? 0 })}${s.nat.loadError ? ` ⚠ ${escapeHtml(String(s.nat.loadError))}` : ''}`
+      : t('about.runtime.natOff')),
+    kvRow(t('about.runtime.ignored'), s.net && Object.values(s.net.ignored ?? {}).some((v) => v > 0)
+      ? escapeHtml(Object.entries(s.net.ignored).filter(([, v]) => v > 0).map(([k, v]) => `${k} ${v}`).join(' / '))
+      : t('common.none')),
+  ];
+  const peerPaths = s.peers ?? { enabled: false, paths: [] };
+  const pathsBlock = !peerPaths.enabled
+    ? `<p class="about-note">${escapeHtml(t('about.paths.disabled'))}</p>`
+    : peerPaths.paths.length === 0
+      ? `<p class="about-note">${escapeHtml(t('about.paths.empty'))}</p>`
+      : `<ul class="path-list">${peerPaths.paths.map((p) => `<li class="path-row">
           <span class="path-key"><code>${escapeHtml(p.key)}</code></span>
           <span class="path-value">${p.connected
             ? `<span class="path-kind path-kind-${escapeHtml(String(p.kind ?? 'unknown'))}">${escapeHtml(String(p.kind ?? t('common.unknown')))}</span> <code>${escapeHtml(String(p.address ?? '—'))}</code> <span class="muted">${p.since ? escapeHtml(t('about.paths.switched', { time: formatTime(p.since) })) : ''}</span>`
             : `<span class="muted">${escapeHtml(t('common.notConnected'))}</span>${p.lastError ? ` <span class="crt-warn">⚠ ${escapeHtml(String(p.lastError))}</span>` : ''}`} <span class="muted">· ${escapeHtml(t('about.paths.candidates', { count: p.candidates }))}</span></span>
         </li>`).join('')}</ul>`;
-      })()}
-      <p class="muted" style="font-size:11px">${escapeHtml(t('about.paths.note'))}</p>
-    </section>
+  const fleetBlock = s.fleet?.configured
+    ? kvRows([
+      kvRow(t('about.fleet.namespace'), s.fleet.namespace ? `<code>${escapeHtml(s.fleet.namespace)}</code>` : t('about.fleet.unset')),
+      kvRow(t('about.fleet.peers'), String(s.fleet.peers ?? 0)),
+      kvRow(t('about.fleet.agents'), String(s.fleet.agents ?? 0)),
+      kvRow(t('about.fleet.config'), escapeHtml(s.fleet.path ?? 'fleet.config.json')),
+    ])
+    : `<p class="about-note">${escapeHtml(t('about.fleet.empty'))}</p>`;
+  const toolsBlock = `<div class="chip-wrap about-tools">${(s.tools ?? []).map((tool) => `<span class="crt-tag">${escapeHtml(tool)}</span>`).join(' ')}</div>`;
+  const sub = (label) => `<p class="about-sub">${escapeHtml(label)}</p>`;
+  const aboutGroup = (id, title, inner) => `
+    <section class="about-group settings-group" data-info-block="${id}">
+      <div class="settings-group-head"><h3>${escapeHtml(title)}</h3></div>
+      <div class="settings-group-body">${inner}</div>
+    </section>`;
+  const aboutFold = (id, label, inner) => `
+    <details class="settings-fold" id="${id}" data-settings-fold="${id}">
+      <summary>${escapeHtml(label)}</summary>
+      <div class="settings-fold-body">${inner}</div>
+    </details>`;
+  body.innerHTML = `
+    ${aboutGroup('identity', t('about.identity.title'), `${kvRows([
+      copyRowOf(t('about.identity.deviceId'), s.identity.deviceId),
+      deviceNameRow,
+    ])}${aboutFold('about-identity', t('about.fold.identity'), `${kvRows([
+      kvRow(t('about.identity.mode'), s.identity.mode === 'delegated'
+        ? t('about.identity.modeDelegated')
+        : t('about.identity.modeRoot')),
+      ...(s.identity.peerId ? [copyRowOf('peerId', s.identity.peerId)] : []),
+      ...addrRows,
+      copyRowOf('storagePath', s.storage.path ?? '—'),
+      kvRow('storageAdapter', escapeHtml(s.storage.adapter)),
+      kvRow(t('about.identity.encryption'), `${escapeHtml(s.encryption.level)}${s.encryption.atRest ? escapeHtml(t('about.identity.atRest')) : ''}`),
+    ])}<p class="about-note">${escapeHtml(t('about.identity.renameNote'))}</p>`)}`)}
 
-    <section class="settings-section" data-info-block="fleet">
-      <h3>${escapeHtml(t('about.fleet.title'))} <span class="badge badge-muted">${escapeHtml(t('settings.common.readonly'))}</span></h3>
-      ${s.fleet?.configured
-        ? kvRows([
-          kvRow(t('about.fleet.namespace'), s.fleet.namespace ? `<code>${escapeHtml(s.fleet.namespace)}</code>` : t('about.fleet.unset')),
-          kvRow(t('about.fleet.peers'), String(s.fleet.peers ?? 0)),
-          kvRow(t('about.fleet.agents'), String(s.fleet.agents ?? 0)),
-          kvRow(t('about.fleet.config'), escapeHtml(s.fleet.path ?? 'fleet.config.json')),
-        ])
-        : `<p class="muted" style="font-size:11px">${escapeHtml(t('about.fleet.empty'))}</p>`}
-      <p class="muted" style="font-size:11px">${t('about.fleet.note')}${s.fleet?.configured ? '' : t('about.fleet.onboard')}</p>
-    </section>
+    ${aboutGroup('runtime', t('about.group.runtime'), `${kvRows([
+      kvRow(t('about.convergence.title'), `<span title="${escapeHtml(convValue)}">${escapeHtml(convValue)}</span>`, null, {
+        tone: convSummary && convSummary.ok === convSummary.peers ? 'ok' : 'warn',
+      }),
+      ...syncRows,
+    ])}${aboutFold('about-runtime', t('about.fold.runtime'), `
+      ${sub(t('about.convergence.title'))}
+      ${convergenceAboutSection(convRows)}
+      <p class="about-note">${escapeHtml(t('about.syncRate.note'))}</p>
+      ${sub(t('about.statusOnly.title'))}
+      <p class="about-note">${escapeHtml(t('about.statusOnly.desc'))}</p>
+      ${kvRows(statusOnlyRows)}
+      ${sub(t('about.runtime.title'))}
+      ${kvRows(runtimeRows)}
+      ${listenAlarm.length ? `<p class="crt-warn about-note">${escapeHtml(t('about.runtime.listenAlarm', { addresses: listenAlarm.join(', ') }))}</p>` : ''}
+    `)}`)}
 
-    <section class="settings-section" data-info-block="tools">
-      <h3>${escapeHtml(t('about.tools.title'))} <span class="badge badge-muted">${escapeHtml(t('about.tools.tag', { count: (s.tools ?? []).length }))}</span></h3>
-      <p class="muted" style="font-size:11px;margin:0 0 8px">${t('about.tools.note')}</p>
-      <div class="chip-wrap">${(s.tools ?? []).map((tool) => `<span class="crt-tag">${escapeHtml(tool)}</span>`).join(' ')}</div>
-    </section>
-      </div>
-    </details>
+    ${aboutGroup('diag', t('about.group.diag'), `${kvRows([
+      copyRowOf(t('about.identity.configFile'), configPath),
+      kvRow(t('about.identity.backup'), `<span title="${escapeHtml(t('about.identity.backupNote'))}"><code>${escapeHtml(configPath)}.bak</code></span>`, `${configPath}.bak`),
+    ])}${aboutFold('about-diag', t('about.fold.diag'), `
+      ${sub(t('about.paths.title'))}
+      ${pathsBlock}
+      <p class="about-note">${escapeHtml(t('about.paths.note'))}</p>
+      ${sub(t('about.fleet.title'))}
+      ${fleetBlock}
+      <p class="about-note">${t('about.fleet.note')}${s.fleet?.configured ? '' : t('about.fleet.onboard')}</p>
+      ${sub(t('about.tools.title'))}
+      ${toolsBlock}
+      <p class="about-note">${t('about.tools.note')}</p>
+    `)}`)}
   `;
   body.querySelectorAll('[data-copy]').forEach((button) => {
     button.addEventListener('click', () => copyText(button.dataset.copy, button));
@@ -3696,11 +3860,11 @@ function runtimeWantsModelCatalog() {
   return !$('#settings')?.hidden && ['runtime', 'advanced'].includes(state.settingsTab ?? '');
 }
 
-/** 轮询只在「设置 · 高级」且正在浏览本地模型、页面可见时进行。 */
+/** 轮询只在「设置 · 记忆」且正在浏览本地模型、页面可见时进行。 */
 function runtimeModelPollingWanted() {
   if (MOCK || document.hidden) return false;
   if ($('#settings')?.hidden) return false;
-  if (state.settingsTab !== 'advanced') return false;
+  if (state.settingsTab !== 'runtime') return false;
   if (memoryRuntimeModeOf(state.runtime.status, currentConfigFile()) !== 'immersive') return false;
   return runtimeModelSourceSelected() === 'local';
 }
@@ -3984,7 +4148,7 @@ async function changeRuntimeModelSource(value) {
   state.runtime.modelSourceBrowse = 'local';
   state.runtime.modelError = null;
   lastSettingsSignature = null;
-  if (!$('#settings')?.hidden && state.settingsTab === 'advanced') renderSettings('advanced');
+  if (!$('#settings')?.hidden && state.settingsTab === 'runtime') renderSettings('runtime');
   const models = await reloadRuntimeModels({ patch: false });
   if (models) {
     const installed = runtimeModelPacks().filter((pack) => pack.installed === true);
@@ -3996,9 +4160,9 @@ async function changeRuntimeModelSource(value) {
 }
 
 function patchRuntimeModelList() {
-  const host = document.querySelector('#settings-panel-advanced [data-rt-model-list]');
+  const host = document.querySelector('#settings-panel-runtime [data-rt-model-list]');
   if (host) host.innerHTML = runtimeModelListBodyHtml();
-  const note = document.querySelector('#settings-panel-advanced [data-rt-model-source-note]');
+  const note = document.querySelector('#settings-panel-runtime [data-rt-model-source-note]');
   if (note) note.textContent = runtimeModelSourceNote();
 }
 
@@ -4128,7 +4292,7 @@ async function setMemoryRuntimeMode(mode) {
   }
 }
 
-/** 高级 · 模型来源：只写 sidecar config.json 的 model.source；失败只降级，不影响对话。 */
+/** 记忆 · 模型来源：只写 sidecar config.json 的 model.source；失败只降级，不影响对话。 */
 async function setRuntimeModelSource(value) {
   if (MOCK) { showToast(t('common.mockReadOnly')); return; }
   if (!state.features.writes) { showToast(t('settings.runtime.readonly')); return; }
@@ -4272,7 +4436,7 @@ function renderRuntimeStatus() {
       ${!status.available && enabled ? `<p class="runtime-pending">${escapeHtml(t('runtime.sidecar.notReady'))}</p>` : ''}
     `)}
     ${enabled ? runtimeStatusCard(t('runtime.model.title'), model?.degraded ? t('runtime.sidecar.degraded') : '', `
-      <dl class="runtime-kv" data-rt-model-status>${modelRows.map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(String(value))}</dd>`).join('')}</dl>
+      <dl class="runtime-kv" data-rt-model-status>${modelRows.map(([label, value]) => `<div class="kv-row"><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(String(value))}</dd></div>`).join('')}</dl>
       <p class="muted">${escapeHtml(t('runtime.model.note'))}</p>
     `) : ''}
   `;
@@ -4309,7 +4473,7 @@ function runtimeObjectDetailHtml(memory) {
     rows.push([t('runtime.timeline.tags'), memory.tags.join(' · ')]);
   }
   return `<div class="runtime-detail" data-runtime-object="${escapeHtml(memory.id)}">
-    <dl class="runtime-kv">${rows.map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`).join('')}</dl>
+    <dl class="runtime-kv">${rows.map(([label, value]) => `<div class="kv-row"><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join('')}</dl>
     <p class="mem-preview">${escapeHtml(memory.preview || t('memories.emptyPreview'))}</p>
     ${runtimeTimelineKind(memory) !== 'memory' ? `<p class="muted">${escapeHtml(t('runtime.timeline.internalBadge'))} · ${escapeHtml(String(memory.namespace ?? '—'))}</p>` : ''}
   </div>`;
@@ -5097,49 +5261,6 @@ function convergenceChipRows(conv, shortTimeFn) {
     rows.push(`<li><span class="muted">${escapeHtml(convergenceReasonText(reason))}</span></li>`);
   }
   return rows.join('');
-}
-
-/** 「关于本机」：收敛健康汇总段（对端各自一句话；未启用 = 说明 + 关掉入口） */
-function convergenceAboutSection() {
-  const peers = (state.devices ?? [])
-    .filter((d) => d.deviceId !== state.overview?.device?.deviceId && d.convergence)
-    .sort((a, b) => (a.deviceId < b.deviceId ? -1 : 1));
-  const s = state.overview?.convergence?.summary;
-  if (!s && peers.length === 0) {
-    return `
-    <section class="settings-section" data-info-block="convergence">
-      <h3>${escapeHtml(t('about.convergence.title'))} <span class="badge badge-muted">${escapeHtml(t('settings.common.readonly'))}</span></h3>
-      <p class="muted" style="font-size:11px;margin:0">${t('about.convergence.disabled')}</p>
-    </section>`;
-  }
-  const summary = s
-    ? t('about.convergence.summary', {
-      peers: s.peers,
-      ok: s.ok,
-      stalled: s.stalled,
-      diverged: s.diverged,
-      unverifiable: s.unverifiable,
-      offline: s.offline,
-    })
-    : '';
-  const rows = peers.map((d) => {
-    const conv = d.convergence;
-    const meta = convergenceStateMeta(conv.state);
-    const detail = [
-      convergencePrimaryText(conv),
-      conv.state === 'ok' && conv.lastConvergedAt ? t('convergence.chipReconciled', { time: fmtClock(conv.lastConvergedAt) }) : '',
-    ]
-      .filter(Boolean)
-      .join(' · ');
-    return kvRow(d.deviceId, `<span class="crt-tag ${meta.cls}">${meta.text}</span>${detail ? ` <span class="muted">${escapeHtml(detail)}</span>` : ''}`);
-  });
-  return `
-    <section class="settings-section" data-info-block="convergence">
-      <h3>${escapeHtml(t('about.convergence.title'))} <span class="badge badge-muted">${escapeHtml(t('about.convergence.tag'))}</span></h3>
-      ${summary ? `<p class="muted" style="font-size:11px;margin:0 0 8px">${escapeHtml(summary)}</p>` : ''}
-      ${peers.length ? kvRows(rows) : `<p class="muted" style="font-size:11px;margin:0">${escapeHtml(t('about.convergence.empty'))}</p>`}
-      <p class="muted" style="font-size:11px;margin:8px 0 0">${escapeHtml(t('about.convergence.note'))}</p>
-    </section>`;
 }
 
 function renderDeviceCard() {
@@ -6103,7 +6224,7 @@ $('#settings-body').addEventListener('click', (event) => {
   const tab = event.target.closest('[data-settings-tab]');
   if (tab) {
     const next = tab.dataset.settingsTab;
-    if (next !== 'advanced') stopRuntimeModelPolling();
+    if (next !== 'runtime') stopRuntimeModelPolling();
     renderSettings(next);
     if (next === 'runtime' || next === 'advanced') {
       void ensureRuntimeData({ force: true }).then(() => {
@@ -6677,9 +6798,15 @@ function cloudRowHtml(entry) {
   const fingerprint = entry.masterFingerprint
     ? `<code>${escapeHtml(entry.masterFingerprint)}</code>`
     : `<span class="kv-empty">${escapeHtml(t('settings.cloud.row.unknownRepair'))}</span>`;
-  const lastUsed = entry.lastUsedAt ? formatTime(entry.lastUsedAt) : '—';
+  const lastUsed = entry.lastUsedAt ? formatShortDate(entry.lastUsedAt) : '—';
+  const lastUsedFull = entry.lastUsedAt ? formatTime(entry.lastUsedAt) : '—';
+  const fingerprintText = entry.masterFingerprint ?? t('settings.cloud.row.unknownRepair');
+  const metaTitle = `${t('settings.cloud.row.rootFingerprint', { fingerprint: fingerprintText })} · ${t('settings.cloud.row.lastUsed', { time: lastUsedFull })}`;
   const conflictBadges = duplicate
     ? `<span class="badge badge-warn cloud-dup-badge">${escapeHtml(t('settings.cloud.row.duplicate'))}</span>${suggested ? `<span class="badge badge-warn cloud-suggest-badge">${escapeHtml(t('settings.cloud.row.suggestRename'))}</span>` : ''}`
+    : '';
+  const nameTitle = entry.nameUpdatedAt
+    ? ` title="${escapeHtml(t('settings.cloud.row.nameUpdated', { time: formatTime(entry.nameUpdatedAt) }))}"`
     : '';
   // 第一版：只有当前忆云能写网络级名字；归档项提示切换后再改。
   const renameUi = current
@@ -6688,22 +6815,19 @@ function cloudRowHtml(entry) {
            value="${escapeHtml(state.cloudRename?.name ?? entry.name)}" aria-label="${escapeHtml(t('settings.cloud.rename.aria'))}" />
          <button class="btn btn-small btn-crt" data-cloud-rename-save type="button" ${cloudRenameBusy ? 'disabled' : ''}>${escapeHtml(t('settings.cloud.rename.save'))}</button>
          <button class="btn btn-small" data-cloud-rename-cancel type="button">${escapeHtml(t('common.cancel'))}</button>`
-      : `<button class="btn btn-small btn-crt" data-cloud-rename="${id}" type="button">${escapeHtml(t('settings.cloud.rename.action'))}</button>`)
-    : `<button class="btn btn-small btn-crt btn-crt-danger" data-cloud-switch="${id}" type="button">${escapeHtml(t('settings.cloud.row.switch'))}</button>
-       <span class="cloud-rename-hint muted">${escapeHtml(t('settings.cloud.row.switchHint'))}</span>`;
-  return `<div class="cloud-row${current ? ' is-current' : ''}${duplicate ? ' is-duplicate' : ''}" data-cloud-row="${id}">
+      : `<button class="btn btn-small btn-crt" data-cloud-rename="${id}" type="button" title="${escapeHtml(t('settings.cloud.row.renameNote'))}">${escapeHtml(t('settings.cloud.rename.action'))}</button>`)
+    : `<button class="btn btn-small btn-crt" data-cloud-switch="${id}" type="button" title="${escapeHtml(t('settings.cloud.row.switchHint'))}">${escapeHtml(t('settings.cloud.row.switch'))}</button>
+       <span class="sr-only">${escapeHtml(t('settings.cloud.row.switchHint'))}</span>`;
+  return `<div class="cloud-row${current ? ' is-current' : ''}${duplicate ? ' is-duplicate' : ''}${renaming ? ' is-renaming' : ''}" data-cloud-row="${id}">
     <div class="cloud-main">
-      <span class="cloud-name">${escapeHtml(entry.name)}</span>
-      <span class="badge ${current ? 'badge-ok' : 'badge-muted'}">${escapeHtml(t(current ? 'settings.cloud.row.current' : 'settings.cloud.row.archived'))}</span>
-      ${conflictBadges}
-    </div>
-    <div class="cloud-meta">
-      <span>${t('settings.cloud.row.rootFingerprint', { fingerprint })}</span>
-      <span>${escapeHtml(t('settings.cloud.row.lastUsed', { time: lastUsed }))}</span>
-      ${entry.nameUpdatedAt ? `<span>${escapeHtml(t('settings.cloud.row.nameUpdated', { time: formatTime(entry.nameUpdatedAt) }))}</span>` : ''}
+      <div class="cloud-title">
+        <span class="cloud-name"${nameTitle}>${escapeHtml(entry.name)}</span>
+        <span class="crt-tag ${current ? 'sec-tag-current' : 'sec-tag-archived'}">${escapeHtml(t(current ? 'settings.cloud.row.current' : 'settings.cloud.row.archived'))}</span>
+        ${conflictBadges}
+      </div>
+      <p class="cloud-sub" title="${escapeHtml(metaTitle)}">${t('settings.cloud.row.rootFingerprint', { fingerprint })}<span class="cloud-sep" aria-hidden="true">·</span>${escapeHtml(t('settings.cloud.row.lastUsed', { time: lastUsed }))}</p>
     </div>
     <div class="cloud-actions">${renameUi}</div>
-    ${current ? `<p class="cfg-help muted cloud-rename-note">${escapeHtml(t('settings.cloud.row.renameNote'))}</p>` : ''}
     ${renaming && state.cloudRenameError ? `<p class="crt-warn cloud-rename-error" role="alert">${escapeHtml(state.cloudRenameError)}</p>` : ''}
   </div>`;
 }
@@ -6715,7 +6839,6 @@ function cloudCardHtml() {
     const rows = (state.clouds.profiles ?? []).map(cloudRowHtml).join('');
     body = `${state.clouds.warning ? `<p class="crt-warn">${escapeHtml(localizeReasonText(state.clouds.warning, 'errors.unknown'))}</p>` : ''}
       <div class="cloud-rows">${rows || `<p class="muted">${escapeHtml(t('settings.cloud.empty'))}</p>`}</div>
-      <p class="cfg-help muted">${escapeHtml(t('settings.cloud.note'))}</p>
       ${state.clouds.nameConflicts?.currentDuplicate
         ? `<p class="crt-warn">${escapeHtml(t('settings.cloud.duplicate'))}</p>`
         : ''}`;
@@ -6725,10 +6848,9 @@ function cloudCardHtml() {
   } else {
     body = `<p class="muted">${escapeHtml(t('settings.cloud.loading'))}</p>`;
   }
-  return `<section id="settings-cloud-card" class="settings-section cloud-card" data-settings-clouds tabindex="-1">
-    <h3>${escapeHtml(t('settings.cloud.title'))} <span class="badge badge-muted">${escapeHtml(t('settings.cloud.keepArchived'))}</span></h3>
-    <p class="muted cloud-intro">${escapeHtml(t('settings.cloud.intro'))}</p>
-    ${body}
+  return `<section id="settings-cloud-card" class="settings-group cloud-card" data-settings-clouds tabindex="-1" title="${escapeHtml(`${t('settings.cloud.intro')} ${t('settings.cloud.note')} ${t('settings.cloud.keepArchived')}。`)}">
+    <div class="settings-group-head"><h3>${escapeHtml(t('settings.cloud.title'))}</h3></div>
+    <div class="settings-group-body">${body}</div>
   </section>`;
 }
 
@@ -7337,6 +7459,16 @@ function formatTime(ts) {
   return formatLocaleDateTime(ts);
 }
 
+/** 忆云行内短日期（月/日）；完整时间在 title。 */
+function formatShortDate(ts) {
+  if (!ts) return '—';
+  try {
+    return new Intl.DateTimeFormat(getLocale(), { month: '2-digit', day: '2-digit' }).format(new Date(ts));
+  } catch {
+    return formatLocaleDate(ts);
+  }
+}
+
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, (char) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
@@ -7352,7 +7484,23 @@ const MOCK_MEMORIES = [
   { id: '01MOCKMEMORY000000000000003', type: 'fact', namespace: 'default', preview: '第三条演示记忆', createdAt: 0, archived: false, deleted: false },
 ];
 
-function mockSecurity(now) {
+function mockSecurity(now, low = false) {
+  if (low) {
+    return {
+      ok: true,
+      level: 'low',
+      changedAt: now - 240_000,
+      changedBy: 'device-A',
+      admitted: ['device-A', 'device-B'],
+      recoveryKeyId: null,
+      coreTierAvailable: true,
+      totp: { imported: false, fingerprint: null, createdAt: 0, failures: 0, lockedUntil: 0, backoffUntil: 0, lastAcceptedAt: null },
+      recovery: { registered: false, keyId: null, mode: null, createdAt: null, lastUsedAt: null, current: false },
+      pendingApprovals: [],
+      recentApprovals: [],
+      rejections: [],
+    };
+  }
   return {
     ok: true,
     level: 'high',
@@ -7574,7 +7722,7 @@ async function mockData() {
         { id: 'p_demo0001', name: '忆云 2', home: 'profiles/p_demo0001', kind: 'delegated', createdAt: now - 5 * 86_400_000, lastUsedAt: now - 2 * 86_400_000, masterFingerprint: 'sha256:9f8e7d6c5b4a', deviceId: 'device-A', current: false },
       ],
     },
-    security: mockSecurity(now),
+    security: mockSecurity(now, params.get('security') === 'low'),
     policy: [
       { eventId: 'e5', type: 'namespace_subscription', issuer: 'device-C', subject: 'device-C', namespace: 'work', namespaces: ['work'], active: true, at: now - 300_000, valid: true },
       { eventId: 'e6', type: 'namespace_subscription', issuer: 'device-B', subject: 'device-B', namespace: 'notes', namespaces: ['notes'], active: true, at: now - 320_000, valid: true },

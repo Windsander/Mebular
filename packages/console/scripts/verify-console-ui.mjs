@@ -820,16 +820,120 @@ async function main() {
     // H-1/UX-2：设置 · AI 助手专区（连接页已收编进设置；单列表 + 行内闭环）
     await evalJs('document.querySelector("#open-settings").click()');
     check('设置弹层打开', await waitFor('document.querySelector("#settings")?.hidden === false'));
+
+    // 900：轨折顶部横排，但只读行必须仍是 40 高、label/value 同一行（不得套 390 堆叠）
+    await setViewport({ width: 900, height: 900, deviceScaleFactor: 1, mobile: false });
+    await evalJs(`document.querySelector('#settings-tab-common')?.click()`);
+    await sleep(250);
+    const rows900 = await evalJs(`(() => {
+      const read = (root, label) => {
+        if (!root) return { label, n: 0, badH: 1, badTop: 1 };
+        const cells = [...root.querySelectorAll('.settings-kv dt')].map((dt) => {
+          const dd = dt.nextElementSibling;
+          if (!dd) return null;
+          const a = dt.getBoundingClientRect(); const b = dd.getBoundingClientRect();
+          return { h: Math.round(a.height), diff: Math.round(Math.abs(a.top - b.top)) };
+        }).filter(Boolean);
+        return { label, n: cells.length, badH: cells.filter((c) => c.h !== 40).length, badTop: cells.filter((c) => c.diff > 2).length };
+      };
+      const box = document.querySelector('#settings .modal-box');
+      return { common: read(document.querySelector('#settings-panel-common'), 'common'),
+        docW: document.documentElement.scrollWidth, vw: innerWidth, modalW: box ? Math.round(box.getBoundingClientRect().width) : 0 };
+    })()`);
+    await waitFor('Boolean(document.querySelector("#settings-panel-common"))', 10000);
+    const v21 = await evalJs(`(() => {
+      const title = document.querySelector('#settings-panel-common') ? document.querySelector('#settings .modal-head h2') : null;
+      const ts = title ? getComputedStyle(title) : null;
+      const grp = document.querySelector('#settings-panel-common .settings-group-head h3');
+      const gs = grp ? getComputedStyle(grp) : null;
+      const face = document.querySelector('#settings-panel-common [data-settings-group=interface]');
+      const btn = document.querySelector('#settings-panel-common .btn');
+      return { title: { fs: ts?.fontSize, fw: ts?.fontWeight },
+        group: { fs: gs?.fontSize, ls: gs?.letterSpacing, tt: gs?.textTransform },
+        face: Boolean(face) && /界面|Interface/.test(face.textContent),
+        btnH: btn ? Math.round(btn.getBoundingClientRect().height) : 0,
+        docW: document.documentElement.scrollWidth, vw: innerWidth };
+    })()`);
+    check('v2.1 排印/尺寸：标题 15/700、分组 10/1.5 大写、按钮 27、界面组就位', Boolean(v21)
+      && v21.title.fs === '15px' && v21.title.fw === '700'
+      && v21.group.fs === '10px' && v21.group.ls === '1.5px' && v21.group.tt === 'uppercase'
+      && v21.face && v21.btnH === 27 && v21.docW <= v21.vw + 1,
+      JSON.stringify(v21));
+    check('U-4 900 常用行模板：40 高 + label/value 同行（top 差 ≤2）+ 无横向溢出',
+      Boolean(rows900) && rows900.common.n >= 3 && rows900.common.badH === 0 && rows900.common.badTop === 0
+        && rows900.docW <= rows900.vw + 1 && rows900.modalW === 760,
+      JSON.stringify(rows900));
+    await evalJs(`document.querySelector('[data-settings-tab="advanced"]')?.click()`);
+    const cfg900 = await evalJs(`(() => {
+      const rows = [...document.querySelectorAll('#settings-panel-advanced .cfg-row')].filter((el) => el.getClientRects().length);
+      const center = (el) => { const r = el.getBoundingClientRect(); return r.top + r.height / 2; };
+      const bad = rows.filter((row) => Math.round(row.getBoundingClientRect().height) !== 40
+        || getComputedStyle(row).gridTemplateColumns.split(' ').filter(Boolean).length !== 3
+        || ['.cfg-label', '.cfg-control', '.cfg-status'].some((selector) => {
+          const cell = row.querySelector(selector);
+          return cell && Math.abs(center(cell) - center(row)) > 1;
+        }));
+      return { count: rows.length, bad: bad.length, vw: innerWidth };
+    })()`);
+    check('900 高级字段：150/1fr/68 横排 + 40 行 + label/control/status 中线对齐',
+      cfg900.count >= 3 && cfg900.bad === 0 && cfg900.vw === 900, JSON.stringify(cfg900));
+    await evalJs(`document.querySelector('[data-settings-tab="common"]')?.click()`);
+    await evalJs(`document.querySelector('[data-settings-extra="about-modal"]')?.click()`);
+    await sleep(300);
+    const about900 = await evalJs(`(() => {
+      const box = document.querySelector('#about .modal-box');
+      const cells = [...document.querySelectorAll('#about .settings-kv dt')].map((dt) => {
+        const dd = dt.nextElementSibling;
+        if (!dd) return null;
+        const a = dt.getBoundingClientRect(); const b = dd.getBoundingClientRect();
+        return { h: Math.round(a.height), diff: Math.round(Math.abs(a.top - b.top)), padL: getComputedStyle(dt).paddingLeft };
+      }).filter(Boolean);
+      return { n: cells.length, badH: cells.filter((c) => c.h !== 40).length, badTop: cells.filter((c) => c.diff > 2).length,
+        badPad: cells.filter((c) => c.padL !== '14px').length,
+        docW: document.documentElement.scrollWidth, vw: innerWidth, w: box ? Math.round(box.getBoundingClientRect().width) : 0 };
+    })()`);
+    check('U-4 900 关于行模板：40 高 + label/value 同行（top 差 ≤2）+ 14px 内缩 + 无横向溢出',
+      Boolean(about900) && about900.n >= 2 && about900.badH === 0 && about900.badTop === 0 && about900.badPad === 0
+        && about900.docW <= about900.vw + 1 && about900.w === 760,
+      JSON.stringify(about900));
+    await evalJs(`document.querySelector('#about-close')?.click()`);
+    await clearViewport();
+    // 异常状态必须默认可见：切到 MCP（种子 config 端口 0 vs 运行时端口 → 未生效）
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await evalJs(`document.querySelector('[data-settings-tab=mcp]')?.click()`);
+    await sleep(300);
+    const anomaly = await evalJs(`(() => {
+      const body = document.querySelector('#settings-body');
+      const row = body.querySelector('[data-cfg-path="mcp.http.port"]')?.closest('.cfg-row');
+      const ex = row?.nextElementSibling?.matches('[data-cfg-state=exception]') ? row.nextElementSibling : null;
+      if (!row || !ex) return { ok: false, why: 'missing' };
+      const status = row.querySelector('.cfg-status');
+      const cs = getComputedStyle(ex);
+      return {
+        ok: /未生效|待重启/.test(status?.textContent ?? '') && /已配置/.test(ex.textContent) && /实际/.test(ex.textContent)
+          && cs.display !== 'none' && ex.getBoundingClientRect().height > 0
+          && Math.round(row.getBoundingClientRect().height) === 40
+          && document.documentElement.scrollWidth <= window.innerWidth + 1,
+        rowH: Math.round(row.getBoundingClientRect().height), vw: innerWidth,
+        warn: status?.textContent?.trim() ?? '',
+        display: cs.display,
+        h: Math.round(ex.getBoundingClientRect().height),
+        text: ex.textContent.replace(/\\s+/g, ' ').trim().slice(0, 60),
+      };
+    })()`);
+    check('U-4 异常默认可见：warn 状态 + 行下 11px 三元组可见 + 行仍 40 + 无横向溢出', Boolean(anomaly?.ok), JSON.stringify(anomaly));
+    await clearViewport();
     // 0.3 · 设置 · 记忆模式：唯一新增控件 1；轻量模式不显示模型配置。
     await evalJs('document.querySelector("[data-settings-tab=runtime]").click()');
-    check('设置·记忆运行时：记忆模式 / 运行状态 / 模型状态；无本地模型包与旧 runtime.* 字段',
+    check('设置·记忆运行时：记忆模式 / 模型来源 / 运行状态 / 模型状态；无本地模型包与旧 runtime.* 字段',
       await waitFor(`(() => {
         const p = document.querySelector('#settings-panel-runtime');
         if (!p || p.hidden) return false;
         return /记忆模式/.test(p.textContent) && /轻量 MCP/.test(p.textContent) && /沉浸式/.test(p.textContent)
-          && /运行状态/.test(p.textContent) && /模型状态/.test(p.textContent)
+          && /模型来源/.test(p.textContent) && /运行状态/.test(p.textContent) && /模型状态/.test(p.textContent)
           && Boolean(p.querySelector('[data-rt-mode=lightweight]'))
           && Boolean(p.querySelector('[data-rt-mode=immersive]'))
+          && Boolean(p.querySelector('#rt-model-source'))
           && !p.querySelector('[data-rt-enabled]') && !p.querySelector('.runtime-pack')
           && p.querySelectorAll('[data-rt-path]').length === 0
           && !/Sidecar 健康|PID|由 Mebular 管理|token/i.test(p.textContent);
@@ -849,8 +953,38 @@ async function main() {
         if (!p || p.hidden) return false;
         return !/capture|本机采集|host|token|逐宿主/i.test(p.textContent);
       })()`));
+    check('v2.2 记忆模式：单框分段（内高跟随外框、两格等宽无间隙、active .10 + ✓）', await evalJs(`(() => {
+      const seg = document.querySelector('#settings-panel-runtime .runtime-mode-seg');
+      const btns = [...document.querySelectorAll('#settings-panel-runtime [data-rt-mode]')];
+      if (!seg || btns.length !== 2) return false;
+      const s = getComputedStyle(seg);
+      const [a, b] = btns.map((el) => el.getBoundingClientRect());
+      const active = btns.find((el) => el.getAttribute('aria-pressed') === 'true');
+      const ast = active ? getComputedStyle(active) : null;
+      return s.borderTopWidth === '1px' && s.borderTopStyle === 'solid'
+        && Math.round(seg.getBoundingClientRect().height) === 27
+        && Math.abs(a.height - seg.clientHeight) <= 1 && Math.abs(b.height - seg.clientHeight) <= 1
+        && btns.every((el) => getComputedStyle(el).boxSizing === 'border-box')
+        && Math.round(b.left - a.right) === 0
+        && Math.abs(a.width - b.width) <= 1
+        && ast?.backgroundColor === 'rgba(80, 255, 170, 0.1)'
+        && /✓/.test(active?.textContent ?? '')
+        && !document.querySelector('#settings-panel-runtime [data-rt-mode-chip]');
+    })()`));
+    check('v2.2 运行状态：模式/状态纯文字右对齐、无 crt-tag、空值 faint', await evalJs(`(() => {
+      const s = document.querySelector('#settings-panel-runtime [data-rt-sidecar-status]');
+      if (!s) return false;
+      const values = [...s.querySelectorAll('dd.rt-value')];
+      const empty = values.find((el) => el.textContent.trim() === '—');
+      const dd = s.querySelector('dd');
+      return values.length === 5
+        && s.querySelectorAll('.crt-tag').length === 0
+        && getComputedStyle(dd).justifyContent === 'flex-end'
+        && getComputedStyle(dd).textAlign === 'right'
+        && (!empty || getComputedStyle(empty).color === 'rgba(140, 255, 200, 0.35)');
+    })()`));
     await capture('c6-settings-runtime.jpg');
-    // 轻量模式：模型状态卡消失，高级模型来源禁用并说明。
+    // 轻量模式：模型状态卡消失，记忆页模型来源禁用并说明。
     await evalJs('document.querySelector("[data-rt-mode=lightweight]").click()');
     check('切回轻量 MCP 走品牌确认（不迁移、不删除）',
       await waitFor('document.querySelector("#modal")?.hidden === false && /切回|轻量|保留|删除/.test(document.querySelector("#modal-body")?.textContent ?? "")'));
@@ -858,17 +992,17 @@ async function main() {
     check('轻量模式：状态为轻量 MCP，模型配置隐藏',
       await waitFor(`(() => {
         const p = document.querySelector('#settings-panel-runtime');
-        return /轻量 MCP/.test(p?.querySelector('[data-rt-mode-chip]')?.textContent ?? '')
+        return /轻量 MCP/.test(p?.querySelector('[data-rt-mode=lightweight][aria-pressed=true]')?.textContent ?? '')
           && !p?.querySelector('[data-rt-model-status]');
       })()`, 30000));
-    await evalJs('document.querySelector("[data-settings-tab=advanced]").click()');
-    check('轻量模式：高级模型来源禁用并说明',
+    await evalJs('document.querySelector("[data-settings-tab=runtime]").click()');
+    check('轻量模式：记忆页模型来源禁用并说明',
       await waitFor(`(() => {
-        const section = document.querySelector('#settings-panel-advanced [data-settings-section=model-source]');
+        const section = document.querySelector('#settings-panel-runtime [data-settings-section=model-source]');
         const s = section?.querySelector('[data-rt-model-source]');
         const note = section?.querySelector('[data-rt-model-source-note]');
         return Boolean(s) && s.disabled === true && /轻量 MCP/.test(section.textContent)
-          && getComputedStyle(note).display !== 'none'
+          && getComputedStyle(note).display === 'none' && (note.getAttribute('title') ?? '').length > 0
           && !section.querySelector('[data-rt-model-list]')
           && !/endpoint|keyRef|token|Raw/i.test(section.textContent);
       })()`, 30000));
@@ -890,15 +1024,15 @@ async function main() {
     check('重新开启沉浸式：模式热生效，模型状态卡恢复',
       await waitFor(`(() => {
         const p = document.querySelector('#settings-panel-runtime');
-        return /沉浸式/.test(p?.querySelector('[data-rt-mode-chip]')?.textContent ?? '')
+        return /沉浸式/.test(p?.querySelector('[data-rt-mode=immersive][aria-pressed=true]')?.textContent ?? '')
           && Boolean(p?.querySelector('[data-rt-model-status]'));
       })()`, 30000));
     await waitFor(`/就绪/.test(document.querySelector('#settings-panel-runtime [data-rt-sidecar-status]')?.textContent ?? '')`, 30000);
-    // 唯一新增控件 2：高级 · 模型来源（仅下拉；不显示 endpoint/key/path）。
-    await evalJs('document.querySelector("[data-settings-tab=advanced]").click()');
-    check('高级模型来源：5 个来源、默认 heuristic、无 endpoint/key/path 明文',
+    // 唯一新增控件 2：记忆 · 模型来源（仅下拉；不显示 endpoint/key/path）。
+    await evalJs('document.querySelector("[data-settings-tab=runtime]").click()');
+    check('记忆模型来源：5 个来源、默认 heuristic、无 endpoint/key/path 明文',
       await waitFor(`(() => {
-        const section = document.querySelector('#settings-panel-advanced [data-settings-section=model-source]');
+        const section = document.querySelector('#settings-panel-runtime [data-settings-section=model-source]');
         const s = section?.querySelector('[data-rt-model-source]');
         if (!s || s.disabled) return false;
         const values = [...s.options].map((o) => o.value);
@@ -907,7 +1041,7 @@ async function main() {
           && /模型来源/.test(section.textContent) && /立即应用|下次启动/.test(section.textContent)
           && !/endpoint|keyRef|api key|token|Raw|模型路径|capture|host/i.test(section.textContent);
       })()`, 30000));
-    await capture('c6-settings-advanced.jpg');
+    await capture('c6-settings-memory-model-source.jpg');
     // C8f · 本地模型：列表 / 下载进度 / 取消 / 失败 / 自动启用 / 停用 / 删除
     const modelAdminPath = join(home, 'ui-model-admin.jsonl');
     const modelPosts = () => {
@@ -928,7 +1062,7 @@ async function main() {
     })()`);
     check('C8f local 选中：同一模型来源设置项内出现 4 个模型（名称/tier/量化/大小/状态/推荐/硬件）',
       await waitFor(`(() => {
-        const section = document.querySelector('#settings-panel-advanced [data-settings-section=model-source]');
+        const section = document.querySelector('#settings-panel-runtime [data-settings-section=model-source]');
         const list = section?.querySelector('[data-rt-model-list]');
         const cards = list ? [...list.querySelectorAll('[data-rt-model-card]')] : [];
         const c8 = list?.querySelector('[data-rt-model-card="${PACK_8B}"]');
@@ -941,7 +1075,8 @@ async function main() {
           && /未安装/.test(c8?.textContent ?? '') && Boolean(c8?.querySelector('[data-rt-model-action=download]'))
           && /Qwen3 4B/.test(c4?.textContent ?? '') && /已安装/.test(c4?.textContent ?? '')
           && Boolean(c4?.querySelector('[data-rt-model-action=enable]'))
-          && getComputedStyle(section.querySelector('[data-rt-model-source-note]')).display !== 'none'
+          && getComputedStyle(section.querySelector('[data-rt-model-source-note]')).display === 'none'
+          && (section.querySelector('[data-rt-model-source-note]')?.getAttribute('title') ?? '').length > 0
           && !/endpoint|keyRef|token|模型路径|capture/i.test(list.textContent);
       })()`, 30000));
     check('C8f local 选中不立刻写 model-source（避免 pack_required）；先选/装模型',
@@ -951,12 +1086,12 @@ async function main() {
           && /选择|下载|启用/.test(document.querySelector('[data-rt-model-source-note]')?.textContent ?? '');
       })()`) && modelPosts().length === postsBeforeLocal);
     await capture('c8f-models-local.jpg');
-    await evalJs(`document.querySelector('#settings-panel-advanced [data-settings-section=model-source]')?.scrollIntoView({ block: 'start' })`);
+    await evalJs(`document.querySelector('#settings-panel-runtime [data-settings-section=model-source]')?.scrollIntoView({ block: 'start' })`);
     await setViewport({ width: 760, height: 900, deviceScaleFactor: 1, mobile: false });
     check('C8f 模型列表 760px：单列卡片、无横向滚动',
       await evalJs(`(() => {
         const box = document.querySelector('#settings .modal-box');
-        const cards = [...document.querySelectorAll('#settings-panel-advanced [data-rt-model-card]')];
+        const cards = [...document.querySelectorAll('#settings-panel-runtime [data-rt-model-card]')];
         const columns = new Set(cards.map((card) => Math.round(card.getBoundingClientRect().left)));
         return cards.length === 4 && columns.size === 1
           && box.scrollWidth <= box.clientWidth + 1
@@ -967,7 +1102,7 @@ async function main() {
     check('C8f 模型列表 390px：无横向滚动，动作按钮不挤压',
       await evalJs(`(() => {
         const box = document.querySelector('#settings .modal-box');
-        const actions = [...document.querySelectorAll('#settings-panel-advanced [data-rt-model-action]')];
+        const actions = [...document.querySelectorAll('#settings-panel-runtime [data-rt-model-action]')];
         return box.scrollWidth <= box.clientWidth + 1
           && document.documentElement.scrollWidth <= window.innerWidth + 1
           && actions.every((button) => button.getBoundingClientRect().width > 0);
@@ -988,7 +1123,7 @@ async function main() {
           && Boolean(card.querySelector('[data-rt-model-action=cancel]'));
       })()`, 15000));
     await evalJs(`(() => {
-      const section = document.querySelector('#settings-panel-advanced [data-settings-section=model-source]');
+      const section = document.querySelector('#settings-panel-runtime [data-settings-section=model-source]');
       const scroller = document.querySelector('#settings .settings-scroll');
       const fold = document.querySelector('#diag-fold');
       if (fold) fold.open = true;
@@ -999,7 +1134,7 @@ async function main() {
     check('C8f 轮询重渲染保留滚动 / 来源选中 / 折叠展开',
       await evalJs(`(() => {
         const scroller = document.querySelector('#settings .settings-scroll');
-        const section = document.querySelector('#settings-panel-advanced [data-settings-section=model-source]');
+        const section = document.querySelector('#settings-panel-runtime [data-settings-section=model-source]');
         return Math.abs(scroller.scrollTop - window.__c8fPollState.scrollTop) <= 2
           && document.querySelector('#rt-model-source')?.value === 'local'
           && document.querySelector('#diag-fold')?.open === true
@@ -1014,7 +1149,7 @@ async function main() {
       })()`));
     await send('Emulation.setEmulatedMedia', { features: [] });
     await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
-    await evalJs(`document.querySelector('#settings-panel-advanced [data-settings-section=model-source]')?.scrollIntoView({ block: 'start' })`);
+    await evalJs(`document.querySelector('#settings-panel-runtime [data-settings-section=model-source]')?.scrollIntoView({ block: 'start' })`);
     await captureNow('c8f-models-progress.jpg');
     await clearViewport();
     check('C8f 完成后自动启用：当前使用 + 停用；不重启 sidecar',
@@ -1030,7 +1165,7 @@ async function main() {
         return res?.source === 'local' && res?.model?.active === 'local';
       })()`, 20000));
     await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
-    await evalJs(`document.querySelector('#settings-panel-advanced [data-settings-section=model-source]')?.scrollIntoView({ block: 'start' })`);
+    await evalJs(`document.querySelector('#settings-panel-runtime [data-settings-section=model-source]')?.scrollIntoView({ block: 'start' })`);
     await captureNow('c8f-models-active.jpg');
     await clearViewport();
 
@@ -1038,7 +1173,7 @@ async function main() {
     check('C8f 停用：回到 heuristic，本地列表收起（不直接重启 sidecar）',
       await waitFor(`(async () => {
         const res = await fetch('/admin/api/memory-runtime/model-source').then((r) => r.json()).catch(() => null);
-        const section = document.querySelector('#settings-panel-advanced [data-settings-section=model-source]');
+        const section = document.querySelector('#settings-panel-runtime [data-settings-section=model-source]');
         return res?.source === 'heuristic'
           && document.querySelector('#rt-model-source')?.value === 'heuristic'
           && !section?.querySelector('[data-rt-model-list]');
@@ -1093,7 +1228,7 @@ async function main() {
     })()`);
     check('C8f local 且无已安装包：提示先安装，绝不 POST model-source',
       await waitFor(`(() => {
-        const section = document.querySelector('#settings-panel-advanced [data-settings-section=model-source]');
+        const section = document.querySelector('#settings-panel-runtime [data-settings-section=model-source]');
         return /先下载并启用一个模型/.test(section?.textContent ?? '')
           && !section?.querySelector('[data-rt-model-active]');
       })()`, 20000));
@@ -1101,7 +1236,7 @@ async function main() {
     check('C8f local 无已安装包不写 model-source（无 pack_required）',
       modelPosts().length === postsBeforeEmptyLocal);
     await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
-    await evalJs(`document.querySelector('#settings-panel-advanced [data-settings-section=model-source]')?.scrollIntoView({ block: 'start' })`);
+    await evalJs(`document.querySelector('#settings-panel-runtime [data-settings-section=model-source]')?.scrollIntoView({ block: 'start' })`);
     await captureNow('c8f-models-empty.jpg');
     await clearViewport();
 
@@ -1111,7 +1246,7 @@ async function main() {
     check('C8f 取消：行内显示已取消，保留模型列表且不自动启用',
       await waitFor(`(() => {
         const card = document.querySelector('[data-rt-model-card="${PACK_14B}"]');
-        const section = document.querySelector('#settings-panel-advanced [data-settings-section=model-source]');
+        const section = document.querySelector('#settings-panel-runtime [data-settings-section=model-source]');
         return /已取消/.test(card?.textContent ?? '')
           && /安装已取消/.test(card?.textContent ?? '')
           && section.querySelectorAll('[data-rt-model-card]').length === 4
@@ -1122,7 +1257,7 @@ async function main() {
     check('C8f 失败：toast/行内错误 + 保留其他模型（30B 引擎失败）',
       await waitFor(`(() => {
         const card = document.querySelector('[data-rt-model-card="${PACK_30B}"]');
-        const section = document.querySelector('#settings-panel-advanced [data-settings-section=model-source]');
+        const section = document.querySelector('#settings-panel-runtime [data-settings-section=model-source]');
         return /失败/.test(card?.textContent ?? '')
           && /推理引擎准备失败/.test(card?.textContent ?? '')
           && section.querySelectorAll('[data-rt-model-card]').length === 4
@@ -1152,40 +1287,73 @@ async function main() {
       })()`, 30000));
     await evalJs('document.querySelector("[data-settings-tab=assistants]").click()');
     // U-3 症状①：背板/设置框不滚，只有页签下的 .settings-scroll 滚动；页面滚动锁定
-    check('U-3 设置壳：提示在标题下 + 仅内容区滚动 + 右上角 X + 滚动条贴边',
-      await evalJs(`(() => {
-        const modal = document.querySelector('#settings');
-        const box = modal.querySelector('.modal-box');
-        const scroller = modal.querySelector('.settings-scroll');
-        const close = modal.querySelector('.modal-head #settings-close.modal-x');
-        const m = getComputedStyle(modal);
-        const b = getComputedStyle(box);
-        const s = getComputedStyle(scroller);
-        const securityFirst = modal.querySelector('#settings-panel-security .settings-section');
-        const spacer = document.createElement('div');
-        spacer.style.height = '900px';
-        scroller.appendChild(spacer);
-        scroller.scrollTop = 120;
-        const out = {
-          modalOverflow: m.overflowY,
-          boxOverflow: b.overflowY,
-          scrollOverflow: s.overflowY,
-          noteInHead: Boolean(modal.querySelector('.modal-head .settings-apply-note')),
-          scrollEdge: Math.abs(scroller.getBoundingClientRect().right - box.getBoundingClientRect().right) <= 1,
-          securityTop: securityFirst ? getComputedStyle(securityFirst).borderTopWidth : 'missing',
-          scrolled: scroller.scrollTop > 0,
-          boxStill: box.scrollTop === 0,
-          backdropStill: modal.scrollTop === 0,
-          bodyLocked: document.body.classList.contains('modal-open'),
-          hasX: Boolean(close) && !modal.querySelector('.modal-actions'),
-        };
-        spacer.remove();
-        scroller.scrollTop = 0;
-        return out.modalOverflow === 'hidden' && out.boxOverflow === 'hidden'
-          && out.scrollOverflow === 'auto' && out.noteInHead && out.scrollEdge
-          && out.securityTop === '0px'
-          && out.scrolled && out.boxStill && out.backdropStill && out.bodyLocked && out.hasX;
-      })()`));
+    const prevShellViewport = await evalJs('({ w: window.innerWidth, h: window.innerHeight })');
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await sleep(350);
+    const settingsShellProbe = await evalJs(`(() => {
+      const modal = document.querySelector('#settings');
+      const box = modal.querySelector('.modal-box');
+      const scroller = modal.querySelector('.settings-scroll');
+      const rail = modal.querySelector('.settings-rail');
+      const close = modal.querySelector('.modal-head #settings-close.modal-x');
+      const title = modal.querySelector('.modal-head h2');
+      const note = modal.querySelector('.modal-head .settings-apply-note');
+      const panel = modal.querySelector('[data-settings-panel]:not([hidden]) .settings-group-body');
+      const m = getComputedStyle(modal);
+      const b = getComputedStyle(box);
+      const sc = getComputedStyle(scroller);
+      const active = modal.querySelector('.settings-rail .settings-tab.is-active');
+      const activeStyle = active ? getComputedStyle(active) : null;
+      const securityFirst = modal.querySelector('#settings-panel-security .settings-section');
+      const boxRect = box.getBoundingClientRect();
+      const scrollRect = scroller.getBoundingClientRect();
+      const railRect = rail.getBoundingClientRect();
+      const titleRect = title.getBoundingClientRect();
+      const noteRect = note.getBoundingClientRect();
+      const headRect = modal.querySelector('.modal-head').getBoundingClientRect();
+      const panelRect = panel ? panel.getBoundingClientRect() : null;
+      const out = {
+        modalOverflow: m.overflowY,
+        boxOverflow: b.overflowY,
+        scrollOverflow: sc.overflowY,
+        noteInHead: Boolean(note),
+        scrollEdge: Math.abs(boxRect.right - scrollRect.right) <= 1,
+        railWidth: Math.round(railRect.width),
+        railGap: panelRect ? Math.abs((panelRect.left - railRect.right) - 20) <= 1 : false,
+        contentGap: panelRect ? Math.abs(panelRect.left - (scrollRect.left + 20)) <= 1 : false,
+        headerInline: noteRect.left >= titleRect.right - 1
+          && noteRect.top < titleRect.bottom && noteRect.bottom > titleRect.top,
+        headerH: Math.round(headRect.bottom - boxRect.top),
+        activeBg: activeStyle?.backgroundColor ?? '',
+        activeInset: activeStyle?.boxShadow ?? '',
+        securityTop: securityFirst ? getComputedStyle(securityFirst).borderTopWidth : 'missing',
+        hasX: Boolean(close) && !modal.querySelector('.modal-actions'),
+      };
+      const spacer = document.createElement('div');
+      spacer.style.height = '900px';
+      scroller.appendChild(spacer);
+      scroller.scrollTop = 120;
+      out.scrolled = scroller.scrollTop > 0;
+      out.boxStill = box.scrollTop === 0;
+      out.backdropStill = modal.scrollTop === 0;
+      out.bodyLocked = document.body.classList.contains('modal-open');
+      spacer.remove();
+      scroller.scrollTop = 0;
+      return out;
+    })()`);
+    check('U-3 设置壳：header 同行 + 20 呼吸 + 仅内容区滚动 + 右上角 X',
+      settingsShellProbe.modalOverflow === 'hidden' && settingsShellProbe.boxOverflow === 'hidden'
+        && settingsShellProbe.scrollOverflow === 'auto' && settingsShellProbe.noteInHead && settingsShellProbe.scrollEdge
+        && settingsShellProbe.railWidth === 160 && settingsShellProbe.railGap && settingsShellProbe.contentGap
+        && settingsShellProbe.headerInline && settingsShellProbe.headerH === 57
+        && settingsShellProbe.activeBg === 'rgba(80, 255, 170, 0.06)'
+        && /inset/.test(settingsShellProbe.activeInset) && /2px/.test(settingsShellProbe.activeInset)
+        && settingsShellProbe.securityTop === '1px'
+        && settingsShellProbe.scrolled && settingsShellProbe.boxStill && settingsShellProbe.backdropStill
+        && settingsShellProbe.bodyLocked && settingsShellProbe.hasX,
+      JSON.stringify(settingsShellProbe));
+    await setViewport({ width: prevShellViewport.w, height: prevShellViewport.h, deviceScaleFactor: 1, mobile: prevShellViewport.w <= 560 });
+    await sleep(300);
     check('常驻运行行归设置 · 常用（状态 + 动作按钮）',
       await waitFor('(() => { const r = document.querySelector("#settings-resident"); return Boolean(r) && /常驻/.test(r.textContent) && r.querySelectorAll("[data-svc-action]").length >= 1; })()'));
     await evalJs('document.querySelector("[data-settings-tab=assistants]").click()');
@@ -1488,6 +1656,8 @@ async function main() {
       return tabs.join(',') === '常用,安全,记忆,集成,MCP 接入,高级' && document.querySelector('#settings')?.hidden === false;
     })()`));
     await evalJs('document.querySelector("[data-settings-tab=common]").click()');
+    await evalJs('document.querySelector("[data-settings-tab=common]")?.click()');
+    await sleep(200);
     check('E1 常用页：保留只读状态 + 自动修复 + 重启向导；无重复邀请入口', await waitFor(`(() => {
       const common = document.querySelector('#settings-panel-common');
       const topbarInvite = document.querySelector('#invite-device');
@@ -1497,8 +1667,331 @@ async function main() {
         && Boolean(common.querySelector('.settings-repair-row #settings-repair'))
         && !common.querySelector('#settings-invite-device')
         && Boolean(topbarInvite)
-        && /高级/.test(common.textContent);
+        && /本机运行|本机状态/.test(common.textContent);
     })()`));
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    const commonItems = await evalJs(`(() => {
+      const root = document.querySelector('#settings-resident');
+      const group = root?.closest('[data-settings-group=resident]');
+      const items = [...(root?.children ?? [])].filter((el) => el.matches('.settings-row-2, .asst-row'));
+      const restart = root?.querySelector('.settings-restart-row');
+      const wizard = root?.querySelector('.settings-wizard-row');
+      const repair = root?.querySelector('.settings-repair-row');
+      const resident = root?.querySelector('[data-service-row]');
+      const heights = items.map((el) => Math.round(el.getBoundingClientRect().height));
+      const statusHeights = [...document.querySelectorAll('[data-settings-common-status] .kv-row dt')].map((el) => Math.round(el.getBoundingClientRect().height));
+      const panels = [root, document.querySelector('[data-settings-common-status] .settings-group-body')].filter(Boolean).map((el) => ({
+        id: el.id || 'status', padding: [getComputedStyle(el).paddingTop, getComputedStyle(el).paddingBottom],
+        radius: getComputedStyle(el).borderRadius, overflow: getComputedStyle(el).overflow,
+      }));
+      const order = items.map((el) => el.hasAttribute('data-service-row') ? 'resident'
+        : el.classList.contains('settings-restart-row') ? 'restart'
+          : el.classList.contains('settings-repair-row') ? 'repair' : 'wizard');
+      const expectedOrder = wizard ? ['resident', 'restart', 'repair', 'wizard'] : ['resident', 'restart', 'repair'];
+      const expectedHeights = wizard ? [40, 40, 40, 40] : [40, 40, 40];
+      return {
+        ok: JSON.stringify(order) === JSON.stringify(expectedOrder)
+          && JSON.stringify(heights) === JSON.stringify(expectedHeights)
+          && Boolean(restart?.querySelector(':scope > [data-svc-action="restart"]'))
+          && !root.querySelector('.settings-more-panel [data-svc-action="restart"]')
+          && Boolean(repair?.querySelector('#settings-repair'))
+          && Boolean(resident?.querySelector(':scope > .asst-name'))
+          && Boolean(resident?.querySelector(':scope > .settings-row-status')?.textContent.trim())
+          && Boolean(resident?.querySelector(':scope > .settings-row-actions'))
+          && !resident?.querySelector('.kv-dot, .settings-row-stack, .settings-row-meta')
+          && (resident?.getAttribute('title') ?? '').includes('开机自启')
+          && (!wizard || Boolean(wizard.querySelector('#settings-open-wizard')))
+          && !group?.querySelector('.settings-group-head #settings-open-wizard')
+          && (!repair || getComputedStyle(repair.querySelector('.asst-st')).display === 'none')
+          && statusHeights.length === 3 && statusHeights.every((height) => height === 40)
+          && panels.every((panel) => panel.padding[0] === '0px' && panel.padding[1] === '0px'
+            && panel.radius === '10px' && panel.overflow === 'hidden'),
+        order, heights, statusHeights, panels,
+        residentStructure: resident ? {
+          className: resident.className,
+          hasDot: Boolean(resident.querySelector('.kv-dot')),
+          hasSubline: Boolean(resident.querySelector('.settings-row-meta, .settings-row-stack')),
+          title: resident.getAttribute('title') ?? '',
+        } : null,
+        restartInMenu: Boolean(root?.querySelector('.settings-more-panel [data-svc-action="restart"]')),
+        wizardInHead: Boolean(group?.querySelector('.settings-group-head #settings-open-wizard')),
+      };
+    })()`);
+    check('常用四项：常驻 / 立即重启 / 自动修复 / 重启向导均 40；钩子与 title 保留',
+      commonItems.ok === true, JSON.stringify(commonItems));
+    const prevGridViewport = await evalJs('({ w: window.innerWidth, h: window.innerHeight })');
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await sleep(350);
+    const gridProbe = await evalJs(`(() => {
+      const modal = document.querySelector('#settings');
+      const box = modal.querySelector('.modal-box').getBoundingClientRect();
+      const head = modal.querySelector('.modal-head');
+      const title = head.querySelector('h2').getBoundingClientRect();
+      const note = head.querySelector('.settings-apply-note').getBoundingClientRect();
+      const rail = modal.querySelector('.settings-rail').getBoundingClientRect();
+      const scroll = modal.querySelector('.settings-scroll').getBoundingClientRect();
+      const panel = modal.querySelector('#settings-panel-common .settings-group-body').getBoundingClientRect();
+      const active = modal.querySelector('.settings-rail .settings-tab.is-active');
+      const as = active ? getComputedStyle(active) : null;
+      const more = modal.querySelector('[data-settings-more-trigger]');
+      const ms = more ? getComputedStyle(more) : null;
+      const restart = modal.querySelector('#settings-resident > [data-svc-action="restart"], #settings-resident [data-svc-action="restart"]');
+      const restartRect = restart?.getBoundingClientRect();
+      return {
+        restartVisible: Boolean(restartRect && restartRect.height === 27 && restartRect.width > 0),
+        restartInMenu: Boolean(restart?.closest('.settings-more-panel')),
+        railW: Math.round(rail.width),
+        railGap: Math.abs((panel.left - rail.right) - 20) <= 1,
+        contentGap: Math.abs(panel.left - (scroll.left + 20)) <= 1,
+        rightGap: Math.abs(panel.right - (box.right - 20)) <= 2,
+        headerH: Math.round(head.getBoundingClientRect().bottom - box.top),
+        inline: note.left >= title.right - 1 && note.top < title.bottom && note.bottom > title.top,
+        bg: as?.backgroundColor ?? '',
+        inset: as?.boxShadow ?? '',
+        moreBg: ms?.backgroundColor ?? '',
+        moreColor: ms?.color ?? '',
+      };
+    })()`);
+    check('v2.2 常用栅格：160 轨 + 20 呼吸；header 同行 57；active 实底 + 2px；重启独立可见',
+      gridProbe.railW === 160 && gridProbe.railGap && gridProbe.contentGap && gridProbe.rightGap
+        && gridProbe.headerH === 57 && gridProbe.inline
+        && gridProbe.bg === 'rgba(80, 255, 170, 0.06)' && /inset/.test(gridProbe.inset) && /2px/.test(gridProbe.inset)
+        && gridProbe.restartVisible && !gridProbe.restartInMenu
+        && (gridProbe.moreBg === '' || (gridProbe.moreBg === 'rgba(8, 38, 26, 0.6)' && gridProbe.moreColor === 'rgb(169, 255, 212)')),
+      JSON.stringify(gridProbe));
+    await setViewport({ width: prevGridViewport.w, height: prevGridViewport.h, deviceScaleFactor: 1, mobile: prevGridViewport.w <= 560 });
+    await sleep(300);
+    // v2.3 全局 token 审计：控件 27/8、行 40/58、说明占满面板、无 62ch；1440 与 390 各跑一遍。
+    const settingsTokenProbe = (checkRows) => `(() => {
+      const root = document.querySelector('#settings .modal-box');
+      const visible = (el) => {
+        const st = getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return st.display !== 'none' && st.visibility !== 'hidden' && st.opacity !== '0'
+          && rect.width > 1 && rect.height > 1 && el.getClientRects().length > 0 && el.offsetParent !== null;
+      };
+      const controls = [...root.querySelectorAll('.btn, .crt-select-trigger, .crt-input')]
+        .filter((el) => visible(el) && !el.classList.contains('crt-select-native'))
+        .map((el) => {
+          const st = getComputedStyle(el);
+          const rect = el.getBoundingClientRect();
+          return {
+            cls: String(el.className).slice(0, 40),
+            isBtn: el.classList.contains('btn'),
+            segCell: Boolean(el.closest('.runtime-mode-seg')),
+            h: Math.round(rect.height * 10) / 10,
+            radius: st.borderTopLeftRadius,
+            padL: st.paddingLeft,
+            fontSize: st.fontSize,
+          };
+        });
+      const badControls = controls.filter((c) => (!c.segCell && Math.abs(c.h - 27) > 0.6)
+        || (c.segCell ? c.radius !== '0px' : c.radius !== '8px')
+        || c.padL !== (c.isBtn ? '10px' : '8px')
+        || c.fontSize !== '12px');
+      const rows = [];
+      const badRowDetails = [];
+      for (const el of root.querySelectorAll('.cfg-row, .settings-row-2, .settings-language-row, .runtime-mode-actions, .asst-head, .asst-row, .cloud-row, .settings-actions-row')) {
+        if (visible(el) && !el.closest('details, .asst-xp')) {
+          const height = Math.round(el.getBoundingClientRect().height * 10) / 10;
+          rows.push(height);
+          if (height !== 40 && height !== 58) badRowDetails.push({ cls: el.className, height, parent: el.parentElement?.className, fold: el.closest('details')?.id || '', xp: el.closest('.asst-xp')?.id || '' });
+        }
+      }
+      for (const kv of root.querySelectorAll('.settings-kv')) {
+        if (!visible(kv) || kv.closest('details, .asst-xp')) continue;
+        const byTop = new Map();
+        for (const cell of kv.querySelectorAll('.kv-row > *')) {
+          if (!visible(cell)) continue;
+          const top = Math.round(cell.getBoundingClientRect().top);
+          if (!byTop.has(top)) byTop.set(top, Math.round(cell.getBoundingClientRect().height * 10) / 10);
+        }
+        rows.push(...byTop.values());
+        for (const height of byTop.values()) {
+          if (height !== 40 && height !== 58) badRowDetails.push({ cls: kv.className, height, parent: kv.parentElement?.className, fold: kv.closest('details')?.id || '', xp: kv.closest('.asst-xp')?.id || '' });
+        }
+      }
+      const badRows = ${checkRows ? 'rows.filter((h) => h !== 40 && h !== 58)' : '[]'};
+      const notes = [];
+      for (const el of root.querySelectorAll('.settings-group-note, .settings-group-desc, .settings-group-foot, .settings-section-foot')) {
+        if (!visible(el)) continue;
+        const st = getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        const panel = el.closest('.settings-group-body') || el.closest('.settings-group');
+        const panelW = panel ? Math.round(panel.getBoundingClientRect().width) : null;
+        notes.push({ cls: String(el.className).slice(0, 30), w: Math.round(rect.width), panelW, max: st.maxWidth, lh: st.lineHeight, pl: st.paddingLeft, pr: st.paddingRight });
+      }
+      const badNotes = notes.filter((n) => n.max !== 'none' || n.lh !== '16px' || n.pl !== '14px'
+        || n.pr !== '14px' || !n.panelW || n.w < n.panelW - 2);
+      const seg = root.querySelector('.runtime-mode-seg');
+      const segStyle = seg ? getComputedStyle(seg) : null;
+      const segCells = seg ? [...seg.querySelectorAll('.btn')] : [];
+      const segOk = !seg || !visible(seg) || (Math.abs(seg.getBoundingClientRect().height - 27) < 0.6 && segStyle.borderTopLeftRadius === '8px'
+        && segCells.every((el) => Math.abs(el.getBoundingClientRect().height - seg.clientHeight) <= 1
+          && getComputedStyle(el).boxSizing === 'border-box' && getComputedStyle(el).borderRadius === '0px'));
+      const tab = root.querySelector('.settings-rail .settings-tab.is-active');
+      const tabLs = tab ? getComputedStyle(tab).letterSpacing : '';
+      const scrollStyle = getComputedStyle(root.querySelector('.settings-scroll'));
+      const kvDt = root.querySelector('.settings-kv dt');
+      const kvVal = root.querySelector('.settings-kv .kv-value');
+      const rtDt = root.querySelector('.runtime-kv dt');
+      const rtDd = root.querySelector('.runtime-kv dd');
+      const fontOk = (el) => !el || (getComputedStyle(el).fontSize === '12px' && getComputedStyle(el).lineHeight === '18px');
+      const kvOk = fontOk(kvDt) && fontOk(kvVal) && fontOk(rtDt) && fontOk(rtDd);
+      const kvInsetOk = ${checkRows ? `(!kvDt || (getComputedStyle(kvDt).paddingLeft === '14px'
+        && (!kvDt.closest('.settings-kv-no-action') || getComputedStyle(kvVal).paddingRight === '14px')))
+        && (!rtDt || (getComputedStyle(rtDt).paddingLeft === '14px' && getComputedStyle(rtDd).paddingRight === '14px'))` : 'true'};
+      const detailTypeOk = [
+        [root.querySelector('#settings-cloud-card .cloud-name'), '13px', '19px'],
+        [root.querySelector('#settings-cloud-card .cloud-sub'), '11px', '16px'],
+        [root.querySelector('#settings-security-slot .sec-card-line'), '12px', '17px'],
+        [root.querySelector('#settings-security-slot .sec-card-meta'), '11px', '16px'],
+        [root.querySelector('#settings-panel-runtime > .settings-note'), '11px', '16px'],
+      ].every(([el, fontSize, lineHeight]) => !el
+        || (getComputedStyle(el).fontSize === fontSize && getComputedStyle(el).lineHeight === lineHeight));
+      const bodies = [...root.querySelectorAll('.settings-group-body')].filter(visible).map((el) => {
+        const st = getComputedStyle(el);
+        const group = el.closest('.settings-group');
+        const kind = el.id === 'settings-resident' ? 'resident' : (group && group.id === 'settings-cloud-card' ? 'cloud' : 'normal');
+        return { kind, pt: st.paddingTop, pb: st.paddingBottom };
+      });
+      const badBodies = bodies.filter((b) => {
+        const expected = '0px';
+        return b.pt !== expected || b.pb !== expected;
+      });
+      const metas = [...root.querySelectorAll('.settings-kv .kv-meta')].filter(visible).map((el) => {
+        const st = getComputedStyle(el);
+        return { text: el.textContent.trim(), fs: st.fontSize, lh: st.lineHeight };
+      });
+      const badMeta = metas.filter((m) => m.fs !== '11px' || m.lh !== '16px' || !m.text
+        || m.text.includes('://') || m.text.startsWith('/'));
+      const hints = [...root.querySelectorAll('.settings-shell .settings-group-note, .settings-shell .settings-group-desc, .settings-shell .settings-group-foot, .settings-shell .settings-section-foot, #settings-panel-runtime > .settings-note, #assistants-panel .asst-head > .muted')];
+      const hintsHidden = hints.every((el) => getComputedStyle(el).display === 'none');
+      const modelControl = root.querySelector('[data-settings-section="model-source"] .cfg-control');
+      const modelWrap = modelControl?.querySelector('.crt-select');
+      const modelTrigger = modelControl?.querySelector('.crt-select-trigger');
+      const modelRow = modelControl?.closest('.cfg-row');
+      const modelPanel = modelControl?.closest('.settings-group-body');
+      const modelStatus = modelRow?.querySelector(':scope > .cfg-status');
+      const dropdownOk = !modelControl || !visible(modelControl) || (Boolean(modelWrap && modelTrigger && modelRow && modelPanel)
+        && getComputedStyle(modelControl).justifyContent === 'flex-end'
+        && getComputedStyle(modelControl).justifySelf === 'end'
+        && getComputedStyle(modelRow).gridTemplateColumns.split(' ').filter(Boolean).length === ${checkRows ? '2' : '1'}
+        && (!modelStatus || getComputedStyle(modelStatus).display === 'none')
+        && getComputedStyle(modelWrap).flexGrow === '0' && getComputedStyle(modelWrap).flexShrink === '0'
+        && Math.abs(modelWrap.getBoundingClientRect().width - Math.min(280, modelControl.getBoundingClientRect().width)) <= 1
+        && Math.abs(modelTrigger.getBoundingClientRect().right - modelControl.getBoundingClientRect().right) <= 1
+        && Math.abs(modelPanel.getBoundingClientRect().right - modelTrigger.getBoundingClientRect().right - 14) <= 1
+        && Math.abs(modelTrigger.getBoundingClientRect().width - modelWrap.getBoundingClientRect().width) <= 1);
+      const commonPanel = root.querySelector('#settings-panel-common');
+      const commonActionButtons = commonPanel && !commonPanel.hidden
+        ? [...commonPanel.querySelectorAll('.settings-row-actions .btn, #settings-resident > .asst-row > .btn, .cloud-actions .btn')].filter(visible)
+        : [];
+      const actionWidths = commonActionButtons.map((el) => Math.round(el.getBoundingClientRect().width * 10) / 10);
+      const actionWidthsOk = commonActionButtons.length === 0 || actionWidths.every((width) => Math.abs(width - 116) <= 0.6);
+      const cfgAlignOk = ${checkRows ? `[...root.querySelectorAll('.cfg-row')].filter(visible).every((row) => {
+        const cells = ['.cfg-label', '.cfg-control', '.cfg-status'].map((selector) => row.querySelector(selector)).filter((el) => el && visible(el));
+        const center = (el) => { const rect = el.getBoundingClientRect(); return rect.top + rect.height / 2; };
+        return cells.every((el) => Math.abs(center(el) - center(row)) <= 1);
+      })` : 'true'};
+      return { controls: controls.length, badControls: badControls.slice(0, 8), rows: [...new Set(rows)].sort((a, b) => a - b), badRows: badRows.slice(0, 8), badRowDetails: badRowDetails.slice(0, 12), notes: notes.length, badNotes: badNotes.slice(0, 6), segOk,
+        layout: { hintsHidden, dropdownOk, cfgAlignOk, actionWidthsOk, actionWidths },
+        typo: { tabLs, scrollTop: scrollStyle.paddingTop, scrollLeft: scrollStyle.paddingLeft, scrollRight: scrollStyle.paddingRight, kvOk, kvInsetOk, detailTypeOk, badBodies: badBodies.slice(0, 6), metas: metas.length, badMeta: badMeta.slice(0, 6) } };
+    })()`;
+    const prevTokenViewport = await evalJs('({ w: window.innerWidth, h: window.innerHeight })');
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await sleep(350);
+    const tokenAudit = {};
+    for (const tab of ['common', 'security', 'runtime', 'mcp', 'advanced', 'assistants']) {
+      await evalJs(`document.querySelector('[data-settings-tab=${tab}]')?.click()`);
+      await sleep(250);
+      tokenAudit[tab] = await evalJs(settingsTokenProbe(true));
+    }
+    const tokenBad = Object.entries(tokenAudit).filter(([, a]) => !a || a.badControls.length || a.badRows.length || a.badNotes.length || !a.segOk
+      || !a.layout.hintsHidden || !a.layout.dropdownOk || !a.layout.cfgAlignOk || !a.layout.actionWidthsOk
+      || a.typo.tabLs !== '2px' || a.typo.scrollTop !== '16px' || a.typo.scrollLeft !== '20px' || a.typo.scrollRight !== '20px'
+      || !a.typo.kvOk || !a.typo.kvInsetOk || !a.typo.detailTypeOk || a.typo.badBodies.length || a.typo.badMeta.length
+      || (a.typo.metas > 0 && a.typo.metas !== 3));
+    check('v2.4 1440 字体/间距：页签 2px、只读行 12/18、滚动区 16/20、面板 0、meta 11 + 控件 27/8 + 行 40/58',
+      tokenBad.length === 0, JSON.stringify(tokenBad).slice(0, 1400));
+    await setViewport({ width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    await sleep(350);
+    const tokenAudit390 = {};
+    for (const tab of ['common', 'security', 'runtime', 'mcp', 'advanced', 'assistants']) {
+      await evalJs(`document.querySelector('[data-settings-tab=${tab}]')?.click()`);
+      await sleep(250);
+      tokenAudit390[tab] = await evalJs(settingsTokenProbe(false));
+    }
+    const tokenBad390 = Object.entries(tokenAudit390).filter(([, a]) => !a || a.badControls.length || a.badNotes.length || !a.segOk
+      || !a.layout.hintsHidden || !a.layout.dropdownOk || !a.layout.actionWidthsOk
+      || a.typo.tabLs !== '2px' || a.typo.scrollTop !== '16px' || a.typo.scrollLeft !== '20px' || a.typo.scrollRight !== '20px'
+      || !a.typo.kvOk || !a.typo.detailTypeOk || a.typo.badBodies.length || a.typo.badMeta.length);
+    check('v2.4 390 字体/间距：页签 2px、只读行 12/18、滚动区 16/20、面板 0、meta 11 + 控件 27/8',
+      tokenBad390.length === 0, JSON.stringify(tokenBad390).slice(0, 1400));
+    // 全页面真实 rect 中线：关闭折叠 / 空动作容器不参与，窄屏堆叠只查横向溢出。
+    const rowAlignProbe = `(() => {
+      const bad = [];
+      const disallowed = [];
+      const visible = (el) => {
+        if (!el || el.closest('details:not([open])')) return false;
+        const r = el.getBoundingClientRect();
+        return el.getClientRects().length > 0 && r.width > 0 && r.height > 0 && getComputedStyle(el).display !== 'none';
+      };
+      const mid = (el) => { const r = el.getBoundingClientRect(); return r.top + r.height / 2; };
+      const add = (type, row, cells, stacked = false) => {
+        if (!visible(row)) return;
+        for (const cell of cells.filter(visible)) {
+          const delta = mid(cell) - mid(row);
+          if (!stacked && Math.abs(delta) > 1) bad.push({ type, delta: Math.round(delta * 10) / 10, text: (cell.textContent || '').trim().slice(0, 60) });
+          if (['start', 'baseline'].includes(getComputedStyle(cell).alignItems)) disallowed.push({ type, align: getComputedStyle(cell).alignItems });
+        }
+      };
+      for (const row of document.querySelectorAll('.settings-kv .kv-row,.runtime-kv .kv-row')) {
+        const dt = row.querySelector('dt');
+        add('kv', getComputedStyle(row).display === 'contents' ? dt : row,
+          [dt, row.querySelector('.kv-value'), row.querySelector('dd.rt-value'), row.querySelector('.kv-action')].filter(Boolean), innerWidth <= 760 && getComputedStyle(row).display !== 'contents');
+      }
+      for (const row of document.querySelectorAll('.cfg-row')) add('cfg', row, [row.querySelector('.cfg-label'), row.querySelector('.cfg-control'), row.querySelector('.cfg-status')].filter(Boolean), innerWidth <= 760);
+      for (const row of document.querySelectorAll('#settings-resident > .asst-row,#settings-resident > .settings-row-2')) add('resident', row, [...row.children].filter((el) => !el.classList.contains('asst-sp')), innerWidth <= 760 && row.getBoundingClientRect().height > 41);
+      for (const row of document.querySelectorAll('.settings-language-row')) add('language', row, [row.querySelector('.settings-language-label'), row.querySelector('.settings-language-control')].filter(Boolean));
+      for (const row of document.querySelectorAll('.cloud-row')) add('cloud', row, [row.querySelector('.cloud-main'), row.querySelector('.cloud-actions')].filter(Boolean), innerWidth <= 760 && getComputedStyle(row).gridTemplateColumns.split(' ').length === 1);
+      for (const row of document.querySelectorAll('#assistants-panel .asst-row,#assistants-panel .asst-head')) add('assistant', row, [...row.children].filter((el) => !el.classList.contains('asst-sp')), innerWidth <= 760 && row.getBoundingClientRect().height > 41);
+      for (const row of document.querySelectorAll('.sec-pending')) add('security-pending', row, [...row.children], innerWidth <= 900);
+      for (const card of document.querySelectorAll('.sec-card')) {
+        const head = card.querySelector('.sec-card-head');
+        const actions = card.querySelector('.sec-card-actions');
+        add('security-action', head, [head, actions].filter(Boolean), innerWidth <= 760 && actions && actions.getBoundingClientRect().top >= head.getBoundingClientRect().bottom - 1);
+        const value = card.querySelector('.sec-card-value');
+        add('security-value', value, [value?.querySelector('strong'), value?.querySelector('span')].filter(Boolean));
+      }
+      for (const row of document.querySelectorAll('.sec-audit-line')) add('security-audit', row, [...row.children]);
+      for (const row of document.querySelectorAll('.settings-fold > summary,.fold > summary')) add('fold', row, [row]);
+      return { bad, disallowed, docW: document.documentElement.scrollWidth, vw: innerWidth };
+    })()`;
+    const alignmentBad = [];
+    for (const [width, height] of [[1440, 900], [900, 900], [390, 844]]) {
+      await setViewport({ width, height, deviceScaleFactor: 1, mobile: width <= 560 });
+      for (const tab of ['common', 'security', 'runtime', 'assistants', 'mcp', 'advanced']) {
+        await evalJs(`document.querySelector('[data-settings-tab=${tab}]')?.click()`);
+        await sleep(180);
+        const result = await evalJs(rowAlignProbe);
+        alignmentBad.push(...result.bad.map((item) => ({ viewport: width, page: tab, ...item })));
+        alignmentBad.push(...result.disallowed.map((item) => ({ viewport: width, page: tab, ...item })));
+        if (result.docW > result.vw + 1) alignmentBad.push({ viewport: width, page: tab, type: 'horizontal-overflow' });
+      }
+      await evalJs('document.querySelector("[data-settings-tab=common]")?.click(); document.querySelector("[data-settings-extra=about-modal]")?.click()');
+      await sleep(250);
+      const about = await evalJs(rowAlignProbe);
+      alignmentBad.push(...about.bad.map((item) => ({ viewport: width, page: 'about', ...item })));
+      alignmentBad.push(...about.disallowed.map((item) => ({ viewport: width, page: 'about', ...item })));
+      if (about.docW > about.vw + 1) alignmentBad.push({ viewport: width, page: 'about', type: 'horizontal-overflow' });
+      await evalJs('document.querySelector("#about-close")?.click()');
+    }
+    check('全页面真实中线：label/value/action 与行中线差 ≤1；无 start/baseline；1440/900/390 无横向溢出',
+      alignmentBad.length === 0, JSON.stringify(alignmentBad).slice(0, 1800));
+    await evalJs('document.querySelector("[data-settings-tab=common]")?.click()');
+    await setViewport({ width: prevTokenViewport.w, height: prevTokenViewport.h, deviceScaleFactor: 1, mobile: prevTokenViewport.w <= 560 });
+    await sleep(300);
     // 自动修复：browser 无 preload 桥也渲染；点击先二次确认（取消不写）。
     await evalJs('document.querySelector("#settings-repair").click()');
     check('自动修复（browser）：二次确认明确覆盖 MCP/Skill、不碰记忆/身份/订阅/任务/审计', await waitFor(`(() => {
@@ -1546,11 +2039,25 @@ async function main() {
           && Boolean(archived.querySelector('[data-cloud-switch]')) && !archived.querySelector('[data-cloud-rename]')
           && /切换到该忆云后可改名/.test(archived.textContent)
           && !card.querySelector('[data-cloud-delete]') && !/删除忆云/.test(card.textContent)
-          && /归档保留，不删除/.test(card.textContent)
+          && /归档保留，不删除/.test(card.getAttribute('title') ?? '')
           && Boolean(common) && common.contains(card)
           && Boolean(common.querySelector('[data-settings-common-status]'))
           && (common.querySelector('[data-settings-common-status]').compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
       })()`));
+    check('v2.2 忆云状态 tag：当前绿描边微光 / 已归档透明描边 dim（非填充 ns-chip）', await evalJs(`(() => {
+      const current = document.querySelector('#settings-cloud-card .sec-tag-current');
+      const archived = document.querySelector('#settings-cloud-card .sec-tag-archived');
+      if (!current || !archived) return false;
+      const c = getComputedStyle(current);
+      const a = getComputedStyle(archived);
+      return !current.classList.contains('ns-chip') && !archived.classList.contains('ns-chip')
+        && c.borderTopColor === 'rgba(109, 255, 184, 0.55)'
+        && c.backgroundColor === 'rgba(109, 255, 184, 0.08)'
+        && c.color === 'rgb(200, 255, 227)'
+        && a.borderTopColor === 'rgba(80, 255, 170, 0.22)'
+        && a.backgroundColor === 'rgba(0, 0, 0, 0)'
+        && a.color === 'rgba(140, 255, 200, 0.52)';
+    })()`));
     await capture('e2a2-after-settings-clouds.jpg');
 
     // 改名即时生效（不重启）：当前忆云 忆云 1 → 工作室；顶栏徽章同步；守护进程仍存活
@@ -1662,19 +2169,20 @@ async function main() {
     await capture('e2a2-after-cloud-switch-fallback.jpg');
     await evalJs('document.querySelector("#cloud-switch-close").click()');
 
-    // 高级页：3 组（常驻服务/网络/自动化）+ 诊断折叠；MCP 六项独立 tab
+    // 高级页：3 组（常驻服务/网络/自动化）+ 诊断折叠；模型来源已迁到记忆 tab
     await evalJs('document.querySelector("[data-settings-tab=advanced]").click()');
-    check('U-3 高级页：三组就位（常驻服务/网络/自动化），MCP 字段不再混入',
+    check('U-3 高级页：三组就位（常驻服务/网络/自动化），模型来源与 MCP 字段不再混入',
       await waitFor(`(() => {
         const p = document.querySelector('#settings-panel-advanced');
-        const sections = [...(p?.querySelectorAll(':scope > .settings-section') ?? [])];
+        const sections = [...(p?.querySelectorAll(':scope > .settings-group') ?? [])];
         const ids = sections.map((s) => s.dataset.settingsSection).join(',');
-        return Boolean(p) && ids === 'resident,network,automation,model-source'
-          && sections.every((s) => Boolean(s.querySelector('h3')) && Boolean(s.querySelector('.settings-section-desc')))
+        return Boolean(p) && ids === 'resident,network,automation'
+          && sections.every((s) => Boolean(s.querySelector('.settings-group-head h3')) && Boolean(s.querySelector('.settings-group-desc')))
           && Boolean(p.querySelector('[data-cfg-path="joinService.enabled"]'))
           && Boolean(p.querySelector('[data-cfg-path="network.enabled"]'))
           && Boolean(p.querySelector('[data-cfg-path="sync.antiEntropy.enabled"]'))
-          && Boolean(p.querySelector('#rt-model-source'))
+          && !p.querySelector('#rt-model-source')
+          && !p.querySelector('[data-settings-section=model-source]')
           && !p.querySelector('[data-task]') && !p.querySelector('[data-cfg-path="mcp.http.host"]')
           && !p.querySelector('[data-cfg-path="sync.peerWhitelist"]');
       })()`));
@@ -1702,7 +2210,7 @@ async function main() {
     check('U-3 MCP 接入：连接/TLS 两组 + 一个「危险与自救」折叠；六字段齐全',
       await waitFor(`(() => {
         const p = document.querySelector('#settings-panel-mcp');
-        const sections = [...(p?.querySelectorAll(':scope > .settings-section') ?? [])];
+        const sections = [...(p?.querySelectorAll(':scope > .settings-group') ?? [])];
         const ids = sections.map((s) => s.dataset.settingsSection).join(',');
         const paths = ['mcp.http.port', 'mcp.http.auth', 'mcp.http.host', 'mcp.http.tls', 'mcp.http.tlsKey', 'mcp.http.tlsCert'];
         return Boolean(p) && ids === 'connection,tls'
@@ -1787,22 +2295,34 @@ async function main() {
     check('简化轮：诊断并入高级底部折叠（cfg-copy-all 就位）',
       await evalJs('(() => { document.querySelector("[data-settings-tab=advanced]")?.click(); const f = document.querySelector("#diag-fold"); return Boolean(f) && Boolean(f.querySelector("#cfg-copy-all")); })()'));
     await evalJs('document.querySelector("[data-settings-tab=mcp]").click()');
-    // 轮 C 症状③：常态不占行；异常才完整三元组；帮助聚焦出现；空值提示进 placeholder
-    check('轮 C 呈现分级：常态不占行，异常自动出现完整三元组',
-      await evalJs(`(() => {
-        const body = document.querySelector('#settings-body');
-        const ok = body.querySelectorAll('[data-cfg-state=ok]').length;
-        // 专指 mcp.http.port 的「已配置 0 / 实际 <port>」例外：避免被 join 端点回环等其它异常行抢先
-        const row = body.querySelector('[data-cfg-path="mcp.http.port"]')?.closest('.cfg-row');
-        const ex = row?.querySelector('[data-cfg-state=exception]');
-        return ok === 0 && !/生效中/.test(body.textContent)
-          && Boolean(ex) && /已配置/.test(ex.textContent) && /实际/.test(ex.textContent) && /不一致/.test(ex.textContent);
-      })()`));
-    check('U-1 呈现分级：帮助聚焦时出现、空值默认/短提示进 placeholder',
+    // 轮 C / B：常态行状态列=生效中（不新增子行）；异常才完整三元组；帮助聚焦出现；空值提示进 placeholder
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await sleep(250);
+    const grading = await evalJs(`(() => {
+      const body = document.querySelector('#settings-body');
+      const row = body.querySelector('[data-cfg-path="mcp.http.port"]')?.closest('.cfg-row');
+      const ex = row?.parentElement?.querySelector('[data-cfg-state=exception]') ?? null;
+      const exStyle = ex ? getComputedStyle(ex) : null;
+      const status = row?.querySelector('.cfg-status');
+      const after = Boolean(ex) && Boolean(row) && (row.compareDocumentPosition(ex) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+      const ok = Boolean(row) && after && exStyle.display !== 'none' && ex.getBoundingClientRect().height > 0
+        && /已配置/.test(ex.textContent) && /实际/.test(ex.textContent) && /不一致/.test(ex.textContent)
+        && Boolean(status) && /未生效|待重启/.test(status.textContent)
+        && Math.round(row.getBoundingClientRect().height) === 40
+        && document.documentElement.scrollWidth <= window.innerWidth + 1;
+      return { ok, row: Boolean(row), exAfter: after, exDisplay: exStyle?.display ?? null,
+        exH: ex ? Math.round(ex.getBoundingClientRect().height) : null, status: status?.textContent?.trim() ?? null,
+        rowH: row ? Math.round(row.getBoundingClientRect().height) : null,
+        docW: document.documentElement.scrollWidth, vw: innerWidth,
+        panelHidden: document.querySelector('#settings-panel-mcp')?.hidden ?? null,
+        exText: ex?.textContent?.replace(/\\s+/g, ' ').trim().slice(0, 70) ?? null };
+    })()`);
+    check('轮 C/B 呈现分级：常态状态列=生效中，异常默认出现完整三元组（行下静态行、行仍 40）', Boolean(grading?.ok), JSON.stringify(grading));
+    check('U-1/B 呈现分级：帮助在行内聚焦时出现、空值默认/短提示进 placeholder',
       await evalJs(`(() => {
         const panel = document.querySelector('#settings-panel-mcp');
         const row = panel?.querySelector('.cfg-row');
-        const help = row?.querySelector('.cfg-control > .cfg-help');
+        const help = row?.querySelector('.cfg-row > .cfg-help');
         const input = row?.querySelector('input, select');
         if (!help || !input) return false;
         const hidden = getComputedStyle(help).display === 'none';
@@ -1813,6 +2333,28 @@ async function main() {
         return hidden && shown && Boolean(cert) && /cert\\.pem/.test(cert.placeholder)
           && !panel.querySelector('details.cfg-more') && !/这是什么/.test(panel.textContent);
       })()`));
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    check('B 统一行模板：三列栅格 / 40px / 行间虚线（首行无）/ 状态列纯文字',
+      await evalJs(`(() => {
+        const editor = document.querySelector('#settings-panel-mcp .cfg-editor');
+        const rows = editor ? [...editor.querySelectorAll('.cfg-row')] : [];
+        if (rows.length < 2) return false;
+        const first = rows[0];
+        const second = rows[1];
+        const status = second.querySelector(':scope > .cfg-status');
+        const statusStyle = status ? getComputedStyle(status) : null;
+        const cols = getComputedStyle(second).gridTemplateColumns.split(' ').filter(Boolean).map((v) => Math.round(parseFloat(v)));
+        return getComputedStyle(second).display === 'grid'
+          && cols.length === 3 && cols[0] === 150 && cols[2] === 68
+          && Math.round(second.getBoundingClientRect().height) === 40
+          && getComputedStyle(first).borderTopStyle === 'none'
+          && getComputedStyle(second).borderTopStyle === 'dashed'
+          && Boolean(status) && status.children.length === 0
+          && statusStyle.fontSize === '12px'
+          && statusStyle.lineHeight === '18px'
+          && statusStyle.fontWeight === '400';
+      })()`));
+    await clearViewport();
     await evalJs('document.querySelector("[data-settings-tab=security]").click()');
     check('U-3 安全 tab：三段式（等级/动态码种子/恢复码）+ 当前档',
       await evalJs(`(() => {
@@ -1829,6 +2371,44 @@ async function main() {
           && !/totp_not_configured/.test(t);
       })()`));
     // B 方案：三档差异/边界/降级入口收进「更改等级」弹框（不内联展开）
+    check('C 安全卡状态（低档）：等级 effective + TOTP/恢复码 off + 空心点/无荧光条',
+      await evalJs(`(() => {
+        const s = document.querySelector('#settings-security-slot');
+        const cards = [...s.querySelectorAll(':scope > .settings-section')];
+        if (cards.length !== 3) return false;
+        const [level, seed, recovery] = cards;
+        const headDot = (card) => card.querySelector('.sec-card-head > .sec-dot');
+        const effBefore = getComputedStyle(level, '::before');
+        const offBefore = getComputedStyle(seed, '::before');
+        const offStrong = getComputedStyle(seed.querySelector('.sec-card-value strong'));
+        const effStrong = getComputedStyle(level.querySelector('.sec-card-value strong'));
+        return level.classList.contains('is-effective') && !level.classList.contains('is-off')
+          && seed.classList.contains('is-off') && recovery.classList.contains('is-off')
+          && cards.every((card) => Boolean(headDot(card)))
+          && level.querySelector('.sec-card-value strong')?.textContent === '低'
+          && seed.querySelector('.sec-card-value strong')?.textContent === '未导入'
+          && recovery.querySelector('.sec-card-value strong')?.textContent === '未生成'
+          && !seed.querySelector('.crt-tag') && !recovery.querySelector('.crt-tag')
+          && /6 位动态码/.test(seed.querySelector('.sec-card-line')?.textContent ?? '')
+          && /离线钥匙/.test(recovery.querySelector('.sec-card-line')?.textContent ?? '')
+          && effBefore.content !== 'none' && parseFloat(effBefore.width) === 2
+          && offBefore.content === 'none'
+          && offStrong.color === 'rgba(140, 255, 200, 0.52)'
+          && effStrong.fontSize === '19px' && effStrong.fontWeight === '700';
+      })()`));
+    check('v2.2 安全卡警告行：inset 2px 琥珀 left-bar + 8px 左内距', await evalJs(`(() => {
+      const seed = document.querySelector('#settings-security-slot .sec-card.is-off');
+      if (!seed) return false;
+      const probe = document.createElement('span');
+      probe.className = 'sec-card-warn';
+      seed.appendChild(probe);
+      const s = getComputedStyle(probe);
+      const ok = s.color === 'rgb(255, 210, 122)'
+        && /inset/.test(s.boxShadow) && /2px/.test(s.boxShadow)
+        && s.paddingLeft === '8px';
+      probe.remove();
+      return ok;
+    })()`));
     await evalJs('document.querySelector("[data-security-change-level]").click()');
     check('U-3 安全 tab：更改等级弹框含三档 + 当前档 + 边界警告',
       await waitFor(`(() => {
@@ -1847,6 +2427,26 @@ async function main() {
     await evalJs('document.querySelector("[data-settings-tab=advanced]").click()');
     const toggleSel = '#settings-body input[data-cfg-path="joinService.enabled"]';
     check('即时生效：joinService 开关在高级 · 常驻服务组', await waitFor(`Boolean(document.querySelector('${toggleSel}'))`));
+    check('v2.2 开关 off 去蓝：轨道 .12 绿、滑块 .45 绿；on 仍 --ok + 白滑块', await evalJs(`(() => {
+      const host = document.querySelector('#settings-panel-advanced');
+      const probe = (checked) => {
+        const wrap = document.createElement('label');
+        wrap.className = 'toggle';
+        wrap.innerHTML = '<input type="checkbox"' + (checked ? ' checked' : '') + '><span class="slider"></span>';
+        host.appendChild(wrap);
+        const slider = wrap.querySelector('.slider');
+        const out = {
+          track: getComputedStyle(slider).backgroundColor,
+          knob: getComputedStyle(slider, '::before').backgroundColor,
+        };
+        wrap.remove();
+        return out;
+      };
+      const off = probe(false);
+      const on = probe(true);
+      return off.track === 'rgba(140, 255, 200, 0.12)' && off.knob === 'rgba(140, 255, 200, 0.45)'
+        && on.track === 'rgb(0, 158, 115)' && on.knob === 'rgb(255, 255, 255)';
+    })()`));
     const tgOriginal = await evalJs(`document.querySelector('${toggleSel}').checked`);
     await evalJs(`(() => { const el = document.querySelector('${toggleSel}'); el.checked = !el.checked; el.dispatchEvent(new Event('change', { bubbles: true })); })()`);
     await sleep(1200);
@@ -1880,15 +2480,20 @@ async function main() {
     check('UI 待重启：页面内写 sync.antiEntropy.intervalMs → 200', wrotePending === 200, `status=${wrotePending}`);
     check(
       'UI 待重启：设置弹窗出现「待重启」并含变更项（反熵间隔）',
-      await waitFor('(() => { const el = document.querySelector("[data-pending-restart]"); return Boolean(el) && /待重启/.test(el.textContent) && /反熵间隔/.test(el.textContent) && /sync\\.antiEntropy\\.intervalMs/.test(el.textContent); })()'),
+      await waitFor('(() => { const el = document.querySelector("[data-pending-restart]"); return Boolean(el) && /待重启/.test(el.textContent) && /反熵间隔/.test(el.textContent) && /sync\\.antiEntropy\\.intervalMs/.test(el.getAttribute("title") ?? ""); })()'),
     );
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await evalJs('document.querySelector("[data-settings-tab=common]")?.click()');
+    await sleep(250);
+    check('720 + 40 条：常用内容不滚动（含界面组）',
+      await evalJs(`(() => { const sc = document.querySelector('#settings .settings-scroll'); const box = document.querySelector('#settings .modal-box'); return Boolean(sc) && Math.round(box.getBoundingClientRect().height) === 720 && sc.scrollHeight <= sc.clientHeight + 1; })()`));
     check(
       'UI 待重启：设置入口徽标标注「待重启 N 项」',
       await waitFor('/待重启/.test(document.querySelector("#settings-pending-badge")?.textContent ?? "")'),
     );
     check(
       'D UI 三元组第三列：待重启横幅含「未生效原因」（服务端计算）',
-      await waitFor('/未生效原因/.test(document.querySelector("[data-pending-restart]")?.textContent ?? "")'),
+      await waitFor('(() => { const el = document.querySelector("[data-pending-restart]"); return /未生效原因/.test(el?.getAttribute("title") ?? ""); })()'),
     );
     check(
       'C UI 一键重启按钮就位（待重启横幅内，写权限下可用）',
@@ -2103,13 +2708,14 @@ async function main() {
       await waitFor('document.querySelector("#settings")?.hidden === true && !document.body.classList.contains("modal-open")'));
     // 关于本机（点顶栏本机徽标进入）
     await evalJs('document.querySelector("#self-badge").click()');
-    check('关于本机打开（身份/存储/收敛；运行状态收一个折叠）', await waitFor(`(() => {
+    check('关于本机打开（v2：身份与存储 / 运行与同步 / 诊断与恢复 三组 + 三折叠）', await waitFor(`(() => {
       const body = document.querySelector('#about-body');
-      const folds = body?.querySelectorAll('details') ?? [];
-      return Boolean(body) && Boolean(body.querySelector('[data-info-block=identity]'))
-        && Boolean(body.querySelector('[data-info-block=convergence]'))
-        && folds.length === 1 && folds[0].dataset.settingsFold === 'about-runtime'
-        && body.textContent.includes('运行状态');
+      if (!body) return false;
+      const groups = [...body.querySelectorAll(':scope > .about-group')].map((el) => el.dataset.infoBlock).join(',');
+      const folds = [...body.querySelectorAll('details')].map((el) => el.dataset.settingsFold).sort().join(',');
+      return groups === 'identity,runtime,diag'
+        && folds === 'about-diag,about-identity,about-runtime'
+        && /身份与存储/.test(body.textContent) && /运行与同步/.test(body.textContent) && /诊断与恢复/.test(body.textContent);
     })()`));
     check('轮 C 配套：写盘路径/.bak 收进关于本机、设置常用页不再重复',
       await evalJs('(() => { const t = document.querySelector("#about-body")?.textContent ?? ""; const s = document.querySelector("#settings-body")?.textContent ?? ""; return /配置文件/.test(t) && /\\.bak/.test(t) && !/修改写入/.test(s); })()'));
@@ -2481,9 +3087,10 @@ async function main() {
       `active=${tokenState.joinState.active?.slice(0, 8)}… revoked=${tokenState.joinState.revoked.length}`);
     const allFoldKeys = await evalJs(`(() => [...document.querySelectorAll('#settings-body details, #about-body details, #invite-body details')]
       .map((el) => el.dataset.settingsFold ?? el.className))()`);
-    check('U-1 全域折叠预算：设置 + 关于 ≤5 且均为白名单类型（邀请无折叠）', Array.isArray(allFoldKeys)
+    check('U-1 全域折叠预算：设置 2 + 关于 3 = 5，均为白名单类型（邀请无折叠；「更多」不再是 details）', Array.isArray(allFoldKeys)
       && allFoldKeys.length <= 5
-      && allFoldKeys.every((key) => ['mcp-danger', 'diagnostics', 'about-runtime', 'assistants'].includes(key)),
+      && !allFoldKeys.includes('settings-more')
+      && allFoldKeys.every((key) => ['mcp-danger', 'diagnostics', 'about-runtime', 'about-identity', 'about-diag', 'assistants'].includes(key)),
       JSON.stringify(allFoldKeys));
     check('E1 邀请面板无「去设置启用」旧指路（未启用时就地一键启用）',
       await evalJs(`(() => {
@@ -2859,6 +3466,29 @@ async function main() {
         return s?.dataset.securityLevel === 'high' && /当前/.test(s.querySelector('[data-security-current]')?.textContent ?? '')
           && /恢复码/.test(t) && /a1b2c3d4/.test(t);
       })()`));
+    check('C mock 高档：三卡 effective + 大数值 + 待批准琥珀置顶',
+      await evalJs(`(() => {
+        const s = document.querySelector('#settings-security-slot');
+        const cards = [...s.querySelectorAll(':scope > .settings-section')];
+        if (cards.length !== 3) return false;
+        const [level, seed, recovery] = cards;
+        const pending = s.querySelector('[data-security-pending]');
+        const ps = pending ? getComputedStyle(pending) : null;
+        return cards.every((card) => card.classList.contains('is-effective')
+            && getComputedStyle(card, '::before').content !== 'none'
+            && Boolean(card.querySelector('.sec-card-head > .sec-dot'))
+            && Math.round(card.getBoundingClientRect().height) === 114)
+          && getComputedStyle(level.querySelector('.sec-card-value strong')).fontSize === '19px'
+          && level.querySelector('.sec-card-value strong')?.textContent === '高'
+          && seed.querySelector('.sec-card-value strong')?.textContent === '已导入'
+          && recovery.querySelector('.sec-card-value strong')?.textContent === '已生成'
+          && /6 位动态码/.test(seed.querySelector('.sec-card-line')?.textContent ?? '')
+          && /离线钥匙/.test(recovery.querySelector('.sec-card-line')?.textContent ?? '')
+          && s.firstElementChild === pending && ps.backgroundColor === 'rgba(60, 42, 8, 0.24)'
+          && ps.borderLeftWidth === '2px' && ps.borderLeftColor === 'rgb(255, 210, 122)'
+          && cards.map((c) => c.querySelector('.sec-card-idx')?.textContent.trim()).join(',') === '01,02,03'
+          && (() => { const a = s.querySelector('[data-security-audit]'); return Boolean(a) && Math.round(a.getBoundingClientRect().height) <= 20 && a.textContent.trim().length > 0; })();
+      })()`));
     await evalJs('document.querySelector("[data-security-change-level]").click()');
     check('S3 mock：更改等级弹框 = 当前高档 + 可会签设备',
       await waitFor(`(() => {
@@ -2898,19 +3528,54 @@ async function main() {
     await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
     await evalJs('document.querySelector("#open-settings").click()');
     await evalJs('document.querySelector("[data-settings-tab=security]").click()');
-    check('S3/E1 窄屏：安全卡与 6 页签不横向溢出（390px）',
-      await waitFor(`(() => {
-        const box = document.querySelector('#settings .modal-box');
-        const card = document.querySelector('#settings-security-slot');
-        const tabs = document.querySelector('#settings-body .settings-tabs');
-        if (!box || !card || !tabs) return false;
-        return box.scrollWidth <= box.clientWidth + 1 && card.scrollWidth <= card.clientWidth + 1
-          && tabs.scrollWidth <= tabs.clientWidth + 1
-          && document.documentElement.scrollWidth <= window.innerWidth + 1;
+    await sleep(400);
+    const narrow390 = await evalJs(`(() => {
+      const box = document.querySelector('#settings .modal-box');
+      const card = document.querySelector('#settings-security-slot');
+      const tabs = document.querySelector('#settings-body .settings-tabs');
+      if (!box || !card || !tabs) return { ok: false, why: 'missing' };
+      const of = (el) => ({ cw: el.clientWidth, sw: el.scrollWidth });
+      const b = of(box); const c = of(card); const t = of(tabs);
+      const kids = [...card.querySelectorAll('*')].map((el) => ({ cls: String(el.className || el.tagName).slice(0, 34), sw: el.scrollWidth, cw: el.clientWidth })).filter((x) => x.sw > x.cw + 1).slice(0, 8);
+      return { ok: b.sw <= b.cw + 1 && c.sw <= c.cw + 1 && t.sw <= t.cw + 1
+          && document.documentElement.scrollWidth <= window.innerWidth + 1,
+        box: b, card: c, tabs: t, kids, docW: document.documentElement.scrollWidth, vw: innerWidth };
+    })()`);
+    check('S3/E1 窄屏：安全卡与 6 页签不横向溢出（390px）', Boolean(narrow390?.ok), JSON.stringify(narrow390));
+    check('C 窄屏 390：三张安全卡状态点/大数值/动作不横向溢出',
+      await evalJs(`(() => {
+        const cards = [...document.querySelectorAll('#settings-security-slot > .settings-section')];
+        if (cards.length !== 3) return false;
+        return cards.every((card) => card.scrollWidth <= card.clientWidth + 1
+          && Boolean(card.querySelector('.sec-card-head > .sec-dot'))
+          && Boolean(card.querySelector('.sec-card-value strong')));
       })()`));
     await capture('e1-after-settings-security-narrow-390.jpg', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
     await evalJs('document.querySelector("#settings-close").click()');
     await send('Emulation.clearDeviceMetricsOverride');
+
+    // C 安全卡状态（mock 低档 / 英文）：三卡状态、空心点与 en-US 一行说明
+    await send('Page.navigate', { url: `${base}/console/?mock=1&security=low&lang=en-US` });
+    await waitFor(`document.documentElement?.dataset?.consoleReady === '1' && Boolean(document.querySelector('#open-settings'))`, 30000);
+    await evalJs('document.querySelector("#open-settings").click()');
+    await evalJs('document.querySelector("[data-settings-tab=security]").click()');
+    check('C mock 低档（en-US）：等级 effective / TOTP 与恢复码 off + 英文一行说明',
+      await waitFor(`(() => {
+        const s = document.querySelector('#settings-security-slot');
+        const cards = [...s.querySelectorAll(':scope > .settings-section')];
+        if (!s || cards.length !== 3) return false;
+        const [level, seed, recovery] = cards;
+        return level.classList.contains('is-effective')
+          && seed.classList.contains('is-off') && recovery.classList.contains('is-off')
+          && level.querySelector('.sec-card-value strong')?.textContent === 'Low'
+          && seed.querySelector('.sec-card-value strong')?.textContent === 'Not imported'
+          && recovery.querySelector('.sec-card-value strong')?.textContent === 'Not generated'
+          && /6-digit code for medium-risk actions/.test(seed.querySelector('.sec-card-line')?.textContent ?? '')
+          && /Offline High-tier key/.test(recovery.querySelector('.sec-card-line')?.textContent ?? '')
+          && getComputedStyle(seed, '::before').content === 'none'
+          && getComputedStyle(recovery.querySelector('.sec-card-head > .sec-dot')).backgroundColor === 'rgba(0, 0, 0, 0)'
+          && getComputedStyle(seed.querySelector('.sec-card-head > .sec-dot')).borderTopWidth === '1px';
+      })()`));
 
     // 设备卡（对端）：interop 段为订阅事实、无批准/撤回（?select= 深链选中）
     await send('Page.navigate', { url: `${base}/console/?mock=1&select=device-B` });
@@ -2987,7 +3652,8 @@ async function main() {
       const select = row?.querySelector('select[data-language-select]');
       const trigger = row?.querySelector('#settings-language-select-trigger');
       return Boolean(row) && Boolean(resident) && panel?.hidden === false
-        && row.parentElement === panel && row === panel.querySelector('.settings-language-row')
+        && row.closest('#settings-panel-common') === panel && Boolean(row.closest('.settings-group-body'))
+        && row === panel.querySelector('.settings-language-row')
         && !row.classList.contains('asst-row') && !row.querySelector('.asst-name, .asst-sp')
         && Boolean(control) && control.querySelector('.crt-select > select[data-language-select]') === select
         && Boolean(trigger) && trigger.getAttribute('role') === 'combobox'
@@ -3273,7 +3939,8 @@ async function main() {
         oneLine: Math.abs((labelRect.top + labelRect.height / 2) - (controlRect.top + controlRect.height / 2)) <= 1
           && rowRect.height <= 44,
         order: rowRect.top < resident.getBoundingClientRect().top,
-        divider: rowStyle.borderBottomStyle === 'dashed' && parseFloat(rowStyle.borderBottomWidth) >= 1,
+        divider: (rowStyle.borderBottomStyle === 'dashed' && parseFloat(rowStyle.borderBottomWidth) >= 1)
+          || Boolean(row.closest('.settings-group-body')),
         appearance: selectStyle.appearance,
         nativeHidden: selectStyle.position === 'absolute' && select.getAttribute('aria-hidden') === 'true'
           && select.tabIndex === -1,
@@ -3293,7 +3960,7 @@ async function main() {
         && language1440.dedicated && language1440.wrapper && language1440.oneLine
         && language1440.order && language1440.divider
         && language1440.appearance === 'none' && language1440.nativeHidden
-        && language1440.triggerRole === 'combobox' && language1440.triggerHeight === 26
+        && language1440.triggerRole === 'combobox' && language1440.triggerHeight === 27
         && language1440.radius === '8px' && language1440.focusShadow !== 'none'
         && language1440.options === 2 && language1440.value === 'en-US'
         && language1440.inRow && language1440.overflow === false,
@@ -3321,7 +3988,7 @@ async function main() {
       const extra = document.querySelector('#settings-body .settings-tab-extra')?.textContent.trim() ?? '';
       const out = { lang: document.documentElement.lang, tabs, extra, panels: {}, cjk: {}, open: {} };
       const full = {};
-      for (const id of ['common', 'security', 'assistants', 'runtime', 'mcp', 'advanced']) {
+      for (const id of ['common', 'security', 'runtime', 'assistants', 'mcp', 'advanced']) {
         document.querySelector('[data-settings-tab=' + id + ']')?.click();
         const text = panel(id);
         full[id] = text;
@@ -3334,15 +4001,15 @@ async function main() {
       out.diag = diag.slice(0, 600);
       out.diagCjk = hasCjk(diag);
       out.has = {
-        language: /Language/.test(full.common),
-        commonStatus: /This device/.test(full.common),
-        service: /Resident/.test(full.common),
-        securitySections: /Security level/.test(full.security) && /Authenticator seed/.test(full.security) && /Recovery code/.test(full.security),
-        assistants: /Add agent/.test(full.assistants),
-        runtime: /Memory mode/.test(full.runtime) && /Lightweight MCP/.test(full.runtime) && /Immersive/.test(full.runtime) && /Model status/.test(full.runtime) && !/Third-party API/.test(full.runtime),
-        mcp: /Connection/.test(full.mcp) && /TLS/.test(full.mcp) && /Risks and recovery/.test(full.mcp),
-        advanced: /Resident service/.test(full.advanced) && /Network/.test(full.advanced) && /Automation/.test(full.advanced) && /Model source/.test(full.advanced) && /Diagnostics and recovery/.test(full.advanced),
-        diagnostics: /Version and service status/.test(diag) && /Recovery guide/.test(diag) && /Full configuration/.test(diag),
+        language: /Language/i.test(full.common),
+        commonStatus: /This device/i.test(full.common),
+        service: /Resident/i.test(full.common),
+        securitySections: /Security level/i.test(full.security) && /Authenticator seed/i.test(full.security) && /Recovery code/i.test(full.security),
+        assistants: /Add agent/i.test(full.assistants),
+        runtime: /Memory mode/i.test(full.runtime) && /Lightweight MCP/i.test(full.runtime) && /Immersive/i.test(full.runtime) && /Model source/i.test(full.runtime) && /Model status/i.test(full.runtime) && !/Third-party API/i.test(full.runtime),
+        mcp: /Connection/i.test(full.mcp) && /TLS/i.test(full.mcp) && /Risks and recovery/i.test(full.mcp),
+        advanced: /Resident service/i.test(full.advanced) && /Network/i.test(full.advanced) && /Automation/i.test(full.advanced) && !/Model source/i.test(full.advanced) && /Diagnostics and recovery/i.test(full.advanced),
+        diagnostics: /Version and service status/i.test(diag) && /Recovery guide/i.test(diag) && /Full configuration/i.test(diag),
       };
       document.querySelector('[data-settings-tab=common]')?.click();
       return out;
@@ -3361,26 +4028,32 @@ async function main() {
       JSON.stringify({ cjk: settingsPanels.diagCjk, sample: settingsPanels.diag?.slice(0, 200) }));
     await captureNow('i18n-en-settings-deep-1440.jpg');
 
-    // 英文设置页签：每个标签必须单行（不被空格拆成两行），三档视口都不横向溢出。
+    // 英文设置页签：宽屏为左侧竖轨（160px），≤900 折叠回顶部横排；标签必须单行、不横向溢出。
     const settingsTabsProbe = `(() => {
-      const tabs = [...document.querySelectorAll('#settings-body .settings-tab')];
-      const container = document.querySelector('#settings-body .settings-tabs');
-      if (!container || tabs.length === 0) return { ok: false, why: 'missing' };
-      const box = container.getBoundingClientRect();
+      const rail = document.querySelector('#settings-body .settings-rail');
+      const list = document.querySelector('#settings-body .settings-tabs');
+      if (!rail || !list) return { ok: false, why: 'missing' };
+      const tabs = [...list.querySelectorAll('.settings-tab')];
+      const listBox = list.getBoundingClientRect();
       return {
         ok: true,
+        orientation: list.getAttribute('aria-orientation'),
+        vertical: getComputedStyle(list).flexDirection === 'column',
+        railWidth: Math.round(rail.getBoundingClientRect().width),
         labels: tabs.map((el) => {
           const rect = el.getBoundingClientRect();
           return {
             text: el.textContent.trim(),
             height: Math.round(rect.height),
-            width: Math.round(rect.width),
-            wrapped: rect.height > 32 || el.scrollWidth > el.clientWidth + 1,
-            outside: rect.right > box.right + 1 || rect.left < box.left - 1,
+            left: Math.round(rect.left),
+            top: Math.round(rect.top),
+            wrapped: rect.height > 40 || el.scrollWidth > el.clientWidth + 1,
+            outside: rect.right > listBox.right + 1 || rect.left < listBox.left - 1,
           };
         }),
         rows: new Set(tabs.map((el) => Math.round(el.getBoundingClientRect().top))).size,
-        containerOverflow: container.scrollWidth > container.clientWidth + 1,
+        columns: new Set(tabs.map((el) => Math.round(el.getBoundingClientRect().left))).size,
+        listOverflow: list.scrollWidth > list.clientWidth + 1,
         pageOverflow: document.documentElement.scrollWidth > window.innerWidth + 1,
       };
     })()`;
@@ -3391,11 +4064,17 @@ async function main() {
     ]) {
       await setViewport(viewport);
       const tabsLayout = await evalJs(settingsTabsProbe);
-      check(`i18n 设置页签英文 ${label}：每个标签单行、页签条不溢出（1440/1024 同排）`,
+      const vertical = label !== '390';
+      check(`i18n 设置页签英文 ${label}：${vertical ? '宽屏竖轨（160px）' : '≤900 顶部横排'}、标签单行且不溢出`,
         tabsLayout.ok
+          && tabsLayout.orientation === (vertical ? 'vertical' : 'horizontal')
+          && tabsLayout.vertical === vertical
+          && tabsLayout.labels.length === 6
           && tabsLayout.labels.every((item) => item.wrapped === false && item.outside === false)
-          && tabsLayout.containerOverflow === false && tabsLayout.pageOverflow === false
-          && (label === '390' || tabsLayout.rows === 1),
+          && tabsLayout.listOverflow === false && tabsLayout.pageOverflow === false
+          && (vertical
+            ? tabsLayout.railWidth === 160 && tabsLayout.columns === 1 && tabsLayout.rows === 6
+            : tabsLayout.rows <= 2),
         JSON.stringify(tabsLayout));
       await captureNow(`i18n-en-settings-tabs-${label}.jpg`);
     }
@@ -3458,7 +4137,8 @@ async function main() {
       const box = document.querySelector('#settings .modal-box');
       const scroller = document.querySelector('#settings .settings-scroll');
       const texts = [...document.querySelectorAll(
-        '#settings .settings-section-desc, #settings .settings-section-foot, #settings .cfg-help, '
+        '#settings .settings-group-desc, #settings .settings-group-foot, #settings .settings-group-note, '
+        + '#settings .settings-section-foot, #settings .settings-warn-line, #settings .cfg-help, '
         + '#settings .settings-kv .kv-value, #settings .cloud-intro, #settings .settings-note',
       )].filter(visible);
       const overflow = texts
@@ -3782,21 +4462,21 @@ async function main() {
         ${extra}
       };
     })()`;
-    const settingsTypeOk = (probe, { labelLh, lang }) => probe.lang === lang
+    const settingsTypeOk = (probe, { lang }) => probe.lang === lang
       && probe.tokens['--type-help'] === '11px'
       && probe.tokens['--type-help-leading'] === '1.55'
       && probe.tokens['--type-micro'] === '10.5px'
       && probe.tokens['--type-label-leading'] === '1.35'
       && /0\.55\)$/.test(probe.tokens['--crt-muted'])
       && Boolean(probe.label) && probe.label.fontSize === '12px'
-      && nearPx(probe.label.lineHeight, labelLh)
-      && (!probe.kvSub || (probe.kvSub.fontSize === '11px' && nearPx(probe.kvSub.lineHeight, 17.05)))
+      && nearPx(probe.label.lineHeight, 18)
+      && (!probe.kvSub || (probe.kvSub.fontSize === '11px' && nearPx(probe.kvSub.lineHeight, 16)))
       && Boolean(probe.cfgHelp) && probe.cfgHelp.fontSize === '11px'
-      && nearPx(probe.cfgHelp.lineHeight, 17.05)
+      && nearPx(probe.cfgHelp.lineHeight, 16)
       && Boolean(probe.cfgEffective) && probe.cfgEffective.fontSize === '11px'
-      && nearPx(probe.cfgEffective.lineHeight, 17.05)
-      && Boolean(probe.cfgLabel) && probe.cfgLabel.fontSize === '12px'
-      && nearPx(probe.cfgLabel.lineHeight, labelLh)
+      && nearPx(probe.cfgEffective.lineHeight, 16)
+      && Boolean(probe.cfgLabel) && probe.cfgLabel.fontSize === '13px'
+      && nearPx(probe.cfgLabel.lineHeight, 19)
       && (!probe.cfgDefault || probe.cfgDefault.fontSize === '10px')
       && Boolean(probe.smallBtn) && probe.smallBtn.fontSize === '12px'
       && nearPx(probe.smallBtn.lineHeight, 18)
@@ -3808,37 +4488,32 @@ async function main() {
     // 设置·常用「Setup wizard」行：英文说明不得把按钮挤出可视区。host adapter 在
     // console.js 模块加载时定型，因此先注入 preload 桩，再重新加载页面（而不是加载后改 window）。
     const wizardProbe = `(() => {
-      const row = document.querySelector('#settings-panel-common .settings-wizard-row');
-      const name = row?.querySelector('.asst-name');
-      const note = row?.querySelector('.asst-st');
+      const group = document.querySelector('#settings-panel-common [data-settings-group=resident]');
+      const row = group?.querySelector('.settings-wizard-row');
       const button = row?.querySelector('#settings-open-wizard');
-      if (!row || !name || !note || !button) return { ok: false, why: 'missing' };
+      if (!group || !row || !button) return { ok: false, why: 'missing' };
       const rowRect = row.getBoundingClientRect();
-      const noteRect = note.getBoundingClientRect();
       const btnRect = button.getBoundingClientRect();
       const boxRect = document.querySelector('#settings .modal-box')?.getBoundingClientRect() ?? null;
-      const noteStyle = getComputedStyle(note);
-      const nameStyle = getComputedStyle(name);
       const btnStyle = getComputedStyle(button);
       return {
         ok: true,
         text: row.innerText.replace(/\\s+/g, ' ').trim(),
+        title: button.getAttribute('title') ?? '',
         visible: btnStyle.display !== 'none' && btnStyle.visibility !== 'hidden'
           && btnRect.width > 0 && btnRect.height > 0,
         button: { left: Math.round(btnRect.left), right: Math.round(btnRect.right), height: Math.round(btnRect.height) },
-        row: { left: Math.round(rowRect.left), right: Math.round(rowRect.right) },
+        row: { left: Math.round(rowRect.left), right: Math.round(rowRect.right), height: Math.round(rowRect.height) },
         boxRight: boxRect ? Math.round(boxRect.right) : null,
-        insideRow: btnRect.left >= rowRect.left - 1 && btnRect.right <= rowRect.right + 1,
+        insideRow: btnRect.left >= rowRect.left - 1 && btnRect.right <= rowRect.right + 1
+          && btnRect.top >= rowRect.top - 1 && btnRect.bottom <= rowRect.bottom + 1,
         insideBox: !boxRect || btnRect.right <= boxRect.right + 1,
-        overlap: noteRect.right > btnRect.left + 1 && noteRect.bottom > btnRect.top + 1
-          && noteRect.top < btnRect.bottom - 1,
-        noteFlexGrow: noteStyle.flexGrow,
-        noteMinWidth: noteStyle.minWidth,
-        noteOverflowWrap: noteStyle.overflowWrap,
-        nameMinWidth: nameStyle.minWidth,
-        sp: Boolean(row.querySelector('.asst-sp')),
+        inRow: button.closest('.asst-row') === row,
+        inHead: Boolean(group.querySelector('.settings-group-head #settings-open-wizard')),
+        row40: Math.round(rowRect.height) === 40,
+        height27: Math.round(btnRect.height) === 27,
         pageOver: document.documentElement.scrollWidth - window.innerWidth,
-        cjk: /[\\u3400-\\u9fff]/.test(row.innerText),
+        cjk: /[\u3400-\u9fff]/.test(row.innerText),
       };
     })()`;
     const wizardPreload = await send('Page.addScriptToEvaluateOnNewDocument', {
@@ -3848,23 +4523,43 @@ async function main() {
     await waitFor('document.documentElement?.dataset?.consoleReady === "1" && Boolean(document.querySelector("#open-settings"))');
     await evalJs('document.querySelector("#open-settings").click()');
     await waitFor('document.querySelector("#settings")?.hidden === false');
-    check('i18n 设置向导行：桌面桥下渲染 .settings-wizard-row（专用行类）',
-      await waitFor('Boolean(document.querySelector("#settings-panel-common .settings-wizard-row #settings-open-wizard"))'));
+    check('i18n 设置向导动作：桌面桥下渲染为「本机运行」最后一个 40px 行',
+      await waitFor('Boolean(document.querySelector("#settings-panel-common [data-settings-group=resident] .settings-wizard-row #settings-open-wizard"))'));
     for (const [label, viewport] of densityViewports) {
       await setViewport(viewport);
       const wizard = await evalJs(wizardProbe);
-      check(`i18n 设置向导行 ${label}：英文说明可收缩，按钮可见且在行/弹框内、无横向溢出`,
+      check(`i18n 设置向导动作 ${label}：独立 40 行 + 27 按钮在行内、无横向溢出`,
         wizard.ok && wizard.visible && wizard.insideRow && wizard.insideBox
-          && wizard.overlap === false && wizard.sp === false
-          && wizard.noteFlexGrow === '1' && wizard.noteMinWidth === '0px'
-          && wizard.nameMinWidth === '0px' && wizard.noteOverflowWrap === 'anywhere'
-          && /Setup wizard/.test(wizard.text) && /Re-run setup/.test(wizard.text)
-          && /config is kept/.test(wizard.text) && /Restart wizard/.test(wizard.text)
+          && wizard.inRow && !wizard.inHead && wizard.row40 && wizard.height27
+          && wizard.pageOver <= 1
+          && /Restart wizard/.test(wizard.text) && /setup/i.test(wizard.title) && /config is kept/i.test(wizard.title)
           && wizard.pageOver <= 1 && wizard.cjk === false,
         JSON.stringify(wizard));
       await captureNow(`i18n-en-wizard-row-${label}.jpg`);
     }
     await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    check('常用四项 + 40px 待重启条：720 设置框内不滚动', await evalJs(`(() => {
+      const body = document.querySelector('#settings-body');
+      const root = document.querySelector('#settings-resident');
+      const sc = document.querySelector('#settings .settings-scroll');
+      if (!body || !root || !sc) return false;
+      const items = [...root.children].filter((el) => el.matches('.settings-row-2, .asst-row'));
+      const heights = items.map((el) => Math.round(el.getBoundingClientRect().height));
+      let banner = body.querySelector('[data-pending-restart]');
+      let created = false;
+      if (!banner) {
+        banner = document.createElement('div');
+        banner.className = 'pending-restart';
+        banner.dataset.pendingRestart = '1';
+        banner.textContent = '待重启 1 项';
+        body.prepend(banner);
+        created = true;
+      }
+      const ok = items.length === 4 && JSON.stringify(heights) === JSON.stringify([40, 40, 40, 40])
+        && sc.scrollHeight <= sc.clientHeight + 1;
+      if (created) banner.remove();
+      return ok;
+    })()`));
     await send('Page.removeScriptToEvaluateOnNewDocument', { identifier: wizardPreload.identifier });
     await evalJs('delete window.mebularDesktop');
 
@@ -3873,8 +4568,8 @@ async function main() {
     for (const [label, viewport] of densityViewports) {
       await setViewport(viewport);
       const settingsType = await evalJs(settingsTypeProbe());
-      check(`i18n 排版 A ${label}：辅助文本 11px / 微文本 10.5px / 标签行距 1.35，无横向溢出且无中文兜底`,
-        settingsTypeOk(settingsType, { labelLh: 16.2, lang: 'en-US' }), JSON.stringify(settingsType));
+      check(`i18n 排版 A ${label}：辅助文本 11/16 / 微文本 10.5 / 标签 12/18，无横向溢出且无中文兜底`,
+        settingsTypeOk(settingsType, { lang: 'en-US' }), JSON.stringify(settingsType));
       await captureNow(`i18n-en-type-settings-${label}.jpg`);
     }
     await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
@@ -4011,18 +4706,18 @@ async function main() {
     await evalJs('document.querySelector("#view-nav li:nth-of-type(2) button").click()');
     await waitFor('document.querySelector("#domains-view")?.hidden === false && Boolean(document.querySelector("#domains-note"))');
     const zhSector = await evalJs(zhSectorProbe);
-    check('i18n 排版 A+C 中文不变：辅助文本仍 10.5px、微文本 10px、标签行高 26px、按钮行高 normal',
+    check('i18n 排版 C 中文 v2：辅助 11/16、标签 12/18、按钮 12/18（token 仍为 10.5/10/26）',
       zhSettingsType.lang === 'zh-CN'
         && zhSettingsType.tokens['--type-help'] === '10.5px'
         && zhSettingsType.tokens['--type-help-leading'] === '1.5'
         && zhSettingsType.tokens['--type-micro'] === '10px'
         && zhSettingsType.tokens['--type-label-leading'] === '26px'
         && /0\.45\)$/.test(zhSettingsType.tokens['--crt-muted'])
-        && Boolean(zhSettingsType.label) && nearPx(zhSettingsType.label.lineHeight, 26)
-        && (!zhSettingsType.kvSub || zhSettingsType.kvSub.fontSize === '10.5px')
-        && Boolean(zhSettingsType.cfgHelp) && zhSettingsType.cfgHelp.fontSize === '10.5px'
-        && (!zhSettingsType.cfgDefault || zhSettingsType.cfgDefault.fontSize === '9px')
-        && Boolean(zhSettingsType.smallBtn) && zhSettingsType.smallBtn.lineHeight === 'normal'
+        && Boolean(zhSettingsType.label) && zhSettingsType.label.fontSize === '12px' && nearPx(zhSettingsType.label.lineHeight, 18)
+        && (!zhSettingsType.kvSub || zhSettingsType.kvSub.fontSize === '11px')
+        && Boolean(zhSettingsType.cfgHelp) && zhSettingsType.cfgHelp.fontSize === '11px' && nearPx(zhSettingsType.cfgHelp.lineHeight, 16)
+        && (!zhSettingsType.cfgDefault || zhSettingsType.cfgDefault.fontSize === '10px')
+        && Boolean(zhSettingsType.smallBtn) && nearPx(zhSettingsType.smallBtn.lineHeight, 18)
         && zhSettingsType.pageOver <= 1,
       JSON.stringify(zhSettingsType));
     check('i18n 排版 A+C 中文数据面不变：仍三列（名称与元信息同排）、说明不设 72ch 上限',
@@ -4218,9 +4913,9 @@ async function main() {
       await evalJs('document.querySelector("[data-view=map]").click()');
 
       const expected = {
-        settingsLanguage: 26,
-        mcpAuth: 26,
-        assistantFormat: 26,
+        settingsLanguage: 27,
+        mcpAuth: 27,
+        assistantFormat: 27,
         auditAction: 32,
         auditDevice: 32,
         auditNamespace: 32,
@@ -4425,20 +5120,26 @@ async function main() {
     await evalJs('document.querySelector("#open-settings").click()');
     await waitFor('document.querySelector("#settings")?.hidden === false && Boolean(document.querySelector("[data-settings-extra=about-modal]"))');
     await evalJs('document.querySelector("[data-settings-extra=about-modal]").click()');
-    await waitFor('document.querySelector("#about")?.hidden === false && document.querySelectorAll("#about-body .settings-section").length >= 4');
+    await waitFor('document.querySelector("#about")?.hidden === false && document.querySelectorAll("#about-body .about-group").length === 3');
     // 运行状态/路径/任务面/工具都在「运行状态」折叠内；展开后再测长文案。
-    await evalJs('document.querySelector("#about-runtime-fold").open = true');
+    check('i18n 关于本机折叠存在（#about-runtime）', await evalJs('Boolean(document.querySelector("#about-runtime"))'));
+    await evalJs('(() => { for (const id of ["about-runtime", "about-diag", "about-identity"]) { const f = document.querySelector(`#${id}`); if (f) f.open = true; } })()');
     for (const [label, viewport] of densityViewports) {
       await setViewport(viewport);
+      // 折叠可能在轮询重渲染后收起：每个视口前重新展开（三组折叠全开）
+      await evalJs('(() => { for (const id of ["about-identity", "about-runtime", "about-diag"]) { const f = document.querySelector(`#${id}`); if (f) f.open = true; } })()');
+      await sleep(150);
       const about = await evalJs(surfaceProbe('#about', '#about-body p, #about-body dd, #about-body .chip-wrap'));
       const aboutText = await surfaceText('#about-body');
+      const phrases = {
+        fleet: /Task plane, not a memory domain/.test(aboutText),
+        runtime: /Set at runtime: relay pool/.test(aboutText),
+        paths: /Paths come from the core address book/.test(aboutText),
+        tools: /Agents call the same handlers over MCP/.test(aboutText),
+      };
       check(`i18n 数据面 about ${label}：长说明/命令不横向越界`,
-        surfaceOk(about)
-          && /Task plane, not a memory domain/.test(aboutText)
-          && /Set at runtime: relay pool/.test(aboutText)
-          && /Paths come from the core address book/.test(aboutText)
-          && /Agents call the same handlers over MCP/.test(aboutText),
-        JSON.stringify({ ...about, sample: aboutText.slice(0, 120) }));
+        surfaceOk(about) && Object.values(phrases).every(Boolean),
+        JSON.stringify({ ...about, phrases, sample: aboutText.slice(0, 120) }));
       await captureNow(`i18n-en-data-about-${label}.jpg`);
     }
     await setViewport(densityViewports[0][1]);
@@ -4688,7 +5389,7 @@ async function main() {
       const panel = document.querySelector('#settings-panel-common');
       if (!row || !resident || !panel) return false;
       const s = getComputedStyle(row);
-      return panel.hidden === false && row.parentElement === panel
+      return panel.hidden === false && row.closest('#settings-panel-common') === panel && Boolean(row.closest('.settings-group-body'))
         && row === panel.querySelector('.settings-language-row')
         && !row.classList.contains('asst-row')
         && Boolean(row.querySelector('.settings-language-control .crt-select > select[data-language-select]'))
@@ -4699,7 +5400,7 @@ async function main() {
         && row.querySelector('select').value === 'en-US'
         && getComputedStyle(row.querySelector('select')).appearance === 'none'
         && row.getBoundingClientRect().top < resident.getBoundingClientRect().top
-        && parseFloat(s.borderBottomWidth) >= 1;
+        && (parseFloat(s.borderBottomWidth) >= 1 || Boolean(row.closest('.settings-group-body')));
     })()`));
     const navsBeforeLocale = cdp.events.filter((event) => event.method === 'Page.frameNavigated').length;
     await evalJs(`(() => { const s = document.querySelector('[data-language-select]'); s.value = 'zh-CN'; s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
@@ -5057,6 +5758,7 @@ async function main() {
         })()`));
 
         // 设置 = 锁定态排错入口（不白屏）
+        await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
         await evalJs('document.querySelector("#open-settings").click()');
         check('P3 锁定设置：不白屏，锁定说明 + 顶栏引导 + 诊断信息，且不再重复两个入口', await waitFor(`(() => {
           const body = document.querySelector('#settings-body');
@@ -5068,6 +5770,17 @@ async function main() {
             && Boolean(create) && create.hidden === false
             && Boolean(join) && join.hidden === false
             && /诊断信息/.test(body.textContent);
+        })()`));
+        check('v2.5 锁定设置只读行：无空动作列 + 左右 14px 内缩', await evalJs(`(() => {
+          const list = document.querySelector('[data-locked-diagnostics] .settings-kv.settings-kv-no-action');
+          const dt = list?.querySelector('dt');
+          const value = list?.querySelector('.kv-value');
+          const action = list?.querySelector('.kv-action');
+          if (!list || !dt || !value || !action) return false;
+          const columns = getComputedStyle(list).gridTemplateColumns.split(' ').filter(Boolean);
+          return columns.length === 2 && getComputedStyle(action).display === 'none'
+            && getComputedStyle(dt).paddingLeft === '14px' && getComputedStyle(value).paddingRight === '14px'
+            && document.documentElement.scrollWidth <= innerWidth + 1;
         })()`));
         await evalJs('document.querySelector("#settings-close").click()');
 

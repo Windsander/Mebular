@@ -67,6 +67,7 @@ main [`README.md`](../README.md); this index only describes document structure.
 
 ## Quality and release evidence
 
+- [v0.3.4 verification](quality/0.3.4-verification.md) — Console settings redesign scope, SSOT/build/lint/docs checks and release dry-run
 - [v0.3.2 verification matrix](quality/0.3.2-verification.md) — final test counts, host boundaries, scale/model evidence and explicit pending items
 - [v0.3.2 scale benchmark](quality/0.3.2-scale-benchmark.md) — 1k/2k/10k count audits, performance, resources, failure injection and preserved 10k failure history
 - [v0.3.2 real-model canary](quality/0.3.2-model-smoke.md) — Qwen3-4B Q4_K_M on macOS x64 with a test-only mirror; records the default-HF failure and exact boundary

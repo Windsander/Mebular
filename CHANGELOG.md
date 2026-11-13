@@ -70,10 +70,15 @@ data. There is no migration.
 
 ### Verification
 
+- Main CI run `43376114600` passed Linux build/test/lint (including Console UI smoke),
+  Windows build/test/lint, DSH E2E, desktop smoke, semantic recall and WAN NAT.
+- Packaging dry-run run `43377170059` passed verify, the eight npm tarballs, Hermes bundle,
+  macOS/Windows/Linux desktop builds and the full DSH E2E matrix. Publish, visibility and
+  GitHub Release were correctly skipped; no registry or Release mutation occurred.
 - `verify:console` passed; the headless Console UI smoke covers the settings v2 layout,
   security cards, About device, responsive breakpoints, bilingual copy and reduced motion.
-- Release dry-run and published artifact verification are recorded on the `v0.3.4` release
-  branch; the desktop packages remain unsigned.
+- The formal `release/v0.3.4` run reruns the same gate before publishing. Desktop packages
+  remain unsigned.
 
 ## [v0.3.2] - 2026-11-06
 

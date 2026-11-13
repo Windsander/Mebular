@@ -2695,12 +2695,12 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
   border: 1px solid rgba(80, 255, 170, 0.22);
   border-radius: 10px;
   background: rgba(2, 16, 11, 0.34);
-  /* 状态卡 2px 呼吸；常驻组 12；忆云 0。行高本身仍严格 40/58。 */
-  padding: 2px 0;
+  /* 面板自身承担圆角贴边；首/末行与中间行一致，不再添加上下呼吸。 */
+  padding: 0;
   overflow: hidden;
   min-width: 0;
 }
-#settings-resident { padding: 12px 0; }
+#settings-resident { padding: 0; }
 #settings-cloud-card .settings-group-body { padding: 0; }
 .settings-group-desc,
 .settings-group-foot {
@@ -2794,7 +2794,7 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
 
 /* 两行行：常驻 / 忆云 / 数据 */
 .settings-row-2 {
-  height: 58px; min-height: 58px;
+  height: 40px; min-height: 40px;
   display: flex; align-items: center; gap: 10px;
   padding: 0 14px;
   border-top: 1px dashed rgba(80, 255, 170, 0.14);
@@ -2803,7 +2803,7 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
 .settings-row-2 .settings-row-stack { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .settings-row-2 .settings-row-title {
   display: flex; align-items: center; gap: 8px; min-width: 0;
-  font-size: 13px; line-height: 19px; font-weight: 600; color: var(--crt-bright);
+  font-size: 13px; line-height: 18px; font-weight: 600; color: var(--crt-bright);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .settings-row-2 .settings-row-meta {
@@ -2999,7 +2999,7 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
   #about .modal-actions { flex-wrap: wrap; }
 }
 
-/* 常用 · 本机运行组内的行（服务行 58；自动修复 / 重启向导 40） */
+/* 常用 · 本机运行组内的行（常驻 / 重启 / 自动修复 / 重启向导均 40） */
 .settings-row-status {
   flex: none; display: inline-flex; align-items: center; gap: 6px;
   font-size: 12px; line-height: 18px; color: var(--crt-bright);
@@ -3110,8 +3110,8 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
   .cfg-control { flex: 1 1 100%; margin-left: 0; justify-content: flex-start; }
   .cfg-control .crt-input { width: 100%; min-width: 0; }
   .cfg-status { margin-left: auto; }
-  .settings-row-2 { height: auto; min-height: 58px; flex-wrap: wrap; padding: 8px 14px; row-gap: 6px; }
-  .settings-row-2 .settings-row-actions { width: 100%; justify-content: flex-end; flex-wrap: wrap; }
+  .settings-row-2 { height: 40px; min-height: 40px; flex-wrap: nowrap; padding: 0 14px; row-gap: 0; }
+  .settings-row-2 .settings-row-actions { width: auto; justify-content: flex-end; flex-wrap: nowrap; }
   #assistants-panel .asst-row { flex-wrap: wrap; padding: 6px 14px; row-gap: 4px; }
   #assistants-panel .asst-row .btn { margin-left: auto; }
 }
@@ -3271,9 +3271,14 @@ html[lang="en-US"] .modal-settings .cfg-label { line-height: 19px; }
 .modal-settings .cfg-label { flex: none; }
 .modal-settings .cfg-control { margin-left: 0; justify-self: end; justify-content: flex-end; }
 .modal-settings .cfg-status { justify-self: end; }
-.modal-settings [data-settings-section="model-source"] .cfg-control { justify-content: flex-end; justify-self: stretch; width: 100%; }
+.modal-settings [data-settings-section="model-source"] .cfg-row { grid-template-columns: 150px minmax(0, 1fr); }
+.modal-settings [data-settings-section="model-source"] .cfg-row > .cfg-status:empty { display: none; }
+.modal-settings [data-settings-section="model-source"] .cfg-control { justify-content: flex-end; justify-self: end; width: 100%; }
 [data-settings-section="model-source"] .cfg-control .crt-select { width: min(280px, 100%); flex: none; }
 [data-settings-section="model-source"] .cfg-control .crt-select-trigger { width: 100%; }
+@media (max-width: 760px) {
+  .modal-settings [data-settings-section="model-source"] .cfg-row { grid-template-columns: minmax(0, 1fr); }
+}
 .modal-settings .settings-kv .kv-action .btn { height: 27px; }
 
 /* v2.1 · 常用「界面」组：语言行在面板内不再自带下虚线 */
@@ -3410,7 +3415,10 @@ html[lang="en-US"] .modal-settings .cfg-label { line-height: 19px; }
 .modal-settings .crt-select-trigger { padding: 0 8px !important; }
 .modal-settings .cfg-control { min-height: var(--settings-control-h); }
 .modal-settings .runtime-mode-seg { height: var(--settings-control-h); border-radius: var(--settings-control-radius); }
-.modal-settings .runtime-mode-seg .btn { border-radius: 0 !important; }
+.modal-settings .runtime-mode-seg .btn {
+  height: 100% !important; min-height: 0 !important;
+  box-sizing: border-box; border-radius: 0 !important;
+}
 
 /* 组内说明/分组说明/段脚：占满面板、16 行高、左右 14；彻底去掉 62ch 截短 */
 .modal-settings .settings-group-note,

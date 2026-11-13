@@ -341,7 +341,7 @@ export function assistantsPanelHtml({ clients, ui = {} } = {}) {
       <div class="asst-xp" id="asst-missing" hidden>${missingRows}</div>` : ''}`;
 }
 
-/** 常驻运行行（设置 · 常用）：58 行 = 状态 + 主操作；「更多」只保留取消常驻。 */
+/** 常驻运行行（设置 · 常用）：40 行 = 标题/短 meta + 主操作；「更多」只保留取消常驻。 */
 export function serviceRowHtml(service, serviceMsg = '') {
   if (!service) return `<p class="muted">${esc(tr('settings.service.loading', '常驻状态加载中…'))}</p>`;
   const registered = Boolean(service.registered);

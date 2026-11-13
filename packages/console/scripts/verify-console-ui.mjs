@@ -953,7 +953,7 @@ async function main() {
         if (!p || p.hidden) return false;
         return !/capture|本机采集|host|token|逐宿主/i.test(p.textContent);
       })()`));
-    check('v2.2 记忆模式：单框分段（两格等宽无间隙、active .10 + ✓、无标题 chip）', await evalJs(`(() => {
+    check('v2.2 记忆模式：单框分段（内高跟随外框、两格等宽无间隙、active .10 + ✓）', await evalJs(`(() => {
       const seg = document.querySelector('#settings-panel-runtime .runtime-mode-seg');
       const btns = [...document.querySelectorAll('#settings-panel-runtime [data-rt-mode]')];
       if (!seg || btns.length !== 2) return false;
@@ -962,9 +962,11 @@ async function main() {
       const active = btns.find((el) => el.getAttribute('aria-pressed') === 'true');
       const ast = active ? getComputedStyle(active) : null;
       return s.borderTopWidth === '1px' && s.borderTopStyle === 'solid'
+        && Math.round(seg.getBoundingClientRect().height) === 27
+        && Math.abs(a.height - seg.clientHeight) <= 1 && Math.abs(b.height - seg.clientHeight) <= 1
+        && btns.every((el) => getComputedStyle(el).boxSizing === 'border-box')
         && Math.round(b.left - a.right) === 0
         && Math.abs(a.width - b.width) <= 1
-        && Math.round(a.height) === 27 && Math.round(b.height) === 27
         && ast?.backgroundColor === 'rgba(80, 255, 170, 0.1)'
         && /✓/.test(active?.textContent ?? '')
         && !document.querySelector('#settings-panel-runtime [data-rt-mode-chip]');
@@ -1676,11 +1678,16 @@ async function main() {
       const wizard = root?.querySelector('.settings-wizard-row');
       const repair = root?.querySelector('.settings-repair-row');
       const heights = items.map((el) => Math.round(el.getBoundingClientRect().height));
+      const statusHeights = [...document.querySelectorAll('[data-settings-common-status] .kv-row dt')].map((el) => Math.round(el.getBoundingClientRect().height));
+      const panels = [root, document.querySelector('[data-settings-common-status] .settings-group-body')].filter(Boolean).map((el) => ({
+        id: el.id || 'status', padding: [getComputedStyle(el).paddingTop, getComputedStyle(el).paddingBottom],
+        radius: getComputedStyle(el).borderRadius, overflow: getComputedStyle(el).overflow,
+      }));
       const order = items.map((el) => el.classList.contains('settings-row-2') ? 'resident'
         : el.classList.contains('settings-restart-row') ? 'restart'
           : el.classList.contains('settings-repair-row') ? 'repair' : 'wizard');
       const expectedOrder = wizard ? ['resident', 'restart', 'repair', 'wizard'] : ['resident', 'restart', 'repair'];
-      const expectedHeights = wizard ? [58, 40, 40, 40] : [58, 40, 40];
+      const expectedHeights = wizard ? [40, 40, 40, 40] : [40, 40, 40];
       return {
         ok: JSON.stringify(order) === JSON.stringify(expectedOrder)
           && JSON.stringify(heights) === JSON.stringify(expectedHeights)
@@ -1689,13 +1696,16 @@ async function main() {
           && Boolean(repair?.querySelector('#settings-repair'))
           && (!wizard || Boolean(wizard.querySelector('#settings-open-wizard')))
           && !group?.querySelector('.settings-group-head #settings-open-wizard')
-          && (!repair || getComputedStyle(repair.querySelector('.asst-st')).display === 'none'),
-        order, heights,
+          && (!repair || getComputedStyle(repair.querySelector('.asst-st')).display === 'none')
+          && statusHeights.length === 3 && statusHeights.every((height) => height === 40)
+          && panels.every((panel) => panel.padding[0] === '0px' && panel.padding[1] === '0px'
+            && panel.radius === '10px' && panel.overflow === 'hidden'),
+        order, heights, statusHeights, panels,
         restartInMenu: Boolean(root?.querySelector('.settings-more-panel [data-svc-action="restart"]')),
         wizardInHead: Boolean(group?.querySelector('.settings-group-head #settings-open-wizard')),
       };
     })()`);
-    check('常用四项：常驻 58 → 立即重启 40 → 自动修复 40 → 重启向导 40；钩子与 title 保留',
+    check('常用四项：常驻 / 立即重启 / 自动修复 / 重启向导均 40；钩子与 title 保留',
       commonItems.ok === true, JSON.stringify(commonItems));
     const prevGridViewport = await evalJs('({ w: window.innerWidth, h: window.innerHeight })');
     await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
@@ -1763,7 +1773,7 @@ async function main() {
             fontSize: st.fontSize,
           };
         });
-      const badControls = controls.filter((c) => Math.abs(c.h - 27) > 0.6
+      const badControls = controls.filter((c) => (!c.segCell && Math.abs(c.h - 27) > 0.6)
         || (c.segCell ? c.radius !== '0px' : c.radius !== '8px')
         || c.padL !== (c.isBtn ? '10px' : '8px')
         || c.fontSize !== '12px');
@@ -1795,7 +1805,10 @@ async function main() {
         || n.pr !== '14px' || !n.panelW || n.w < n.panelW - 2);
       const seg = root.querySelector('.runtime-mode-seg');
       const segStyle = seg ? getComputedStyle(seg) : null;
-      const segOk = !seg || !visible(seg) || (Math.abs(seg.getBoundingClientRect().height - 27) < 0.6 && segStyle.borderTopLeftRadius === '8px');
+      const segCells = seg ? [...seg.querySelectorAll('.btn')] : [];
+      const segOk = !seg || !visible(seg) || (Math.abs(seg.getBoundingClientRect().height - 27) < 0.6 && segStyle.borderTopLeftRadius === '8px'
+        && segCells.every((el) => Math.abs(el.getBoundingClientRect().height - seg.clientHeight) <= 1
+          && getComputedStyle(el).boxSizing === 'border-box' && getComputedStyle(el).borderRadius === '0px'));
       const tab = root.querySelector('.settings-rail .settings-tab.is-active');
       const tabLs = tab ? getComputedStyle(tab).letterSpacing : '';
       const scrollStyle = getComputedStyle(root.querySelector('.settings-scroll'));
@@ -1823,7 +1836,7 @@ async function main() {
         return { kind, pt: st.paddingTop, pb: st.paddingBottom };
       });
       const badBodies = bodies.filter((b) => {
-        const expected = b.kind === 'resident' ? '12px' : b.kind === 'cloud' ? '0px' : '2px';
+        const expected = '0px';
         return b.pt !== expected || b.pb !== expected;
       });
       const metas = [...root.querySelectorAll('.settings-kv .kv-meta')].filter(visible).map((el) => {
@@ -1837,11 +1850,18 @@ async function main() {
       const modelControl = root.querySelector('[data-settings-section="model-source"] .cfg-control');
       const modelWrap = modelControl?.querySelector('.crt-select');
       const modelTrigger = modelControl?.querySelector('.crt-select-trigger');
-      const dropdownOk = !modelControl || !visible(modelControl) || (Boolean(modelWrap && modelTrigger)
+      const modelRow = modelControl?.closest('.cfg-row');
+      const modelPanel = modelControl?.closest('.settings-group-body');
+      const modelStatus = modelRow?.querySelector(':scope > .cfg-status');
+      const dropdownOk = !modelControl || !visible(modelControl) || (Boolean(modelWrap && modelTrigger && modelRow && modelPanel)
         && getComputedStyle(modelControl).justifyContent === 'flex-end'
+        && getComputedStyle(modelControl).justifySelf === 'end'
+        && getComputedStyle(modelRow).gridTemplateColumns.split(' ').filter(Boolean).length === ${checkRows ? '2' : '1'}
+        && (!modelStatus || getComputedStyle(modelStatus).display === 'none')
         && getComputedStyle(modelWrap).flexGrow === '0' && getComputedStyle(modelWrap).flexShrink === '0'
         && Math.abs(modelWrap.getBoundingClientRect().width - Math.min(280, modelControl.getBoundingClientRect().width)) <= 1
         && Math.abs(modelTrigger.getBoundingClientRect().right - modelControl.getBoundingClientRect().right) <= 1
+        && Math.abs(modelPanel.getBoundingClientRect().right - modelTrigger.getBoundingClientRect().right - 14) <= 1
         && Math.abs(modelTrigger.getBoundingClientRect().width - modelWrap.getBoundingClientRect().width) <= 1);
       const cfgAlignOk = ${checkRows ? `[...root.querySelectorAll('.cfg-row')].filter(visible).every((row) => {
         const cells = ['.cfg-label', '.cfg-control', '.cfg-status'].map((selector) => row.querySelector(selector)).filter((el) => el && visible(el));
@@ -1866,7 +1886,7 @@ async function main() {
       || a.typo.tabLs !== '2px' || a.typo.scrollTop !== '16px' || a.typo.scrollLeft !== '20px' || a.typo.scrollRight !== '20px'
       || !a.typo.kvOk || !a.typo.kvInsetOk || !a.typo.detailTypeOk || a.typo.badBodies.length || a.typo.badMeta.length
       || (a.typo.metas > 0 && a.typo.metas !== 3));
-    check('v2.4 1440 字体/间距：页签 2px、只读行 12/18、滚动区 16/20、面板 2/12/0、meta 11 + 控件 27/8 + 行 40/58',
+    check('v2.4 1440 字体/间距：页签 2px、只读行 12/18、滚动区 16/20、面板 0、meta 11 + 控件 27/8 + 行 40/58',
       tokenBad.length === 0, JSON.stringify(tokenBad).slice(0, 1400));
     await setViewport({ width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
     await sleep(350);
@@ -1880,7 +1900,7 @@ async function main() {
       || !a.layout.hintsHidden || !a.layout.dropdownOk
       || a.typo.tabLs !== '2px' || a.typo.scrollTop !== '16px' || a.typo.scrollLeft !== '20px' || a.typo.scrollRight !== '20px'
       || !a.typo.kvOk || !a.typo.detailTypeOk || a.typo.badBodies.length || a.typo.badMeta.length);
-    check('v2.4 390 字体/间距：页签 2px、只读行 12/18、滚动区 16/20、面板 2/12/0、meta 11 + 控件 27/8',
+    check('v2.4 390 字体/间距：页签 2px、只读行 12/18、滚动区 16/20、面板 0、meta 11 + 控件 27/8',
       tokenBad390.length === 0, JSON.stringify(tokenBad390).slice(0, 1400));
     await evalJs('document.querySelector("[data-settings-tab=common]")?.click()');
     await setViewport({ width: prevTokenViewport.w, height: prevTokenViewport.h, deviceScaleFactor: 1, mobile: prevTokenViewport.w <= 560 });
@@ -4448,7 +4468,7 @@ async function main() {
         body.prepend(banner);
         created = true;
       }
-      const ok = items.length === 4 && JSON.stringify(heights) === JSON.stringify([58, 40, 40, 40])
+      const ok = items.length === 4 && JSON.stringify(heights) === JSON.stringify([40, 40, 40, 40])
         && sc.scrollHeight <= sc.clientHeight + 1;
       if (created) banner.remove();
       return ok;

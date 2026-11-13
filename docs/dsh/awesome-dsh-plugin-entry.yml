@@ -6,11 +6,19 @@
 # 说明: 这是 monorepo 子包条目，url 指向 packages/dsh-plugin；name 使用
 # owner/repo#subname。
 #
-# 2026-11-03 文案校准（对齐 0.3 工具面与主项目口径）：上游 PR 已提交：
-# https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/11519
-# 合并后把本文件同步为目标仓库状态并记录合并时间。
+# 2026-11-03 文案校准（对齐 0.3 工具面与主项目口径）：
+# https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/11519（已合并，
+# 🌌 长描述自此为条目文案基准）。
 #
-# 安装: dsh plugin --profile web add @mebular/dsh-plugin@0.3.0
+# 2026-11-06 描述恢复：批量校准提交在 #11519 合并后覆盖了文案，已通过
+# https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/12556 恢复（已合并）。
+# 上游 main 现为 🌌 文案 + 一句运行时前置说明（attaches to an existing Mebular app or
+# CLI runtime…），由 #12556 合并后的批量提交补回；按维护者校准流程接受，不再单独提 PR。
+#
+# 详情页安装片段（0.3.2）属上游 README 快照缓存，由 nightly build-site 从本仓库
+# README 重建；本仓库 README 已为 0.3.4。逐面状态见 docs/community/LISTINGS.md。
+#
+# 安装: dsh plugin --profile web add @mebular/dsh-plugin@0.3.4
 # 兼容: DSH >=0.2.1-rc.2 <0.3.0, Node.js >=22.19
 
 url: https://github.com/Windsander/Mebular/tree/main/packages/dsh-plugin

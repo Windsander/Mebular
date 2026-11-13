@@ -3,9 +3,9 @@
 面向 `@mebular/*` npm 包与三平台桌面安装包的发布操作手册。核心约束：**分支名即版本号
 （SSOT）**、**先构建安装包再发 npm**、**幂等发布**、**按 ref 串行**。
 
-当前发布线 v0.3.2：
+当前发布线 v0.3.4：
 
-- **8 个 npm 包**统一为 `0.3.2`（单版本 umbrella）：`core` / `service` / `skill` / `mcp` /
+- **8 个 npm 包**统一为 `0.3.4`（单版本 umbrella）：`core` / `service` / `skill` / `mcp` /
   `fleet` / `memory-runtime` / `opencode-plugin` 七个 lockstep 包，加独立 npm job 的
   `dsh-plugin`；
 - macOS Universal DMG、Windows NSIS x64、Linux AppImage + deb x64（unsigned）；
@@ -61,7 +61,7 @@ v0.3.0 也新增独立的 `@mebular/opencode-plugin`（OpenCode V2 / OpenChamber
   `MEBULAR_MEMORY_RUNTIME_BIN` > 包内捆绑路径 > `PATH` 解析。
 - **桌面版本**：`apps/desktop/package.json`、`apps/desktop/package-lock.json` 与
   `apps/desktop/src/main/daemon.mjs` 的 `APP_VERSION` 必须等于发布版本。
-- **触发方式**：push 到 `release/v*` 分支（例如 `release/v0.3.2`），**不使用 tag 触发**。
+- **触发方式**：push 到 `release/v*` 分支（例如 `release/v0.3.4`），**不使用 tag 触发**。
   手动 `workflow_dispatch` 是 packaging dry-run。
 - **发布分支即真相**：`release/vX.Y.Z` 的 `X.Y.Z` 必须等于 8 个 `package.json` 的版本、
   根 `package-lock.json` 的 workspace 条目、桌面三处版本、MCP 版本源、sidecar
@@ -109,24 +109,24 @@ v0.3.0 也新增独立的 `@mebular/opencode-plugin`（OpenCode V2 / OpenChamber
 - **npm unpublish（72 小时窗口）**：仅能删除**发布后 72 小时内**、且**无人依赖**的版本；
   超时或被依赖一律 400。八个包各执行一次（同一版本）：
   ```bash
-  npm unpublish @mebular/core@0.3.2     # 重复 core → service → memory-runtime → skill → mcp → fleet → opencode-plugin → dsh-plugin
+  npm unpublish @mebular/core@0.3.4     # 重复 core → service → memory-runtime → skill → mcp → fleet → opencode-plugin → dsh-plugin
   ```
   同一版本被删除后**不可再以相同版本号重新发布**，后续必须升号。
 - **npm deprecate（常规手段）**：标记问题版本，安装时会打印警告但不阻断：
   ```bash
-  npm deprecate @mebular/mcp@0.3.2 "broken: upgrade to a newer version"
+  npm deprecate @mebular/mcp@0.3.4 "broken: upgrade to a newer version"
   ```
   建议八个包用同一条消息一并废弃，再发布更高修复版本。
 - **回退 GitHub Release**：
   ```bash
-  gh release delete v0.3.2 --yes            # 仅删 Release
-  git push origin :refs/tags/v0.3.2         # 删除 tag（仅在确认无人依赖时）
+  gh release delete v0.3.4 --yes            # 仅删 Release
+  git push origin :refs/tags/v0.3.4         # 删除 tag（仅在确认无人依赖时）
   ```
   或网页端 Releases → 该版本 → Delete release；若只想隐藏，标为 **pre-release**。
   注意：删除 Release 不会撤销 npm 发布，npm 仍需按上面的步骤处理。
 - **只换安装包**：npm 不受影响。重新构建后对同一 tag 重传资产即可：
   ```bash
-  gh release upload v0.3.2 release-assets/* --clobber
+  gh release upload v0.3.4 release-assets/* --clobber
   ```
   下载页会立即使用新文件；`SHA256SUMS.txt` 必须与安装包一起重传。
 
@@ -223,24 +223,24 @@ origin/main
 
 ```bash
 git fetch origin
-git switch -c release-prep/v0.3.2 origin/main  # 先 prep，dry-run 后再建 release 分支
-bash scripts/bump_version.sh v0.3.2             # 同步 8 包 + 版本源 + CHANGELOG 章节
+git switch -c release-prep/v0.3.4 origin/main  # 先 prep，dry-run 后再建 release 分支
+bash scripts/bump_version.sh v0.3.4             # 同步 8 包 + 版本源 + CHANGELOG 章节
 npm run verify:release-version                  # 只读校验；也可带 --version/--tag
 ```
 
 `bump_version.sh` 会：
 
 1. 将 8 个 `package.json`（core / fleet / mcp / memory-runtime / service / skill /
-   opencode-plugin / dsh-plugin）改为 `0.3.2`；
+   opencode-plugin / dsh-plugin）改为 `0.3.4`；
 2. 同步根 `package-lock.json` 的根版本与 8 个 workspace 条目；
 3. 同步桌面 `package.json` / `package-lock.json` / `APP_VERSION`；
-4. 同步任何「已是版本号区间」的内部 `@mebular/*` 依赖为 `^0.3.2`；
+4. 同步任何「已是版本号区间」的内部 `@mebular/*` 依赖为 `^0.3.4`；
 5. 改写 `packages/mcp/src/version.mjs` 的 `APP_VERSION`（MCP 唯一版本源）、
    `packages/memory-runtime/src/sidecar/config.ts` 的 `SIDECAR_RUNTIME_VERSION`
    （sidecar 唯一版本源）与 `packages/opencode-plugin/index.js` 的 `PACKAGE_VERSION`；
-6. 在 `CHANGELOG.md` 顶部插入 `## [v0.3.2] - <date>` 章节（已存在则跳过，幂等）。
+6. 在 `CHANGELOG.md` 顶部插入 `## [v0.3.4] - <date>` 章节（已存在则跳过，幂等）。
 
-> 若版本号与 CHANGELOG 章节已存在（例如当前 `release-prep/v0.3.2`），**不需要**再跑
+> 若版本号与 CHANGELOG 章节已存在（例如当前 `release-prep/v0.3.4`），**不需要**再跑
 > `bump_version.sh`；只有从新版本开始时才执行上面的 bump。
 
 ### 3.2 本地预检（推荐）
@@ -288,7 +288,7 @@ node --experimental-vm-modules node_modules/jest/bin/jest.js \
 发布后可见性 gate 也可以独立预演（对已发布版本只读）：
 
 ```bash
-npm run verify:release-visibility -- --version 0.3.2 --timeout-seconds 60 --interval-seconds 5
+npm run verify:release-visibility -- --version 0.3.4 --timeout-seconds 60 --interval-seconds 5
 ```
 
 桌面链路（与 CI 同路径）：
@@ -342,7 +342,7 @@ DSH 破坏”。
 
 ```bash
 # 在 release-prep 分支上触发（workflow 已在 main 注册）
-gh workflow run publish.yml --ref release-prep/v0.3.2
+gh workflow run publish.yml --ref release-prep/v0.3.4
 
 # 观察
 gh run list --workflow=publish.yml --limit 5
@@ -374,9 +374,9 @@ sha256sum release-assets/*              # Linux
 dry-run 通过后，从 prep 分支创建正式发布分支并 push：
 
 ```bash
-git switch release-prep/v0.3.2
-git switch -c release/v0.3.2
-git push -u origin release/v0.3.2
+git switch release-prep/v0.3.4
+git switch -c release/v0.3.4
+git push -u origin release/v0.3.4
 ```
 
 push 后自动执行第 2 节的完整流水线。任一 job 失败即停；安装包未全绿时不会发 npm；
@@ -385,7 +385,7 @@ push 后自动执行第 2 节的完整流水线。任一 job 失败即停；安�
 ### 5.2 观察
 
 ```bash
-gh run list --workflow=publish.yml --branch release/v0.3.2 --limit 5
+gh run list --workflow=publish.yml --branch release/v0.3.4 --limit 5
 gh run watch <run-id>
 gh run view <run-id> --log-failed       # 失败时
 
@@ -398,19 +398,19 @@ gh run view <run-id> --json jobs --jq '.jobs[] | select(.name | contains("visibi
 ```bash
 # npm 八包：version 与 latest 都必须指向本次版本
 for p in core service skill mcp fleet memory-runtime opencode-plugin dsh-plugin; do
-  npm view "@mebular/$p@0.3.2" version
+  npm view "@mebular/$p@0.3.4" version
   npm view "@mebular/$p" dist-tags.latest
 done
 
 # 或复用流水线同一个 gate（只读轮询；已可见时立即通过）
-npm run verify:release-visibility -- --version 0.3.2 --dsh-version 0.3.2
+npm run verify:release-visibility -- --version 0.3.4 --dsh-version 0.3.4
 
 # GitHub Release
-gh release view v0.3.2
-gh release view v0.3.2 --json assets --jq '.assets[] | "\(.name)  \(.size) bytes"'
+gh release view v0.3.4
+gh release view v0.3.4 --json assets --jq '.assets[] | "\(.name)  \(.size) bytes"'
 
 # 根包双 bin + sidecar 包
-npm install -g @mebular/core@0.3.2 @mebular/memory-runtime@0.3.2
+npm install -g @mebular/core@0.3.4 @mebular/memory-runtime@0.3.4
 command -v mebular && command -v fleet && command -v mebular-memory-runtime
 mebular tools >/dev/null && fleet --version
 mebular-memory-runtime version
@@ -428,13 +428,13 @@ mebular-memory-runtime version
       插件 tarball（至少 5 行）；
 - [ ] `release/vX.Y.Z` 已通过 PR 回合并 `main`，随后删除 release / prep 分支。
 
-> 不要用 `npm install -g @mebular/mcp@0.3.2` 冒充双 bin 安装：`@mebular/mcp` 只提供
+> 不要用 `npm install -g @mebular/mcp@0.3.4` 冒充双 bin 安装：`@mebular/mcp` 只提供
 > `mebular`，`fleet` 必须来自根包（或单独安装 `@mebular/fleet`）。
 
 插件独立验证（先让 App / 守护运行）：
 
 ```bash
-dsh plugin --profile web add @mebular/dsh-plugin@0.3.2
+dsh plugin --profile web add @mebular/dsh-plugin@0.3.4
 dsh --profile web --dump-config | grep -A3 mebular   # host row；transport 由官方 MCP client 挂载
 # DSH 会话中确认 mcp__mebular__* 可调用；侧边栏面板加载 /console/?embed=dsh
 ```
@@ -456,7 +456,7 @@ MEBULAR_HOME="$(mktemp -d)" mebular serve --port 7399
 从 Release 下载并校验：
 
 ```bash
-gh release download v0.3.2 -D release-assets
+gh release download v0.3.4 -D release-assets
 cd release-assets
 
 # Linux
@@ -482,7 +482,7 @@ Get-Content SHA256SUMS.txt | ForEach-Object {
 - macOS 打开 DMG 后能启动；Windows NSIS 能安装并启动；Linux AppImage 可执行，deb 可安装；
 - 首次启动能进入锁定控制台，`/healthz` 正常；
 - 全部为 **unsigned** 发布：macOS Gatekeeper 与 Windows SmartScreen 会拦截，按 Release
-  notes 的绕过步骤操作。签名、公证与自动更新不在 v0.3.2 范围。
+  notes 的绕过步骤操作。签名、公证与自动更新不在 v0.3.4 范围。
 
 Hermes 插件 tarball 的离线验收（用临时 `HERMES_HOME`，不碰真实 `~/.hermes`）：
 
@@ -596,7 +596,7 @@ node scripts/prune-merged-branches.mjs --apply --yes   # 确认后删除
 发布分支本身在回合并 main 后，再用同一脚本或显式命令删除：
 
 ```bash
-git push origin --delete release/v0.3.2 release-prep/v0.3.2
+git push origin --delete release/v0.3.4 release-prep/v0.3.4
 ```
 
 > 不要未经确认批量删除；不要删除 `site-*`（Pages 部署源）或仍有 open PR 的分支。

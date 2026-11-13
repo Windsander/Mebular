@@ -1,6 +1,6 @@
 {
   "name": "@mebular/core",
-  "version": "0.3.2",
+  "version": "0.3.4",
   "description": "One shared graph for every AI assistant and device — memory and tasks, local-first, signed, auditable, direct P2P sync; MCP tools, no hosted account. | 一份记忆，每个助手，每台设备：本地优先、可审计的跨设备记忆与任务协作；提供 MCP 工具，无需托管账号。",
   "license": "MIT",
   "author": {

@@ -97,15 +97,15 @@ when the MCP setting `memoryRuntime.enabled=true` (or when you start it manually
    While it is ready, `<home>/memory-runtime.json` exists and contains the sidecar URL
    plus `tokenFile` (normally `<home>/memory-runtime/host-token`).
 
-3. Install the provider from the release bundle (available **after** the 0.3.2
+3. Install the provider from the release bundle (available **after** the 0.3.4
    release; use the source command below before the release). The provider must be
    installed as `plugins/mebular`, because Hermes uses the directory name as the value
    of `memory.provider`:
 
    ```bash
-   gh release download v0.3.2 -p 'mebular-hermes-plugins-*.tar.gz'
+   gh release download v0.3.4 -p 'mebular-hermes-plugins-*.tar.gz'
    mkdir -p mebular-hermes-plugins
-   tar -xzf mebular-hermes-plugins-0.3.2.tar.gz -C mebular-hermes-plugins
+   tar -xzf mebular-hermes-plugins-0.3.4.tar.gz -C mebular-hermes-plugins
    cd mebular-hermes-plugins
 
    HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}" ./install.sh

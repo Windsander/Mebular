@@ -1,6 +1,6 @@
 {
   "name": "@mebular/opencode-plugin",
-  "version": "0.3.2",
+  "version": "0.3.4",
   "description": "Opt-in OpenCode V2 server plugin for Mebular Memory Runtime (OpenChamber). | 面向 Mebular Memory Runtime 的 OpenCode V2 可选服务端插件（OpenChamber）。",
   "license": "MIT",
   "author": {

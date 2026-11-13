@@ -16,6 +16,70 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 The GitHub Release body is extracted from this file: everything between the release's
 `## [vX.Y.Z]` heading and the next `## [` heading. Keep that section self-contained.
 
+## [v0.3.4] - 2026-11-13
+
+Console settings release. It refreshes the Console settings experience added around 0.3
+without changing the 29-tool MCP surface, graph/event/sync formats, host adapters or stored
+data. There is no migration.
+
+### Added
+
+- **Settings v2 shell** — a 760×720 settings modal (760×680 for About device) with a 160px
+  left rail on desktop, a horizontal tab strip at 900px and below, and a full-screen layout
+  on narrow screens. The six sections are General, Security, Memory, Integrations, MCP and
+  Advanced; About device is a separate entry.
+- **Memory and integration IA** — the Memory section now owns the memory mode, model source,
+  runtime status and model status; Integrations owns Agent configuration. Memory mode is a
+  compact segmented control, with long explanations kept out of the layout.
+- **Consistent settings rows** — 40/58px row templates, a 150/1fr/68 field grid, 27px
+  controls, grouped panels, three 114px security cards, always-visible configured/effective/
+  reason warning rows, and an About device page with three groups and three folds.
+- **Responsive, accessible and bilingual coverage** — layout baselines at 1440/1024/900/390,
+  English and Chinese copy, reduced-motion behavior, settings deep links, fixed-position
+  service menu, focus return, and expanded Console UI smoke assertions.
+- **CI reliability** — Windows-only bounded test retries, a slower local sidecar health
+  probe, a regression test for delayed health responses, and retry-safe Windows temp-file
+  cleanup. These are test/infrastructure changes, not new product capabilities.
+
+### Changed
+
+- Settings tabs now use **集成 / Integrations** (formerly AI 助手 / Assistants) and
+  **记忆 / Memory** (formerly 记忆运行时 / runtime), while the underlying agent and runtime
+  configuration remains compatible.
+- The settings shell no longer scrolls as a whole: the header and rail stay fixed and only
+  the content column scrolls. Rows remain single-line at 900px and stack cleanly on mobile.
+- Routine settings hints are carried by group/control `title` text; only actionable
+  warnings, pending restarts and security exceptions stay visible in the layout.
+- The public MCP tool count, CLI commands, graph/event/sync formats and data layout are
+  unchanged. This is a Console-only release.
+
+### Fixed
+
+- **Settings tab overflow** — the expanded English tab set no longer overflows the settings
+  strip by 5px at 1440/1024.
+- **Truthful dormant states** — sidecar tests accept `mcp/degraded` when a clean drain cannot
+  be confirmed, while still asserting no new writes, no outbox flush, `409 mode_mismatch`
+  and correct resume behavior.
+- **Slow-health false 503s** — a 200ms local health probe could mark a busy sidecar
+  unavailable; the timeout is now 1000ms and covered by a 300ms regression test.
+- **Windows cleanup races** — provisioning harness cleanup is bounded-retry and best-effort,
+  so a transient file lock no longer fails the suite; Windows timing-sensitive tests retry
+  at most twice while persistent failures still fail.
+- **Settings smoke assertions** — aligned with the current IA (`Integrations`, `Add agent`,
+  active tab order) and the updated security/about layout.
+
+### Verification
+
+- Main CI run `43376114600` passed Linux build/test/lint (including Console UI smoke),
+  Windows build/test/lint, DSH E2E, desktop smoke, semantic recall and WAN NAT.
+- Packaging dry-run run `43377170059` passed verify, the eight npm tarballs, Hermes bundle,
+  macOS/Windows/Linux desktop builds and the full DSH E2E matrix. Publish, visibility and
+  GitHub Release were correctly skipped; no registry or Release mutation occurred.
+- `verify:console` passed; the headless Console UI smoke covers the settings v2 layout,
+  security cards, About device, responsive breakpoints, bilingual copy and reduced motion.
+- The formal `release/v0.3.4` run reruns the same gate before publishing. Desktop packages
+  remain unsigned.
+
 ## [v0.3.2] - 2026-11-06
 
 Memory Runtime stability release. It makes lifecycle, local data, detail evidence,

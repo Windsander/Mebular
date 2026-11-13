@@ -93,13 +93,13 @@ Provider 需要 0.3 Memory Runtime sidecar 正在运行。只有 MCP 设置
    sidecar 就绪时存在 `<home>/memory-runtime.json`，其中包含 sidecar URL 和
    `tokenFile`（通常是 `<home>/memory-runtime/host-token`）。
 
-3. 从 Release 资产安装（**0.3.2 发布后**可用；发布前用下面的源码命令）。安装目录必须叫
+3. 从 Release 资产安装（**0.3.4 发布后**可用；发布前用下面的源码命令）。安装目录必须叫
    `plugins/mebular`，因为 Hermes 用目录名作为 `memory.provider` 的值：
 
    ```bash
-   gh release download v0.3.2 -p 'mebular-hermes-plugins-*.tar.gz'
+   gh release download v0.3.4 -p 'mebular-hermes-plugins-*.tar.gz'
    mkdir -p mebular-hermes-plugins
-   tar -xzf mebular-hermes-plugins-0.3.2.tar.gz -C mebular-hermes-plugins
+   tar -xzf mebular-hermes-plugins-0.3.4.tar.gz -C mebular-hermes-plugins
    cd mebular-hermes-plugins
 
    HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}" ./install.sh

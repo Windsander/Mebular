@@ -1,16 +1,16 @@
 # 桌面安装包发布
 
-面向 Mebular v0.3.2 的桌面安装包构建、验收与后续签名计划。发布流程总览见
+面向 Mebular v0.3.4 的桌面安装包构建、验收与后续签名计划。发布流程总览见
 [`RELEASE.md`](RELEASE.md)。
 
-## 0. v0.3.2 范围
+## 0. v0.3.4 范围
 
 | 平台 | 目标 | 架构 | 产物 |
 | --- | --- | --- | --- |
-| macOS | DMG | Universal（arm64 + x64） | `Mebular-0.3.2-universal.dmg` |
-| Windows | NSIS | x64 | `Mebular-Setup-0.3.2.exe` |
-| Linux | AppImage | x64 | `Mebular-0.3.2-x86_64.AppImage` |
-| Linux | deb | x64 | `Mebular-0.3.2-amd64.deb` |
+| macOS | DMG | Universal（arm64 + x64） | `Mebular-0.3.4-universal.dmg` |
+| Windows | NSIS | x64 | `Mebular-Setup-0.3.4.exe` |
+| Linux | AppImage | x64 | `Mebular-0.3.4-x86_64.AppImage` |
+| Linux | deb | x64 | `Mebular-0.3.4-amd64.deb` |
 
 - 全部为 **unsigned** 发布；不做代码签名、公证或自动更新。
 - 每个安装包都自带 Electron 和一份完整的 Mebular runtime，**不需要本机 Node.js**，也不依赖
@@ -243,21 +243,21 @@ electron-builder 的 `artifactName` 固定为：
 
 | 平台 | 配置 | 最终文件名 |
 | --- | --- | --- |
-| macOS | `Mebular-${version}-${arch}.${ext}` + `--universal` | `Mebular-0.3.2-universal.dmg` |
-| Windows | `Mebular-Setup-${version}.${ext}` | `Mebular-Setup-0.3.2.exe` |
-| Linux AppImage | `Mebular-${version}-${arch}.${ext}` + x64 | `Mebular-0.3.2-x86_64.AppImage` |
-| Linux deb | 同上；deb 的 arch 宏为 `amd64` | `Mebular-0.3.2-amd64.deb` |
+| macOS | `Mebular-${version}-${arch}.${ext}` + `--universal` | `Mebular-0.3.4-universal.dmg` |
+| Windows | `Mebular-Setup-${version}.${ext}` | `Mebular-Setup-0.3.4.exe` |
+| Linux AppImage | `Mebular-${version}-${arch}.${ext}` + x64 | `Mebular-0.3.4-x86_64.AppImage` |
+| Linux deb | 同上；deb 的 arch 宏为 `amd64` | `Mebular-0.3.4-amd64.deb` |
 
 `SHA256SUMS.txt` 由 `scripts/verify-desktop-assets.mjs` 生成，覆盖 4 个安装包和 Hermes
 插件 tarball，按文件名 ASCII 排序（等价 `LC_ALL=C sort`），每行
 `<sha256>  <文件名>`，例如：
 
 ```text
-<hash>  Mebular-0.3.2-amd64.deb
-<hash>  Mebular-0.3.2-universal.dmg
-<hash>  Mebular-0.3.2-x86_64.AppImage
-<hash>  Mebular-Setup-0.3.2.exe
-<hash>  mebular-hermes-plugins-0.3.2.tar.gz
+<hash>  Mebular-0.3.4-amd64.deb
+<hash>  Mebular-0.3.4-universal.dmg
+<hash>  Mebular-0.3.4-x86_64.AppImage
+<hash>  Mebular-Setup-0.3.4.exe
+<hash>  mebular-hermes-plugins-0.3.4.tar.gz
 ```
 
 release job 直接调用该脚本（`--expect dmg,exe,AppImage,deb --require-hermes`）校验资产并
@@ -267,7 +267,7 @@ release job 直接调用该脚本（`--expect dmg,exe,AppImage,deb --require-her
 
 ## 4. unsigned 安装体验
 
-v0.3.2 没有 Apple Developer ID、公证或 Windows 代码签名证书。用户会看到系统安全提示，
+v0.3.4 没有 Apple Developer ID、公证或 Windows 代码签名证书。用户会看到系统安全提示，
 这是预期行为，不是安装包损坏。
 
 本机 unsigned dry-run 的实测结果是：DMG 的 `hdiutil verify` 通过（压缩/分区校验和完整），
@@ -298,17 +298,17 @@ Windows 可用 PowerShell 的 `Get-FileHash -Algorithm SHA256` 对照 `SHA256SUM
 
 ### 4.3 Windows SmartScreen
 
-1. 运行 `Mebular-Setup-0.3.2.exe`。
+1. 运行 `Mebular-Setup-0.3.4.exe`。
 2. 出现「Windows 已保护你的电脑」时点「更多信息」，再点「仍要运行」。
 
 ### 4.4 Linux
 
 ```bash
-chmod +x Mebular-0.3.2-x86_64.AppImage
-./Mebular-0.3.2-x86_64.AppImage
+chmod +x Mebular-0.3.4-x86_64.AppImage
+./Mebular-0.3.4-x86_64.AppImage
 
 # Debian / Ubuntu
-sudo apt install ./Mebular-0.3.2-amd64.deb
+sudo apt install ./Mebular-0.3.4-amd64.deb
 ```
 
 AppImage 需要 FUSE；没有 FUSE 时可使用 `--appimage-extract-and-run`。deb 安装后从应用菜单
@@ -381,7 +381,7 @@ npm run verify:desktop:assets -- \
 
 ## 6. 签名、公证与自动更新（后续）
 
-v0.3.2 明确不签名。后续版本的建议顺序：
+v0.3.4 明确不签名。后续版本的建议顺序：
 
 1. **macOS**：申请 Developer ID Application 证书；在 CI 注入 `CSC_LINK` /
    `CSC_KEY_PASSWORD`，移除 `electron-builder.yml` 的 `identity: null`；用
@@ -406,7 +406,7 @@ v0.3.2 明确不签名。后续版本的建议顺序：
 | `runtime 缺少必需文件` | 根包 `files` 或构建产物不完整；先 `npm run build`，再重新 pack。 |
 | `dist:mac` 失败并提示架构 / 证书 | Universal 只能在 macOS 构建；`identity: null` 下不应要求证书。 |
 | `dist:*` 提示找不到 Electron / `electron/dist` 为空 | npm 11.19+ 默认阻止依赖安装脚本；执行 `node apps/desktop/node_modules/electron/install.js`，确认 `path.txt` 与 `dist/` 已生成后重试。 |
-| `codesign --verify` 报 `code object is not signed at all` | v0.3.2 预期 unsigned；只要 `hdiutil verify` 通过、sha256 匹配即可。不要伪造签名。 |
+| `codesign --verify` 报 `code object is not signed at all` | v0.3.4 预期 unsigned；只要 `hdiutil verify` 通过、sha256 匹配即可。不要伪造签名。 |
 | `spctl` 报 `rejected / no usable signature` | Gatekeeper 对未签名包的预期结果；按 4.2 右键打开，或交由后续版本签名/公证。 |
 | `verify:desktop:assets` 报「dmg 恰好 1 个」失败 | `dist/` 里混入了旧产物；清空 `apps/desktop/dist` 后重新构建。 |
 | packaged smoke 找不到 `Resources` | 查看 `apps/desktop/dist/` 实际目录；不同 electron-builder 版本的解包目录名可能不同。 |

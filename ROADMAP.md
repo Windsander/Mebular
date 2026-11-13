@@ -10,17 +10,19 @@
   <img src="https://raw.githubusercontent.com/Windsander/Mebular/main/assets/roadmap-en.svg" alt="Mebular constellation roadmap: released foundation, current stability hardening, trusted desktop distribution and controlled updates next, protocol lifecycle topics under exploration">
 </picture>
 
-## Released — v0.3.0
+## Released — v0.3.4
 
-Available in the [v0.3.0 release](https://github.com/Windsander/Mebular/releases/tag/v0.3.0).
+Available in the [v0.3.4 release](https://github.com/Windsander/Mebular/releases/tag/v0.3.4).
 
 - **Memory Runtime** — opt-in sidecar for automatic capture, recall, durable details, checkpoints and local extraction/summary.
 - **Three host paths** — DSH, Hermes and OpenCode/OpenChamber adapters share one graph, event log and sync layer.
 - **Local model supply** — explicit model/engine installation with fixed revisions, size and SHA-256 verification; no silent download.
+- **Runtime stability contract** — lifecycle, local data, detail evidence, checkpoint revisions, host failure states and diagnostics now match the documented contract; Fleet black-box orchestration and a unified executor/adapter layer with the public OpenChamber runner shipped alongside.
+- **Console settings v2** — a rebuilt settings shell (General, Security, Memory, Integrations, MCP, Advanced plus About device) with responsive layouts at 1440/1024/900/390, bilingual copy, accessible focus and reduced-motion behavior. No data, protocol or MCP-tool migration.
 
 ## Now — v0.3.x
 
-The current stabilization focus. Priorities can move in response to reproducible reports and first-run feedback.
+The current stabilization focus after v0.3.4. Priorities can move in response to reproducible reports and first-run feedback.
 
 - **Data lifecycle and privacy** — keep staging, settled details, host copies, retention and deletion boundaries explicit.
 - **Lifecycle and recovery** — validate managed/attached/manual sidecars, offline queues, Compact/Checkpoint/SelfRecord and host fail-open behavior.

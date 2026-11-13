@@ -44,7 +44,7 @@ chore(scripts): 新增 wan-l2 relay-only 驗證腳本
 
 ## 项目状态与质量门禁
 
-Mebular 仍在早期：功能可用，API 未稳定，未发 npm 包；生产使用请自行评估。记忆层契约见 [`SEALING.md`](SEALING.md)。
+Mebular 仍在早期：功能可用，API 未稳定。自 v0.3.0 起 `@mebular/*` 包已随统一 release train 发布到 npm，但跨版本 API 兼容性仍不作保证；生产使用请自行评估。记忆层契约见 [`SEALING.md`](SEALING.md)。
 
 | 门禁 | 说明 |
 |------|------|

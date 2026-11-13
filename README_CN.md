@@ -144,6 +144,10 @@ mebular print-config --client opencode         # MCP 配置
   </tbody>
 </table>
 
+<p align="center"><strong>社区</strong><br>
+<a href="https://github.com/Windsander/Mebular/discussions">讨论区</a> · <a href="https://github.com/Windsander/Mebular/discussions/categories/q-a">问答</a> · <a href="https://github.com/Windsander/Mebular/issues">Issues</a> · <a href="ROADMAP_CN.md">路线图</a> · <a href="CONTRIBUTING.md">参与贡献</a><br>
+<sub>使用问题 → 问答 · 早期构想 → Ideas · 可复现问题 → Issues</sub></p>
+
 <p align="center"><strong>与 DSH 一起使用</strong><br>
 从 npm 把插件装入 DSH 的 web profile：<br>
 <code>dsh plugin --profile web add @mebular/dsh-plugin@0.3.4</code><br>

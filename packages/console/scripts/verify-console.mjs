@@ -1918,7 +1918,7 @@ try {
         && cssSrc.includes('.modal-settings .settings-kv .kv-meta {')
         && jsSrc.includes(" has-meta") && jsSrc.includes("kv-meta")
         && jsSrc.includes('settings.common.securityMeta.'),
-      '2px/12-18/16-20/2-12-0/meta 11');
+      '2px/12-18/16-20/panel-0/meta 11');
 
     const serviceFnFinal = assistantsSrcV2.slice(
       assistantsSrcV2.indexOf('export function serviceRowHtml'),
@@ -1926,6 +1926,10 @@ try {
     );
     check('v2.4 最终交互布局：常用四行、重启不入菜单、模型下拉右对齐、普通 hint 隐藏',
       serviceFnFinal.includes('data-svc-action="uninstall"') && !serviceFnFinal.includes('data-svc-action="restart"')
+        && serviceFnFinal.includes('asst-row settings-resident-row')
+        && serviceFnFinal.includes('settings-row-status')
+        && !serviceFnFinal.includes('kv-dot') && !serviceFnFinal.includes('settings-row-meta')
+        && cssSrc.includes('--settings-action-btn-w: 116px;')
         && assistantsSrcV2.includes('export function restartRowHtml') && assistantsSrcV2.includes('export function wizardRowHtml')
         && !assistantsSrcV2.includes('wizardHeadActionHtml')
         && jsSrc.includes('${restartRowHtml()}${repairRowHtml(state.repair)}${wizardRowHtml(host.capabilities.openWizard)}')

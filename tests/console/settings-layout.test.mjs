@@ -7,6 +7,12 @@ describe('设置 · 本机运行行', () => {
   it('临时运行：保留安装与独立重启，不渲染无动作的更多菜单', () => {
     const service = serviceRowHtml({ registered: false, running: true });
     expect(service).toContain('data-svc-action="install"');
+    expect(service).toContain('asst-row settings-resident-row');
+    expect(service).toContain('settings-row-status');
+    expect(service).toContain('开机自启');
+    expect(service).not.toContain('kv-dot');
+    expect(service).not.toContain('settings-row-stack');
+    expect(service).not.toContain('settings-row-meta');
     expect(service).not.toContain('data-settings-more');
     expect(restartRowHtml()).toContain('class="asst-row settings-restart-row"');
     expect(restartRowHtml()).toContain('data-svc-action="restart"');

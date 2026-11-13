@@ -2829,7 +2829,7 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
 .sec-card-head h3 { font-size: 13px; line-height: 19px; font-weight: 600; margin: 0; }
 .sec-card-head .sec-card-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; }
 .sec-card-head .btn { height: 26px; padding: 0 10px; }
-.sec-card-value { display: flex; align-items: baseline; gap: 8px; margin: 4px 0 0; min-width: 0; }
+.sec-card-value { display: flex; align-items: center; gap: 8px; margin: 4px 0 0; min-width: 0; }
 .sec-card-value strong {
   font-size: 19px; line-height: 22px; font-weight: 700; letter-spacing: 0.5px;
   color: #d6ffea; text-shadow: none; font-variant-numeric: tabular-nums;
@@ -2855,17 +2855,17 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
   background: rgba(60, 42, 8, 0.24);
 }
 .sec-pending-ico { flex: none; color: #ffd27a; font-size: 12px; line-height: 1; }
-.sec-pending-copy { flex: 1 1 auto; min-width: 0; display: flex; align-items: baseline; gap: 8px; }
+.sec-pending-copy { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 8px; }
 .sec-pending-copy b { font-size: 12px; line-height: 18px; font-weight: 600; color: #ffe2a6; white-space: nowrap; }
 .sec-pending-copy span { font-size: 11px; line-height: 16px; color: rgba(255, 226, 166, 0.72); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sec-pending .btn { flex: none; height: 26px; }
 
-/* 折叠：摘要 34，与导航同高 */
+/* 折叠：摘要 40，与内容行同高 */
 .fold, .settings-fold { margin-top: 14px; border-top: 0; padding-top: 0; box-shadow: inset 0 1px 0 rgba(80, 255, 170, 0.22); }
 .settings-group-body > .fold, .settings-group-body > .settings-fold { margin-top: 0; box-shadow: inset 0 1px 0 rgba(80, 255, 170, 0.14); }
 .fold > summary, .settings-fold > summary {
-  height: 34px; min-height: 34px; padding: 0 2px;
-  display: flex; align-items: center; gap: 8px;
+  height: 40px; min-height: 40px; padding: 0 2px;
+  display: flex; align-items: center; align-self: center; gap: 8px;
   font-size: 11px; line-height: 16px; letter-spacing: 0;
   color: var(--crt-dim); cursor: pointer; list-style: none;
   width: auto; margin: 0;
@@ -3271,6 +3271,19 @@ html[lang="en-US"] .modal-settings .cfg-label { line-height: 19px; }
 .modal-settings .cfg-label { flex: none; }
 .modal-settings .cfg-control { margin-left: 0; justify-self: end; justify-content: flex-end; }
 .modal-settings .cfg-status { justify-self: end; }
+/* 主要 cell 的中线显式居中；多行值保留 column + justify-center。窄屏堆叠不套此规则。 */
+@media (min-width: 761px) {
+  .modal-settings :is(.cfg-row, .settings-kv .kv-row, .runtime-kv .kv-row, .asst-row, .asst-head, .settings-language-row) > *,
+  #about .settings-kv .kv-row > * { align-self: center; }
+  .modal-settings .cfg-row > :where(.cfg-label, .cfg-control, .cfg-status),
+  #settings-resident > .asst-row > :where(.asst-name, .settings-row-status, .settings-row-actions) {
+    min-height: 40px; display: flex; align-items: center; align-self: center;
+  }
+  #assistants-panel :is(.asst-row, .asst-head) > :where(.asst-name, .asst-st, .settings-row-actions) {
+    display: flex; align-items: center; align-self: center;
+  }
+  .modal-settings .settings-kv .kv-value { justify-content: center; }
+}
 .modal-settings [data-settings-section="model-source"] .cfg-row { grid-template-columns: 150px minmax(0, 1fr); }
 .modal-settings [data-settings-section="model-source"] .cfg-row > .cfg-status:empty { display: none; }
 .modal-settings [data-settings-section="model-source"] .cfg-control { justify-content: flex-end; justify-self: end; width: 100%; }
@@ -3302,8 +3315,9 @@ html[lang="en-US"] .modal-settings .cfg-label { line-height: 19px; }
 }
 .sec-card-main { grid-column: 2; min-width: 0; }
 .sec-card-actions {
-  grid-column: 3; justify-self: end;
-  display: flex; align-items: flex-start; justify-content: flex-end;
+  grid-column: 3; justify-self: end; align-self: start;
+  height: 20px; min-height: 20px;
+  display: flex; align-items: center; justify-content: flex-end;
   gap: 6px; flex-wrap: wrap; min-width: 0;
 }
 .sec-card-actions .btn { height: 27px; padding: 0 10px; }
@@ -3311,7 +3325,7 @@ html[lang="en-US"] .modal-settings .cfg-label { line-height: 19px; }
 /* 安全审计一行流（无事件时不渲染） */
 .modal-settings .sec-audit-line, #settings .sec-audit-line {
   margin: 2px 0 0;
-  display: flex; align-items: baseline; gap: 8px;
+  display: flex; align-items: center; gap: 8px;
   line-height: 16px; white-space: nowrap;
   min-width: 0;
   font-size: 11px; line-height: 16px; color: var(--crt-dim);
@@ -3349,6 +3363,24 @@ html[lang="en-US"] .modal-settings .cfg-label { line-height: 19px; }
 #settings-panel-common > .settings-group:first-child { margin-top: 0; }
 #settings-panel-common .settings-group-head { margin-bottom: 4px; }
 #settings-panel-common [data-settings-group="interface"] .settings-group-head { display: none; }
+/* 常用动作共享同一宽度；文字仍 12、控件 27/8，不随文案长度跳动。 */
+#settings-panel-common { --settings-action-btn-w: 116px; }
+#settings-panel-common .settings-row-actions .btn,
+#settings-resident > .asst-row > .btn,
+#settings-panel-common .cloud-actions .btn {
+  width: var(--settings-action-btn-w); min-width: var(--settings-action-btn-w);
+  flex: 0 0 var(--settings-action-btn-w);
+}
+.settings-resident-row .settings-row-status {
+  flex: 0 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.settings-resident-row .settings-row-actions { margin-left: auto; flex: none; }
+@media (max-width: 760px) {
+  #settings-resident > .asst-row.settings-resident-row {
+    height: auto; min-height: 40px; padding: 0 14px; row-gap: 0;
+  }
+}
 
 /* ===== v2.2 校准（PR #315 任务书：160 轨 / 20 呼吸 / 分段 / 去 pill） ===== */
 

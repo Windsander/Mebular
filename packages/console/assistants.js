@@ -341,7 +341,7 @@ export function assistantsPanelHtml({ clients, ui = {} } = {}) {
       <div class="asst-xp" id="asst-missing" hidden>${missingRows}</div>` : ''}`;
 }
 
-/** 常驻运行行（设置 · 常用）：40 行 = 标题/短 meta + 主操作；「更多」只保留取消常驻。 */
+/** 常驻运行行（设置 · 常用）：40 行 = label + 状态/动作；说明归 title，「更多」只保留取消常驻。 */
 export function serviceRowHtml(service, serviceMsg = '') {
   if (!service) return `<p class="muted">${esc(tr('settings.service.loading', '常驻状态加载中…'))}</p>`;
   const registered = Boolean(service.registered);
@@ -359,13 +359,10 @@ export function serviceRowHtml(service, serviceMsg = '') {
   const primary = registered
     ? `<button class="btn" type="button" data-svc-action="recheck">${esc(tr('settings.service.recheck', '重新检测'))}</button>`
     : `<button class="btn btn-crt" type="button" data-svc-action="install">${esc(tr('settings.service.install', '让 Mebular 常驻'))}</button>`;
-  return `<div class="settings-row-2" data-service-row>
-      <div class="settings-row-stack">
-        <div class="settings-row-title"><span class="kv-dot ${registered ? (service.running ? 'ok' : 'warn') : 'off'}" aria-hidden="true"></span>${esc(tr('settings.service.title', '常驻运行'))}</div>
-        <div class="settings-row-meta" title="${esc(`${note}${serviceMsg ? ` ${serviceMsg}` : ''}`)}">${esc(note)}${serviceMsg ? ` · ${esc(serviceMsg)}` : ''}</div>
-      </div>
+  return `<div class="asst-row settings-resident-row" data-service-row title="${esc(`${badge} · ${note}${serviceMsg ? ` ${serviceMsg}` : ''}`)}">
+      <span class="asst-name">${esc(tr('settings.service.title', '常驻运行'))}</span>
+      <span class="settings-row-status">${esc(badge)}</span>
       <div class="settings-row-actions">
-        <span class="settings-row-status">${esc(badge)}</span>
         ${primary}
         ${more}
       </div>

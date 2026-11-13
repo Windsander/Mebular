@@ -3,7 +3,7 @@
 基线：`feat/console-settings-redesign` 的 v2 设置改版（760×720 / 关于 760×680）。本目录是 v2 全量视觉基线；U-1 / U-3 目录里对应的设置截图已同步刷新。
 
 > **v2.5 实证纠偏（2026-11-12，真实 App 改前 + 本地 serve/CDP 改后）**：只读行不再被旧选择器清掉内缩——设置 / 运行状态 / 关于均为左 14，纯只读值右 14；无复制动作时不保留空 56px 列。主值在左、meta 在右；P2P multiaddr 与邀请 URL 仅显示实际 `host:port`，不可解析为 `—`。控件文字 12；安全说明 12/17、辅助 meta 11/16；忆云名称 13/19、辅助 11/16；记忆页尾 11/16；关于标题 15/20，仍 680 + 三组三折叠。1440 与 390 的 common / security / memory / integrations / mcp / advanced 均重新实测，390 无横向溢出。
-> **最终几何收口**：本机运行四项均为 **40px**（常驻 / 立即重启 / 自动修复 / 重启向导）；设置面板上下 padding 全 0，panel 自身 `border-radius:10 + overflow:hidden`，首末行与中间一致。重启不进「更多」，向导不在组头。普通 group/section hint 与记忆页尾均 `display:none`，全文由组/控件 `title` 承载，异常 warning 保持可见。模型来源删除空 68px 状态列，`.cfg-control` 右对齐，`.crt-select` 为 `min(280px,100%)`、trigger 全宽；1440/900/390 均为 280px，距面板外缘 15px（14 行内距 + 1 边框）。分段外框 27、content/选项 25，选项 `height:100% + border-box`、圆角 0。常用用组间距 8、组头下距 4，并隐藏语言项上方重复的「界面」组头；四项 + 40px banner 在 1440/900/390 均不滚动。
+> **最终几何收口**：本机运行四项均为 **40px**（常驻 / 立即重启 / 自动修复 / 重启向导）；常驻行与其他项同为 `label + status/actions`，无前置圆点或可见 subline，说明归 title；常用动作按钮实测均 **116×27 / 8px**。设置面板上下 padding 全 0，panel 自身 `border-radius:10 + overflow:hidden`，首末行与中间一致。重启不进「更多」，向导不在组头。普通 group/section hint 与记忆页尾均 `display:none`，全文由组/控件 `title` 承载，异常 warning 保持可见。模型来源删除空 68px 状态列，`.cfg-control` 右对齐，`.crt-select` 为 `min(280px,100%)`、trigger 全宽；1440/900/390 均为 280px，距面板外缘 15px（14 行内距 + 1 边框）。分段外框 27、content/选项 25，选项 `height:100% + border-box`、圆角 0。常用用组间距 8、组头下距 4，并隐藏语言项上方重复的「界面」组头；四项 + 40px banner 在 1440/900/390 均不滚动。七页 label/value/action 的真实中线差均 ≤1px；折叠摘要 40px，安全卡动作与标题同中线。
 > **v2.4 字体/间距校准（2026-11-12，设计原稿）**：页签字距 **2px**；普通只读行（settings-kv / runtime-kv）标签与值 **12 / 18**；内容滚动区 **16 / 20 / 20**；组面板内缩 **状态卡 2 / 常驻 12 / 忆云 0**；本机状态右侧 meta **11px 纯文字右对齐**（P2P 监听地址 / 邀请 endpoint / 安全档位说明，无数据 `—`）；常用 720 + 40 条内容 **558 / 596** 不滚；行仍 40/58，安全卡 114/19、160 轨、分段、序号/审计、关于 680 不变。
 > **v2.3 控件 token 收口（2026-11-12）**：设置内可见控件统一 **27 高 / 8 圆角**（button `padding: 0 10`；input / select trigger `0 8`）。`.settings-group-body` **padding 0 + overflow hidden**，首/末行严格 40/58（面板高 = 行 + 2px 边框）；`.settings-group-note/-desc/-foot`、`.settings-section-foot` **width 100% / max-width none / 16px 行高 / padding 0 14**，取消 62ch；390 自动修复行改 58 两行，meta 留在面板内。实测：button 27/8/10、trigger 27/8/8、input 27/8/8；group label/body x=541，note 元素 x=542（1px 面板边框内）、右缘 1078，文字左 556。
 > **v2.2 校准（2026-11-11，任务书覆盖）**：设置外框 **760**、左轨 **160**、内容列 **538**（约 540）；`.modal-settings` 内距 `18 0 18 20`，`.settings-scroll` 横向 **20** —— 竖线到内容、内容到右缘都留 20（滚动条贴右）。Header **57**（18 顶距 + 38 行）：`✦ 本机设置  改动即生效…` 同一行。左轨激活 **实底 `rgba(80,255,170,.06)` + 2px 左条 + 亮绿**。设置高 **720**、关于 **680**；行 **34 / 40 / 58**，按钮 **27**、输入/下拉 26。
@@ -107,7 +107,7 @@ MEBULAR_CLOUD_ROOT=/tmp/mebular-v2-home node packages/mcp/bin/mebular.mjs serve 
 4. `C8f 模型列表 760px：单列卡片、无横向滚动`
 5. `UI 冒烟执行（页面求值失败：TypeError: Cannot read properties of null (reading 'click')）`
 
-该失败在改动前的 HEAD 上同样复现，与 v2 无关。用临时副本跳过该段后：**432 / 432 通过**（900 行模板、异常可见性、关于三组、安全卡 v2、i18n v2 token、v2.2 栅格/分段/去 pill 全绿）；官方脚本仍只报这 5 条。
+该失败在改动前的 HEAD 上同样复现，与 v2 无关。用临时副本跳过该段后：**433 / 433 通过**（900 行模板、异常可见性、关于三组、安全卡 v2、i18n v2 token、v2.2 栅格/分段/去 pill 全绿）；官方脚本仍只报这 5 条。
 
 ## 人工走查结论
 

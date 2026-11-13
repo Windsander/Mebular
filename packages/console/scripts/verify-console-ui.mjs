@@ -1677,13 +1677,14 @@ async function main() {
       const restart = root?.querySelector('.settings-restart-row');
       const wizard = root?.querySelector('.settings-wizard-row');
       const repair = root?.querySelector('.settings-repair-row');
+      const resident = root?.querySelector('[data-service-row]');
       const heights = items.map((el) => Math.round(el.getBoundingClientRect().height));
       const statusHeights = [...document.querySelectorAll('[data-settings-common-status] .kv-row dt')].map((el) => Math.round(el.getBoundingClientRect().height));
       const panels = [root, document.querySelector('[data-settings-common-status] .settings-group-body')].filter(Boolean).map((el) => ({
         id: el.id || 'status', padding: [getComputedStyle(el).paddingTop, getComputedStyle(el).paddingBottom],
         radius: getComputedStyle(el).borderRadius, overflow: getComputedStyle(el).overflow,
       }));
-      const order = items.map((el) => el.classList.contains('settings-row-2') ? 'resident'
+      const order = items.map((el) => el.hasAttribute('data-service-row') ? 'resident'
         : el.classList.contains('settings-restart-row') ? 'restart'
           : el.classList.contains('settings-repair-row') ? 'repair' : 'wizard');
       const expectedOrder = wizard ? ['resident', 'restart', 'repair', 'wizard'] : ['resident', 'restart', 'repair'];
@@ -1694,6 +1695,11 @@ async function main() {
           && Boolean(restart?.querySelector(':scope > [data-svc-action="restart"]'))
           && !root.querySelector('.settings-more-panel [data-svc-action="restart"]')
           && Boolean(repair?.querySelector('#settings-repair'))
+          && Boolean(resident?.querySelector(':scope > .asst-name'))
+          && Boolean(resident?.querySelector(':scope > .settings-row-status')?.textContent.trim())
+          && Boolean(resident?.querySelector(':scope > .settings-row-actions'))
+          && !resident?.querySelector('.kv-dot, .settings-row-stack, .settings-row-meta')
+          && (resident?.getAttribute('title') ?? '').includes('开机自启')
           && (!wizard || Boolean(wizard.querySelector('#settings-open-wizard')))
           && !group?.querySelector('.settings-group-head #settings-open-wizard')
           && (!repair || getComputedStyle(repair.querySelector('.asst-st')).display === 'none')
@@ -1701,6 +1707,12 @@ async function main() {
           && panels.every((panel) => panel.padding[0] === '0px' && panel.padding[1] === '0px'
             && panel.radius === '10px' && panel.overflow === 'hidden'),
         order, heights, statusHeights, panels,
+        residentStructure: resident ? {
+          className: resident.className,
+          hasDot: Boolean(resident.querySelector('.kv-dot')),
+          hasSubline: Boolean(resident.querySelector('.settings-row-meta, .settings-row-stack')),
+          title: resident.getAttribute('title') ?? '',
+        } : null,
         restartInMenu: Boolean(root?.querySelector('.settings-more-panel [data-svc-action="restart"]')),
         wizardInHead: Boolean(group?.querySelector('.settings-group-head #settings-open-wizard')),
       };
@@ -1778,11 +1790,16 @@ async function main() {
         || c.padL !== (c.isBtn ? '10px' : '8px')
         || c.fontSize !== '12px');
       const rows = [];
+      const badRowDetails = [];
       for (const el of root.querySelectorAll('.cfg-row, .settings-row-2, .settings-language-row, .runtime-mode-actions, .asst-head, .asst-row, .cloud-row, .settings-actions-row')) {
-        if (visible(el)) rows.push(Math.round(el.getBoundingClientRect().height * 10) / 10);
+        if (visible(el) && !el.closest('details, .asst-xp')) {
+          const height = Math.round(el.getBoundingClientRect().height * 10) / 10;
+          rows.push(height);
+          if (height !== 40 && height !== 58) badRowDetails.push({ cls: el.className, height, parent: el.parentElement?.className, fold: el.closest('details')?.id || '', xp: el.closest('.asst-xp')?.id || '' });
+        }
       }
       for (const kv of root.querySelectorAll('.settings-kv')) {
-        if (!visible(kv)) continue;
+        if (!visible(kv) || kv.closest('details, .asst-xp')) continue;
         const byTop = new Map();
         for (const cell of kv.querySelectorAll('.kv-row > *')) {
           if (!visible(cell)) continue;
@@ -1790,6 +1807,9 @@ async function main() {
           if (!byTop.has(top)) byTop.set(top, Math.round(cell.getBoundingClientRect().height * 10) / 10);
         }
         rows.push(...byTop.values());
+        for (const height of byTop.values()) {
+          if (height !== 40 && height !== 58) badRowDetails.push({ cls: kv.className, height, parent: kv.parentElement?.className, fold: kv.closest('details')?.id || '', xp: kv.closest('.asst-xp')?.id || '' });
+        }
       }
       const badRows = ${checkRows ? 'rows.filter((h) => h !== 40 && h !== 58)' : '[]'};
       const notes = [];
@@ -1863,13 +1883,19 @@ async function main() {
         && Math.abs(modelTrigger.getBoundingClientRect().right - modelControl.getBoundingClientRect().right) <= 1
         && Math.abs(modelPanel.getBoundingClientRect().right - modelTrigger.getBoundingClientRect().right - 14) <= 1
         && Math.abs(modelTrigger.getBoundingClientRect().width - modelWrap.getBoundingClientRect().width) <= 1);
+      const commonPanel = root.querySelector('#settings-panel-common');
+      const commonActionButtons = commonPanel && !commonPanel.hidden
+        ? [...commonPanel.querySelectorAll('.settings-row-actions .btn, #settings-resident > .asst-row > .btn, .cloud-actions .btn')].filter(visible)
+        : [];
+      const actionWidths = commonActionButtons.map((el) => Math.round(el.getBoundingClientRect().width * 10) / 10);
+      const actionWidthsOk = commonActionButtons.length === 0 || actionWidths.every((width) => Math.abs(width - 116) <= 0.6);
       const cfgAlignOk = ${checkRows ? `[...root.querySelectorAll('.cfg-row')].filter(visible).every((row) => {
         const cells = ['.cfg-label', '.cfg-control', '.cfg-status'].map((selector) => row.querySelector(selector)).filter((el) => el && visible(el));
         const center = (el) => { const rect = el.getBoundingClientRect(); return rect.top + rect.height / 2; };
         return cells.every((el) => Math.abs(center(el) - center(row)) <= 1);
       })` : 'true'};
-      return { controls: controls.length, badControls: badControls.slice(0, 8), rows: [...new Set(rows)].sort((a, b) => a - b), badRows: badRows.slice(0, 8), notes: notes.length, badNotes: badNotes.slice(0, 6), segOk,
-        layout: { hintsHidden, dropdownOk, cfgAlignOk },
+      return { controls: controls.length, badControls: badControls.slice(0, 8), rows: [...new Set(rows)].sort((a, b) => a - b), badRows: badRows.slice(0, 8), badRowDetails: badRowDetails.slice(0, 12), notes: notes.length, badNotes: badNotes.slice(0, 6), segOk,
+        layout: { hintsHidden, dropdownOk, cfgAlignOk, actionWidthsOk, actionWidths },
         typo: { tabLs, scrollTop: scrollStyle.paddingTop, scrollLeft: scrollStyle.paddingLeft, scrollRight: scrollStyle.paddingRight, kvOk, kvInsetOk, detailTypeOk, badBodies: badBodies.slice(0, 6), metas: metas.length, badMeta: badMeta.slice(0, 6) } };
     })()`;
     const prevTokenViewport = await evalJs('({ w: window.innerWidth, h: window.innerHeight })');
@@ -1882,7 +1908,7 @@ async function main() {
       tokenAudit[tab] = await evalJs(settingsTokenProbe(true));
     }
     const tokenBad = Object.entries(tokenAudit).filter(([, a]) => !a || a.badControls.length || a.badRows.length || a.badNotes.length || !a.segOk
-      || !a.layout.hintsHidden || !a.layout.dropdownOk || !a.layout.cfgAlignOk
+      || !a.layout.hintsHidden || !a.layout.dropdownOk || !a.layout.cfgAlignOk || !a.layout.actionWidthsOk
       || a.typo.tabLs !== '2px' || a.typo.scrollTop !== '16px' || a.typo.scrollLeft !== '20px' || a.typo.scrollRight !== '20px'
       || !a.typo.kvOk || !a.typo.kvInsetOk || !a.typo.detailTypeOk || a.typo.badBodies.length || a.typo.badMeta.length
       || (a.typo.metas > 0 && a.typo.metas !== 3));
@@ -1897,11 +1923,72 @@ async function main() {
       tokenAudit390[tab] = await evalJs(settingsTokenProbe(false));
     }
     const tokenBad390 = Object.entries(tokenAudit390).filter(([, a]) => !a || a.badControls.length || a.badNotes.length || !a.segOk
-      || !a.layout.hintsHidden || !a.layout.dropdownOk
+      || !a.layout.hintsHidden || !a.layout.dropdownOk || !a.layout.actionWidthsOk
       || a.typo.tabLs !== '2px' || a.typo.scrollTop !== '16px' || a.typo.scrollLeft !== '20px' || a.typo.scrollRight !== '20px'
       || !a.typo.kvOk || !a.typo.detailTypeOk || a.typo.badBodies.length || a.typo.badMeta.length);
     check('v2.4 390 字体/间距：页签 2px、只读行 12/18、滚动区 16/20、面板 0、meta 11 + 控件 27/8',
       tokenBad390.length === 0, JSON.stringify(tokenBad390).slice(0, 1400));
+    // 全页面真实 rect 中线：关闭折叠 / 空动作容器不参与，窄屏堆叠只查横向溢出。
+    const rowAlignProbe = `(() => {
+      const bad = [];
+      const disallowed = [];
+      const visible = (el) => {
+        if (!el || el.closest('details:not([open])')) return false;
+        const r = el.getBoundingClientRect();
+        return el.getClientRects().length > 0 && r.width > 0 && r.height > 0 && getComputedStyle(el).display !== 'none';
+      };
+      const mid = (el) => { const r = el.getBoundingClientRect(); return r.top + r.height / 2; };
+      const add = (type, row, cells, stacked = false) => {
+        if (!visible(row)) return;
+        for (const cell of cells.filter(visible)) {
+          const delta = mid(cell) - mid(row);
+          if (!stacked && Math.abs(delta) > 1) bad.push({ type, delta: Math.round(delta * 10) / 10, text: (cell.textContent || '').trim().slice(0, 60) });
+          if (['start', 'baseline'].includes(getComputedStyle(cell).alignItems)) disallowed.push({ type, align: getComputedStyle(cell).alignItems });
+        }
+      };
+      for (const row of document.querySelectorAll('.settings-kv .kv-row,.runtime-kv .kv-row')) {
+        const dt = row.querySelector('dt');
+        add('kv', getComputedStyle(row).display === 'contents' ? dt : row,
+          [dt, row.querySelector('.kv-value'), row.querySelector('dd.rt-value'), row.querySelector('.kv-action')].filter(Boolean), innerWidth <= 760 && getComputedStyle(row).display !== 'contents');
+      }
+      for (const row of document.querySelectorAll('.cfg-row')) add('cfg', row, [row.querySelector('.cfg-label'), row.querySelector('.cfg-control'), row.querySelector('.cfg-status')].filter(Boolean), innerWidth <= 760);
+      for (const row of document.querySelectorAll('#settings-resident > .asst-row,#settings-resident > .settings-row-2')) add('resident', row, [...row.children].filter((el) => !el.classList.contains('asst-sp')), innerWidth <= 760 && row.getBoundingClientRect().height > 41);
+      for (const row of document.querySelectorAll('.settings-language-row')) add('language', row, [row.querySelector('.settings-language-label'), row.querySelector('.settings-language-control')].filter(Boolean));
+      for (const row of document.querySelectorAll('.cloud-row')) add('cloud', row, [row.querySelector('.cloud-main'), row.querySelector('.cloud-actions')].filter(Boolean), innerWidth <= 760 && getComputedStyle(row).gridTemplateColumns.split(' ').length === 1);
+      for (const row of document.querySelectorAll('#assistants-panel .asst-row,#assistants-panel .asst-head')) add('assistant', row, [...row.children].filter((el) => !el.classList.contains('asst-sp')), innerWidth <= 760 && row.getBoundingClientRect().height > 41);
+      for (const row of document.querySelectorAll('.sec-pending')) add('security-pending', row, [...row.children], innerWidth <= 900);
+      for (const card of document.querySelectorAll('.sec-card')) {
+        const head = card.querySelector('.sec-card-head');
+        const actions = card.querySelector('.sec-card-actions');
+        add('security-action', head, [head, actions].filter(Boolean), innerWidth <= 760 && actions && actions.getBoundingClientRect().top >= head.getBoundingClientRect().bottom - 1);
+        const value = card.querySelector('.sec-card-value');
+        add('security-value', value, [value?.querySelector('strong'), value?.querySelector('span')].filter(Boolean));
+      }
+      for (const row of document.querySelectorAll('.sec-audit-line')) add('security-audit', row, [...row.children]);
+      for (const row of document.querySelectorAll('.settings-fold > summary,.fold > summary')) add('fold', row, [row]);
+      return { bad, disallowed, docW: document.documentElement.scrollWidth, vw: innerWidth };
+    })()`;
+    const alignmentBad = [];
+    for (const [width, height] of [[1440, 900], [900, 900], [390, 844]]) {
+      await setViewport({ width, height, deviceScaleFactor: 1, mobile: width <= 560 });
+      for (const tab of ['common', 'security', 'runtime', 'assistants', 'mcp', 'advanced']) {
+        await evalJs(`document.querySelector('[data-settings-tab=${tab}]')?.click()`);
+        await sleep(180);
+        const result = await evalJs(rowAlignProbe);
+        alignmentBad.push(...result.bad.map((item) => ({ viewport: width, page: tab, ...item })));
+        alignmentBad.push(...result.disallowed.map((item) => ({ viewport: width, page: tab, ...item })));
+        if (result.docW > result.vw + 1) alignmentBad.push({ viewport: width, page: tab, type: 'horizontal-overflow' });
+      }
+      await evalJs('document.querySelector("[data-settings-tab=common]")?.click(); document.querySelector("[data-settings-extra=about-modal]")?.click()');
+      await sleep(250);
+      const about = await evalJs(rowAlignProbe);
+      alignmentBad.push(...about.bad.map((item) => ({ viewport: width, page: 'about', ...item })));
+      alignmentBad.push(...about.disallowed.map((item) => ({ viewport: width, page: 'about', ...item })));
+      if (about.docW > about.vw + 1) alignmentBad.push({ viewport: width, page: 'about', type: 'horizontal-overflow' });
+      await evalJs('document.querySelector("#about-close")?.click()');
+    }
+    check('全页面真实中线：label/value/action 与行中线差 ≤1；无 start/baseline；1440/900/390 无横向溢出',
+      alignmentBad.length === 0, JSON.stringify(alignmentBad).slice(0, 1800));
     await evalJs('document.querySelector("[data-settings-tab=common]")?.click()');
     await setViewport({ width: prevTokenViewport.w, height: prevTokenViewport.h, deviceScaleFactor: 1, mobile: prevTokenViewport.w <= 560 });
     await sleep(300);

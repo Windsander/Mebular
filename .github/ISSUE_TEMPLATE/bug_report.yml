@@ -14,7 +14,7 @@ body:
     attributes:
       label: Mebular version / Mebular 版本
       description: Release, commit SHA, or local branch / 发布版本、commit SHA 或本地分支
-      placeholder: "v0.2.3 or 04f39ff"
+      placeholder: "v0.3.4 or 04f39ff"
     validations:
       required: true
 

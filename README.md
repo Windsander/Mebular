@@ -144,6 +144,10 @@ mebular print-config --client opencode         # MCP config
   </tbody>
 </table>
 
+<p align="center"><strong>Community</strong><br>
+<a href="https://github.com/Windsander/Mebular/discussions">Discussions</a> · <a href="https://github.com/Windsander/Mebular/discussions/categories/q-a">Q&amp;A</a> · <a href="https://github.com/Windsander/Mebular/issues">Issues</a> · <a href="ROADMAP.md">Roadmap</a> · <a href="CONTRIBUTING.md">Contributing</a><br>
+<sub>Usage questions → Q&amp;A · early ideas → Ideas · reproducible problems → Issues</sub></p>
+
 <p align="center"><strong>Use with DSH</strong><br>
 Install the plugin from npm into DSH's web profile:<br>
 <code>dsh plugin --profile web add @mebular/dsh-plugin@0.3.4</code><br>

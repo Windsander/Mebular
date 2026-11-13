@@ -10,17 +10,19 @@
   <img src="https://raw.githubusercontent.com/Windsander/Mebular/main/assets/roadmap-cn.svg" alt="Mebular 星轨路线图：基础版本已发布，当前聚焦稳定性硬化，下一步候选为桌面签名与受控更新，并探索协议生命周期问题">
 </picture>
 
-## 已发布 — v0.3.0
+## 已发布 — v0.3.4
 
-已在 [v0.3.0](https://github.com/Windsander/Mebular/releases/tag/v0.3.0) 中提供。
+已在 [v0.3.4](https://github.com/Windsander/Mebular/releases/tag/v0.3.4) 中提供。
 
 - **Memory Runtime** —— 可选 sidecar：自动采集、召回、持久详情、检查点和本地抽取/摘要。
 - **三条宿主接入** —— DSH、Hermes 与 OpenCode/OpenChamber 适配器共用同一张图、事件日志和同步层。
 - **本地模型供应** —— 显式安装模型/引擎，固定 revision、大小和 SHA-256 校验；不会静默下载。
+- **运行时稳定性契约** —— 生命周期、本地数据、详情证据、检查点修订、宿主失败状态与诊断已与文档契约对齐；同期加入 Fleet 黑盒编排，以及带公开 OpenChamber runner 的统一执行器/适配层。
+- **Console 设置 v2** —— 重建设置外壳（通用、安全、记忆、集成、MCP、高级，另含关于设备），覆盖 1440/1024/900/390 响应式布局、中英文案、可访问焦点与减少动效行为。不涉及数据、协议或 MCP 工具迁移。
 
 ## 当前 — v0.3.x
 
-现阶段的稳定化重点。优先级会根据可复现报告和首次运行反馈调整。
+现阶段的稳定化重点，起点为 v0.3.4。优先级会根据可复现报告和首次运行反馈调整。
 
 - **数据生命周期与隐私** —— 让 staging、已沉降详情、宿主副本、保留和删除边界保持明确。
 - **生命周期与恢复** —— 验证 managed/attached/manual sidecar、离线队列、Compact/Checkpoint/SelfRecord 和宿主 fail-open 行为。

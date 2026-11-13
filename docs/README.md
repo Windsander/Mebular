@@ -23,6 +23,10 @@ main [`README.md`](../README.md); this index only describes document structure.
 - [Hermes](integrations/HERMES.md) · [Hermes 集成](integrations/HERMES_CN.md)
 - [OpenChamber / OpenCode](integrations/OPENCHAMBER.md) · [OpenChamber / OpenCode 集成](integrations/OPENCHAMBER_CN.md)
 
+## Community
+
+- [Community listings and directory audit](community/LISTINGS.md) · [社区目录与收录审计](community/LISTINGS_CN.md) — where Mebular is listed, what each surface currently shows, and what is blocked on an external maintainer
+
 ## Architecture
 
 - [ARCHITECT.md](architecture/ARCHITECT.md) — runtime layers, trust/sync model, code map

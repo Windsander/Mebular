@@ -1073,7 +1073,8 @@ async function main() {
           && /未安装/.test(c8?.textContent ?? '') && Boolean(c8?.querySelector('[data-rt-model-action=download]'))
           && /Qwen3 4B/.test(c4?.textContent ?? '') && /已安装/.test(c4?.textContent ?? '')
           && Boolean(c4?.querySelector('[data-rt-model-action=enable]'))
-          && getComputedStyle(section.querySelector('[data-rt-model-source-note]')).display !== 'none'
+          && getComputedStyle(section.querySelector('[data-rt-model-source-note]')).display === 'none'
+          && (section.querySelector('[data-rt-model-source-note]')?.getAttribute('title') ?? '').length > 0
           && !/endpoint|keyRef|token|模型路径|capture/i.test(list.textContent);
       })()`, 30000));
     check('C8f local 选中不立刻写 model-source（避免 pack_required）；先选/装模型',

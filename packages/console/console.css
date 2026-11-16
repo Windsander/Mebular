@@ -1770,18 +1770,95 @@ body.modal-open { overflow: hidden; }
   .mem-row { grid-template-columns: minmax(0, 1fr); }
 }
 
-/* ---------- 0.3 · 记忆运行时（状态 / 治理 / 设置） ---------- */
-.runtime-status { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 10px; }
-.runtime-card { padding: 10px 12px; display: grid; gap: 6px; align-content: start; }
-.runtime-card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.runtime-card-head h3 { margin: 0; font-size: 12px; letter-spacing: 1px; }
-.runtime-card-head .crt-tag { margin-left: auto; }
-.runtime-card p { margin: 0; }
+/* ---------- 0.3 · 记忆运行时（四格状态带 + 召回轨迹账本） ---------- */
+.runtime-status { margin-top: 0; }
+#runtime-view .rt-band {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  border: 1px solid var(--crt-border-soft); border-radius: 8px;
+  background: rgba(2, 16, 11, 0.42); overflow: hidden;
+}
+#runtime-view .rt-band-cell { min-width: 0; display: grid; gap: 3px; align-content: start; padding: 8px 12px; }
+#runtime-view .rt-band-cell + .rt-band-cell { border-left: 1px dashed var(--crt-border-soft); }
+#runtime-view .rt-band-label { font-size: 10px; font-weight: 600; letter-spacing: 1px; color: var(--crt-dim); }
+#runtime-view .rt-band-value {
+  display: inline-flex; align-items: center; gap: 6px; min-width: 0;
+  font-size: 13px; line-height: 18px; color: var(--crt-bright); overflow-wrap: anywhere;
+}
+#runtime-view .rt-band-value.is-muted { color: var(--crt-muted); }
+#runtime-view .rt-status-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; background: var(--crt-muted); }
+#runtime-view .rt-status-dot.is-ok { background: #6dffb8; box-shadow: 0 0 6px rgba(109, 255, 184, 0.6); }
+#runtime-view .rt-status-dot.is-warn { background: #ffd27a; }
+#runtime-view .rt-status-dot.is-error { background: #ff9b9b; }
+#runtime-view .rt-status-dot.is-idle { background: var(--crt-faint); box-shadow: none; }
+#runtime-view .rt-alert {
+  margin: 8px 0 0; padding: 6px 10px; border-left: 2px solid #ffd27a;
+  background: rgba(255, 210, 122, 0.06); color: #ffd27a;
+  font-size: 12px; line-height: 17px; overflow-wrap: anywhere;
+}
+#runtime-view .rt-alert.is-error { border-left-color: #ff9b9b; background: rgba(255, 155, 155, 0.06); color: #ffb9b9; }
+#runtime-view .rt-traces { min-width: 0; }
+#runtime-view .rt-section-title {
+  margin: 12px 0 0; font-size: 13px; font-weight: 700; line-height: 18px;
+  color: var(--crt-bright);
+}
+#runtime-view .rt-trace-list { list-style: none; margin: 4px 0 0; padding: 0; display: grid; min-width: 0; }
+/* 从审计扁平行派生：同 padding / 虚线分隔 / 透明底，只把列换成 时间 / 标签 / 内容 / 动作。 */
+#runtime-view .rt-trace-row {
+  grid-template-columns: 132px 92px minmax(0, 1fr) auto;
+  align-items: start;
+  padding: 9px 8px 9px 10px;
+}
+#runtime-view .rt-trace-row::before { display: none; }
+#runtime-view .rt-trace-kind { align-self: start; justify-self: start; margin-top: 1px; }
+#runtime-view .rt-trace-main { display: grid; gap: 2px; min-width: 0; }
+#runtime-view .rt-trace-query {
+  margin: 0; font-size: 12.5px; line-height: 18px; color: #d6ffea; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
+}
+#runtime-view .rt-trace-badges { display: flex; gap: 4px; flex-wrap: wrap; }
+#runtime-view .rt-trace-meta { margin: 0; font-size: 11px; line-height: 16px; color: var(--crt-dim); overflow-wrap: anywhere; }
+#runtime-view .rt-trace-action { display: flex; align-items: flex-start; justify-content: flex-end; }
+#runtime-view .rt-detail {
+  margin: 0; padding: 8px 0 12px 12px;
+  border-left: 2px solid rgba(80, 255, 170, 0.28); border-bottom: 1px dashed rgba(80, 255, 170, 0.16);
+  font-size: 11px; line-height: 17px; overflow-wrap: anywhere;
+}
+#runtime-view .rt-trace-row > .rt-detail { grid-column: 1 / -1; width: 100%; margin-top: 6px; }
+#runtime-view .rt-detail-note { margin: 0; }
+#runtime-view .rt-detail-id { margin: 0 0 6px; color: var(--crt-dim); }
+#runtime-view .rt-detail-id code { color: var(--crt); overflow-wrap: anywhere; }
+#runtime-view .rt-detail-preview { margin: 6px 0 0; color: #d6ffea; font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
+#runtime-view .rt-detail-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+#runtime-view .rt-state {
+  list-style: none; margin: 0; padding: 12px 14px;
+  border: 1px dashed var(--crt-border-soft); border-radius: 8px;
+  font-size: 12px; line-height: 18px; color: var(--crt-muted); overflow-wrap: anywhere;
+}
+#runtime-view .rt-state.is-error { border-color: rgba(255, 155, 155, 0.35); color: #ffb9b9; }
+#runtime-view .runtime-trace-hits { margin: 6px 0 0; padding-left: 16px; display: grid; gap: 3px; font-size: 11px; }
+#runtime-view .runtime-trace-why { margin: 6px 0 0; padding-left: 16px; display: grid; gap: 3px; font-size: 11px; }
+#runtime-view .runtime-trace-context-list { margin: 6px 0 0; padding: 0; list-style: none; display: grid; gap: 4px; font-size: 11px; }
+#runtime-view .runtime-trace-context {
+  display: flex; gap: 8px; flex-wrap: wrap; align-items: baseline;
+  padding: 4px 0; border-top: 1px dashed rgba(80, 255, 170, 0.18); overflow-wrap: anywhere;
+}
+#runtime-view .runtime-trace-context code { color: #d6ffea; }
+@media (max-width: 900px) {
+  #runtime-view .rt-band { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  #runtime-view .rt-band-cell:nth-child(3) { border-left: 0; }
+  #runtime-view .rt-band-cell:nth-child(n + 3) { border-top: 1px dashed var(--crt-border-soft); }
+  #runtime-view .rt-trace-row { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  #runtime-view .rt-trace-action { justify-content: flex-start; }
+}
+@media (prefers-reduced-motion: reduce) {
+  #runtime-view .rt-trace-row { transition: none; }
+}
+
+/* 设置 · 记忆页（与运行时页面共用的只读/模式控件） */
 .runtime-kv { display: grid; grid-template-columns: minmax(88px, auto) minmax(0, 1fr); gap: 4px 10px; margin: 0; font-size: 12px; }
 .runtime-kv dt { color: var(--crt-dim); }
 .runtime-kv dd { margin: 0; overflow-wrap: anywhere; }
 .runtime-warnings { margin: 8px 0 0; padding-left: 18px; display: grid; gap: 3px; font-size: 11.5px; color: #ffd27a; }
-.runtime-pending { grid-column: 1 / -1; margin: 0; padding: 8px 10px; border: 1px dashed rgba(255, 210, 122, 0.4); border-radius: 6px; font-size: 11.5px; line-height: 1.55; color: #ffd27a; }
 .runtime-mode-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
 .runtime-mode-actions .btn { display: inline-flex; align-items: center; justify-content: center; gap: 4px; padding: 9px 12px; min-width: 0; white-space: normal; overflow-wrap: anywhere; }
 .runtime-mode-actions .btn[aria-pressed="true"] { border-color: rgba(120, 255, 190, 0.6); color: #9dffcf; background: rgba(12, 52, 36, 0.45); }
@@ -1791,27 +1868,6 @@ body.modal-open { overflow: hidden; }
 .runtime-switch-copy { display: grid; gap: 3px; min-width: 0; }
 .runtime-sidecar-block { display: grid; gap: 6px; margin-top: 10px; }
 .runtime-sidecar-block h4 { margin: 0; font-size: 12px; letter-spacing: 1px; }
-.runtime-layout { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(280px, 1fr); gap: 14px; margin-top: 14px; align-items: start; }
-.runtime-panel { min-width: 0; }
-.runtime-panel-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.runtime-panel-head h3 { margin: 0; font-size: 13px; }
-.runtime-panel-note { margin: 4px 0 0; font-size: 11px; line-height: 1.6; }
-.runtime-timeline-controls { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-left: auto; }
-.runtime-filter { display: inline-flex; align-items: center; gap: 4px; }
-.runtime-filter .btn[aria-pressed="true"] { border-color: rgba(120, 255, 190, 0.6); color: #9dffcf; }
-.runtime-internal-toggle { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--crt-dim); }
-.runtime-internal-toggle input { accent-color: #6dffb8; }
-.runtime-internal-hint { flex: 1 1 100%; margin: 0; font-size: 11px; }
-.runtime-timeline-row .mem-head { row-gap: 4px; }
-.runtime-detail { margin: 8px 0 0; padding: 8px 10px; border: 1px dashed rgba(80, 255, 170, 0.28); border-radius: 6px; background: rgba(0, 0, 0, 0.22); font-size: 11.5px; line-height: 1.55; overflow-wrap: anywhere; }
-.runtime-detail pre { margin: 4px 0 0; white-space: pre-wrap; font-family: var(--font, monospace); font-size: 11px; }
-.runtime-trace-row .mem-main { min-width: 0; }
-.runtime-trace-hits { margin: 6px 0 0; padding-left: 18px; display: grid; gap: 3px; font-size: 11.5px; }
-.runtime-trace-why { margin: 6px 0 0; padding-left: 18px; display: grid; gap: 3px; font-size: 11.5px; }
-.runtime-trace-context-list { margin: 6px 0 0; padding: 0; list-style: none; display: grid; gap: 4px; font-size: 11px; }
-.runtime-trace-context { display: flex; gap: 8px; flex-wrap: wrap; align-items: baseline; padding: 4px 0; border-top: 1px dashed rgba(80, 255, 170, 0.18); overflow-wrap: anywhere; }
-.runtime-trace-context code { color: #d6ffea; }
-.runtime-trace-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
 .runtime-progress { height: 5px; border-radius: 999px; background: rgba(80, 255, 170, 0.12); overflow: hidden; margin-top: 4px; }
 .runtime-progress > span { display: block; height: 100%; width: calc(var(--rt-progress, 0) * 1%); background: rgba(109, 255, 184, 0.65); }
 .runtime-mode-settings-hint { margin-top: 8px; }
@@ -1855,11 +1911,7 @@ body.modal-open { overflow: hidden; }
 @media (prefers-reduced-motion: reduce) {
   .runtime-model-progress .runtime-progress > span { transition: none; }
 }
-@media (max-width: 1100px) {
-  .runtime-layout { grid-template-columns: minmax(0, 1fr); }
-}
 @media (max-width: 900px) {
-  .runtime-status { grid-template-columns: minmax(0, 1fr); }
   .runtime-mode-actions { grid-template-columns: minmax(0, 1fr); }
 }
 

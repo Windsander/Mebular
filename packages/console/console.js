@@ -9,7 +9,7 @@
 import { StarStage, namespaceColor, shortId, buildHoverRoutes, buildNetworkScene, normalizeFleetEvent, resolveTaskNamespace, summarizeHoverRoutes } from './starfield.js';
 import { initialViewFromSearch } from './deep-link.js';
 import { createWizardState, wizardReduce, WIZARD_STEPS } from './wizard.js';
-import { IA_TABS, IA_ADVANCED_SECTIONS, IA_MCP_SECTIONS, IA_FIELD_COPY, IA_SETTINGS_EXTRA, IA_SETTINGS_FOLDS, IA_SECURITY_SECTIONS, IA_MCP_DANGER_LINE_KEYS, INVITE_TTL_OPTIONS, INVITE_TTL_DEFAULT_MS, SECURITY_LEVEL_LABEL, SECURITY_LEVEL_TITLE_KEY, SECURITY_LEVEL_NOTE_KEY, SECURITY_BOUNDARY_KEY, SCHEMA_CONFIGURED_VALUE, localizeSchemaReason, refreshCsrfToken, withCsrfRetry, filterRuntimeTimeline, runtimeTimelineKind, memoryRuntimeEnabledOf, runtimeSidecarStateKey, memoryRuntimeModeOf, runtimeShowsModelSettings, runtimeModelSourceOf, runtimeModelSourceAvailable, runtimeModelSourceReady, runtimeModelJobActive, runtimeModelStatusOf, runtimeModelActionOf, formatBytes, settingsListenHostPort, settingsEndpointHostPort, IA_RUNTIME_MODEL_SOURCES, IA_RUNTIME_MODEL_SOURCE_DEFAULT } from './settings-ia.js';
+import { IA_TABS, IA_ADVANCED_SECTIONS, IA_MCP_SECTIONS, IA_FIELD_COPY, IA_SETTINGS_EXTRA, IA_SETTINGS_FOLDS, IA_SECURITY_SECTIONS, IA_MCP_DANGER_LINE_KEYS, INVITE_TTL_OPTIONS, INVITE_TTL_DEFAULT_MS, SECURITY_LEVEL_LABEL, SECURITY_LEVEL_TITLE_KEY, SECURITY_LEVEL_NOTE_KEY, SECURITY_BOUNDARY_KEY, SCHEMA_CONFIGURED_VALUE, localizeSchemaReason, refreshCsrfToken, withCsrfRetry, memoryRuntimeEnabledOf, runtimeSidecarStateKey, memoryRuntimeModeOf, runtimeShowsModelSettings, runtimeModelSourceOf, runtimeModelSourceAvailable, runtimeModelSourceReady, runtimeModelJobActive, runtimeModelStatusOf, runtimeModelActionOf, formatBytes, settingsListenHostPort, settingsEndpointHostPort, IA_RUNTIME_MODEL_SOURCES, IA_RUNTIME_MODEL_SOURCE_DEFAULT } from './settings-ia.js';
 import { assistantsPanelHtml, serviceRowHtml, restartRowHtml, wizardRowHtml, repairRowHtml, statusPillHtml, attentionItems, assistantAddFormHtml } from './assistants.js';
 import { reconcileAssistantUi } from './assistant-status.js';
 import { createConsoleHost, markEmbeddedDocument } from './host.js';
@@ -72,14 +72,10 @@ const state = {
     traces: null,
     traceMeta: null,
     traceDetails: {},
-    memories: null,
     errors: {},
     loading: false,
     loadedAt: 0,
-    timelineFilter: 'memory',
-    includeInternal: false,
     traceOpen: {},
-    objectDetail: null,
   },
   settings: null,
   // E2-A2：忆云列表/卡片与加入弹层（clouds 端点旧守护可能没有 → 卡片显示升级提示）
@@ -1593,7 +1589,22 @@ function runtimeModelReasonLabel(reason) {
   return t.has(key) ? t(key) : t('runtime.modelReason.unknown');
 }
 
-/** 运行状态只读卡：mode / state / degraded / error / version；不显示 token、pid 或配置路径。 */
+/** 运行时状态带单一色调：ok / warn / error / idle（文字始终同时出现，不只靠颜色）。 */
+function runtimeStatusTone(status) {
+  if (!status) return 'idle';
+  if (status.enabled === false) return 'idle';
+  if (status.state === 'failed') return 'error';
+  if (status.degraded || status.state === 'degraded') return 'warn';
+  if (status.state === 'starting' || status.state === 'stopping') return 'warn';
+  if (status.state === 'ready') return 'ok';
+  return 'idle';
+}
+
+function runtimeStatusBandCell(label, value, className = '') {
+  return `<div class="rt-band-cell"><span class="rt-band-label">${escapeHtml(label)}</span><span class="rt-band-value${className ? ` ${className}` : ''}">${value}</span></div>`;
+}
+
+/** 设置 · 记忆页运行状态只读卡：mode / state / degraded / error / version；不显示 token、pid 或配置路径。 */
 function runtimeStatusFactsHtml(status) {
   if (!status) return `<p class="muted">${escapeHtml(t('runtime.loading'))}</p>`;
   const error = runtimeStatusErrorText(status);
@@ -1609,6 +1620,51 @@ function runtimeStatusFactsHtml(status) {
     <div class="kv-row"><dt>${escapeHtml(t('runtime.sidecar.error'))}</dt>${error ? value(error, 'is-warn') : value('—', 'is-empty')}</div>
     <div class="kv-row"><dt>${escapeHtml(t('runtime.sidecar.version'))}</dt>${version ? value(version) : value('—', 'is-empty')}</div>
   </dl>`;
+}
+
+/**
+ * 运行时页面顶部四格状态带（服务状态 / 记忆模式 / 模型来源 / 版本）。
+ * 正常时只有这一条；降级、错误、未启用才追加一条独立状态行（左侧细条 + role=status/alert）。
+ */
+function runtimeStatusBandHtml(status, error = '') {
+  if (!status) {
+    if (error) {
+      return `<div class="rt-state is-error" role="alert" data-rt-status-error>${escapeHtml(t('runtime.error', { message: error }))}</div>`;
+    }
+    return `<div class="rt-state" aria-busy="true">${escapeHtml(t('runtime.loading'))}</div>`;
+  }
+  const enabled = memoryRuntimeEnabledOf(status, currentConfigFile());
+  const stateLabel = runtimeStatusStateLabel(status);
+  const tone = runtimeStatusTone(status);
+  const runtimeError = runtimeStatusErrorText(status) || String(error || '');
+  const modeLabel = enabled ? t('runtime.sidecar.immersive') : t('runtime.sidecar.lightweight');
+  const model = status.model ?? null;
+  const source = enabled ? (state.runtime.modelSource?.source ?? model?.configured ?? '') : '';
+  const modelLabel = source ? runtimeModelSourceLabel(source) : t('runtime.band.unavailable');
+  const version = status.runtimeVersion ? String(status.runtimeVersion) : '—';
+  const statusValue = `<span class="rt-status-dot is-${escapeHtml(tone)}" aria-hidden="true"></span><span class="rt-value rt-status-text" title="${escapeHtml(`${t('runtime.sidecar.state')}：${stateLabel}`)}">${escapeHtml(stateLabel)}</span>`;
+  const band = `<div class="rt-band" data-rt-sidecar-status role="group" aria-label="${escapeHtml(t('runtime.band.label'))}">
+    ${runtimeStatusBandCell(t('runtime.band.service'), statusValue, `is-${tone}`)}
+    ${runtimeStatusBandCell(t('runtime.band.mode'), `<span id="runtime-head-mode" title="${escapeHtml(`${t('runtime.status.mode')}：${modeLabel}`)}">${escapeHtml(modeLabel)}</span>`)}
+    ${runtimeStatusBandCell(t('runtime.band.modelSource'), escapeHtml(modelLabel), enabled && source ? '' : 'is-muted')}
+    ${runtimeStatusBandCell(t('runtime.sidecar.version'), escapeHtml(version), status.runtimeVersion ? '' : 'is-muted')}
+  </div>`;
+  let warning = '';
+  let alert = false;
+  if (runtimeError) {
+    warning = t('runtime.band.error', { message: runtimeError });
+    alert = true;
+  } else if (status.state === 'failed') {
+    warning = t('runtime.band.failed');
+    alert = true;
+  } else if (status.degraded || status.state === 'degraded') {
+    warning = t('runtime.band.degraded', { label: t('runtime.sidecar.degraded') });
+  } else if (status.enabled === false) {
+    warning = t('runtime.band.disabled');
+  } else if (enabled && status.available === false && status.state !== 'starting') {
+    warning = t('runtime.sidecar.notReady');
+  }
+  return `${band}${warning ? `<p class="rt-alert${alert ? ' is-error' : ''}" role="${alert ? 'alert' : 'status'}" aria-label="${escapeHtml(alert ? t('runtime.sidecar.error') : t('runtime.sidecar.state'))}">${escapeHtml(warning)}</p>` : ''}`;
 }
 
 function runtimeModeSettingsHtml() {
@@ -2062,8 +2118,6 @@ function settingsSignature(activeTab) {
       state.runtime.modelSourceBrowse ?? null,
       state.runtime.traceMeta ?? null,
       state.runtime.errors ?? null,
-      state.runtime.timelineFilter ?? null,
-      state.runtime.includeInternal ?? null,
     ] : null,
     // AI 助手专区依赖：只取稳定投影（整对象序列化会因服务端易变字段导致每 3s 重建）
     (state.clients ?? null) && (state.clients ?? []).map((c) => [c.id, Boolean(c.installed), Boolean(c.connected), c.state ?? null]),
@@ -4178,7 +4232,6 @@ async function ensureRuntimeData({ force = false } = {}) {
     state.runtime.modelSourceBrowse = null;
     state.runtime.traces = mock.traces;
     state.runtime.traceMeta = { available: true, disabled: false, state: 'ready' };
-    state.runtime.memories = mock.memories;
     state.runtime.errors = {};
     state.runtime.loadedAt = Date.now();
     return;
@@ -4188,16 +4241,15 @@ async function ensureRuntimeData({ force = false } = {}) {
   if (!force && Date.now() - state.runtime.loadedAt < RUNTIME_REFRESH_MS) return;
 
   state.runtime.loading = true;
-  const wantTimeline = state.view === 'runtime';
+  const wantTraces = state.view === 'runtime';
   const wantModels = runtimeWantsModelCatalog();
-  const keys = ['status', 'modelSource', ...(wantModels ? ['models'] : []), ...(wantTimeline ? ['traces', 'memories'] : [])];
+  const keys = ['status', 'modelSource', ...(wantModels ? ['models'] : []), ...(wantTraces ? ['traces'] : [])];
   const requests = keys.map((key) => {
     if (key === 'status') return api('/admin/api/memory-runtime/status');
     if (key === 'modelSource') return api('/admin/api/memory-runtime/model-source');
     if (key === 'models') return api('/admin/api/models');
     if (key === 'traces') return api('/admin/api/memory-runtime/traces?limit=20');
-    const internal = state.runtime.includeInternal === true ? '&includeInternal=1' : '';
-    return api(`/admin/api/memories?limit=200${internal}`);
+    return Promise.reject(new Error(`unknown runtime request: ${key}`));
   });
   const results = await Promise.allSettled(requests);
   const errors = {};
@@ -4221,7 +4273,7 @@ async function ensureRuntimeData({ force = false } = {}) {
         reason: result.value?.reason ?? null,
         error: result.value?.error ?? null,
       };
-    } else if (key === 'memories') state.runtime.memories = result.value;
+    }
   });
   state.runtime.errors = errors;
   state.runtime.loading = false;
@@ -4372,164 +4424,12 @@ async function loadRuntimeTrace(id) {
   renderRuntimeTraces();
 }
 
-function toggleRuntimeObject(id) {
-  state.runtime.objectDetail = state.runtime.objectDetail?.id === id ? null : { id };
-  renderRuntimeTimeline();
-}
-
-async function runtimeMemoryAction(id, action) {
-  if (MOCK) { showToast(t('common.mockReadOnly')); return; }
-  if (!state.features.writes) { showToast(t('settings.runtime.readonly')); return; }
-  if (action === 'delete') {
-    const ok = await confirmModal({
-      title: t('memories.delete.title'),
-      body: t('memories.delete.body', { id }),
-      confirmLabel: t('memories.action.delete'),
-    });
-    if (!ok) return;
-  }
-  try {
-    await api(`/admin/api/memories/${encodeURIComponent(id)}/${action}`, { method: 'POST', body: {} });
-    showToast(action === 'delete'
-      ? t('memories.toast.deleted', { id })
-      : action === 'archive' ? t('memories.toast.archived', { id }) : t('memories.toast.unarchived', { id }));
-    state.runtime.loadedAt = 0;
-    await ensureRuntimeData({ force: true });
-    await refresh();
-  } catch (error) {
-    showToast(t('runtime.timeline.actionFailed', { message: localizeError(error, 'errors.unknown') }));
-  }
-}
-
-function runtimeStatusCard(title, chip, body) {
-  return `<section class="runtime-card crt-surface">
-    <div class="runtime-card-head"><h3>${escapeHtml(title)}</h3>${chip ? `<span class="crt-tag">${escapeHtml(chip)}</span>` : ''}</div>
-    ${body}
-  </section>`;
-}
-
 function renderRuntimeStatus() {
-  const status = state.runtime.status;
-  const error = state.runtime.errors.status;
-  if (!status) {
-    if (error) return `<section class="runtime-card crt-surface"><p class="crt-warn">${escapeHtml(t('runtime.error', { message: error }))}</p></section>`;
-    return `<section class="runtime-card crt-surface"><p class="muted">${escapeHtml(t('runtime.loading'))}</p></section>`;
-  }
-  const enabled = memoryRuntimeModeOf(status, currentConfigFile()) === 'immersive';
-  const stateLabel = runtimeStatusStateLabel(status);
-  const model = status.model ?? null;
-  const modelRows = model
-    ? [
-      [t('settings.runtime.modelStatus.configured'), runtimeModelSourceLabel(model.configured)],
-      [t('settings.runtime.modelStatus.active'), runtimeModelSourceLabel(model.active)],
-      [t('settings.runtime.modelStatus.degraded'), model.degraded ? t('runtime.sidecar.degradedYes') : t('runtime.sidecar.degradedNo')],
-      [t('settings.runtime.modelStatus.reason'), runtimeModelReasonLabel(model.reason)],
-    ]
-    : [[t('settings.runtime.modelStatus.state'), t('settings.runtime.modelStatus.unavailable')]];
-  return `
-    ${runtimeStatusCard(t('runtime.access.title'), enabled ? t('runtime.sidecar.immersive') : t('runtime.sidecar.lightweight'), `
-      <p class="muted">${escapeHtml(enabled ? t('runtime.access.onHint') : t('runtime.access.offHint'))}</p>
-      <p class="runtime-mode-settings-hint muted">${escapeHtml(t('runtime.access.settingsHint'))}</p>
-    `)}
-    ${runtimeStatusCard(t('runtime.status.title'), stateLabel, `
-      ${runtimeStatusFactsHtml(status)}
-      ${!status.available && enabled ? `<p class="runtime-pending">${escapeHtml(t('runtime.sidecar.notReady'))}</p>` : ''}
-    `)}
-    ${enabled ? runtimeStatusCard(t('runtime.model.title'), model?.degraded ? t('runtime.sidecar.degraded') : '', `
-      <dl class="runtime-kv" data-rt-model-status>${modelRows.map(([label, value]) => `<div class="kv-row"><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(String(value))}</dd></div>`).join('')}</dl>
-      <p class="muted">${escapeHtml(t('runtime.model.note'))}</p>
-    `) : ''}
-  `;
+  return runtimeStatusBandHtml(state.runtime.status, state.runtime.errors.status ?? '');
 }
 
-function runtimeTimelineControlsHtml() {
-  const includeInternal = state.runtime.includeInternal === true;
-  const filter = state.runtime.timelineFilter;
-  const canInternal = state.features.writes && !MOCK;
-  const filters = [
-    ['all', 'runtime.timeline.all'],
-    ['memory', 'runtime.timeline.memory'],
-    ['compact', 'runtime.timeline.compact'],
-    ['checkpoint', 'runtime.timeline.checkpoint'],
-    ['self', 'runtime.timeline.self'],
-  ];
-  return `${filters.map(([value, key]) => {
-    const disabled = !includeInternal && value !== 'all' && value !== 'memory';
-    return `<button class="btn btn-small btn-crt" type="button" data-rt-filter="${value}" aria-pressed="${filter === value}" ${disabled || !canInternal ? 'disabled' : ''}>${escapeHtml(t(key))}</button>`;
-  }).join('')}
-  <label class="runtime-internal-toggle"><input type="checkbox" data-rt-internal-toggle ${includeInternal ? 'checked' : ''} ${canInternal ? '' : 'disabled'}> ${escapeHtml(t('runtime.timeline.internalToggle'))}</label>
-  <p class="runtime-internal-hint muted">${escapeHtml(t('runtime.timeline.internalHint'))}</p>`;
-}
-
-function runtimeObjectDetailHtml(memory) {
-  if (!memory) return '';
-  const rows = [
-    [t('runtime.timeline.type'), String(memory.type ?? '—')],
-    [t('runtime.timeline.namespace'), String(memory.namespace ?? 'default')],
-    [t('runtime.timeline.created'), formatTime(memory.createdAt)],
-    [t('runtime.timeline.updated'), formatTime(memory.updatedAt)],
-  ];
-  if (Array.isArray(memory.tags) && memory.tags.length > 0) {
-    rows.push([t('runtime.timeline.tags'), memory.tags.join(' · ')]);
-  }
-  return `<div class="runtime-detail" data-runtime-object="${escapeHtml(memory.id)}">
-    <dl class="runtime-kv">${rows.map(([label, value]) => `<div class="kv-row"><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join('')}</dl>
-    <p class="mem-preview">${escapeHtml(memory.preview || t('memories.emptyPreview'))}</p>
-    ${runtimeTimelineKind(memory) !== 'memory' ? `<p class="muted">${escapeHtml(t('runtime.timeline.internalBadge'))} · ${escapeHtml(String(memory.namespace ?? '—'))}</p>` : ''}
-  </div>`;
-}
-
-function renderRuntimeTimeline() {
-  const list = $('#runtime-timeline');
-  const controls = $('#runtime-timeline-controls');
-  if (!list) return;
-  if (controls) controls.innerHTML = runtimeTimelineControlsHtml();
-  const data = state.runtime.memories;
-  const error = state.runtime.errors.memories;
-  if (!data) {
-    list.innerHTML = `<p class="muted">${escapeHtml(error ? t('runtime.timeline.error', { message: error }) : t('runtime.timeline.loading'))}</p>`;
-    return;
-  }
-  const rows = filterRuntimeTimeline(data.memories, {
-    filter: state.runtime.timelineFilter,
-    includeInternal: state.runtime.includeInternal,
-  });
-  if (rows.length === 0) {
-    list.innerHTML = `<p class="muted">${escapeHtml(t('runtime.timeline.empty'))}</p>`;
-    return;
-  }
-  list.innerHTML = rows.map((memory) => {
-    const kind = runtimeTimelineKind(memory);
-    const internal = kind !== 'memory';
-    const badges = [
-      memory.archived ? `<span class="crt-tag crt-tag-warn">${escapeHtml(t('memories.badge.archived'))}</span>` : '',
-      memory.deleted ? `<span class="crt-tag crt-tag-error">${escapeHtml(t('memories.badge.deleted'))}</span>` : '',
-      internal ? `<span class="crt-tag crt-tag-warn">${escapeHtml(t('runtime.timeline.internalBadge'))}</span>` : '',
-    ].filter(Boolean).join(' ');
-    const open = state.runtime.objectDetail?.id === memory.id;
-    const writable = state.features.writes && !MOCK;
-    const actions = [
-      `<button class="btn btn-small btn-crt" type="button" data-rt-object="${escapeHtml(memory.id)}">${escapeHtml(open ? t('runtime.timeline.hide') : t('runtime.timeline.view'))}</button>`,
-      ...(writable ? [
-        `<button class="btn btn-small btn-crt" type="button" data-rt-mem-action="${memory.archived ? 'unarchive' : 'archive'}" data-rt-mem-id="${escapeHtml(memory.id)}">${escapeHtml(memory.archived ? t('memories.action.unarchive') : t('memories.action.archive'))}</button>`,
-        `<button class="btn btn-small btn-crt" type="button" data-rt-mem-action="delete" data-rt-mem-id="${escapeHtml(memory.id)}">${escapeHtml(t('memories.action.delete'))}</button>`,
-      ] : []),
-    ].join(' ');
-    return `<article class="mem-row runtime-timeline-row crt-surface" data-rt-mem-row="${escapeHtml(memory.id)}" data-rt-kind="${escapeHtml(kind)}">
-      <div class="mem-main">
-        <div class="mem-head">
-          <span class="crt-tag">${escapeHtml(t(`runtime.timeline.${kind}`))}</span>
-          <span class="crt-tag">${escapeHtml(String(memory.namespace ?? 'default'))}</span>
-          ${badges}
-          <code class="mem-id">${escapeHtml(memory.id)}</code>
-        </div>
-        <p class="mem-preview">${escapeHtml(memory.preview || t('memories.emptyPreview'))}</p>
-        <p class="muted mem-meta">${escapeHtml(t('memories.meta.created', { time: formatTime(memory.createdAt) }))}</p>
-        ${open ? runtimeObjectDetailHtml(memory) : ''}
-      </div>
-      <div class="mem-actions">${actions}</div>
-    </article>`;
-  }).join('');
+function runtimeStateHtml(text, { tone = '', busy = false, attrs = '' } = {}) {
+  return `<li class="rt-state${tone ? ` is-${tone}` : ''}"${busy ? ' aria-busy="true"' : ''}${attrs ? ` ${attrs}` : ''}>${escapeHtml(text)}</li>`;
 }
 
 function runtimeTraceCitationIds(entry) {
@@ -4564,11 +4464,14 @@ function runtimeTraceProvenanceText(entry) {
 }
 
 function runtimeTraceDetailHtml(trace, detail) {
-  if (!detail) return '';
-  if (detail.loading) return `<p class="runtime-detail muted">${escapeHtml(t('runtime.trace.detailLoading'))}</p>`;
-  if (detail.error) return `<p class="runtime-detail crt-warn">${escapeHtml(t('runtime.trace.detailError', { message: detail.error }))}</p>`;
+  if (!trace) return '';
+  const traceId = escapeHtml(trace.id);
+  const wrap = (body) => `<div class="rt-detail runtime-trace-detail" id="rt-trace-detail-${traceId}" data-runtime-trace="${traceId}">${body}</div>`;
+  if (!detail) return wrap(`<p class="rt-detail-note muted">${escapeHtml(t('runtime.trace.detailLoading'))}</p>`);
+  if (detail.loading) return wrap(`<p class="rt-detail-note muted">${escapeHtml(t('runtime.trace.detailLoading'))}</p>`);
+  if (detail.error) return wrap(`<p class="rt-detail-note crt-warn" role="alert">${escapeHtml(t('runtime.trace.detailError', { message: detail.error }))}</p>`);
   const data = detail.trace ?? trace;
-  if (!data) return `<p class="runtime-detail muted">${escapeHtml(t('runtime.trace.detailUnavailable'))}</p>`;
+  if (!data) return wrap(`<p class="rt-detail-note muted">${escapeHtml(t('runtime.trace.detailUnavailable'))}</p>`);
   const hits = Array.isArray(data.hits) ? data.hits : [];
   const candidates = Array.isArray(data.candidates) ? data.candidates : [];
   const injected = Array.isArray(data.injected) ? data.injected : [];
@@ -4615,13 +4518,19 @@ function runtimeTraceDetailHtml(trace, detail) {
       const score = typeof hit.score === 'number' ? hit.score.toFixed(2) : '—';
       return `<li>${escapeHtml(t('runtime.trace.hit', { rank: hit.rank ?? '—', type: hit.type ?? '—', score }))} <code>${escapeHtml(hit.id ?? '')}</code></li>`;
     }).join('')}</ul>`
-    : `<p class="muted">${escapeHtml(t('runtime.trace.noHits'))}</p>`;
-  return `<div class="runtime-detail runtime-trace-detail" data-runtime-trace="${escapeHtml(data.id ?? trace.id)}">
+    : `<p class="rt-detail-note muted">${escapeHtml(t('runtime.trace.noHits'))}</p>`;
+  const canFeedback = state.features.writes && !MOCK && runtimeSidecarReady();
+  return wrap(`
+    <p class="rt-detail-id"><span>${escapeHtml(t('runtime.trace.id'))}</span> <code>${traceId}</code></p>
     ${reasons.length > 0 ? `<ul class="runtime-trace-why">${reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join('')}</ul>` : ''}
     ${hitHtml}
-    ${citations.size > 0 ? `<p class="mem-preview">${escapeHtml(t('runtime.trace.citations', { citations: [...citations].join(' · ') }))}</p>` : ''}
+    ${citations.size > 0 ? `<p class="rt-detail-preview">${escapeHtml(t('runtime.trace.citations', { citations: [...citations].join(' · ') }))}</p>` : ''}
     ${contextRows.length > 0 ? `<ul class="runtime-trace-context-list">${contextRows.join('')}</ul>` : ''}
-  </div>`;
+    <div class="rt-detail-actions" role="group" aria-label="${escapeHtml(t('runtime.trace.feedback'))}">
+      <button class="btn btn-small btn-crt" type="button" data-rt-trace-useful="${traceId}" data-useful="true" ${canFeedback ? '' : 'disabled'} title="${escapeHtml(canFeedback ? '' : t('runtime.trace.feedbackMode'))}">${escapeHtml(t('runtime.trace.useful'))}</button>
+      <button class="btn btn-small btn-crt" type="button" data-rt-trace-useful="${traceId}" data-useful="false" ${canFeedback ? '' : 'disabled'} title="${escapeHtml(canFeedback ? '' : t('runtime.trace.feedbackMode'))}">${escapeHtml(t('runtime.trace.notUseful'))}</button>
+    </div>
+  `);
 }
 
 function renderRuntimeTraces() {
@@ -4631,22 +4540,23 @@ function renderRuntimeTraces() {
   const error = state.runtime.errors.traces;
   const meta = state.runtime.traceMeta;
   if (meta?.disabled) {
-    list.innerHTML = `<p class="muted" data-rt-traces-disabled>${escapeHtml(t('runtime.trace.disabled'))}</p>`;
+    list.innerHTML = runtimeStateHtml(t('runtime.trace.disabled'), { attrs: 'data-rt-traces-disabled' });
     return;
   }
   if (meta && meta.available === false) {
-    list.innerHTML = `<p class="muted" data-rt-traces-unavailable>${escapeHtml(t('runtime.trace.unavailable', { state: t(runtimeSidecarStateKey(meta.state)) }))}</p>`;
+    list.innerHTML = runtimeStateHtml(t('runtime.trace.unavailable', { state: t(runtimeSidecarStateKey(meta.state)) }), { attrs: 'data-rt-traces-unavailable' });
     return;
   }
   if (!data) {
-    list.innerHTML = `<p class="muted">${escapeHtml(error ? t('runtime.trace.error', { message: error }) : t('runtime.loading'))}</p>`;
+    list.innerHTML = error
+      ? runtimeStateHtml(t('runtime.trace.error', { message: error }), { tone: 'error', attrs: 'role="alert"' })
+      : runtimeStateHtml(t('runtime.loading'), { busy: true });
     return;
   }
   if (data.length === 0) {
-    list.innerHTML = `<p class="muted">${escapeHtml(t('runtime.trace.empty'))}</p>`;
+    list.innerHTML = runtimeStateHtml(t('runtime.trace.empty'));
     return;
   }
-  const canFeedback = state.features.writes && !MOCK && runtimeSidecarReady();
   list.innerHTML = data.map((trace) => {
     const open = state.runtime.traceOpen?.[trace.id] === true;
     const detail = state.runtime.traceDetails?.[trace.id];
@@ -4657,25 +4567,25 @@ function renderRuntimeTraces() {
     const tookMs = trace.timing?.totalMs ?? trace.tookMs ?? 0;
     const model = trace.model?.query ?? trace.model?.embedding ?? trace.model?.extractor ?? '—';
     const domains = Array.isArray(trace.domains) ? trace.domains : Array.isArray(trace.namespaces) ? trace.namespaces : [];
-    return `<article class="mem-row runtime-trace-row crt-surface" data-rt-trace-row="${escapeHtml(trace.id)}">
-      <div class="mem-main">
-        <div class="mem-head">
-          <span class="crt-tag">${escapeHtml(formatTime(trace.at))}</span>
-          ${trace.degraded ? `<span class="crt-tag crt-tag-warn">${escapeHtml(t('runtime.trace.degraded'))}</span>` : ''}
-          ${feedback ? `<span class="crt-tag ${feedback.useful ? 'crt-tag-ok' : 'crt-tag-error'}">${escapeHtml(t(feedback.useful ? 'runtime.trace.feedbackUseful' : 'runtime.trace.feedbackNotUseful'))}</span>` : ''}
-          <code class="mem-id">${escapeHtml(trace.id)}</code>
-        </div>
-        <p class="mem-preview">${escapeHtml(trace.queryPreview || t('runtime.trace.noQuery'))}</p>
-        <p class="muted mem-meta">${escapeHtml(t('runtime.trace.took', { ms: tookMs }))} · ${escapeHtml(t('runtime.trace.hits', { count: candidateCount }))} · ${escapeHtml(t('runtime.trace.injected', { count: injectedCount }))} · ${escapeHtml(t('runtime.trace.model', { model }))}</p>
-        ${domains.length > 0 ? `<p class="muted mem-meta">${escapeHtml(t('runtime.trace.domains', { domains: domains.join(', ') }))}</p>` : ''}
-        ${open ? runtimeTraceDetailHtml(trace, detail) : ''}
-        <div class="runtime-trace-actions">
-          <button class="btn btn-small btn-crt" type="button" data-rt-trace="${escapeHtml(trace.id)}">${escapeHtml(open ? t('runtime.timeline.hide') : t('runtime.trace.why'))}</button>
-          <button class="btn btn-small btn-crt" type="button" data-rt-trace-useful="${escapeHtml(trace.id)}" data-useful="true" ${canFeedback ? '' : 'disabled'} title="${escapeHtml(canFeedback ? '' : t('runtime.trace.feedbackMode'))}">${escapeHtml(t('runtime.trace.useful'))}</button>
-          <button class="btn btn-small btn-crt" type="button" data-rt-trace-useful="${escapeHtml(trace.id)}" data-useful="false" ${canFeedback ? '' : 'disabled'} title="${escapeHtml(canFeedback ? '' : t('runtime.trace.feedbackMode'))}">${escapeHtml(t('runtime.trace.notUseful'))}</button>
-        </div>
+    const badges = [
+      trace.degraded ? `<span class="crt-tag crt-tag-warn">${escapeHtml(t('runtime.trace.degraded'))}</span>` : '',
+      feedback ? `<span class="crt-tag ${feedback.useful ? 'crt-tag-ok' : 'crt-tag-error'}">${escapeHtml(t(feedback.useful ? 'runtime.trace.feedbackUseful' : 'runtime.trace.feedbackNotUseful'))}</span>` : '',
+    ].filter(Boolean).join(' ');
+    const metaText = `${t('runtime.trace.took', { ms: tookMs })} · ${t('runtime.trace.hits', { count: candidateCount })} · ${t('runtime.trace.injected', { count: injectedCount })} · ${t('runtime.trace.model', { model })}`;
+    return `<li class="audit-item rt-trace-row" data-rt-trace-row="${escapeHtml(trace.id)}">
+      <span class="audit-time">${escapeHtml(formatTime(trace.at))}</span>
+      <span class="crt-tag rt-trace-kind">${escapeHtml(t('runtime.trace.kind'))}</span>
+      <div class="rt-trace-main">
+        <p class="rt-trace-query">${escapeHtml(trace.queryPreview || t('runtime.trace.noQuery'))}</p>
+        ${badges ? `<div class="rt-trace-badges">${badges}</div>` : ''}
+        <p class="rt-trace-meta">${escapeHtml(metaText)}</p>
+        ${domains.length > 0 ? `<p class="rt-trace-meta">${escapeHtml(t('runtime.trace.domains', { domains: domains.join(', ') }))}</p>` : ''}
       </div>
-    </article>`;
+      <div class="rt-trace-action">
+        <button class="btn btn-small btn-crt" type="button" data-rt-trace="${escapeHtml(trace.id)}" aria-expanded="${open}" aria-controls="rt-trace-detail-${escapeHtml(trace.id)}">${escapeHtml(open ? t('runtime.trace.collapse') : t('runtime.trace.why'))}</button>
+      </div>
+      ${open ? runtimeTraceDetailHtml(trace, detail) : ''}
+    </li>`;
   }).join('');
 }
 
@@ -4683,15 +4593,7 @@ function renderRuntime() {
   if (state.view !== 'runtime') return;
   const root = $('#runtime-status');
   if (!root) return;
-  const badge = $('#runtime-head-mode');
-  const status = state.runtime.status;
-  if (badge) {
-    badge.hidden = !status;
-    const enabled = status ? memoryRuntimeEnabledOf(status, currentConfigFile()) : false;
-    badge.textContent = status ? t(enabled ? 'runtime.sidecar.immersive' : 'runtime.sidecar.lightweight') : '';
-  }
   root.innerHTML = renderRuntimeStatus();
-  renderRuntimeTimeline();
   renderRuntimeTraces();
 }
 
@@ -5882,16 +5784,6 @@ $('#runtime-refresh')?.addEventListener('click', () => {
   })();
 });
 $('#runtime-view')?.addEventListener('click', (event) => {
-  const filter = event.target.closest('[data-rt-filter]');
-  if (filter) {
-    state.runtime.timelineFilter = filter.dataset.rtFilter;
-    renderRuntimeTimeline();
-    return;
-  }
-  const object = event.target.closest('[data-rt-object]');
-  if (object) { toggleRuntimeObject(object.dataset.rtObject); return; }
-  const memActionButton = event.target.closest('[data-rt-mem-action]');
-  if (memActionButton) { void runtimeMemoryAction(memActionButton.dataset.rtMemId, memActionButton.dataset.rtMemAction); return; }
   const traceToggle = event.target.closest('[data-rt-trace]');
   if (traceToggle) {
     const id = traceToggle.dataset.rtTrace;
@@ -5904,17 +5796,6 @@ $('#runtime-view')?.addEventListener('click', (event) => {
   if (feedback) {
     void runtimeTraceFeedback(feedback.dataset.rtTraceUseful, feedback.dataset.useful === 'true');
   }
-});
-$('#runtime-view')?.addEventListener('change', (event) => {
-  const internal = event.target.closest('[data-rt-internal-toggle]');
-  if (!internal) return;
-  state.runtime.includeInternal = internal.checked === true;
-  state.runtime.timelineFilter = state.runtime.includeInternal ? 'all' : 'memory';
-  state.runtime.loadedAt = 0;
-  void (async () => {
-    await ensureRuntimeData({ force: true });
-    renderRuntime();
-  })();
 });
 
 // UX-2「需要注意」浮卡：点击直达处理位（助手 → 设置·AI 助手；对端 → 设备卡）
@@ -7650,16 +7531,6 @@ function mockRuntimeData(now) {
       ],
       model: { query: 'heuristic' },
     }],
-    memories: {
-      total: 5,
-      memories: [
-        { id: '01MOCKMEMORY000000000000001', type: 'fact', namespace: 'notes', preview: '演示记忆：偏好深色主题', createdAt: now - 240_000, archived: false, deleted: false },
-        { id: '01MOCKMEMORY000000000000003', type: 'episode', namespace: 'default', preview: '演示对话情节', createdAt: now - 360_000, archived: false, deleted: false },
-        { id: '01MOCKCOMPACT00000000000001', type: 'compact', namespace: 'notes', preview: '摘要：两条偏好的合并视图', createdAt: now - 180_000, archived: false, deleted: false },
-        { id: '01MOCKCHECKPOINT000000000001', type: 'context_checkpoint', namespace: '__checkpoint__', preview: '任务 checkpoint · revision 3', createdAt: now - 120_000, archived: false, deleted: false },
-        { id: '01MOCKSELF00000000000000001', type: 'self_record', namespace: '__self__', preview: 'OpenCode 的自我记录', createdAt: now - 90_000, archived: false, deleted: false },
-      ],
-    },
   };
 }
 

@@ -734,86 +734,256 @@ async function main() {
     await evalJs('document.querySelector("#view-nav li:nth-of-type(1) button").click()');
     check('从记忆视图切回星图', await waitFor('document.querySelector("#memories-view")?.hidden === true'));
 
-    // 0.3 · 记忆运行时：状态 / 内部对象过滤 / 轨迹 / 反馈（全部经 admin 代理；模式开关只在设置里）
+    // 0.3 · 记忆运行时：四格状态带 + 单列召回轨迹（全部经 admin 代理；模式开关只在设置里）
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
     await evalJs('document.querySelector("#view-nav li:nth-of-type(5) button").click()');
     check('切换到运行时视图（#runtime-view 可见）', await waitFor('document.querySelector("#runtime-view")?.hidden === false'));
-    check('运行时状态卡：记忆模式 + 运行状态（只读，无启停开关/PID/模型包）',
+    check('运行时：三张状态卡已移除，顶部为四格状态带（服务 / 模式 / 模型来源 / 版本）',
       await waitFor(`(() => {
         const v = document.querySelector('#runtime-view');
-        const s = document.querySelector('#runtime-status');
-        return Boolean(v) && Boolean(s) && /记忆模式/.test(s.textContent) && /运行状态/.test(s.textContent)
-          && /模式/.test(s.textContent) && /状态/.test(s.textContent) && /降级/.test(s.textContent)
-          && /错误/.test(s.textContent) && /版本/.test(s.textContent) && /模型状态/.test(s.textContent)
-          && !s.querySelector('[data-rt-enabled]') && !s.querySelector('.runtime-pack')
-          && !/PID|Sidecar 健康|由 Mebular 管理/.test(s.textContent)
-          && /本机视角/.test(v.textContent);
+        const band = v?.querySelector('#runtime-status [data-rt-sidecar-status]');
+        const cells = band ? [...band.querySelectorAll('.rt-band-cell')] : [];
+        return Boolean(band) && cells.length === 4
+          && /服务状态/.test(band.textContent) && /记忆模式/.test(band.textContent)
+          && /模型来源/.test(band.textContent) && /版本/.test(band.textContent)
+          && /就绪/.test(band.textContent) && /沉浸式/.test(document.querySelector('#runtime-head-mode')?.textContent ?? '')
+          && v.querySelectorAll('.runtime-card').length === 0
+          && v.querySelectorAll('.runtime-layout').length === 0
+          && Boolean(band.querySelector('.rt-status-dot'))
+          && !/Bearer|host-token|tokenFile|token/i.test(v.textContent)
+          && !/PID|Sidecar 健康|由 Mebular 管理/.test(band.textContent);
       })()`, 30000));
-    check('sidecar 由 MCP 自动启动并显示就绪（无 token 泄漏）',
-      await waitFor(`(() => {
-        const s = document.querySelector('#runtime-status [data-rt-sidecar-status]');
-        const head = document.querySelector('#runtime-head-mode');
-        return Boolean(s) && /就绪/.test(s.textContent) && /沉浸式/.test(head?.textContent ?? '')
-          && !/Bearer|host-token|tokenFile|token/i.test(document.querySelector('#runtime-view')?.textContent ?? '');
-      })()`, 30000));
-    check('运行时时间线默认只显示普通记录（compact/checkpoint/self 隐藏）',
-      await waitFor(`(() => {
-        const list = document.querySelector('#runtime-timeline');
-        return Boolean(list) && list.querySelectorAll('.mem-row').length >= 1
-          && list.querySelectorAll('[data-rt-kind=compact], [data-rt-kind=checkpoint], [data-rt-kind=self]').length === 0;
-      })()`, 20000));
-    await evalJs('document.querySelector("[data-rt-internal-toggle]").click()');
-    const internalVisible = await waitFor(`(() => {
-        const list = document.querySelector('#runtime-timeline');
-        return Boolean(list)
-          && list.querySelectorAll('[data-rt-kind=compact]').length >= 1
-          && list.querySelectorAll('[data-rt-kind=checkpoint]').length >= 1
-          && list.querySelectorAll('[data-rt-kind=self]').length >= 1;
-      })()`, 20000);
-    check('管理员打开「显示内部对象」后出现 compact / checkpoint / self', internalVisible,
-      internalVisible ? '' : await evalJs(`(async () => {
-        const api = await fetch('/admin/api/memories?limit=200&includeInternal=1').then((r) => r.json()).catch(() => null);
-        return JSON.stringify({
-          checked: document.querySelector('[data-rt-internal-toggle]')?.checked ?? null,
-          rows: [...document.querySelectorAll('#runtime-timeline .mem-row')].map((row) => row.dataset.rtKind),
-          api: (api?.memories ?? []).map((memory) => memory.type),
-        });
+    check('正常就绪时只有状态带，不再重复说明（无独立 warning 行）',
+      await evalJs(`document.querySelectorAll('#runtime-view .rt-alert').length === 0`));
+    check('运行时只保留状态带 + 召回轨迹：无时间线、无筛选、无内部对象开关、无两视图 tab',
+      await evalJs(`(() => {
+        const v = document.querySelector('#runtime-view');
+        return !v.querySelector('#runtime-timeline')
+          && !v.querySelector('#runtime-timeline-controls')
+          && !v.querySelector('#runtime-filter')
+          && !v.querySelector('[data-rt-internal-toggle]')
+          && !v.querySelector('[data-rt-object]')
+          && !v.querySelector('[data-rt-mem-action]')
+          && !v.querySelector('[role=tablist]')
+          && Boolean(document.querySelector('#runtime-traces'));
       })()`));
-    await evalJs('document.querySelector("[data-rt-filter=compact]").click()');
-    check('时间线筛选 compact：只显示摘要行',
-      await waitFor(`(() => {
-        const rows = [...document.querySelectorAll('#runtime-timeline .mem-row')];
-        return rows.length >= 1 && rows.every((row) => row.dataset.rtKind === 'compact')
-          && /内部 · 管理员/.test(document.querySelector('#runtime-timeline')?.textContent ?? '');
-      })()`, 20000));
-    await evalJs('document.querySelector("#runtime-timeline [data-rt-object]").click()');
-    check('内部对象可查看（compact 类型/域，仅管理员视图）',
-      await waitFor(`(() => {
-        const d = document.querySelector('#runtime-timeline .runtime-detail');
-        return Boolean(d) && d.hasAttribute('data-runtime-object') && /compact/.test(d.textContent)
-          && /内部 · 管理员/.test(d.textContent);
-      })()`, 20000));
-    await evalJs('document.querySelector("#runtime-timeline [data-rt-object]").click()');
-    check('召回轨迹可见（经 /admin/api/memory-runtime/traces 代理）',
+    check('召回轨迹有可见 h3 标题（13/700/18），section 与列表用 aria-labelledby 指向它',
+      await evalJs(`(() => {
+        const title = document.querySelector('#runtime-trace-title');
+        const list = document.querySelector('#runtime-traces');
+        const section = title?.closest('section');
+        const cs = title ? getComputedStyle(title) : null;
+        return Boolean(title) && /召回轨迹 · 为什么想起/.test(title.textContent)
+          && cs && [cs.fontSize, cs.fontWeight, cs.lineHeight].join(' / ') === '13px / 700 / 18px'
+          && section?.getAttribute('aria-labelledby') === 'runtime-trace-title'
+          && list?.getAttribute('aria-labelledby') === 'runtime-trace-title';
+      })()`));
+    check('召回轨迹可见（经 /admin/api/memory-runtime/traces 代理），首行可交互',
       await waitFor(`(() => {
         const list = document.querySelector('#runtime-traces');
-        return Boolean(list) && /UI 召回/.test(list.textContent) && Boolean(list.querySelector('[data-rt-trace]'));
+        const row = list?.querySelector('[data-rt-trace-row]');
+        return Boolean(row) && /UI 召回/.test(list.textContent) && Boolean(row.querySelector('[data-rt-trace]'));
       })()`, 30000));
+    const traceRow = await evalJs(`(() => {
+      const row = document.querySelector('#runtime-traces [data-rt-trace-row]');
+      const text = row?.textContent ?? '';
+      const cs = row ? getComputedStyle(row) : null;
+      const tag = row?.querySelector('.crt-tag');
+      const btn = row?.querySelector('.btn-small');
+      return {
+        ledger: Boolean(row) && row.classList.contains('audit-item') && !row.classList.contains('crt-surface')
+          && cs.borderRadius === '0px' && cs.borderBottomStyle === 'dashed' && cs.backgroundColor === 'rgba(0, 0, 0, 0)',
+        oneAction: row?.querySelectorAll('[data-rt-trace]').length === 1,
+        feedbackInRow: row?.querySelectorAll('[data-rt-trace-useful]').length ?? 0,
+        time: Boolean(row?.querySelector('.audit-time')),
+        tag: tag ? getComputedStyle(tag).fontSize : '',
+        actionH: btn ? Math.round(btn.getBoundingClientRect().height) : 0,
+        btnSmall: Boolean(btn?.classList.contains('btn-small')),
+        took: /9 ms/.test(text), candidates: /候选/.test(text), fragments: /片段/.test(text),
+        model: /模型/.test(text), scope: /范围/.test(text),
+      };
+    })()`);
+    check('轨迹行：审计扁平行派生（时间 / 标签 / 查询 / 紧凑 meta / 范围 / 一个动作），反馈在详情',
+      traceRow.ledger && traceRow.oneAction && traceRow.feedbackInRow === 0 && traceRow.time
+        && traceRow.tag === '10px' && traceRow.btnSmall && traceRow.actionH >= 20
+        && traceRow.took && traceRow.candidates && traceRow.fragments && traceRow.model && traceRow.scope,
+      JSON.stringify(traceRow));
+    await captureNow('u5-after-runtime-traces-1440.jpg');
     await evalJs('document.querySelector("#runtime-traces [data-rt-trace]").click()');
-    check('轨迹详情：命中 + citations / confidence / domain / owner / provenance',
+    check('轨迹行可展开：aria-controls 指向详情节点，命中 + citations / confidence / domain / owner / provenance + 反馈动作',
       await waitFor(`(() => {
         const d = document.querySelector('#runtime-traces .runtime-trace-detail');
-        if (!d) return false;
+        const toggle = document.querySelector('#runtime-traces [data-rt-trace]');
+        const controlled = toggle?.getAttribute('aria-controls');
+        const target = controlled ? document.getElementById(controlled) : null;
+        if (!d || !target || target !== d) return false;
         const text = d.textContent;
         return /fact/.test(text) && /0.91/.test(text) && /citations/.test(text) && /confidence/.test(text)
-          && /domain/.test(text) && /owner/.test(text) && /provenance/.test(text) && /agent:opencode/.test(text);
+          && /domain/.test(text) && /owner/.test(text) && /provenance/.test(text) && /agent:opencode/.test(text)
+          && Boolean(d.querySelector('[data-rt-trace-useful]'));
       })()`, 30000));
-    check('sidecar ready 时反馈按钮可用',
-      await evalJs('(() => { const b = document.querySelector("#runtime-traces [data-rt-trace-useful]"); return Boolean(b) && b.disabled === false; })()'));
-    await evalJs('document.querySelector("#runtime-traces [data-rt-trace-useful]").click()');
-    check('反馈经 admin 代理写入并即时显示',
-      await waitFor('(() => { const list = document.querySelector("#runtime-traces"); return Boolean(list) && /已标记有用/.test(list.textContent); })()', 30000));
-    await evalJs('document.querySelector("[data-rt-filter=memory]").click()');
-    const beforeModeSwitch = await evalJs('document.querySelectorAll("#runtime-timeline .mem-row[data-rt-kind=memory]").length');
+    await captureNow('u5-after-runtime-traces-expanded-1440.jpg');
+    check('sidecar ready 时反馈按钮可用（详情内）',
+      await evalJs('(() => { const b = document.querySelector("#runtime-traces .runtime-trace-detail [data-rt-trace-useful]"); return Boolean(b) && b.disabled === false; })()'));
+    await evalJs('document.querySelector("#runtime-traces .runtime-trace-detail [data-rt-trace-useful]").click()');
+    check('反馈经 admin 代理写入并即时显示为状态徽标',
+      await waitFor(`(() => {
+        const row = document.querySelector('#runtime-traces [data-rt-trace-row]');
+        return Boolean(row) && /已标记有用/.test(row.textContent) && Boolean(row.querySelector('.crt-tag.crt-tag-ok'));
+      })()`, 30000));
+    await evalJs('document.querySelector("#runtime-traces [data-rt-trace]").click()');
+    await waitFor('!document.querySelector("#runtime-traces .runtime-trace-detail")');
+    const first1440 = await evalJs(`(() => {
+      const row = document.querySelector('#runtime-traces [data-rt-trace-row]');
+      const v = document.querySelector('#runtime-view');
+      if (!row) return { ok: false };
+      const r = row.getBoundingClientRect();
+      return {
+        ok: r.top >= 0 && r.top < innerHeight,
+        top: Math.round(r.top), vh: innerHeight,
+        docOver: document.documentElement.scrollWidth - innerWidth,
+        panelOver: v.scrollWidth - v.clientWidth,
+      };
+    })()`);
+    check('1440 首屏可见第一条召回轨迹，页面与面板无横向溢出',
+      first1440.ok && first1440.docOver <= 1 && first1440.panelOver <= 1, JSON.stringify(first1440));
+    await setViewport({ width: 900, height: 900, deviceScaleFactor: 1, mobile: false });
+    const at900 = await evalJs(`(() => {
+      const band = document.querySelector('#runtime-status .rt-band');
+      const cells = band ? [...band.querySelectorAll('.rt-band-cell')] : [];
+      const tops = cells.map((cell) => cell.getBoundingClientRect().top);
+      const row = document.querySelector('#runtime-traces [data-rt-trace-row]');
+      const r = row?.getBoundingClientRect();
+      const v = document.querySelector('#runtime-view');
+      return {
+        four: cells.length === 4,
+        twoByTwo: tops.length === 4 && tops[2] > tops[0] + 4,
+        firstVisible: Boolean(r) && r.top >= 0 && r.top < innerHeight,
+        top: Math.round(r?.top ?? -1),
+        docOver: document.documentElement.scrollWidth - innerWidth,
+        panelOver: v.scrollWidth - v.clientWidth,
+      };
+    })()`);
+    check('900 状态带 2×2，第一条召回轨迹仍在首屏，无横向溢出',
+      at900.four && at900.twoByTwo && at900.firstVisible && at900.docOver <= 1 && at900.panelOver <= 1,
+      JSON.stringify(at900));
+    await captureNow('u5-after-runtime-traces-900.jpg');
+    await setViewport({ width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    const at390 = await evalJs(`(() => {
+      const row = document.querySelector('#runtime-traces [data-rt-trace-row]');
+      const time = row?.querySelector('.audit-time');
+      const main = row?.querySelector('.rt-trace-main');
+      const v = document.querySelector('#runtime-view');
+      return {
+        stacked: Boolean(time) && Boolean(main) && time.getBoundingClientRect().top < main.getBoundingClientRect().top,
+        firstVisible: Boolean(row) && row.getBoundingClientRect().top < innerHeight,
+        docOver: document.documentElement.scrollWidth - innerWidth,
+        panelOver: v.scrollWidth - v.clientWidth,
+        bodyOver: document.body.scrollWidth - document.body.clientWidth,
+      };
+    })()`);
+    check('390 行堆叠、首行可见，页面 / 面板 / body 均无横向溢出',
+      at390.stacked && at390.firstVisible && at390.docOver <= 1 && at390.panelOver <= 1 && at390.bodyOver <= 1,
+      JSON.stringify(at390));
+    await captureNow('u5-after-runtime-traces-390.jpg');
+
+    // 主页面一致性：运行时标题 / 工具栏 / 页面级按钮 / 行语言与共享、记忆、审计同源。
+    const readShell = (viewId, buttonSel, rowSel) => evalJs(`(() => {
+      const v = document.getElementById(${JSON.stringify(viewId)});
+      if (!v || v.hidden) return null;
+      const head = v.querySelector('.audit-toolbar .view-head h2');
+      const bar = v.querySelector('.audit-toolbar');
+      const btn = v.querySelector(${JSON.stringify(buttonSel)});
+      const row = ${JSON.stringify(rowSel)} ? v.querySelector(${JSON.stringify(rowSel)}) : null;
+      const hs = head ? getComputedStyle(head) : null;
+      const bs = btn ? getComputedStyle(btn) : null;
+      const br = btn ? btn.getBoundingClientRect() : null;
+      const rs = row ? getComputedStyle(row) : null;
+      const rowBtn = row?.querySelector('.btn-small');
+      return {
+        view: ${JSON.stringify(viewId)},
+        h2: hs ? [hs.fontSize, hs.fontWeight, hs.lineHeight, hs.letterSpacing].join(' / ') : null,
+        toolbarH: bar ? Math.round(bar.getBoundingClientRect().height) : null,
+        toolbarTop: bar ? Math.round(bar.getBoundingClientRect().top) : null,
+        button: br ? { h: Math.round(br.height), pad: bs.padding, radius: bs.borderRadius } : null,
+        row: rs ? { pad: rs.padding, radius: rs.borderRadius, borderBottom: rs.borderBottomStyle, btnH: rowBtn ? Math.round(rowBtn.getBoundingClientRect().height) : null } : null,
+        docOver: document.documentElement.scrollWidth - innerWidth,
+      };
+    })()`);
+    const readConsistency = async (suffix) => {
+      await evalJs('document.querySelector("#view-nav li:nth-of-type(5) button").click()');
+      await waitFor('document.querySelector("#runtime-view")?.hidden === false && Boolean(document.querySelector("#runtime-traces [data-rt-trace-row]"))', 20000);
+      const runtime = await readShell('runtime-view', '#runtime-refresh', '#runtime-traces .rt-trace-row');
+      await captureNow(`u5-consistency-runtime-${suffix}.jpg`);
+      await evalJs('document.querySelector("#view-nav li:nth-of-type(2) button").click()');
+      await waitFor('document.querySelector("#domains-view")?.hidden === false');
+      const shared = await readShell('domains-view', '#namespace-new', '#domains-list .sector-item');
+      await captureNow(`u5-consistency-shared-${suffix}.jpg`);
+      await evalJs('document.querySelector("#view-nav li:nth-of-type(3) button").click()');
+      await waitFor('document.querySelector("#memories-view")?.hidden === false');
+      const memories = await readShell('memories-view', '#mem-refresh', '#memories-list .mem-row');
+      await captureNow(`u5-consistency-memories-${suffix}.jpg`);
+      await evalJs('document.querySelector("#view-nav li:nth-of-type(4) button").click()');
+      await waitFor('document.querySelector("#audit-view")?.hidden === false');
+      const audit = await readShell('audit-view', '#audit-export', '#audit-list .audit-item');
+      await captureNow(`u5-consistency-audit-${suffix}.jpg`);
+      return { runtime, shared, memories, audit };
+    };
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    const shells1440 = await readConsistency('1440');
+    check('主页面一致性 1440：h2 13/700/18/3px、toolbar 高度、页面级按钮同源；运行时行 = 审计扁平行',
+      [shells1440.shared, shells1440.memories, shells1440.audit].every((s) => s
+        && s.h2 === shells1440.runtime.h2 && s.toolbarH === shells1440.runtime.toolbarH
+        && s.button && Math.abs(s.button.h - shells1440.runtime.button.h) <= 1
+        && s.button.pad === shells1440.runtime.button.pad && s.button.radius === shells1440.runtime.button.radius)
+        && shells1440.runtime.row?.radius === shells1440.audit.row?.radius
+        && shells1440.runtime.row?.borderBottom === shells1440.audit.row?.borderBottom
+        && shells1440.runtime.row?.pad === shells1440.audit.row?.pad
+        && shells1440.runtime.row?.btnH === shells1440.memories.row?.btnH
+        && shells1440.memories.row?.radius !== '0px',
+      JSON.stringify(shells1440));
+    await setViewport({ width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    const shells390 = await readConsistency('390');
+    check('主页面一致性 390：h2 / 页面级按钮仍同源，四页均无横向溢出',
+      [shells390.runtime, shells390.shared, shells390.memories, shells390.audit].every((s) => s
+        && s.h2 === shells390.runtime.h2 && s.docOver <= 1)
+        && [shells390.shared, shells390.memories, shells390.audit].every((s) => s.button
+          && Math.abs(s.button.h - shells390.runtime.button.h) <= 1
+          && s.button.pad === shells390.runtime.button.pad && s.button.radius === shells390.runtime.button.radius)
+        && shells390.runtime.row?.btnH === shells390.memories.row?.btnH,
+      JSON.stringify(shells390));
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await send('Page.navigate', { url: `${base}/console/?lang=en-US` });
+    await waitFor('document.documentElement?.dataset?.consoleReady === "1"');
+    await evalJs('document.querySelector("#view-nav li:nth-of-type(5) button").click()');
+    check('运行时英文：状态带 / 召回轨迹 / 行内动作全部走 i18n',
+      await waitFor(`(() => {
+        const v = document.querySelector('#runtime-view');
+        const text = v?.textContent ?? '';
+        const band = v?.querySelector('#runtime-status [data-rt-sidecar-status]');
+        const title = v?.querySelector('#runtime-trace-title');
+        return Boolean(band) && /Memory runtime/.test(text) && /Service status/.test(band.textContent)
+          && /Memory mode/.test(band.textContent) && /Model source/.test(band.textContent)
+          && /Version/.test(band.textContent)
+          && /Recall traces · why it was recalled/.test(title?.textContent ?? '')
+          && title?.closest('section')?.getAttribute('aria-labelledby') === 'runtime-trace-title'
+          && /Recall/.test(text)
+          && Boolean(document.querySelector('#runtime-traces [data-rt-trace-row]'));
+      })()`, 30000));
+    await captureNow('u5-after-runtime-traces-en-1440.jpg');
+    await send('Page.navigate', { url: `${base}/console/` });
+    await waitFor('document.documentElement?.dataset?.consoleReady === "1"');
+    await evalJs('document.querySelector("#view-nav li:nth-of-type(5) button").click()');
+    await waitFor('document.querySelector("#runtime-status [data-rt-sidecar-status]") && Boolean(document.querySelector("#runtime-traces [data-rt-trace-row]"))', 30000);
+    await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+    check('reduced-motion：召回轨迹行无动画与过渡依赖',
+      await evalJs(`(() => {
+        const row = document.querySelector('#runtime-traces .rt-trace-row');
+        return Boolean(row) && getComputedStyle(row).animationName === 'none'
+          && getComputedStyle(row).transitionDuration === '0s';
+      })()`));
+    await captureNow('u5-after-runtime-traces-reduced-motion-1440.jpg');
+    await send('Emulation.setEmulatedMedia', { features: [] });
     await evalJs('document.querySelector("#view-nav li:nth-of-type(1) button").click()');
     check('从运行时视图切回星图', await waitFor('document.querySelector("#runtime-view")?.hidden === true'));
 
@@ -1008,13 +1178,26 @@ async function main() {
       })()`, 30000));
     await evalJs('document.querySelector("#settings-close").click()');
     await evalJs('document.querySelector("#view-nav li:nth-of-type(5) button").click()');
-    check('轻量模式：轨迹显示未启用（不是 501/错误弹窗），普通记录数量不变',
+    check('轻量模式：召回轨迹显示未启用（不是 501/错误弹窗），无时间线回潮',
       await waitFor(`(() => {
         const head = document.querySelector('#runtime-head-mode')?.textContent ?? '';
-        const traces = document.querySelector('#runtime-traces')?.textContent ?? '';
-        return /轻量 MCP/.test(head) && /记忆运行时未启用/.test(traces)
-          && document.querySelectorAll('#runtime-timeline .mem-row[data-rt-kind=memory]').length === ${beforeModeSwitch};
+        const list = document.querySelector('#runtime-traces');
+        return /轻量 MCP/.test(head) && /记忆运行时未启用/.test(list?.textContent ?? '')
+          && Boolean(list?.querySelector('[data-rt-traces-disabled]'))
+          && Boolean(document.querySelector('#runtime-trace-title'))
+          && !document.querySelector('#runtime-timeline')
+          && !document.querySelector('#runtime-view [role=tablist]');
       })()`, 30000));
+    check('轻量模式：状态带显示未启用，只追加一条琥珀状态行（role=status）',
+      await evalJs(`(() => {
+        const band = document.querySelector('#runtime-status [data-rt-sidecar-status]');
+        const alerts = [...document.querySelectorAll('#runtime-view .rt-alert')];
+        return Boolean(band) && /未启用/.test(band.textContent) && /轻量 MCP/.test(band.textContent)
+          && Boolean(band.querySelector('.rt-status-dot.is-idle'))
+          && alerts.length === 1 && alerts[0].getAttribute('role') === 'status'
+          && /记忆运行时未启用/.test(alerts[0].textContent)
+          && getComputedStyle(alerts[0]).borderLeftWidth === '2px';
+      })()`));
     // 重新开启沉浸式：设置里的模式开关热生效。
     await evalJs('document.querySelector("#open-settings").click()');
     await evalJs('document.querySelector("[data-settings-tab=runtime]").click()');
@@ -1504,7 +1687,7 @@ async function main() {
       'domains-view': ['#domains-list', '#domain-detail .sector-readout'],
       'audit-view': [],
       'memories-view': ['#memories-list .mem-row'],
-      'runtime-view': ['#runtime-status .runtime-card', '#runtime-timeline .mem-row'],
+      'runtime-view': [],
     };
     const bgReports = [];
     for (const [viewId, nth] of Object.entries(viewTabs)) {

@@ -1676,7 +1676,7 @@ try {
         && !/runtimePack|data-rt-pack|settings\.runtime\.local/.test(consoleSrc2)
         && !consoleSrc2.includes('/runtime/v1')
         && memQueryBlock.length > 0 && !memQueryBlock.includes('includeInternal')
-        && htmlSrc.includes('id="runtime-view"') && htmlSrc.includes('id="runtime-timeline"') && htmlSrc.includes('id="runtime-traces"'),
+        && htmlSrc.includes('id="runtime-view"') && htmlSrc.includes('id="runtime-status"') && htmlSrc.includes('id="runtime-traces"'),
       `runtimeFields=${ia.IA_RUNTIME_FIELDS.length} memQueryInternal=${memQueryBlock.includes('includeInternal')}`);
     check('0.3 运行状态卡只显示 mode/state/degraded/error/version（不显示 token/tokenFile）',
       ['runtime.status.mode', 'runtime.sidecar.state', 'runtime.sidecar.degraded', 'runtime.sidecar.error', 'runtime.sidecar.version']

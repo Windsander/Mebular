@@ -155,31 +155,16 @@
           <div class="audit-toolbar">
             <div class="view-head">
               <h2 data-i18n="runtime.title">记忆运行时</h2>
-              <span id="runtime-head-mode" class="crt-tag" hidden></span>
             </div>
             <div class="audit-filters">
               <button id="runtime-refresh" class="btn btn-crt" type="button" data-i18n="runtime.refresh">刷新</button>
             </div>
           </div>
-          <p class="panel-note panel-note-wide muted" data-i18n="runtime.note">本机视角：记忆模式只影响这台设备；已有记忆会保留，切换或停止不会删除记忆。</p>
           <div id="runtime-status" class="runtime-status" aria-live="polite"></div>
-          <div class="runtime-layout">
-            <section class="runtime-panel" aria-labelledby="runtime-timeline-title">
-              <div class="runtime-panel-head">
-                <h3 id="runtime-timeline-title" data-i18n="runtime.timeline.title">记忆时间线</h3>
-                <div id="runtime-timeline-controls" class="runtime-timeline-controls"></div>
-              </div>
-              <p class="runtime-panel-note muted" data-i18n="runtime.timeline.note">默认隐藏内部对象；普通记忆查询不会返回它们。</p>
-              <div id="runtime-timeline" class="memories-list"></div>
-            </section>
-            <section class="runtime-panel" aria-labelledby="runtime-trace-title">
-              <div class="runtime-panel-head">
-                <h3 id="runtime-trace-title" data-i18n="runtime.trace.title">召回轨迹 · 为什么想起</h3>
-              </div>
-              <p class="runtime-panel-note muted" data-i18n="runtime.trace.note">只显示本机轨迹；不保存完整原文。</p>
-              <div id="runtime-traces" class="memories-list"></div>
-            </section>
-          </div>
+          <section class="rt-traces" aria-labelledby="runtime-trace-title">
+            <h3 id="runtime-trace-title" class="rt-section-title" data-i18n="runtime.trace.title">召回轨迹 · 为什么想起</h3>
+            <ul id="runtime-traces" class="rt-trace-list" aria-labelledby="runtime-trace-title"></ul>
+          </section>
         </section>
       </main>
 

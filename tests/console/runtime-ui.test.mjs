@@ -14,8 +14,6 @@ import {
   IA_SETTINGS_FOLDS,
   IA_TABS,
   RUNTIME_SIDECAR_STATES,
-  filterRuntimeTimeline,
-  isInternalRuntimeMemory,
   formatBytes,
   memoryRuntimeEnabledOf,
   memoryRuntimeModeOf,
@@ -28,7 +26,6 @@ import {
   runtimeModelStatusOf,
   runtimeShowsModelSettings,
   runtimeSidecarStateKey,
-  runtimeTimelineKind,
 } from '../../packages/console/settings-ia.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -38,13 +35,6 @@ const settingsIa = readFileSync(join(root, 'packages', 'console', 'settings-ia.j
 const indexHtml = readFileSync(join(root, 'packages', 'console', 'index.html'), 'utf-8');
 const zh = JSON.parse(readFileSync(join(root, 'locales', 'zh-CN', 'console.json'), 'utf-8')).messages;
 const en = JSON.parse(readFileSync(join(root, 'locales', 'en-US', 'console.json'), 'utf-8')).messages;
-
-const normal = { id: '01A', type: 'fact', namespace: 'notes', preview: '普通事实' };
-const compact = { id: '01B', type: 'compact', namespace: 'notes', preview: '摘要', metadata: { internal: true } };
-const checkpoint = { id: '01C', type: 'context_checkpoint', namespace: 'task:th_1', preview: '恢复点', metadata: { internal: true } };
-const self = { id: '01D', type: 'self_record', namespace: 'agent:opencode', preview: '自我', metadata: { internal: true } };
-const hiddenRecord = { id: '01E', type: 'fact', namespace: 'notes', metadata: { internal: true } };
-const legacyHidden = { id: '01F', type: 'fact', namespace: '__checkpoint__', preview: '旧原型' };
 
 const functionSource = (name, nextName) => {
   const start = consoleJs.indexOf(`function ${name}(`);
@@ -138,40 +128,58 @@ describe('0.3 设置 IA：只有两个产品增量', () => {
   });
 });
 
-describe('0.3 时间线：默认隐藏内部对象（治理能力保留）', () => {
-  it('三重判定：内部类型 / metadata.internal / 保留 namespace', () => {
-    expect(isInternalRuntimeMemory(compact)).toBe(true);
-    expect(isInternalRuntimeMemory(checkpoint)).toBe(true);
-    expect(isInternalRuntimeMemory(self)).toBe(true);
-    expect(isInternalRuntimeMemory(hiddenRecord)).toBe(true);
-    expect(isInternalRuntimeMemory(legacyHidden)).toBe(true);
-    expect(isInternalRuntimeMemory(normal)).toBe(false);
-    expect(runtimeTimelineKind(compact)).toBe('compact');
-    expect(runtimeTimelineKind(checkpoint)).toBe('checkpoint');
-    expect(runtimeTimelineKind(self)).toBe('self');
-    expect(runtimeTimelineKind(hiddenRecord)).toBe('other');
-  });
-
-  it('默认 filter=memory 只返回普通记录；管理员开关后才出现内部对象', () => {
-    const all = [normal, compact, checkpoint, self, hiddenRecord];
-    expect(filterRuntimeTimeline(all).map((row) => row.id)).toEqual(['01A']);
-    expect(filterRuntimeTimeline(all, { filter: 'all', includeInternal: true }).map((row) => row.id)).toEqual(['01A', '01B', '01C', '01D', '01E']);
-    expect(filterRuntimeTimeline(all, { filter: 'compact', includeInternal: true }).map((row) => row.id)).toEqual(['01B']);
-    expect(filterRuntimeTimeline(all, { filter: 'checkpoint', includeInternal: true }).map((row) => row.id)).toEqual(['01C']);
-    expect(filterRuntimeTimeline(all, { filter: 'self', includeInternal: true }).map((row) => row.id)).toEqual(['01D']);
-    expect(filterRuntimeTimeline(all, { filter: 'compact', includeInternal: false })).toEqual([]);
-  });
-});
-
 describe('0.3 静态 DOM / 数据面契约', () => {
   it('导航与治理视图保留：运行时在审计之后', () => {
     const nav = indexHtml.slice(indexHtml.indexOf('id="view-nav"'), indexHtml.indexOf('</nav>'));
     const order = [...nav.matchAll(/data-view="([^"]+)"/g)].map((match) => match[1]);
     expect(order).toEqual(['map', 'domains', 'memories', 'audit', 'runtime']);
-    for (const id of ['runtime-view', 'runtime-status', 'runtime-timeline', 'runtime-timeline-controls', 'runtime-traces', 'runtime-refresh']) {
+    for (const id of ['runtime-view', 'runtime-status', 'runtime-traces', 'runtime-refresh']) {
       expect(indexHtml).toContain(`id="${id}"`);
     }
     expect(indexHtml).toContain('data-i18n="nav.runtime"');
+  });
+
+  it('运行时页面：四格状态带 + 单列召回轨迹；可见标题与 aria-labelledby', () => {
+    const runtimeHtml = indexHtml.slice(indexHtml.indexOf('id="runtime-view"'), indexHtml.indexOf('</main>'));
+    expect(runtimeHtml).not.toContain('role="tablist"');
+    expect(runtimeHtml).not.toContain('runtime-timeline');
+    expect(runtimeHtml).not.toContain('runtime-panel-');
+    expect(runtimeHtml).not.toContain('rt-tab');
+    expect(runtimeHtml).toContain('id="runtime-traces"');
+    expect(runtimeHtml).toContain('id="runtime-trace-title"');
+    expect(runtimeHtml).toContain('data-i18n="runtime.trace.title"');
+    expect(runtimeHtml).toContain('aria-labelledby="runtime-trace-title"');
+    expect(runtimeHtml).not.toContain('runtime-card');
+    expect(consoleJs).not.toContain('runtimeStatusCard');
+    expect(consoleJs).not.toContain('renderRuntimeTimeline');
+    expect(consoleJs).not.toContain('filterRuntimeTimeline');
+    expect(consoleJs).not.toContain('data-rt-object');
+    expect(consoleJs).not.toContain('data-rt-mem-action');
+    for (const marker of ['runtime.band.service', 'runtime.band.mode', 'runtime.band.modelSource', 'runtime.sidecar.version']) {
+      expect(consoleJs).toContain(marker);
+    }
+    expect(consoleJs).toContain('rt-trace-row');
+    expect(consoleJs).toContain('aria-expanded');
+    expect(consoleJs).toContain('id="rt-trace-detail-${traceId}"');
+    expect(consoleJs).toContain('aria-controls="rt-trace-detail-${escapeHtml(trace.id)}"');
+  });
+
+  it('空 / 加载 / 错误状态：各自只有一个状态块，禁用与不可用有独立锚点', () => {
+    const traceListSource = functionSource('renderRuntimeTraces', 'renderRuntime');
+    expect(traceListSource.length).toBeGreaterThan(0);
+    expect(traceListSource).toContain("t('runtime.trace.disabled')");
+    expect(traceListSource).toContain("t('runtime.trace.unavailable'");
+    expect(traceListSource).toContain("t('runtime.trace.error', { message: error })");
+    expect(traceListSource).toContain("t('runtime.loading')");
+    expect(traceListSource).toContain("t('runtime.trace.empty')");
+    expect(traceListSource).toContain("tone: 'error'");
+    expect(traceListSource).toContain('busy: true');
+    expect(traceListSource).toContain('data-rt-traces-disabled');
+    expect(traceListSource).toContain('data-rt-traces-unavailable');
+    const stateHelperSource = functionSource('runtimeStateHtml', 'runtimeTraceDetailHtml');
+    expect(stateHelperSource).toContain('<li class="rt-state');
+    expect(stateHelperSource).toContain('is-${tone}');
+    expect(stateHelperSource).toContain('aria-busy="true"');
   });
 
   it('数据面：模式状态、模型来源、轨迹、反馈都走 admin 薄代理；不再调用本地模型包接口', () => {
@@ -191,11 +199,7 @@ describe('0.3 静态 DOM / 数据面契约', () => {
     expect(consoleJs).toContain('saveRuntimePatch({ memoryRuntime: { enabled } }');
     expect(consoleJs).toContain('data-rt-mode');
     expect(consoleJs).toContain('data-rt-model-source');
-    expect(consoleJs).toContain('data-rt-mem-action');
-    expect(consoleJs).toContain("api(`/admin/api/memories/${encodeURIComponent(id)}/${action}`");
     expect(consoleJs).toContain('runtime.trace.disabled');
-    expect(consoleJs).toContain('includeInternal=1');
-    expect(consoleJs).toContain('data-rt-internal-toggle');
     const memQuery = consoleJs.match(/function memQuery\(\) \{[\s\S]*?\n\}/)?.[0] ?? '';
     expect(memQuery).not.toContain('includeInternal');
   });
@@ -209,7 +213,8 @@ describe('0.3 静态 DOM / 数据面契约', () => {
   });
 
   it('轻量模式不渲染模型配置；记忆页模型来源禁用并说明；模型来源区在记忆面板', () => {
-    expect(consoleJs).toContain('${enabled ? runtimeModelStatusHtml(status) : \'\'}');
+    expect(consoleJs).toContain('runtime.band.unavailable');
+    expect(consoleJs).toContain('const enabled = memoryRuntimeEnabledOf(status, currentConfigFile());');
     expect(runtimeSettingsSource).toContain('${runtimeModelSourceSectionHtml()}');
     expect(consoleJs).toContain("t('settings.runtime.modelSource.light')");
     expect(consoleJs).toContain('meta.available !== true');

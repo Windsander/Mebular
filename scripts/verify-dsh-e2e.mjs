@@ -747,7 +747,13 @@ const scenarios = [
 
       await world.startDsh({
         probeExpect: 'down',
-        env: { MEBULAR_HTTP_PORT: String(port), PATH: pathDirs.join(delimiter) },
+        env: {
+          MEBULAR_HTTP_PORT: String(port),
+          PATH: pathDirs.join(delimiter),
+          // Test-only: never discover this machine's installed App bundle, so
+          // the scenario truly reaches the download_required branch.
+          MEBULAR_DSH_E2E_DISABLE_STANDARD_APP: '1',
+        },
       });
       await world.openBrowser({ chromePath: context.chromePath });
       check('DSH Web 页面已加载', (await world.state.page.evalJs('document.title')) === 'DeepSeek Harness');
@@ -1098,6 +1104,17 @@ const scenarios = [
       check('/mebular/embed-info 包含契约字段', requiredKeys.every((key) => keys.includes(key)), JSON.stringify(requiredKeys));
       await assertNoSensitive(world, dshInfo.json, '/mebular/embed-info 不含 token/密钥/home/CLI 路径');
       check('/mebular/embed-info 同源', dshInfo.json?.consoleUrl === `${origin}/console` && dshInfo.json?.embedUrl === `${origin}/console/?embed=dsh`, JSON.stringify(dshInfo.json));
+
+      // A direct request without the browser session cookie must be refused by
+      // the DSH connection guard instead of returning the state document.
+      const unauthUrl = new URL('/mebular/embed-info', world.state.dshUrl).href;
+      const unauth = await fetchRaw(unauthUrl);
+      check(
+        '未携带会话直达 /mebular/embed-info 返回 401/403',
+        unauth.status === 401 || unauth.status === 403,
+        `status=${unauth.status}`,
+      );
+      check('未认证响应不包含状态文档', !unauth.text.includes('"daemonUrl"'), tail(unauth.text, 120));
 
       await assertNoPageExceptions(world);
 

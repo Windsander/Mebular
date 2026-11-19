@@ -897,7 +897,11 @@ export async function discoverRuntimeProviders(options = {}) {
     warnings.push('runtime-providers.json ignored (invalid shape or version)');
   }
 
-  if (opts.includeStandardApp !== false) {
+  // Test-only isolation switch for the offline E2E harness. A real user never
+  // sets it; it only suppresses this machine's installed App bundle so the
+  // managed-cli-missing scenario cannot borrow a runtime from the host.
+  const disableStandardApp = env?.MEBULAR_DSH_E2E_DISABLE_STANDARD_APP === '1';
+  if (opts.includeStandardApp !== false && !disableStandardApp) {
     for (const path of standardAppProviderPaths({ platform, env, userHome })) {
       add('app', path, 'standard');
     }
@@ -1297,7 +1301,6 @@ function sanitizeService(value) {
     provider: text('provider') ?? (typeof runtime?.provider === 'string' ? runtime.provider : null),
     owner: text('owner') ?? (typeof runtime?.owner === 'string' ? runtime.owner : null),
     label: text('label'),
-    unitPath: text('unitPath'),
   };
 }
 
@@ -3527,6 +3530,55 @@ function readInstallBody(req) {
 }
 
 /**
+ * Normalize DSH's native connection service into a route guard.
+ *
+ * `ctx.connection.requestRejection({ headers })` applies the Host/Origin fence
+ * and the signed browser/API credential check before a route dispatches. It
+ * returns 401, 403, or undefined. A broken service fails closed so a malformed
+ * connection object can never open the loopback routes.
+ *
+ * @param {unknown} connection
+ * @returns {((req: import('node:http').IncomingMessage) => 401 | 403 | undefined) | null}
+ */
+function createConnectionGuard(connection) {
+  if (!isObject(connection) || typeof connection.requestRejection !== 'function') return null;
+  return (req) => {
+    try {
+      const rejection = connection.requestRejection({ headers: isObject(req?.headers) ? req.headers : {} });
+      return rejection === 401 || rejection === 403 ? rejection : undefined;
+    } catch {
+      return 403;
+    }
+  };
+}
+
+/**
+ * Apply an optional guard after the loopback gate. Returns true when the
+ * request was already refused, so the handler must not read state or dispatch.
+ *
+ * @param {((req: import('node:http').IncomingMessage) => 401 | 403 | undefined) | null} guard
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @returns {boolean}
+ */
+function rejectIfUnauthorized(guard, req, res) {
+  if (typeof guard !== 'function') return false;
+  let rejection;
+  try {
+    rejection = guard(req);
+  } catch {
+    rejection = 403;
+  }
+  if (rejection !== 401 && rejection !== 403) return false;
+  if (res !== null && typeof res === 'object' && typeof res.end === 'function') {
+    res.statusCode = rejection;
+    res.setHeader('cache-control', 'no-store');
+    res.end();
+  }
+  return true;
+}
+
+/**
  * Loopback-only `POST /mebular/runtime/install`.
  *
  * Remote peers get 404 for every method. The body accepts exactly one optional
@@ -3537,6 +3589,7 @@ function readInstallBody(req) {
  * @param {{
  *   config?: unknown,
  *   manager: ReturnType<typeof createRuntimeInstallManager>,
+ *   guard?: (req: import('node:http').IncomingMessage) => 401 | 403 | undefined,
  * }} [options]
  * @returns {(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<void>}
  */
@@ -3544,6 +3597,7 @@ export function createRuntimeInstallHandler(options = {}) {
   const opts = isObject(options) ? options : {};
   const config = resolveConfig(opts.config, { env: opts.env });
   const manager = isObject(opts.manager) ? opts.manager : null;
+  const guard = typeof opts.guard === 'function' ? opts.guard : null;
 
   function sendJson(res, status, value, extraHeaders = {}) {
     if (res === null || typeof res !== 'object' || typeof res.end !== 'function') return;
@@ -3562,6 +3616,7 @@ export function createRuntimeInstallHandler(options = {}) {
       }
       return;
     }
+    if (rejectIfUnauthorized(guard, req, res)) return;
     if (req.method !== 'POST') {
       sendJson(res, 405, { ok: false, error: 'method_not_allowed' }, { allow: 'POST' });
       return;
@@ -3661,6 +3716,7 @@ export function createRuntimeInstallHandler(options = {}) {
  * @param {{
  *   config?: unknown,
  *   manager: ReturnType<typeof createRuntimeUpgradeManager>,
+ *   guard?: (req: import('node:http').IncomingMessage) => 401 | 403 | undefined,
  * }} [options]
  * @returns {(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<void>}
  */
@@ -3668,6 +3724,7 @@ export function createRuntimeUpgradeHandler(options = {}) {
   const opts = isObject(options) ? options : {};
   const config = resolveConfig(opts.config, { env: opts.env });
   const manager = isObject(opts.manager) ? opts.manager : null;
+  const guard = typeof opts.guard === 'function' ? opts.guard : null;
 
   function sendJson(res, status, value, extraHeaders = {}) {
     if (res === null || typeof res !== 'object' || typeof res.end !== 'function') return;
@@ -3686,6 +3743,7 @@ export function createRuntimeUpgradeHandler(options = {}) {
       }
       return;
     }
+    if (rejectIfUnauthorized(guard, req, res)) return;
     if (req.method !== 'POST') {
       sendJson(res, 405, { ok: false, error: 'method_not_allowed' }, { allow: 'POST' });
       return;
@@ -4701,6 +4759,7 @@ export function createDaemonLifecycle(options = {}) {
  *   home?: string,
  *   runtime?: unknown,
  *   pidAlive?: (pid: number) => boolean,
+ *   guard?: (req: import('node:http').IncomingMessage) => 401 | 403 | undefined,
  * }} [options]
  * @returns {(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<void>}
  */
@@ -4709,6 +4768,7 @@ export function createEmbedInfoHandler(options = {}) {
   const config = resolveConfig(options.config, configOptions);
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
   const probe = typeof options.probe === 'function' ? options.probe : probeDaemon;
+  const guard = typeof options.guard === 'function' ? options.guard : null;
   const lifecycle = options.lifecycle !== null && typeof options.lifecycle?.inspect === 'function'
     ? options.lifecycle
     : null;
@@ -4813,6 +4873,7 @@ export function createEmbedInfoHandler(options = {}) {
       }
       return;
     }
+    if (rejectIfUnauthorized(guard, req, res)) return;
     if (req.method !== 'GET') {
       sendJson(res, 405, { ok: false, error: 'method_not_allowed' }, { allow: 'GET' });
       return;
@@ -5663,13 +5724,38 @@ export function apply(ctx, config = {}, options = {}) {
   void lifecycleStart;
   void bridge.start();
 
-  const handler = createEmbedInfoHandler({ config: resolved, lifecycle, installManager, upgradeManager });
-  const installHandler = createRuntimeInstallHandler({ config: resolved, manager: installManager, env: opts.env });
-  const upgradeHandler = createRuntimeUpgradeHandler({ config: resolved, manager: upgradeManager, env: opts.env });
   if (typeof ctx.inject !== 'function') return;
-  ctx.inject(['webServer'], (webCtx) => {
+  ctx.inject(['webServer', 'connection'], (webCtx) => {
     const webServer = webCtx?.webServer;
     if (webServer === undefined || webServer === null) return;
+    // DSH's native guard covers the Host/Origin fence and the signed browser
+    // cookie that the same-origin panel already carries. Loopback remains the
+    // first gate inside each handler; this is the second. Without it, refuse to
+    // register the routes rather than serving them without authentication.
+    const guard = createConnectionGuard(webCtx?.connection);
+    if (guard === null) {
+      log('warn', 'connection guard unavailable; refusing to register Mebular web routes');
+      return;
+    }
+    const handler = createEmbedInfoHandler({
+      config: resolved,
+      lifecycle,
+      installManager,
+      upgradeManager,
+      guard,
+    });
+    const installHandler = createRuntimeInstallHandler({
+      config: resolved,
+      manager: installManager,
+      env: opts.env,
+      guard,
+    });
+    const upgradeHandler = createRuntimeUpgradeHandler({
+      config: resolved,
+      manager: upgradeManager,
+      env: opts.env,
+      guard,
+    });
     if (typeof webServer.register === 'function') {
       webCtx.effect(
         () => webServer.register({

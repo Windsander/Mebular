@@ -2192,6 +2192,34 @@ async function main() {
       return;
     }
     case 'serve': {
+      // D6：`serve --help`/`-h` 是纯文本查询，必须在读配置、写 heartbeat、取 <home>/lock、
+      // 绑定端口之前短路——否则空 home 会留下 store/heartbeat 副作用，且会被在跑的守护挡住。
+      if (flags.help !== undefined || argv.slice(1).includes('-h')) {
+        console.log(
+          [
+            '用法：mebular serve [--host HOST] [--port PORT] [--auth none|bearer|oauth]',
+            '                    [--tls-key FILE] [--tls-cert FILE] [--tokens-file FILE]',
+            '',
+            '启动 Streamable HTTP MCP 守护（单实例：同一 MEBULAR_HOME 只允许一个 serve）。',
+            '',
+            '选项：',
+            '  --host HOST          监听地址（默认 config.json 的 mcp.http.host，否则 127.0.0.1）',
+            '  --port PORT          监听端口（默认 config.json 的 mcp.http.port，否则 7331）',
+            '  --auth MODE          鉴权：none | bearer | oauth（默认 config.json）',
+            '  --tls-key FILE       TLS 私钥；与 --tls-cert 同时提供才启用 HTTPS',
+            '  --tls-cert FILE      TLS 证书',
+            '  --tokens-file FILE   bearer token 文件（默认 <home>/auth/tokens.json）',
+            '  -h, --help           显示本帮助并退出（不读配置、不写 store/heartbeat、不占端口）',
+            '',
+            '环境变量：',
+            '  MEBULAR_HOME=<dir>   家目录（默认 ~/.mebular）；每个 home 有独立 config/store/锁/heartbeat，',
+            '                       多实例隔离请用 MEBULAR_HOME（serve 没有 --dir 选项）',
+            '  MEBULAR_TOKEN=<tok>  访问运行中守护 admin API 的 bearer token',
+          ].join('\n'),
+        );
+        process.exit(0);
+        return;
+      }
       const { startServeServer } = await import('../src/server.mjs');
       const { loadConfigFile } = await import('../src/config.mjs');
       const home = homeDir();

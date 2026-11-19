@@ -3,7 +3,7 @@
 // All tests are hermetic: fake ctx, fake fetch and fake session only. No real
 // OpenCode, OpenChamber, Mebular runtime or native memory file is touched.
 
-import { afterEach, describe, expect, it } from '@jest/globals';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from '@jest/globals';
 import { createHash } from 'node:crypto';
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -31,6 +31,18 @@ const BASE = 'http://127.0.0.1:7331';
 const PACKAGE_DIR = fileURLToPath(new URL('../../packages/opencode-plugin/', import.meta.url));
 const temporaryDirectories = [];
 
+// Shared, hermetic home for the whole suite so plugin/controller defaults never
+// read the developer's real `~/.mebular` profile or discovery state.
+let TEST_HOME = '';
+
+beforeAll(async () => {
+  TEST_HOME = await mkdtemp(join(tmpdir(), 'mebular-opencode-plugin-test-home-'));
+});
+
+afterAll(async () => {
+  if (TEST_HOME) await rm(TEST_HOME, { recursive: true, force: true });
+});
+
 afterEach(async () => {
   while (temporaryDirectories.length > 0) {
     await rm(temporaryDirectories.pop(), { recursive: true, force: true });
@@ -41,6 +53,10 @@ async function tempDir(prefix = 'mebular-opencode-plugin-') {
   const directory = await mkdtemp(join(tmpdir(), prefix));
   temporaryDirectories.push(directory);
   return directory;
+}
+
+function createTestPlugin(overrides = {}) {
+  return createPlugin({ homeDir: TEST_HOME, ...overrides });
 }
 
 function jsonResponse(data, options = {}) {
@@ -269,7 +285,7 @@ function controllerWith(options = {}) {
     },
     fetchImpl,
     env: options.env ?? {},
-    homeDir: options.homeDir,
+    homeDir: options.homeDir ?? TEST_HOME,
     now: options.now,
   });
   return { ctx, calls, fetchImpl, controller };
@@ -367,7 +383,7 @@ describe('@mebular/opencode-plugin package', () => {
 
   it('loads on 2.2.0, registers only its own status tool, and exposes status', async () => {
     const { ctx, calls } = makeCtx({ options: { runtimeUrl: BASE } });
-    const definition = createPlugin({ fetchImpl: createFetch(), env: {} });
+    const definition = createTestPlugin({ fetchImpl: createFetch(), env: {} });
     const cleanup = await definition.setup(ctx);
     const status = definition.status();
     expect(status.id).toBe(PLUGIN_ID);
@@ -389,7 +405,7 @@ describe('@mebular/opencode-plugin package', () => {
 
   it('disables below 2.2.0, without hooking or fetching', async () => {
     const { ctx, calls } = makeCtx({ version: '2.1.3', options: { runtimeUrl: BASE } });
-    const definition = createPlugin();
+    const definition = createTestPlugin();
     const cleanup = await definition.setup(ctx);
     const status = definition.status();
     expect(status.enabled).toBe(false);
@@ -402,12 +418,12 @@ describe('@mebular/opencode-plugin package', () => {
 
   it('disables when the context hook or runtime URL is missing', async () => {
     const noHook = makeCtx({ hook: false, options: { runtimeUrl: BASE } });
-    const noHookDefinition = createPlugin();
+    const noHookDefinition = createTestPlugin();
     await noHookDefinition.setup(noHook.ctx);
     expect(noHookDefinition.status().reason).toBe('context_hook_missing');
 
     const noUrl = makeCtx({ options: {} });
-    const noUrlDefinition = createPlugin({ fetchImpl: createFetch(), env: {}, homeDir: await tempDir() });
+    const noUrlDefinition = createTestPlugin({ fetchImpl: createFetch(), env: {}, homeDir: await tempDir() });
     await noUrlDefinition.setup(noUrl.ctx);
     expect(noUrlDefinition.status().reason).toBe('runtime_not_discovered');
     expect(noUrl.calls.hooks).toHaveLength(0);
@@ -415,7 +431,7 @@ describe('@mebular/opencode-plugin package', () => {
 
   it('reports generate as unavailable without disabling recall/ingest', async () => {
     const { ctx, calls } = makeCtx({ generate: false, options: { runtimeUrl: BASE, modelSource: 'host' } });
-    const definition = createPlugin({ fetchImpl: createFetch(), env: {} });
+    const definition = createTestPlugin({ fetchImpl: createFetch(), env: {} });
     const cleanup = await definition.setup(ctx);
     const status = definition.status();
     expect(status.enabled).toBe(true);
@@ -537,7 +553,7 @@ describe('context hook', () => {
 
     const fetchImpl = createFetch({ '/context': HIT });
     const { ctx, calls } = makeCtx({ options: { runtimeUrl: BASE }, contextMessages: userMessages() });
-    const definition = createPlugin({ fetchImpl, env: {}, homeDir: home });
+    const definition = createTestPlugin({ fetchImpl, env: {}, homeDir: home });
     const cleanup = await definition.setup(ctx);
     await calls.hooks[0].callback(hookEvent(userMessages()));
     expect(await readFile(memoryPath, 'utf8')).toBe(before);
@@ -3156,6 +3172,7 @@ describe('event subscription reconnect and hot disable', () => {
       config: { runtimeUrl: BASE, eventReconnectMs: 10, eventReconnectMaxMs: 50 },
       fetchImpl: createFetch(),
       env: {},
+      homeDir: TEST_HOME,
     });
     await controller.start();
     expect(await waitFor(() => controller.getStatus().counts.events.handled === 1)).toBeTruthy();

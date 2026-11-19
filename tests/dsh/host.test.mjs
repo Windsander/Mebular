@@ -314,6 +314,7 @@ function applyHarness(fetchHandler, {
   panel = true,
   tapIndex = true,
   systemPrompt = true,
+  connection = { requestRejection: () => undefined },
   importModule = async () => ({ name: 'fake-mcp-client' }),
   applyOptions = {},
   config,
@@ -403,7 +404,7 @@ function applyHarness(fetchHandler, {
         });
         return undefined;
       }
-      expect(deps).toEqual(['webServer']);
+      expect(deps).toEqual(['webServer', 'connection']);
       callback({
         effect(run) {
           const disposer = run();
@@ -424,6 +425,7 @@ function applyHarness(fetchHandler, {
               }
             : {}),
         },
+        connection,
       });
     },
   };
@@ -695,6 +697,38 @@ describe('P2 @mebular/dsh-plugin host：纯函数', () => {
     for (const word of ['token', 'secret', 'password', 'authorization']) {
       expect(serialized).not.toContain(word);
     }
+  });
+
+  it('buildEmbedInfo：service 保留文档字段但不暴露 unitPath/home 路径', () => {
+    const info = buildEmbedInfo({
+      daemonUrl: BASE,
+      reachable: true,
+      health: HEALTH,
+      embed: EMBED,
+      service: {
+        registered: true,
+        running: true,
+        foreign: false,
+        version: '0.3.5',
+        provider: 'shared',
+        owner: 'shared',
+        label: 'mebular-serve',
+        unitPath: '/Users/alice/.mebular/services/mebular-serve.service',
+      },
+    });
+    expect(info.service).toEqual({
+      registered: true,
+      running: true,
+      foreign: false,
+      version: '0.3.5',
+      provider: 'shared',
+      owner: 'shared',
+      label: 'mebular-serve',
+    });
+    expect(info.service).not.toHaveProperty('unitPath');
+    const serialized = JSON.stringify(info);
+    expect(serialized).not.toContain('/Users/alice');
+    expect(serialized).not.toContain('.mebular/services');
   });
 
   it('buildEmbedInfo：daemon 不可达时 ok=false、status=down、embedUrl=null', () => {
@@ -1866,6 +1900,70 @@ describe('P2 @mebular/dsh-plugin host：探测与 /mebular/embed-info 路由', (
     ]);
   });
 
+  it('连接守卫：三个路由在 401/403 时拒绝且不读取状态', async () => {
+    let status = 401;
+    const guardCalls = [];
+    const connection = {
+      requestRejection(request) {
+        guardCalls.push(request);
+        return status;
+      },
+    };
+    let installStarts = 0;
+    let upgradeStarts = 0;
+    const harness = applyHarness(() => {
+      throw new Error('fetch must not run');
+    }, {
+      connection,
+      applyOptions: {
+        bridgeIntervalMs: 60000,
+        installManager: {
+          start() {
+            installStarts += 1;
+            return { accepted: true };
+          },
+          getState: () => ({ state: 'idle' }),
+        },
+        upgradeManager: {
+          start() {
+            upgradeStarts += 1;
+            return { accepted: true };
+          },
+          getState: () => ({ state: 'idle' }),
+        },
+      },
+    });
+    activeMock = harness.mock;
+    // The host probes once on activation; route-triggered calls are what matter.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    harness.mock.calls.length = 0;
+
+    for (status of [401, 403]) {
+      for (const route of harness.routes) {
+        const method = route.path === EMBED_INFO_PATH ? 'GET' : 'POST';
+        const req = makeRequest({ method });
+        const res = makeResponse();
+        await route.handler(req, res);
+        expect(res.statusCode).toBe(status);
+        expect(res.body).toBe('');
+        expect(res.headers['cache-control']).toBe('no-store');
+        expect(guardCalls.at(-1)).toEqual({ headers: req.headers });
+      }
+    }
+
+    expect(harness.mock.calls).toHaveLength(0);
+    expect(installStarts).toBe(0);
+    expect(upgradeStarts).toBe(0);
+
+    // Loopback remains the first gate: a remote peer gets 404 without
+    // consulting the connection guard.
+    const before = guardCalls.length;
+    const remote = makeResponse();
+    await harness.route.handler(makeRequest({ remoteAddress: '192.168.1.7' }), remote);
+    expect(remote.statusCode).toBe(404);
+    expect(guardCalls).toHaveLength(before);
+  });
+
   it('panel:false：tapIndex 注入安全全局，embed-info 同步返回 panel=false', async () => {
     const harness = applyHarness((url) => {
       if (url === `${BASE}/healthz`) return jsonResponse(HEALTH);
@@ -2088,6 +2186,36 @@ describe('P8 @mebular/dsh-plugin：共享 runtime 发现', () => {
     expect(discovery.selected).toMatchObject({ kind: 'app', path: standard, source: 'standard' });
     expect(runtimeCloudRoot({ env: { MEBULAR_CLOUD_ROOT: '/custom/root' }, userHome: '/home/u' })).toBe('/custom/root');
     expect(runtimeCloudRoot({ env: {}, userHome: '/home/u' })).toBe(join('/home/u', '.mebular'));
+  });
+
+  it('MEBULAR_DSH_E2E_DISABLE_STANDARD_APP=1 只跳过标准 App 发现', async () => {
+    const standard = join('/Applications', 'Mebular.app', 'Contents', 'Resources', ...[
+      'node_modules', '@mebular', 'core', 'packages', 'mcp', 'bin', 'mebular.mjs',
+    ]);
+    const exists = (file) => new Set([standard, '/usr/bin/mebular']).has(file);
+    const base = {
+      platform: 'darwin',
+      userHome: '/home/u',
+      exists,
+      registry: { v: 1, providers: [{ kind: 'cli', path: '/usr/bin/mebular' }] },
+    };
+
+    const normal = await discoverRuntimeProviders({ ...base, env: { PATH: '/usr/bin' } });
+    expect(normal.selected).toMatchObject({ kind: 'app', path: standard, source: 'standard' });
+
+    const isolated = await discoverRuntimeProviders({
+      ...base,
+      env: { PATH: '/usr/bin', MEBULAR_DSH_E2E_DISABLE_STANDARD_APP: '1' },
+    });
+    expect(isolated.providers.some((entry) => entry.source === 'standard')).toBe(false);
+    expect(isolated.selected).toMatchObject({ kind: 'cli', path: '/usr/bin/mebular', source: 'registry' });
+
+    // Any other value (including '0') keeps normal user behavior.
+    const notLiteralOne = await discoverRuntimeProviders({
+      ...base,
+      env: { PATH: '/usr/bin', MEBULAR_DSH_E2E_DISABLE_STANDARD_APP: '0' },
+    });
+    expect(notLiteralOne.selected).toMatchObject({ kind: 'app', path: standard, source: 'standard' });
   });
 
   it('Windows PATH 按 PATHEXT 发现 mebular.cmd', async () => {

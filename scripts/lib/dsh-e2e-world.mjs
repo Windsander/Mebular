@@ -92,9 +92,11 @@ export async function createWorld(options) {
   const scenarioDir = join(options.root, `scenario-${name}`);
   const mebularHome = join(scenarioDir, 'mebular-home');
   const dshHome = join(scenarioDir, 'dsh-home');
+  const serviceHome = join(scenarioDir, 'mebular-service-home');
   const artifactsDir = join(scenarioDir, 'artifacts');
   const probeOut = join(artifactsDir, 'probe.json');
   await mkdir(artifactsDir, { recursive: true });
+  await mkdir(serviceHome, { recursive: true });
 
   const seed = await seedHome(mebularHome, { memoryToken: `dsh-e2e-${randomUUID()}` });
 
@@ -102,6 +104,7 @@ export async function createWorld(options) {
   for (const key of [
     'MEBULAR_HTTP_PORT', 'MEBULAR_CLI', 'PROBE_OUT', 'PROBE_QUERY', 'PROBE_EXPECT',
     'PROBE_TIMEOUT_MS', 'DSH_HOME', 'MEBULAR_HOME', 'MEBULAR_USER_HOME', 'MEBULAR_CLOUD_ROOT',
+    'MEBULAR_SERVICE_HOME', 'MEBULAR_DSH_E2E_DISABLE_STANDARD_APP',
   ]) {
     delete baseEnv[key];
   }
@@ -110,6 +113,10 @@ export async function createWorld(options) {
     MEBULAR_HOME: mebularHome,
     MEBULAR_USER_HOME: mebularHome,
     MEBULAR_CLOUD_ROOT: mebularHome,
+    // Never read the developer's registered service manifest: each scenario
+    // owns an empty service home, so a host-installed mebular-serve unit
+    // cannot change the managed/CLI-missing branches.
+    MEBULAR_SERVICE_HOME: serviceHome,
     NO_COLOR: '1',
     FORCE_COLOR: '0',
   });
@@ -122,6 +129,7 @@ export async function createWorld(options) {
     scenarioDir,
     mebularHome,
     dshHome,
+    serviceHome,
     artifactsDir,
     probeOut,
     dshVersion: options.dshVersion,
@@ -159,6 +167,7 @@ export async function createWorld(options) {
       { value: scenarioDir, label: '<scenario>' },
       { value: mebularHome, label: '<mebular-home>' },
       { value: dshHome, label: '<dsh-home>' },
+      { value: serviceHome, label: '<service-home>' },
       { value: options.dshInstall, label: '<dsh-install>' },
       { value: options.root, label: '<e2e-root>' },
       { value: options.repoRoot, label: '<repo>' },

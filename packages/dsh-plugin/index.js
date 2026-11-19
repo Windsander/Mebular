@@ -5730,8 +5730,13 @@ export function apply(ctx, config = {}, options = {}) {
     if (webServer === undefined || webServer === null) return;
     // DSH's native guard covers the Host/Origin fence and the signed browser
     // cookie that the same-origin panel already carries. Loopback remains the
-    // first gate inside each handler; this is the second.
+    // first gate inside each handler; this is the second. Without it, refuse to
+    // register the routes rather than serving them without authentication.
     const guard = createConnectionGuard(webCtx?.connection);
+    if (guard === null) {
+      log('warn', 'connection guard unavailable; refusing to register Mebular web routes');
+      return;
+    }
     const handler = createEmbedInfoHandler({
       config: resolved,
       lifecycle,

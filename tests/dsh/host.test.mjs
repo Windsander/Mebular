@@ -1964,6 +1964,18 @@ describe('P2 @mebular/dsh-plugin host：探测与 /mebular/embed-info 路由', (
     expect(guardCalls).toHaveLength(before);
   });
 
+  it('connection 守卫不可用：拒绝注册 web 路由，失败关闭', () => {
+    const harness = applyHarness(() => {
+      throw new Error('fetch must not run');
+    }, {
+      connection: null,
+      applyOptions: { bridgeIntervalMs: 60000 },
+    });
+
+    expect(harness.routes).toHaveLength(0);
+    expect(harness.warnings.some((line) => line.includes('connection guard unavailable'))).toBe(true);
+  });
+
   it('panel:false：tapIndex 注入安全全局，embed-info 同步返回 panel=false', async () => {
     const harness = applyHarness((url) => {
       if (url === `${BASE}/healthz`) return jsonResponse(HEALTH);

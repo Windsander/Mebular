@@ -16,6 +16,63 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 The GitHub Release body is extracted from this file: everything between the release's
 `## [vX.Y.Z]` heading and the next `## [` heading. Keep that section self-contained.
 
+## [v0.3.5] - 2026-11-19
+
+Runtime page and acceptance-hardening release. It redesigns the Console Runtime page
+and closes the security, CLI and test-isolation gaps found during the v0.3.4 acceptance
+pass. The 29-tool MCP surface, graph/event/sync formats, host adapters and stored data
+are unchanged; there is no migration.
+
+### Added
+
+- **Runtime page redesign** — one four-cell status band (service / mode / model source /
+  version), a single-column recall-trace ledger, and a stable section title with
+  `aria-labelledby` and stable `aria-controls` ids for expanded trace details.
+- **Cleaner page boundaries** — the duplicated memory timeline, filters, internal-object
+  toggle, object detail, archive/delete actions and `/admin/api/memories` reads are removed
+  from Runtime. Memory browsing stays on the Memories page.
+
+### Changed
+
+- Runtime now uses the same page shell as Memories and Audit: existing `h2`, toolbar,
+  `.btn`/`.btn-crt`, `.crt-tag` and `.btn-small` primitives, with runtime-scoped CSS only.
+- The Runtime warning line is shown only for degraded, failed, error or disabled states;
+  deterministic empty/loading/error states replace the old timeline.
+- Community documentation and roadmap links were refreshed for the v0.3.4 line.
+
+### Security
+
+- **DSH route authentication** — `GET /mebular/embed-info`,
+  `POST /mebular/runtime/install` and `POST /mebular/runtime/upgrade` now apply DSH's
+  native `ctx.connection.requestRejection()` after the loopback check. Host/Origin and the
+  signed browser session are required; missing or broken connection guards fail closed and
+  the routes are not registered.
+- **Home-path minimization** — `service.unitPath` is no longer exposed in
+  `/mebular/embed-info`; the existing documented `profile`, `provider`, `service` and
+  `daemonUrl` fields remain.
+
+### Fixed
+
+- **`mebular serve --help`** — now prints the serve usage and exits 0 before reading
+  config, writing heartbeat, taking the store lock or binding a port; `-h` behaves the
+  same, including while another daemon holds the lock.
+- **Acceptance test isolation** — the OpenCode plugin suite uses a hermetic temporary home
+  and no longer reads the developer's real `~/.mebular`; the DSH `managed-cli-missing`
+  scenario suppresses the host App provider with a test-only switch and uses a per-scenario
+  `MEBULAR_SERVICE_HOME`, so it genuinely reaches `download_required`.
+- **DSH version matrix** — `current` now tracks `0.2.2-rc.1`; the minimum remains
+  `0.2.1-rc.2`.
+
+### Verification
+
+- Full Jest: **3416 passed, 1 skipped**.
+- DSH E2E minimum and latest: **9/9 scenarios, 212/212 checks each**.
+- DSH E2E negative control: passed; the intentionally broken plugin is still rejected.
+- `verify:dsh-plugin`: **214/214 checks**.
+- ESLint and `node --check` on the changed files: clean.
+- The release branch reruns the same gate before publishing; desktop packages remain
+  unsigned.
+
 ## [v0.3.4] - 2026-11-13
 
 Console settings release. It refreshes the Console settings experience added around 0.3

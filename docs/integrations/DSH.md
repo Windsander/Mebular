@@ -36,7 +36,7 @@ resolve`/`supervise`) and daemon HTTP endpoints.
 Install from npm into the DSH web profile:
 
 ```bash
-dsh plugin --profile web add @mebular/dsh-plugin@0.3.4
+dsh plugin --profile web add @mebular/dsh-plugin@0.3.5
 ```
 
 For development:
@@ -371,10 +371,10 @@ panel header displays. If they differ, the header tooltip shows the runtime vers
   "runtimeMode": "reused",
   "managed": false,
   "panel": true,
-  "version": "0.3.4",
-  "pluginVersion": "0.3.4",
+  "version": "0.3.5",
+  "pluginVersion": "0.3.5",
   "profile": { "id": "default", "name": "My Cloud" },
-  "provider": { "kind": "app", "source": "registry", "version": "0.3.4" },
+  "provider": { "kind": "app", "source": "registry", "version": "0.3.5" },
   "service": { "registered": false, "running": false, "foreign": false },
   "downloadRequired": false,
   "install": { "state": "idle", "allowed": true },
@@ -483,13 +483,13 @@ single daemon, service, update locks and upgrade rollback are covered by CI and
 
 ## Release and version
 
-- Version: `0.3.4`, on the unified Mebular v0.3.4 release train (seven lockstep npm
+- Version: `0.3.5`, on the unified Mebular v0.3.5 release train (seven lockstep npm
   packages plus the isolated `dsh-plugin` share the same version).
-- npm: `@mebular/dsh-plugin@0.3.4`.
+- npm: `@mebular/dsh-plugin@0.3.5`.
 - The Plugin is an isolated adapter in `packages/dsh-plugin`, published by its
   own npm job. It reads the pinned runtime version from its own `package.json`,
   so a release bump needs no Plugin source edit.
-- Publish `@mebular/core@0.3.4` before `@mebular/dsh-plugin@0.3.4`; see
+- Publish `@mebular/core@0.3.5` before `@mebular/dsh-plugin@0.3.5`; see
   [Release SOP](../operations/RELEASE.md).
 - Listed in the `memory` category of
   [awesome-dsh-plugin](https://awesome-dsh-plugin.com/p/Windsander/Mebular--packages-dsh-plugin/).

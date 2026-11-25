@@ -35,6 +35,8 @@ describe('sidecar config', () => {
     expect(paths.dataDir).toBe(join(home, 'memory-runtime'));
     expect(paths.discoveryPath).toBe(join(home, 'memory-runtime.json'));
     expect(paths.stagingDir).toBe(join(home, 'memory-runtime', 'staging'));
+    expect(paths.policyDir).toBe(join(home, 'memory-runtime', 'policy'));
+    expect(paths.policyStatePath).toBe(join(home, 'memory-runtime', 'policy', 'state.json'));
     expect(paths.tracesPath).toBe(join(home, 'memory-runtime', 'traces.jsonl'));
     expect(paths.cacheDir).toBe(join(home, 'memory-runtime', 'cache'));
     expect(paths.detailCacheDir).toBe(join(home, 'memory-runtime', 'cache', 'details'));
@@ -59,6 +61,15 @@ describe('sidecar config', () => {
     const defaults = defaultSidecarConfig();
     expect(defaults.http).toEqual({ host: '127.0.0.1', port: 7341 });
     expect(defaults.trace).toBe('local');
+    expect(defaults.intervention).toMatchObject({
+      mode: 'off',
+      minConfidence: 0.55,
+      maxSilentStreak: 3,
+      explorationRate: 0.05,
+      outcomeWindowMs: 120_000,
+      policyTtlDays: 30,
+      modelTimeoutMs: 500,
+    });
     expect(defaults.detail.stagingHours).toBe(24);
     expect(defaults.detail.stagingBytes).toBe(268_435_456);
     expect(defaults.detail.quotaBytesPerDomain).toBe(268_435_456);
@@ -89,6 +100,43 @@ describe('sidecar config', () => {
     });
     expect((normalized as unknown as Record<string, unknown>).capture).toBeUndefined();
     expect(() => normalizeSidecarConfig({ detail: { stagingHours: 0 } })).toThrow(SidecarConfigError);
+  });
+
+  it('intervention 配置：默认 off；严格校验；旧配置兼容', () => {
+    // 旧配置（无 intervention）保持默认 off。
+    expect(normalizeSidecarConfig({ schema: 1 }).intervention.mode).toBe('off');
+    expect(normalizeSidecarConfig({
+      intervention: {
+        mode: 'heuristic',
+        minConfidence: 0.62,
+        maxSilentStreak: 5,
+        explorationRate: 0.1,
+        outcomeWindowMs: 60_000,
+        policyTtlDays: 7,
+        modelTimeoutMs: 800,
+      },
+    }).intervention).toEqual({
+      mode: 'heuristic',
+      minConfidence: 0.62,
+      maxSilentStreak: 5,
+      explorationRate: 0.1,
+      outcomeWindowMs: 60_000,
+      policyTtlDays: 7,
+      modelTimeoutMs: 800,
+    });
+
+    for (const bad of [
+      { mode: 'always' },
+      { minConfidence: 1.5 },
+      { minConfidence: '0.5' },
+      { maxSilentStreak: 0 },
+      { explorationRate: -0.1 },
+      { outcomeWindowMs: 0 },
+      { policyTtlDays: 1.5 },
+      { modelTimeoutMs: 0 },
+    ]) {
+      expect(() => normalizeSidecarConfig({ intervention: bad })).toThrow(SidecarConfigError);
+    }
   });
 
   it('拒绝旧原型/已删除配置键', () => {

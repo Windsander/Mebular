@@ -631,6 +631,7 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
       client,
       identity,
       policyPath: paths.policyPath,
+      policyStatePath: paths.policyStatePath,
       inference: model,
       lifecycle,
       diagnostics,
@@ -682,6 +683,8 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
   const stopSettlementWithoutFlush = async (timeoutMs = 2000): Promise<boolean> => {
     let clean = true;
     try {
+      // 先落盘 write-behind 策略统计；失败只影响 degraded，不阻塞停止。
+      if (!await settlement.flushPolicy()) clean = false;
       await settlement.replayer.stop({ flushMs: 0 });
     } catch {
       clean = false;
@@ -752,6 +755,7 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
     namespaces: settlement,
     recall: settlement,
     objects: settlement,
+    intervention: settlement,
     inference: inferenceService,
     getDegraded: runtimeDegraded,
     state: 'starting',

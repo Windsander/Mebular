@@ -112,6 +112,23 @@ export interface SidecarContextSettings {
   maxFragments: number;
 }
 
+/** 0.4.0 记忆介入策略；默认 off，不改变 0.3.x 行为。 */
+export interface SidecarInterventionSettings {
+  mode: 'off' | 'shadow' | 'heuristic' | 'model';
+  /** heuristic 说话最低 top score；adaptive 阈值以此为基准。 */
+  minConfidence: number;
+  /** 连续沉默上限；达到后强制至少注入一条 gist，避免学成哑巴。 */
+  maxSilentStreak: number;
+  /** 本应沉默时按比例探索性注入。 */
+  explorationRate: number;
+  /** outcome 归因窗口（毫秒）；超窗仍记录但标记。 */
+  outcomeWindowMs: number;
+  /** 本机策略统计保留天数。 */
+  policyTtlDays: number;
+  /** model 模式超时；本轮未接入模型时不影响 heuristic fallback。 */
+  modelTimeoutMs: number;
+}
+
 export interface SidecarHttpSettings {
   host: string;
   port: number;
@@ -132,6 +149,7 @@ export interface SidecarConfig {
   limits: SidecarLimitSettings;
   recall: SidecarRecallSettings;
   context: SidecarContextSettings;
+  intervention: SidecarInterventionSettings;
   queue: { concurrency: number };
   http: SidecarHttpSettings;
   idleStopMinutes: number;
@@ -147,6 +165,10 @@ export interface SidecarPaths {
   discoveryPath: string;
   configPath: string;
   policyPath: string;
+  /** `<dataDir>/policy`：本机介入策略统计目录（0700）。 */
+  policyDir: string;
+  /** `<dataDir>/policy/state.json`：PolicyStore 状态（0600）。 */
+  policyStatePath: string;
   hostTokenPath: string;
   capabilityTokenPath: string;
   startLockPath: string;
@@ -203,6 +225,15 @@ export function defaultSidecarConfig(): SidecarConfig {
       queryPlan: 'heuristic',
     },
     context: { maxTokens: 12_000, maxFragments: 3 },
+    intervention: {
+      mode: 'off',
+      minConfidence: 0.55,
+      maxSilentStreak: 3,
+      explorationRate: 0.05,
+      outcomeWindowMs: 120_000,
+      policyTtlDays: 30,
+      modelTimeoutMs: 500,
+    },
     queue: { concurrency: 1 },
     http: { host: DEFAULT_SIDECAR_HOST, port: DEFAULT_SIDECAR_PORT },
     idleStopMinutes: 0,
@@ -253,6 +284,20 @@ function boolOf(input: Record<string, unknown>, key: string, fallback: boolean):
   if (value === undefined || value === null) return fallback;
   if (typeof value === 'boolean') return value;
   throw new SidecarConfigError('config_invalid', `${key} 必须是布尔值`);
+}
+
+function numberOf(
+  input: Record<string, unknown>,
+  key: string,
+  fallback: number,
+  { min = 0, max = 1 }: { min?: number; max?: number } = {},
+): number {
+  const value = input[key];
+  if (value === undefined || value === null) return fallback;
+  if (typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max) {
+    return value;
+  }
+  throw new SidecarConfigError('config_invalid', `${key} 必须是 ${min}–${max} 的数字`);
 }
 
 function stringOrNullOf(input: Record<string, unknown>, key: string, fallback: string | null): string | null {
@@ -379,6 +424,8 @@ export function resolveSidecarPaths({
     discoveryPath: join(resolvedHome, 'memory-runtime.json'),
     configPath: join(resolvedDataDir, 'config.json'),
     policyPath: join(resolvedDataDir, 'policy.json'),
+    policyDir: join(resolvedDataDir, 'policy'),
+    policyStatePath: join(resolvedDataDir, 'policy', 'state.json'),
     hostTokenPath: join(resolvedDataDir, 'host-token'),
     capabilityTokenPath: join(resolvedDataDir, 'capability-token'),
     startLockPath: join(resolvedDataDir, 'start.lock'),
@@ -461,6 +508,7 @@ export function normalizeSidecarConfig(raw: unknown, options: { warnings?: strin
   const limits = objectOf(raw.limits);
   const recall = objectOf(raw.recall);
   const context = objectOf(raw.context);
+  const intervention = objectOf(raw.intervention);
   const queue = objectOf(raw.queue);
   const http = objectOf(raw.http);
   const capability = objectOf(raw.capability);
@@ -524,6 +572,50 @@ export function normalizeSidecarConfig(raw: unknown, options: { warnings?: strin
     context: {
       maxTokens: intOf(context, 'maxTokens', defaults.context.maxTokens, { min: 1 }),
       maxFragments: intOf(context, 'maxFragments', defaults.context.maxFragments, { min: 1 }),
+    },
+    intervention: {
+      mode: enumOf(
+        intervention,
+        'mode',
+        ['off', 'shadow', 'heuristic', 'model'] as const,
+        defaults.intervention.mode,
+      ),
+      minConfidence: numberOf(
+        intervention,
+        'minConfidence',
+        defaults.intervention.minConfidence,
+        { min: 0, max: 1 },
+      ),
+      maxSilentStreak: intOf(
+        intervention,
+        'maxSilentStreak',
+        defaults.intervention.maxSilentStreak,
+        { min: 1, max: 100 },
+      ),
+      explorationRate: numberOf(
+        intervention,
+        'explorationRate',
+        defaults.intervention.explorationRate,
+        { min: 0, max: 1 },
+      ),
+      outcomeWindowMs: intOf(
+        intervention,
+        'outcomeWindowMs',
+        defaults.intervention.outcomeWindowMs,
+        { min: 1 },
+      ),
+      policyTtlDays: intOf(
+        intervention,
+        'policyTtlDays',
+        defaults.intervention.policyTtlDays,
+        { min: 1 },
+      ),
+      modelTimeoutMs: intOf(
+        intervention,
+        'modelTimeoutMs',
+        defaults.intervention.modelTimeoutMs,
+        { min: 1 },
+      ),
     },
     queue: { concurrency: intOf(queue, 'concurrency', defaults.queue.concurrency, { min: 1, max: 4 }) },
     http: {

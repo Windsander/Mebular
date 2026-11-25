@@ -243,6 +243,79 @@ export interface ContextCheckpoint {
 
 // ---------- 2.3.5 RecallTrace（本地诊断） ----------
 
+// ---------- 记忆介入策略（0.4.0） ----------
+
+export type InterventionAction = 'speak' | 'defer' | 'silent';
+export type RecallDepth = 'gist' | 'detail' | 'quote';
+
+/** 介入决策的解释分数；只描述本次判定，不含正文。 */
+export interface InterventionScores {
+  /** 首选候选的 score.final。 */
+  top: number;
+  /** cue 具体度：broad=0.3 / targeted=0.7 / exact=1。 */
+  specificity: number;
+  /** 首选候选是否不在 alreadyInjectedIds 中（0/1）。 */
+  novelty: number;
+  /** 同 agent/domain 最近的负例占比。 */
+  recentUseless: number;
+  /** 所选深度与 cue 意图的贴合度。 */
+  depthFit: number;
+}
+
+export interface InterventionDecision {
+  action: InterventionAction;
+  depth: RecallDepth;
+  /** 0..1；silent 时表示维持沉默的置信度。 */
+  confidence: number;
+  /** must_speak / high_relevance / low_confidence / recent_false_alarm / no_novelty / budget / baseline ... */
+  reason: string;
+  /** v0-baseline / v0-rules / heuristic:<hash>。model 失败回退 heuristic 时必须仍是 heuristic 版本。 */
+  policyVersion: string;
+  /** 本次决策是否真正作用于注入：off/baseline=false，shadow=false，heuristic/model=true。 */
+  enforced: boolean;
+  scores?: InterventionScores;
+  /** 命中硬规则（显式追问/task 续接/上轮沉默后纠正）。 */
+  mustSpeak?: boolean;
+  /** 降级标记：must_speak 无候选/详情不可用，或 model 回退 heuristic。 */
+  degraded?: boolean;
+}
+
+/** 实际生效的介入结果；与 decision 在 shadow/off 下可能不同。 */
+export interface AppliedIntervention {
+  action: InterventionAction;
+  depth: RecallDepth;
+  /** 实际注入的长期记忆片段数（不含 self/checkpoint）。 */
+  fragments: number;
+  /** 决策所用的主域，供 outcome 归因；不含正文。 */
+  domain?: string;
+  /** 被策略裁掉的候选 fragmentId（heuristic 才有）。 */
+  suppressed?: string[];
+  /** shadow 模式下策略建议但未生效的 action/depth。 */
+  wouldAction?: InterventionAction;
+  wouldDepth?: RecallDepth;
+  degraded?: boolean;
+}
+
+export type RecallOutcomeKind =
+  | 'accepted'
+  | 'ignored'
+  | 'reasked'
+  | 'corrected'
+  | 'dismissed'
+  | 'missed'
+  | 'too_shallow'
+  | 'too_deep';
+
+export type RecallOutcomeSource = 'host' | 'console' | 'heuristic';
+
+export interface RecallOutcome {
+  kind: RecallOutcomeKind;
+  at: number;
+  source: RecallOutcomeSource;
+  confidence?: number;
+  note?: string;
+}
+
 export interface RecallTrace {
   /** schema 1 是旧原型；schema 2 是 sidecar 碎片化召回 trace（本地对象）。 */
   schema: 1 | 2;
@@ -284,6 +357,14 @@ export interface RecallTrace {
     totalMs: number;
   };
   warnings?: string[];
+  /** 0.4.0：本次 memory fragments 的介入决策（additive，不升 schema）。 */
+  decision?: InterventionDecision;
+  /** 0.4.0：实际生效结果；shadow 下与 decision 不同。 */
+  applied?: AppliedIntervention;
+  /** 0.4.0：最近一次结果归因。 */
+  outcome?: RecallOutcome;
+  /** 0.4.0：最近 5 条结果归因（同 kind 幂等）。 */
+  outcomeHistory?: RecallOutcome[];
 }
 
 // ---------- 2.3.6 SelfRecord（Agent 自我） ----------

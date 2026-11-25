@@ -262,6 +262,7 @@ export interface SidecarLocalLayerStats {
 export async function ensureSidecarDirectories(paths: SidecarPaths): Promise<void> {
   await Promise.all([
     ensurePrivateDir(paths.dataDir),
+    ensurePrivateDir(paths.policyDir),
     ensurePrivateDir(paths.stagingDir),
     ensurePrivateDir(paths.cacheDir),
     ensurePrivateDir(paths.detailCacheDir),

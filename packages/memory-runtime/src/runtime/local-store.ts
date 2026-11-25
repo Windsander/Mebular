@@ -14,7 +14,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { chmod, mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { ulid } from 'ulid';
-import type { RawChunk, RecallTrace } from './types.js';
+import type { RawChunk, RecallOutcome, RecallTrace } from './types.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -395,6 +395,37 @@ export class RuntimeLocalStore {
       this.traces[index] = updated;
       await this.writeTracesAtomic();
       return updated;
+    });
+  }
+
+  /**
+   * 追加一次 outcome 归因；同 trace 同 kind 幂等，不重复计数。
+   * 不同 kind 更新 latest outcome，并只保留最近 maxHistory 条历史。
+   */
+  async updateTraceOutcome(
+    id: string,
+    outcome: RecallOutcome,
+    { maxHistory = 5 }: { maxHistory?: number } = {},
+  ): Promise<{ trace: RecallTrace; duplicate: boolean } | null> {
+    return this.exclusive(async () => {
+      await this.ensureTracesLoaded();
+      const index = this.traces.findIndex((trace) => trace.id === id);
+      if (index < 0) return null;
+      const current = this.traces[index]!;
+      const history = Array.isArray(current.outcomeHistory) ? current.outcomeHistory : [];
+      if (history.some((entry) => entry.kind === outcome.kind)) {
+        return { trace: current, duplicate: true };
+      }
+      const nextHistory = [...history.map((entry) => ({ ...entry })), { ...outcome }]
+        .slice(-Math.max(1, Math.floor(maxHistory)));
+      const updated: RecallTrace = {
+        ...current,
+        outcome: { ...outcome },
+        outcomeHistory: nextHistory,
+      };
+      this.traces[index] = updated;
+      await this.writeTracesAtomic();
+      return { trace: updated, duplicate: false };
     });
   }
 

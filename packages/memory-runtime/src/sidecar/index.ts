@@ -15,6 +15,8 @@ export * from './inference/index.js';
 export * from './cue.js';
 export * from './text.js';
 export * from './recall.js';
+export * from './intervention.js';
+export * from './policy-store.js';
 export * from './candidates.js';
 export * from './errors.js';
 export * from './ingest.js';

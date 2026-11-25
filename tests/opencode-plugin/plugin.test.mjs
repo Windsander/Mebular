@@ -678,7 +678,7 @@ describe('outcome attribution', () => {
     await controller.dispose();
   });
 
-  it('reports too_deep when a detail answer is followed by an unrelated topic', async () => {
+  it('does not report too_deep when a detail answer is followed by a new task', async () => {
     const fetchImpl = createFetch({
       '/context': contextSequence([
         { ...HIT, traceId: 'tr_topic_1', decision: interventionDecision('speak', { depth: 'detail' }) },
@@ -689,9 +689,8 @@ describe('outcome attribution', () => {
     const { controller } = controllerWith({ fetchImpl });
     await controller.handleContext(hookEvent([userTurn('u1', 'explain the deploy process')]));
     await controller.handleContext(hookEvent([userTurn('u2', '帮我查一下明天北京的天气')]));
-    const call = await waitFor(() => fetchImpl.callsFor('/recall/tr_topic_1/outcome')[0]);
-    expect(call).toBeTruthy();
-    expect(call.body).toMatchObject({ kind: 'too_deep', source: 'host' });
+    await sleep(25);
+    expect(fetchImpl.callsFor('/recall/tr_topic_1/outcome')).toHaveLength(0);
     await controller.dispose();
   });
 
@@ -709,6 +708,22 @@ describe('outcome attribution', () => {
     const call = await waitFor(() => fetchImpl.callsFor('/recall/tr_accept_1/outcome')[0]);
     expect(call).toBeTruthy();
     expect(call.body).toMatchObject({ kind: 'accepted', source: 'host' });
+    await controller.dispose();
+  });
+
+  it('does not report accepted for a standalone permission word', async () => {
+    const fetchImpl = createFetch({
+      '/context': contextSequence([
+        { ...HIT, traceId: 'tr_ok_1', decision: interventionDecision('speak') },
+        { ...HIT, traceId: 'tr_ok_2', decision: interventionDecision('speak') },
+      ]),
+      'POST /recall/tr_ok_1/outcome': { traceId: 'tr_ok_1', outcome: { kind: 'accepted' } },
+    });
+    const { controller } = controllerWith({ fetchImpl });
+    await controller.handleContext(hookEvent([userTurn('u1', 'how do I change the theme')]));
+    await controller.handleContext(hookEvent([userTurn('u2', '可以')]));
+    await sleep(25);
+    expect(fetchImpl.callsFor('/recall/tr_ok_1/outcome')).toHaveLength(0);
     await controller.dispose();
   });
 

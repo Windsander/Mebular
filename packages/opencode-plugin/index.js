@@ -65,7 +65,7 @@ const REASK_RE = /重问|再问|再说一遍|再讲一遍|再说一次|重新说
 const CORRECTION_RE = /不对|不是(?!说过|吗|嘛|吧)|错了|搞错|弄错|说错|记错|不正确|有误|wrong|incorrect|that'?s not|not what i (?:said|meant)|mistaken/iu;
 const DETAIL_REQUEST_RE = /具体|详细|详尽|怎么配|如何配|配置步骤|原文|准确点|准确一点|精确|展开|更多细节|细节|逐条|一步一步|一步步|step[ -]?by[ -]?step|more detail|in detail|elaborate|verbatim|quote|show me the (?:exact|full|raw)|how (?:do|to) (?:i )?(?:configure|set up)/iu;
 const SHALLOW_REQUEST_RE = /太长|太详细|太啰嗦|不用这么详细|不用那么详细|不用详细|简短|简单点|简单一点|精炼|精简|只要结论|只要答案|只给结论|说重点|概括|摘要|\bsummary\b|\bshort(?:er)?\b|\bsimpler\b|\bbrief(?:ly)?\b|\btl;?dr\b|too long|too detailed|too much detail|just the (?:answer|conclusion)|keep it short|be concise/iu;
-const ACCEPTED_RE = /谢谢|多谢|感谢|thank(?:s| you)|this helps|that helps|很有用|挺有用|非常有用|(?:^|[，。！？,.!?\s])(?:对的|对呀|对|是的|没错|有用|很好|完美|可以)(?=$|[，。！？,.!?\s])|\b(?:perfect|exactly|helpful)\b/iu;
+const ACCEPTED_RE = /谢谢|多谢|感谢|thank(?:s| you)|this helps|that helps|很有用|挺有用|非常有用|(?:^|[，。！？,.!?\s])(?:对的|对呀|对|是的|没错|有用|很好|完美)(?=$|[，。！？,.!?\s])|\b(?:perfect|exactly|helpful)\b/iu;
 const TERM_STOPWORDS = new Set([
   'the', 'and', 'for', 'you', 'your', 'with', 'this', 'that', 'what', 'when', 'where', 'which',
   'how', 'why', 'can', 'could', 'would', 'should', 'please', 'about', 'from', 'have', 'has',
@@ -2612,15 +2612,6 @@ export function createController(dependencies = {}) {
       reportOutcome(record, 'accepted', {
         confidence: 0.6,
         note: 'follow-up explicitly confirmed the answer',
-      });
-      return;
-    }
-    // A detail/quote turn followed by an unrelated request means the user
-    // moved on without using the injected detail.
-    if ((record.depth === 'detail' || record.depth === 'quote') && !overlap && !followUp) {
-      reportOutcome(record, 'too_deep', {
-        confidence: 0.45,
-        note: 'follow-up changed topic after a detail answer',
       });
     }
   }

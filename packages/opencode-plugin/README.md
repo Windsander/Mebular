@@ -172,12 +172,12 @@ Runtime 返回 `decision` / `traceId` 时，插件会把每次 `/context`（**�
 | 上轮 `speak` + 本轮重问/复述 | `reasked` | 注入没阻止重问 |
 | 上轮 `speak` + 本轮纠正 | `corrected` | 注入内容被纠正 |
 | 上轮 `speak` + `gist` + 本轮明确要细节 | `too_shallow` | 深度不够 |
-| 上轮 `speak` + `detail`/`quote` + 本轮明确要更短或直接换话题 | `too_deep` | 深度过头 |
+| 上轮 `speak` + `detail`/`quote` + 本轮明确要更短/更浅 | `too_deep` | 深度过头 |
 | 上轮 `speak` + 本轮明确正向确认（对/有用/谢谢/没错/this helps/perfect） | `accepted` | 注入被接受 |
 | `session.idle` / `session.execution.succeeded` 后窗口内无追问 | `ignored` | 弱信号，延迟且去重 |
 
 - 深度反馈只在上轮实际 `speak` 且 `decision.depth` 已知时判断；普通继续、
-  同主题追问、问候不会触发 `too_shallow`/`too_deep`。
+  同主题追问、问候或直接开新任务不会触发 `too_shallow`/`too_deep`。
 - 明确要求更短/更浅优先于 `accepted`；纠正优先于其他正向或深度信号。
 - 只保留每个 thread/session 最近一次 decision；下一轮 user turn 或 idle 上报后消费。
 - 同一 `traceId` + `kind` 最多上报一次；失败不重试、不阻塞主流程，401 之外的

@@ -142,6 +142,30 @@ describe('intervention planner', () => {
     expect(broad).toMatchObject({ action: 'silent', reason: 'broad_cue' });
   });
 
+  it('novelty：alreadyInjectedIds 传 fragment ID 也视为已注入（novelty=0）', () => {
+    const repeated = planIntervention(input({
+      candidates: [candidate({ fragmentId: 'mf_01JHOSTECHO', sourceIds: ['01JSOURCE'] })],
+      alreadyInjectedIds: ['mf_01JHOSTECHO'],
+    }));
+    expect(repeated).toMatchObject({
+      action: 'silent',
+      reason: 'no_novelty',
+      scores: { novelty: 0 },
+    });
+  });
+
+  it('novelty：不相关的 fragment/source ID 不影响（novelty=1，正常 speak）', () => {
+    const fresh = planIntervention(input({
+      candidates: [candidate({ fragmentId: 'mf_01JHOSTECHO', sourceIds: ['01JSOURCE'] })],
+      alreadyInjectedIds: ['mf_01JOTHER', '01JOTHER'],
+    }));
+    expect(fresh).toMatchObject({
+      action: 'speak',
+      reason: 'high_relevance',
+      scores: { novelty: 1 },
+    });
+  });
+
   it('maxSilentStreak 与 explorationRate 避免学成哑巴', () => {
     const forced = planIntervention(input({
       candidates: [candidate({ score: 0.2 })],

@@ -33,6 +33,8 @@ import type { SidecarLocalLayer } from './local-layer.js';
 import type { OutboxItem } from './local-layer.js';
 import type { SidecarInferenceProvider } from './inference-provider.js';
 import { OutboxReplayer } from './outbox-replayer.js';
+import { SidecarSettlementError } from './errors.js';
+import { INTERVENTION_POLICY_VERSION } from './intervention.js';
 import { PolicyStore } from './policy-store.js';
 import {
   RecallService,
@@ -422,6 +424,8 @@ export class SettlementRuntime {
   private readonly diagnostics: DiagnosticLog | null;
   private readonly restartReason: string | null;
   private readonly now: () => number;
+  /** PolicyStore 初始化/落盘失败；不影响 recall/ingest，只作为 degraded 诊断。 */
+  private policyDegraded = false;
 
   constructor(options: SettlementRuntimeOptions) {
     this.config = options.config;
@@ -580,9 +584,15 @@ export class SettlementRuntime {
         this.recall.setPolicy(this.policy);
       }
     }
-    await this.policyStore?.init();
-    await this.ingest.init();
-    const beforeStagingCleanup = (ids: readonly string[]) => this.ingest.expireStagingDependencies(ids);
+    if (this.policyStore) {
+      try {
+        await this.policyStore.init();
+      } catch {
+        // 策略统计不可用不能阻塞 sidecar 启动；召回照常，只是不学习。
+        this.policyDegraded = true;
+      }
+    }
+    await this.ingest.init();    const beforeStagingCleanup = (ids: readonly string[]) => this.ingest.expireStagingDependencies(ids);
     this.local.setMaintenanceDependencyHandler(beforeStagingCleanup);
     await this.local.runMaintenance({ beforeStagingCleanup }).catch(() => null);
     this.local.startMaintenance({
@@ -597,16 +607,31 @@ export class SettlementRuntime {
 
   async stop(): Promise<void> {
     this.local.stopMaintenance();
+    // 先把 write-behind 策略统计落盘（失败只标记 degraded，不阻塞停止）。
+    await this.flushPolicy();
     // 先让 replayer 在 finalize 仍可用时完成有界 flush，再关闭收口入口。
     await this.replayer.stop({ flushMs: 2000 });
     this.ingest.stop();
   }
 
   get degraded(): boolean {
-    return this.ingest.isDegraded
+    return this.policyDegraded
+      || this.ingest.isDegraded
       || this.recall.isDegraded
       || this.objects.isDegraded
       || this.inference?.currentStatus().degraded === true;
+  }
+
+  /** 运维/停止时显式落盘策略统计；返回 false 表示本次 flush 失败。 */
+  async flushPolicy(): Promise<boolean> {
+    if (!this.policyStore) return true;
+    try {
+      await this.policyStore.flush();
+      return true;
+    } catch {
+      this.policyDegraded = true;
+      return false;
+    }
   }
 
   get stats(): IngestStatsSnapshot {
@@ -697,8 +722,26 @@ export class SettlementRuntime {
   }
 
   /** Console/CLI reset 入口：清空本机策略统计；不影响记忆或 trace。 */
-  resetInterventionPolicy(): Promise<number> {
-    return this.policyStore ? this.policyStore.reset() : Promise.resolve(0);
+  async resetInterventionPolicy(): Promise<{
+    reset: true;
+    policyVersion: string;
+    removedDomains: number;
+  }> {
+    if (!this.policyStore) {
+      throw new SidecarSettlementError('intervention_unavailable', '介入策略未启用或本机策略状态不可用', {
+        status: 409,
+      });
+    }
+    try {
+      const removedDomains = await this.policyStore.reset();
+      return { reset: true, policyVersion: INTERVENTION_POLICY_VERSION, removedDomains };
+    } catch {
+      this.policyDegraded = true;
+      throw new SidecarSettlementError('intervention_unavailable', '本机策略状态不可写', {
+        status: 503,
+        retryable: true,
+      });
+    }
   }
 
   async reloadPolicy(): Promise<string[]> {

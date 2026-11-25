@@ -12,6 +12,7 @@ describe('PolicyStore', () => {
   let dir: string;
   let now: number;
   let path: string;
+  const stores: PolicyStore[] = [];
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'mebular-policy-store-'));
@@ -20,14 +21,19 @@ describe('PolicyStore', () => {
   });
 
   afterEach(async () => {
+    await Promise.allSettled(stores.splice(0).map((policy) => policy.close()));
     await rm(dir, { recursive: true, force: true });
   });
 
-  const store = (options: { ttlDays?: number; maxDomains?: number } = {}) => new PolicyStore({
-    path,
-    now: () => now,
-    ...options,
-  });
+  const store = (options: { ttlDays?: number; maxDomains?: number } = {}) => {
+    const policy = new PolicyStore({
+      path,
+      now: () => now,
+      ...options,
+    });
+    stores.push(policy);
+    return policy;
+  };
 
   it('首次写入创建 0700 目录与 0600 文件，并持久化计数', async () => {
     const policy = store();
@@ -35,6 +41,7 @@ describe('PolicyStore', () => {
     await policy.recordDecision({ agentId: 'opencode', domain: 'user', action: 'speak' });
     await policy.recordDecision({ agentId: 'opencode', domain: 'user', action: 'silent' });
     await policy.recordOutcome({ agentId: 'opencode', domain: 'user', kind: 'accepted' });
+    await policy.flush();
 
     const dirMode = (await stat(join(dir, 'policy'))).mode & 0o777;
     const fileMode = (await stat(path)).mode & 0o777;
@@ -70,10 +77,50 @@ describe('PolicyStore', () => {
     expect(snapshot.global.reasked).toBe(5);
   });
 
+  it('write-behind：record 立即返回且不落盘，flush 后可见', async () => {
+    const policy = store();
+    await policy.init();
+    await policy.recordDecision({ agentId: 'opencode', domain: 'user', action: 'speak' });
+    const immediate = await stat(path).catch(() => null);
+    expect(immediate).toBeNull();
+    expect((await policy.snapshot()).global.spoken).toBe(1);
+
+    await policy.flush();
+    const persisted = JSON.parse(await readFile(path, 'utf8')) as any;
+    expect(persisted.global.spoken).toBe(1);
+  });
+
+  it('effectiveStats：outcome 先验按 spoken/silent 分别归一', async () => {
+    const policy = store();
+    await policy.init();
+    for (let index = 0; index < 10; index += 1) {
+      await policy.recordDecision({ agentId: 'opencode', domain: 'user', action: 'speak' });
+    }
+    for (let index = 0; index < 10; index += 1) {
+      await policy.recordDecision({ agentId: 'opencode', domain: 'user', action: 'silent' });
+    }
+    for (let index = 0; index < 5; index += 1) {
+      await policy.recordOutcome({ agentId: 'opencode', domain: 'user', kind: 'missed' });
+    }
+    for (let index = 0; index < 5; index += 1) {
+      await policy.recordOutcome({ agentId: 'opencode', domain: 'user', kind: 'reasked' });
+    }
+    // 冷启动域只有 2 次 spoken，向全局先验收缩。
+    await policy.recordDecision({ agentId: 'opencode', domain: 'agent:opencode', action: 'speak' });
+    await policy.recordDecision({ agentId: 'opencode', domain: 'agent:opencode', action: 'speak' });
+
+    const pooled = await policy.effectiveStats('opencode', 'agent:opencode');
+    expect(pooled.source).toBe('global');
+    // missed 先验按 global.silent 归一（5/10），useless 先验按 global.spoken 归一（5/10）。
+    expect(pooled.missedRate).toBeGreaterThan(0.9);
+    expect(pooled.uselessRate).toBeGreaterThan(0.55);
+  });
+
   it('TTL 到期后丢弃域统计；全局计数保留', async () => {
     const policy = store({ ttlDays: 2 });
     await policy.init();
     await policy.recordDecision({ agentId: 'opencode', domain: 'user', action: 'speak' });
+    await policy.flush();
     now += 3 * DAY;
     const reopened = store({ ttlDays: 2 });
     await reopened.init();

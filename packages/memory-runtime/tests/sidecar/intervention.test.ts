@@ -66,8 +66,16 @@ describe('intervention planner', () => {
       action: 'speak',
       mustSpeak: true,
       confidence: 1,
+      enforced: true,
     });
     expect(decision.reason).toBe('must_speak:explicit_memory_request');
+  });
+
+  it('shadow 决策 enforced=false；heuristic 决策 enforced=true', () => {
+    const shadow = planIntervention(input({ mode: 'shadow', candidates: [candidate({ score: 0.8 })] }));
+    expect(shadow).toMatchObject({ action: 'speak', enforced: false });
+    const heuristic = planIntervention(input({ mode: 'heuristic', candidates: [candidate({ score: 0.8 })] }));
+    expect(heuristic).toMatchObject({ action: 'speak', enforced: true });
   });
 
   it('must_speak 无候选：不静默失败，返回 degraded + must_speak_unavailable', () => {
@@ -81,6 +89,7 @@ describe('intervention planner', () => {
       reason: 'must_speak_unavailable',
       mustSpeak: true,
       degraded: true,
+      enforced: true,
     });
   });
 
@@ -164,6 +173,7 @@ describe('intervention planner', () => {
     const decision = planIntervention(input({ mode: 'model', candidates: [candidate({ score: 0.8 })] }));
     expect(decision.action).toBe('speak');
     expect(decision.degraded).toBe(true);
+    expect(decision.enforced).toBe(true);
     expect(decision.policyVersion).toMatch(/^heuristic:/);
     expect(decision.policyVersion).not.toMatch(/^model:/);
   });

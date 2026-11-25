@@ -77,6 +77,8 @@ const EXPAND_TRACE_TTL_MS = 10 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MAX_OUTCOME_NOTE_CHARS = 500;
 const MAX_OUTCOME_HISTORY = 5;
+/** ignored 是弱信号，归因窗口至少 10 分钟。 */
+const IGNORED_OUTCOME_WINDOW_MS = 10 * 60 * 1000;
 
 const RECALL_OUTCOME_KINDS: readonly RecallOutcomeKind[] = [
   'accepted',
@@ -1430,13 +1432,14 @@ export class RecallService {
     });
     if (!updated) throw new SidecarSettlementError('not_found', 'trace 不存在', { status: 404 });
 
-    const withinWindow = at - trace.at <= this.config.intervention.outcomeWindowMs;
+    const windowMs = outcome.kind === 'ignored'
+      ? Math.max(this.config.intervention.outcomeWindowMs, IGNORED_OUTCOME_WINDOW_MS)
+      : this.config.intervention.outcomeWindowMs;
+    const withinWindow = at - trace.at <= windowMs;
     if (!updated.duplicate) {
       await this.recordPolicyOutcome(updated.trace, outcome.kind);
     }
-    const warnings = !updated.duplicate && !withinWindow && outcome.kind !== 'ignored'
-      ? ['outcome_outside_window']
-      : [];
+    const warnings = !updated.duplicate && !withinWindow ? ['outcome_outside_window'] : [];
     return {
       traceId,
       outcome: updated.trace.outcome ?? outcome,
@@ -3163,6 +3166,7 @@ export class RecallService {
         confidence: 0,
         reason: hasSelfCheckpoint ? 'self_checkpoint_only' : (run.silenceReason ?? 'no_memory'),
         policyVersion: 'v0-baseline',
+        enforced: false,
       };
     }
     return {
@@ -3171,6 +3175,7 @@ export class RecallService {
       confidence: Number(Math.min(1, Math.max(0, top.fragment.score.final)).toFixed(4)),
       reason: 'baseline',
       policyVersion: 'v0-baseline',
+      enforced: false,
     };
   }
 
@@ -3805,20 +3810,28 @@ export class RecallService {
     // 任何路径（gate/无命中/策略沉默）都有 decision；off 与早期返回使用 baseline。
     const decision = run.decision ?? this.baselineDecision(run, run.selected, new Map());
     if (decision.degraded) degraded = true;
-    const actualDepth: RecallDepth = fragments.length === 0
+    // context 以实际展开后的 blocks 为准；预算裁掉或未注入时不能报成 speak。
+    const injectedIds = mode === 'context'
+      ? new Set(run.blocks.flatMap((block) => block.fragments))
+      : new Set(fragments.map((fragment) => fragment.id));
+    const injectedFragments = fragments.filter((fragment) => injectedIds.has(fragment.id));
+    const injectedCount = mode === 'context'
+      ? run.blocks.reduce((sum, block) => sum + block.fragments.length, 0)
+      : fragments.length;
+    const actualDepth: RecallDepth = injectedCount === 0
       ? 'gist'
-      : fragments.some((fragment) => fragment.detail?.format === 'verbatim')
+      : injectedFragments.some((fragment) => fragment.detail?.format === 'verbatim')
         ? 'quote'
-        : fragments.some((fragment) => Boolean(fragment.detail))
+        : injectedFragments.some((fragment) => fragment.detail && fragment.detail.format !== 'summary')
           ? 'detail'
           : 'gist';
-    const action: InterventionAction = fragments.length > 0
+    const action: InterventionAction = injectedCount > 0
       ? 'speak'
       : run.effective?.action === 'defer' ? 'defer' : 'silent';
     const applied: AppliedIntervention = {
       action,
       depth: actualDepth,
-      fragments: fragments.length,
+      fragments: injectedCount,
       domain: run.effective?.domain ?? run.domains[0] ?? 'default',
       ...(run.effective?.suppressed && run.effective.suppressed.length > 0
         ? { suppressed: [...run.effective.suppressed] }

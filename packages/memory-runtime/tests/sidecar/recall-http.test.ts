@@ -64,11 +64,15 @@ function preference(): FakeMemoryRecord {
 async function setup(options: {
   intervention?: Partial<ReturnType<typeof defaultSidecarConfig>['intervention']>;
   trace?: 'off' | 'local';
+  now?: () => number;
+  withPolicy?: boolean;
+  interventionApi?: boolean;
 } = {}): Promise<Harness> {
   const home = await mkdtemp(join(tmpdir(), 'mebular-recall-http-'));
-  const local = new SidecarLocalLayer({ root: join(home, 'memory-runtime'), now: () => NOW });
+  const now = options.now ?? (() => NOW);
+  const local = new SidecarLocalLayer({ root: join(home, 'memory-runtime'), now });
   await local.init();
-  const fake = await startFakeCapability({ now: () => NOW });
+  const fake = await startFakeCapability({ now });
   fake.setRecords([preference()]);
   const client = new CapabilityClient({ baseUrl: fake.baseUrl, token: 'cap-token', retries: 0, retryDelayMs: 0 });
   const identity = { cloudId: 'cl_test', profileId: 'default', hostId: 'h_test' };
@@ -82,9 +86,9 @@ async function setup(options: {
     client,
     identity,
     policy: defaultSidecarPolicy(),
-    policyStatePath: join(home, 'memory-runtime', 'policy', 'state.json'),
+    ...(options.withPolicy === false ? {} : { policyStatePath: join(home, 'memory-runtime', 'policy', 'state.json') }),
     autoStartReplayer: false,
-    now: () => NOW,
+    now,
   });
   await runtime.init();
   const server = new SidecarServer({
@@ -107,6 +111,7 @@ async function setup(options: {
     namespaces: runtime,
     recall: runtime,
     objects: runtime,
+    ...(options.interventionApi === false ? {} : { intervention: runtime }),
     getDegraded: () => runtime.degraded,
   });
   await server.listen();
@@ -812,6 +817,7 @@ describe('sidecar recall/context HTTP', () => {
       action: 'speak',
       policyVersion: 'v0-baseline',
       reason: 'baseline',
+      enforced: false,
     });
     const trace = await fetch(`${server.url}/traces/${context.body.data.traceId}`, { headers: auth() });
     const traceBody = await trace.json() as any;
@@ -861,6 +867,8 @@ describe('sidecar recall/context HTTP', () => {
     }));
     expect(fragmentsShape(shadowContext.body.data.fragments)).toEqual(fragmentsShape(offContext.body.data.fragments));
     expect(shadowContext.body.data.decision.policyVersion).toMatch(/^(v0-rules|heuristic:)/);
+    expect(shadowContext.body.data.decision.enforced).toBe(false);
+    expect(offContext.body.data.decision.enforced).toBe(false);
     const trace = await fetch(`${shadow.server.url}/traces/${shadowContext.body.data.traceId}`, { headers: auth() });
     const traceBody = await trace.json() as any;
     expect(traceBody.data.applied).toMatchObject({
@@ -906,7 +914,7 @@ describe('sidecar recall/context HTTP', () => {
       query: '今天天气怎么样',
     });
     expect(context.status).toBe(200);
-    expect(context.body.data.decision).toMatchObject({ action: 'silent' });
+    expect(context.body.data.decision).toMatchObject({ action: 'silent', enforced: true });
     expect(context.body.data.fragments).toEqual([]);
     expect(context.body.data.blocks.map((block: any) => block.kind)).toEqual(['checkpoint']);
     expect(context.body.data.blocks[0].content).toContain('保持 self/checkpoint 注入');
@@ -947,6 +955,7 @@ describe('sidecar recall/context HTTP', () => {
       action: 'speak',
       depth: 'gist',
       mustSpeak: true,
+      enforced: true,
     });
     expect(context.body.data.decision.reason).toMatch(/^must_speak:/);
     expect(context.body.data.fragments.length).toBeGreaterThan(0);
@@ -1087,6 +1096,116 @@ describe('sidecar recall/context HTTP', () => {
     expect(offStatsAfter.global).toMatchObject({ spoken: 0, silent: 0 });
   });
 
+  it('applied 以实际注入块为准：预算裁掉 memory 片段时不显示 speak', async () => {
+    const { server, fake } = await setup({ intervention: { mode: 'heuristic', explorationRate: 0 } });
+    fake.setRecords([{
+      ...preference(),
+      id: '01JLONGGIST',
+      content: { entity: 'user', preferenceType: 'note', value: 'x'.repeat(800) },
+      text: 'x'.repeat(800),
+      provenance: { ...preference().provenance },
+    }]);
+    const context = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_budget',
+      turnId: 'turn_budget',
+      query: '为什么偏好这条笔记？',
+      maxBytes: 128,
+      tokenBudget: 100,
+    });
+    expect(context.status).toBe(200);
+    expect(context.body.data.decision).toMatchObject({ action: 'speak', enforced: true });
+    expect(context.body.data.fragments).toEqual([]);
+    expect(context.body.data.blocks).toEqual([]);
+    const trace = await fetch(`${server.url}/traces/${context.body.data.traceId}`, { headers: auth() });
+    const traceBody = await trace.json() as any;
+    expect(traceBody.data.applied).toMatchObject({ action: 'silent', fragments: 0 });
+  });
+
+  it('outcome ignored 使用至少 10 分钟窗口；其他 kind 仍用 outcomeWindowMs', async () => {
+    let now = NOW;
+    const { server } = await setup({ intervention: { mode: 'heuristic' }, now: () => now });
+    const trace = async (thread: string): Promise<string> => {
+      const context = await post(`${server.url}/context`, {
+        agentId: 'opencode',
+        threadId: thread,
+        turnId: `turn_${thread}`,
+        query: '我的偏好是什么？',
+      });
+      return context.body.data.traceId as string;
+    };
+
+    const first = await trace('th_window_1');
+    now += 5 * 60 * 1000;
+    const ignored = await post(`${server.url}/recall/${first}/outcome`, {
+      kind: 'ignored',
+      source: 'host',
+    });
+    expect(ignored.body.data.withinWindow).toBe(true);
+    expect(ignored.body.data.warnings).toEqual([]);
+
+    const lateAccepted = await post(`${server.url}/recall/${first}/outcome`, {
+      kind: 'accepted',
+      source: 'host',
+    });
+    expect(lateAccepted.body.data.withinWindow).toBe(false);
+    expect(lateAccepted.body.data.warnings).toEqual(['outcome_outside_window']);
+
+    const second = await trace('th_window_2');
+    now += 11 * 60 * 1000;
+    const lateIgnored = await post(`${server.url}/recall/${second}/outcome`, {
+      kind: 'ignored',
+      source: 'host',
+    });
+    expect(lateIgnored.body.data.withinWindow).toBe(false);
+    expect(lateIgnored.body.data.warnings).toEqual(['outcome_outside_window']);
+  });
+
+  it('POST /intervention/reset：成功、重复 reset、未启用与错误路径', async () => {
+    const { server, runtime } = await setup({ intervention: { mode: 'heuristic' } });
+    await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_reset',
+      turnId: 'turn_reset',
+      query: '我的偏好是什么？',
+    });
+    const before = await runtime.policyStore!.snapshot();
+    expect(before.global.spoken + before.global.silent).toBeGreaterThan(0);
+
+    const reset = await post(`${server.url}/intervention/reset`, {});
+    expect(reset.status).toBe(200);
+    expect(reset.body).toMatchObject({
+      ok: true,
+      data: { reset: true, policyVersion: 'v0-rules' },
+      degraded: false,
+    });
+    expect(reset.body.data.removedDomains).toBeGreaterThanOrEqual(1);
+    const after = await runtime.policyStore!.snapshot();
+    expect(after.global).toMatchObject({ spoken: 0, silent: 0 });
+    expect(after.domains).toEqual([]);
+
+    const repeated = await post(`${server.url}/intervention/reset`, {});
+    expect(repeated.status).toBe(200);
+    expect(repeated.body.data).toMatchObject({ reset: true, removedDomains: 0 });
+
+    const wrongMethod = await fetch(`${server.url}/intervention/reset`, { headers: auth() });
+    expect(wrongMethod.status).toBe(405);
+    expect((await wrongMethod.json() as any).error.code).toBe('method_not_allowed');
+
+    const unavailable = await setup({ withPolicy: false });
+    const denied = await post(`${unavailable.server.url}/intervention/reset`, {});
+    expect(denied.status).toBe(409);
+    expect(denied.body).toMatchObject({
+      ok: false,
+      error: { code: 'intervention_unavailable' },
+    });
+
+    const noApi = await setup({ interventionApi: false });
+    const notImplemented = await post(`${noApi.server.url}/intervention/reset`, {});
+    expect(notImplemented.status).toBe(501);
+    expect(notImplemented.body.error.code).toBe('not_implemented');
+  });
+
   it('/version 暴露 intervention 能力位；旧字段保持兼容', async () => {
     const { server } = await setup({ intervention: { mode: 'heuristic' } });
     const version = await fetch(`${server.url}/version`, { headers: auth() });
@@ -1102,6 +1221,7 @@ describe('sidecar recall/context HTTP', () => {
         decision: true,
         outcome: true,
         shadow: true,
+        reset: true,
         mode: 'heuristic',
       },
     });

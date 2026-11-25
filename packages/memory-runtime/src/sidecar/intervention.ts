@@ -21,6 +21,8 @@ import type {
 } from '../runtime/types.js';
 
 const RULES_POLICY_VERSION = 'v0-rules';
+/** Console/宿主契约：策略规则版本；reset 响应也用这个值。 */
+export const INTERVENTION_POLICY_VERSION = RULES_POLICY_VERSION;
 const MAX_SILENT_STREAK_FALLBACK = 3;
 
 export type InterventionMode = 'off' | 'shadow' | 'heuristic' | 'model';
@@ -185,6 +187,7 @@ function mustSpeakDecision(
       confidence: 0,
       reason: 'must_speak_unavailable',
       policyVersion: RULES_POLICY_VERSION,
+      enforced: input.mode === 'heuristic' || input.mode === 'model',
       scores,
       mustSpeak: true,
       degraded: true,
@@ -198,6 +201,7 @@ function mustSpeakDecision(
     confidence: 1,
     reason,
     policyVersion: RULES_POLICY_VERSION,
+    enforced: input.mode === 'heuristic' || input.mode === 'model',
     scores,
     mustSpeak: true,
     ...(depth !== intended ? { degraded: true } : {}),
@@ -232,6 +236,7 @@ function planHeuristic(input: InterventionPlannerInput): InterventionDecision {
       confidence: 0,
       reason: 'no_candidates',
       policyVersion: heuristicVersion(input),
+      enforced: input.mode === 'heuristic' || input.mode === 'model',
       scores: scoresOf(input.cue, candidate, novelty, recentUselessRate, 'gist'),
     };
   }
@@ -252,6 +257,7 @@ function planHeuristic(input: InterventionPlannerInput): InterventionDecision {
     confidence: round4(topScore),
     reason,
     policyVersion: heuristicVersion(input),
+    enforced: input.mode === 'heuristic' || input.mode === 'model',
     scores: scoresOf(input.cue, candidate, novelty, recentUselessRate, chosenDepth),
   });
 

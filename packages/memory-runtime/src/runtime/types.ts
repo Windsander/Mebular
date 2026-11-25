@@ -271,6 +271,8 @@ export interface InterventionDecision {
   reason: string;
   /** v0-baseline / v0-rules / heuristic:<hash>。model 失败回退 heuristic 时必须仍是 heuristic 版本。 */
   policyVersion: string;
+  /** 本次决策是否真正作用于注入：off/baseline=false，shadow=false，heuristic/model=true。 */
+  enforced: boolean;
   scores?: InterventionScores;
   /** 命中硬规则（显式追问/task 续接/上轮沉默后纠正）。 */
   mustSpeak?: boolean;

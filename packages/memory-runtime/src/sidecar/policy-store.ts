@@ -3,6 +3,8 @@
 // 只保存可复用的聚合计数，不保存 query、正文、trace 或 token：
 // - 固定 `<dataDir>/policy/state.json`，目录 0700、文件 0600；
 // - 同目录临时文件 + fsync + rename 原子写；
+// - write-behind：内存立即生效，250ms / 25 条批量落盘，stop 时 flush；
+//   进程被强杀时最多丢失一个窗口的统计，不影响召回；
 // - 进程内串行化，避免并发决策/结果互相覆盖；
 // - 超过 TTL 的域统计丢弃；最多保留 maxDomains 个域；
 // - 文件损坏时 fail-open 为空统计，绝不影响召回主流程。
@@ -24,6 +26,9 @@ const THRESHOLD_MIN = 0.45;
 const THRESHOLD_MAX = 0.80;
 const USELESS_RATE_HIGH = 0.35;
 const MISSED_RATE_HIGH = 0.20;
+/** 写后（write-behind）：内存立即生效，最多延迟一个窗口落盘。 */
+const FLUSH_DELAY_MS = 250;
+const FLUSH_BATCH_SIZE = 25;
 
 export interface PolicyCounts {
   spoken: number;
@@ -165,9 +170,17 @@ function effectiveOf(global: PolicyCounts, domain: PolicyCounts): EffectivePolic
   const globalSamples = global.spoken + global.silent;
   const source: EffectivePolicyStats['source'] = domainSamples >= DOMAIN_MIN_SAMPLES ? 'domain' : 'global';
   const deficit = source === 'domain' ? 0 : Math.max(0, DOMAIN_MIN_SAMPLES - domainSamples);
-  const globalRate = (key: keyof PolicyCounts): number => (
-    globalSamples > 0 ? global[key] / globalSamples : 0
-  );
+  // spoken 侧结果按 global.spoken 归一，silent 侧 missed 按 global.silent 归一；
+  // 决策本身的先验仍按 globalSamples（spoken/silent 占比）。
+  const globalRate = (key: keyof PolicyCounts): number => {
+    if (key === 'spoken' || key === 'silent') {
+      return globalSamples > 0 ? global[key] / globalSamples : 0;
+    }
+    if (key === 'missed') {
+      return global.silent > 0 ? global[key] / global.silent : 0;
+    }
+    return global.spoken > 0 ? global[key] / global.spoken : 0;
+  };
   const merged = (key: keyof PolicyCounts): number => (
     domain[key] + deficit * globalRate(key)
   );
@@ -222,6 +235,11 @@ export class PolicyStore {
   private state: PolicyState;
   private loaded = false;
   private tail: Promise<void> = Promise.resolve();
+  private dirty = false;
+  private pendingChanges = 0;
+  private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  private retryDelayMs = FLUSH_DELAY_MS;
+  private closed = false;
 
   constructor(options: PolicyStoreOptions) {
     this.path = options.path;
@@ -282,7 +300,7 @@ export class PolicyStore {
       tuneEntry(state, entry, now);
       state.updatedAt = now;
       this.state = trimDomains(state, this.maxDomains);
-      await this.persist();
+      this.markDirty();
     });
   }
 
@@ -298,7 +316,7 @@ export class PolicyStore {
       entry.updatedAt = now;
       state.updatedAt = now;
       this.state = trimDomains(state, this.maxDomains);
-      await this.persist();
+      this.markDirty();
     });
   }
 
@@ -326,16 +344,74 @@ export class PolicyStore {
     });
   }
 
-  /** 清空本机策略统计；返回删除的域条目数。 */
+  /** 清空本机策略统计；返回删除的域条目数。reset 是显式运维动作，直接落盘。 */
   async reset(): Promise<number> {
     return this.exclusive(async () => {
       await this.ensureLoaded();
       const removed = Object.keys(this.state.domains).length;
       const now = this.now();
       this.state = emptyState(now);
+      this.cancelFlush();
+      this.dirty = false;
+      this.pendingChanges = 0;
       await this.persist();
       return removed;
     });
+  }
+
+  /** 立即把 write-behind 缓冲落盘；失败时保留 dirty，等待下次重试。 */
+  async flush(): Promise<void> {
+    return this.exclusive(async () => {
+      this.cancelFlush();
+      if (!this.dirty) return;
+      await this.persist();
+      this.dirty = false;
+      this.pendingChanges = 0;
+      this.retryDelayMs = FLUSH_DELAY_MS;
+    });
+  }
+
+  /** stop 时调用：停止定时器并做最后一次 flush。 */
+  async close(): Promise<void> {
+    this.closed = true;
+    this.cancelFlush();
+    await this.flush();
+  }
+
+  private markDirty(): void {
+    this.dirty = true;
+    this.pendingChanges += 1;
+    if (this.closed) return;
+    if (this.pendingChanges >= FLUSH_BATCH_SIZE) {
+      this.scheduleFlush(0);
+      return;
+    }
+    this.scheduleFlush(FLUSH_DELAY_MS);
+  }
+
+  private scheduleFlush(delayMs: number): void {
+    if (this.flushTimer) {
+      if (delayMs > 0) return;
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = null;
+      void this.flush().catch(() => {
+        // 落盘失败不能影响召回；保留 dirty，按指数退避重试。
+        if (this.closed) return;
+        const delay = this.retryDelayMs;
+        this.retryDelayMs = Math.min(30_000, this.retryDelayMs * 2);
+        this.scheduleFlush(delay);
+      });
+    }, delayMs);
+    this.flushTimer.unref?.();
+  }
+
+  private cancelFlush(): void {
+    if (!this.flushTimer) return;
+    clearTimeout(this.flushTimer);
+    this.flushTimer = null;
   }
 
   private async exclusive<T>(operation: () => Promise<T>): Promise<T> {

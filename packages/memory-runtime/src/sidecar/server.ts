@@ -306,6 +306,15 @@ export interface SidecarNamespacesApi {
   getNamespaces(agentId: string | null): Promise<NamespacesView>;
 }
 
+/** 0.4.0 介入策略运维面（Console reset）。 */
+export interface SidecarInterventionApi {
+  resetInterventionPolicy(): Promise<{
+    reset: true;
+    policyVersion: string;
+    removedDomains: number;
+  }>;
+}
+
 /** 召回/上下文/trace 的 host API；由 RecallService 实现。 */
 export interface SidecarRecallApi {
   handleRecall(request: unknown): Promise<{
@@ -372,6 +381,7 @@ export interface SidecarServerOptions {
   namespaces?: SidecarNamespacesApi;
   recall?: SidecarRecallApi;
   objects?: SidecarObjectsApi;
+  intervention?: SidecarInterventionApi;
   /** inference host API；缺省时 /models 返回 501。 */
   inference?: InferenceApi;
   /** 动态降级标记（沉降/outbox）；与显式 degraded 取或。 */
@@ -528,6 +538,7 @@ export class SidecarServer {
   private readonly namespaces?: SidecarNamespacesApi;
   private readonly recall?: SidecarRecallApi;
   private readonly objects?: SidecarObjectsApi;
+  private readonly intervention?: SidecarInterventionApi;
   private readonly inference?: InferenceApi;
   private readonly getDegraded?: () => boolean;
   private readonly now: () => number;
@@ -553,6 +564,7 @@ export class SidecarServer {
     this.namespaces = options.namespaces;
     this.recall = options.recall;
     this.objects = options.objects;
+    this.intervention = options.intervention;
     this.inference = options.inference;
     this.getDegraded = options.getDegraded;
     this.state = options.state ?? 'starting';
@@ -1043,6 +1055,7 @@ export class SidecarServer {
               decision: this.mode === 'immersive' && Boolean(this.recall),
               outcome: this.mode === 'immersive' && Boolean(this.recall),
               shadow: Boolean(this.recall),
+              reset: this.mode === 'immersive' && Boolean(this.intervention),
               mode: this.config.intervention.mode,
             },
             models: {
@@ -1296,6 +1309,28 @@ export class SidecarServer {
         req.resume();
         const job = await this.inference.cancelInstall(jobId);
         this.send(res, 200, this.envelope(requestId, job, job.warnings, false));
+        return;
+      }
+
+      if (relative === 'intervention/reset') {
+        if (!isPost) {
+          req.resume();
+          this.sendError(res, 405, requestId, 'method_not_allowed', 'intervention/reset 仅接受 POST');
+          return;
+        }
+        if (!this.intervention) {
+          req.resume();
+          this.sendError(res, 501, requestId, 'not_implemented', 'intervention 尚未启用');
+          return;
+        }
+        if (this.state === 'stopping') {
+          req.resume();
+          this.sendError(res, 503, requestId, 'stopping', 'sidecar 正在停止', undefined, true);
+          return;
+        }
+        req.resume();
+        const result = await this.intervention.resetInterventionPolicy();
+        this.send(res, 200, this.envelope(requestId, result, [], false));
         return;
       }
 

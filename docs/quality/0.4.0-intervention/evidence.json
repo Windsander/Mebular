@@ -2,9 +2,9 @@
   "release": "0.4.0",
   "status": "unreleased",
   "theme": "memory-intervention-policy",
-  "branch": "feat/0.4-docs-e2e",
-  "baseCommit": "cca4dcfa87ea1528fce21e6f0160936a3b6e38e0",
-  "evidenceCommit": "018ec5f8f9f0e633b9eab2cd6ba3e636b7a57b4c",
+  "branch": "feat/0.4-verification",
+  "baseCommit": "b42212da6088decb7d6e2551c4ae61247b54771d",
+  "evidenceCommit": "d9ce7c0",
   "date": "2026-11-25",
   "environment": {
     "platform": "macOS 15.7.9",
@@ -31,26 +31,39 @@
       "result": "passed"
     },
     {
+      "name": "lint",
+      "command": "npm run lint",
+      "result": "passed"
+    },
+    {
       "name": "memory-runtime",
       "command": "node --experimental-vm-modules node_modules/jest/bin/jest.js packages/memory-runtime/tests --runInBand",
       "result": "passed",
       "suites": 42,
-      "tests": 460,
-      "durationMs": 125866
+      "tests": 469,
+      "durationMs": 126420
     },
     {
       "name": "targeted",
       "command": "node --experimental-vm-modules node_modules/jest/bin/jest.js tests/opencode-plugin tests/console/runtime-ui.test.mjs tests/mcp/memory-runtime-admin-proxy.test.mjs --runInBand",
       "result": "passed",
       "suites": 5,
-      "tests": 177,
-      "durationMs": 11132
+      "tests": 179,
+      "durationMs": 16060
     },
     {
       "name": "intervention-e2e",
       "command": "node tests/integration/host-e2e/opencode-intervention-outcome.mjs",
       "result": "passed",
-      "passed": 39,
+      "passed": 46,
+      "failed": 0,
+      "exitCode": 0
+    },
+    {
+      "name": "intervention-shadow-e2e",
+      "command": "node tests/integration/host-e2e/opencode-intervention-shadow.mjs",
+      "result": "passed",
+      "passed": 15,
       "failed": 0,
       "exitCode": 0
     },
@@ -81,6 +94,7 @@
     }
   ],
   "performance": {
+    "source": "base commit b42212d; not re-run in this verification session",
     "ingest": {
       "samples": 100,
       "p50Ms": 181.99,
@@ -173,20 +187,8 @@
     {
       "id": "R1",
       "scenario": "policy-state",
-      "assertion": "policy/state.json persists spoken=6, silent=1, reasked=1, missed=1, too_shallow=1, too_deep=1",
-      "result": "passed",
-      "observed": {
-        "spoken": 6,
-        "silent": 1,
-        "accepted": 0,
-        "ignored": 0,
-        "reasked": 1,
-        "corrected": 0,
-        "dismissed": 0,
-        "missed": 1,
-        "too_shallow": 1,
-        "too_deep": 1
-      }
+      "assertion": "policy/state.json persists spoken/silent/outcome counters before reset",
+      "result": "passed"
     },
     {
       "id": "R2",
@@ -219,6 +221,24 @@
       "result": "passed"
     },
     {
+      "id": "R7",
+      "scenario": "late-outcome-before-reset",
+      "assertion": "POST outcome for a pre-reset trace returns recorded=false with warning outcome_before_reset and leaves the old reasked outcome intact",
+      "result": "passed"
+    },
+    {
+      "id": "R8",
+      "scenario": "late-outcome-keeps-zero",
+      "assertion": "policy/state.json still has all 10 counters at 0 after the rejected late outcome",
+      "result": "passed"
+    },
+    {
+      "id": "R9",
+      "scenario": "post-reset-outcome",
+      "assertion": "a new post-reset trace records reasked/source=host and policy counters resume",
+      "result": "passed"
+    },
+    {
       "id": "P1",
       "scenario": "console-view",
       "assertion": "real MCP admin proxy /admin/api/memory-runtime/traces returns 9 traces without exposing host token",
@@ -240,6 +260,50 @@
       "id": "P4",
       "scenario": "outcome-note",
       "assertion": "outcome notes are fixed attribution strings, not user text",
+      "result": "passed"
+    }
+  ],
+  "shadowAssertions": [
+    {
+      "id": "S0",
+      "scenario": "capabilities",
+      "assertion": "/version intervention shadow=true and mode=shadow",
+      "result": "passed"
+    },
+    {
+      "id": "S1",
+      "scenario": "shadow-decision-vs-applied",
+      "assertion": "decision.action=silent, enforced=false, applied.action=speak, applied.wouldAction=silent, counts.injected>=1",
+      "result": "passed"
+    },
+    {
+      "id": "S1b",
+      "scenario": "decision-not-applied",
+      "assertion": "decision.action differs from applied.action (silent vs speak)",
+      "result": "passed"
+    },
+    {
+      "id": "S1c",
+      "scenario": "policy-counts-applied",
+      "assertion": "local policy counts spoken and does not count the shadow silent advice",
+      "result": "passed"
+    },
+    {
+      "id": "S2",
+      "scenario": "reasked-after-shadow-speak",
+      "assertion": "next explicit memory re-ask posts reasked/source=host",
+      "result": "passed"
+    },
+    {
+      "id": "S2b",
+      "scenario": "no-missed-from-shadow",
+      "assertion": "trace outcome and outcomeHistory never contain missed",
+      "result": "passed"
+    },
+    {
+      "id": "S2c",
+      "scenario": "outcome-counts-applied",
+      "assertion": "local policy records reasked>=1 and missed=0",
       "result": "passed"
     }
   ],
@@ -283,26 +347,48 @@
     "docs/quality/0.4.0-intervention/console/u5-after-runtime-policy-reset-1440.jpg"
   ],
   "knownLimitations": [
-    "0.4.0 is unreleased; default intervention.mode=off and 0.3.x behavior is unchanged.",
-    "model mode and per-domain adaptive thresholds remain experimental.",
-    "No real-model smoke was run: no local model on this host; the model planner is covered by fake-gateway tests.",
+    "0.4.0 is unreleased; default intervention.mode=off and 0.3.x recall behavior is unchanged.",
+    "off changes no injection but still persists applied baseline spoken/silent counts in the local policy store and traces; it does not apply policy advice or adapt thresholds.",
+    "must_speak is not a 100% speak guarantee: with no candidate it degrades to checkpoint-only (silent + must_speak_unavailable + degraded) while self/checkpoint still inject.",
+    "The alreadyInjectedIds fragment-ID alias table is process-local; old mf_... IDs from before a sidecar restart may not resolve. Source/record IDs remain valid.",
+    "Phase 3 (model) and Phase 4 (adaptive thresholds) are code complete with fake-gateway/unit evidence only, not a real-model quality gate.",
+    "No real-model smoke or golden-set evaluation was run: no local model on this host; the model planner is covered by fake-gateway tests.",
     "The E2E uses a fake OpenAI-compatible provider; sidecar, plugin, capability, host and HTTP paths are real.",
     "Console screenshots come from verify:console:ui fixture data and prove UI state only; real-sidecar trace fields are asserted separately.",
     "Attribution is heuristic; this report proves the designed signals fire and persist, not long-term answer quality.",
     "Only OpenCode outcome attribution is covered; DSH/Hermes and cross-device policy sync are out of scope.",
-    "Performance numbers come from one non-idle developer host and are regression evidence, not an SLA.",
+    "Performance numbers come from the base commit on one non-idle developer host and are regression evidence, not an SLA.",
+    "Outcome notes are capped at 200 characters; defer is recorded as applied.action=defer; reset clears policy statistics and runtime streak/last-decision state only, never memory, traces or outcome history.",
     "Existing trace queryPreview (redacted, <=200 chars) is retained from 0.3.x; the new policy state stores no query text."
   ],
-  "unfixedProductionIssues": [
+  "fixedProductionIssues": [
     {
       "id": "already-injected-id-contract",
-      "severity": "observation",
+      "severity": "major",
       "preExisting": true,
       "since": "0.3.0",
-      "summary": "OpenCode plugin sends fragment IDs (mf_...) in alreadyInjectedIds, while the sidecar compares them with source/record IDs, so host-level already-injected dedupe may be ineffective.",
-      "impact": "Not a 0.4.0 regression and not used by this E2E; may affect repeated injection and token cost.",
-      "action": "Reported to chief; no production change made in this docs/E2E session."
+      "summary": "OpenCode plugin sends fragment IDs (mf_...) in alreadyInjectedIds, while the sidecar compared them with source/record IDs, so host-level already-injected dedupe could be ineffective.",
+      "fix": "buildCandidates() now matches sourceIds and fragment.id and keeps a bounded in-process fragment-ID alias table; noveltyOf() checks fragmentId and sourceIds.",
+      "fixCommit": "2c21325",
+      "residual": "The alias table is process-local; old mf_... IDs from before a sidecar restart may not resolve."
+    },
+    {
+      "id": "outcome-attributed-to-decision",
+      "severity": "major",
+      "preExisting": false,
+      "summary": "Outcomes and policy counters used the policy decision instead of the applied intervention, so shadow silent advice could be recorded as missed/silent even though baseline spoke.",
+      "fix": "Plugin attribution uses applied; /context exposes applied; policy counts are written once after assembly using applied action. Covered by the shadow E2E.",
+      "fixCommit": "dfc3082"
+    },
+    {
+      "id": "late-outcome-after-reset",
+      "severity": "major",
+      "preExisting": false,
+      "summary": "A delayed outcome for a pre-reset trace could re-dirty the policy counters right after reset.",
+      "fix": "submitOutcome() rejects traces created before policyResetAt with recorded=false and warning outcome_before_reset. Covered by R7/R8.",
+      "fixCommit": "dfc3082"
     }
   ],
+  "unfixedProductionIssues": [],
   "productionCodeChanges": 0
 }

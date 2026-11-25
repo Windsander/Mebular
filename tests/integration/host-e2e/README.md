@@ -43,8 +43,21 @@ npm run verify:opencode:intervention
 
 覆盖：speak → 重问 = `reasked`；silent → 显式记忆追问 = `missed`；gist → 要细节 =
 `too_shallow`；detail → 要更短 = `too_deep`；`POST /intervention/reset` 清零本机策略
-统计但不删 trace/记忆；policy state / trace / Console admin 视图不含 raw query 尾部、
-detail 正文或 host token。结果与截图见
+统计但不删 trace/记忆；reset 前旧 trace 的迟到 outcome 被拒绝；reset 后新 trace 的
+outcome 正常写入；policy state / trace / Console admin 视图不含 raw query 尾部、
+detail 正文或 host token。
+
+`opencode-intervention-shadow.mjs` 用同一条真实链路验证 shadow 归因：sidecar
+`intervention.mode=shadow` 下 decision=silent、applied=speak；下一轮显式记忆重问必须
+记成 `reasked` 而不是 `missed`，本机计数也按 applied 记 spoken。
+
+```bash
+node tests/integration/host-e2e/opencode-intervention-shadow.mjs
+# 等价
+npm run verify:opencode:intervention:shadow
+```
+
+结果与截图见
 [`docs/quality/0.4.0-intervention/`](../../docs/quality/0.4.0-intervention/0.4.0-verification.md)。
 
 ## 沉浸式用户旅程（C6）

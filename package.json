@@ -109,6 +109,7 @@
     "verify:host-e2e": "node tests/integration/host-e2e/verify-host-e2e.mjs",
     "verify:opencode:checkpoint-recovery": "node tests/integration/host-e2e/opencode-checkpoint-recovery.mjs",
     "verify:opencode:intervention": "node tests/integration/host-e2e/opencode-intervention-outcome.mjs",
+    "verify:opencode:intervention:shadow": "node tests/integration/host-e2e/opencode-intervention-shadow.mjs",
     "verify:openchamber:runner": "node tests/integration/host-e2e/openchamber-runner-real.mjs",
     "verify:runtime:coexistence": "node scripts/verify-runtime-coexistence.mjs",
     "verify:dsh:e2e:min": "node scripts/verify-dsh-e2e.mjs --dsh-version minimum",

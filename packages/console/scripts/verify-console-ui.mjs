@@ -331,11 +331,47 @@ async function seedHome(home) {
         policyVersion: 'v0-shadow',
         enforced: false,
       },
-      applied: { action: 'silent', depth: 'gist', fragments: 0 },
+      applied: {
+        action: 'silent',
+        depth: 'gist',
+        fragments: 0,
+        wouldAction: 'speak',
+        wouldDepth: 'detail',
+        suppressed: true,
+      },
       outcome: { kind: 'missed', at: now - 20_000, source: 'host', confidence: 0.7, note: '下一轮追问同一实体' },
       counts: { candidates: 1, expansions: 0, injected: 0, tokens: 0 },
       timing: { totalMs: 6 },
       tookMs: 6,
+      degraded: false,
+      feedback: null,
+      model: { query: 'heuristic' },
+    };
+    const offTrace = {
+      schema: 2,
+      id: 'tr_ui_runtime_0004',
+      recallId: 'rr_ui_runtime_0004',
+      agentId: 'opencode',
+      threadId: 'th_ui_runtime',
+      at: now - 5_000,
+      queryHash: 'ui-trace-off-hash',
+      queryPreview: 'UI 召回：策略关闭',
+      domains: ['notes'],
+      namespaces: ['notes'],
+      silenceReason: null,
+      decision: {
+        action: 'speak',
+        depth: 'gist',
+        confidence: 0.63,
+        reason: 'policy_off',
+        policyVersion: 'off',
+        enforced: false,
+      },
+      applied: { action: 'speak', depth: 'gist', fragments: 1 },
+      outcome: null,
+      counts: { candidates: 1, expansions: 0, injected: 1, tokens: 6 },
+      timing: { totalMs: 8 },
+      tookMs: 8,
       degraded: false,
       feedback: null,
       model: { query: 'heuristic' },
@@ -385,8 +421,39 @@ async function seedHome(home) {
         provenance: { source: 'runtime', writerType: 'agent', extractor: 'heuristic', hostId: 'h_ui', threadId: 'th_ui_runtime' },
       }],
     };
-    await writeFile(join(home, 'ui-memory-runtime-traces.json'), `${JSON.stringify([trace, silentTrace, legacyTrace])}\n`, { encoding: 'utf-8', mode: 0o600 });
-    await writeFile(join(home, 'ui-memory-runtime-trace-detail.json'), `${JSON.stringify(traceDetail)}\n`, { encoding: 'utf-8', mode: 0o600 });
+    const shadowTraceDetail = {
+      ...silentTrace,
+      hits: [],
+      cue: { topics: ['影子建议'], entities: [] },
+      candidates: [],
+      expansions: [],
+      injected: [],
+    };
+    const offTraceDetail = {
+      ...offTrace,
+      hits: [{ id: 'ui-hit-off', type: 'fact', score: 0.63, rank: 1 }],
+      cue: { topics: ['策略关闭'], entities: [] },
+      candidates: [],
+      expansions: [],
+      injected: [{
+        fragmentId: 'mf_ui_off',
+        sourceId: 'ui-hit-off',
+        layer: 'gist',
+        tokens: 6,
+        citations: ['ui-hit-off'],
+        confidence: 0.63,
+        owner: { role: 'agent', ownerId: 'opencode', domain: 'agent:opencode', agentName: 'OpenCode' },
+        provenance: { source: 'runtime', writerType: 'agent', extractor: 'heuristic', hostId: 'h_ui', threadId: 'th_ui_runtime' },
+      }],
+    };
+    await writeFile(join(home, 'ui-memory-runtime-traces.json'), `${JSON.stringify([trace, silentTrace, offTrace, legacyTrace])}\n`, { encoding: 'utf-8', mode: 0o600 });
+    await writeFile(join(home, 'ui-memory-runtime-trace-detail.json'), `${JSON.stringify({
+      byId: {
+        [trace.id]: traceDetail,
+        [silentTrace.id]: shadowTraceDetail,
+        [offTrace.id]: offTraceDetail,
+      },
+    })}\n`, { encoding: 'utf-8', mode: 0o600 });
     await app.shutdown();
   }
   // UX-2 收口联调用料（全在沙箱 home 内）：
@@ -914,23 +981,57 @@ async function main() {
       })()`, 30000));
     await evalJs('document.querySelector("#runtime-traces [data-rt-trace]").click()');
     await waitFor('!document.querySelector("#runtime-traces .runtime-trace-detail")');
-    check('轨迹列表标记 silent / missed / shadow；旧轨迹无新字段仍正常显示',
+    check('轨迹列表标记 silent / missed / shadow；off trace 与旧轨迹不误标 shadow',
       await evalJs(`(() => {
         const rows = [...document.querySelectorAll('#runtime-traces [data-rt-trace-row]')];
         const byId = (id) => rows.find((row) => row.getAttribute('data-rt-trace-row') === id);
         const shadow = byId('tr_ui_runtime_0002');
+        const off = byId('tr_ui_runtime_0004');
         const legacy = byId('tr_ui_runtime_0003');
-        return rows.length >= 3
+        return rows.length >= 4
           && Boolean(shadow?.querySelector('[data-rt-trace-silent]'))
           && Boolean(shadow?.querySelector('[data-rt-trace-missed]'))
           && Boolean(shadow?.querySelector('[data-rt-trace-shadow]'))
           && /沉默/.test(shadow.textContent) && /漏介入/.test(shadow.textContent) && /影子/.test(shadow.textContent)
-          && Boolean(legacy) && /旧轨迹/.test(legacy.textContent)
+          && Boolean(off) && /策略关闭/.test(off.textContent)
+          && !off.querySelector('[data-rt-trace-shadow]')
           && !legacy.querySelector('[data-rt-trace-silent]')
           && !legacy.querySelector('[data-rt-trace-missed]')
           && !legacy.querySelector('[data-rt-trace-shadow]');
       })()`));
     await captureNow('u5-after-runtime-trace-markers-1440.jpg');
+    await evalJs('document.querySelector("[data-rt-trace-row=\\"tr_ui_runtime_0002\\"] [data-rt-trace]").click()');
+    check('shadow 详情显示建议 speak/detail（未执行），而非 off baseline',
+      await waitFor(`(() => {
+        const detail = document.querySelector('#runtime-traces .runtime-trace-detail');
+        const suggestion = detail?.querySelector('[data-rt-trace-suggestion]');
+        const decision = detail?.querySelector('[data-rt-trace-decision]');
+        return Boolean(suggestion) && Boolean(decision)
+          && /建议：说明\\/详情（未执行）/.test(suggestion.textContent)
+          && suggestion.getAttribute('data-rt-trace-would-action') === 'speak'
+          && suggestion.getAttribute('data-rt-trace-would-depth') === 'detail'
+          && /否，仅建议/.test(decision.textContent)
+          && /已执行/.test(decision.textContent);
+      })()`));
+    await captureNow('u5-after-runtime-trace-shadow-detail-1440.jpg');
+    await evalJs('document.querySelector("[data-rt-trace-row=\\"tr_ui_runtime_0002\\"] [data-rt-trace]").click()');
+    await waitFor('!document.querySelector("#runtime-traces .runtime-trace-detail")');
+    await evalJs('document.querySelector("[data-rt-trace-row=\\"tr_ui_runtime_0004\\"] [data-rt-trace]").click()');
+    check('off baseline 详情显示「策略未启用」，无 shadow 建议',
+      await waitFor(`(() => {
+        const detail = document.querySelector('#runtime-traces .runtime-trace-detail');
+        const decision = detail?.querySelector('[data-rt-trace-decision]');
+        return Boolean(decision)
+          && Boolean(decision.querySelector('[data-rt-trace-policy-off]'))
+          && /策略未启用/.test(decision.textContent)
+          && !/否，仅建议/.test(decision.textContent)
+          && !detail.querySelector('[data-rt-trace-shadow]')
+          && !detail.querySelector('[data-rt-trace-suggestion]')
+          && !/影子/.test(detail.textContent);
+      })()`));
+    await captureNow('u5-after-runtime-trace-off-detail-1440.jpg');
+    await evalJs('document.querySelector("[data-rt-trace-row=\\"tr_ui_runtime_0004\\"] [data-rt-trace]").click()');
+    await waitFor('!document.querySelector("#runtime-traces .runtime-trace-detail")');
     check('重置介入策略按钮可用（sidecar ready + 可写）',
       await evalJs(`(() => { const b = document.querySelector('#runtime-policy-reset'); return Boolean(b) && b.disabled === false; })()`));
     await evalJs('document.querySelector("#runtime-policy-reset").click()');

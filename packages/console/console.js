@@ -4507,6 +4507,17 @@ function runtimeTraceReasonText(reason) {
   return t.has(key) ? t(key) : reason;
 }
 
+/**
+ * shadow 的可靠信号：applied 上有反事实建议键，或 runtime 显式给了 decision.shadow=true。
+ * 不能用 decision.enforced === false：off baseline 同样是 false。
+ */
+function runtimeTraceIsShadow(decision, applied) {
+  return (applied && (applied.wouldAction !== undefined
+    || applied.wouldDepth !== undefined
+    || applied.suppressed === true))
+    || decision?.shadow === true;
+}
+
 function runtimeTracePolicyHtml(data) {
   const decision = data?.decision && typeof data.decision === 'object' ? data.decision : null;
   const applied = data?.applied && typeof data.applied === 'object' ? data.applied : null;
@@ -4515,11 +4526,12 @@ function runtimeTracePolicyHtml(data) {
     ? data.outcomeHistory.filter((entry) => entry && typeof entry === 'object')
     : [];
   if (!decision && !applied && !outcome && history.length === 0) return '';
+  const shadow = runtimeTraceIsShadow(decision, applied);
   const kv = (rows) => `<dl class="rt-policy-kv">${rows.map(([label, value]) => (
     `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(String(value ?? '—'))}</dd></div>`
   )).join('')}</dl>`;
-  const block = (attr, title, rows) => `<div class="rt-policy-block" ${attr}>
-    <h4>${escapeHtml(title)}</h4>${kv(rows)}
+  const block = (attr, title, rows, extra = '') => `<div class="rt-policy-block" ${attr}>
+    <h4>${escapeHtml(title)}</h4>${kv(rows)}${extra}
   </div>`;
   const blocks = [];
   if (decision) {
@@ -4536,9 +4548,17 @@ function runtimeTracePolicyHtml(data) {
       t('runtime.trace.decision.enforced'),
       decision.enforced === true
         ? t('runtime.trace.decision.enforcedYes')
-        : decision.enforced === false ? t('runtime.trace.decision.enforcedNo') : '—',
+        : decision.enforced === false
+          ? (shadow ? t('runtime.trace.decision.enforcedNo') : '—')
+          : '—',
     ]);
-    blocks.push(block('data-rt-trace-decision', t('runtime.trace.decision'), rows));
+    const offPolicy = decision.enforced === false && !shadow;
+    blocks.push(block(
+      'data-rt-trace-decision',
+      t('runtime.trace.decision'),
+      rows,
+      offPolicy ? `<p class="crt-warn" data-rt-trace-policy-off>${escapeHtml(t('runtime.trace.decision.enforcedOff'))}</p>` : '',
+    ));
   }
   if (applied) {
     const fragments = typeof applied.fragments === 'number'
@@ -4549,7 +4569,13 @@ function runtimeTracePolicyHtml(data) {
       [t('runtime.trace.applied.depth'), runtimeTraceEnumLabel('depth', applied.depth)],
       [t('runtime.trace.applied.fragments'), typeof fragments === 'number' ? String(fragments) : '—'],
     ];
-    blocks.push(block('data-rt-trace-applied', t('runtime.trace.applied'), rows));
+    let extra = '';
+    if (shadow && (applied.wouldAction !== undefined || applied.wouldDepth !== undefined)) {
+      const wouldAction = runtimeTraceEnumLabel('action', applied.wouldAction);
+      const wouldDepth = runtimeTraceEnumLabel('depth', applied.wouldDepth);
+      extra = `<p class="crt-warn" data-rt-trace-suggestion data-rt-trace-would-action="${escapeHtml(applied.wouldAction ?? '')}" data-rt-trace-would-depth="${escapeHtml(applied.wouldDepth ?? '')}">${escapeHtml(t('runtime.trace.applied.suggestion', { action: wouldAction, depth: wouldDepth }))}</p>`;
+    }
+    blocks.push(block('data-rt-trace-applied', t('runtime.trace.applied'), rows, extra));
   }
   if (outcome) {
     const rows = [
@@ -4693,11 +4719,12 @@ function renderRuntimeTraces() {
     const domains = Array.isArray(trace.domains) ? trace.domains : Array.isArray(trace.namespaces) ? trace.namespaces : [];
     const silent = applied?.action === 'silent'
       || (!applied && typeof trace.silenceReason === 'string' && trace.silenceReason.length > 0);
+    const shadow = runtimeTraceIsShadow(decision, applied);
     const badges = [
       trace.degraded ? `<span class="crt-tag crt-tag-warn">${escapeHtml(t('runtime.trace.degraded'))}</span>` : '',
       silent ? `<span class="crt-tag rt-tag-silent" data-rt-trace-silent>${escapeHtml(t('runtime.trace.marker.silent'))}</span>` : '',
       outcome?.kind === 'missed' ? `<span class="crt-tag rt-tag-missed" data-rt-trace-missed>${escapeHtml(t('runtime.trace.marker.missed'))}</span>` : '',
-      decision && decision.enforced === false ? `<span class="crt-tag rt-tag-shadow" data-rt-trace-shadow>${escapeHtml(t('runtime.trace.marker.shadow'))}</span>` : '',
+      shadow ? `<span class="crt-tag rt-tag-shadow" data-rt-trace-shadow>${escapeHtml(t('runtime.trace.marker.shadow'))}</span>` : '',
       feedback ? `<span class="crt-tag ${feedback.useful ? 'crt-tag-ok' : 'crt-tag-error'}">${escapeHtml(t(feedback.useful ? 'runtime.trace.feedbackUseful' : 'runtime.trace.feedbackNotUseful'))}</span>` : '',
     ].filter(Boolean).join(' ');
     const metaText = `${t('runtime.trace.took', { ms: tookMs })} · ${t('runtime.trace.hits', { count: candidateCount })} · ${t('runtime.trace.injected', { count: injectedCount })} · ${t('runtime.trace.model', { model })}`;

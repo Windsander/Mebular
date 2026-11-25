@@ -243,6 +243,11 @@ describe('0.3 静态 DOM / 数据面契约', () => {
       'runtime.trace.marker.silent',
       'runtime.trace.marker.missed',
       'runtime.trace.marker.shadow',
+      'runtime.trace.decision.enforcedOff',
+      'runtime.trace.applied.suggestion',
+      'runtimeTraceIsShadow',
+      'wouldAction',
+      'wouldDepth',
       "api('/admin/api/memory-runtime/policy/reset'",
       'runtime.policy.resetConfirmTitle',
     ]) {

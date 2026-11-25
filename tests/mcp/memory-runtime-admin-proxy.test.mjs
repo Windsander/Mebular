@@ -22,6 +22,10 @@ const savedCloudRoot = process.env.MEBULAR_CLOUD_ROOT;
 const savedHostToken = process.env.FAKE_SIDECAR_HOST_TOKEN;
 const savedAuthOut = process.env.FAKE_SIDECAR_AUTH_OUT;
 const savedFeedbackOut = process.env.FAKE_SIDECAR_FEEDBACK_OUT;
+const savedTracesFile = process.env.FAKE_SIDECAR_TRACES_FILE;
+const savedTraceDetailFile = process.env.FAKE_SIDECAR_TRACE_DETAIL_FILE;
+const savedInterventionStatus = process.env.FAKE_SIDECAR_INTERVENTION_STATUS;
+const savedInterventionOut = process.env.FAKE_SIDECAR_INTERVENTION_OUT;
 
 afterEach(async () => {
   while (servers.length > 0) await servers.pop().close().catch(() => undefined);
@@ -38,6 +42,14 @@ afterEach(async () => {
   else process.env.FAKE_SIDECAR_AUTH_OUT = savedAuthOut;
   if (savedFeedbackOut === undefined) delete process.env.FAKE_SIDECAR_FEEDBACK_OUT;
   else process.env.FAKE_SIDECAR_FEEDBACK_OUT = savedFeedbackOut;
+  if (savedTracesFile === undefined) delete process.env.FAKE_SIDECAR_TRACES_FILE;
+  else process.env.FAKE_SIDECAR_TRACES_FILE = savedTracesFile;
+  if (savedTraceDetailFile === undefined) delete process.env.FAKE_SIDECAR_TRACE_DETAIL_FILE;
+  else process.env.FAKE_SIDECAR_TRACE_DETAIL_FILE = savedTraceDetailFile;
+  if (savedInterventionStatus === undefined) delete process.env.FAKE_SIDECAR_INTERVENTION_STATUS;
+  else process.env.FAKE_SIDECAR_INTERVENTION_STATUS = savedInterventionStatus;
+  if (savedInterventionOut === undefined) delete process.env.FAKE_SIDECAR_INTERVENTION_OUT;
+  else process.env.FAKE_SIDECAR_INTERVENTION_OUT = savedInterventionOut;
 });
 
 async function tempDir(prefix = 'memory-runtime-admin-') {
@@ -412,6 +424,158 @@ describe('MCP admin · Memory Runtime sidecar 只读代理', () => {
     expect(interventionLines.at(-1)).toMatchObject({
       method: 'POST',
       path: '/memory-runtime/v1/intervention/reset',
+    });
+  }, 30000);
+
+  it('trace view：off baseline 不外泄 would*，shadow 透出反事实建议，旧 trace 三字段为 null', async () => {
+    const dir = await tempDir('memory-runtime-admin-traces-');
+    const now = Date.now();
+    const baseTrace = {
+      schema: 2,
+      agentId: 'opencode',
+      threadId: 'th_policy',
+      domains: ['notes'],
+      silenceReason: null,
+      outcome: null,
+      counts: { candidates: 1, expansions: 0, injected: 1, tokens: 6 },
+      timing: { totalMs: 6 },
+      degraded: false,
+      feedback: null,
+      model: { query: 'heuristic' },
+    };
+    const offTrace = {
+      ...baseTrace,
+      id: 'tr_off',
+      at: now - 3000,
+      queryHash: 'hash-off',
+      queryPreview: 'off baseline',
+      decision: {
+        action: 'speak',
+        depth: 'gist',
+        confidence: 0.63,
+        reason: 'policy_off',
+        policyVersion: 'off',
+        enforced: false,
+      },
+      applied: { action: 'speak', depth: 'gist', fragments: 1 },
+    };
+    const shadowTrace = {
+      ...baseTrace,
+      id: 'tr_shadow',
+      at: now - 2000,
+      queryHash: 'hash-shadow',
+      queryPreview: 'shadow suggestion',
+      decision: {
+        action: 'silent',
+        depth: 'gist',
+        confidence: 0.42,
+        reason: 'low_confidence',
+        policyVersion: 'v0-shadow',
+        enforced: false,
+      },
+      applied: {
+        action: 'silent',
+        depth: 'gist',
+        fragments: 0,
+        wouldAction: 'speak',
+        wouldDepth: 'detail',
+        suppressed: true,
+      },
+    };
+    const legacyTrace = {
+      ...baseTrace,
+      id: 'tr_legacy',
+      at: now - 1000,
+      queryHash: 'hash-legacy',
+      queryPreview: 'legacy trace',
+    };
+    const tracesFile = join(dir, 'traces.json');
+    const detailFile = join(dir, 'trace-detail.json');
+    await writeFile(tracesFile, JSON.stringify([offTrace, shadowTrace, legacyTrace]), 'utf-8');
+    await writeFile(detailFile, JSON.stringify({
+      byId: {
+        [shadowTrace.id]: {
+          ...shadowTrace,
+          hits: [],
+          cue: { topics: [], entities: [] },
+          candidates: [],
+          expansions: [],
+          injected: [],
+          outcomeHistory: [
+            { kind: 'ignored', at: now - 1500, source: 'heuristic' },
+            { kind: 'missed', at: now - 1000, source: 'host', confidence: 0.7, note: 'next turn asked again' },
+          ],
+        },
+      },
+    }), 'utf-8');
+    const { base } = await start({
+      enabled: true,
+      env: {
+        FAKE_SIDECAR_TRACES_FILE: tracesFile,
+        FAKE_SIDECAR_TRACE_DETAIL_FILE: detailFile,
+      },
+    });
+    await readyStatus(base);
+
+    const list = await (await fetch(`${base}/admin/api/memory-runtime/traces`)).json();
+    expect(list.total).toBe(3);
+    const off = list.traces.find((trace) => trace.id === 'tr_off');
+    const shadow = list.traces.find((trace) => trace.id === 'tr_shadow');
+    const legacy = list.traces.find((trace) => trace.id === 'tr_legacy');
+    expect(off.decision).toMatchObject({ enforced: false });
+    expect(off.decision.shadow).toBeUndefined();
+    expect(off.applied).toEqual({ action: 'speak', depth: 'gist', fragments: 1 });
+    expect('wouldAction' in off.applied).toBe(false);
+    expect('wouldDepth' in off.applied).toBe(false);
+    expect('suppressed' in off.applied).toBe(false);
+    expect(shadow.decision).toMatchObject({ enforced: false });
+    expect(shadow.applied).toEqual({
+      action: 'silent',
+      depth: 'gist',
+      fragments: 0,
+      wouldAction: 'speak',
+      wouldDepth: 'detail',
+      suppressed: true,
+    });
+    expect(legacy.decision).toBeNull();
+    expect(legacy.applied).toBeNull();
+    expect(legacy.outcome).toBeNull();
+
+    const detailResponse = await fetch(`${base}/admin/api/memory-runtime/traces/tr_shadow`);
+    expect(detailResponse.status).toBe(200);
+    const detail = await detailResponse.json();
+    expect(detail.trace.applied).toMatchObject({
+      action: 'silent',
+      wouldAction: 'speak',
+      wouldDepth: 'detail',
+      suppressed: true,
+    });
+    expect(detail.trace.outcomeHistory).toEqual([
+      expect.objectContaining({ kind: 'ignored', source: 'heuristic' }),
+      expect.objectContaining({ kind: 'missed', source: 'host', confidence: 0.7 }),
+    ]);
+  }, 30000);
+
+  it('policy reset 不伪成功：sidecar 404 原样返回明确失败', async () => {
+    const { base } = await start({
+      enabled: true,
+      env: { FAKE_SIDECAR_INTERVENTION_STATUS: '404' },
+    });
+    await readyStatus(base);
+    const { token, cookie } = await csrf(base);
+    const response = await fetch(`${base}/admin/api/memory-runtime/policy/reset`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-mebular-csrf': token,
+        cookie,
+      },
+      body: '{}',
+    });
+    expect(response.status).toBe(404);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      error: 'intervention_reset_unavailable',
     });
   }, 30000);
 

@@ -418,7 +418,7 @@ function traceDecisionView(decision) {
   const action = ['speak', 'defer', 'silent'].includes(decision.action) ? decision.action : null;
   if (!action) return null;
   const depth = ['gist', 'detail', 'quote'].includes(decision.depth) ? decision.depth : null;
-  return {
+  const view = {
     action,
     depth,
     confidence: traceNumber(decision.confidence),
@@ -427,6 +427,9 @@ function traceDecisionView(decision) {
     // 三态：旧 record / shadow 记录可能没有该字段，不把缺失伪造成“未执行”。
     enforced: typeof decision.enforced === 'boolean' ? decision.enforced : null,
   };
+  // 可选：部分 runtime 在 decision 上直接标记影子决策。
+  if (typeof decision.shadow === 'boolean') view.shadow = decision.shadow;
+  return view;
 }
 
 function traceAppliedView(applied) {
@@ -445,7 +448,12 @@ function traceAppliedView(applied) {
       return null;
     }).filter(Boolean);
   }
-  return { action, depth, fragments };
+  const view = { action, depth, fragments };
+  // 影子模式的反事实建议：仅枚举/短值，缺失时不输出键，便于上层区分 off baseline。
+  if (['speak', 'defer', 'silent'].includes(applied.wouldAction)) view.wouldAction = applied.wouldAction;
+  if (['gist', 'detail', 'quote'].includes(applied.wouldDepth)) view.wouldDepth = applied.wouldDepth;
+  if (typeof applied.suppressed === 'boolean') view.suppressed = applied.suppressed;
+  return view;
 }
 
 function traceOutcomeView(outcome) {

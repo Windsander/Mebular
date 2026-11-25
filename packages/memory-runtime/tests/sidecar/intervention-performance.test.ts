@@ -2,7 +2,8 @@
 //
 // 使用与 acceptance-performance 相同的本地 fake capability（真实 HTTP 往返），
 // 但直接调用 RecallService.handleContext，测量介入决策 + write-behind 策略统计
-// 的额外开销。断言采用宽松绝对上限 + 相对开销上限，避免 CI 资源噪声。
+// 的额外开销。跑 3 轮取 p95 overhead 中位数：目标 <5ms，CI 噪声下断言 <10ms；
+// 保留绝对 p95 上限兜底。
 
 import { describe, it, expect } from '@jest/globals';
 import { performance } from 'node:perf_hooks';
@@ -110,33 +111,52 @@ describe('intervention /context performance', () => {
         await context(heuristic, index, 'warm_heuristic');
       }
 
-      const offTimes: number[] = [];
-      const heuristicTimes: number[] = [];
-      for (let index = 0; index < SAMPLES; index += 1) {
-        let started = performance.now();
-        await context(off, index, 'off');
-        offTimes.push(performance.now() - started);
+      const ROUNDS = 3;
+      const rounds: Array<{ offP50: number; offP95: number; heuristicP50: number; heuristicP95: number; overhead: number }> = [];
+      for (let round = 0; round < ROUNDS; round += 1) {
+        const offTimes: number[] = [];
+        const heuristicTimes: number[] = [];
+        for (let index = 0; index < SAMPLES; index += 1) {
+          let started = performance.now();
+          await context(off, index, `off_r${round}`);
+          offTimes.push(performance.now() - started);
 
-        started = performance.now();
-        await context(heuristic, index, 'heuristic');
-        heuristicTimes.push(performance.now() - started);
+          started = performance.now();
+          await context(heuristic, index, `heuristic_r${round}`);
+          heuristicTimes.push(performance.now() - started);
+        }
+        const offP50 = percentile(offTimes, 0.5);
+        const offP95 = percentile(offTimes, 0.95);
+        const heuristicP50 = percentile(heuristicTimes, 0.5);
+        const heuristicP95 = percentile(heuristicTimes, 0.95);
+        rounds.push({
+          offP50,
+          offP95,
+          heuristicP50,
+          heuristicP95,
+          overhead: heuristicP95 - offP95,
+        });
+        console.log(
+          `[perf][intervention] round=${round + 1} `
+          + `off p50=${offP50.toFixed(2)}ms p95=${offP95.toFixed(2)}ms; `
+          + `heuristic p50=${heuristicP50.toFixed(2)}ms p95=${heuristicP95.toFixed(2)}ms; `
+          + `p95 overhead=${(heuristicP95 - offP95).toFixed(2)}ms`,
+        );
       }
 
-      const offP50 = percentile(offTimes, 0.5);
-      const offP95 = percentile(offTimes, 0.95);
-      const heuristicP50 = percentile(heuristicTimes, 0.5);
-      const heuristicP95 = percentile(heuristicTimes, 0.95);
-      const overheadP95 = heuristicP95 - offP95;
+      // 取 3 轮 p95 overhead 的中位数，避免单轮抖动。
+      const overheadMedian = [...rounds.map((round) => round.overhead)].sort((a, b) => a - b)[1]!;
       console.log(
-        `[perf][intervention] off p50=${offP50.toFixed(2)}ms p95=${offP95.toFixed(2)}ms; `
-        + `heuristic p50=${heuristicP50.toFixed(2)}ms p95=${heuristicP95.toFixed(2)}ms; `
-        + `p95 overhead=${overheadP95.toFixed(2)}ms`,
+        `[perf][intervention] p95 overhead median=${overheadMedian.toFixed(2)}ms `
+        + `(rounds=${rounds.map((round) => round.overhead.toFixed(2)).join(',')})`,
       );
 
-      expect(offP95).toBeLessThan(500);
-      expect(heuristicP95).toBeLessThan(500);
-      // write-behind 后介入决策应远低于 Phase 0 的 5ms 预算；留足 CI 噪声。
-      expect(overheadP95).toBeLessThan(50);
+      // 绝对上限兜底；相对开销目标仍是计划里的 <5ms，CI 噪声下放宽到 10ms。
+      for (const round of rounds) {
+        expect(round.offP95).toBeLessThan(500);
+        expect(round.heuristicP95).toBeLessThan(500);
+      }
+      expect(overheadMedian).toBeLessThan(10);
     } finally {
       await off.runtime.stop();
       await heuristic.runtime.stop();

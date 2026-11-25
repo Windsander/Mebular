@@ -2,7 +2,7 @@
 // 使用 fake capability server；不启动真实 MCP/core。
 
 import { describe, it, expect, afterEach } from '@jest/globals';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CapabilityClient } from '../../src/sidecar/capability-client.js';
@@ -1159,6 +1159,35 @@ describe('sidecar recall/context HTTP', () => {
     });
     expect(lateIgnored.body.data.withinWindow).toBe(false);
     expect(lateIgnored.body.data.warnings).toEqual(['outcome_outside_window']);
+  });
+
+  it('/status 暴露 policy.degraded；flush 恢复后清除', async () => {
+    const { server, runtime, home } = await setup({ intervention: { mode: 'heuristic' } });
+    const statePath = join(home, 'memory-runtime', 'policy', 'state.json');
+    await mkdir(statePath, { recursive: true });
+    await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_policy_fail',
+      turnId: 'turn_policy_fail',
+      query: '我的偏好是什么？',
+    });
+
+    expect(await runtime.flushPolicy()).toBe(false);
+    expect(runtime.degraded).toBe(true);
+    const failed = await fetch(`${server.url}/status`, { headers: auth() });
+    const failedBody = await failed.json() as any;
+    expect(failedBody.data.policy).toMatchObject({
+      degraded: true,
+      lastError: { code: expect.any(String), at: NOW },
+    });
+    expect(JSON.stringify(failedBody)).not.toContain(statePath);
+
+    await rm(statePath, { recursive: true, force: true });
+    expect(await runtime.flushPolicy()).toBe(true);
+    expect(runtime.degraded).toBe(false);
+    const recovered = await fetch(`${server.url}/status`, { headers: auth() });
+    const recoveredBody = await recovered.json() as any;
+    expect(recoveredBody.data.policy).toEqual({ degraded: false, lastError: null });
   });
 
   it('POST /intervention/reset：成功、重复 reset、未启用与错误路径', async () => {

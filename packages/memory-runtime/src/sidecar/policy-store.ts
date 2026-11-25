@@ -225,6 +225,11 @@ function entryOf(state: PolicyState, agentId: string, domain: string, now: numbe
   return created;
 }
 
+export interface PolicyStoreErrorView {
+  code: string;
+  at: number;
+}
+
 /** 本机介入策略统计存储。所有读写都串行化，失败向上抛出由调用方 fail-open。 */
 export class PolicyStore {
   readonly path: string;
@@ -240,6 +245,8 @@ export class PolicyStore {
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
   private retryDelayMs = FLUSH_DELAY_MS;
   private closed = false;
+  private degraded = false;
+  private lastErrorState: PolicyStoreErrorView | null = null;
 
   constructor(options: PolicyStoreOptions) {
     this.path = options.path;
@@ -250,15 +257,36 @@ export class PolicyStore {
   }
 
   async init(): Promise<void> {
-    await ensurePrivateDir(dirname(this.path));
-    await this.load();
+    try {
+      await ensurePrivateDir(dirname(this.path));
+      await this.load();
+    } catch (error) {
+      this.markFailure(error);
+      throw error;
+    }
+  }
+
+  /** 只读：最近一次策略统计读写是否失败。 */
+  get isDegraded(): boolean {
+    return this.degraded;
+  }
+
+  /** 只读：最近一次失败；只保留稳定 code 与时间，不含路径/正文/token。 */
+  get lastError(): PolicyStoreErrorView | null {
+    return this.lastErrorState ? { ...this.lastErrorState } : null;
   }
 
   /** 读取状态；文件缺失/损坏时 fail-open 为空统计。 */
   async load(): Promise<void> {
     return this.exclusive(async () => {
-      this.state = await this.readState();
-      this.loaded = true;
+      try {
+        this.state = await this.readState();
+        this.loaded = true;
+        this.markHealthy();
+      } catch (error) {
+        this.markFailure(error);
+        throw error;
+      }
     });
   }
 
@@ -354,7 +382,13 @@ export class PolicyStore {
       this.cancelFlush();
       this.dirty = false;
       this.pendingChanges = 0;
-      await this.persist();
+      try {
+        await this.persist();
+        this.markHealthy();
+      } catch (error) {
+        this.markFailure(error);
+        throw error;
+      }
       return removed;
     });
   }
@@ -364,10 +398,16 @@ export class PolicyStore {
     return this.exclusive(async () => {
       this.cancelFlush();
       if (!this.dirty) return;
-      await this.persist();
-      this.dirty = false;
-      this.pendingChanges = 0;
-      this.retryDelayMs = FLUSH_DELAY_MS;
+      try {
+        await this.persist();
+        this.dirty = false;
+        this.pendingChanges = 0;
+        this.retryDelayMs = FLUSH_DELAY_MS;
+        this.markHealthy();
+      } catch (error) {
+        this.markFailure(error);
+        throw error;
+      }
     });
   }
 
@@ -422,8 +462,26 @@ export class PolicyStore {
 
   private async ensureLoaded(): Promise<void> {
     if (this.loaded) return;
-    this.state = await this.readState();
-    this.loaded = true;
+    try {
+      this.state = await this.readState();
+      this.loaded = true;
+    } catch (error) {
+      this.markFailure(error);
+      throw error;
+    }
+  }
+
+  private markHealthy(): void {
+    this.degraded = false;
+    this.lastErrorState = null;
+  }
+
+  private markFailure(error: unknown): void {
+    this.degraded = true;
+    const code = isObject(error) && typeof error.code === 'string' && error.code.length > 0
+      ? error.code.slice(0, 64)
+      : 'policy_storage_failed';
+    this.lastErrorState = { code, at: this.now() };
   }
 
   private async readState(): Promise<PolicyState> {

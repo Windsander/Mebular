@@ -1,7 +1,7 @@
 // PolicyStore：原子写/0600/0700、TTL、maxDomains、并发串行、阈值与 reset、损坏 fail-open。
 
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PolicyStore } from '../../src/sidecar/policy-store.js';
@@ -86,6 +86,24 @@ describe('PolicyStore', () => {
     expect((await policy.snapshot()).global.spoken).toBe(1);
 
     await policy.flush();
+    const persisted = JSON.parse(await readFile(path, 'utf8')) as any;
+    expect(persisted.global.spoken).toBe(1);
+  });
+
+  it('写失败标记 degraded + lastError，下一次 flush 成功清除', async () => {
+    const policy = store();
+    await policy.init();
+    // 把状态文件位置变成目录，让原子 rename 失败（确定性强于权限位）。
+    await mkdir(path, { recursive: true });
+    await policy.recordDecision({ agentId: 'opencode', domain: 'user', action: 'speak' });
+    await expect(policy.flush()).rejects.toBeTruthy();
+    expect(policy.isDegraded).toBe(true);
+    expect(policy.lastError?.code).toBeTruthy();
+
+    await rm(path, { recursive: true, force: true });
+    await policy.flush();
+    expect(policy.isDegraded).toBe(false);
+    expect(policy.lastError).toBeNull();
     const persisted = JSON.parse(await readFile(path, 'utf8')) as any;
     expect(persisted.global.spoken).toBe(1);
   });

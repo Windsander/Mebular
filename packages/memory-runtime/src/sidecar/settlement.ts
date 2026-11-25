@@ -592,7 +592,8 @@ export class SettlementRuntime {
         this.policyDegraded = true;
       }
     }
-    await this.ingest.init();    const beforeStagingCleanup = (ids: readonly string[]) => this.ingest.expireStagingDependencies(ids);
+    await this.ingest.init();
+    const beforeStagingCleanup = (ids: readonly string[]) => this.ingest.expireStagingDependencies(ids);
     this.local.setMaintenanceDependencyHandler(beforeStagingCleanup);
     await this.local.runMaintenance({ beforeStagingCleanup }).catch(() => null);
     this.local.startMaintenance({
@@ -616,6 +617,7 @@ export class SettlementRuntime {
 
   get degraded(): boolean {
     return this.policyDegraded
+      || this.policyStore?.isDegraded === true
       || this.ingest.isDegraded
       || this.recall.isDegraded
       || this.objects.isDegraded
@@ -627,6 +629,7 @@ export class SettlementRuntime {
     if (!this.policyStore) return true;
     try {
       await this.policyStore.flush();
+      this.policyDegraded = this.policyStore.isDegraded;
       return true;
     } catch {
       this.policyDegraded = true;
@@ -734,6 +737,7 @@ export class SettlementRuntime {
     }
     try {
       const removedDomains = await this.policyStore.reset();
+      this.policyDegraded = this.policyStore.isDegraded;
       return { reset: true, policyVersion: INTERVENTION_POLICY_VERSION, removedDomains };
     } catch {
       this.policyDegraded = true;
@@ -966,6 +970,10 @@ export class SettlementRuntime {
       outbox: outboxView,
       details,
       lastError: lastError ?? ingest.lastError,
+      policy: {
+        degraded: this.policyDegraded || this.policyStore?.isDegraded === true,
+        lastError: this.policyStore?.lastError ?? null,
+      },
     };
   }
 }

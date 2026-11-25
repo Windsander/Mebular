@@ -284,6 +284,11 @@ export interface SidecarStatusSnapshot {
   warnings: string[];
   /** 最近的沉降错误；不包含正文/token。 */
   lastError: SidecarStatusError | null;
+  /** 0.4.0 本机策略统计只读状态；不包含路径/token。 */
+  policy?: {
+    degraded: boolean;
+    lastError: { code: string; at: number } | null;
+  };
   /** 模型安装/引擎/推荐状态；不包含 token/path。 */
   inference?: InferenceStatusView;
 }

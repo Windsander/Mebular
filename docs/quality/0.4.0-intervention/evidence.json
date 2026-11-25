@@ -4,6 +4,7 @@
   "theme": "memory-intervention-policy",
   "branch": "feat/0.4-docs-e2e",
   "baseCommit": "cca4dcfa87ea1528fce21e6f0160936a3b6e38e0",
+  "evidenceCommit": "43b2899f0a567a51367b43a09b6d00659a65ff66",
   "date": "2026-11-25",
   "environment": {
     "platform": "macOS 15.7.9",

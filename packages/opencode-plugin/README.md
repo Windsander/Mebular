@@ -130,6 +130,10 @@ base；旧 `/runtime/v1` 路径会被拒绝（`runtime_url_legacy`）。非 loop
 | `recallTokenBudget` | `2000` | Runtime context token 预算 |
 | `maxFragments` | `3` | 单次 context 最多片段数（1–3） |
 | `maxContextBytes` | `8192` | 注入块硬上限（不可超过 8 KiB） |
+| `outcomes` | `true` | 是否上报 `/context` 归因结果；旧 Runtime 无 `decision` 时不会产生任何请求 |
+| `outcomeTimeoutMs` | `1500` | 单次 outcome 上报超时；超时/网络失败静默丢弃 |
+| `outcomeWindowMs` | `120000` | 下一轮 user turn 归因窗口；超过后不再推断 missed/reasked/corrected |
+| `outcomeIgnoredDelayMs` | `600000` | `session.idle` / `session.execution.succeeded` 后等待多久上报弱信号 `ignored` |
 | `maxChunkBytes` | `16384` | 单个 ingest chunk 上限 |
 | `maxCaptureMessages` | `12` | 每次读取会话上下文时最多检查的最近消息数 |
 | `hostExtractTimeoutMs` | `15000` | `session.generate` 后台抽取超时 |
@@ -155,6 +159,34 @@ detail: ...
 - 无命中、HTTP 失败、超时、空块：不注入，不向模型暴露错误细节。
 - 只修改本次 outgoing request；不写 session history、不写 instructions entry、
   不发 synthetic message。
+
+## 结果归因（outcome，0.4.0）
+
+Runtime 返回 `decision` / `traceId` 时，插件会把每次 `/context`（**包括 silent**）
+关联到后续用户行为，并 fire-and-forget 上报
+`POST /memory-runtime/v1/recall/:traceId/outcome`：
+
+| 时机 | `kind` | 说明 |
+|---|---|---|
+| 上轮 `silent`/`defer` + 本轮显式记忆追问或高实体/主题重叠 | `missed` | 该说没说 |
+| 上轮 `speak` + 本轮重问/复述 | `reasked` | 注入没阻止重问 |
+| 上轮 `speak` + 本轮纠正 | `corrected` | 注入内容被纠正 |
+| 上轮 `speak` + `gist` + 本轮明确要细节 | `too_shallow` | 深度不够 |
+| 上轮 `speak` + `detail`/`quote` + 本轮明确要更短/更浅 | `too_deep` | 深度过头 |
+| 上轮 `speak` + 本轮明确正向确认（对/有用/谢谢/没错/this helps/perfect） | `accepted` | 注入被接受 |
+| `session.idle` / `session.execution.succeeded` 后窗口内无追问 | `ignored` | 弱信号，延迟且去重 |
+
+- 深度反馈只在上轮实际 `speak` 且 `decision.depth` 已知时判断；普通继续、
+  同主题追问、问候或直接开新任务不会触发 `too_shallow`/`too_deep`。
+- 明确要求更短/更浅优先于 `accepted`；纠正优先于其他正向或深度信号。
+- 只保留每个 thread/session 最近一次 decision；下一轮 user turn 或 idle 上报后消费。
+- 同一 `traceId` + `kind` 最多上报一次；失败不重试、不阻塞主流程，401 之外的
+  网络/超时/404 一律静默丢弃。
+- 归因只保存 `queryHash`、实体名和主题词，**不保存/打印 query 正文或 token**。
+- 只有 Runtime 返回 `decision`（或显式宣告 `capabilities.intervention.outcome`）
+  时才会上报；旧 Runtime / `trace=off` / 无 `traceId` 的响应完全保持 0.3.x 行为，
+  不产生 outcome 请求。可用 `outcomes: false` 一键关闭。
+- `session.idle` 的 `ignored` 窗口默认 10 分钟；新 user turn 会取消待上报计时器。
 
 ## 隐私与共存边界
 
@@ -192,7 +224,10 @@ node --experimental-vm-modules node_modules/jest/bin/jest.js tests/opencode-plug
 测试使用 fake `ctx` / `fetch` / `session`，覆盖加载、版本检查、sidecar
 发现/token 文件权限、认证/API 版本失败禁用、无命中、超时、去重、工具遮蔽、
 原生 memory 不受影响、request-only 注入、`session.generate` 失败回退、
-compaction checkpoint 与 ingest 幂等。[真实 OpenCode E2E](../../tests/integration/host-e2e/README.md)
+compaction checkpoint 与 ingest 幂等，以及 0.4.0 outcome 归因（silent→missed、
+speak→reasked/corrected/accepted、gist→too_shallow、detail→too_deep、
+idle→ignored、同 trace/kind 去重、普通继续不误报、旧 Runtime 与 outcome 失败时
+fail-open）。[真实 OpenCode E2E](../../tests/integration/host-e2e/README.md)
 启动真实 OpenCode、sidecar、capability 与 GraphStore，但模型侧使用 fake
 OpenAI-compatible provider，不跑真实 LLM。`--controller-fallback` 不启动真实
 OpenCode，只验证 plugin controller + 真实 sidecar，并会明确打印该边界。

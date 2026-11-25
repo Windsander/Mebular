@@ -57,6 +57,30 @@ export const EVENT_TYPES = Object.freeze([
 
 const CANDIDATE_KINDS = new Set(['fact', 'preference', 'episode', 'skill', 'observation']);
 const CONTEXT_KINDS = new Set(['self', 'checkpoint', 'compact', 'memory', 'fragment']);
+const INTERVENTION_ACTIONS = new Set(['speak', 'defer', 'silent']);
+const RECALL_DEPTHS = new Set(['gist', 'detail', 'quote']);
+const OUTCOME_TRACE_RE = /^tr_[A-Za-z0-9._:-]{1,128}$/u;
+const MEMORY_FOLLOW_UP_RE = /上次|上回|前次|之前|先前|前面|刚才|刚刚|记得|还记得|忘了|忘记|不是说过|你说过|提过|说过的|remember|last time|earlier|previously|as (?:i|you) (?:said|mentioned)|you (?:said|mentioned)|forgot/iu;
+const REASK_RE = /重问|再问|再说一遍|再讲一遍|再说一次|重新说|重新回答|重复一遍|重复一下|复述|again|repeat(?: that)?|say (?:it|that) again|what did you (?:just )?say|come again/iu;
+const CORRECTION_RE = /不对|不是(?!说过|吗|嘛|吧)|错了|搞错|弄错|说错|记错|不正确|有误|wrong|incorrect|that'?s not|not what i (?:said|meant)|mistaken/iu;
+const DETAIL_REQUEST_RE = /具体|详细|详尽|怎么配|如何配|配置步骤|原文|准确点|准确一点|精确|展开|更多细节|细节|逐条|一步一步|一步步|step[ -]?by[ -]?step|more detail|in detail|elaborate|verbatim|quote|show me the (?:exact|full|raw)|how (?:do|to) (?:i )?(?:configure|set up)/iu;
+const SHALLOW_REQUEST_RE = /太长|太详细|太啰嗦|不用这么详细|不用那么详细|不用详细|简短|简单点|简单一点|精炼|精简|只要结论|只要答案|只给结论|说重点|概括|摘要|\bsummary\b|\bshort(?:er)?\b|\bsimpler\b|\bbrief(?:ly)?\b|\btl;?dr\b|too long|too detailed|too much detail|just the (?:answer|conclusion)|keep it short|be concise/iu;
+const ACCEPTED_RE = /谢谢|多谢|感谢|thank(?:s| you)|this helps|that helps|很有用|挺有用|非常有用|(?:^|[，。！？,.!?\s])(?:对的|对呀|对|是的|没错|有用|很好|完美)(?=$|[，。！？,.!?\s])|\b(?:perfect|exactly|helpful)\b/iu;
+const TERM_STOPWORDS = new Set([
+  'the', 'and', 'for', 'you', 'your', 'with', 'this', 'that', 'what', 'when', 'where', 'which',
+  'how', 'why', 'can', 'could', 'would', 'should', 'please', 'about', 'from', 'have', 'has',
+  'had', 'are', 'was', 'were', 'will', 'just', 'now', 'again', 'last', 'time', 'remember',
+  'did', 'say', 'said', 'not', 'but', 'our', 'its', 'all', 'any', 'one', 'two', 'use', 'using',
+  'make', 'need', 'want', 'let', 'get', 'got', 'also', 'then', 'than', 'them', 'they', 'she',
+  'him', 'her', 'his', 'out', 'into', 'over', 'under', 'more', 'most', 'some', 'such', 'only',
+  'own', 'same', 'too', 'very', 'add', 'set', 'new', 'old',
+  '的', '了', '是', '在', '我', '你', '他', '她', '它', '们', '这', '那', '个', '吗', '呢',
+  '吧', '啊', '和', '与', '就', '也', '都', '不', '有', '要', '会', '能', '把', '被', '给',
+  '对', '说', '过', '什么', '这个', '那个', '我们', '你们', '他们', '一下', '可以', '现在',
+  '然后', '就是', '还是', '没有', '已经', '一个', '怎么', '如何', '为什么',
+]);
+const MAX_LAST_CONTEXTS = 64;
+const MAX_REPORTED_OUTCOMES = 512;
 const MAX_CANDIDATES = 20;
 const DISCOVERY_ACTIVE_MODES = new Set(['immersive', 'ready', 'active']);
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
@@ -105,6 +129,13 @@ const DEFAULT_CONFIG = Object.freeze({
   includeSelf: true,
   includeCheckpoint: true,
   includeOtherAgents: false,
+  // 0.4.0 outcome attribution. Reporting is only attempted when the Runtime
+  // returns a `decision` (or advertises the `intervention.outcome` capability),
+  // so an older Runtime keeps the exact 0.3.x behavior.
+  outcomes: true,
+  outcomeTimeoutMs: 1500,
+  outcomeWindowMs: 120000,
+  outcomeIgnoredDelayMs: 600000,
   ingestTimeoutMs: 2000,
   checkpointTimeoutMs: 2500,
   maxChunkBytes: 16 * 1024,
@@ -167,6 +198,75 @@ function uniqueStrings(value, limit = 64) {
 
 function hashText(value) {
   return createHash('sha256').update(String(value ?? '')).digest('hex');
+}
+
+/**
+ * Extract bounded, privacy-safe comparison terms from a user turn. Only the
+ * terms are retained for outcome attribution; the turn text itself is never
+ * stored or logged.
+ */
+function textTerms(value) {
+  const text = String(value ?? '').toLowerCase();
+  const terms = [];
+  for (const word of text.match(/[a-z][a-z0-9._:-]+/gu) ?? []) {
+    const cleaned = word.replace(/[._:-]+$/u, '');
+    if (cleaned.length < 2 || TERM_STOPWORDS.has(cleaned)) continue;
+    terms.push(cleaned);
+  }
+  for (const run of text.match(/[\u4e00-\u9fff]+/gu) ?? []) {
+    if (run.length < 2) continue;
+    if (run.length === 2) {
+      if (!TERM_STOPWORDS.has(run)) terms.push(run);
+      continue;
+    }
+    for (let index = 0; index < run.length - 1; index += 1) {
+      const bigram = run.slice(index, index + 2);
+      if (!TERM_STOPWORDS.has(bigram)) terms.push(bigram);
+    }
+  }
+  return uniqueStrings(terms, 32);
+}
+
+function hasHighOverlap(currentTerms, previousTerms) {
+  const previous = new Set((previousTerms ?? []).map((term) => asText(term).toLowerCase()).filter(Boolean));
+  if (previous.size === 0) return false;
+  let matched = 0;
+  for (const term of currentTerms ?? []) {
+    if (previous.has(term)) matched += 1;
+  }
+  if (matched >= 2) return true;
+  const shortest = Math.min(currentTerms?.length ?? 0, previous.size);
+  return matched >= 1 && shortest <= 2;
+}
+
+function parseInterventionDecision(value) {
+  if (!isObject(value)) return null;
+  const action = asText(value.action);
+  if (!INTERVENTION_ACTIONS.has(action)) return null;
+  const depth = asText(value.depth);
+  return {
+    action,
+    depth: RECALL_DEPTHS.has(depth) ? depth : null,
+    ...(Number.isFinite(value.confidence) ? { confidence: Math.min(Math.max(value.confidence, 0), 1) } : {}),
+    ...(asText(value.reason) ? { reason: truncateChars(asText(value.reason), 200) } : {}),
+    ...(asText(value.policyVersion) ? { policyVersion: truncateChars(asText(value.policyVersion), 120) } : {}),
+    ...(typeof value.enforced === 'boolean' ? { enforced: value.enforced } : {}),
+  };
+}
+
+function fragmentEntityNames(data) {
+  const names = [];
+  for (const fragment of Array.isArray(data?.fragments) ? data.fragments : []) {
+    for (const entity of Array.isArray(fragment?.entities) ? fragment.entities : []) {
+      const name = asText(entity?.name);
+      if (name) names.push(name.toLowerCase());
+    }
+  }
+  return uniqueStrings(names, 16);
+}
+
+function isTraceId(value) {
+  return OUTCOME_TRACE_RE.test(asText(value));
 }
 
 function clone(value) {
@@ -868,6 +968,10 @@ export function resolvePluginConfig(input, options = {}) {
     includeSelf: asBool(merged.includeSelf, true),
     includeCheckpoint: asBool(merged.includeCheckpoint, true),
     includeOtherAgents: asBool(merged.includeOtherAgents, DEFAULT_CONFIG.includeOtherAgents),
+    outcomes: asBool(merged.outcomes, DEFAULT_CONFIG.outcomes),
+    outcomeTimeoutMs: asInt(merged.outcomeTimeoutMs, DEFAULT_CONFIG.outcomeTimeoutMs, 10, 10000),
+    outcomeWindowMs: asInt(merged.outcomeWindowMs, DEFAULT_CONFIG.outcomeWindowMs, 0, 3600000),
+    outcomeIgnoredDelayMs: asInt(merged.outcomeIgnoredDelayMs, DEFAULT_CONFIG.outcomeIgnoredDelayMs, 0, 3600000),
     ingestTimeoutMs: asInt(merged.ingestTimeoutMs, DEFAULT_CONFIG.ingestTimeoutMs, 50, 10000),
     maxChunkBytes: asInt(merged.maxChunkBytes, DEFAULT_CONFIG.maxChunkBytes, 64, 256 * 1024),
     maxCaptureMessages: asInt(merged.maxCaptureMessages, DEFAULT_CONFIG.maxCaptureMessages, 1, 50),
@@ -1464,6 +1568,11 @@ export function createController(dependencies = {}) {
   const toolCalls = new Map();
   const contextReads = new Map();
   const recalls = new Map();
+  // Per thread/session: the most recent /context decision, kept only until the
+  // next user turn (or an idle-triggered `ignored` report) consumes it.
+  const lastContexts = new Map();
+  const reportedOutcomes = new Set();
+  let outcomeSupport = null;
   const pendingCheckpoints = new Map();
   const checkpointRevisions = new Map();
   const knownRecordIds = new Map();
@@ -1511,6 +1620,7 @@ export function createController(dependencies = {}) {
       retryAfterTruncated: 0,
     },
     model: { calls: 0, succeeded: 0, failed: 0, fallbacks: 0, skipped: 0 },
+    outcomes: { attempted: 0, reported: 0, failed: 0, unsupported: 0, skipped: 0 },
     tools: { maskedAgents: 0, maskedTools: 0, governanceAgents: 0 },
     events: { received: 0, handled: 0, failures: 0, duplicates: 0, subscriptions: 0, reconnects: 0 },
     writes: { rejected: 0, disabled: 0, recovered: 0, authProbes: 0, readForbidden: 0 },
@@ -2087,6 +2197,7 @@ export function createController(dependencies = {}) {
     // Hot disable: cancel event subscription, reconnect/backoff timers,
     // in-flight requests, buffered turns and pending checkpoints. No flush.
     stopEventLoop();
+    clearOutcomeState();
     clearAuthRecovery();
     abortLifecycleRequests({ restart: true });
     clearBuffers();
@@ -2308,12 +2419,205 @@ export function createController(dependencies = {}) {
     }
   }
 
-  async function contextRecall(event) {
-    if (!enabled || closed || !recallAllowed) return;
-    if (now() < recallCooldownUntil) {
-      stats.context.cooldown += 1;
+  function outcomeCapability() {
+    const intervention = runtimeState.capabilities?.intervention;
+    if (isObject(intervention) && typeof intervention.outcome === 'boolean') return intervention.outcome;
+    return null;
+  }
+
+  function clearOutcomeTimer(record) {
+    if (record?.ignoredTimer !== null && record?.ignoredTimer !== undefined) {
+      clearTimeoutFn(record.ignoredTimer);
+      record.ignoredTimer = null;
+    }
+  }
+
+  function clearOutcomeState() {
+    for (const record of lastContexts.values()) clearOutcomeTimer(record);
+    lastContexts.clear();
+    reportedOutcomes.clear();
+  }
+
+  function rememberReportedOutcome(key) {
+    reportedOutcomes.add(key);
+    while (reportedOutcomes.size > MAX_REPORTED_OUTCOMES) {
+      const oldest = reportedOutcomes.values().next().value;
+      if (oldest === undefined) break;
+      reportedOutcomes.delete(oldest);
+    }
+  }
+
+  /**
+   * Persist the last /context decision for a thread. A silent response with a
+   * traceId is kept too: it is exactly the signal needed for `missed`.
+   */
+  function saveLastContext(threadId, turn, data) {
+    if (!config.outcomes) return;
+    const traceId = asText(data?.traceId);
+    if (!traceId) return;
+    const key = threadId ?? 'session';
+    const previous = lastContexts.get(key);
+    if (previous) clearOutcomeTimer(previous);
+    const decision = parseInterventionDecision(data?.decision);
+    lastContexts.set(key, {
+      traceId,
+      recallId: asText(data?.recallId) || null,
+      at: now(),
+      action: decision?.action ?? null,
+      depth: decision?.depth ?? null,
+      queryHash: hashText(turn.text),
+      entities: fragmentEntityNames(data),
+      topics: textTerms(turn.text),
+      turnKey: `${key}:${turn.key}`,
+      reported: new Set(),
+      ignoredTimer: null,
+    });
+    while (lastContexts.size > MAX_LAST_CONTEXTS) {
+      const oldestKey = lastContexts.keys().next().value;
+      if (oldestKey === undefined) break;
+      clearOutcomeTimer(lastContexts.get(oldestKey));
+      lastContexts.delete(oldestKey);
+    }
+  }
+
+  function takePreviousContext(threadId) {
+    const key = threadId ?? 'session';
+    const record = lastContexts.get(key);
+    if (!record) return null;
+    lastContexts.delete(key);
+    clearOutcomeTimer(record);
+    return record;
+  }
+
+  async function sendOutcome(record, kind, options = {}) {
+    if (outcomeSupport === false) {
+      stats.outcomes.skipped += 1;
       return;
     }
+    const capability = outcomeCapability();
+    if (capability === false) {
+      stats.outcomes.skipped += 1;
+      return;
+    }
+    // No decision means an older Runtime: do not invent an outcome.
+    if (!record.action && capability !== true) {
+      stats.outcomes.skipped += 1;
+      return;
+    }
+    stats.outcomes.attempted += 1;
+    const result = await requestJson(`/recall/${record.traceId}/outcome`, {
+      kind,
+      source: 'host',
+      ...(Number.isFinite(options.confidence) ? { confidence: options.confidence } : {}),
+      ...(asText(options.note) ? { note: truncateChars(asText(options.note), 200) } : {}),
+    }, { timeoutMs: config.outcomeTimeoutMs });
+    if (result.ok) {
+      stats.outcomes.reported += 1;
+      if (outcomeSupport === null) outcomeSupport = true;
+      return;
+    }
+    if (result.status === 405 || result.status === 501
+      || result.code === 'not_implemented' || result.code === 'method_not_allowed') {
+      outcomeSupport = false;
+      stats.outcomes.unsupported += 1;
+      return;
+    }
+    stats.outcomes.failed += 1;
+  }
+
+  /**
+   * Fire-and-forget outcome report. Same trace + kind is reported at most once
+   * (per record and across records), and failures never surface to the host.
+   */
+  function reportOutcome(record, kind, options = {}) {
+    if (!enabled || closed || !config.outcomes || !record) return;
+    if (!isTraceId(record.traceId)) return;
+    if (record.reported?.has(kind)) return;
+    const key = `${record.traceId}:${kind}`;
+    if (reportedOutcomes.has(key)) return;
+    record.reported?.add(kind);
+    rememberReportedOutcome(key);
+    void track(sendOutcome(record, kind, options));
+  }
+
+  function scheduleIgnoredOutcome(sessionID) {
+    if (!enabled || closed || !config.outcomes) return;
+    const record = lastContexts.get(safeThreadId(sessionID) ?? 'session');
+    if (!record || !record.action || !isTraceId(record.traceId)) return;
+    if (record.reported?.has('ignored') || record.ignoredTimer !== null) return;
+    const fire = () => {
+      record.ignoredTimer = null;
+      reportOutcome(record, 'ignored', {
+        confidence: 0.3,
+        note: 'no follow-up before the outcome window elapsed',
+      });
+    };
+    if (config.outcomeIgnoredDelayMs <= 0) {
+      fire();
+      return;
+    }
+    record.ignoredTimer = setTimeoutFn(fire, config.outcomeIgnoredDelayMs);
+    record.ignoredTimer?.unref?.();
+  }
+
+  function attributePreviousContext(record, turn) {
+    if (!record || !record.action || !isTraceId(record.traceId)) return;
+    if (now() - record.at > config.outcomeWindowMs) return;
+    const text = turn.text;
+    const currentTerms = textTerms(text);
+    const followUp = MEMORY_FOLLOW_UP_RE.test(text);
+    const reask = REASK_RE.test(text);
+    const correction = CORRECTION_RE.test(text);
+    const wantsDetail = DETAIL_REQUEST_RE.test(text);
+    const wantsShallow = SHALLOW_REQUEST_RE.test(text);
+    const positive = ACCEPTED_RE.test(text);
+    const overlap = hasHighOverlap(currentTerms, [...(record.topics ?? []), ...(record.entities ?? [])]);
+    if ((record.action === 'silent' || record.action === 'defer') && (followUp || overlap)) {
+      reportOutcome(record, 'missed', {
+        confidence: followUp ? 0.7 : 0.55,
+        note: 'silent context followed by a memory follow-up',
+      });
+      return;
+    }
+    if (record.action !== 'speak') return;
+    if (correction) {
+      reportOutcome(record, 'corrected', {
+        confidence: 0.7,
+        note: 'follow-up corrected the previous answer',
+      });
+      return;
+    }
+    if (record.depth === 'gist' && wantsDetail) {
+      reportOutcome(record, 'too_shallow', {
+        confidence: 0.65,
+        note: 'follow-up asked for more detail after a gist',
+      });
+      return;
+    }
+    if ((record.depth === 'detail' || record.depth === 'quote') && wantsShallow) {
+      reportOutcome(record, 'too_deep', {
+        confidence: 0.65,
+        note: 'follow-up asked for a shorter answer',
+      });
+      return;
+    }
+    if (reask) {
+      reportOutcome(record, 'reasked', {
+        confidence: 0.65,
+        note: 'follow-up re-asked the previous turn',
+      });
+      return;
+    }
+    if (positive) {
+      reportOutcome(record, 'accepted', {
+        confidence: 0.6,
+        note: 'follow-up explicitly confirmed the answer',
+      });
+    }
+  }
+
+  async function contextRecall(event) {
+    if (!enabled || closed || !recallAllowed) return;
     const turn = extractLastUserTurn(event?.messages);
     if (!turn) {
       stats.context.empty += 1;
@@ -2323,6 +2627,14 @@ export function createController(dependencies = {}) {
     const turnKey = `${threadId ?? 'session'}:${turn.key}`;
     if (seenTurns.has(turnKey)) {
       stats.context.deduped += 1;
+      return;
+    }
+    // A new user turn ends the previous turn's idle window. Attribute before
+    // the request so a failed recall cannot lose the follow-up signal.
+    const previous = takePreviousContext(threadId);
+    attributePreviousContext(previous, turn);
+    if (now() < recallCooldownUntil) {
+      stats.context.cooldown += 1;
       return;
     }
     remember(seenTurns, turnKey);
@@ -2374,6 +2686,9 @@ export function createController(dependencies = {}) {
       return;
     }
     const blocks = contextBlocksFromResponse(result.data);
+    // Record every successful decision, including silent (blocks empty) turns.
+    // Existing `recalls` (used by detail expand) stays injection-scoped below.
+    saveLastContext(threadId, turn, result.data);
     if (blocks.length === 0) {
       stats.context.empty += 1;
       return;
@@ -3666,6 +3981,7 @@ export function createController(dependencies = {}) {
         case 'session.execution.succeeded':
           await captureSessionContext(sessionID);
           await finalizeSession(sessionID);
+          scheduleIgnoredOutcome(sessionID);
           break;
         case 'session.execution.failed':
         case 'session.execution.interrupted':
@@ -3675,6 +3991,7 @@ export function createController(dependencies = {}) {
         case 'session.idle':
           await captureSessionContext(sessionID);
           await finalizeSession(sessionID);
+          scheduleIgnoredOutcome(sessionID);
           break;
         case 'session.text.ended':
           bufferChunk(sessionID, 'assistant', data.text, data.assistantMessageID);
@@ -3813,6 +4130,7 @@ export function createController(dependencies = {}) {
     // No persistent host spool: an interrupted pending checkpoint becomes
     // visibly failed on shutdown instead of silently disappearing.
     stopEventLoop();
+    clearOutcomeState();
     clearAuthRecovery();
     abortLifecycleRequests({ restart: false });
     failAllPendingCheckpoints('checkpoint_shutdown');
@@ -3894,6 +4212,7 @@ export function createController(dependencies = {}) {
         toolMasking: active && config.hideMemoryTools,
         hostModel: active && hostAvailable,
         writes: active && !writesDisabled,
+        outcomes: active && recallAllowed && config.outcomes,
       },
       model: {
         selected: config.modelSource,
@@ -3930,6 +4249,10 @@ export function createController(dependencies = {}) {
         ...stats.writes,
         ...(status.writeState ?? {}),
         disabled: writesDisabled,
+      },
+      outcomes: {
+        ...stats.outcomes,
+        supported: outcomeSupport,
       },
       lifecycle: {
         ...stats.lifecycle,

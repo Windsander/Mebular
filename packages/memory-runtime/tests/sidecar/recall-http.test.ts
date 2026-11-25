@@ -61,7 +61,10 @@ function preference(): FakeMemoryRecord {
   };
 }
 
-async function setup(): Promise<Harness> {
+async function setup(options: {
+  intervention?: Partial<ReturnType<typeof defaultSidecarConfig>['intervention']>;
+  trace?: 'off' | 'local';
+} = {}): Promise<Harness> {
   const home = await mkdtemp(join(tmpdir(), 'mebular-recall-http-'));
   const local = new SidecarLocalLayer({ root: join(home, 'memory-runtime'), now: () => NOW });
   await local.init();
@@ -71,12 +74,15 @@ async function setup(): Promise<Harness> {
   const identity = { cloudId: 'cl_test', profileId: 'default', hostId: 'h_test' };
   const config = defaultSidecarConfig();
   config.http.port = 0;
+  if (options.trace) config.trace = options.trace;
+  if (options.intervention) config.intervention = { ...config.intervention, ...options.intervention };
   const runtime = new SettlementRuntime({
     config,
     local,
     client,
     identity,
     policy: defaultSidecarPolicy(),
+    policyStatePath: join(home, 'memory-runtime', 'policy', 'state.json'),
     autoStartReplayer: false,
     now: () => NOW,
   });
@@ -790,5 +796,314 @@ describe('sidecar recall/context HTTP', () => {
     }
     expect(context.body.data.estimatedBytes).toBeLessThanOrEqual(2400);
     expect(context.body.data.estimatedTokens).toBeLessThanOrEqual(1200);
+  });
+
+  it('off 模式不改变 baseline 注入，但始终返回 decision/applied', async () => {
+    const { server } = await setup({ intervention: { mode: 'off', minConfidence: 0.95 } });
+    const context = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_off',
+      turnId: 'turn_off_1',
+      query: '今天天气怎么样',
+    });
+    expect(context.status).toBe(200);
+    expect(context.body.data.fragments.length).toBeGreaterThan(0);
+    expect(context.body.data.decision).toMatchObject({
+      action: 'speak',
+      policyVersion: 'v0-baseline',
+      reason: 'baseline',
+    });
+    const trace = await fetch(`${server.url}/traces/${context.body.data.traceId}`, { headers: auth() });
+    const traceBody = await trace.json() as any;
+    expect(traceBody.data.decision.action).toBe('speak');
+    expect(traceBody.data.applied).toMatchObject({ action: 'speak', fragments: expect.any(Number) });
+    expect(traceBody.data.applied.wouldAction).toBeUndefined();
+
+    const recall = await post(`${server.url}/recall`, {
+      agentId: 'opencode',
+      threadId: 'th_off',
+      query: '今天天气怎么样',
+    });
+    expect(recall.status).toBe(200);
+    expect(recall.body.data.decision).toMatchObject({ action: 'speak', reason: 'baseline' });
+  });
+
+  it('shadow 只记录建议：注入块与 off 完全一致，并在 applied 记录 wouldAction/wouldDepth', async () => {
+    const off = await setup({ intervention: { mode: 'off' } });
+    const offContext = await post(`${off.server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_shadow',
+      turnId: 'turn_shadow_1',
+      query: '你记得我的喜好吗？',
+    });
+    const shadow = await setup({ intervention: { mode: 'shadow' } });
+    const shadowContext = await post(`${shadow.server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_shadow',
+      turnId: 'turn_shadow_1',
+      query: '你记得我的喜好吗？',
+    });
+    expect(offContext.status).toBe(200);
+    expect(shadowContext.status).toBe(200);
+    const shape = (blocks: any[]) => blocks.map((block) => ({
+      kind: block.kind,
+      content: block.content,
+      domain: block.domain,
+      format: block.format ?? null,
+      tokens: block.tokens,
+      bytes: block.bytes,
+    }));
+    expect(shape(shadowContext.body.data.blocks)).toEqual(shape(offContext.body.data.blocks));
+    const fragmentsShape = (fragments: any[]) => fragments.map((fragment) => ({
+      kind: fragment.kind,
+      gist: fragment.gist,
+      detail: fragment.detail?.format ?? null,
+    }));
+    expect(fragmentsShape(shadowContext.body.data.fragments)).toEqual(fragmentsShape(offContext.body.data.fragments));
+    expect(shadowContext.body.data.decision.policyVersion).toMatch(/^(v0-rules|heuristic:)/);
+    const trace = await fetch(`${shadow.server.url}/traces/${shadowContext.body.data.traceId}`, { headers: auth() });
+    const traceBody = await trace.json() as any;
+    expect(traceBody.data.applied).toMatchObject({
+      wouldAction: shadowContext.body.data.decision.action,
+      wouldDepth: shadowContext.body.data.decision.depth,
+    });
+  });
+
+  it('heuristic silent/defer：跳过 memory fragments，self/checkpoint 仍按原顺序注入', async () => {
+    const { server, fake } = await setup({
+      intervention: { mode: 'heuristic', minConfidence: 0.95, explorationRate: 0, maxSilentStreak: 99 },
+    });
+    fake.setRecords([preference()]);
+    fake.checkpoints.push({
+      id: '01JCKPTINT',
+      domain: 'task:th_intervention',
+      agentId: 'opencode',
+      threadId: 'th_intervention',
+      revision: 1,
+      state: {
+        schema: 2,
+        contentMode: 'structured',
+        task: { key: 'task:th_intervention', threadId: 'th_intervention', fleetTaskId: null },
+        goal: '保持 self/checkpoint 注入',
+        constraints: [],
+        decisions: [],
+        progress: { done: [], doing: [], blocked: [] },
+        nextSteps: [{ id: 'n1', text: 'continue' }],
+        files: [],
+        openQuestions: [],
+        references: { recordIds: [], detailIds: [], messageIds: [], fleetTaskId: null, urls: [] },
+      },
+      summary: null,
+      recordIds: [],
+      lease: null,
+      expiresAt: 0,
+    } as any);
+
+    const context = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_intervention',
+      turnId: 'turn_intervention_silent',
+      query: '今天天气怎么样',
+    });
+    expect(context.status).toBe(200);
+    expect(context.body.data.decision).toMatchObject({ action: 'silent' });
+    expect(context.body.data.fragments).toEqual([]);
+    expect(context.body.data.blocks.map((block: any) => block.kind)).toEqual(['checkpoint']);
+    expect(context.body.data.blocks[0].content).toContain('保持 self/checkpoint 注入');
+    expect(context.body.data.warnings).toContain('intervention_silent');
+    const trace = await fetch(`${server.url}/traces/${context.body.data.traceId}`, { headers: auth() });
+    const traceBody = await trace.json() as any;
+    expect(traceBody.data.applied).toMatchObject({ action: 'silent', fragments: 0 });
+    expect(traceBody.data.applied.suppressed.length).toBeGreaterThan(0);
+
+    // 没有 self/checkpoint 时，沉默原因必须保留策略原因而不是 budget_too_small。
+    const bare = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_intervention_bare',
+      turnId: 'turn_intervention_bare',
+      query: '今天天气怎么样',
+    });
+    expect(bare.body.data.blocks).toEqual([]);
+    expect(bare.body.data.silenceReason).toBe('intervention_silent');
+  });
+
+  it('must_speak 不能被低阈值/高负例率否决；gist 不生详情', async () => {
+    const { server, runtime } = await setup({
+      intervention: { mode: 'heuristic', minConfidence: 0.95, explorationRate: 0, maxSilentStreak: 1 },
+    });
+    // 制造很高的 recentUselessRate，普通策略一定会沉默。
+    for (let index = 0; index < 20; index += 1) {
+      await runtime.policyStore!.recordDecision({ agentId: 'opencode', domain: 'user', action: 'speak' });
+      await runtime.policyStore!.recordOutcome({ agentId: 'opencode', domain: 'user', kind: 'dismissed' });
+    }
+    const context = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_must_speak',
+      turnId: 'turn_must_speak',
+      query: '你还记得我的喜好吗？',
+    });
+    expect(context.status).toBe(200);
+    expect(context.body.data.decision).toMatchObject({
+      action: 'speak',
+      depth: 'gist',
+      mustSpeak: true,
+    });
+    expect(context.body.data.decision.reason).toMatch(/^must_speak:/);
+    expect(context.body.data.fragments.length).toBeGreaterThan(0);
+    expect(context.body.data.fragments[0].detail).toBeUndefined();
+  });
+
+  it('heuristic detail/quote：why 展开 detail，原话请求展开 quote', async () => {
+    const detailHarness = await setup({ intervention: { mode: 'heuristic', explorationRate: 0 } });
+    const detailText = '深色主题更省电，也更适合夜间使用。';
+    detailHarness.fake.setRecords([{
+      ...preference(),
+      id: '01JINTDETAILREC',
+      provenance: { ...preference().provenance, detailIds: ['01JINTWHYDETAIL'] },
+    }]);
+    detailHarness.fake.details.push({
+      id: '01JINTWHYDETAIL',
+      detailKind: 'raw_chunk',
+      domain: 'user',
+      recordIds: ['01JINTDETAILREC'],
+      role: 'user',
+      text: detailText,
+      messageId: 'm_int_why',
+      chunkIndex: 0,
+      provenance: { source: 'runtime', deviceId: 'device-a', agentId: 'opencode' },
+      createdAt: NOW - 60_000,
+    });
+    const detailContext = await post(`${detailHarness.server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_detail',
+      turnId: 'turn_detail',
+      query: '之前为什么偏好深色主题？',
+    });
+    expect(detailContext.status).toBe(200);
+    expect(detailContext.body.data.decision).toMatchObject({ action: 'speak', depth: 'detail' });
+    expect(detailContext.body.data.fragments[0].detail).toMatchObject({ format: 'structured' });
+    expect(detailContext.body.data.fragments[0].detail.text).toContain('theme=dark');
+
+    const quoteHarness = await setup({ intervention: { mode: 'heuristic', explorationRate: 0 } });
+    const text = '我原话：以后默认用深色主题。';
+    quoteHarness.fake.setRecords([{
+      ...preference(),
+      id: '01JINTQUOTE1',
+      type: 'episode',
+      kind: 'episode',
+      content: { episodeType: 'conversation', title: '原话', content: text },
+      text,
+      provenance: { ...preference().provenance, detailIds: ['01JINTDETAIL1'] },
+    }]);
+    quoteHarness.fake.details.push({
+      id: '01JINTDETAIL1',
+      detailKind: 'raw_chunk',
+      domain: 'user',
+      recordIds: ['01JINTQUOTE1'],
+      role: 'user',
+      text,
+      messageId: 'm_int_detail',
+      chunkIndex: 0,
+      provenance: { source: 'runtime', deviceId: 'device-a', agentId: 'opencode' },
+      createdAt: NOW - 60_000,
+    });
+    const quoteContext = await post(`${quoteHarness.server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_quote',
+      turnId: 'turn_quote',
+      query: '我当时原话怎么说的？',
+    });
+    expect(quoteContext.status).toBe(200);
+    expect(quoteContext.body.data.decision).toMatchObject({ action: 'speak', depth: 'quote' });
+    expect(quoteContext.body.data.fragments[0].detail).toMatchObject({
+      format: 'verbatim',
+      text,
+    });
+  });
+
+  it('outcome：同 trace 同 kind 幂等、保留历史、非法输入 400、trace=off 明确降级', async () => {
+    const { server, runtime } = await setup({ intervention: { mode: 'heuristic' } });
+    const context = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_outcome',
+      turnId: 'turn_outcome',
+      query: '我的偏好是什么？',
+    });
+    const traceId = context.body.data.traceId as string;
+    expect(traceId).toMatch(/^tr_/);
+
+    const first = await post(`${server.url}/recall/${traceId}/outcome`, {
+      kind: 'accepted',
+      source: 'host',
+      confidence: 0.8,
+      note: 'user said thanks',
+    });
+    expect(first.status).toBe(200);
+    expect(first.body.data).toMatchObject({ recorded: true, duplicate: false, degraded: false });
+
+    const again = await post(`${server.url}/recall/${traceId}/outcome`, {
+      kind: 'accepted',
+      source: 'host',
+    });
+    expect(again.status).toBe(200);
+    expect(again.body.data).toMatchObject({ recorded: false, duplicate: true });
+
+    const second = await post(`${server.url}/recall/${traceId}/outcome`, {
+      kind: 'dismissed',
+      source: 'console',
+    });
+    expect(second.status).toBe(200);
+    expect(second.body.data.recorded).toBe(true);
+
+    const trace = await fetch(`${server.url}/traces/${traceId}`, { headers: auth() });
+    const traceBody = await trace.json() as any;
+    expect(traceBody.data.outcome).toMatchObject({ kind: 'dismissed', source: 'console' });
+    expect(traceBody.data.outcomeHistory.map((entry: any) => entry.kind)).toEqual(['accepted', 'dismissed']);
+
+    const stats = await runtime.policyStore!.snapshot();
+    expect(stats.global.accepted).toBe(1);
+    expect(stats.global.dismissed).toBe(1);
+
+    const invalid = await post(`${server.url}/recall/${traceId}/outcome`, { kind: 'nope', source: 'host' });
+    expect(invalid.status).toBe(400);
+    const missing = await post(`${server.url}/recall/tr_missing/outcome`, { kind: 'missed', source: 'host' });
+    expect(missing.status).toBe(404);
+
+    const off = await setup({ trace: 'off' });
+    const offline = await post(`${off.server.url}/recall/tr_offline/outcome`, { kind: 'missed', source: 'host' });
+    expect(offline.status).toBe(200);
+    expect(offline.body.data).toMatchObject({ recorded: false, degraded: true });
+    expect(offline.body.data.warnings).toContain('trace_off');
+    const offStats = await off.runtime.policyStore!.snapshot();
+    expect(offStats.global).toMatchObject({ spoken: 0, silent: 0, missed: 0 });
+    const offContext = await post(`${off.server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_off_no_learn',
+      turnId: 'turn_off_no_learn',
+      query: '我的偏好是什么？',
+    });
+    expect(offContext.body.data.traceId).toBeNull();
+    const offStatsAfter = await off.runtime.policyStore!.snapshot();
+    expect(offStatsAfter.global).toMatchObject({ spoken: 0, silent: 0 });
+  });
+
+  it('/version 暴露 intervention 能力位；旧字段保持兼容', async () => {
+    const { server } = await setup({ intervention: { mode: 'heuristic' } });
+    const version = await fetch(`${server.url}/version`, { headers: auth() });
+    const body = await version.json() as any;
+    expect(version.status).toBe(200);
+    expect(body.data.capabilities).toMatchObject({
+      ingest: true,
+      recall: true,
+      context: true,
+      feedback: true,
+      traces: true,
+      intervention: {
+        decision: true,
+        outcome: true,
+        shadow: true,
+        mode: 'heuristic',
+      },
+    });
   });
 });

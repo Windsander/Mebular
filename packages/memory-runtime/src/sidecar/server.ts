@@ -350,6 +350,15 @@ export interface SidecarRecallApi {
     warnings: string[];
     degraded: boolean;
   }>;
+  submitOutcome(traceId: string, body: unknown): Promise<{
+    traceId: string;
+    outcome: unknown | null;
+    duplicate: boolean;
+    recorded: boolean;
+    withinWindow: boolean | null;
+    warnings: string[];
+    degraded: boolean;
+  }>;
 }
 
 export interface SidecarServerOptions {
@@ -1030,6 +1039,12 @@ export class SidecarServer {
             checkpoint: this.mode === 'immersive' && Boolean(this.objects),
             compact: this.mode === 'immersive' && Boolean(this.objects),
             self: this.mode === 'immersive' && Boolean(this.objects),
+            intervention: {
+              decision: this.mode === 'immersive' && Boolean(this.recall),
+              outcome: this.mode === 'immersive' && Boolean(this.recall),
+              shadow: Boolean(this.recall),
+              mode: this.config.intervention.mode,
+            },
             models: {
               install: this.mode === 'immersive' && modelCapabilities.install,
               activate: this.mode === 'immersive' && modelCapabilities.activate,
@@ -1551,14 +1566,15 @@ export class SidecarServer {
 
       if (relative.startsWith('recall/')) {
         const parts = relative.split('/');
-        if (parts.length !== 3 || (parts[2] !== 'feedback' && parts[2] !== 'expand')) {
+        if (parts.length !== 3
+          || (parts[2] !== 'feedback' && parts[2] !== 'expand' && parts[2] !== 'outcome')) {
           req.resume();
           this.sendError(res, 404, requestId, 'not_found', '未知召回路径');
           return;
         }
         if (!isPost) {
           req.resume();
-          this.sendError(res, 405, requestId, 'method_not_allowed', 'feedback/expand 仅接受 POST');
+          this.sendError(res, 405, requestId, 'method_not_allowed', 'feedback/expand/outcome 仅接受 POST');
           return;
         }
         if (!this.recall) {
@@ -1581,6 +1597,11 @@ export class SidecarServer {
         if (parts[2] === 'expand') {
           const result = await this.recall.expandRecall(traceId, body);
           this.send(res, 200, this.envelope(requestId, result.data, result.warnings, result.degraded));
+          return;
+        }
+        if (parts[2] === 'outcome') {
+          const result = await this.recall.submitOutcome(traceId, body);
+          this.send(res, 200, this.envelope(requestId, result, result.warnings, result.degraded));
           return;
         }
         const result = await this.recall.submitFeedback(traceId, body);

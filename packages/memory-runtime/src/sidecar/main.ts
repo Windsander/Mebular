@@ -631,6 +631,7 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
       client,
       identity,
       policyPath: paths.policyPath,
+      policyStatePath: paths.policyStatePath,
       inference: model,
       lifecycle,
       diagnostics,

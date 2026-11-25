@@ -33,6 +33,7 @@ import type { SidecarLocalLayer } from './local-layer.js';
 import type { OutboxItem } from './local-layer.js';
 import type { SidecarInferenceProvider } from './inference-provider.js';
 import { OutboxReplayer } from './outbox-replayer.js';
+import { PolicyStore } from './policy-store.js';
 import {
   RecallService,
   type ContextResponse,
@@ -56,6 +57,10 @@ export interface SettlementRuntimeOptions {
   policy?: SidecarPolicy | null;
   inference?: SidecarInferenceProvider | null;
   policyPath?: string;
+  /** `<dataDir>/policy/state.json`；缺省不启用本机策略学习。 */
+  policyStatePath?: string;
+  /** 测试注入；优先于 policyStatePath。 */
+  policyStore?: PolicyStore | null;
   lifecycle?: LifecycleGate | null;
   /** WP5：脱敏运行日志；状态只暴露计数/最近错误，不返回日志正文路径。 */
   diagnostics?: DiagnosticLog | null;
@@ -404,6 +409,8 @@ export class SettlementRuntime {
   readonly replayer: OutboxReplayer;
   readonly recall: RecallService;
   readonly objects: MemoryObjectService;
+  /** 0.4.0 本机介入策略统计；未配置路径时为 null。 */
+  readonly policyStore: PolicyStore | null;
 
   private readonly client: CapabilityClient | null;
   private readonly inference: SidecarInferenceProvider | null;
@@ -461,6 +468,16 @@ export class SettlementRuntime {
       ...(options.lifecycle ? { lifecycle: options.lifecycle } : {}),
       ...(options.now ? { now: options.now } : {}),
     });
+    const policyStore = options.policyStore ?? (
+      options.policyStatePath
+        ? new PolicyStore({
+          path: options.policyStatePath,
+          ttlDays: options.config.intervention.policyTtlDays,
+          ...(options.now ? { now: options.now } : {}),
+        })
+        : null
+    );
+    this.policyStore = policyStore;
     this.recall = new RecallService({
       config: options.config,
       local: options.local,
@@ -474,6 +491,7 @@ export class SettlementRuntime {
       policy: this.policy,
       getPolicy: () => this.policy,
       checkpointSource: this.objects,
+      policyStore,
       ...(this.inference ? { inference: this.inference } : {}),
       ...(options.lifecycle ? { lifecycle: options.lifecycle } : {}),
       ...(options.now ? { now: options.now } : {}),
@@ -562,6 +580,7 @@ export class SettlementRuntime {
         this.recall.setPolicy(this.policy);
       }
     }
+    await this.policyStore?.init();
     await this.ingest.init();
     const beforeStagingCleanup = (ids: readonly string[]) => this.ingest.expireStagingDependencies(ids);
     this.local.setMaintenanceDependencyHandler(beforeStagingCleanup);
@@ -671,6 +690,15 @@ export class SettlementRuntime {
 
   submitFeedback(traceId: string, body: unknown) {
     return this.recall.submitFeedback(traceId, body);
+  }
+
+  submitOutcome(traceId: string, body: unknown) {
+    return this.recall.submitOutcome(traceId, body);
+  }
+
+  /** Console/CLI reset 入口：清空本机策略统计；不影响记忆或 trace。 */
+  resetInterventionPolicy(): Promise<number> {
+    return this.policyStore ? this.policyStore.reset() : Promise.resolve(0);
   }
 
   async reloadPolicy(): Promise<string[]> {

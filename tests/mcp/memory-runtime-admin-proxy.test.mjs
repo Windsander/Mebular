@@ -197,6 +197,23 @@ describe('MCP admin · Memory Runtime sidecar 只读代理', () => {
     expect(feedback.status).toBe(409);
     expect(await feedback.json()).toMatchObject({ ok: false, error: 'memory_runtime_disabled', state: 'stopped' });
 
+    const reset = await fetch(`${base}/admin/api/memory-runtime/policy/reset`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-mebular-csrf': token,
+        cookie,
+      },
+      body: '{}',
+    });
+    expect(reset.status).toBe(409);
+    expect(await reset.json()).toMatchObject({
+      ok: false,
+      error: 'memory_runtime_disabled',
+      enabled: false,
+      state: 'stopped',
+    });
+
     // 轻量模式零副作用：不创建 sidecar 数据目录/discovery/token。
     expect(existsSync(join(home, 'memory-runtime'))).toBe(false);
     expect(existsSync(join(home, 'memory-runtime.json'))).toBe(false);
@@ -294,11 +311,13 @@ describe('MCP admin · Memory Runtime sidecar 只读代理', () => {
     const outDir = await tempDir('memory-runtime-admin-out-');
     const authOut = join(outDir, 'auth.jsonl');
     const feedbackOut = join(outDir, 'feedback.jsonl');
+    const interventionOut = join(outDir, 'intervention.jsonl');
     const { home, base } = await start({
       enabled: true,
       env: {
         FAKE_SIDECAR_AUTH_OUT: authOut,
         FAKE_SIDECAR_FEEDBACK_OUT: feedbackOut,
+        FAKE_SIDECAR_INTERVENTION_OUT: interventionOut,
       },
     });
     const status = await readyStatus(base);
@@ -314,6 +333,18 @@ describe('MCP admin · Memory Runtime sidecar 只读代理', () => {
     const traces = await tracesResponse.json();
     expect(traces).toMatchObject({ ok: true, enabled: true, available: true, total: 1 });
     expect(traces.traces[0].id).toBe('tr_fake_0001');
+    expect(traces.traces[0]).toMatchObject({
+      decision: {
+        action: 'speak',
+        depth: 'detail',
+        confidence: 0.88,
+        reason: 'high_relevance',
+        policyVersion: 'v0-rules',
+        enforced: true,
+      },
+      applied: { action: 'speak', depth: 'detail', fragments: 1 },
+      outcome: { kind: 'accepted', source: 'host', confidence: 0.8 },
+    });
     expect(JSON.stringify(traces)).not.toContain(hostToken);
     expect(JSON.stringify(traces)).not.toContain('RAW_TRACE_SECRET');
     expect(JSON.stringify(traces)).not.toContain('UNLISTED_API_TOKEN');
@@ -329,6 +360,10 @@ describe('MCP admin · Memory Runtime sidecar 只读代理', () => {
       extractor: 'fake-extractor-model',
       tookMs: 3,
     });
+    expect(detail.trace.outcomeHistory).toEqual([
+      expect.objectContaining({ kind: 'ignored', source: 'heuristic' }),
+      expect.objectContaining({ kind: 'accepted', source: 'host', confidence: 0.8 }),
+    ]);
     expect(Object.keys(detail.trace.debug ?? {})).toEqual([]);
     expect(JSON.stringify(detail)).not.toContain(hostToken);
     expect(JSON.stringify(detail)).not.toMatch(/tokenFile|Bearer/);
@@ -350,6 +385,20 @@ describe('MCP admin · Memory Runtime sidecar 只读代理', () => {
     expect(feedback).toMatchObject({ ok: true, data: { traceId: 'tr_fake_0001', feedback: { useful: true } } });
     expect(JSON.stringify(feedback)).not.toContain(hostToken);
 
+    const resetResponse = await fetch(`${base}/admin/api/memory-runtime/policy/reset`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-mebular-csrf': token,
+        cookie,
+      },
+      body: '{}',
+    });
+    expect(resetResponse.status).toBe(200);
+    const reset = await resetResponse.json();
+    expect(reset).toMatchObject({ ok: true, data: { reset: true, policyVersion: 'v0-rules' } });
+    expect(JSON.stringify(reset)).not.toContain(hostToken);
+
     // 浏览器从未发送 host token；代理在服务端带 Bearer。
     const authLines = (await readFile(authOut, 'utf-8')).trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
     expect(authLines.length).toBeGreaterThanOrEqual(3);
@@ -358,6 +407,11 @@ describe('MCP admin · Memory Runtime sidecar 只读代理', () => {
     expect(feedbackLines.at(-1)).toMatchObject({
       traceId: 'tr_fake_0001',
       body: { useful: true, reason: 'helpful' },
+    });
+    const interventionLines = (await readFile(interventionOut, 'utf-8')).trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+    expect(interventionLines.at(-1)).toMatchObject({
+      method: 'POST',
+      path: '/memory-runtime/v1/intervention/reset',
     });
   }, 30000);
 
@@ -463,6 +517,25 @@ describe('MCP admin · Memory Runtime sidecar 只读代理', () => {
       body: JSON.stringify({ traceId: 'tr_fake_0001', useful: 'yes' }),
     });
     expect(badFeedback.status).toBe(400);
+
+    const noCsrfReset = await fetch(`${base}/admin/api/memory-runtime/policy/reset`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie },
+      body: '{}',
+    });
+    expect(noCsrfReset.status).toBe(403);
+
+    const badOriginReset = await fetch(`${base}/admin/api/memory-runtime/policy/reset`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-mebular-csrf': token,
+        cookie,
+        origin: 'http://evil.example',
+      },
+      body: '{}',
+    });
+    expect(badOriginReset.status).toBe(403);
   }, 30000);
 
   it('D6 writes-enabled 否决变更；D5 不新增 raw detail/checkpoint/self 代理', async () => {
@@ -476,12 +549,19 @@ describe('MCP admin · Memory Runtime sidecar 只读代理', () => {
       body: JSON.stringify({ traceId: 'tr_fake_0001', useful: true }),
     });
     expect(write.status).toBe(403);
+    const reset = await fetch(`${base}/admin/api/memory-runtime/policy/reset`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-mebular-csrf': token, cookie, origin: base },
+      body: '{}',
+    });
+    expect(reset.status).toBe(403);
     for (const path of ['details/detail-1', 'checkpoints/thread-1', 'self/agent-1']) {
       const response = await fetch(`${base}/admin/api/memory-runtime/${path}`);
       expect(response.status).toBe(404);
     }
     const forwarded = (await readFile(authOut, 'utf-8')).trim().split('\n').map((line) => JSON.parse(line));
     expect(forwarded.every((entry) => !entry.path.includes('/feedback')
+      && !entry.path.includes('/intervention/reset')
       && !entry.path.includes('/details/')
       && !entry.path.includes('/checkpoints/')
       && !entry.path.includes('/self/'))).toBe(true);

@@ -290,9 +290,71 @@ async function seedHome(home) {
       domains: ['notes'],
       namespaces: ['notes'],
       silenceReason: null,
+      decision: {
+        action: 'speak',
+        depth: 'detail',
+        confidence: 0.88,
+        reason: 'high_relevance',
+        policyVersion: 'v0-rules',
+        enforced: true,
+      },
+      applied: { action: 'speak', depth: 'detail', fragments: 1 },
+      outcome: { kind: 'accepted', at: now - 30_000, source: 'host', confidence: 0.8, note: '下一轮继续同一主题' },
+      outcomeHistory: [
+        { kind: 'ignored', at: now - 45_000, source: 'heuristic' },
+        { kind: 'accepted', at: now - 30_000, source: 'host', confidence: 0.8, note: '下一轮继续同一主题' },
+      ],
       counts: { candidates: 1, expansions: 1, injected: 1, tokens: 12 },
       timing: { totalMs: 9 },
       tookMs: 9,
+      degraded: false,
+      feedback: null,
+      model: { query: 'heuristic' },
+    };
+    const silentTrace = {
+      schema: 2,
+      id: 'tr_ui_runtime_0002',
+      recallId: 'rr_ui_runtime_0002',
+      agentId: 'opencode',
+      threadId: 'th_ui_runtime',
+      at: now - 30_000,
+      queryHash: 'ui-trace-shadow-hash',
+      queryPreview: 'UI 召回：影子建议',
+      domains: ['notes'],
+      namespaces: ['notes'],
+      silenceReason: 'low_confidence',
+      decision: {
+        action: 'silent',
+        depth: 'gist',
+        confidence: 0.42,
+        reason: 'low_confidence',
+        policyVersion: 'v0-shadow',
+        enforced: false,
+      },
+      applied: { action: 'silent', depth: 'gist', fragments: 0 },
+      outcome: { kind: 'missed', at: now - 20_000, source: 'host', confidence: 0.7, note: '下一轮追问同一实体' },
+      counts: { candidates: 1, expansions: 0, injected: 0, tokens: 0 },
+      timing: { totalMs: 6 },
+      tookMs: 6,
+      degraded: false,
+      feedback: null,
+      model: { query: 'heuristic' },
+    };
+    const legacyTrace = {
+      schema: 2,
+      id: 'tr_ui_runtime_0003',
+      recallId: 'rr_ui_runtime_0003',
+      agentId: 'opencode',
+      threadId: 'th_ui_runtime',
+      at: now - 10_000,
+      queryHash: 'ui-trace-legacy-hash',
+      queryPreview: 'UI 召回：旧轨迹',
+      domains: ['notes'],
+      namespaces: ['notes'],
+      silenceReason: null,
+      counts: { candidates: 1, expansions: 0, injected: 1, tokens: 8 },
+      timing: { totalMs: 7 },
+      tookMs: 7,
       degraded: false,
       feedback: null,
       model: { query: 'heuristic' },
@@ -323,7 +385,7 @@ async function seedHome(home) {
         provenance: { source: 'runtime', writerType: 'agent', extractor: 'heuristic', hostId: 'h_ui', threadId: 'th_ui_runtime' },
       }],
     };
-    await writeFile(join(home, 'ui-memory-runtime-traces.json'), `${JSON.stringify([trace])}\n`, { encoding: 'utf-8', mode: 0o600 });
+    await writeFile(join(home, 'ui-memory-runtime-traces.json'), `${JSON.stringify([trace, silentTrace, legacyTrace])}\n`, { encoding: 'utf-8', mode: 0o600 });
     await writeFile(join(home, 'ui-memory-runtime-trace-detail.json'), `${JSON.stringify(traceDetail)}\n`, { encoding: 'utf-8', mode: 0o600 });
     await app.shutdown();
   }
@@ -367,6 +429,7 @@ function spawnServe(home, port) {
       MEBULAR_CLOUD_ROOT: home,
       FAKE_SIDECAR_TRACES_FILE: join(home, 'ui-memory-runtime-traces.json'),
       FAKE_SIDECAR_TRACE_DETAIL_FILE: join(home, 'ui-memory-runtime-trace-detail.json'),
+      FAKE_SIDECAR_INTERVENTION_OUT: join(home, 'ui-intervention.jsonl'),
       // C8f：安装任务在 3.5s 内走完下载/校验/引擎准备；30B 固定失败用于错误行。
       FAKE_SIDECAR_INSTALL_AUTOCOMPLETE_MS: '3500',
       FAKE_SIDECAR_INSTALL_FAIL_PACKS: 'qwen3-30b-a3b-instruct-q4_k_m',
@@ -823,6 +886,24 @@ async function main() {
           && Boolean(d.querySelector('[data-rt-trace-useful]'));
       })()`, 30000));
     await captureNow('u5-after-runtime-traces-expanded-1440.jpg');
+    check('轨迹详情显示介入决策 / 实际注入 / 结果（action/depth/confidence/reason/policyVersion/enforced）',
+      await evalJs(`(() => {
+        const d = document.querySelector('#runtime-traces .runtime-trace-detail');
+        const decision = d?.querySelector('[data-rt-trace-decision]');
+        const applied = d?.querySelector('[data-rt-trace-applied]');
+        const outcome = d?.querySelector('[data-rt-trace-outcome]');
+        if (!decision || !applied || !outcome) return false;
+        const text = d.textContent;
+        return /介入决策/.test(decision.textContent) && /说明/.test(decision.textContent)
+          && /详情/.test(decision.textContent) && /0.88/.test(decision.textContent)
+          && /高度相关/.test(decision.textContent) && /v0-rules/.test(decision.textContent)
+          && /已执行/.test(decision.textContent) && /是/.test(decision.textContent)
+          && /实际注入/.test(applied.textContent) && /片段数/.test(applied.textContent)
+          && /结果/.test(outcome.textContent) && /已接受/.test(outcome.textContent)
+          && /来源/.test(outcome.textContent) && /时间/.test(outcome.textContent)
+          && /备注/.test(outcome.textContent) && /结果历史/.test(text);
+      })()`));
+    await captureNow('u5-after-runtime-trace-decision-1440.jpg');
     check('sidecar ready 时反馈按钮可用（详情内）',
       await evalJs('(() => { const b = document.querySelector("#runtime-traces .runtime-trace-detail [data-rt-trace-useful]"); return Boolean(b) && b.disabled === false; })()'));
     await evalJs('document.querySelector("#runtime-traces .runtime-trace-detail [data-rt-trace-useful]").click()');
@@ -833,6 +914,53 @@ async function main() {
       })()`, 30000));
     await evalJs('document.querySelector("#runtime-traces [data-rt-trace]").click()');
     await waitFor('!document.querySelector("#runtime-traces .runtime-trace-detail")');
+    check('轨迹列表标记 silent / missed / shadow；旧轨迹无新字段仍正常显示',
+      await evalJs(`(() => {
+        const rows = [...document.querySelectorAll('#runtime-traces [data-rt-trace-row]')];
+        const byId = (id) => rows.find((row) => row.getAttribute('data-rt-trace-row') === id);
+        const shadow = byId('tr_ui_runtime_0002');
+        const legacy = byId('tr_ui_runtime_0003');
+        return rows.length >= 3
+          && Boolean(shadow?.querySelector('[data-rt-trace-silent]'))
+          && Boolean(shadow?.querySelector('[data-rt-trace-missed]'))
+          && Boolean(shadow?.querySelector('[data-rt-trace-shadow]'))
+          && /沉默/.test(shadow.textContent) && /漏介入/.test(shadow.textContent) && /影子/.test(shadow.textContent)
+          && Boolean(legacy) && /旧轨迹/.test(legacy.textContent)
+          && !legacy.querySelector('[data-rt-trace-silent]')
+          && !legacy.querySelector('[data-rt-trace-missed]')
+          && !legacy.querySelector('[data-rt-trace-shadow]');
+      })()`));
+    await captureNow('u5-after-runtime-trace-markers-1440.jpg');
+    check('重置介入策略按钮可用（sidecar ready + 可写）',
+      await evalJs(`(() => { const b = document.querySelector('#runtime-policy-reset'); return Boolean(b) && b.disabled === false; })()`));
+    await evalJs('document.querySelector("#runtime-policy-reset").click()');
+    check('重置介入策略有二次确认（标题 / 影响 / 不可撤销说明）',
+      await waitFor(`(() => {
+        const modal = document.querySelector('#modal');
+        return Boolean(modal) && modal.hidden === false
+          && /重置介入策略/.test(document.querySelector('#modal-title')?.textContent ?? '')
+          && /不可撤销/.test(document.querySelector('#modal-body')?.textContent ?? '');
+      })()`));
+    await captureNow('u5-after-runtime-policy-reset-confirm-1440.jpg');
+    await evalJs('document.querySelector("#modal-confirm").click()');
+    check('重置经 admin 代理转发 sidecar /intervention/reset，并提示成功',
+      await waitFor(`(() => document.querySelector('#banner')?.textContent?.includes('介入策略已重置') ?? false)()`, 15000));
+    {
+      const interventionOut = join(home, 'ui-intervention.jsonl');
+      let lines = [];
+      for (let attempt = 0; attempt < 50 && lines.length === 0; attempt += 1) {
+        try {
+          lines = readFileSync(interventionOut, 'utf-8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+        } catch {
+          // 第一次点击后文件可能尚未落盘
+        }
+        if (lines.length === 0) await sleep(100);
+      }
+      check('sidecar 收到 POST /memory-runtime/v1/intervention/reset',
+        lines.some((entry) => entry.method === 'POST' && entry.path === '/memory-runtime/v1/intervention/reset'),
+        JSON.stringify(lines.slice(-1)));
+    }
+    await captureNow('u5-after-runtime-policy-reset-1440.jpg');
     const first1440 = await evalJs(`(() => {
       const row = document.querySelector('#runtime-traces [data-rt-trace-row]');
       const v = document.querySelector('#runtime-view');
@@ -847,6 +975,40 @@ async function main() {
     })()`);
     check('1440 首屏可见第一条召回轨迹，页面与面板无横向溢出',
       first1440.ok && first1440.docOver <= 1 && first1440.panelOver <= 1, JSON.stringify(first1440));
+    await setViewport({ width: 1024, height: 900, deviceScaleFactor: 1, mobile: false });
+    const at1024 = await evalJs(`(() => {
+      const band = document.querySelector('#runtime-status .rt-band');
+      const cells = band ? [...band.querySelectorAll('.rt-band-cell')] : [];
+      const row = document.querySelector('#runtime-traces [data-rt-trace-row]');
+      const r = row?.getBoundingClientRect();
+      const v = document.querySelector('#runtime-view');
+      const reset = document.querySelector('#runtime-policy-reset');
+      const rr = reset?.getBoundingClientRect();
+      return {
+        four: cells.length === 4,
+        firstVisible: Boolean(r) && r.top >= 0 && r.top < innerHeight,
+        resetVisible: Boolean(rr) && rr.right <= innerWidth + 1 && rr.left >= 0 && reset.disabled === false,
+        docOver: document.documentElement.scrollWidth - innerWidth,
+        panelOver: v.scrollWidth - v.clientWidth,
+      };
+    })()`);
+    check('1024：状态带仍四格、首条召回轨迹在首屏、reset 入口可见且无横向溢出',
+      at1024.four && at1024.firstVisible && at1024.resetVisible
+        && at1024.docOver <= 1 && at1024.panelOver <= 1, JSON.stringify(at1024));
+    await evalJs('document.querySelector("#runtime-traces [data-rt-trace]").click()');
+    check('1024 轨迹详情（decision/applied/outcome）不横向溢出',
+      await waitFor(`(() => {
+        const detail = document.querySelector('#runtime-traces .runtime-trace-detail');
+        const policy = detail?.querySelector('[data-rt-trace-policy]');
+        if (!detail || !policy) return false;
+        return detail.scrollWidth <= detail.clientWidth + 1
+          && policy.scrollWidth <= policy.clientWidth + 1
+          && document.documentElement.scrollWidth - innerWidth <= 1;
+      })()`));
+    await captureNow('u5-after-runtime-trace-decision-1024.jpg');
+    await evalJs('document.querySelector("#runtime-traces [data-rt-trace]").click()');
+    await waitFor('!document.querySelector("#runtime-traces .runtime-trace-detail")');
+    await captureNow('u5-after-runtime-traces-1024.jpg');
     await setViewport({ width: 900, height: 900, deviceScaleFactor: 1, mobile: false });
     const at900 = await evalJs(`(() => {
       const band = document.querySelector('#runtime-status .rt-band');
@@ -867,6 +1029,18 @@ async function main() {
     check('900 状态带 2×2，第一条召回轨迹仍在首屏，无横向溢出',
       at900.four && at900.twoByTwo && at900.firstVisible && at900.docOver <= 1 && at900.panelOver <= 1,
       JSON.stringify(at900));
+    await evalJs('document.querySelector("#runtime-traces [data-rt-trace]").click()');
+    check('900 轨迹详情（decision/applied/outcome）不横向溢出',
+      await waitFor(`(() => {
+        const detail = document.querySelector('#runtime-traces .runtime-trace-detail');
+        const policy = detail?.querySelector('[data-rt-trace-policy]');
+        if (!detail || !policy) return false;
+        return detail.scrollWidth <= detail.clientWidth + 1
+          && policy.scrollWidth <= policy.clientWidth + 1
+          && document.documentElement.scrollWidth - innerWidth <= 1;
+      })()`));
+    await evalJs('document.querySelector("#runtime-traces [data-rt-trace]").click()');
+    await waitFor('!document.querySelector("#runtime-traces .runtime-trace-detail")');
     await captureNow('u5-after-runtime-traces-900.jpg');
     await setViewport({ width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
     const at390 = await evalJs(`(() => {
@@ -885,6 +1059,19 @@ async function main() {
     check('390 行堆叠、首行可见，页面 / 面板 / body 均无横向溢出',
       at390.stacked && at390.firstVisible && at390.docOver <= 1 && at390.panelOver <= 1 && at390.bodyOver <= 1,
       JSON.stringify(at390));
+    await evalJs('document.querySelector("#runtime-traces [data-rt-trace]").click()');
+    check('390 轨迹详情（decision/applied/outcome）不横向溢出',
+      await waitFor(`(() => {
+        const detail = document.querySelector('#runtime-traces .runtime-trace-detail');
+        const policy = detail?.querySelector('[data-rt-trace-policy]');
+        if (!detail || !policy) return false;
+        return detail.scrollWidth <= detail.clientWidth + 1
+          && policy.scrollWidth <= policy.clientWidth + 1
+          && document.body.scrollWidth - document.body.clientWidth <= 1
+          && document.documentElement.scrollWidth - innerWidth <= 1;
+      })()`));
+    await evalJs('document.querySelector("#runtime-traces [data-rt-trace]").click()');
+    await waitFor('!document.querySelector("#runtime-traces .runtime-trace-detail")');
     await captureNow('u5-after-runtime-traces-390.jpg');
 
     // 主页面一致性：运行时标题 / 工具栏 / 页面级按钮 / 行语言与共享、记忆、审计同源。
@@ -971,6 +1158,26 @@ async function main() {
           && Boolean(document.querySelector('#runtime-traces [data-rt-trace-row]'));
       })()`, 30000));
     await captureNow('u5-after-runtime-traces-en-1440.jpg');
+    await setViewport({ width: 1024, height: 900, deviceScaleFactor: 1, mobile: false });
+    await evalJs('document.querySelector("#runtime-traces [data-rt-trace]").click()');
+    check('运行时英文 1024：decision/applied/outcome 英文完整且不横向溢出',
+      await waitFor(`(() => {
+        const detail = document.querySelector('#runtime-traces .runtime-trace-detail');
+        const decision = detail?.querySelector('[data-rt-trace-decision]');
+        const applied = detail?.querySelector('[data-rt-trace-applied]');
+        const outcome = detail?.querySelector('[data-rt-trace-outcome]');
+        if (!decision || !applied || !outcome) return false;
+        return /Intervention decision/.test(decision.textContent)
+          && /Action/.test(decision.textContent) && /Speak/.test(decision.textContent)
+          && /Applied/.test(applied.textContent) && /Outcome/.test(outcome.textContent)
+          && /Accepted/.test(outcome.textContent)
+          && detail.scrollWidth <= detail.clientWidth + 1
+          && document.documentElement.scrollWidth - innerWidth <= 1;
+      })()`, 30000));
+    await captureNow('u5-after-runtime-trace-decision-en-1024.jpg');
+    await evalJs('document.querySelector("#runtime-traces [data-rt-trace]").click()');
+    await waitFor('!document.querySelector("#runtime-traces .runtime-trace-detail")');
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
     await send('Page.navigate', { url: `${base}/console/` });
     await waitFor('document.documentElement?.dataset?.consoleReady === "1"');
     await evalJs('document.querySelector("#view-nav li:nth-of-type(5) button").click()');

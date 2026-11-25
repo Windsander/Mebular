@@ -1140,6 +1140,16 @@ class ManagedInferenceProvider implements SidecarInferenceProvider {
     if (!this.failure) return;
     if (source && this.failure.source !== source) return;
     this.failure = null;
+    // 成功路径同步清除只读快照，避免 currentStatus() 在下次 probe 前残留 degraded。
+    this.statusSnapshot = {
+      ...this.statusSnapshot,
+      ...(source ? { active: source } : {}),
+      degraded: false,
+      reason: null,
+      warnings: [],
+      credential: { ...this.statusSnapshot.credential },
+      sources: [...this.statusSnapshot.sources],
+    };
   }
 
   async dispose(): Promise<void> {
@@ -1402,11 +1412,13 @@ class ManagedInferenceProvider implements SidecarInferenceProvider {
   ): Promise<InferenceInterventionResult> {
     const candidates = request.candidates.slice(0, INTERVENTION_MAX_CANDIDATES);
     if (candidates.length === 0) {
+      const warnings = ['model_no_candidates'];
+      this.noteFailure(request.source, 'no_candidates', warnings);
       return {
         ok: false,
         degraded: true,
         reasonCode: 'no_candidates',
-        warnings: ['model_no_candidates'],
+        warnings,
         latencyMs: 0,
       };
     }
@@ -1432,24 +1444,29 @@ class ManagedInferenceProvider implements SidecarInferenceProvider {
     );
 
     if (!completion.outcome) {
+      const reasonCode = completion.reason ?? 'model_unavailable';
+      const warnings = unique([...completion.warnings, 'model_unavailable']);
+      this.noteFailure(request.source, reasonCode, warnings);
       return {
         ok: false,
         ...(completion.model ? { model: completion.model } : {}),
         degraded: true,
-        reasonCode: completion.reason ?? 'model_unavailable',
-        warnings: unique([...completion.warnings, 'model_unavailable']),
+        reasonCode,
+        warnings,
         latencyMs: 0,
       };
     }
     const outcome = completion.outcome;
     if (!outcome.ok) {
       const warning = gatewayWarning(outcome.error);
+      const warnings = unique([warning, 'model_unavailable']);
+      this.noteFailure(request.source, warning, warnings);
       return {
         ok: false,
         ...(completion.model ? { model: completion.model } : {}),
         degraded: true,
         reasonCode: warning,
-        warnings: unique([warning, 'model_unavailable']),
+        warnings,
         latencyMs: outcome.latencyMs,
       };
     }
@@ -1469,12 +1486,14 @@ class ManagedInferenceProvider implements SidecarInferenceProvider {
       : null;
     const reason = data ? validInterventionReason(data.reason) : null;
     if (!action || !depth || confidence === null || !reason) {
+      const warnings = ['model_invalid_response', 'model_unavailable'];
+      this.noteFailure(request.source, 'invalid_model_response', warnings);
       return {
         ok: false,
         ...(completion.model ? { model: completion.model } : {}),
         degraded: true,
         reasonCode: 'invalid_model_response',
-        warnings: ['model_invalid_response', 'model_unavailable'],
+        warnings,
         latencyMs: outcome.latencyMs,
       };
     }

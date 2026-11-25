@@ -401,6 +401,9 @@ function modelVersionOf(
 ): string {
   const digest = createHash('sha256')
     .update(JSON.stringify([
+      // 模型身份与来源进入 hash：同一结果在不同模型/来源上必须可区分。
+      request.source,
+      result.model ?? '',
       request.cue,
       request.candidates,
       request.stats,

@@ -432,6 +432,15 @@ describe('intervention model HTTP path', () => {
     ]));
     // 请求超时预算被传给 gateway（单次不重试）。
     expect(harness.calls[0]?.max_tokens).toBe(256);
+
+    // 持续失败会让 provider / /status 降级，而不是每轮静默白等。
+    const status = await fetch(`${harness.server.url}/status`, { headers: auth() });
+    const statusBody = await status.json() as any;
+    expect(statusBody.data.model).toMatchObject({
+      degraded: true,
+      reason: 'model_timeout',
+    });
+    expect(harness.runtime.degraded).toBe(true);
   });
 
   it.each([

@@ -287,6 +287,24 @@ describe('planInterventionAsync (model controller)', () => {
     expect(planned.decision.degraded).toBe(true);
   });
 
+  it('policyVersion 纳入模型身份/来源：不同模型可区分，同一输入稳定', async () => {
+    const localPlanner = new FakePlanner();
+    localPlanner.result = modelResult({ model: 'model-a' });
+    const local = await planInterventionAsync(input(), context(localPlanner));
+
+    const apiPlanner = new FakePlanner();
+    apiPlanner.selectResult = { source: 'api', warnings: [], degraded: false };
+    apiPlanner.result = modelResult({ model: 'model-b' });
+    const api = await planInterventionAsync(input(), context(apiPlanner));
+
+    expect(local.decision.policyVersion).toMatch(/^model:[0-9a-f]{8}$/);
+    expect(api.decision.policyVersion).toMatch(/^model:[0-9a-f]{8}$/);
+    expect(local.decision.policyVersion).not.toBe(api.decision.policyVersion);
+
+    const again = await planInterventionAsync(input(), context(localPlanner));
+    expect(again.decision.policyVersion).toBe(local.decision.policyVersion);
+  });
+
   it('隐私：请求只含 cue + top-3 候选 gist + 统计，不含 detail/正文/checkpoint/token', async () => {
     const candidates = Array.from({ length: 5 }, (_, index) => candidate({
       fragmentId: `mf_${index + 1}`,
@@ -365,6 +383,27 @@ function gatewayReturning(outcome: GatewayOutcome<unknown>): GatewayStub {
       },
     },
   };
+}
+
+interface MutableGatewayStub extends GatewayStub {
+  outcome: GatewayOutcome<unknown>;
+}
+
+function mutableGateway(first: GatewayOutcome<unknown>): MutableGatewayStub {
+  const stub: MutableGatewayStub = {
+    requests: [],
+    outcome: first,
+    gateway: {
+      async completeJson<T>(request: ChatJsonRequest): Promise<GatewayOutcome<T>> {
+        stub.requests.push(request);
+        return stub.outcome as GatewayOutcome<T>;
+      },
+      isCircuitOpen() {
+        return false;
+      },
+    },
+  };
+  return stub;
 }
 
 function successOutcome(data: Record<string, unknown>): GatewayOutcome<unknown> {
@@ -511,6 +550,46 @@ describe('ManagedInferenceProvider.planIntervention', () => {
     expect(result.ok).toBe(false);
     expect(result.reasonCode).toBe('model_source_unavailable');
     expect(stub.requests).toHaveLength(0);
+  });
+
+  it('失败路径进入 provider 失败状态；成功路径清除', async () => {
+    const stub = mutableGateway(failureOutcome('timeout'));
+    const model = provider(stub);
+    const failed = await model.planIntervention(interventionRequest(), { timeoutMs: 40 });
+    expect(failed.ok).toBe(false);
+    const degraded = model.currentStatus();
+    expect(degraded.degraded).toBe(true);
+    expect(degraded.reason).toBe('model_timeout');
+    expect(degraded.warnings).toContain('model_timeout');
+
+    stub.outcome = successOutcome({
+      action: 'speak',
+      depth: 'gist',
+      confidence: 0.8,
+      reason: 'relevant',
+    });
+    const ok = await model.planIntervention(interventionRequest());
+    expect(ok.ok).toBe(true);
+    const recovered = model.currentStatus();
+    expect(recovered.degraded).toBe(false);
+    expect(recovered.reason).toBeNull();
+    expect(recovered.active).toBe('api');
+  });
+
+  it('非法模型输出也进入失败状态', async () => {
+    const stub = mutableGateway(successOutcome({
+      action: 'shout',
+      depth: 'gist',
+      confidence: 0.5,
+      reason: 'x',
+    }));
+    const model = provider(stub);
+    const result = await model.planIntervention(interventionRequest());
+    expect(result.ok).toBe(false);
+    expect(model.currentStatus()).toMatchObject({
+      degraded: true,
+      reason: 'invalid_model_response',
+    });
   });
 
   it('buildInterventionInferenceRequest 不含 detail/checkpoint/token', () => {

@@ -215,6 +215,151 @@ checkpoint files are cache only.
   Revision/lease is local optimistic concurrency plus a cooperation hint across synced
   replicas, not strong cross-device consistency or agent authentication.
 
+## Intervention policy (0.4.0)
+
+0.4.0 adds an opt-in **Memory Intervention Policy** above the existing
+coarse-to-fine recall: the sidecar decides whether this turn should carry long-term
+memory fragments, and how deep they should be. It is still **unreleased** on this line
+and is documented here as the 0.4.0 target, not as a shipped default.
+
+The default is unchanged: `intervention.mode` is `off`. Upgrading does not change
+0.3.x behavior. `self → checkpoint → compact/fragment` stays in the same order, and
+`self` / checkpoint are always injected by the existing path. The policy only filters
+and expands the **memory fragment** part of the context.
+
+The design and boundaries are in
+[0.4.0 Intervention Policy](../design/0.4.0-intervention-policy.md); the 0.4.0
+verification evidence is in
+[0.4.0 intervention verification](../quality/0.4.0-intervention/0.4.0-verification.md).
+
+### Modes and configuration
+
+Configure the sidecar in `<home>/memory-runtime/config.json`:
+
+```jsonc
+{
+  "intervention": {
+    "mode": "off",          // off | shadow | heuristic | model
+    "minConfidence": 0.55,
+    "maxSilentStreak": 3,
+    "explorationRate": 0.05,
+    "outcomeWindowMs": 120000,
+    "policyTtlDays": 30,
+    "modelTimeoutMs": 500
+  }
+}
+```
+
+| Mode | Behavior |
+|---|---|
+| `off` | Default. No policy change; `/context` still returns a baseline `decision` with `enforced:false`. |
+| `shadow` | Computes policy advice (`decision`) but injects the baseline result; traces carry `wouldAction` / `wouldDepth`. |
+| `heuristic` | Applies the local rule-based policy; `must_speak` remains a hard rule. |
+| `model` | **Experimental.** Uses the configured model for `planIntervention()`; timeout/invalid output/provider failure falls back to `heuristic` with `degraded:true`. |
+
+Console does not edit these values; it only shows trace decisions and offers a
+confirmed reset. Change the mode in the sidecar config, then restart the sidecar (or
+follow the existing lifecycle path) so the new mode is loaded.
+
+### Decision, depth and `must_speak`
+
+`POST /context` returns an additive `decision`:
+
+```json
+{
+  "action": "speak",
+  "depth": "gist",
+  "confidence": 0.72,
+  "reason": "high_relevance",
+  "policyVersion": "heuristic:1a2b3c4d",
+  "enforced": true
+}
+```
+
+- `action`: `speak | defer | silent`.
+- `depth`: `gist → detail → quote`; speak/gist is the default, `silent` is the last
+  resort.
+- `reason`: `must_speak:*`, `high_relevance`, `low_confidence`, `broad_cue`,
+  `no_novelty`, `recent_false_alarm`, `no_candidates`, `max_silent_streak`,
+  `exploration`, and related reasons.
+- `policyVersion`: `v0-baseline` for off/baseline, `v0-rules`, `heuristic:<hash>` or
+  `model:<hash>`.
+- `enforced`: `false` for `off` and `shadow`; `true` when the decision changed the
+  actual injection.
+- `applied`: actual action/depth/fragment count, suppressed fragment IDs, and shadow
+  `wouldAction` / `wouldDepth`.
+
+Hard rules that the policy cannot veto: an explicit memory request (“上次 / 之前 /
+记得 / 你忘了”), a high-confidence exact intent, task continuation/checkpoint
+follow-up, a follow-up or correction after the previous silent/defer, and a follow-up
+reference to the last fragment. If no truthful material is available, the trace
+records `must_speak_unavailable` with `degraded:true` instead of pretending success.
+
+`trace=off` disables attribution and policy learning; a host that does not read
+`decision` sees the same response fields it saw in 0.3.x.
+
+### Outcomes and attribution
+
+Hosts report what happened next to the trace:
+
+```http
+POST /memory-runtime/v1/recall/:traceId/outcome
+{ "kind": "missed", "source": "host", "confidence": 0.7, "note": "short reason" }
+```
+
+Kinds: `accepted`, `ignored`, `reasked`, `corrected`, `dismissed`, `missed`,
+`too_shallow`, `too_deep`. The same trace + kind is idempotent; a different kind
+updates the latest result and keeps up to five in `outcomeHistory`. `note` is capped
+at 200 characters and must not contain user text.
+
+The OpenCode plugin is the first host adapter. It records every `/context`, including
+silent responses, and attributes the next user turn: silent + explicit memory
+follow-up → `missed`; speak + re-ask → `reasked`; correction → `corrected`;
+gist + detail request → `too_shallow`; detail/quote + shorter request → `too_deep`;
+explicit confirmation → `accepted`; no follow-up before the window → delayed
+`ignored`. The default attribution window is 120 s; `ignored` uses at least 10
+minutes. Failures are fire-and-forget and never block the host.
+
+### Canary
+
+Use the order `off → shadow → heuristic → model`, one agent/domain at a time:
+
+1. Run `shadow` for at least a week and compare `decision` with `applied`
+   (`wouldAction` / `wouldDepth`) on the Runtime page.
+2. Enable `heuristic` for a single agent/domain. Watch trace counts and outcomes in
+   the Console Runtime trace list; there is no new Console page.
+3. Only after the Go/No-Go metrics in the design document pass, consider `model`
+   (experimental) with a timeout and fallback.
+
+Check `/status.policy` for local policy-store health (`degraded`, `lastError`).
+Counters and outcome history are in the local trace/outcome data and
+`<home>/memory-runtime/policy/state.json`, not in `/status`. `GET /traces` and
+`GET /traces/:id` expose decision/applied/outcome for debugging; they do not include
+detail bodies or tokens.
+
+### Reset and rollback
+
+- Rollback: set `intervention.mode` back to `off`. Trace and policy statistics are
+  kept; no data migration runs.
+- `POST /memory-runtime/v1/intervention/reset` clears **local policy statistics only**
+  and returns `{ reset, policyVersion, removedDomains }`. Console exposes the same
+  action behind a confirmation dialog.
+- Reset does not delete memory records, details, checkpoints, traces or outcome
+  history. Use the normal MCP/Console governance path to delete memory.
+
+### Privacy
+
+- Policy state is local and contains aggregate counts plus `(agentId, domain)` keys.
+  It contains no query text, detail body, prompt or token.
+- Traces stay local. They keep the existing redacted `queryPreview` (at most 200
+  characters), `queryHash`, entities/topics and decision/outcome metadata; they do
+  not store raw query bodies, detail bodies or tokens.
+- The `model` strategy sees cue aggregates, top-3 gists, scores and aggregate stats.
+  It does not see raw query text, detail text, checkpoint content or tokens.
+- Outcome notes are fixed attribution strings from the host adapter; user text is not
+  copied into the outcome.
+- Policy state is not synced across devices in 0.4.0.
+
 ## Details, evidence and retention
 
 Settled conversation detail is a graph object (`type=detail_record`) with one of

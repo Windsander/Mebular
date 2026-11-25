@@ -20,6 +20,26 @@
 - **运行时稳定性契约** —— 生命周期、本地数据、详情证据、检查点修订、宿主失败状态与诊断已与文档契约对齐；同期加入 Fleet 黑盒编排，以及带公开 OpenChamber runner 的统一执行器/适配层。
 - **Console 设置 v2** —— 重建设置外壳（通用、安全、记忆、集成、MCP、高级，另含关于设备），覆盖 1440/1024/900/390 响应式布局、中英文案、可访问焦点与减少动效行为。不涉及数据、协议或 MCP 工具迁移。
 
+## 当前 — v0.4.0（开发中）
+
+0.4.0 的主线是**记忆介入策略（Memory Intervention Policy）**：把记忆从“召回”推进到
+**时机**——什么时候把记忆带回来、带多深。它**尚未发布**；本节记录目标范围，不承诺日期。
+
+- **记忆介入策略** —— from recall to timing；`when × how deep`；`speak` / `defer` /
+  `silent` 与 `gist` / `detail` / `quote`，带 `must_speak` 硬规则，默认 `off`。
+- **决策与结果 trace** —— 在现有本机 RecallTrace 上增加 `decision` / `applied` /
+  `outcome`；先接 OpenCode 的 outcome 上报。
+- **Shadow 与 canary** —— `off → shadow → heuristic → model`；shadow 只记录建议、不改变
+  注入，便于先对比再开启。
+- **Console 只做可观测性** —— Runtime trace 展示 decision/outcome/would*，并提供二次确认
+  的本机策略 reset。0.4.0 的主题是介入机制，不是 Console UI 升级。
+- **实验性后续** —— 本地模型 planner（`model`）与按域自适应阈值仍由 flag 控制，标记为
+  experimental。
+
+边界：默认 `off`；`self → checkpoint → compact/fragment` 的恢复语义不变；0.4.0 不做桌面
+弹窗、不做跨设备策略同步，也不做可见的主动提醒 UI。完整设计与限制见
+[0.4.0 介入策略](https://github.com/Windsander/Mebular/blob/main/docs/design/0.4.0-intervention-policy.md)。
+
 ## 当前 — v0.3.x
 
 现阶段的稳定化重点，起点为 v0.3.4。优先级会根据可复现报告和首次运行反馈调整。

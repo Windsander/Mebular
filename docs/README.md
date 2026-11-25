@@ -62,6 +62,7 @@ main [`README.md`](../README.md); this index only describes document structure.
 
 ## Design
 
+- [0.4.0 Memory Intervention Policy](design/0.4.0-intervention-policy.md) — when × how deep, decision/outcome, shadow/canary and boundaries
 - [Memory Runtime 0.3.2 stability contract](design/0.3.2-stability-contract.md) · [中文](design/0.3.2-stability-contract_CN.md) — data, failure, lifecycle and acceptance target
 - [Memory Runtime 0.3.0 contract](design/0.3.0-memory-runtime-contract-v2.md) — historical sidecar and capability contract (Chinese)
 - [Memory Runtime sidecar lifecycle](design/0.3.0-memory-runtime-sidecar.md) — historical process, discovery, token and local-data design (Chinese)
@@ -71,6 +72,7 @@ main [`README.md`](../README.md); this index only describes document structure.
 
 ## Quality and release evidence
 
+- [v0.4.0 intervention verification](quality/0.4.0-intervention/0.4.0-verification.md) — real sidecar + real OpenCode plugin outcome E2E, privacy and Console evidence
 - [v0.3.4 verification](quality/0.3.4-verification.md) — Console settings redesign scope, SSOT/build/lint/docs checks and release dry-run
 - [v0.3.2 verification matrix](quality/0.3.2-verification.md) — final test counts, host boundaries, scale/model evidence and explicit pending items
 - [v0.3.2 scale benchmark](quality/0.3.2-scale-benchmark.md) — 1k/2k/10k count audits, performance, resources, failure injection and preserved 10k failure history

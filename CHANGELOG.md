@@ -16,6 +16,49 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 The GitHub Release body is extracted from this file: everything between the release's
 `## [vX.Y.Z]` heading and the next `## [` heading. Keep that section self-contained.
 
+## [v0.4.0] - Unreleased
+
+Memory Intervention Policy. 0.4.0 moves immersive recall from “what to remember” to
+**when and how deeply to bring it back**. It is **not released**, the default remains
+`off`, and upgrading does not change 0.3.x recall behavior.
+
+### Added
+
+- **Memory Intervention Policy** — `intervention.mode` supports
+  `off | shadow | heuristic | model`; the policy decides `speak` / `defer` / `silent`
+  and `gist` / `detail` / `quote` for memory fragments only. `must_speak` is a hard
+  rule and `self → checkpoint → compact/fragment` recovery is unchanged.
+- **Decision, applied and outcome trace** — `/context` returns an additive `decision`;
+  `RecallTrace` records `decision`, `applied`, `outcome` and bounded `outcomeHistory`
+  without a schema bump.
+- **Outcome API** — `POST /memory-runtime/v1/recall/:traceId/outcome` with
+  `accepted / ignored / reasked / corrected / dismissed / missed / too_shallow /
+  too_deep`; same trace + kind is idempotent, and outcome notes are capped at 200
+  characters.
+- **OpenCode outcome attribution** — the plugin records every `/context` (including
+  silent) and reports the next-turn signal: silent → `missed`, re-ask → `reasked`,
+  correction → `corrected`, gist → `too_shallow`, detail/quote → `too_deep`,
+  confirmation → `accepted`, idle → delayed `ignored`.
+- **Console observability** — Runtime trace list/detail shows decision, applied,
+  outcome, shadow `would*` markers and a confirmed local policy reset. This is
+  observability only; there is no new page or intervention control panel.
+- **Local policy statistics** — `<home>/memory-runtime/policy/state.json` stores
+  aggregate counts per `(agentId, domain)`, written atomically with a 30-day TTL.
+- **Experimental** — local model planner (`model`) with strict JSON, 500 ms timeout
+  and heuristic fallback; per-domain adaptive thresholds (local only, ±0.03, clamped).
+
+### Changed
+
+- `off` remains the default and records a `v0-baseline` decision with
+  `enforced:false`; old hosts, old traces and `trace=off` keep 0.3.x behavior.
+- Model and adaptive modes are explicitly experimental and flag-controlled.
+
+### Documentation
+
+- Added the [0.4.0 intervention design](docs/design/0.4.0-intervention-policy.md),
+  the intervention section in the Memory Runtime guide, and the
+  [0.4.0 verification report](docs/quality/0.4.0-intervention/0.4.0-verification.md).
+
 ## [v0.3.5] - 2026-11-19
 
 Runtime page and acceptance-hardening release. It redesigns the Console Runtime page
@@ -789,6 +832,9 @@ installers.
 - **范围** —— v0.1.0 不做签名、公证与自动更新，留到后续版本。
 
 [Unreleased]: https://github.com/Windsander/Mebular/compare/v0.2.0...HEAD
+[v0.4.0]: https://github.com/Windsander/Mebular/compare/v0.3.5...HEAD
+[v0.3.5]: https://github.com/Windsander/Mebular/releases/tag/v0.3.5
+[v0.3.4]: https://github.com/Windsander/Mebular/releases/tag/v0.3.4
 [v0.2.0]: https://github.com/Windsander/Mebular/releases/tag/v0.2.0
 [v0.1.2]: https://github.com/Windsander/Mebular/releases/tag/v0.1.2
 [v0.1.1]: https://github.com/Windsander/Mebular/releases/tag/v0.1.1

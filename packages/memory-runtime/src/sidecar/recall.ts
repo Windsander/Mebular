@@ -82,7 +82,7 @@ const ANCHOR_TTL_MS = 10 * 60 * 1000;
 const QUARANTINE_MS = 7 * 24 * 60 * 60 * 1000;
 const EXPAND_TRACE_TTL_MS = 10 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
-const MAX_OUTCOME_NOTE_CHARS = 500;
+const MAX_OUTCOME_NOTE_CHARS = 200;
 const MAX_OUTCOME_HISTORY = 5;
 /** fragment ID → source ID 的进程内别名表上限；防止长时间运行无限增长。 */
 const MAX_FRAGMENT_ALIASES = 4096;
@@ -298,6 +298,8 @@ export interface RecallResponse {
   traceId: string | null;
   /** 0.4.0：本次 memory fragments 的介入决策；旧宿主忽略即可。 */
   decision?: InterventionDecision;
+  /** 0.4.0：实际生效的介入结果；shadow/预算裁剪下与 decision 不同。旧宿主忽略即可。 */
+  applied?: AppliedIntervention;
   timing: {
     cueMs: number;
     fuzzyMs: number;
@@ -1187,6 +1189,8 @@ export class RecallService {
   /** (agentId, threadId/task) → 连续沉默次数与上一轮决策；只在本进程内。 */
   private readonly silentStreaks = new Map<string, number>();
   private readonly lastDecisions = new Map<string, { action: InterventionAction; depth: RecallDepth }>();
+  /** reset 时间戳：早于它的 trace 视为迟到 outcome，不再写策略统计。 */
+  private policyResetAt = 0;
 
   private recalls = 0;
   private contexts = 0;
@@ -1238,6 +1242,16 @@ export class RecallService {
     this.policy = policy;
   }
 
+  /**
+   * Console/CLI reset 的运行中状态清理：不碰记忆、trace 或别名表。
+   * policyResetAt 用于挡住 reset 前 trace 的迟到 outcome，避免重新写脏。
+   */
+  resetInterventionState(): void {
+    this.silentStreaks.clear();
+    this.lastDecisions.clear();
+    this.policyResetAt = this.now();
+  }
+
   private currentPolicy(): SidecarPolicy | null {
     return this.getPolicy ? this.getPolicy() : this.policy;
   }
@@ -1275,6 +1289,7 @@ export class RecallService {
       silenceReason: base.silenceReason,
       traceId: base.traceId,
       ...(base.decision ? { decision: base.decision } : {}),
+      ...(base.applied ? { applied: base.applied } : {}),
       timing: base.timing,
       records: base.records,
       trusted: false,
@@ -1430,6 +1445,18 @@ export class RecallService {
 
     const trace = await this.local.store.getTrace(traceId);
     if (!trace) throw new SidecarSettlementError('not_found', 'trace 不存在', { status: 404 });
+    // reset 前 trace 的迟到 outcome：明确不写 trace/policy，避免把刚清空的统计重新写脏。
+    if (trace.at < this.policyResetAt) {
+      return {
+        traceId,
+        outcome: trace.outcome ?? null,
+        duplicate: false,
+        recorded: false,
+        withinWindow: null,
+        warnings: ['outcome_before_reset'],
+        degraded: false,
+      };
+    }
     const at = this.now();
     const outcome: RecallOutcome = {
       kind: kind as RecallOutcomeKind,
@@ -3037,8 +3064,6 @@ export class RecallService {
         shadow: false,
         domain,
       };
-      this.noteIntervention(key, effective.action, effective.depth);
-      await this.recordPolicyDecision(run.request.agentId, domain, effective.action);
       return { decision, effective, inject: selected, expansionPlan: basePlan };
     }
 
@@ -3139,8 +3164,6 @@ export class RecallService {
         shadow: true,
         domain,
       };
-      this.noteIntervention(key, effective.action, effective.depth);
-      await this.recordPolicyDecision(run.request.agentId, domain, effective.action);
       return { decision, effective, inject: selected, expansionPlan: basePlan };
     }
 
@@ -3169,8 +3192,6 @@ export class RecallService {
       shadow: false,
       domain,
     };
-    this.noteIntervention(key, effective.action, effective.depth);
-    await this.recordPolicyDecision(run.request.agentId, domain, effective.action);
     return { decision, effective, inject, expansionPlan };
   }
 
@@ -3215,7 +3236,6 @@ export class RecallService {
         shadow: true,
         domain,
       };
-      await this.recordPolicyDecision(run.request.agentId, domain, baseline.action);
       return;
     }
     if (decision.reason === 'must_speak_unavailable') {
@@ -3229,7 +3249,6 @@ export class RecallService {
       shadow: false,
       domain,
     };
-    await this.recordPolicyDecision(run.request.agentId, domain, decision.action);
   }
 
   private baselineDecision(
@@ -3865,6 +3884,8 @@ export class RecallService {
     degraded = run.degraded,
   ): Promise<RecallResponse & { blocks?: ContextBlock[] }> {
     const warnings = dedupe(run.warnings);
+    // gate / 非人类 turn / mute 等不是策略决策，不能计入 spoken/silent。
+    const policyBlocked = NON_INTERVENTION_SILENCE.has(run.silenceReason ?? '');
     await this.ensureDecision(run, warnings);
     const fragments = run.selected.map((candidate) => ({
       ...candidate.fragment,
@@ -3924,6 +3945,17 @@ export class RecallService {
     run.decision = decision;
     run.applied = applied;
 
+    // 决策计数与连续沉默都必须在实际注入结果之后：shadow 记 baseline、
+    // 预算裁剪记 silent，不能记未生效的建议。每个 /context 只记一次。
+    if (!policyBlocked) {
+      this.noteIntervention(this.decisionKey(run), applied.action, applied.depth);
+      await this.recordPolicyDecision(
+        run.request.agentId,
+        applied.domain ?? run.domains[0] ?? 'default',
+        applied.action,
+      );
+    }
+
     if (degraded && warnings.length === 0) warnings.push('degraded');
     if (silenceReason) this.silent += 1;
     if (mode === 'recall' ? run.selected.length > 0 : contextBlocks.length > 0) {
@@ -3952,6 +3984,7 @@ export class RecallService {
       silenceReason,
       traceId: trace.traceId,
       decision,
+      applied,
       timing,
     };
 

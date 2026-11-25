@@ -4719,10 +4719,12 @@ function renderRuntimeTraces() {
     const domains = Array.isArray(trace.domains) ? trace.domains : Array.isArray(trace.namespaces) ? trace.namespaces : [];
     const silent = applied?.action === 'silent'
       || (!applied && typeof trace.silenceReason === 'string' && trace.silenceReason.length > 0);
+    const deferred = applied?.action === 'defer';
     const shadow = runtimeTraceIsShadow(decision, applied);
     const badges = [
       trace.degraded ? `<span class="crt-tag crt-tag-warn">${escapeHtml(t('runtime.trace.degraded'))}</span>` : '',
       silent ? `<span class="crt-tag rt-tag-silent" data-rt-trace-silent>${escapeHtml(t('runtime.trace.marker.silent'))}</span>` : '',
+      deferred ? `<span class="crt-tag rt-tag-defer" data-rt-trace-defer>${escapeHtml(t('runtime.trace.marker.defer'))}</span>` : '',
       outcome?.kind === 'missed' ? `<span class="crt-tag rt-tag-missed" data-rt-trace-missed>${escapeHtml(t('runtime.trace.marker.missed'))}</span>` : '',
       shadow ? `<span class="crt-tag rt-tag-shadow" data-rt-trace-shadow>${escapeHtml(t('runtime.trace.marker.shadow'))}</span>` : '',
       feedback ? `<span class="crt-tag ${feedback.useful ? 'crt-tag-ok' : 'crt-tag-error'}">${escapeHtml(t(feedback.useful ? 'runtime.trace.feedbackUseful' : 'runtime.trace.feedbackNotUseful'))}</span>` : '',

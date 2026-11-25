@@ -365,6 +365,8 @@ export interface RecallTrace {
   outcome?: RecallOutcome;
   /** 0.4.0：最近 5 条结果归因（同 kind 幂等）。 */
   outcomeHistory?: RecallOutcome[];
+  /** 0.4.0：本 trace 已记录过的 outcome kind（最多 8），用于跨 history 截断的幂等判断。 */
+  seenOutcomeKinds?: RecallOutcomeKind[];
 }
 
 // ---------- 2.3.6 SelfRecord（Agent 自我） ----------

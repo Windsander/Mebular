@@ -610,6 +610,66 @@ describe('outcome attribution', () => {
     await controller.dispose();
   });
 
+  it('uses applied, not decision: shadow decision silent + applied speak does not report missed', async () => {
+    const shadowApplied = {
+      action: 'speak',
+      depth: 'gist',
+      fragments: 1,
+      wouldAction: 'silent',
+      wouldDepth: 'gist',
+    };
+    const fetchImpl = createFetch({
+      '/context': contextSequence([
+        {
+          ...HIT,
+          traceId: 'tr_shadow_applied_1',
+          decision: interventionDecision('silent', { enforced: false }),
+          applied: shadowApplied,
+        },
+        {
+          ...HIT,
+          traceId: 'tr_shadow_applied_2',
+          decision: interventionDecision('silent', { enforced: false }),
+          applied: shadowApplied,
+        },
+      ]),
+      'POST /recall/tr_shadow_applied_1/outcome': { traceId: 'tr_shadow_applied_1', outcome: { kind: 'missed' } },
+    });
+    const { controller } = controllerWith({ fetchImpl });
+    await controller.handleContext(hookEvent([userTurn('u1', 'where is the deploy script')]));
+    await controller.handleContext(hookEvent([userTurn('u2', '记得部署脚本')]));
+    await sleep(25);
+    expect(fetchImpl.callsFor('/recall/tr_shadow_applied_1/outcome')).toHaveLength(0);
+    await controller.dispose();
+  });
+
+  it('uses applied, not decision: budget decision speak + applied silent does not report too_shallow/reasked', async () => {
+    const budgetApplied = { action: 'silent', depth: 'gist', fragments: 0 };
+    const fetchImpl = createFetch({
+      '/context': contextSequence([
+        {
+          blocks: [],
+          traceId: 'tr_budget_applied_1',
+          decision: interventionDecision('speak'),
+          applied: budgetApplied,
+        },
+        {
+          blocks: [],
+          traceId: 'tr_budget_applied_2',
+          decision: interventionDecision('speak'),
+          applied: budgetApplied,
+        },
+      ]),
+      'POST /recall/tr_budget_applied_1/outcome': { traceId: 'tr_budget_applied_1', outcome: { kind: 'reasked' } },
+    });
+    const { controller } = controllerWith({ fetchImpl });
+    await controller.handleContext(hookEvent([userTurn('u1', 'how do I change the theme')]));
+    await controller.handleContext(hookEvent([userTurn('u2', '再说一遍，深色主题怎么设置')]));
+    await sleep(25);
+    expect(fetchImpl.callsFor('/recall/tr_budget_applied_1/outcome')).toHaveLength(0);
+    await controller.dispose();
+  });
+
   it('reports reasked when a spoken context is immediately re-asked', async () => {
     const fetchImpl = createFetch({
       '/context': contextSequence([

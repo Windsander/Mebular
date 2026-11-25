@@ -413,15 +413,21 @@ export class RuntimeLocalStore {
       if (index < 0) return null;
       const current = this.traces[index]!;
       const history = Array.isArray(current.outcomeHistory) ? current.outcomeHistory : [];
-      if (history.some((entry) => entry.kind === outcome.kind)) {
+      // seenOutcomeKinds 不会随 history 截断而丢失；旧 trace 回退到 history。
+      const seen = Array.isArray(current.seenOutcomeKinds)
+        ? current.seenOutcomeKinds
+        : history.map((entry) => entry.kind);
+      if (seen.includes(outcome.kind)) {
         return { trace: current, duplicate: true };
       }
       const nextHistory = [...history.map((entry) => ({ ...entry })), { ...outcome }]
         .slice(-Math.max(1, Math.floor(maxHistory)));
+      const nextSeen = [...new Set([...seen, outcome.kind])].slice(-8);
       const updated: RecallTrace = {
         ...current,
         outcome: { ...outcome },
         outcomeHistory: nextHistory,
+        seenOutcomeKinds: nextSeen,
       };
       this.traces[index] = updated;
       await this.writeTracesAtomic();

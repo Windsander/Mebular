@@ -254,6 +254,22 @@ function parseInterventionDecision(value) {
   };
 }
 
+/**
+ * Actual applied intervention. Attribution must use this, not the policy
+ * decision: shadow can decide silent while baseline still speaks, and budget
+ * trimming can decide speak while nothing is injected.
+ */
+function parseInterventionApplied(value) {
+  if (!isObject(value)) return null;
+  const action = asText(value.action);
+  if (!INTERVENTION_ACTIONS.has(action)) return null;
+  const depth = asText(value.depth);
+  return {
+    action,
+    depth: RECALL_DEPTHS.has(depth) ? depth : null,
+  };
+}
+
 function fragmentEntityNames(data) {
   const names = [];
   for (const fragment of Array.isArray(data?.fragments) ? data.fragments : []) {
@@ -2459,12 +2475,17 @@ export function createController(dependencies = {}) {
     const previous = lastContexts.get(key);
     if (previous) clearOutcomeTimer(previous);
     const decision = parseInterventionDecision(data?.decision);
+    const applied = parseInterventionApplied(data?.applied);
+    // Older Runtime only returns decision; prefer applied whenever present.
+    const effective = applied ?? decision;
     lastContexts.set(key, {
       traceId,
       recallId: asText(data?.recallId) || null,
       at: now(),
-      action: decision?.action ?? null,
-      depth: decision?.depth ?? null,
+      action: effective?.action ?? null,
+      depth: effective?.depth ?? null,
+      decisionAction: decision?.action ?? null,
+      decisionDepth: decision?.depth ?? null,
       queryHash: hashText(turn.text),
       entities: fragmentEntityNames(data),
       topics: textTerms(turn.text),

@@ -706,10 +706,14 @@ export function buildInterventionPrompt(request: InferenceInterventionRequest): 
     '',
     'cue:',
     `  specificity: ${request.cue.specificity}`,
-    `  topics: ${interventionList(request.cue.topics)}`,
-    `  entities: ${interventionList(request.cue.entities)}`,
-    `  reasons: ${interventionList(request.cue.reasons)}`,
     `  followUp: ${request.cue.followUp ? 'true' : 'false'}`,
+    // topics/entities/reasons 来自用户文本或模型抽取，可能包含提示注入；
+    // 统一当 untrusted 数据包裹，并复用截断上限。
+    untrustedBlock([
+      `topics: ${interventionList(request.cue.topics)}`,
+      `entities: ${interventionList(request.cue.entities)}`,
+      `reasons: ${interventionList(request.cue.reasons)}`,
+    ].join('\n')),
     '',
     `stats: spoken=${request.stats.spoken} silent=${request.stats.silent}`
       + ` accepted=${request.stats.accepted} reasked=${request.stats.reasked}`

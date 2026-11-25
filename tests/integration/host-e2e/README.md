@@ -28,6 +28,25 @@ node tests/integration/host-e2e/opencode-real-runtime.mjs
 node tests/integration/host-e2e/dsh-real-runtime.mjs
 ```
 
+## 0.4.0 介入结果闭环（OpenCode）
+
+`opencode-intervention-outcome.mjs` 用真实 `opencode >= 2.2`（`OPENCODE_BIN` 或
+`PATH` 指定）、真实 `@mebular/opencode-plugin`、真实 sidecar 和真实 capability 跑
+decision → 用户下一轮 → outcome 闭环；只有 OpenAI-compatible provider 是 fake（同
+`opencode-real-runtime.mjs` 约定）。
+
+```bash
+node tests/integration/host-e2e/opencode-intervention-outcome.mjs
+# 等价
+npm run verify:opencode:intervention
+```
+
+覆盖：speak → 重问 = `reasked`；silent → 显式记忆追问 = `missed`；gist → 要细节 =
+`too_shallow`；detail → 要更短 = `too_deep`；`POST /intervention/reset` 清零本机策略
+统计但不删 trace/记忆；policy state / trace / Console admin 视图不含 raw query 尾部、
+detail 正文或 host token。结果与截图见
+[`docs/quality/0.4.0-intervention/`](../../docs/quality/0.4.0-intervention/0.4.0-verification.md)。
+
 ## 沉浸式用户旅程（C6）
 
 `immersive-journey.mjs` 串起同一用户主公钥下的两台真实设备：

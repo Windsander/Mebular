@@ -506,6 +506,22 @@ describe('MCP admin · Memory Runtime sidecar 只读代理', () => {
         ],
       },
     };
+    const deferTrace = {
+      ...baseTrace,
+      id: 'tr_defer',
+      at: now - 1200,
+      queryHash: 'hash-defer',
+      queryPreview: 'defer',
+      decision: {
+        action: 'defer',
+        depth: 'gist',
+        confidence: 0.44,
+        reason: 'recent_false_alarm',
+        policyVersion: 'v0-heuristic',
+        enforced: true,
+      },
+      applied: { action: 'defer', depth: 'gist', fragments: 0 },
+    };
     const legacyTrace = {
       ...baseTrace,
       id: 'tr_legacy',
@@ -515,7 +531,11 @@ describe('MCP admin · Memory Runtime sidecar 只读代理', () => {
     };
     const tracesFile = join(dir, 'traces.json');
     const detailFile = join(dir, 'trace-detail.json');
-    await writeFile(tracesFile, JSON.stringify([offTrace, shadowTrace, heuristicSilentTrace, legacyTrace]), 'utf-8');
+    await writeFile(
+      tracesFile,
+      JSON.stringify([offTrace, shadowTrace, heuristicSilentTrace, deferTrace, legacyTrace]),
+      'utf-8',
+    );
     await writeFile(detailFile, JSON.stringify({
       byId: {
         [shadowTrace.id]: {
@@ -550,10 +570,11 @@ describe('MCP admin · Memory Runtime sidecar 只读代理', () => {
     await readyStatus(base);
 
     const list = await (await fetch(`${base}/admin/api/memory-runtime/traces`)).json();
-    expect(list.total).toBe(4);
+    expect(list.total).toBe(5);
     const off = list.traces.find((trace) => trace.id === 'tr_off');
     const shadow = list.traces.find((trace) => trace.id === 'tr_shadow');
     const heuristicSilent = list.traces.find((trace) => trace.id === 'tr_heuristic_silent');
+    const defer = list.traces.find((trace) => trace.id === 'tr_defer');
     const legacy = list.traces.find((trace) => trace.id === 'tr_legacy');
     expect(off.decision).toMatchObject({ enforced: false });
     expect(off.decision.shadow).toBeUndefined();
@@ -578,6 +599,7 @@ describe('MCP admin · Memory Runtime sidecar 只读代理', () => {
     });
     expect('wouldAction' in heuristicSilent.applied).toBe(false);
     expect('wouldDepth' in heuristicSilent.applied).toBe(false);
+    expect(defer.applied).toEqual({ action: 'defer', depth: 'gist', fragments: 0 });
     expect(JSON.stringify(heuristicSilent)).not.toContain('RAW_SUPPRESSED_SECRET');
     expect(legacy.decision).toBeNull();
     expect(legacy.applied).toBeNull();

@@ -732,6 +732,8 @@ export class SettlementRuntime {
     }
     try {
       const removedDomains = await this.policyStore.reset();
+      // 只清运行中状态，不动记忆/trace；之后旧 trace 的迟到 outcome 会被挡住。
+      this.recall.resetInterventionState();
       return { reset: true, policyVersion: INTERVENTION_POLICY_VERSION, removedDomains };
     } catch {
       throw new SidecarSettlementError('intervention_unavailable', '本机策略状态不可写', {

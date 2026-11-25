@@ -1364,6 +1364,7 @@
     "runtime.trace.outcome.note": "备注",
     "runtime.trace.outcome.history": "结果历史",
     "runtime.trace.marker.silent": "沉默",
+    "runtime.trace.marker.defer": "暂缓",
     "runtime.trace.marker.missed": "漏介入",
     "runtime.trace.marker.shadow": "影子",
     "runtime.trace.action.speak": "说明",

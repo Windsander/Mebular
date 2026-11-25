@@ -241,6 +241,7 @@ describe('0.3 静态 DOM / 数据面契约', () => {
       'runtime.trace.outcome',
       'runtime.trace.outcome.history',
       'runtime.trace.marker.silent',
+      'runtime.trace.marker.defer',
       'runtime.trace.marker.missed',
       'runtime.trace.marker.shadow',
       'runtime.trace.decision.enforcedOff',

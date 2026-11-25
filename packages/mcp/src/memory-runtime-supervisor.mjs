@@ -446,7 +446,7 @@ function traceIdList(value, max = 100) {
 
 function traceAppliedView(applied) {
   if (!isObject(applied)) return null;
-  const action = ['speak', 'silent'].includes(applied.action) ? applied.action : null;
+  const action = ['speak', 'defer', 'silent'].includes(applied.action) ? applied.action : null;
   if (!action) return null;
   const depth = ['gist', 'detail', 'quote'].includes(applied.depth) ? applied.depth : null;
   let fragments = null;

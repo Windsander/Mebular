@@ -809,7 +809,7 @@ describe('sidecar recall/context HTTP', () => {
   });
 
   it('off 模式不改变 baseline 注入，但始终返回 decision/applied', async () => {
-    const { server } = await setup({ intervention: { mode: 'off', minConfidence: 0.95 } });
+    const { server, runtime } = await setup({ intervention: { mode: 'off', minConfidence: 0.95 } });
     const context = await post(`${server.url}/context`, {
       agentId: 'opencode',
       threadId: 'th_off',
@@ -824,6 +824,14 @@ describe('sidecar recall/context HTTP', () => {
       reason: 'baseline',
       enforced: false,
     });
+    expect(context.body.data.applied).toMatchObject({
+      action: 'speak',
+      fragments: expect.any(Number),
+    });
+    // off 也记录实际 baseline，而不是未生效的建议。
+    const offStats = await runtime.policyStore!.snapshot();
+    expect(offStats.global.spoken).toBe(1);
+    expect(offStats.global.silent).toBe(0);
     const trace = await fetch(`${server.url}/traces/${context.body.data.traceId}`, { headers: auth() });
     const traceBody = await trace.json() as any;
     expect(traceBody.data.decision.action).toBe('speak');
@@ -880,6 +888,28 @@ describe('sidecar recall/context HTTP', () => {
       wouldAction: shadowContext.body.data.decision.action,
       wouldDepth: shadowContext.body.data.decision.depth,
     });
+  });
+
+  it('shadow 的策略计数用 applied baseline：decision silent / applied speak 记 spoken 而不是 silent', async () => {
+    const { server, runtime } = await setup({
+      intervention: { mode: 'shadow', minConfidence: 0.95, explorationRate: 0, maxSilentStreak: 99 },
+    });
+    const context = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_shadow_applied',
+      turnId: 'turn_shadow_applied',
+      query: '今天天气怎么样',
+    });
+    expect(context.status).toBe(200);
+    expect(context.body.data.decision).toMatchObject({ action: 'silent', enforced: false });
+    expect(context.body.data.applied).toMatchObject({ action: 'speak', wouldAction: 'silent' });
+    expect(context.body.data.fragments.length).toBeGreaterThan(0);
+    const stats = await runtime.policyStore!.snapshot();
+    expect(stats.global.spoken).toBe(1);
+    expect(stats.global.silent).toBe(0);
+    const trace = await fetch(`${server.url}/traces/${context.body.data.traceId}`, { headers: auth() });
+    const traceBody = await trace.json() as any;
+    expect(traceBody.data.applied).toMatchObject({ action: 'speak', wouldAction: 'silent' });
   });
 
   it('heuristic silent/defer：跳过 memory fragments，self/checkpoint 仍按原顺序注入', async () => {
@@ -1080,6 +1110,18 @@ describe('sidecar recall/context HTTP', () => {
 
     const invalid = await post(`${server.url}/recall/${traceId}/outcome`, { kind: 'nope', source: 'host' });
     expect(invalid.status).toBe(400);
+    const tooLongNote = await post(`${server.url}/recall/${traceId}/outcome`, {
+      kind: 'ignored',
+      source: 'host',
+      note: 'x'.repeat(201),
+    });
+    expect(tooLongNote.status).toBe(400);
+    const maxNote = await post(`${server.url}/recall/${traceId}/outcome`, {
+      kind: 'ignored',
+      source: 'host',
+      note: 'y'.repeat(200),
+    });
+    expect(maxNote.status).toBe(200);
     const missing = await post(`${server.url}/recall/tr_missing/outcome`, { kind: 'missed', source: 'host' });
     expect(missing.status).toBe(404);
 
@@ -1101,8 +1143,35 @@ describe('sidecar recall/context HTTP', () => {
     expect(offStatsAfter.global).toMatchObject({ spoken: 0, silent: 0 });
   });
 
+  it('outcome 幂等记录 seenOutcomeKinds，不受 5 条 history 截断影响', async () => {
+    const { server, runtime } = await setup({ intervention: { mode: 'heuristic' } });
+    const context = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_seen_kinds',
+      turnId: 'turn_seen_kinds',
+      query: '我的偏好是什么？',
+    });
+    const traceId = context.body.data.traceId as string;
+    const kinds = ['accepted', 'ignored', 'reasked', 'corrected', 'dismissed', 'missed', 'too_shallow', 'too_deep'];
+    for (const kind of kinds) {
+      const result = await post(`${server.url}/recall/${traceId}/outcome`, { kind, source: 'host' });
+      expect(result.status).toBe(200);
+      expect(result.body.data.recorded).toBe(true);
+    }
+    // 早期 kind 已超出 history 上限，但 seenOutcomeKinds 仍能保证幂等。
+    const again = await post(`${server.url}/recall/${traceId}/outcome`, { kind: 'accepted', source: 'host' });
+    expect(again.status).toBe(200);
+    expect(again.body.data).toMatchObject({ recorded: false, duplicate: true });
+    const trace = await fetch(`${server.url}/traces/${traceId}`, { headers: auth() });
+    const traceBody = await trace.json() as any;
+    expect(traceBody.data.outcomeHistory).toHaveLength(5);
+    expect(traceBody.data.seenOutcomeKinds).toEqual(kinds);
+    const stats = await runtime.policyStore!.snapshot();
+    expect(stats.global.accepted).toBe(1);
+  });
+
   it('applied 以实际注入块为准：预算裁掉 memory 片段时不显示 speak', async () => {
-    const { server, fake } = await setup({ intervention: { mode: 'heuristic', explorationRate: 0 } });
+    const { server, fake, runtime } = await setup({ intervention: { mode: 'heuristic', explorationRate: 0 } });
     fake.setRecords([{
       ...preference(),
       id: '01JLONGGIST',
@@ -1120,8 +1189,13 @@ describe('sidecar recall/context HTTP', () => {
     });
     expect(context.status).toBe(200);
     expect(context.body.data.decision).toMatchObject({ action: 'speak', enforced: true });
+    expect(context.body.data.applied).toMatchObject({ action: 'silent', fragments: 0 });
     expect(context.body.data.fragments).toEqual([]);
     expect(context.body.data.blocks).toEqual([]);
+    // 预算裁掉全部 fragment 时，策略统计必须记 silenced，而不是 decision 的 spoken。
+    const stats = await runtime.policyStore!.snapshot();
+    expect(stats.global.spoken).toBe(0);
+    expect(stats.global.silent).toBe(1);
     const trace = await fetch(`${server.url}/traces/${context.body.data.traceId}`, { headers: auth() });
     const traceBody = await trace.json() as any;
     expect(traceBody.data.applied).toMatchObject({ action: 'silent', fragments: 0 });
@@ -1271,6 +1345,51 @@ describe('sidecar recall/context HTTP', () => {
     const notImplemented = await post(`${noApi.server.url}/intervention/reset`, {});
     expect(notImplemented.status).toBe(501);
     expect(notImplemented.body.error.code).toBe('not_implemented');
+  });
+
+  it('reset 挡住 reset 前 trace 的迟到 outcome；reset 后新 trace 正常记录', async () => {
+    let now = NOW;
+    const { server, runtime } = await setup({ intervention: { mode: 'heuristic' }, now: () => now });
+    const oldContext = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_reset_late',
+      turnId: 'turn_reset_late_old',
+      query: '我的偏好是什么？',
+    });
+    const oldTraceId = oldContext.body.data.traceId as string;
+    now += 1000;
+    const reset = await post(`${server.url}/intervention/reset`, {});
+    expect(reset.status).toBe(200);
+    const afterReset = await runtime.policyStore!.snapshot();
+    expect(afterReset.global).toMatchObject({ spoken: 0, silent: 0 });
+
+    now += 1000;
+    const late = await post(`${server.url}/recall/${oldTraceId}/outcome`, { kind: 'accepted', source: 'host' });
+    expect(late.status).toBe(200);
+    expect(late.body.data).toMatchObject({ recorded: false, duplicate: false, degraded: false });
+    expect(late.body.data.warnings).toContain('outcome_before_reset');
+    const stillClean = await runtime.policyStore!.snapshot();
+    expect(stillClean.global.accepted).toBe(0);
+    expect(stillClean.global.spoken + stillClean.global.silent).toBe(0);
+    const oldTrace = await fetch(`${server.url}/traces/${oldTraceId}`, { headers: auth() });
+    const oldTraceBody = await oldTrace.json() as any;
+    expect(oldTraceBody.data.outcome ?? null).toBeNull();
+    expect(oldTraceBody.data.outcomeHistory ?? []).toEqual([]);
+
+    now += 1000;
+    const freshContext = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_reset_late',
+      turnId: 'turn_reset_late_new',
+      query: '我的偏好是什么？',
+    });
+    const freshTraceId = freshContext.body.data.traceId as string;
+    const fresh = await post(`${server.url}/recall/${freshTraceId}/outcome`, { kind: 'accepted', source: 'host' });
+    expect(fresh.status).toBe(200);
+    expect(fresh.body.data.recorded).toBe(true);
+    const finalStats = await runtime.policyStore!.snapshot();
+    expect(finalStats.global.accepted).toBe(1);
+    expect(finalStats.global.spoken + finalStats.global.silent).toBeGreaterThan(0);
   });
 
   it('/version 暴露 intervention 能力位；旧字段保持兼容', async () => {

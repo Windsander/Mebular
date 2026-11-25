@@ -1817,6 +1817,7 @@ body.modal-open { overflow: hidden; }
 }
 #runtime-view .rt-trace-badges { display: flex; gap: 4px; flex-wrap: wrap; }
 #runtime-view .rt-tag-silent { border-color: rgba(255, 210, 122, 0.5); color: #ffd27a; }
+#runtime-view .rt-tag-defer { border-color: rgba(190, 205, 255, 0.5); color: #c8d4ff; }
 #runtime-view .rt-tag-missed { border-color: rgba(255, 155, 155, 0.55); color: #ffb9b9; }
 #runtime-view .rt-tag-shadow { border-color: rgba(160, 180, 255, 0.5); color: #b9c7ff; }
 #runtime-view .rt-trace-meta { margin: 0; font-size: 11px; line-height: 16px; color: var(--crt-dim); overflow-wrap: anywhere; }

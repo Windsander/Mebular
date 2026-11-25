@@ -1364,6 +1364,7 @@
     "runtime.trace.outcome.note": "Note",
     "runtime.trace.outcome.history": "Outcome history",
     "runtime.trace.marker.silent": "Silent",
+    "runtime.trace.marker.defer": "Deferred",
     "runtime.trace.marker.missed": "Missed",
     "runtime.trace.marker.shadow": "Shadow",
     "runtime.trace.action.speak": "Speak",

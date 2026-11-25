@@ -43,10 +43,13 @@ describe('PolicyStore', () => {
     await policy.recordOutcome({ agentId: 'opencode', domain: 'user', kind: 'accepted' });
     await policy.flush();
 
-    const dirMode = (await stat(join(dir, 'policy'))).mode & 0o777;
-    const fileMode = (await stat(path)).mode & 0o777;
-    expect(dirMode).toBe(0o700);
-    expect(fileMode).toBe(0o600);
+    // Windows 不提供 POSIX mode（stat 上报 0o666），不能用它代表 ACL。
+    if (process.platform !== 'win32') {
+      const dirMode = (await stat(join(dir, 'policy'))).mode & 0o777;
+      const fileMode = (await stat(path)).mode & 0o777;
+      expect(dirMode).toBe(0o700);
+      expect(fileMode).toBe(0o600);
+    }
 
     const raw = JSON.parse(await readFile(path, 'utf8')) as any;
     expect(raw.global).toMatchObject({ spoken: 1, silent: 1, accepted: 1 });

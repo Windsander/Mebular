@@ -365,6 +365,31 @@ const HIT = {
   warnings: [],
 };
 
+function userTurn(id, text) {
+  return { id, role: 'user', content: [{ type: 'text', text }] };
+}
+
+function contextSequence(items) {
+  let index = 0;
+  return () => {
+    const data = items[Math.min(index, items.length - 1)];
+    index += 1;
+    return jsonResponse({ ok: true, data });
+  };
+}
+
+function interventionDecision(action, overrides = {}) {
+  return {
+    action,
+    depth: 'gist',
+    confidence: 0.8,
+    reason: action === 'silent' ? 'low_confidence' : 'high_relevance',
+    policyVersion: 'v0-rules',
+    enforced: true,
+    ...overrides,
+  };
+}
+
 describe('@mebular/opencode-plugin package', () => {
   it('has the intended package shape and no Mebular core import', async () => {
     const pkg = JSON.parse(await readFile(join(PACKAGE_DIR, 'package.json'), 'utf8'));
@@ -561,6 +586,175 @@ describe('context hook', () => {
     expect(calls.prompts).toBe(0);
     expect(calls.toolsAdded.some((tool) => tool.name === 'openchamber_memory')).toBe(false);
     await cleanup();
+  });
+});
+
+describe('outcome attribution', () => {
+  it('reports missed when a silent context is followed by a memory follow-up', async () => {
+    const fetchImpl = createFetch({
+      '/context': contextSequence([
+        { blocks: [], traceId: 'tr_silent_1', decision: interventionDecision('silent') },
+        { blocks: [], traceId: 'tr_silent_2', decision: interventionDecision('silent') },
+      ]),
+      'POST /recall/tr_silent_1/outcome': { traceId: 'tr_silent_1', outcome: { kind: 'missed' } },
+    });
+    const { controller } = controllerWith({ fetchImpl });
+    await controller.handleContext(hookEvent([userTurn('u1', 'where is the deploy script')]));
+    await controller.handleContext(hookEvent([userTurn('u2', '上次说的部署脚本在哪里？')]));
+    const call = await waitFor(() => fetchImpl.callsFor('/recall/tr_silent_1/outcome')[0]);
+    expect(call).toBeTruthy();
+    expect(call.body).toMatchObject({ kind: 'missed', source: 'host' });
+    // The note may explain the signal but must never carry the query text.
+    expect(JSON.stringify(call.body)).not.toContain('部署');
+    expect(JSON.stringify(controller.getStatus())).not.toContain('部署');
+    await controller.dispose();
+  });
+
+  it('reports reasked when a spoken context is immediately re-asked', async () => {
+    const fetchImpl = createFetch({
+      '/context': contextSequence([
+        { ...HIT, traceId: 'tr_speak_1', decision: interventionDecision('speak') },
+        { ...HIT, traceId: 'tr_speak_2', decision: interventionDecision('speak') },
+      ]),
+      'POST /recall/tr_speak_1/outcome': { traceId: 'tr_speak_1', outcome: { kind: 'reasked' } },
+    });
+    const { controller } = controllerWith({ fetchImpl });
+    await controller.handleContext(hookEvent([userTurn('u1', 'how do I change the theme')]));
+    await controller.handleContext(hookEvent([userTurn('u2', '再说一遍，深色主题怎么设置')]));
+    const call = await waitFor(() => fetchImpl.callsFor('/recall/tr_speak_1/outcome')[0]);
+    expect(call).toBeTruthy();
+    expect(call.body).toMatchObject({ kind: 'reasked', source: 'host' });
+    await controller.dispose();
+  });
+
+  it('reports corrected when a spoken context is corrected', async () => {
+    const fetchImpl = createFetch({
+      '/context': contextSequence([
+        { ...HIT, traceId: 'tr_correct_1', decision: interventionDecision('speak') },
+        { ...HIT, traceId: 'tr_correct_2', decision: interventionDecision('speak') },
+      ]),
+      'POST /recall/tr_correct_1/outcome': { traceId: 'tr_correct_1', outcome: { kind: 'corrected' } },
+    });
+    const { controller } = controllerWith({ fetchImpl });
+    await controller.handleContext(hookEvent([userTurn('u1', 'the theme is dark')]));
+    await controller.handleContext(hookEvent([userTurn('u2', '不对，你刚才说的不是这个')]));
+    const call = await waitFor(() => fetchImpl.callsFor('/recall/tr_correct_1/outcome')[0]);
+    expect(call).toBeTruthy();
+    expect(call.body).toMatchObject({ kind: 'corrected', source: 'host' });
+    await controller.dispose();
+  });
+
+  it('reports ignored once on session.idle and session.execution.succeeded', async () => {
+    for (const [type, traceId] of [
+      ['session.idle', 'tr_idle_1'],
+      ['session.execution.succeeded', 'tr_success_1'],
+    ]) {
+      const fetchImpl = createFetch({
+        '/context': { ...HIT, traceId, decision: interventionDecision('speak') },
+        [`POST /recall/${traceId}/outcome`]: { traceId, outcome: { kind: 'ignored' } },
+      });
+      const { controller } = controllerWith({
+        fetchImpl,
+        config: { outcomeIgnoredDelayMs: 5 },
+        ctx: { contextMessages: [] },
+      });
+      await controller.handleContext(hookEvent([userTurn('u1', 'deploy status')]));
+      await controller.handleEvent({ type, data: { sessionID: 'ses_test' } });
+      const first = await waitFor(() => fetchImpl.callsFor(`/recall/${traceId}/outcome`)[0]);
+      expect(first).toBeTruthy();
+      expect(first.body).toMatchObject({ kind: 'ignored', source: 'host' });
+      // A second lifecycle event must not report the same trace/kind again.
+      await controller.handleEvent({ type, data: { sessionID: 'ses_test' } });
+      await sleep(25);
+      expect(fetchImpl.callsFor(`/recall/${traceId}/outcome`)).toHaveLength(1);
+      await controller.dispose();
+    }
+  });
+
+  it('dedupes the same trace and kind across turns', async () => {
+    const fetchImpl = createFetch({
+      '/context': { blocks: [], traceId: 'tr_dup_1', decision: interventionDecision('silent') },
+      'POST /recall/tr_dup_1/outcome': { traceId: 'tr_dup_1', outcome: { kind: 'missed' } },
+    });
+    const { controller } = controllerWith({ fetchImpl });
+    await controller.handleContext(hookEvent([userTurn('u1', 'the deploy process')]));
+    await controller.handleContext(hookEvent([userTurn('u2', '上次的部署流程')]));
+    await waitFor(() => fetchImpl.callsFor('/recall/tr_dup_1/outcome')[0]);
+    await controller.handleContext(hookEvent([userTurn('u3', '之前的部署流程再说说')]));
+    await sleep(25);
+    expect(fetchImpl.callsFor('/recall/tr_dup_1/outcome')).toHaveLength(1);
+    expect(controller.getStatus().counts.outcomes.attempted).toBe(1);
+    await controller.dispose();
+  });
+
+  it('silently skips when the runtime does not implement outcome', async () => {
+    let contextCalls = 0;
+    const fetchImpl = createFetch({
+      '/context': () => {
+        contextCalls += 1;
+        return jsonResponse({
+          ok: true,
+          data: {
+            ...HIT,
+            traceId: `tr_unsupported_${contextCalls}`,
+            decision: interventionDecision('speak'),
+          },
+        });
+      },
+      'POST /recall/tr_unsupported_1/outcome': () => jsonResponse(
+        { ok: false, error: { code: 'not_found' } },
+        { ok: false, status: 404 },
+      ),
+    });
+    const { controller } = controllerWith({ fetchImpl, config: { outcomeIgnoredDelayMs: 5 } });
+    await controller.handleContext(hookEvent([userTurn('u1', 'deploy status')]));
+    await controller.handleEvent({ type: 'session.idle', data: { sessionID: 'ses_test' } });
+    expect(await waitFor(() => fetchImpl.callsFor('/recall/tr_unsupported_1/outcome')[0])).toBeTruthy();
+    const second = hookEvent([userTurn('u2', 'now use a light theme')]);
+    await controller.handleContext(second);
+    expect(second.system).toHaveLength(1);
+    expect(controller.getStatus().counts.outcomes.failed).toBeGreaterThanOrEqual(1);
+    await controller.dispose();
+  });
+
+  it('keeps context injection working when the outcome request fails', async () => {
+    let contextCalls = 0;
+    const fetchImpl = createFetch({
+      '/context': () => {
+        contextCalls += 1;
+        return jsonResponse({
+          ok: true,
+          data: {
+            ...HIT,
+            traceId: `tr_fail_${contextCalls}`,
+            decision: interventionDecision('speak'),
+          },
+        });
+      },
+      'POST /recall/tr_fail_1/outcome': async () => {
+        throw new Error('network down');
+      },
+    });
+    const { controller } = controllerWith({ fetchImpl, config: { outcomeIgnoredDelayMs: 5 } });
+    await controller.handleContext(hookEvent([userTurn('u1', 'deploy status')]));
+    await controller.handleEvent({ type: 'session.idle', data: { sessionID: 'ses_test' } });
+    expect(await waitFor(() => fetchImpl.callsFor('/recall/tr_fail_1/outcome')[0])).toBeTruthy();
+    const second = hookEvent([userTurn('u2', 'now use a light theme')]);
+    await controller.handleContext(second);
+    expect(second.system).toHaveLength(1);
+    expect(controller.getStatus().counts.outcomes.failed).toBeGreaterThanOrEqual(1);
+    await controller.dispose();
+  });
+
+  it('does nothing for an older runtime without traceId or decision', async () => {
+    const fetchImpl = createFetch({ '/context': HIT, 'POST /recall/tr_old_1/outcome': {} });
+    const { controller } = controllerWith({ fetchImpl, config: { outcomeIgnoredDelayMs: 0 } });
+    await controller.handleContext(hookEvent([userTurn('u1', 'deploy status')]));
+    await controller.handleEvent({ type: 'session.idle', data: { sessionID: 'ses_test' } });
+    await sleep(25);
+    expect(fetchImpl.calls.some((call) => call.path.endsWith('/outcome'))).toBe(false);
+    expect(controller.getStatus().counts.outcomes.attempted).toBe(0);
+    await controller.dispose();
   });
 });
 

@@ -375,6 +375,20 @@ async function main() {
       JSON.stringify({ decision: traceA1?.decision, applied: traceA1?.applied }));
     check('A1 trace 可经真实 GET /traces/:id 读取',
       Boolean(traceA1) && Boolean(await fetchTrace(discovery, traceA1.id)));
+    const injected = await waitFor(() => provider.state.requests.find((entry) => {
+      const text = (entry.body?.messages ?? []).map((message) => (
+        typeof message?.content === 'string'
+          ? message.content
+          : Array.isArray(message?.content)
+            ? message.content.map((part) => part?.text ?? '').join('\n')
+            : ''
+      )).join('\n');
+      return text.includes('<mebular_memory') && text.includes(seedToken);
+    }), { timeoutMs: 15000 });
+    check('A1 注入进入真实 outgoing model request 且标记 untrusted/request-only',
+      Boolean(injected)
+      && JSON.stringify(injected.body).includes('trust=\\"untrusted\\"')
+      && JSON.stringify(injected.body).includes('purpose=\\"background\\"'));
     await turn(sessionA, '再说一遍 deepwork 主题是什么');
     const traceA1Reasked = await waitOutcome(discovery, traceA1.id, 'reasked');
     check('A2 用户重问 → 真实 /recall/:id/outcome 记录 reasked',

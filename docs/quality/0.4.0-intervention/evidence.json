@@ -50,7 +50,7 @@
       "name": "intervention-e2e",
       "command": "node tests/integration/host-e2e/opencode-intervention-outcome.mjs",
       "result": "passed",
-      "passed": 38,
+      "passed": 39,
       "failed": 0,
       "exitCode": 0
     },
@@ -120,6 +120,12 @@
       "id": "A1",
       "scenario": "speak",
       "assertion": "real /context decision.action=speak, depth=gist, applied.fragments=1",
+      "result": "passed"
+    },
+    {
+      "id": "A1b",
+      "scenario": "request-only-injection",
+      "assertion": "real plugin writes the memory block into the outgoing model request with trust=untrusted and purpose=background",
       "result": "passed"
     },
     {

@@ -218,4 +218,37 @@ describe('RuntimeLocalStore', () => {
     await local.putTrace(t);
     await expect(local.putTrace(t)).rejects.toMatchObject({ code: 'invalid_trace' });
   });
+
+  it('updateTraceOutcome：同 kind 幂等，不同 kind 更新 latest 且只保留 5 条历史', async () => {
+    const local = store();
+    const t = trace();
+    await local.putTrace(t);
+    const outcome = (kind: any, at = now) => ({ kind, at, source: 'host' as const });
+
+    const first = await local.updateTraceOutcome(t.id, outcome('accepted'));
+    expect(first).toMatchObject({ duplicate: false });
+    expect(first?.trace.outcome).toMatchObject({ kind: 'accepted', source: 'host' });
+    expect(first?.trace.outcomeHistory).toHaveLength(1);
+
+    const duplicate = await local.updateTraceOutcome(t.id, outcome('accepted'));
+    expect(duplicate).toMatchObject({ duplicate: true });
+    expect(duplicate?.trace.outcomeHistory).toHaveLength(1);
+
+    for (const kind of ['ignored', 'reasked', 'corrected', 'dismissed', 'missed'] as const) {
+      now += 1000;
+      await local.updateTraceOutcome(t.id, outcome(kind));
+    }
+    const stored = await local.getTrace(t.id);
+    expect(stored?.outcome).toMatchObject({ kind: 'missed' });
+    expect(stored?.outcomeHistory).toHaveLength(5);
+    expect(stored?.outcomeHistory?.map((entry) => entry.kind)).toEqual([
+      'ignored',
+      'reasked',
+      'corrected',
+      'dismissed',
+      'missed',
+    ]);
+
+    expect(await local.updateTraceOutcome('tr_missing', outcome('accepted'))).toBeNull();
+  });
 });

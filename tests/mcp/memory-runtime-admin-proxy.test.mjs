@@ -22,6 +22,10 @@ const savedCloudRoot = process.env.MEBULAR_CLOUD_ROOT;
 const savedHostToken = process.env.FAKE_SIDECAR_HOST_TOKEN;
 const savedAuthOut = process.env.FAKE_SIDECAR_AUTH_OUT;
 const savedFeedbackOut = process.env.FAKE_SIDECAR_FEEDBACK_OUT;
+const savedTracesFile = process.env.FAKE_SIDECAR_TRACES_FILE;
+const savedTraceDetailFile = process.env.FAKE_SIDECAR_TRACE_DETAIL_FILE;
+const savedInterventionStatus = process.env.FAKE_SIDECAR_INTERVENTION_STATUS;
+const savedInterventionOut = process.env.FAKE_SIDECAR_INTERVENTION_OUT;
 
 afterEach(async () => {
   while (servers.length > 0) await servers.pop().close().catch(() => undefined);
@@ -38,6 +42,14 @@ afterEach(async () => {
   else process.env.FAKE_SIDECAR_AUTH_OUT = savedAuthOut;
   if (savedFeedbackOut === undefined) delete process.env.FAKE_SIDECAR_FEEDBACK_OUT;
   else process.env.FAKE_SIDECAR_FEEDBACK_OUT = savedFeedbackOut;
+  if (savedTracesFile === undefined) delete process.env.FAKE_SIDECAR_TRACES_FILE;
+  else process.env.FAKE_SIDECAR_TRACES_FILE = savedTracesFile;
+  if (savedTraceDetailFile === undefined) delete process.env.FAKE_SIDECAR_TRACE_DETAIL_FILE;
+  else process.env.FAKE_SIDECAR_TRACE_DETAIL_FILE = savedTraceDetailFile;
+  if (savedInterventionStatus === undefined) delete process.env.FAKE_SIDECAR_INTERVENTION_STATUS;
+  else process.env.FAKE_SIDECAR_INTERVENTION_STATUS = savedInterventionStatus;
+  if (savedInterventionOut === undefined) delete process.env.FAKE_SIDECAR_INTERVENTION_OUT;
+  else process.env.FAKE_SIDECAR_INTERVENTION_OUT = savedInterventionOut;
 });
 
 async function tempDir(prefix = 'memory-runtime-admin-') {
@@ -197,6 +209,23 @@ describe('MCP admin · Memory Runtime sidecar 只读代理', () => {
     expect(feedback.status).toBe(409);
     expect(await feedback.json()).toMatchObject({ ok: false, error: 'memory_runtime_disabled', state: 'stopped' });
 
+    const reset = await fetch(`${base}/admin/api/memory-runtime/policy/reset`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-mebular-csrf': token,
+        cookie,
+      },
+      body: '{}',
+    });
+    expect(reset.status).toBe(409);
+    expect(await reset.json()).toMatchObject({
+      ok: false,
+      error: 'memory_runtime_disabled',
+      enabled: false,
+      state: 'stopped',
+    });
+
     // 轻量模式零副作用：不创建 sidecar 数据目录/discovery/token。
     expect(existsSync(join(home, 'memory-runtime'))).toBe(false);
     expect(existsSync(join(home, 'memory-runtime.json'))).toBe(false);
@@ -294,11 +323,13 @@ describe('MCP admin · Memory Runtime sidecar 只读代理', () => {
     const outDir = await tempDir('memory-runtime-admin-out-');
     const authOut = join(outDir, 'auth.jsonl');
     const feedbackOut = join(outDir, 'feedback.jsonl');
+    const interventionOut = join(outDir, 'intervention.jsonl');
     const { home, base } = await start({
       enabled: true,
       env: {
         FAKE_SIDECAR_AUTH_OUT: authOut,
         FAKE_SIDECAR_FEEDBACK_OUT: feedbackOut,
+        FAKE_SIDECAR_INTERVENTION_OUT: interventionOut,
       },
     });
     const status = await readyStatus(base);
@@ -314,6 +345,18 @@ describe('MCP admin · Memory Runtime sidecar 只读代理', () => {
     const traces = await tracesResponse.json();
     expect(traces).toMatchObject({ ok: true, enabled: true, available: true, total: 1 });
     expect(traces.traces[0].id).toBe('tr_fake_0001');
+    expect(traces.traces[0]).toMatchObject({
+      decision: {
+        action: 'speak',
+        depth: 'detail',
+        confidence: 0.88,
+        reason: 'high_relevance',
+        policyVersion: 'v0-rules',
+        enforced: true,
+      },
+      applied: { action: 'speak', depth: 'detail', fragments: 1 },
+      outcome: { kind: 'accepted', source: 'host', confidence: 0.8 },
+    });
     expect(JSON.stringify(traces)).not.toContain(hostToken);
     expect(JSON.stringify(traces)).not.toContain('RAW_TRACE_SECRET');
     expect(JSON.stringify(traces)).not.toContain('UNLISTED_API_TOKEN');
@@ -329,6 +372,10 @@ describe('MCP admin · Memory Runtime sidecar 只读代理', () => {
       extractor: 'fake-extractor-model',
       tookMs: 3,
     });
+    expect(detail.trace.outcomeHistory).toEqual([
+      expect.objectContaining({ kind: 'ignored', source: 'heuristic' }),
+      expect.objectContaining({ kind: 'accepted', source: 'host', confidence: 0.8 }),
+    ]);
     expect(Object.keys(detail.trace.debug ?? {})).toEqual([]);
     expect(JSON.stringify(detail)).not.toContain(hostToken);
     expect(JSON.stringify(detail)).not.toMatch(/tokenFile|Bearer/);
@@ -350,6 +397,20 @@ describe('MCP admin · Memory Runtime sidecar 只读代理', () => {
     expect(feedback).toMatchObject({ ok: true, data: { traceId: 'tr_fake_0001', feedback: { useful: true } } });
     expect(JSON.stringify(feedback)).not.toContain(hostToken);
 
+    const resetResponse = await fetch(`${base}/admin/api/memory-runtime/policy/reset`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-mebular-csrf': token,
+        cookie,
+      },
+      body: '{}',
+    });
+    expect(resetResponse.status).toBe(200);
+    const reset = await resetResponse.json();
+    expect(reset).toMatchObject({ ok: true, data: { reset: true, policyVersion: 'v0-rules' } });
+    expect(JSON.stringify(reset)).not.toContain(hostToken);
+
     // 浏览器从未发送 host token；代理在服务端带 Bearer。
     const authLines = (await readFile(authOut, 'utf-8')).trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
     expect(authLines.length).toBeGreaterThanOrEqual(3);
@@ -358,6 +419,233 @@ describe('MCP admin · Memory Runtime sidecar 只读代理', () => {
     expect(feedbackLines.at(-1)).toMatchObject({
       traceId: 'tr_fake_0001',
       body: { useful: true, reason: 'helpful' },
+    });
+    const interventionLines = (await readFile(interventionOut, 'utf-8')).trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+    expect(interventionLines.at(-1)).toMatchObject({
+      method: 'POST',
+      path: '/memory-runtime/v1/intervention/reset',
+    });
+  }, 30000);
+
+  it('trace view：off baseline 不外泄 would*，shadow 透出反事实建议，旧 trace 三字段为 null', async () => {
+    const dir = await tempDir('memory-runtime-admin-traces-');
+    const now = Date.now();
+    const baseTrace = {
+      schema: 2,
+      agentId: 'opencode',
+      threadId: 'th_policy',
+      domains: ['notes'],
+      silenceReason: null,
+      outcome: null,
+      counts: { candidates: 1, expansions: 0, injected: 1, tokens: 6 },
+      timing: { totalMs: 6 },
+      degraded: false,
+      feedback: null,
+      model: { query: 'heuristic' },
+    };
+    const offTrace = {
+      ...baseTrace,
+      id: 'tr_off',
+      at: now - 3000,
+      queryHash: 'hash-off',
+      queryPreview: 'off baseline',
+      decision: {
+        action: 'speak',
+        depth: 'gist',
+        confidence: 0.63,
+        reason: 'policy_off',
+        policyVersion: 'off',
+        enforced: false,
+      },
+      applied: { action: 'speak', depth: 'gist', fragments: 1 },
+    };
+    const shadowTrace = {
+      ...baseTrace,
+      id: 'tr_shadow',
+      at: now - 2000,
+      queryHash: 'hash-shadow',
+      queryPreview: 'shadow suggestion',
+      decision: {
+        action: 'silent',
+        depth: 'gist',
+        confidence: 0.42,
+        reason: 'low_confidence',
+        policyVersion: 'v0-shadow',
+        enforced: false,
+      },
+      applied: {
+        action: 'silent',
+        depth: 'gist',
+        fragments: 0,
+        wouldAction: 'speak',
+        wouldDepth: 'detail',
+        suppressed: ['mf_shadow_suppressed'],
+      },
+    };
+    const heuristicSilentTrace = {
+      ...baseTrace,
+      id: 'tr_heuristic_silent',
+      at: now - 1500,
+      queryHash: 'hash-heuristic-silent',
+      queryPreview: 'heuristic silent',
+      decision: {
+        action: 'silent',
+        depth: 'gist',
+        confidence: 0.38,
+        reason: 'low_confidence',
+        policyVersion: 'v0-heuristic',
+        enforced: true,
+      },
+      applied: {
+        action: 'silent',
+        depth: 'gist',
+        fragments: 0,
+        suppressed: [
+          { fragmentId: 'mf_suppressed_1', content: 'RAW_SUPPRESSED_SECRET' },
+          'mf_suppressed_2',
+        ],
+      },
+    };
+    const deferTrace = {
+      ...baseTrace,
+      id: 'tr_defer',
+      at: now - 1200,
+      queryHash: 'hash-defer',
+      queryPreview: 'defer',
+      decision: {
+        action: 'defer',
+        depth: 'gist',
+        confidence: 0.44,
+        reason: 'recent_false_alarm',
+        policyVersion: 'v0-heuristic',
+        enforced: true,
+      },
+      applied: { action: 'defer', depth: 'gist', fragments: 0 },
+    };
+    const legacyTrace = {
+      ...baseTrace,
+      id: 'tr_legacy',
+      at: now - 1000,
+      queryHash: 'hash-legacy',
+      queryPreview: 'legacy trace',
+    };
+    const tracesFile = join(dir, 'traces.json');
+    const detailFile = join(dir, 'trace-detail.json');
+    await writeFile(
+      tracesFile,
+      JSON.stringify([offTrace, shadowTrace, heuristicSilentTrace, deferTrace, legacyTrace]),
+      'utf-8',
+    );
+    await writeFile(detailFile, JSON.stringify({
+      byId: {
+        [shadowTrace.id]: {
+          ...shadowTrace,
+          hits: [],
+          cue: { topics: [], entities: [] },
+          candidates: [],
+          expansions: [],
+          injected: [],
+          outcomeHistory: [
+            { kind: 'ignored', at: now - 1500, source: 'heuristic' },
+            { kind: 'missed', at: now - 1000, source: 'host', confidence: 0.7, note: 'next turn asked again' },
+          ],
+        },
+        [heuristicSilentTrace.id]: {
+          ...heuristicSilentTrace,
+          hits: [],
+          cue: { topics: [], entities: [] },
+          candidates: [],
+          expansions: [],
+          injected: [],
+        },
+      },
+    }), 'utf-8');
+    const { base } = await start({
+      enabled: true,
+      env: {
+        FAKE_SIDECAR_TRACES_FILE: tracesFile,
+        FAKE_SIDECAR_TRACE_DETAIL_FILE: detailFile,
+      },
+    });
+    await readyStatus(base);
+
+    const list = await (await fetch(`${base}/admin/api/memory-runtime/traces`)).json();
+    expect(list.total).toBe(5);
+    const off = list.traces.find((trace) => trace.id === 'tr_off');
+    const shadow = list.traces.find((trace) => trace.id === 'tr_shadow');
+    const heuristicSilent = list.traces.find((trace) => trace.id === 'tr_heuristic_silent');
+    const defer = list.traces.find((trace) => trace.id === 'tr_defer');
+    const legacy = list.traces.find((trace) => trace.id === 'tr_legacy');
+    expect(off.decision).toMatchObject({ enforced: false });
+    expect(off.decision.shadow).toBeUndefined();
+    expect(off.applied).toEqual({ action: 'speak', depth: 'gist', fragments: 1 });
+    expect('wouldAction' in off.applied).toBe(false);
+    expect('wouldDepth' in off.applied).toBe(false);
+    expect('suppressed' in off.applied).toBe(false);
+    expect(shadow.decision).toMatchObject({ enforced: false });
+    expect(shadow.applied).toEqual({
+      action: 'silent',
+      depth: 'gist',
+      fragments: 0,
+      wouldAction: 'speak',
+      wouldDepth: 'detail',
+      suppressed: ['mf_shadow_suppressed'],
+    });
+    expect(heuristicSilent.applied).toEqual({
+      action: 'silent',
+      depth: 'gist',
+      fragments: 0,
+      suppressed: ['mf_suppressed_1', 'mf_suppressed_2'],
+    });
+    expect('wouldAction' in heuristicSilent.applied).toBe(false);
+    expect('wouldDepth' in heuristicSilent.applied).toBe(false);
+    expect(defer.applied).toEqual({ action: 'defer', depth: 'gist', fragments: 0 });
+    expect(JSON.stringify(heuristicSilent)).not.toContain('RAW_SUPPRESSED_SECRET');
+    expect(legacy.decision).toBeNull();
+    expect(legacy.applied).toBeNull();
+    expect(legacy.outcome).toBeNull();
+
+    const detailResponse = await fetch(`${base}/admin/api/memory-runtime/traces/tr_shadow`);
+    expect(detailResponse.status).toBe(200);
+    const detail = await detailResponse.json();
+    expect(detail.trace.applied).toMatchObject({
+      action: 'silent',
+      wouldAction: 'speak',
+      wouldDepth: 'detail',
+      suppressed: ['mf_shadow_suppressed'],
+    });
+    expect(detail.trace.outcomeHistory).toEqual([
+      expect.objectContaining({ kind: 'ignored', source: 'heuristic' }),
+      expect.objectContaining({ kind: 'missed', source: 'host', confidence: 0.7 }),
+    ]);
+    const heuristicDetail = await (await fetch(`${base}/admin/api/memory-runtime/traces/tr_heuristic_silent`)).json();
+    expect(heuristicDetail.trace.applied).toMatchObject({
+      action: 'silent',
+      suppressed: ['mf_suppressed_1', 'mf_suppressed_2'],
+    });
+    expect(JSON.stringify(heuristicDetail)).not.toContain('RAW_SUPPRESSED_SECRET');
+  }, 30000);
+
+  it('policy reset 不伪成功：sidecar 404 原样返回明确失败', async () => {
+    const { base } = await start({
+      enabled: true,
+      env: { FAKE_SIDECAR_INTERVENTION_STATUS: '404' },
+    });
+    await readyStatus(base);
+    const { token, cookie } = await csrf(base);
+    const response = await fetch(`${base}/admin/api/memory-runtime/policy/reset`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-mebular-csrf': token,
+        cookie,
+      },
+      body: '{}',
+    });
+    expect(response.status).toBe(404);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      error: 'intervention_reset_unavailable',
     });
   }, 30000);
 
@@ -463,6 +751,25 @@ describe('MCP admin · Memory Runtime sidecar 只读代理', () => {
       body: JSON.stringify({ traceId: 'tr_fake_0001', useful: 'yes' }),
     });
     expect(badFeedback.status).toBe(400);
+
+    const noCsrfReset = await fetch(`${base}/admin/api/memory-runtime/policy/reset`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie },
+      body: '{}',
+    });
+    expect(noCsrfReset.status).toBe(403);
+
+    const badOriginReset = await fetch(`${base}/admin/api/memory-runtime/policy/reset`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-mebular-csrf': token,
+        cookie,
+        origin: 'http://evil.example',
+      },
+      body: '{}',
+    });
+    expect(badOriginReset.status).toBe(403);
   }, 30000);
 
   it('D6 writes-enabled 否决变更；D5 不新增 raw detail/checkpoint/self 代理', async () => {
@@ -476,12 +783,19 @@ describe('MCP admin · Memory Runtime sidecar 只读代理', () => {
       body: JSON.stringify({ traceId: 'tr_fake_0001', useful: true }),
     });
     expect(write.status).toBe(403);
+    const reset = await fetch(`${base}/admin/api/memory-runtime/policy/reset`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-mebular-csrf': token, cookie, origin: base },
+      body: '{}',
+    });
+    expect(reset.status).toBe(403);
     for (const path of ['details/detail-1', 'checkpoints/thread-1', 'self/agent-1']) {
       const response = await fetch(`${base}/admin/api/memory-runtime/${path}`);
       expect(response.status).toBe(404);
     }
     const forwarded = (await readFile(authOut, 'utf-8')).trim().split('\n').map((line) => JSON.parse(line));
     expect(forwarded.every((entry) => !entry.path.includes('/feedback')
+      && !entry.path.includes('/intervention/reset')
       && !entry.path.includes('/details/')
       && !entry.path.includes('/checkpoints/')
       && !entry.path.includes('/self/'))).toBe(true);

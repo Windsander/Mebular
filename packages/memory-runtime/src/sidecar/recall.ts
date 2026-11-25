@@ -51,7 +51,26 @@ import {
   truncateLines,
   truncateText,
 } from './text.js';
-import { RUNTIME_DETAIL_KINDS, type RecallTrace } from '../runtime/types.js';
+import {
+  RUNTIME_DETAIL_KINDS,
+  type AppliedIntervention,
+  type InterventionAction,
+  type InterventionDecision,
+  type RecallDepth,
+  type RecallOutcome,
+  type RecallOutcomeKind,
+  type RecallOutcomeSource,
+  type RecallTrace,
+} from '../runtime/types.js';
+import {
+  planIntervention,
+  planInterventionAsync,
+  type InterventionCandidateView,
+  type InterventionMode,
+  type InterventionPlannerInput,
+} from './intervention.js';
+import type { InferenceInterventionStats } from './inference-provider.js';
+import type { PolicyStore } from './policy-store.js';
 
 const MAX_DOMAINS = 16;
 const MAX_QUERY_CHARS = 2000;
@@ -63,6 +82,38 @@ const ANCHOR_TTL_MS = 10 * 60 * 1000;
 const QUARANTINE_MS = 7 * 24 * 60 * 60 * 1000;
 const EXPAND_TRACE_TTL_MS = 10 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
+const MAX_OUTCOME_NOTE_CHARS = 200;
+const MAX_OUTCOME_HISTORY = 5;
+/** fragment ID → source ID 的进程内别名表上限；防止长时间运行无限增长。 */
+const MAX_FRAGMENT_ALIASES = 4096;
+/** ignored 是弱信号，归因窗口至少 10 分钟。 */
+const IGNORED_OUTCOME_WINDOW_MS = 10 * 60 * 1000;
+
+const RECALL_OUTCOME_KINDS: readonly RecallOutcomeKind[] = [
+  'accepted',
+  'ignored',
+  'reasked',
+  'corrected',
+  'dismissed',
+  'missed',
+  'too_shallow',
+  'too_deep',
+];
+const RECALL_OUTCOME_SOURCES: readonly RecallOutcomeSource[] = ['host', 'console', 'heuristic'];
+
+/** 这些沉默原因不是策略可以复审的“没有召回”，不跑 must_speak/heuristic。 */
+const NON_INTERVENTION_SILENCE = new Set([
+  'muted',
+  'non_human_turn',
+  'memory_governance',
+  'user_negated',
+  'chitchat',
+  'no_cue',
+  'duplicate_turn',
+  'domain_forbidden',
+  'capability_unavailable',
+  'runtime_unavailable',
+]);
 
 const RECORD_TYPES = ['fact', 'preference', 'episode', 'observation', 'skill', 'entity'] as const;
 
@@ -245,6 +296,10 @@ export interface RecallResponse {
   warnings: string[];
   silenceReason: string | null;
   traceId: string | null;
+  /** 0.4.0：本次 memory fragments 的介入决策；旧宿主忽略即可。 */
+  decision?: InterventionDecision;
+  /** 0.4.0：实际生效的介入结果；shadow/预算裁剪下与 decision 不同。旧宿主忽略即可。 */
+  applied?: AppliedIntervention;
   timing: {
     cueMs: number;
     fuzzyMs: number;
@@ -307,6 +362,8 @@ export interface RecallServiceOptions {
   policy?: SidecarPolicy | null;
   getPolicy?: () => SidecarPolicy | null;
   inference?: SidecarInferenceProvider | null;
+  /** 0.4.0 本机策略统计；缺省不学习，但决策仍照常返回。 */
+  policyStore?: PolicyStore | null;
   lifecycle?: LifecycleGate | null;
   checkpointSource?: {
     getCheckpoint(threadId: string, options?: {
@@ -404,6 +461,16 @@ interface RecallRun {
   estimatedTokens: number;
   estimatedBytes: number;
   timing: RecallResponse['timing'];
+  /** 0.4.0：本次决策与实际生效结果。 */
+  decision: InterventionDecision | null;
+  applied: AppliedIntervention | null;
+  effective: {
+    action: InterventionAction;
+    depth: RecallDepth;
+    suppressed: string[];
+    shadow: boolean;
+    domain: string;
+  } | null;
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -1108,14 +1175,22 @@ export class RecallService {
 
   private readonly client: CapabilityClient | null;
   private readonly models: SidecarInferenceProvider | null;
+  private readonly policyStore: PolicyStore | null;
   private readonly lifecycle: LifecycleGate | null;
   private readonly checkpointSource: RecallServiceOptions['checkpointSource'];
   private readonly selfSource: RecallServiceOptions['checkpointSource'];
   private readonly getPolicy?: () => SidecarPolicy | null;
   private policy: SidecarPolicy | null;
   private readonly now: () => number;
+  /** fragment ID → 本轮该片段的 source/record IDs；用于解析宿主回传的 mf_ ID（进程内、有界）。 */
+  private readonly fragmentAliases = new Map<string, string[]>();
   private readonly anchors = new Map<string, number>();
   private readonly quarantined = new Map<string, number>();
+  /** (agentId, threadId/task) → 连续沉默次数与上一轮决策；只在本进程内。 */
+  private readonly silentStreaks = new Map<string, number>();
+  private readonly lastDecisions = new Map<string, { action: InterventionAction; depth: RecallDepth }>();
+  /** reset 时间戳：早于它的 trace 视为迟到 outcome，不再写策略统计。 */
+  private policyResetAt = 0;
 
   private recalls = 0;
   private contexts = 0;
@@ -1130,6 +1205,7 @@ export class RecallService {
     this.local = options.local;
     this.client = options.client;
     this.models = options.inference ?? null;
+    this.policyStore = options.policyStore ?? null;
     this.lifecycle = options.lifecycle ?? null;
     this.checkpointSource = options.checkpointSource ?? null;
     this.selfSource = options.selfSource
@@ -1164,6 +1240,16 @@ export class RecallService {
 
   setPolicy(policy: SidecarPolicy | null): void {
     this.policy = policy;
+  }
+
+  /**
+   * Console/CLI reset 的运行中状态清理：不碰记忆、trace 或别名表。
+   * policyResetAt 用于挡住 reset 前 trace 的迟到 outcome，避免重新写脏。
+   */
+  resetInterventionState(): void {
+    this.silentStreaks.clear();
+    this.lastDecisions.clear();
+    this.policyResetAt = this.now();
   }
 
   private currentPolicy(): SidecarPolicy | null {
@@ -1202,6 +1288,8 @@ export class RecallService {
       warnings: base.warnings,
       silenceReason: base.silenceReason,
       traceId: base.traceId,
+      ...(base.decision ? { decision: base.decision } : {}),
+      ...(base.applied ? { applied: base.applied } : {}),
       timing: base.timing,
       records: base.records,
       trusted: false,
@@ -1268,6 +1356,11 @@ export class RecallService {
     });
     if (!updated) throw new SidecarSettlementError('not_found', 'trace 不存在', { status: 404 });
 
+    // 手动 feedback 继续可用，同时映射为策略结果；重复相同反馈不重复计数。
+    if (!trace.feedback || trace.feedback.useful !== body.useful) {
+      await this.recordPolicyOutcome(trace, body.useful ? 'accepted' : 'dismissed');
+    }
+
     this.feedback += 1;
     const quarantined: string[] = [];
     if (reason === 'should_not_recall') {
@@ -1291,6 +1384,107 @@ export class RecallService {
       feedback: { useful: body.useful, ...(reason !== undefined ? { reason } : {}), at },
       quarantined,
       warnings: [],
+      degraded: false,
+    };
+  }
+
+  /**
+   * `POST /recall/:traceId/outcome`：宿主/Console 上报召回结果。
+   * 同 trace 同 kind 幂等；只保存 kind/source/confidence/短 note，不存正文。
+   */
+  async submitOutcome(traceId: string, body: unknown): Promise<{
+    traceId: string;
+    outcome: RecallOutcome | null;
+    duplicate: boolean;
+    recorded: boolean;
+    withinWindow: boolean | null;
+    warnings: string[];
+    degraded: boolean;
+  }> {
+    if (!/^tr_[A-Za-z0-9._:-]{1,128}$/.test(traceId)) {
+      throw new SidecarSettlementError('not_found', 'trace 不存在', { status: 404 });
+    }
+    if (!isObject(body)) invalid('outcome 请求必须是对象');
+    const kind = body.kind;
+    if (typeof kind !== 'string' || !RECALL_OUTCOME_KINDS.includes(kind as RecallOutcomeKind)) {
+      invalid('outcome.kind 非法');
+    }
+    const source = body.source;
+    if (typeof source !== 'string' || !RECALL_OUTCOME_SOURCES.includes(source as RecallOutcomeSource)) {
+      invalid('outcome.source 必须是 host/console/heuristic');
+    }
+    let confidence: number | undefined;
+    if (body.confidence !== undefined && body.confidence !== null) {
+      if (typeof body.confidence !== 'number' || !Number.isFinite(body.confidence)
+        || body.confidence < 0 || body.confidence > 1) {
+        invalid('outcome.confidence 必须是 0..1 的数字');
+      }
+      confidence = body.confidence;
+    }
+    let note: string | undefined;
+    if (body.note !== undefined && body.note !== null) {
+      if (typeof body.note !== 'string' || body.note.length > MAX_OUTCOME_NOTE_CHARS) {
+        invalid(`outcome.note 必须是不超过 ${MAX_OUTCOME_NOTE_CHARS} 字符的字符串`);
+      }
+      note = body.note.trim();
+      if (note.length === 0) note = undefined;
+    }
+
+    // trace=off：没有本地 trace 可归因，明确降级且不学习。
+    if (this.config.trace !== 'local') {
+      return {
+        traceId,
+        outcome: null,
+        duplicate: false,
+        recorded: false,
+        withinWindow: null,
+        warnings: ['trace_off'],
+        degraded: true,
+      };
+    }
+
+    const trace = await this.local.store.getTrace(traceId);
+    if (!trace) throw new SidecarSettlementError('not_found', 'trace 不存在', { status: 404 });
+    // reset 前 trace 的迟到 outcome：明确不写 trace/policy，避免把刚清空的统计重新写脏。
+    if (trace.at < this.policyResetAt) {
+      return {
+        traceId,
+        outcome: trace.outcome ?? null,
+        duplicate: false,
+        recorded: false,
+        withinWindow: null,
+        warnings: ['outcome_before_reset'],
+        degraded: false,
+      };
+    }
+    const at = this.now();
+    const outcome: RecallOutcome = {
+      kind: kind as RecallOutcomeKind,
+      at,
+      source: source as RecallOutcomeSource,
+      ...(confidence !== undefined ? { confidence } : {}),
+      ...(note !== undefined ? { note } : {}),
+    };
+    const updated = await this.local.store.updateTraceOutcome(traceId, outcome, {
+      maxHistory: MAX_OUTCOME_HISTORY,
+    });
+    if (!updated) throw new SidecarSettlementError('not_found', 'trace 不存在', { status: 404 });
+
+    const windowMs = outcome.kind === 'ignored'
+      ? Math.max(this.config.intervention.outcomeWindowMs, IGNORED_OUTCOME_WINDOW_MS)
+      : this.config.intervention.outcomeWindowMs;
+    const withinWindow = at - trace.at <= windowMs;
+    if (!updated.duplicate) {
+      await this.recordPolicyOutcome(updated.trace, outcome.kind);
+    }
+    const warnings = !updated.duplicate && !withinWindow ? ['outcome_outside_window'] : [];
+    return {
+      traceId,
+      outcome: updated.trace.outcome ?? outcome,
+      duplicate: updated.duplicate,
+      recorded: !updated.duplicate,
+      withinWindow,
+      warnings,
       degraded: false,
     };
   }
@@ -1480,6 +1674,9 @@ export class RecallService {
       queryPreview: trace.queryPreview,
       domains: Array.isArray(trace.domains) ? trace.domains : trace.namespaces,
       silenceReason: trace.silenceReason ?? null,
+      decision: trace.decision ?? null,
+      applied: trace.applied ?? null,
+      outcome: trace.outcome ?? null,
       degraded: trace.degraded,
       feedback: trace.feedback ?? null,
       counts: {
@@ -2092,6 +2289,9 @@ export class RecallService {
       estimatedTokens: 0,
       estimatedBytes: 0,
       timing: { cueMs, fuzzyMs: 0, expandMs: 0, assembleMs: 0, totalMs: 0 },
+      decision: null,
+      applied: null,
+      effective: null,
     };
 
     const gate = this.gate(request, cue);
@@ -2186,13 +2386,28 @@ export class RecallService {
       return this.finish(run, mode, degraded);
     }
 
-    const expandStart = this.now();
-    await this.expandSelected(selected, cue, warnings);
-    run.timing.expandMs = elapsed(expandStart, this.now());
+    // 在这里决定「要不要带 memory fragments、带多深」；self/checkpoint 已经加载，
+    // 不受影响。off 只记录 baseline；shadow 只记录建议；heuristic/model 实际生效。
+    const intervention = await this.decideIntervention(run, selected, warnings);
+    run.decision = intervention.decision;
+    run.effective = intervention.effective;
+
+    if (intervention.inject.length === 0) {
+      run.selected = [];
+      run.timing.expandMs = 0;
+      run.silenceReason = intervention.decision.action === 'defer'
+        ? 'intervention_defer'
+        : 'intervention_silent';
+    } else {
+      run.selected = intervention.inject;
+      const expandStart = this.now();
+      await this.expandSelected(intervention.inject, cue, warnings, intervention.expansionPlan);
+      run.timing.expandMs = elapsed(expandStart, this.now());
+    }
 
     if (mode === 'context') {
       const assembleStart = this.now();
-      const assembled = this.assembleBlocks(selected, cue, warnings, {
+      const assembled = this.assembleBlocks(intervention.inject, cue, warnings, {
         bytes: (run.selfBlock?.bytes ?? 0) + (run.checkpointBlock?.bytes ?? 0),
         tokens: (run.selfBlock?.tokens ?? 0) + (run.checkpointBlock?.tokens ?? 0),
       });
@@ -2207,17 +2422,21 @@ export class RecallService {
       run.estimatedTokens = assembled.tokens + (run.selfBlock?.tokens ?? 0) + (run.checkpointBlock?.tokens ?? 0);
       run.timing.assembleMs = elapsed(assembleStart, this.now());
       if (assembled.blocks.length === 0 && !run.selfBlock && !run.checkpointBlock) {
-        run.silenceReason = assembled.silenceReason ?? 'budget_too_small';
-        if (assembled.truncated) pushWarning(warnings, 'budget_truncated');
+        if (intervention.inject.length > 0) {
+          run.silenceReason = assembled.silenceReason ?? 'budget_too_small';
+          if (assembled.truncated) pushWarning(warnings, 'budget_truncated');
+        } else {
+          run.silenceReason = run.silenceReason ?? 'no_memory';
+        }
       }
     } else {
-      run.selected = selected;
-      run.truncated = selected.some((candidate) => candidate.detail?.truncated === true);
-      run.estimatedTokens = selected.reduce((sum, candidate) => {
+      run.selected = intervention.inject;
+      run.truncated = intervention.inject.some((candidate) => candidate.detail?.truncated === true);
+      run.estimatedTokens = intervention.inject.reduce((sum, candidate) => {
         const text = candidate.fragment.gist + (candidate.detail?.text ?? '');
         return sum + estimateTokens(text);
       }, 0);
-      run.estimatedBytes = selected.reduce((sum, candidate) => {
+      run.estimatedBytes = intervention.inject.reduce((sum, candidate) => {
         const text = candidate.fragment.gist + (candidate.detail?.text ?? '');
         return sum + byteLength(text);
       }, 0);
@@ -2570,6 +2789,30 @@ export class RecallService {
     }
   }
 
+  /** 记录本轮 fragment ID → 源记录 ID；宿主下一轮可能把 mf_ ID 放进 alreadyInjectedIds。 */
+  private rememberFragmentAlias(fragmentId: string, sourceIds: readonly string[]): void {
+    if (sourceIds.length === 0) return;
+    this.fragmentAliases.set(fragmentId, [...sourceIds]);
+    while (this.fragmentAliases.size > MAX_FRAGMENT_ALIASES) {
+      const oldest = this.fragmentAliases.keys().next().value;
+      if (oldest === undefined) break;
+      this.fragmentAliases.delete(oldest);
+    }
+  }
+
+  /**
+   * alreadyInjectedIds 既可能是 source/record ID，也可能是宿主回传的 fragment ID（mf_…）。
+   * 新 fragment 每次召回的 ID 都不同，因此用别名表把旧 mf_ ID 展开为对应的源 ID；
+   * 未知 ID 原样保留，不产生任何匹配。
+   */
+  private resolveInjectedIds(ids: readonly string[]): string[] {
+    const resolved = new Set(ids);
+    for (const id of ids) {
+      for (const sourceId of this.fragmentAliases.get(id) ?? []) resolved.add(sourceId);
+    }
+    return [...resolved];
+  }
+
   private async buildCandidates(
     rawRecords: RawCandidate[],
     cue: Cue,
@@ -2577,7 +2820,7 @@ export class RecallService {
     warnings: string[],
   ): Promise<Candidate[]> {
     const candidates: Candidate[] = [];
-    const quota = new Set(request.alreadyInjectedIds);
+    const quota = new Set(this.resolveInjectedIds(request.alreadyInjectedIds));
     const now = this.now();
     for (const entry of rawRecords) {
       const record = entry.record;
@@ -2652,6 +2895,8 @@ export class RecallService {
         citations: citationsOf(record, kind),
         sourceIds,
       };
+      // 先记住别名：即使本轮被 other 规则过滤，宿主下一轮回传该 mf_ ID 也能解析。
+      this.rememberFragmentAlias(fragment.id, sourceIds);
 
       const candidate: Candidate = {
         record,
@@ -2666,7 +2911,10 @@ export class RecallService {
       };
       candidate.fragment.score = scoreCandidate(candidate, cue, now);
 
-      const sourceHit = sourceIds.find((id) => quota.has(id)
+      // 宿主级去重：quota 已把旧的 fragment ID（mf_…）通过别名表展开为 source ID；
+      // 这里再直接检查本轮 fragment.id，兼容在同一次召回上下文内回传 ID 的调用方。
+      // 顺序保持 sourceIds 优先；同一 ID 上 quarantine 仍优先于普通去重。
+      const sourceHit = [...sourceIds, fragment.id].find((id) => quota.has(id)
         || (this.quarantined.get(id) ?? 0) > now);
       if (sourceHit) {
         candidate.filteredReason = (this.quarantined.get(sourceHit) ?? 0) > now ? 'quarantined' : 'already_injected';
@@ -2792,8 +3040,308 @@ export class RecallService {
     return this.orderWithConflictGroups(selected, groupNameOf);
   }
 
-  private async expandSelected(selected: Candidate[], cue: Cue, warnings: string[]): Promise<void> {
-    const plan = this.expansionPlan(selected, cue, warnings);
+  private async decideIntervention(
+    run: RecallRun,
+    selected: Candidate[],
+    warnings: string[],
+  ): Promise<{
+    decision: InterventionDecision;
+    effective: NonNullable<RecallRun['effective']>;
+    inject: Candidate[];
+    expansionPlan: Map<string, string>;
+  }> {
+    const config = this.config.intervention;
+    const basePlan = this.expansionPlan(selected, run.cue, warnings);
+    const domain = selected[0]?.fragment.owner.domain ?? run.domains[0] ?? 'default';
+    const key = this.decisionKey(run);
+
+    if (config.mode === 'off') {
+      const decision = this.baselineDecision(run, selected, basePlan);
+      const effective = {
+        action: decision.action,
+        depth: decision.depth,
+        suppressed: [] as string[],
+        shadow: false,
+        domain,
+      };
+      return { decision, effective, inject: selected, expansionPlan: basePlan };
+    }
+
+    let threshold = config.minConfidence;
+    let recentUselessRate = 0;
+    let policyStats: InferenceInterventionStats = {
+      spoken: 0,
+      silent: 0,
+      accepted: 0,
+      reasked: 0,
+      corrected: 0,
+      missed: 0,
+      tooShallow: 0,
+      tooDeep: 0,
+    };
+    if (this.policyStore) {
+      try {
+        const stats = await this.policyStore.effectiveStats(run.request.agentId, domain);
+        recentUselessRate = stats.uselessRate;
+        policyStats = {
+          spoken: Math.round(stats.spoken),
+          silent: Math.round(stats.silent),
+          accepted: Math.round(stats.accepted),
+          reasked: Math.round(stats.reasked),
+          corrected: Math.round(stats.corrected),
+          missed: Math.round(stats.missed),
+          tooShallow: Math.round(stats.too_shallow),
+          tooDeep: Math.round(stats.too_deep),
+        };
+        threshold = await this.policyStore.thresholdFor(
+          run.request.agentId,
+          domain,
+          config.minConfidence,
+        );
+      } catch {
+        threshold = config.minConfidence;
+        recentUselessRate = 0;
+      }
+    }
+
+    const now = this.now();
+    const candidates: InterventionCandidateView[] = selected.map((candidate) => {
+      const fragment = candidate.fragment;
+      const at = fragment.time?.to
+        ?? fragment.time?.at
+        ?? fragment.time?.from
+        ?? fragment.provenance.at;
+      return {
+        fragmentId: fragment.id,
+        sourceIds: fragment.sourceIds,
+        score: fragment.score.final,
+        confidence: fragment.confidence,
+        kind: fragment.kind,
+        domain: fragment.owner.domain,
+        detailAvailable: fragment.detailAvailable,
+        conflict: Boolean(fragment.conflictGroup),
+        // 只给模型 gist；detail/正文绝不进入请求。
+        gist: fragment.gist,
+        ageDays: typeof at === 'number' && Number.isFinite(at) && at > 0
+          ? Math.max(0, (now - at) / (24 * 60 * 60 * 1000))
+          : 0,
+      };
+    });
+
+    const planInput: InterventionPlannerInput = {
+      mode: config.mode as InterventionMode,
+      cue: run.cue,
+      candidates,
+      alreadyInjectedIds: this.resolveInjectedIds(run.request.alreadyInjectedIds),
+      threshold,
+      recentUselessRate,
+      silentStreak: this.silentStreaks.get(key) ?? 0,
+      lastDecision: this.lastDecisions.get(key) ?? null,
+      maxSilentStreak: config.maxSilentStreak,
+      explorationRate: config.explorationRate,
+    };
+    // model 模式：must_speak 不调用模型；其余真实调用 provider，失败 fail-open。
+    const planned = config.mode === 'model'
+      ? await planInterventionAsync(planInput, {
+        planner: this.models,
+        allowRemote: run.request.allowRemote,
+        timeoutMs: config.modelTimeoutMs,
+        stats: policyStats,
+        hasCheckpoint: Boolean(run.checkpointBlock),
+        now: this.now,
+      })
+      : { decision: planIntervention(planInput), warnings: [] as string[] };
+    const decision = planned.decision;
+    for (const warning of planned.warnings) pushWarning(warnings, warning);
+
+    if (config.mode === 'shadow') {
+      // shadow 只记录建议；实际注入保持 baseline，且不得改变 warning/预算行为。
+      const baseline = this.baselineDecision(run, selected, basePlan);
+      const effective = {
+        action: baseline.action,
+        depth: baseline.depth,
+        suppressed: [] as string[],
+        shadow: true,
+        domain,
+      };
+      return { decision, effective, inject: selected, expansionPlan: basePlan };
+    }
+
+    const speak = decision.action === 'speak';
+    const inject = speak ? selected : [];
+    const suppressed = speak ? [] : selected.map((candidate) => candidate.fragment.id);
+    const expansionPlan = speak
+      ? decision.depth === 'gist'
+        ? new Map<string, string>()
+        : this.ensureExpansionPlan(basePlan, selected, decision.depth)
+      : new Map<string, string>();
+
+    if (!speak) {
+      pushWarning(warnings, decision.action === 'defer' ? 'intervention_defer' : 'intervention_silent');
+    }
+    if (decision.reason === 'must_speak_unavailable') {
+      pushWarning(warnings, 'must_speak_unavailable');
+    } else if (decision.mustSpeak && decision.degraded) {
+      pushWarning(warnings, 'must_speak_gist');
+    }
+
+    const effective = {
+      action: decision.action,
+      depth: decision.depth,
+      suppressed,
+      shadow: false,
+      domain,
+    };
+    return { decision, effective, inject, expansionPlan };
+  }
+
+  private async ensureDecision(run: RecallRun, warnings: string[]): Promise<void> {
+    if (run.decision) return;
+    const config = this.config.intervention;
+    const blocked = NON_INTERVENTION_SILENCE.has(run.silenceReason ?? '');
+    if (config.mode === 'off' || blocked) {
+      const decision = this.baselineDecision(run, run.selected, new Map());
+      run.decision = decision;
+      run.effective = {
+        action: decision.action,
+        depth: decision.depth,
+        suppressed: [],
+        shadow: false,
+        domain: run.domains[0] ?? 'default',
+      };
+      return;
+    }
+
+    const key = this.decisionKey(run);
+    const domain = run.domains[0] ?? 'default';
+    const decision = planIntervention({
+      mode: config.mode as InterventionMode,
+      cue: run.cue,
+      candidates: [],
+      alreadyInjectedIds: this.resolveInjectedIds(run.request.alreadyInjectedIds),
+      threshold: config.minConfidence,
+      recentUselessRate: 0,
+      silentStreak: this.silentStreaks.get(key) ?? 0,
+      lastDecision: this.lastDecisions.get(key) ?? null,
+      maxSilentStreak: config.maxSilentStreak,
+      explorationRate: config.explorationRate,
+    });
+    if (config.mode === 'shadow') {
+      const baseline = this.baselineDecision(run, run.selected, new Map());
+      run.decision = decision;
+      run.effective = {
+        action: baseline.action,
+        depth: baseline.depth,
+        suppressed: [],
+        shadow: true,
+        domain,
+      };
+      return;
+    }
+    if (decision.reason === 'must_speak_unavailable') {
+      pushWarning(warnings, 'must_speak_unavailable');
+    }
+    run.decision = decision;
+    run.effective = {
+      action: decision.action,
+      depth: decision.depth,
+      suppressed: [],
+      shadow: false,
+      domain,
+    };
+  }
+
+  private baselineDecision(
+    run: RecallRun,
+    selected: Candidate[],
+    plan: Map<string, string>,
+  ): InterventionDecision {
+    const top = selected[0];
+    if (!top) {
+      const hasSelfCheckpoint = Boolean(run.selfBlock || run.checkpointBlock);
+      return {
+        action: 'silent',
+        depth: 'gist',
+        confidence: 0,
+        reason: hasSelfCheckpoint ? 'self_checkpoint_only' : (run.silenceReason ?? 'no_memory'),
+        policyVersion: 'v0-baseline',
+        enforced: false,
+      };
+    }
+    return {
+      action: 'speak',
+      depth: depthFromPlan(plan),
+      confidence: Number(Math.min(1, Math.max(0, top.fragment.score.final)).toFixed(4)),
+      reason: 'baseline',
+      policyVersion: 'v0-baseline',
+      enforced: false,
+    };
+  }
+
+  private ensureExpansionPlan(
+    base: Map<string, string>,
+    selected: Candidate[],
+    depth: RecallDepth,
+  ): Map<string, string> {
+    const plan = new Map(base);
+    const top = selected[0];
+    if (!top) return plan;
+    const topId = top.fragment.id;
+    if (depth === 'quote') {
+      if (!QUOTE_EXPANSION_REASONS.has(plan.get(topId) ?? '')) {
+        plan.set(topId, 'quote_request');
+      }
+    } else if (plan.size === 0 || !plan.has(topId)) {
+      plan.set(topId, 'intervention_detail');
+    }
+    return plan;
+  }
+
+  private decisionKey(run: RecallRun): string {
+    return [run.request.agentId, run.request.threadId ?? '', run.request.checkpointDomain ?? ''].join('\u0000');
+  }
+
+  private noteIntervention(key: string, action: InterventionAction, depth: RecallDepth): void {
+    this.lastDecisions.set(key, { action, depth });
+    if (action === 'speak') {
+      this.silentStreaks.set(key, 0);
+      return;
+    }
+    this.silentStreaks.set(key, (this.silentStreaks.get(key) ?? 0) + 1);
+  }
+
+  private async recordPolicyDecision(
+    agentId: string,
+    domain: string,
+    action: InterventionAction,
+  ): Promise<void> {
+    if (!this.policyStore || this.config.trace !== 'local') return;
+    try {
+      await this.policyStore.recordDecision({ agentId, domain, action });
+    } catch {
+      // 策略统计失败不得影响召回主流程。
+    }
+  }
+
+  private async recordPolicyOutcome(
+    trace: RecallTrace,
+    kind: RecallOutcomeKind,
+  ): Promise<void> {
+    if (!this.policyStore || this.config.trace !== 'local') return;
+    const domain = trace.applied?.domain ?? trace.domains?.[0] ?? 'default';
+    try {
+      await this.policyStore.recordOutcome({ agentId: trace.agentId, domain, kind });
+    } catch {
+      // fail-open：outcome 已写入 trace，统计失败不阻塞宿主。
+    }
+  }
+
+  private async expandSelected(
+    selected: Candidate[],
+    cue: Cue,
+    warnings: string[],
+    plan: Map<string, string>,
+  ): Promise<void> {
     for (const candidate of selected) {
       const reason = plan.get(candidate.fragment.id);
       if (!reason) continue;
@@ -3336,6 +3884,9 @@ export class RecallService {
     degraded = run.degraded,
   ): Promise<RecallResponse & { blocks?: ContextBlock[] }> {
     const warnings = dedupe(run.warnings);
+    // gate / 非人类 turn / mute 等不是策略决策，不能计入 spoken/silent。
+    const policyBlocked = NON_INTERVENTION_SILENCE.has(run.silenceReason ?? '');
+    await this.ensureDecision(run, warnings);
     const fragments = run.selected.map((candidate) => ({
       ...candidate.fragment,
       ...(candidate.fragment.detail ? { detail: { ...candidate.fragment.detail } } : {}),
@@ -3356,6 +3907,54 @@ export class RecallService {
       ? run.silenceReason ?? 'no_blocks'
       : run.silenceReason;
     if (mode === 'context' && contextBlocks.length > 0) run.silenceReason = null;
+
+    // 任何路径（gate/无命中/策略沉默）都有 decision；off 与早期返回使用 baseline。
+    const decision = run.decision ?? this.baselineDecision(run, run.selected, new Map());
+    if (decision.degraded) degraded = true;
+    // context 以实际展开后的 blocks 为准；预算裁掉或未注入时不能报成 speak。
+    const injectedIds = mode === 'context'
+      ? new Set(run.blocks.flatMap((block) => block.fragments))
+      : new Set(fragments.map((fragment) => fragment.id));
+    const injectedFragments = fragments.filter((fragment) => injectedIds.has(fragment.id));
+    const injectedCount = mode === 'context'
+      ? run.blocks.reduce((sum, block) => sum + block.fragments.length, 0)
+      : fragments.length;
+    const actualDepth: RecallDepth = injectedCount === 0
+      ? 'gist'
+      : injectedFragments.some((fragment) => fragment.detail?.format === 'verbatim')
+        ? 'quote'
+        : injectedFragments.some((fragment) => fragment.detail && fragment.detail.format !== 'summary')
+          ? 'detail'
+          : 'gist';
+    const action: InterventionAction = injectedCount > 0
+      ? 'speak'
+      : run.effective?.action === 'defer' ? 'defer' : 'silent';
+    const applied: AppliedIntervention = {
+      action,
+      depth: actualDepth,
+      fragments: injectedCount,
+      domain: run.effective?.domain ?? run.domains[0] ?? 'default',
+      ...(run.effective?.suppressed && run.effective.suppressed.length > 0
+        ? { suppressed: [...run.effective.suppressed] }
+        : {}),
+      ...(run.effective?.shadow
+        ? { wouldAction: decision.action, wouldDepth: decision.depth }
+        : {}),
+      ...(decision.degraded ? { degraded: true } : {}),
+    };
+    run.decision = decision;
+    run.applied = applied;
+
+    // 决策计数与连续沉默都必须在实际注入结果之后：shadow 记 baseline、
+    // 预算裁剪记 silent，不能记未生效的建议。每个 /context 只记一次。
+    if (!policyBlocked) {
+      this.noteIntervention(this.decisionKey(run), applied.action, applied.depth);
+      await this.recordPolicyDecision(
+        run.request.agentId,
+        applied.domain ?? run.domains[0] ?? 'default',
+        applied.action,
+      );
+    }
 
     if (degraded && warnings.length === 0) warnings.push('degraded');
     if (silenceReason) this.silent += 1;
@@ -3384,6 +3983,8 @@ export class RecallService {
       warnings: dedupe(warnings),
       silenceReason,
       traceId: trace.traceId,
+      decision,
+      applied,
       timing,
     };
 
@@ -3521,6 +4122,8 @@ export class RecallService {
       model: { query: run.queryPlan.source, extractor: 'heuristic' },
       degraded,
       warnings: [...warnings],
+      ...(run.decision ? { decision: { ...run.decision } } : {}),
+      ...(run.applied ? { applied: { ...run.applied } } : {}),
     };
 
     try {
@@ -3537,4 +4140,12 @@ export class RecallService {
 
 function groupNameOf(candidate: Candidate): string | undefined {
   return candidate.fragment.conflictGroup;
+}
+
+const QUOTE_EXPANSION_REASONS = new Set(['quote_request', 'command_request', 'exact_value']);
+
+function depthFromPlan(plan: Map<string, string>): RecallDepth {
+  const reasons = [...plan.values()];
+  if (reasons.some((reason) => QUOTE_EXPANSION_REASONS.has(reason))) return 'quote';
+  return reasons.length > 0 ? 'detail' : 'gist';
 }

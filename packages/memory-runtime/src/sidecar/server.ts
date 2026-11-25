@@ -284,6 +284,11 @@ export interface SidecarStatusSnapshot {
   warnings: string[];
   /** 最近的沉降错误；不包含正文/token。 */
   lastError: SidecarStatusError | null;
+  /** 0.4.0 本机策略统计只读状态；不包含路径/token。 */
+  policy?: {
+    degraded: boolean;
+    lastError: { code: string; at: number } | null;
+  };
   /** 模型安装/引擎/推荐状态；不包含 token/path。 */
   inference?: InferenceStatusView;
 }
@@ -304,6 +309,15 @@ export interface SidecarIngestApi {
 
 export interface SidecarNamespacesApi {
   getNamespaces(agentId: string | null): Promise<NamespacesView>;
+}
+
+/** 0.4.0 介入策略运维面（Console reset）。 */
+export interface SidecarInterventionApi {
+  resetInterventionPolicy(): Promise<{
+    reset: true;
+    policyVersion: string;
+    removedDomains: number;
+  }>;
 }
 
 /** 召回/上下文/trace 的 host API；由 RecallService 实现。 */
@@ -350,6 +364,15 @@ export interface SidecarRecallApi {
     warnings: string[];
     degraded: boolean;
   }>;
+  submitOutcome(traceId: string, body: unknown): Promise<{
+    traceId: string;
+    outcome: unknown | null;
+    duplicate: boolean;
+    recorded: boolean;
+    withinWindow: boolean | null;
+    warnings: string[];
+    degraded: boolean;
+  }>;
 }
 
 export interface SidecarServerOptions {
@@ -363,6 +386,7 @@ export interface SidecarServerOptions {
   namespaces?: SidecarNamespacesApi;
   recall?: SidecarRecallApi;
   objects?: SidecarObjectsApi;
+  intervention?: SidecarInterventionApi;
   /** inference host API；缺省时 /models 返回 501。 */
   inference?: InferenceApi;
   /** 动态降级标记（沉降/outbox）；与显式 degraded 取或。 */
@@ -519,6 +543,7 @@ export class SidecarServer {
   private readonly namespaces?: SidecarNamespacesApi;
   private readonly recall?: SidecarRecallApi;
   private readonly objects?: SidecarObjectsApi;
+  private readonly intervention?: SidecarInterventionApi;
   private readonly inference?: InferenceApi;
   private readonly getDegraded?: () => boolean;
   private readonly now: () => number;
@@ -544,6 +569,7 @@ export class SidecarServer {
     this.namespaces = options.namespaces;
     this.recall = options.recall;
     this.objects = options.objects;
+    this.intervention = options.intervention;
     this.inference = options.inference;
     this.getDegraded = options.getDegraded;
     this.state = options.state ?? 'starting';
@@ -1030,6 +1056,13 @@ export class SidecarServer {
             checkpoint: this.mode === 'immersive' && Boolean(this.objects),
             compact: this.mode === 'immersive' && Boolean(this.objects),
             self: this.mode === 'immersive' && Boolean(this.objects),
+            intervention: {
+              decision: this.mode === 'immersive' && Boolean(this.recall),
+              outcome: this.mode === 'immersive' && Boolean(this.recall),
+              shadow: Boolean(this.recall),
+              reset: this.mode === 'immersive' && Boolean(this.intervention),
+              mode: this.config.intervention.mode,
+            },
             models: {
               install: this.mode === 'immersive' && modelCapabilities.install,
               activate: this.mode === 'immersive' && modelCapabilities.activate,
@@ -1281,6 +1314,28 @@ export class SidecarServer {
         req.resume();
         const job = await this.inference.cancelInstall(jobId);
         this.send(res, 200, this.envelope(requestId, job, job.warnings, false));
+        return;
+      }
+
+      if (relative === 'intervention/reset') {
+        if (!isPost) {
+          req.resume();
+          this.sendError(res, 405, requestId, 'method_not_allowed', 'intervention/reset 仅接受 POST');
+          return;
+        }
+        if (!this.intervention) {
+          req.resume();
+          this.sendError(res, 501, requestId, 'not_implemented', 'intervention 尚未启用');
+          return;
+        }
+        if (this.state === 'stopping') {
+          req.resume();
+          this.sendError(res, 503, requestId, 'stopping', 'sidecar 正在停止', undefined, true);
+          return;
+        }
+        req.resume();
+        const result = await this.intervention.resetInterventionPolicy();
+        this.send(res, 200, this.envelope(requestId, result, [], false));
         return;
       }
 
@@ -1551,14 +1606,15 @@ export class SidecarServer {
 
       if (relative.startsWith('recall/')) {
         const parts = relative.split('/');
-        if (parts.length !== 3 || (parts[2] !== 'feedback' && parts[2] !== 'expand')) {
+        if (parts.length !== 3
+          || (parts[2] !== 'feedback' && parts[2] !== 'expand' && parts[2] !== 'outcome')) {
           req.resume();
           this.sendError(res, 404, requestId, 'not_found', '未知召回路径');
           return;
         }
         if (!isPost) {
           req.resume();
-          this.sendError(res, 405, requestId, 'method_not_allowed', 'feedback/expand 仅接受 POST');
+          this.sendError(res, 405, requestId, 'method_not_allowed', 'feedback/expand/outcome 仅接受 POST');
           return;
         }
         if (!this.recall) {
@@ -1581,6 +1637,11 @@ export class SidecarServer {
         if (parts[2] === 'expand') {
           const result = await this.recall.expandRecall(traceId, body);
           this.send(res, 200, this.envelope(requestId, result.data, result.warnings, result.degraded));
+          return;
+        }
+        if (parts[2] === 'outcome') {
+          const result = await this.recall.submitOutcome(traceId, body);
+          this.send(res, 200, this.envelope(requestId, result, result.warnings, result.degraded));
           return;
         }
         const result = await this.recall.submitFeedback(traceId, body);

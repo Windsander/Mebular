@@ -33,6 +33,9 @@ import type { SidecarLocalLayer } from './local-layer.js';
 import type { OutboxItem } from './local-layer.js';
 import type { SidecarInferenceProvider } from './inference-provider.js';
 import { OutboxReplayer } from './outbox-replayer.js';
+import { SidecarSettlementError } from './errors.js';
+import { INTERVENTION_POLICY_VERSION } from './intervention.js';
+import { PolicyStore } from './policy-store.js';
 import {
   RecallService,
   type ContextResponse,
@@ -56,6 +59,10 @@ export interface SettlementRuntimeOptions {
   policy?: SidecarPolicy | null;
   inference?: SidecarInferenceProvider | null;
   policyPath?: string;
+  /** `<dataDir>/policy/state.json`；缺省不启用本机策略学习。 */
+  policyStatePath?: string;
+  /** 测试注入；优先于 policyStatePath。 */
+  policyStore?: PolicyStore | null;
   lifecycle?: LifecycleGate | null;
   /** WP5：脱敏运行日志；状态只暴露计数/最近错误，不返回日志正文路径。 */
   diagnostics?: DiagnosticLog | null;
@@ -404,6 +411,8 @@ export class SettlementRuntime {
   readonly replayer: OutboxReplayer;
   readonly recall: RecallService;
   readonly objects: MemoryObjectService;
+  /** 0.4.0 本机介入策略统计；未配置路径时为 null。 */
+  readonly policyStore: PolicyStore | null;
 
   private readonly client: CapabilityClient | null;
   private readonly inference: SidecarInferenceProvider | null;
@@ -461,6 +470,16 @@ export class SettlementRuntime {
       ...(options.lifecycle ? { lifecycle: options.lifecycle } : {}),
       ...(options.now ? { now: options.now } : {}),
     });
+    const policyStore = options.policyStore ?? (
+      options.policyStatePath
+        ? new PolicyStore({
+          path: options.policyStatePath,
+          ttlDays: options.config.intervention.policyTtlDays,
+          ...(options.now ? { now: options.now } : {}),
+        })
+        : null
+    );
+    this.policyStore = policyStore;
     this.recall = new RecallService({
       config: options.config,
       local: options.local,
@@ -474,6 +493,7 @@ export class SettlementRuntime {
       policy: this.policy,
       getPolicy: () => this.policy,
       checkpointSource: this.objects,
+      policyStore,
       ...(this.inference ? { inference: this.inference } : {}),
       ...(options.lifecycle ? { lifecycle: options.lifecycle } : {}),
       ...(options.now ? { now: options.now } : {}),
@@ -562,6 +582,14 @@ export class SettlementRuntime {
         this.recall.setPolicy(this.policy);
       }
     }
+    if (this.policyStore) {
+      try {
+        await this.policyStore.init();
+      } catch {
+        // 策略统计不可用不能阻塞 sidecar 启动；召回照常，只是不学习。
+        // PolicyStore.init() 已在内部记录 degraded/lastError，这里不重复维护状态。
+      }
+    }
     await this.ingest.init();
     const beforeStagingCleanup = (ids: readonly string[]) => this.ingest.expireStagingDependencies(ids);
     this.local.setMaintenanceDependencyHandler(beforeStagingCleanup);
@@ -578,16 +606,30 @@ export class SettlementRuntime {
 
   async stop(): Promise<void> {
     this.local.stopMaintenance();
+    // 先把 write-behind 策略统计落盘（失败只标记 degraded，不阻塞停止）。
+    await this.flushPolicy();
     // 先让 replayer 在 finalize 仍可用时完成有界 flush，再关闭收口入口。
     await this.replayer.stop({ flushMs: 2000 });
     this.ingest.stop();
   }
 
   get degraded(): boolean {
-    return this.ingest.isDegraded
+    return this.policyStore?.isDegraded === true
+      || this.ingest.isDegraded
       || this.recall.isDegraded
       || this.objects.isDegraded
       || this.inference?.currentStatus().degraded === true;
+  }
+
+  /** 运维/停止时显式落盘策略统计；返回 false 表示本次 flush 失败。 */
+  async flushPolicy(): Promise<boolean> {
+    if (!this.policyStore) return true;
+    try {
+      await this.policyStore.flush();
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   get stats(): IngestStatsSnapshot {
@@ -671,6 +713,34 @@ export class SettlementRuntime {
 
   submitFeedback(traceId: string, body: unknown) {
     return this.recall.submitFeedback(traceId, body);
+  }
+
+  submitOutcome(traceId: string, body: unknown) {
+    return this.recall.submitOutcome(traceId, body);
+  }
+
+  /** Console/CLI reset 入口：清空本机策略统计；不影响记忆或 trace。 */
+  async resetInterventionPolicy(): Promise<{
+    reset: true;
+    policyVersion: string;
+    removedDomains: number;
+  }> {
+    if (!this.policyStore) {
+      throw new SidecarSettlementError('intervention_unavailable', '介入策略未启用或本机策略状态不可用', {
+        status: 409,
+      });
+    }
+    try {
+      const removedDomains = await this.policyStore.reset();
+      // 只清运行中状态，不动记忆/trace；之后旧 trace 的迟到 outcome 会被挡住。
+      this.recall.resetInterventionState();
+      return { reset: true, policyVersion: INTERVENTION_POLICY_VERSION, removedDomains };
+    } catch {
+      throw new SidecarSettlementError('intervention_unavailable', '本机策略状态不可写', {
+        status: 503,
+        retryable: true,
+      });
+    }
   }
 
   async reloadPolicy(): Promise<string[]> {
@@ -895,6 +965,10 @@ export class SettlementRuntime {
       outbox: outboxView,
       details,
       lastError: lastError ?? ingest.lastError,
+      policy: {
+        degraded: this.policyStore?.isDegraded === true,
+        lastError: this.policyStore?.lastError ?? null,
+      },
     };
   }
 }

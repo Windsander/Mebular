@@ -3907,6 +3907,17 @@ function runtimeSidecarReady(status = state.runtime.status) {
   return status?.enabled === true && ['ready', 'degraded'].includes(status?.state);
 }
 
+/** 重置按钮：只在可写、非 mock、sidecar ready/degraded 时可用；禁用时说明原因。 */
+function syncRuntimePolicyReset() {
+  const button = $('#runtime-policy-reset');
+  if (!button) return;
+  const ready = state.features.writes === true && !MOCK && runtimeSidecarReady();
+  button.disabled = !ready;
+  button.title = ready
+    ? t('runtime.policy.reset')
+    : (state.features.writes !== true || MOCK ? t('settings.runtime.readonly') : t('runtime.policy.resetUnavailable'));
+}
+
 /** 模型目录只在设置 advanced/runtime 或运行时视图可见时加载；动作后可直接 reload。 */
 function runtimeWantsModelCatalog() {
   if (MOCK) return true;
@@ -4395,6 +4406,27 @@ async function runtimeTraceFeedback(traceId, useful) {
   }
 }
 
+async function resetInterventionPolicy() {
+  if (MOCK) { showToast(t('common.mockReadOnly')); return; }
+  if (!state.features.writes) { showToast(t('settings.runtime.readonly')); return; }
+  if (!runtimeSidecarReady()) { showToast(t('runtime.policy.resetUnavailable')); return; }
+  const ok = await confirmModal({
+    title: t('runtime.policy.resetConfirmTitle'),
+    body: t('runtime.policy.resetConfirmBody'),
+    confirmLabel: t('runtime.policy.resetConfirm'),
+  });
+  if (!ok) return;
+  try {
+    await api('/admin/api/memory-runtime/policy/reset', { method: 'POST', body: {} });
+    showToast(t('runtime.policy.resetDone'));
+    state.runtime.loadedAt = 0;
+    await ensureRuntimeData({ force: true });
+    renderRuntime();
+  } catch (error) {
+    showToast(t('runtime.policy.resetFailed', { message: localizeError(error, 'errors.unknown') }));
+  }
+}
+
 async function loadRuntimeTrace(id) {
   if (!id) return;
   if (state.runtime.traceDetails?.[id]?.loading) return;
@@ -4463,6 +4495,120 @@ function runtimeTraceProvenanceText(entry) {
   ].filter((part) => typeof part === 'string' && part.length > 0).join(' · ');
 }
 
+function runtimeTraceEnumLabel(group, value) {
+  if (typeof value !== 'string' || value.length === 0) return '—';
+  const key = `runtime.trace.${group}.${value}`;
+  return t.has(key) ? t(key) : value;
+}
+
+function runtimeTraceReasonText(reason) {
+  if (typeof reason !== 'string' || reason.length === 0) return '—';
+  const key = `runtime.trace.reason.${reason.replace(/[^a-z0-9_]/gi, '_')}`;
+  return t.has(key) ? t(key) : reason;
+}
+
+/**
+ * shadow 的可靠信号：applied 上有反事实建议键，或 runtime 显式给了 decision.shadow=true。
+ * 不能用 decision.enforced === false（off baseline 同样是 false），
+ * 也不能用 applied.suppressed（heuristic silent/defer 也会带，且实际可能是 id 数组）。
+ */
+function runtimeTraceIsShadow(decision, applied) {
+  return (applied && (applied.wouldAction !== undefined
+    || applied.wouldDepth !== undefined))
+    || decision?.shadow === true;
+}
+
+function runtimeTracePolicyHtml(data) {
+  const decision = data?.decision && typeof data.decision === 'object' ? data.decision : null;
+  const applied = data?.applied && typeof data.applied === 'object' ? data.applied : null;
+  const outcome = data?.outcome && typeof data.outcome === 'object' ? data.outcome : null;
+  const history = Array.isArray(data?.outcomeHistory)
+    ? data.outcomeHistory.filter((entry) => entry && typeof entry === 'object')
+    : [];
+  if (!decision && !applied && !outcome && history.length === 0) return '';
+  const shadow = runtimeTraceIsShadow(decision, applied);
+  const kv = (rows) => `<dl class="rt-policy-kv">${rows.map(([label, value]) => (
+    `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(String(value ?? '—'))}</dd></div>`
+  )).join('')}</dl>`;
+  const block = (attr, title, rows, extra = '') => `<div class="rt-policy-block" ${attr}>
+    <h4>${escapeHtml(title)}</h4>${kv(rows)}${extra}
+  </div>`;
+  const blocks = [];
+  if (decision) {
+    const rows = [
+      [t('runtime.trace.decision.action'), runtimeTraceEnumLabel('action', decision.action)],
+      [t('runtime.trace.decision.depth'), runtimeTraceEnumLabel('depth', decision.depth)],
+    ];
+    if (typeof decision.confidence === 'number') {
+      rows.push([t('runtime.trace.decision.confidence'), decision.confidence.toFixed(2)]);
+    }
+    rows.push([t('runtime.trace.decision.reason'), runtimeTraceReasonText(decision.reason)]);
+    rows.push([t('runtime.trace.decision.policyVersion'), decision.policyVersion || '—']);
+    rows.push([
+      t('runtime.trace.decision.enforced'),
+      decision.enforced === true
+        ? t('runtime.trace.decision.enforcedYes')
+        : decision.enforced === false
+          ? (shadow ? t('runtime.trace.decision.enforcedNo') : '—')
+          : '—',
+    ]);
+    const offPolicy = decision.enforced === false && !shadow;
+    blocks.push(block(
+      'data-rt-trace-decision',
+      t('runtime.trace.decision'),
+      rows,
+      offPolicy ? `<p class="crt-warn" data-rt-trace-policy-off>${escapeHtml(t('runtime.trace.decision.enforcedOff'))}</p>` : '',
+    ));
+  }
+  if (applied) {
+    const fragments = typeof applied.fragments === 'number'
+      ? applied.fragments
+      : Array.isArray(applied.fragments) ? applied.fragments.length : null;
+    const rows = [
+      [t('runtime.trace.applied.action'), runtimeTraceEnumLabel('action', applied.action)],
+      [t('runtime.trace.applied.depth'), runtimeTraceEnumLabel('depth', applied.depth)],
+      [t('runtime.trace.applied.fragments'), typeof fragments === 'number' ? String(fragments) : '—'],
+    ];
+    let extra = '';
+    if (shadow && (applied.wouldAction !== undefined || applied.wouldDepth !== undefined)) {
+      const wouldAction = runtimeTraceEnumLabel('action', applied.wouldAction);
+      const wouldDepth = runtimeTraceEnumLabel('depth', applied.wouldDepth);
+      extra = `<p class="crt-warn" data-rt-trace-suggestion data-rt-trace-would-action="${escapeHtml(applied.wouldAction ?? '')}" data-rt-trace-would-depth="${escapeHtml(applied.wouldDepth ?? '')}">${escapeHtml(t('runtime.trace.applied.suggestion', { action: wouldAction, depth: wouldDepth }))}</p>`;
+    }
+    blocks.push(block('data-rt-trace-applied', t('runtime.trace.applied'), rows, extra));
+  }
+  if (outcome) {
+    const rows = [
+      [t('runtime.trace.outcome.kind'), runtimeTraceEnumLabel('outcomeKind', outcome.kind)],
+      [t('runtime.trace.outcome.source'), outcome.source || '—'],
+      [t('runtime.trace.outcome.at'), typeof outcome.at === 'number' ? formatTime(outcome.at) : '—'],
+    ];
+    if (typeof outcome.confidence === 'number') {
+      rows.push([t('runtime.trace.outcome.confidence'), outcome.confidence.toFixed(2)]);
+    }
+    if (typeof outcome.note === 'string' && outcome.note.length > 0) {
+      rows.push([t('runtime.trace.outcome.note'), outcome.note]);
+    }
+    blocks.push(block('data-rt-trace-outcome', t('runtime.trace.outcome'), rows));
+  }
+  if (history.length > 0) {
+    const items = history.slice(0, 5).map((entry) => {
+      const parts = [
+        runtimeTraceEnumLabel('outcomeKind', entry.kind),
+        entry.source || '—',
+        typeof entry.at === 'number' ? formatTime(entry.at) : '—',
+        typeof entry.note === 'string' && entry.note.length > 0 ? entry.note : null,
+      ].filter(Boolean);
+      return `<li>${escapeHtml(parts.join(' · '))}</li>`;
+    }).join('');
+    blocks.push(`<div class="rt-policy-block" data-rt-trace-outcome-history>
+      <h4>${escapeHtml(t('runtime.trace.outcome.history'))}</h4>
+      <ul class="rt-policy-history">${items}</ul>
+    </div>`);
+  }
+  return `<div class="rt-policy" data-rt-trace-policy>${blocks.join('')}</div>`;
+}
+
 function runtimeTraceDetailHtml(trace, detail) {
   if (!trace) return '';
   const traceId = escapeHtml(trace.id);
@@ -4522,6 +4668,7 @@ function runtimeTraceDetailHtml(trace, detail) {
   const canFeedback = state.features.writes && !MOCK && runtimeSidecarReady();
   return wrap(`
     <p class="rt-detail-id"><span>${escapeHtml(t('runtime.trace.id'))}</span> <code>${traceId}</code></p>
+    ${runtimeTracePolicyHtml(data)}
     ${reasons.length > 0 ? `<ul class="runtime-trace-why">${reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join('')}</ul>` : ''}
     ${hitHtml}
     ${citations.size > 0 ? `<p class="rt-detail-preview">${escapeHtml(t('runtime.trace.citations', { citations: [...citations].join(' · ') }))}</p>` : ''}
@@ -4561,14 +4708,25 @@ function renderRuntimeTraces() {
     const open = state.runtime.traceOpen?.[trace.id] === true;
     const detail = state.runtime.traceDetails?.[trace.id];
     const feedback = detail?.trace?.feedback ?? trace.feedback;
+    const decision = trace.decision && typeof trace.decision === 'object' ? trace.decision : null;
+    const applied = trace.applied && typeof trace.applied === 'object' ? trace.applied : null;
+    const outcome = trace.outcome && typeof trace.outcome === 'object' ? trace.outcome : null;
     const counts = trace.counts ?? {};
     const candidateCount = Number.isInteger(counts.candidates) ? counts.candidates : 0;
     const injectedCount = Number.isInteger(counts.injected) ? counts.injected : 0;
     const tookMs = trace.timing?.totalMs ?? trace.tookMs ?? 0;
     const model = trace.model?.query ?? trace.model?.embedding ?? trace.model?.extractor ?? '—';
     const domains = Array.isArray(trace.domains) ? trace.domains : Array.isArray(trace.namespaces) ? trace.namespaces : [];
+    const silent = applied?.action === 'silent'
+      || (!applied && typeof trace.silenceReason === 'string' && trace.silenceReason.length > 0);
+    const deferred = applied?.action === 'defer';
+    const shadow = runtimeTraceIsShadow(decision, applied);
     const badges = [
       trace.degraded ? `<span class="crt-tag crt-tag-warn">${escapeHtml(t('runtime.trace.degraded'))}</span>` : '',
+      silent ? `<span class="crt-tag rt-tag-silent" data-rt-trace-silent>${escapeHtml(t('runtime.trace.marker.silent'))}</span>` : '',
+      deferred ? `<span class="crt-tag rt-tag-defer" data-rt-trace-defer>${escapeHtml(t('runtime.trace.marker.defer'))}</span>` : '',
+      outcome?.kind === 'missed' ? `<span class="crt-tag rt-tag-missed" data-rt-trace-missed>${escapeHtml(t('runtime.trace.marker.missed'))}</span>` : '',
+      shadow ? `<span class="crt-tag rt-tag-shadow" data-rt-trace-shadow>${escapeHtml(t('runtime.trace.marker.shadow'))}</span>` : '',
       feedback ? `<span class="crt-tag ${feedback.useful ? 'crt-tag-ok' : 'crt-tag-error'}">${escapeHtml(t(feedback.useful ? 'runtime.trace.feedbackUseful' : 'runtime.trace.feedbackNotUseful'))}</span>` : '',
     ].filter(Boolean).join(' ');
     const metaText = `${t('runtime.trace.took', { ms: tookMs })} · ${t('runtime.trace.hits', { count: candidateCount })} · ${t('runtime.trace.injected', { count: injectedCount })} · ${t('runtime.trace.model', { model })}`;
@@ -4590,6 +4748,7 @@ function renderRuntimeTraces() {
 }
 
 function renderRuntime() {
+  syncRuntimePolicyReset();
   if (state.view !== 'runtime') return;
   const root = $('#runtime-status');
   if (!root) return;
@@ -5782,6 +5941,9 @@ $('#runtime-refresh')?.addEventListener('click', () => {
     await ensureRuntimeData({ force: true });
     renderRuntime();
   })();
+});
+$('#runtime-policy-reset')?.addEventListener('click', () => {
+  void resetInterventionPolicy();
 });
 $('#runtime-view')?.addEventListener('click', (event) => {
   const traceToggle = event.target.closest('[data-rt-trace]');

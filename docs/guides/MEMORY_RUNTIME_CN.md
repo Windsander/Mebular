@@ -189,6 +189,150 @@ ContextCheckpoint 始终是 `task:<threadId>` 或 `default` 中的图对象；�
   宿主已停止。revision/lease 是本地乐观并发加跨同步副本的协作提示，不是强跨设备一致性或
   agent 认证。
 
+## 介入策略（Intervention policy，0.4.0）
+
+0.4.0 在现有“粗到细”召回之上增加可选的**记忆介入策略**：由 sidecar 决定这一轮是否要带
+长期记忆片段、带多深。本线仍在 0.4.0 目标阶段、**尚未发布**；这里写的是 0.4.0 目标
+契约，不是已发布的默认行为。
+
+默认不变：`intervention.mode` 为 `off`，升级不改变 0.3.x 行为。上下文顺序仍是
+`self → checkpoint → compact/fragment`，`self` / checkpoint 继续由现有路径自动注入；
+策略只裁剪/展开其中的 **memory fragments**。
+
+设计与边界见
+[0.4.0 介入策略设计](../design/0.4.0-intervention-policy.md)，验证证据见
+[0.4.0 介入验证](../quality/0.4.0-intervention/0.4.0-verification.md)。
+
+### 模式与配置
+
+在 `<home>/memory-runtime/config.json` 中配置：
+
+```jsonc
+{
+  "intervention": {
+    "mode": "off",          // off | shadow | heuristic | model
+    "minConfidence": 0.55,
+    "maxSilentStreak": 3,
+    "explorationRate": 0.05,
+    "outcomeWindowMs": 120000,
+    "policyTtlDays": 30,
+    "modelTimeoutMs": 500
+  }
+}
+```
+
+| 模式 | 行为 |
+|---|---|
+| `off` | 默认。不改变策略行为；`/context` 仍返回 baseline `decision`，`enforced:false`。`off` 仍会把 baseline 的 **applied** spoken/silent 写进本机 policy 统计与 trace，但不应用策略建议，也不做阈值自适应。 |
+| `shadow` | 计算策略建议（`decision`），但实际注入保持 baseline；trace 带 `wouldAction` / `wouldDepth`。 |
+| `heuristic` | 启用本机规则策略；`must_speak` 仍是硬规则。 |
+| `model` | **实验性。** 用配置的模型做 `planIntervention()`；超时/非法输出/模型不可用回退 heuristic，并标 `degraded:true`。 |
+
+Console 不编辑这些值，只展示 trace 决策并提供二次确认的 reset。修改模式需改 sidecar
+config 并按现有生命周期重启/重载，使新配置生效。
+
+### 决策、深度与 `must_speak`
+
+`POST /context` 新增 `decision` 字段：
+
+```json
+{
+  "action": "speak",
+  "depth": "gist",
+  "confidence": 0.72,
+  "reason": "high_relevance",
+  "policyVersion": "heuristic:1a2b3c4d",
+  "enforced": true
+}
+```
+
+- `action`：`speak | defer | silent`。`defer` 表示本轮不注入 memory fragments，保留
+  既有 `self`/checkpoint 路径，并在 `applied` 中与 `silent` 区分，供后续归因。
+- `depth`：`gist → detail → quote`；默认 speak/gist，`silent` 是最后手段。
+- `reason`：`must_speak:*`、`high_relevance`、`low_confidence`、`broad_cue`、
+  `no_novelty`、`recent_false_alarm`、`no_candidates`、`max_silent_streak`、
+  `exploration` 等。
+- `policyVersion`：off/baseline 为 `v0-baseline`，另有 `v0-rules`、
+  `heuristic:<hash>`、`model:<hash>`。
+- `enforced`：`off`/`shadow` 为 `false`；真正改变注入时为 `true`。
+- `applied`：实际 action/depth/片段数、被裁掉的 fragment ID，以及 shadow 的
+  `wouldAction` / `wouldDepth`。
+
+策略不可否决的硬规则：显式记忆追问（“上次/之前/记得/你忘了”）、高置信 exact 意图、
+任务续接/checkpoint follow-up、上一轮 silent/defer 后的追问或纠正、指向刚注入片段的
+follow-up。
+
+`must_speak` 是硬规则，但不是 100% `speak` 的保证：有候选时会说（请求的 detail 不可用
+则降为 gist）；**完全没有候选**时降级为 checkpoint-only：`action=silent`、
+`reason=must_speak_unavailable`、`degraded:true`、`applied.fragments=0`，`self`/
+checkpoint 仍按现有路径注入。它不会伪造片段，也不会静默失败。
+
+`trace=off` 时不做归因与策略学习；不读取 `decision` 的旧宿主看到的字段与 0.3.x 一致。
+
+### 结果归因
+
+宿主把下一轮结果上报到 trace：
+
+```http
+POST /memory-runtime/v1/recall/:traceId/outcome
+{ "kind": "missed", "source": "host", "confidence": 0.7, "note": "简短原因" }
+```
+
+kind：`accepted`、`ignored`、`reasked`、`corrected`、`dismissed`、`missed`、
+`too_shallow`、`too_deep`。同一 trace + kind 幂等；不同 kind 更新最新结果，最多保留
+5 条 `outcomeHistory`。`note` 最多 200 字符，且不得包含用户正文。
+
+OpenCode 插件是第一个宿主适配器：记录每次 `/context`（包括 silent），并在下一轮用户
+turn 归因：silent + 显式记忆追问 → `missed`；speak + 重问 → `reasked`；纠正 →
+`corrected`；gist + 要细节 → `too_shallow`；detail/quote + 要更短 → `too_deep`；
+明确正向确认 → `accepted`；窗口内无追问 → 延迟 `ignored`。归因使用 `applied`，
+shadow 的 `silent` 建议 + baseline `speak` 不会被当成实际沉默。默认归因窗口 120 秒；
+`ignored` 至少 10 分钟。上报 fire-and-forget，失败不阻塞宿主。
+
+### Canary
+
+按 `off → shadow → heuristic → model` 的顺序，一次只对一个 agent/domain 开启：
+
+1. 至少跑一周 `shadow`，在 Runtime 页对比 `decision` 与 `applied`
+   （`wouldAction` / `wouldDepth`）。
+2. 对单个 agent/domain 开启 `heuristic`；在 Console Runtime trace 列表观察决策与
+   outcome。不新增 Console 页面。
+3. 设计文档中的 Go/No-Go 指标全部通过后，才考虑 `model`（实验性），并保留超时和回退。
+
+Phase 3（`model`）和 Phase 4（自适应阈值）是**代码完成 + fake gateway/单测证据**，
+不是真实模型质量 Gate；真实模型 smoke 与 golden set 尚未运行，两者继续标 experimental。
+
+插件的 `alreadyInjectedIds` fragment ID 别名表是**进程内**的：同一次 sidecar 会话里
+回传的 `mf_…` 能解析到 source 记录，但 sidecar 重启后，重启前产生的旧 `mf_…` 可能
+无法解析并被忽略。source/record ID 仍直接有效。
+
+用 `/status.policy` 看本机策略存储健康（`degraded`、`lastError`）。计数与 outcome
+历史在本机 trace/outcome 数据与 `<home>/memory-runtime/policy/state.json` 中，不在
+`/status` 内。`GET /traces`、`GET /traces/:id` 暴露 decision/applied/outcome 供调试，
+不包含 detail 正文或 token。
+
+### 重置与回滚
+
+- 回滚：把 `intervention.mode` 改回 `off`。trace 与策略统计保留，不做数据迁移。
+- `POST /memory-runtime/v1/intervention/reset` 只清空**本机策略统计与运行态**
+  （沉默 streak、上一轮决策、reset guard），返回
+  `{ reset, policyVersion, removedDomains }`。Console 通过二次确认提供同一动作。
+  reset 前创建 trace 的迟到 outcome 会被拒绝（`recorded:false`，warning
+  `outcome_before_reset`），不会把刚清空的计数重新写脏。
+- reset 不删记忆记录、详情、checkpoint、trace 或 outcome 历史。删除记忆仍走正常
+  MCP/Console 治理路径。
+
+### 隐私
+
+- 策略状态只在本机，保存聚合计数和 `(agentId, domain)` 键，不含 query 正文、detail
+  正文、prompt 或 token。
+- trace 只在本机；保留现有脱敏 `queryPreview`（最多 200 字符）、`queryHash`、
+  实体/主题和 decision/outcome 元数据；不保存 raw query 正文、detail 正文或 token。
+- `model` 策略只看 cue 聚合、top-3 gist、分数和聚合统计，不看 raw query、detail 正文、
+  checkpoint 内容或 token。
+- outcome note 由宿主适配器使用固定归因说明，不复制用户正文。
+- 0.4.0 不同步策略状态到其他设备。
+
 ## 详情、证据与保留
 
 已沉淀对话详情是图对象（`type=detail_record`），kind 为 `raw_chunk`、`message`、

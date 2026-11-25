@@ -233,6 +233,42 @@ describe('0.3 静态 DOM / 数据面契约', () => {
     expect(consoleJs).toContain('runtimeTraceFeedback');
   });
 
+  it('0.4 增量：trace decision/applied/outcome、列表标记与 reset 入口只在 Runtime 区', () => {
+    expect(consoleJs).toContain('runtimeTracePolicyHtml');
+    for (const marker of [
+      'runtime.trace.decision',
+      'runtime.trace.applied',
+      'runtime.trace.outcome',
+      'runtime.trace.outcome.history',
+      'runtime.trace.marker.silent',
+      'runtime.trace.marker.missed',
+      'runtime.trace.marker.shadow',
+      'runtime.trace.decision.enforcedOff',
+      'runtime.trace.applied.suggestion',
+      'runtimeTraceIsShadow',
+      'wouldAction',
+      'wouldDepth',
+      "api('/admin/api/memory-runtime/policy/reset'",
+      'runtime.policy.resetConfirmTitle',
+    ]) {
+      expect(consoleJs).toContain(marker);
+    }
+    expect(indexHtml).toContain('id="runtime-policy-reset"');
+    // reset 复用现有按钮/确认弹层，不新增独立弹层或页面。
+    expect(indexHtml).not.toContain('id="runtime-policy-modal"');
+    expect(consoleJs).toContain('confirmModal');
+    const shadowSignalSource = consoleJs.slice(
+      consoleJs.indexOf('function runtimeTraceIsShadow'),
+      consoleJs.indexOf('function runtimeTracePolicyHtml'),
+    );
+    const shadowSignalCode = shadowSignalSource
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/\/\/.*$/gm, '');
+    expect(shadowSignalCode).toContain('wouldAction');
+    expect(shadowSignalCode).not.toContain('suppressed');
+    expect(shadowSignalCode).not.toContain('enforced');
+  });
+
   it('中英文运行时文案完整；旧 capture/raw/token 文案与模型包文案已删除', () => {
     const keys = Object.keys(zh).filter((key) => key.startsWith('runtime.') || key.startsWith('settings.runtime.') || key === 'nav.runtime' || key === 'settings.tab.runtime');
     expect(keys.length).toBeGreaterThan(120);

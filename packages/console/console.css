@@ -1816,6 +1816,9 @@ body.modal-open { overflow: hidden; }
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
 }
 #runtime-view .rt-trace-badges { display: flex; gap: 4px; flex-wrap: wrap; }
+#runtime-view .rt-tag-silent { border-color: rgba(255, 210, 122, 0.5); color: #ffd27a; }
+#runtime-view .rt-tag-missed { border-color: rgba(255, 155, 155, 0.55); color: #ffb9b9; }
+#runtime-view .rt-tag-shadow { border-color: rgba(160, 180, 255, 0.5); color: #b9c7ff; }
 #runtime-view .rt-trace-meta { margin: 0; font-size: 11px; line-height: 16px; color: var(--crt-dim); overflow-wrap: anywhere; }
 #runtime-view .rt-trace-action { display: flex; align-items: flex-start; justify-content: flex-end; }
 #runtime-view .rt-detail {
@@ -1829,6 +1832,27 @@ body.modal-open { overflow: hidden; }
 #runtime-view .rt-detail-id code { color: var(--crt); overflow-wrap: anywhere; }
 #runtime-view .rt-detail-preview { margin: 6px 0 0; color: #d6ffea; font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
 #runtime-view .rt-detail-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+#runtime-view .rt-policy {
+  display: grid; gap: 8px; margin: 8px 0 0; padding-top: 6px;
+  border-top: 1px dashed rgba(80, 255, 170, 0.18);
+}
+#runtime-view .rt-policy-block { display: grid; gap: 3px; min-width: 0; }
+#runtime-view .rt-policy-block h4 {
+  margin: 0; font-size: 10px; font-weight: 600; letter-spacing: 1px;
+  text-transform: uppercase; color: var(--crt-dim);
+}
+#runtime-view .rt-policy-kv {
+  display: flex; flex-wrap: wrap; gap: 2px 12px; margin: 0;
+  font-size: 11px; line-height: 16px;
+}
+#runtime-view .rt-policy-kv > div { display: inline-flex; gap: 4px; min-width: 0; }
+#runtime-view .rt-policy-kv dt { margin: 0; color: var(--crt-dim); }
+#runtime-view .rt-policy-kv dd { margin: 0; color: #d6ffea; overflow-wrap: anywhere; }
+#runtime-view .rt-policy-history { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+#runtime-view .rt-policy-history li {
+  padding-top: 3px; border-top: 1px dashed rgba(80, 255, 170, 0.14);
+  color: var(--crt-dim); overflow-wrap: anywhere;
+}
 #runtime-view .rt-state {
   list-style: none; margin: 0; padding: 12px 14px;
   border: 1px dashed var(--crt-border-soft); border-radius: 8px;

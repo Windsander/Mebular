@@ -2196,6 +2196,8 @@ export async function startHttpServer({
     /^\/admin\/api\/(?:models|inference)\/(install|select|download|pause|resume|cancel|import|uninstall|remove|start|stop|test)$/,
     // 0.3 记忆运行时：召回反馈经 MCP 薄代理转发 sidecar；host token 不出服务端。
     /^\/admin\/api\/memory-runtime\/feedback$/,
+    // 0.4 记忆介入策略：重置本机策略状态；同样经薄代理，sidecar 未启用时明确失败。
+    /^\/admin\/api\/memory-runtime\/policy\/reset$/,
     // 0.3 高级模型来源：经 sidecar `/inference/settings` 或 `/models/:pack/activate`。
     /^\/admin\/api\/memory-runtime\/model-source$/,
   ];
@@ -2769,6 +2771,23 @@ export async function startHttpServer({
       const traceId = typeof input.traceId === 'string' ? input.traceId : '';
       const result = memoryRuntimeSupervisor
         ? await memoryRuntimeSupervisor.submitRecallFeedback(traceId, input)
+        : {
+            statusCode: 409,
+            body: {
+              ok: false,
+              error: 'memory_runtime_disabled',
+              enabled: false,
+              state: 'stopped',
+              message: '记忆运行时未启用',
+            },
+          };
+      return sendJson(res, result.statusCode, result.body);
+    }
+
+    // 0.4 记忆介入策略重置：同 feedback 的鉴权/CSRF/writes-enabled；sidecar 未启用返回 409。
+    if (path === '/admin/api/memory-runtime/policy/reset') {
+      const result = memoryRuntimeSupervisor
+        ? await memoryRuntimeSupervisor.resetInterventionPolicy()
         : {
             statusCode: 409,
             body: {

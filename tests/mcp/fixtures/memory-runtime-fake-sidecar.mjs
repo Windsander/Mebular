@@ -373,6 +373,20 @@ const defaultTrace = {
   silenceReason: null,
   degraded: false,
   feedback: null,
+  decision: {
+    action: 'speak',
+    depth: 'detail',
+    confidence: 0.88,
+    reason: 'high_relevance',
+    policyVersion: 'v0-rules',
+    enforced: true,
+  },
+  applied: { action: 'speak', depth: 'detail', fragments: 1 },
+  outcome: { kind: 'accepted', at: Date.now() - 30_000, source: 'host', confidence: 0.8 },
+  outcomeHistory: [
+    { kind: 'ignored', at: Date.now() - 45_000, source: 'heuristic' },
+    { kind: 'accepted', at: Date.now() - 30_000, source: 'host', confidence: 0.8 },
+  ],
   counts: { candidates: 1, expansions: 1, injected: 1, tokens: 12 },
   timing: { totalMs: 9 },
   model: {
@@ -805,7 +819,15 @@ if (mode === 'hang') {
         return;
       }
       if (relative.startsWith('traces/')) {
-        const detail = readJsonEnv('FAKE_SIDECAR_TRACE_DETAIL_FILE', defaultTraceDetail);
+        const fixture = readJsonEnv('FAKE_SIDECAR_TRACE_DETAIL_FILE', defaultTraceDetail);
+        const requestedId = decodeURIComponent(relative.slice('traces/'.length));
+        const detail = fixture && typeof fixture === 'object' && fixture.byId && typeof fixture.byId === 'object'
+          ? fixture.byId[requestedId] ?? null
+          : fixture;
+        if (!detail) {
+          sendError(res, 404, 'trace_not_found', '轨迹不存在');
+          return;
+        }
         // 模拟未来 sidecar 回归：即使响应里误带令牌字段，MCP 代理也必须剥离。
         res.end(JSON.stringify({
           ok: true,
@@ -837,6 +859,20 @@ if (mode === 'hang') {
             degraded: false,
           },
         }));
+        return;
+      }
+      if (relative === 'intervention/reset') {
+        const body = await readBody(req);
+        const out = env.FAKE_SIDECAR_INTERVENTION_OUT;
+        if (typeof out === 'string' && out.length > 0) {
+          appendFileSync(out, `${JSON.stringify({ method: req.method, path: pathname, body })}\n`);
+        }
+        const failStatus = Number(env.FAKE_SIDECAR_INTERVENTION_STATUS ?? 0);
+        if (Number.isInteger(failStatus) && failStatus >= 400) {
+          sendError(res, failStatus, 'intervention_reset_unavailable', '介入策略重置不可用');
+          return;
+        }
+        sendEnvelope(res, 200, { reset: true, policyVersion: 'v0-rules', at: Date.now() });
         return;
       }
     }

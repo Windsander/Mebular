@@ -409,6 +409,76 @@ function traceProvenanceView(provenance) {
   };
 }
 
+/**
+ * 介入决策只透出可解释的枚举/数值/短原因；不返回任何 prompt、正文或 token。
+ * 旧 trace 没有 decision → null，读取方按“无策略信息”展示。
+ */
+function traceDecisionView(decision) {
+  if (!isObject(decision)) return null;
+  const action = ['speak', 'defer', 'silent'].includes(decision.action) ? decision.action : null;
+  if (!action) return null;
+  const depth = ['gist', 'detail', 'quote'].includes(decision.depth) ? decision.depth : null;
+  const view = {
+    action,
+    depth,
+    confidence: traceNumber(decision.confidence),
+    reason: traceText(decision.reason, 128),
+    policyVersion: traceText(decision.policyVersion, 64),
+    // 三态：旧 record / shadow 记录可能没有该字段，不把缺失伪造成“未执行”。
+    enforced: typeof decision.enforced === 'boolean' ? decision.enforced : null,
+  };
+  // 可选：部分 runtime 在 decision 上直接标记影子决策。
+  if (typeof decision.shadow === 'boolean') view.shadow = decision.shadow;
+  return view;
+}
+
+/**
+ * 只保留 id 型引用；即使未来写成对象数组，也不把正文/token 带到浏览器。
+ */
+function traceIdList(value, max = 100) {
+  if (!Array.isArray(value)) return null;
+  return value.slice(0, max).map((entry) => {
+    if (typeof entry === 'string') return traceText(entry, 256);
+    if (isObject(entry)) return traceText(entry.fragmentId ?? entry.sourceId ?? entry.id, 256);
+    return null;
+  }).filter(Boolean);
+}
+
+function traceAppliedView(applied) {
+  if (!isObject(applied)) return null;
+  const action = ['speak', 'silent'].includes(applied.action) ? applied.action : null;
+  if (!action) return null;
+  const depth = ['gist', 'detail', 'quote'].includes(applied.depth) ? applied.depth : null;
+  let fragments = null;
+  if (typeof applied.fragments === 'number' && Number.isFinite(applied.fragments)) {
+    fragments = Math.max(0, Math.trunc(applied.fragments));
+  } else if (Array.isArray(applied.fragments)) {
+    fragments = traceIdList(applied.fragments);
+  }
+  const view = { action, depth, fragments };
+  // 影子模式的反事实建议：仅枚举/短值，缺失时不输出键，便于上层区分 off baseline。
+  if (['speak', 'defer', 'silent'].includes(applied.wouldAction)) view.wouldAction = applied.wouldAction;
+  if (['gist', 'detail', 'quote'].includes(applied.wouldDepth)) view.wouldDepth = applied.wouldDepth;
+  // runtime 的 suppressed 可能是布尔，也可能是被抑制的 fragmentId 数组；
+  // 数组与 fragments 同样只保留 id，不携带正文。shadow 判定不使用该字段。
+  if (typeof applied.suppressed === 'boolean') view.suppressed = applied.suppressed;
+  else if (Array.isArray(applied.suppressed)) view.suppressed = traceIdList(applied.suppressed);
+  return view;
+}
+
+function traceOutcomeView(outcome) {
+  if (!isObject(outcome)) return null;
+  const kind = traceText(outcome.kind, 64);
+  if (!kind) return null;
+  return {
+    kind,
+    at: traceNumber(outcome.at),
+    source: traceText(outcome.source, 64),
+    confidence: traceNumber(outcome.confidence),
+    note: traceText(outcome.note, 200),
+  };
+}
+
 function traceSummaryView(trace) {
   const feedback = trace?.feedback;
   return {
@@ -434,6 +504,9 @@ function traceSummaryView(trace) {
       injected: traceNumber(trace?.counts?.injected),
       tokens: traceNumber(trace?.counts?.tokens),
     },
+    decision: traceDecisionView(trace?.decision),
+    applied: traceAppliedView(trace?.applied),
+    outcome: traceOutcomeView(trace?.outcome),
     timing: { totalMs: traceNumber(trace?.timing?.totalMs) },
     model: {
       query: traceText(trace?.model?.query, 128),
@@ -485,6 +558,9 @@ function traceDetailView(trace) {
       owner: traceOwnerView(fragment?.owner),
       provenance: traceProvenanceView(fragment?.provenance),
     })) : [],
+    outcomeHistory: Array.isArray(trace?.outcomeHistory)
+      ? trace.outcomeHistory.slice(0, 5).map(traceOutcomeView).filter(Boolean)
+      : [],
   };
 }
 
@@ -1437,6 +1513,51 @@ export class MemoryRuntimeSupervisor {
       };
     }
     return { statusCode: 200, body: result.body ?? { ok: true, data } };
+  }
+
+  /**
+   * 重置本机介入策略状态（sidecar `POST /intervention/reset`）。
+   *
+   * 与 feedback 共用 host token 代理；轻量模式/未就绪返回明确 disabled/503，
+   * sidecar 报错或 `ok:false` 原样失败，不伪造成功。
+   */
+  async resetInterventionPolicy() {
+    const result = await this.#proxyHostApi('intervention/reset', {
+      method: 'POST',
+      body: {},
+      timeoutMs: 5000,
+    });
+    if (!result.available) {
+      return {
+        statusCode: result.disabled === true ? 409 : 503,
+        body: {
+          ok: false,
+          error: result.disabled === true ? 'memory_runtime_disabled' : 'sidecar_unavailable',
+          enabled: result.enabled,
+          state: result.state,
+          message: result.disabled === true
+            ? '记忆运行时未启用'
+            : 'Memory Runtime sidecar 未就绪',
+          ...(result.error ? { details: result.error } : {}),
+        },
+      };
+    }
+    const envelope = isObject(result.body) ? result.body : {};
+    const data = envelope.data ?? result.body ?? null;
+    if (!result.ok || envelope.ok === false) {
+      return {
+        statusCode: result.ok ? 502 : (result.statusCode ?? 502),
+        body: {
+          ok: false,
+          error: data?.error?.code ?? envelope.error?.code ?? 'policy_reset_failed',
+          message: proxyErrorMessage(data, proxyErrorMessage(envelope, '介入策略重置失败')),
+        },
+      };
+    }
+    return {
+      statusCode: 200,
+      body: envelope.ok === undefined ? { ok: true, data } : envelope,
+    };
   }
 
   async #resolveHostToken(discovery) {

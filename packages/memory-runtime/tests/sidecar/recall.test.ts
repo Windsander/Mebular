@@ -794,6 +794,56 @@ describe('RecallService', () => {
     expect(second.data.silenceReason).toBe('duplicate_turn');
   });
 
+  it('alreadyInjectedIds 传 fragment ID 时过滤已注入候选', async () => {
+    // 宿主（OpenCode 插件）回传的是 /context 响应里的 fragment ID（mf_…）。
+    // fragment ID 每次召回都会重新生成，因此 sidecar 需要把它解析回 source ID。
+    const { service } = await setup({ records: [preferenceRecord()] });
+    const request = {
+      agentId: 'opencode',
+      threadId: 'th_recall',
+      query: '你记得我的喜好吗？',
+    };
+    const first = await service.handleContext(request);
+    expect(first.data.fragments).toHaveLength(1);
+    const fragmentId = first.data.fragments[0]!.id;
+    expect(fragmentId).toMatch(/^mf_/);
+
+    const second = await service.handleContext({ ...request, alreadyInjectedIds: [fragmentId] });
+    expect(second.data.fragments).toEqual([]);
+    expect(second.data.blocks).toEqual([]);
+    expect(second.data.silenceReason).toBe('already_injected');
+
+    const trace = await service.getTrace(second.data.traceId!);
+    expect(trace?.candidates?.find((entry) => entry.id === '01JPREF0001')).toMatchObject({
+      filteredReason: 'already_injected',
+    });
+  });
+
+  it('alreadyInjectedIds 传 source ID 时仍然过滤已注入候选', async () => {
+    const { service } = await setup({ records: [preferenceRecord()] });
+    const response = await service.handleContext({
+      agentId: 'opencode',
+      threadId: 'th_recall',
+      query: '你记得我的喜好吗？',
+      alreadyInjectedIds: ['01JPREF0001'],
+    });
+    expect(response.data.fragments).toEqual([]);
+    expect(response.data.blocks).toEqual([]);
+    expect(response.data.silenceReason).toBe('already_injected');
+  });
+
+  it('alreadyInjectedIds 中的无关 ID 不影响召回', async () => {
+    const { service } = await setup({ records: [preferenceRecord()] });
+    const response = await service.handleContext({
+      agentId: 'opencode',
+      threadId: 'th_recall',
+      query: '你记得我的喜好吗？',
+      alreadyInjectedIds: ['mf_01JOTHER', '01JOTHER'],
+    });
+    expect(response.data.fragments).toHaveLength(1);
+    expect(response.data.silenceReason).toBeNull();
+  });
+
   it('trace/feedback 只写本地，不返回正文或 token；preview 脱敏', async () => {
     const { service, local } = await setup({ records: [preferenceRecord()] });
     const response = await service.handleContext({

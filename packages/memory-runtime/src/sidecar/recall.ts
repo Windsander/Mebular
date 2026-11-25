@@ -84,6 +84,8 @@ const EXPAND_TRACE_TTL_MS = 10 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MAX_OUTCOME_NOTE_CHARS = 500;
 const MAX_OUTCOME_HISTORY = 5;
+/** fragment ID → source ID 的进程内别名表上限；防止长时间运行无限增长。 */
+const MAX_FRAGMENT_ALIASES = 4096;
 /** ignored 是弱信号，归因窗口至少 10 分钟。 */
 const IGNORED_OUTCOME_WINDOW_MS = 10 * 60 * 1000;
 
@@ -1178,6 +1180,8 @@ export class RecallService {
   private readonly getPolicy?: () => SidecarPolicy | null;
   private policy: SidecarPolicy | null;
   private readonly now: () => number;
+  /** fragment ID → 本轮该片段的 source/record IDs；用于解析宿主回传的 mf_ ID（进程内、有界）。 */
+  private readonly fragmentAliases = new Map<string, string[]>();
   private readonly anchors = new Map<string, number>();
   private readonly quarantined = new Map<string, number>();
   /** (agentId, threadId/task) → 连续沉默次数与上一轮决策；只在本进程内。 */
@@ -2758,6 +2762,30 @@ export class RecallService {
     }
   }
 
+  /** 记录本轮 fragment ID → 源记录 ID；宿主下一轮可能把 mf_ ID 放进 alreadyInjectedIds。 */
+  private rememberFragmentAlias(fragmentId: string, sourceIds: readonly string[]): void {
+    if (sourceIds.length === 0) return;
+    this.fragmentAliases.set(fragmentId, [...sourceIds]);
+    while (this.fragmentAliases.size > MAX_FRAGMENT_ALIASES) {
+      const oldest = this.fragmentAliases.keys().next().value;
+      if (oldest === undefined) break;
+      this.fragmentAliases.delete(oldest);
+    }
+  }
+
+  /**
+   * alreadyInjectedIds 既可能是 source/record ID，也可能是宿主回传的 fragment ID（mf_…）。
+   * 新 fragment 每次召回的 ID 都不同，因此用别名表把旧 mf_ ID 展开为对应的源 ID；
+   * 未知 ID 原样保留，不产生任何匹配。
+   */
+  private resolveInjectedIds(ids: readonly string[]): string[] {
+    const resolved = new Set(ids);
+    for (const id of ids) {
+      for (const sourceId of this.fragmentAliases.get(id) ?? []) resolved.add(sourceId);
+    }
+    return [...resolved];
+  }
+
   private async buildCandidates(
     rawRecords: RawCandidate[],
     cue: Cue,
@@ -2765,7 +2793,7 @@ export class RecallService {
     warnings: string[],
   ): Promise<Candidate[]> {
     const candidates: Candidate[] = [];
-    const quota = new Set(request.alreadyInjectedIds);
+    const quota = new Set(this.resolveInjectedIds(request.alreadyInjectedIds));
     const now = this.now();
     for (const entry of rawRecords) {
       const record = entry.record;
@@ -2840,6 +2868,8 @@ export class RecallService {
         citations: citationsOf(record, kind),
         sourceIds,
       };
+      // 先记住别名：即使本轮被 other 规则过滤，宿主下一轮回传该 mf_ ID 也能解析。
+      this.rememberFragmentAlias(fragment.id, sourceIds);
 
       const candidate: Candidate = {
         record,
@@ -2854,7 +2884,10 @@ export class RecallService {
       };
       candidate.fragment.score = scoreCandidate(candidate, cue, now);
 
-      const sourceHit = sourceIds.find((id) => quota.has(id)
+      // 宿主级去重：quota 已把旧的 fragment ID（mf_…）通过别名表展开为 source ID；
+      // 这里再直接检查本轮 fragment.id，兼容在同一次召回上下文内回传 ID 的调用方。
+      // 顺序保持 sourceIds 优先；同一 ID 上 quarantine 仍优先于普通去重。
+      const sourceHit = [...sourceIds, fragment.id].find((id) => quota.has(id)
         || (this.quarantined.get(id) ?? 0) > now);
       if (sourceHit) {
         candidate.filteredReason = (this.quarantined.get(sourceHit) ?? 0) > now ? 'quarantined' : 'already_injected';
@@ -3074,7 +3107,7 @@ export class RecallService {
       mode: config.mode as InterventionMode,
       cue: run.cue,
       candidates,
-      alreadyInjectedIds: run.request.alreadyInjectedIds,
+      alreadyInjectedIds: this.resolveInjectedIds(run.request.alreadyInjectedIds),
       threshold,
       recentUselessRate,
       silentStreak: this.silentStreaks.get(key) ?? 0,
@@ -3164,7 +3197,7 @@ export class RecallService {
       mode: config.mode as InterventionMode,
       cue: run.cue,
       candidates: [],
-      alreadyInjectedIds: run.request.alreadyInjectedIds,
+      alreadyInjectedIds: this.resolveInjectedIds(run.request.alreadyInjectedIds),
       threshold: config.minConfidence,
       recentUselessRate: 0,
       silentStreak: this.silentStreaks.get(key) ?? 0,

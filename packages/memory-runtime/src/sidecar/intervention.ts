@@ -143,6 +143,9 @@ function noveltyOf(candidate: InterventionCandidateView | undefined, alreadyInje
   if (!candidate) return 0;
   if (alreadyInjected.length === 0) return 1;
   const injected = new Set(alreadyInjected);
+  // 宿主可能回传上一轮 /context 的 fragment ID（mf_…）或 source/record ID；
+  // 任一命中都表示该候选已经注入过，novelty=0。
+  if (injected.has(candidate.fragmentId)) return 0;
   return candidate.sourceIds.some((id) => injected.has(id)) ? 0 : 1;
 }
 

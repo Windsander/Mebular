@@ -500,6 +500,33 @@ async function main() {
       && memoryAfter.records.some((record) => String(record.content ?? '').includes(seedToken)),
       JSON.stringify({ before: memoryBefore.records.length, after: memoryAfter.records.length }));
 
+    // ---- Late outcome for a pre-reset trace must not re-dirty policy state --
+    const lateOutcome = await requestSidecar(
+      discovery,
+      `/recall/${encodeURIComponent(traceA1.id)}/outcome`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          kind: 'accepted',
+          source: 'host',
+          confidence: 0.6,
+          note: 'late outcome for a pre-reset trace',
+        }),
+      },
+    );
+    const traceA1AfterLate = await fetchTrace(discovery, traceA1.id);
+    const stateAfterLate = await readPolicyState(policyStatePath);
+    check('reset 前旧 trace 的迟到 outcome 不写入（recorded=false + outcome_before_reset）',
+      lateOutcome.status === 200
+      && lateOutcome.data?.recorded === false
+      && Array.isArray(lateOutcome.data?.warnings)
+      && lateOutcome.data.warnings.includes('outcome_before_reset')
+      && traceA1AfterLate?.outcome?.kind === 'reasked',
+      JSON.stringify({ recorded: lateOutcome.data?.recorded, warnings: lateOutcome.data?.warnings }));
+    check('迟到 outcome 不重新写脏 policy/state.json',
+      policyAllZero(stateAfterLate), JSON.stringify(stateAfterLate?.global));
+
     // ---- Privacy: policy state / trace / Console view ---------------------
     const policyText = JSON.stringify(stateAfter ?? {}) + JSON.stringify(stateBefore ?? {});
     const traceListText = JSON.stringify(tracesAfter);
@@ -540,6 +567,31 @@ async function main() {
       traceA1Reasked?.outcome?.note === 'follow-up re-asked the previous turn'
       && traceB1Missed?.outcome?.note === 'silent context followed by a memory follow-up',
       JSON.stringify({ reasked: traceA1Reasked?.outcome?.note, missed: traceB1Missed?.outcome?.note }));
+
+    // ---- Post-reset trace still records outcomes normally ------------------
+    const sessionE = await turn(null, 'deepwork 主题');
+    const traceE1 = await findTrace(discovery, { threadId: sessionE, includes: 'deepwork 主题' });
+    check('reset 后新 trace 仍走真实 heuristic 并注入记忆',
+      traceE1?.decision?.action === 'speak'
+      && traceE1?.applied?.action === 'speak'
+      && (traceE1?.counts?.injected ?? 0) >= 1,
+      JSON.stringify({ decision: traceE1?.decision, applied: traceE1?.applied }));
+    await turn(sessionE, '再说一遍 deepwork 主题是什么');
+    const traceE1Reasked = await waitOutcome(discovery, traceE1.id, 'reasked');
+    check('reset 后新 trace 的 outcome 正常写入',
+      traceE1Reasked?.outcome?.kind === 'reasked'
+      && traceE1Reasked?.outcome?.source === 'host',
+      JSON.stringify(traceE1Reasked?.outcome));
+    const stateAfterPostReset = await waitFor(async () => {
+      const state = await readPolicyState(policyStatePath);
+      const counts = state?.global ?? {};
+      return (counts.spoken ?? 0) > 0 && (counts.reasked ?? 0) > 0 ? state : null;
+    }, { timeoutMs: 10000 });
+    check('reset 后新 outcome 恢复写本机 policy 统计',
+      Boolean(stateAfterPostReset)
+      && (stateAfterPostReset.global.spoken ?? 0) >= 1
+      && (stateAfterPostReset.global.reasked ?? 0) >= 1,
+      JSON.stringify(stateAfterPostReset?.global));
 
     if (serve.exitCode !== null) {
       check('opencode serve 全程存活', false, `exit=${serve.exitCode} ${serveErr.slice(-300)}`);

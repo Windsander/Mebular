@@ -252,7 +252,7 @@ Configure the sidecar in `<home>/memory-runtime/config.json`:
 
 | Mode | Behavior |
 |---|---|
-| `off` | Default. No policy change; `/context` still returns a baseline `decision` with `enforced:false`. |
+| `off` | Default. No policy change; `/context` still returns a baseline `decision` with `enforced:false`. `off` still records the **applied** baseline counts in the local policy store and traces, but does not apply policy advice or adapt thresholds. |
 | `shadow` | Computes policy advice (`decision`) but injects the baseline result; traces carry `wouldAction` / `wouldDepth`. |
 | `heuristic` | Applies the local rule-based policy; `must_speak` remains a hard rule. |
 | `model` | **Experimental.** Uses the configured model for `planIntervention()`; timeout/invalid output/provider failure falls back to `heuristic` with `degraded:true`. |
@@ -276,7 +276,9 @@ follow the existing lifecycle path) so the new mode is loaded.
 }
 ```
 
-- `action`: `speak | defer | silent`.
+- `action`: `speak | defer | silent`. `defer` injects no memory fragments this turn,
+  keeps `self`/checkpoint on the existing path, and stays distinguishable from `silent`
+  in `applied` for later attribution.
 - `depth`: `gist → detail → quote`; speak/gist is the default, `silent` is the last
   resort.
 - `reason`: `must_speak:*`, `high_relevance`, `low_confidence`, `broad_cue`,
@@ -292,8 +294,13 @@ follow the existing lifecycle path) so the new mode is loaded.
 Hard rules that the policy cannot veto: an explicit memory request (“上次 / 之前 /
 记得 / 你忘了”), a high-confidence exact intent, task continuation/checkpoint
 follow-up, a follow-up or correction after the previous silent/defer, and a follow-up
-reference to the last fragment. If no truthful material is available, the trace
-records `must_speak_unavailable` with `degraded:true` instead of pretending success.
+reference to the last fragment.
+
+`must_speak` is a hard rule, not a 100% `speak` guarantee. With a candidate it speaks
+(using `gist` if the requested detail is unavailable). With **no candidate at all** it
+degrades to checkpoint-only: `action=silent`, `reason=must_speak_unavailable`,
+`degraded:true`, `applied.fragments=0`; `self`/checkpoint still inject through the
+existing path. It never invents a fragment or fails silently.
 
 `trace=off` disables attribution and policy learning; a host that does not read
 `decision` sees the same response fields it saw in 0.3.x.
@@ -317,8 +324,10 @@ silent responses, and attributes the next user turn: silent + explicit memory
 follow-up → `missed`; speak + re-ask → `reasked`; correction → `corrected`;
 gist + detail request → `too_shallow`; detail/quote + shorter request → `too_deep`;
 explicit confirmation → `accepted`; no follow-up before the window → delayed
-`ignored`. The default attribution window is 120 s; `ignored` uses at least 10
-minutes. Failures are fire-and-forget and never block the host.
+`ignored`. Attribution uses `applied`, so a shadow `silent` advice with baseline
+`speak` is never reported as a real silence. The default attribution window is 120 s;
+`ignored` uses at least 10 minutes. Failures are fire-and-forget and never block the
+host.
 
 ### Canary
 
@@ -331,6 +340,15 @@ Use the order `off → shadow → heuristic → model`, one agent/domain at a ti
 3. Only after the Go/No-Go metrics in the design document pass, consider `model`
    (experimental) with a timeout and fallback.
 
+Phase 3 (`model`) and Phase 4 (adaptive thresholds) are **code complete with
+fake-gateway/unit evidence**, not a real-model quality gate. No real-model smoke or
+golden-set evaluation has run, so keep both experimental.
+
+The plugin's `alreadyInjectedIds` fragment-ID alias table is **process-local**: `mf_…`
+IDs sent back within a live sidecar session resolve to source records, but after a
+sidecar restart an old `mf_…` from before the restart may not resolve and may be ignored.
+Source/record IDs remain directly valid.
+
 Check `/status.policy` for local policy-store health (`degraded`, `lastError`).
 Counters and outcome history are in the local trace/outcome data and
 `<home>/memory-runtime/policy/state.json`, not in `/status`. `GET /traces` and
@@ -341,9 +359,12 @@ detail bodies or tokens.
 
 - Rollback: set `intervention.mode` back to `off`. Trace and policy statistics are
   kept; no data migration runs.
-- `POST /memory-runtime/v1/intervention/reset` clears **local policy statistics only**
-  and returns `{ reset, policyVersion, removedDomains }`. Console exposes the same
-  action behind a confirmation dialog.
+- `POST /memory-runtime/v1/intervention/reset` clears **local policy statistics and
+  in-memory runtime state** (silent streak, last decision, reset guard) and returns
+  `{ reset, policyVersion, removedDomains }`. Console exposes the same action behind a
+  confirmation dialog. Outcomes reported for a trace created before the reset are
+  rejected with `recorded:false` and warning `outcome_before_reset`, so a late report
+  cannot re-dirty the cleared counters.
 - Reset does not delete memory records, details, checkpoints, traces or outcome
   history. Use the normal MCP/Console governance path to delete memory.
 

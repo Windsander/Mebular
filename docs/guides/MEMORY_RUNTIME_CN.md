@@ -223,7 +223,7 @@ ContextCheckpoint 始终是 `task:<threadId>` 或 `default` 中的图对象；�
 
 | 模式 | 行为 |
 |---|---|
-| `off` | 默认。不改变策略行为；`/context` 仍返回 baseline `decision`，`enforced:false`。 |
+| `off` | 默认。不改变策略行为；`/context` 仍返回 baseline `decision`，`enforced:false`。`off` 仍会把 baseline 的 **applied** spoken/silent 写进本机 policy 统计与 trace，但不应用策略建议，也不做阈值自适应。 |
 | `shadow` | 计算策略建议（`decision`），但实际注入保持 baseline；trace 带 `wouldAction` / `wouldDepth`。 |
 | `heuristic` | 启用本机规则策略；`must_speak` 仍是硬规则。 |
 | `model` | **实验性。** 用配置的模型做 `planIntervention()`；超时/非法输出/模型不可用回退 heuristic，并标 `degraded:true`。 |
@@ -246,7 +246,8 @@ config 并按现有生命周期重启/重载，使新配置生效。
 }
 ```
 
-- `action`：`speak | defer | silent`。
+- `action`：`speak | defer | silent`。`defer` 表示本轮不注入 memory fragments，保留
+  既有 `self`/checkpoint 路径，并在 `applied` 中与 `silent` 区分，供后续归因。
 - `depth`：`gist → detail → quote`；默认 speak/gist，`silent` 是最后手段。
 - `reason`：`must_speak:*`、`high_relevance`、`low_confidence`、`broad_cue`、
   `no_novelty`、`recent_false_alarm`、`no_candidates`、`max_silent_streak`、
@@ -259,8 +260,12 @@ config 并按现有生命周期重启/重载，使新配置生效。
 
 策略不可否决的硬规则：显式记忆追问（“上次/之前/记得/你忘了”）、高置信 exact 意图、
 任务续接/checkpoint follow-up、上一轮 silent/defer 后的追问或纠正、指向刚注入片段的
-follow-up。如果没有真实可用的候选/详情，trace 记 `must_speak_unavailable` +
-`degraded:true`，不允许静默失败。
+follow-up。
+
+`must_speak` 是硬规则，但不是 100% `speak` 的保证：有候选时会说（请求的 detail 不可用
+则降为 gist）；**完全没有候选**时降级为 checkpoint-only：`action=silent`、
+`reason=must_speak_unavailable`、`degraded:true`、`applied.fragments=0`，`self`/
+checkpoint 仍按现有路径注入。它不会伪造片段，也不会静默失败。
 
 `trace=off` 时不做归因与策略学习；不读取 `decision` 的旧宿主看到的字段与 0.3.x 一致。
 
@@ -280,7 +285,8 @@ kind：`accepted`、`ignored`、`reasked`、`corrected`、`dismissed`、`missed`
 OpenCode 插件是第一个宿主适配器：记录每次 `/context`（包括 silent），并在下一轮用户
 turn 归因：silent + 显式记忆追问 → `missed`；speak + 重问 → `reasked`；纠正 →
 `corrected`；gist + 要细节 → `too_shallow`；detail/quote + 要更短 → `too_deep`；
-明确正向确认 → `accepted`；窗口内无追问 → 延迟 `ignored`。默认归因窗口 120 秒；
+明确正向确认 → `accepted`；窗口内无追问 → 延迟 `ignored`。归因使用 `applied`，
+shadow 的 `silent` 建议 + baseline `speak` 不会被当成实际沉默。默认归因窗口 120 秒；
 `ignored` 至少 10 分钟。上报 fire-and-forget，失败不阻塞宿主。
 
 ### Canary
@@ -293,6 +299,13 @@ turn 归因：silent + 显式记忆追问 → `missed`；speak + 重问 → `rea
    outcome。不新增 Console 页面。
 3. 设计文档中的 Go/No-Go 指标全部通过后，才考虑 `model`（实验性），并保留超时和回退。
 
+Phase 3（`model`）和 Phase 4（自适应阈值）是**代码完成 + fake gateway/单测证据**，
+不是真实模型质量 Gate；真实模型 smoke 与 golden set 尚未运行，两者继续标 experimental。
+
+插件的 `alreadyInjectedIds` fragment ID 别名表是**进程内**的：同一次 sidecar 会话里
+回传的 `mf_…` 能解析到 source 记录，但 sidecar 重启后，重启前产生的旧 `mf_…` 可能
+无法解析并被忽略。source/record ID 仍直接有效。
+
 用 `/status.policy` 看本机策略存储健康（`degraded`、`lastError`）。计数与 outcome
 历史在本机 trace/outcome 数据与 `<home>/memory-runtime/policy/state.json` 中，不在
 `/status` 内。`GET /traces`、`GET /traces/:id` 暴露 decision/applied/outcome 供调试，
@@ -301,8 +314,11 @@ turn 归因：silent + 显式记忆追问 → `missed`；speak + 重问 → `rea
 ### 重置与回滚
 
 - 回滚：把 `intervention.mode` 改回 `off`。trace 与策略统计保留，不做数据迁移。
-- `POST /memory-runtime/v1/intervention/reset` 只清空**本机策略统计**，返回
+- `POST /memory-runtime/v1/intervention/reset` 只清空**本机策略统计与运行态**
+  （沉默 streak、上一轮决策、reset guard），返回
   `{ reset, policyVersion, removedDomains }`。Console 通过二次确认提供同一动作。
+  reset 前创建 trace 的迟到 outcome 会被拒绝（`recorded:false`，warning
+  `outcome_before_reset`），不会把刚清空的计数重新写脏。
 - reset 不删记忆记录、详情、checkpoint、trace 或 outcome 历史。删除记忆仍走正常
   MCP/Console 治理路径。
 

@@ -51,7 +51,26 @@ Memory Intervention Policy. 0.4.0 moves immersive recall from “what to remembe
 
 - `off` remains the default and records a `v0-baseline` decision with
   `enforced:false`; old hosts, old traces and `trace=off` keep 0.3.x behavior.
+  `off` changes no injection, but it **still persists the applied baseline
+  spoken/silent counts** in the local policy store and traces; it does not apply
+  policy advice or adapt thresholds.
+- Outcome attribution uses `applied`, not the policy `decision`: a shadow `silent`
+  advice with a baseline `speak` is never reported as `missed`. Outcome notes are
+  capped at 200 characters, `defer` remains distinguishable from `silent` in
+  `applied`, and reset clears policy statistics plus runtime streaks/last-decision
+  only, never memory or traces.
 - Model and adaptive modes are explicitly experimental and flag-controlled.
+
+### Known limitations
+
+- **`must_speak` is not 100% speak.** With no candidate it degrades to
+  checkpoint-only: `action=silent`, `reason=must_speak_unavailable`,
+  `degraded:true`, while `self`/checkpoint still inject.
+- **Phase 3/4 evidence is not a real-model gate.** `model` and adaptive thresholds are
+  code complete with fake-gateway/unit coverage only; real-model smoke and a golden-set
+  quality evaluation have not run.
+- **The `alreadyInjectedIds` fragment-ID alias table is process-local.** Old `mf_…` IDs
+  from before a sidecar restart may not resolve; source/record IDs stay valid.
 
 ### Documentation
 

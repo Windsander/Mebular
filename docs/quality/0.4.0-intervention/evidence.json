@@ -4,7 +4,7 @@
   "theme": "memory-intervention-policy",
   "branch": "feat/0.4-verification",
   "baseCommit": "b42212da6088decb7d6e2551c4ae61247b54771d",
-  "evidenceCommit": "d9ce7c0",
+  "evidenceCommit": "0d67075",
   "date": "2026-11-25",
   "environment": {
     "platform": "macOS 15.7.9",

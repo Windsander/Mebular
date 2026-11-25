@@ -337,7 +337,7 @@ async function seedHome(home) {
         fragments: 0,
         wouldAction: 'speak',
         wouldDepth: 'detail',
-        suppressed: true,
+        suppressed: ['mf_shadow_suppressed_1'],
       },
       outcome: { kind: 'missed', at: now - 20_000, source: 'host', confidence: 0.7, note: '下一轮追问同一实体' },
       counts: { candidates: 1, expansions: 0, injected: 0, tokens: 0 },
@@ -372,6 +372,40 @@ async function seedHome(home) {
       counts: { candidates: 1, expansions: 0, injected: 1, tokens: 6 },
       timing: { totalMs: 8 },
       tookMs: 8,
+      degraded: false,
+      feedback: null,
+      model: { query: 'heuristic' },
+    };
+    const heuristicSilentTrace = {
+      schema: 2,
+      id: 'tr_ui_runtime_0005',
+      recallId: 'rr_ui_runtime_0005',
+      agentId: 'opencode',
+      threadId: 'th_ui_runtime',
+      at: now - 8_000,
+      queryHash: 'ui-trace-heuristic-silent-hash',
+      queryPreview: 'UI 召回：主动沉默',
+      domains: ['notes'],
+      namespaces: ['notes'],
+      silenceReason: 'low_confidence',
+      decision: {
+        action: 'silent',
+        depth: 'gist',
+        confidence: 0.38,
+        reason: 'low_confidence',
+        policyVersion: 'v0-heuristic',
+        enforced: true,
+      },
+      applied: {
+        action: 'silent',
+        depth: 'gist',
+        fragments: 0,
+        suppressed: ['mf_heuristic_suppressed_1', 'mf_heuristic_suppressed_2'],
+      },
+      outcome: null,
+      counts: { candidates: 2, expansions: 1, injected: 0, tokens: 0 },
+      timing: { totalMs: 5 },
+      tookMs: 5,
       degraded: false,
       feedback: null,
       model: { query: 'heuristic' },
@@ -446,7 +480,7 @@ async function seedHome(home) {
         provenance: { source: 'runtime', writerType: 'agent', extractor: 'heuristic', hostId: 'h_ui', threadId: 'th_ui_runtime' },
       }],
     };
-    await writeFile(join(home, 'ui-memory-runtime-traces.json'), `${JSON.stringify([trace, silentTrace, offTrace, legacyTrace])}\n`, { encoding: 'utf-8', mode: 0o600 });
+    await writeFile(join(home, 'ui-memory-runtime-traces.json'), `${JSON.stringify([trace, silentTrace, offTrace, heuristicSilentTrace, legacyTrace])}\n`, { encoding: 'utf-8', mode: 0o600 });
     await writeFile(join(home, 'ui-memory-runtime-trace-detail.json'), `${JSON.stringify({
       byId: {
         [trace.id]: traceDetail,
@@ -981,20 +1015,24 @@ async function main() {
       })()`, 30000));
     await evalJs('document.querySelector("#runtime-traces [data-rt-trace]").click()');
     await waitFor('!document.querySelector("#runtime-traces .runtime-trace-detail")');
-    check('轨迹列表标记 silent / missed / shadow；off trace 与旧轨迹不误标 shadow',
+    check('轨迹列表标记 silent / missed / shadow；off / heuristic silent 与旧轨迹不误标 shadow',
       await evalJs(`(() => {
         const rows = [...document.querySelectorAll('#runtime-traces [data-rt-trace-row]')];
         const byId = (id) => rows.find((row) => row.getAttribute('data-rt-trace-row') === id);
         const shadow = byId('tr_ui_runtime_0002');
         const off = byId('tr_ui_runtime_0004');
+        const heuristicSilent = byId('tr_ui_runtime_0005');
         const legacy = byId('tr_ui_runtime_0003');
-        return rows.length >= 4
+        return rows.length >= 5
           && Boolean(shadow?.querySelector('[data-rt-trace-silent]'))
           && Boolean(shadow?.querySelector('[data-rt-trace-missed]'))
           && Boolean(shadow?.querySelector('[data-rt-trace-shadow]'))
           && /沉默/.test(shadow.textContent) && /漏介入/.test(shadow.textContent) && /影子/.test(shadow.textContent)
           && Boolean(off) && /策略关闭/.test(off.textContent)
           && !off.querySelector('[data-rt-trace-shadow]')
+          && Boolean(heuristicSilent) && /主动沉默/.test(heuristicSilent.textContent)
+          && Boolean(heuristicSilent.querySelector('[data-rt-trace-silent]'))
+          && !heuristicSilent.querySelector('[data-rt-trace-shadow]')
           && !legacy.querySelector('[data-rt-trace-silent]')
           && !legacy.querySelector('[data-rt-trace-missed]')
           && !legacy.querySelector('[data-rt-trace-shadow]');

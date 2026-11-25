@@ -432,6 +432,18 @@ function traceDecisionView(decision) {
   return view;
 }
 
+/**
+ * 只保留 id 型引用；即使未来写成对象数组，也不把正文/token 带到浏览器。
+ */
+function traceIdList(value, max = 100) {
+  if (!Array.isArray(value)) return null;
+  return value.slice(0, max).map((entry) => {
+    if (typeof entry === 'string') return traceText(entry, 256);
+    if (isObject(entry)) return traceText(entry.fragmentId ?? entry.sourceId ?? entry.id, 256);
+    return null;
+  }).filter(Boolean);
+}
+
 function traceAppliedView(applied) {
   if (!isObject(applied)) return null;
   const action = ['speak', 'silent'].includes(applied.action) ? applied.action : null;
@@ -441,18 +453,16 @@ function traceAppliedView(applied) {
   if (typeof applied.fragments === 'number' && Number.isFinite(applied.fragments)) {
     fragments = Math.max(0, Math.trunc(applied.fragments));
   } else if (Array.isArray(applied.fragments)) {
-    // 只保留 id 型引用；即使未来写成对象数组，也不把正文/token 带到浏览器。
-    fragments = applied.fragments.slice(0, 100).map((entry) => {
-      if (typeof entry === 'string') return traceText(entry, 256);
-      if (isObject(entry)) return traceText(entry.fragmentId ?? entry.sourceId ?? entry.id, 256);
-      return null;
-    }).filter(Boolean);
+    fragments = traceIdList(applied.fragments);
   }
   const view = { action, depth, fragments };
   // 影子模式的反事实建议：仅枚举/短值，缺失时不输出键，便于上层区分 off baseline。
   if (['speak', 'defer', 'silent'].includes(applied.wouldAction)) view.wouldAction = applied.wouldAction;
   if (['gist', 'detail', 'quote'].includes(applied.wouldDepth)) view.wouldDepth = applied.wouldDepth;
+  // runtime 的 suppressed 可能是布尔，也可能是被抑制的 fragmentId 数组；
+  // 数组与 fragments 同样只保留 id，不携带正文。shadow 判定不使用该字段。
   if (typeof applied.suppressed === 'boolean') view.suppressed = applied.suppressed;
+  else if (Array.isArray(applied.suppressed)) view.suppressed = traceIdList(applied.suppressed);
   return view;
 }
 

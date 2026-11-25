@@ -257,6 +257,16 @@ describe('0.3 静态 DOM / 数据面契约', () => {
     // reset 复用现有按钮/确认弹层，不新增独立弹层或页面。
     expect(indexHtml).not.toContain('id="runtime-policy-modal"');
     expect(consoleJs).toContain('confirmModal');
+    const shadowSignalSource = consoleJs.slice(
+      consoleJs.indexOf('function runtimeTraceIsShadow'),
+      consoleJs.indexOf('function runtimeTracePolicyHtml'),
+    );
+    const shadowSignalCode = shadowSignalSource
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/\/\/.*$/gm, '');
+    expect(shadowSignalCode).toContain('wouldAction');
+    expect(shadowSignalCode).not.toContain('suppressed');
+    expect(shadowSignalCode).not.toContain('enforced');
   });
 
   it('中英文运行时文案完整；旧 capture/raw/token 文案与模型包文案已删除', () => {

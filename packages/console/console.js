@@ -4509,12 +4509,12 @@ function runtimeTraceReasonText(reason) {
 
 /**
  * shadow 的可靠信号：applied 上有反事实建议键，或 runtime 显式给了 decision.shadow=true。
- * 不能用 decision.enforced === false：off baseline 同样是 false。
+ * 不能用 decision.enforced === false（off baseline 同样是 false），
+ * 也不能用 applied.suppressed（heuristic silent/defer 也会带，且实际可能是 id 数组）。
  */
 function runtimeTraceIsShadow(decision, applied) {
   return (applied && (applied.wouldAction !== undefined
-    || applied.wouldDepth !== undefined
-    || applied.suppressed === true))
+    || applied.wouldDepth !== undefined))
     || decision?.shadow === true;
 }
 

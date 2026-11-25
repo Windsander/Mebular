@@ -479,7 +479,31 @@ describe('MCP admin · Memory Runtime sidecar 只读代理', () => {
         fragments: 0,
         wouldAction: 'speak',
         wouldDepth: 'detail',
-        suppressed: true,
+        suppressed: ['mf_shadow_suppressed'],
+      },
+    };
+    const heuristicSilentTrace = {
+      ...baseTrace,
+      id: 'tr_heuristic_silent',
+      at: now - 1500,
+      queryHash: 'hash-heuristic-silent',
+      queryPreview: 'heuristic silent',
+      decision: {
+        action: 'silent',
+        depth: 'gist',
+        confidence: 0.38,
+        reason: 'low_confidence',
+        policyVersion: 'v0-heuristic',
+        enforced: true,
+      },
+      applied: {
+        action: 'silent',
+        depth: 'gist',
+        fragments: 0,
+        suppressed: [
+          { fragmentId: 'mf_suppressed_1', content: 'RAW_SUPPRESSED_SECRET' },
+          'mf_suppressed_2',
+        ],
       },
     };
     const legacyTrace = {
@@ -491,7 +515,7 @@ describe('MCP admin · Memory Runtime sidecar 只读代理', () => {
     };
     const tracesFile = join(dir, 'traces.json');
     const detailFile = join(dir, 'trace-detail.json');
-    await writeFile(tracesFile, JSON.stringify([offTrace, shadowTrace, legacyTrace]), 'utf-8');
+    await writeFile(tracesFile, JSON.stringify([offTrace, shadowTrace, heuristicSilentTrace, legacyTrace]), 'utf-8');
     await writeFile(detailFile, JSON.stringify({
       byId: {
         [shadowTrace.id]: {
@@ -506,6 +530,14 @@ describe('MCP admin · Memory Runtime sidecar 只读代理', () => {
             { kind: 'missed', at: now - 1000, source: 'host', confidence: 0.7, note: 'next turn asked again' },
           ],
         },
+        [heuristicSilentTrace.id]: {
+          ...heuristicSilentTrace,
+          hits: [],
+          cue: { topics: [], entities: [] },
+          candidates: [],
+          expansions: [],
+          injected: [],
+        },
       },
     }), 'utf-8');
     const { base } = await start({
@@ -518,9 +550,10 @@ describe('MCP admin · Memory Runtime sidecar 只读代理', () => {
     await readyStatus(base);
 
     const list = await (await fetch(`${base}/admin/api/memory-runtime/traces`)).json();
-    expect(list.total).toBe(3);
+    expect(list.total).toBe(4);
     const off = list.traces.find((trace) => trace.id === 'tr_off');
     const shadow = list.traces.find((trace) => trace.id === 'tr_shadow');
+    const heuristicSilent = list.traces.find((trace) => trace.id === 'tr_heuristic_silent');
     const legacy = list.traces.find((trace) => trace.id === 'tr_legacy');
     expect(off.decision).toMatchObject({ enforced: false });
     expect(off.decision.shadow).toBeUndefined();
@@ -535,8 +568,17 @@ describe('MCP admin · Memory Runtime sidecar 只读代理', () => {
       fragments: 0,
       wouldAction: 'speak',
       wouldDepth: 'detail',
-      suppressed: true,
+      suppressed: ['mf_shadow_suppressed'],
     });
+    expect(heuristicSilent.applied).toEqual({
+      action: 'silent',
+      depth: 'gist',
+      fragments: 0,
+      suppressed: ['mf_suppressed_1', 'mf_suppressed_2'],
+    });
+    expect('wouldAction' in heuristicSilent.applied).toBe(false);
+    expect('wouldDepth' in heuristicSilent.applied).toBe(false);
+    expect(JSON.stringify(heuristicSilent)).not.toContain('RAW_SUPPRESSED_SECRET');
     expect(legacy.decision).toBeNull();
     expect(legacy.applied).toBeNull();
     expect(legacy.outcome).toBeNull();
@@ -548,12 +590,18 @@ describe('MCP admin · Memory Runtime sidecar 只读代理', () => {
       action: 'silent',
       wouldAction: 'speak',
       wouldDepth: 'detail',
-      suppressed: true,
+      suppressed: ['mf_shadow_suppressed'],
     });
     expect(detail.trace.outcomeHistory).toEqual([
       expect.objectContaining({ kind: 'ignored', source: 'heuristic' }),
       expect.objectContaining({ kind: 'missed', source: 'host', confidence: 0.7 }),
     ]);
+    const heuristicDetail = await (await fetch(`${base}/admin/api/memory-runtime/traces/tr_heuristic_silent`)).json();
+    expect(heuristicDetail.trace.applied).toMatchObject({
+      action: 'silent',
+      suppressed: ['mf_suppressed_1', 'mf_suppressed_2'],
+    });
+    expect(JSON.stringify(heuristicDetail)).not.toContain('RAW_SUPPRESSED_SECRET');
   }, 30000);
 
   it('policy reset 不伪成功：sidecar 404 原样返回明确失败', async () => {

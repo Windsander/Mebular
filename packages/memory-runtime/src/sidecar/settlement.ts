@@ -424,8 +424,6 @@ export class SettlementRuntime {
   private readonly diagnostics: DiagnosticLog | null;
   private readonly restartReason: string | null;
   private readonly now: () => number;
-  /** PolicyStore 初始化/落盘失败；不影响 recall/ingest，只作为 degraded 诊断。 */
-  private policyDegraded = false;
 
   constructor(options: SettlementRuntimeOptions) {
     this.config = options.config;
@@ -589,7 +587,7 @@ export class SettlementRuntime {
         await this.policyStore.init();
       } catch {
         // 策略统计不可用不能阻塞 sidecar 启动；召回照常，只是不学习。
-        this.policyDegraded = true;
+        // PolicyStore.init() 已在内部记录 degraded/lastError，这里不重复维护状态。
       }
     }
     await this.ingest.init();
@@ -616,8 +614,7 @@ export class SettlementRuntime {
   }
 
   get degraded(): boolean {
-    return this.policyDegraded
-      || this.policyStore?.isDegraded === true
+    return this.policyStore?.isDegraded === true
       || this.ingest.isDegraded
       || this.recall.isDegraded
       || this.objects.isDegraded
@@ -629,10 +626,8 @@ export class SettlementRuntime {
     if (!this.policyStore) return true;
     try {
       await this.policyStore.flush();
-      this.policyDegraded = this.policyStore.isDegraded;
       return true;
     } catch {
-      this.policyDegraded = true;
       return false;
     }
   }
@@ -737,10 +732,8 @@ export class SettlementRuntime {
     }
     try {
       const removedDomains = await this.policyStore.reset();
-      this.policyDegraded = this.policyStore.isDegraded;
       return { reset: true, policyVersion: INTERVENTION_POLICY_VERSION, removedDomains };
     } catch {
-      this.policyDegraded = true;
       throw new SidecarSettlementError('intervention_unavailable', '本机策略状态不可写', {
         status: 503,
         retryable: true,
@@ -971,7 +964,7 @@ export class SettlementRuntime {
       details,
       lastError: lastError ?? ingest.lastError,
       policy: {
-        degraded: this.policyDegraded || this.policyStore?.isDegraded === true,
+        degraded: this.policyStore?.isDegraded === true,
         lastError: this.policyStore?.lastError ?? null,
       },
     };

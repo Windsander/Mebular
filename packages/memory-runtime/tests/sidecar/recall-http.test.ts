@@ -2,7 +2,7 @@
 // 使用 fake capability server；不启动真实 MCP/core。
 
 import { describe, it, expect, afterEach } from '@jest/globals';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CapabilityClient } from '../../src/sidecar/capability-client.js';
@@ -67,11 +67,16 @@ async function setup(options: {
   now?: () => number;
   withPolicy?: boolean;
   interventionApi?: boolean;
+  /** 在 runtime.init 前把 policy 目录位置占成文件，模拟 PolicyStore init 失败。 */
+  policyBlocker?: boolean;
 } = {}): Promise<Harness> {
   const home = await mkdtemp(join(tmpdir(), 'mebular-recall-http-'));
   const now = options.now ?? (() => NOW);
   const local = new SidecarLocalLayer({ root: join(home, 'memory-runtime'), now });
   await local.init();
+  if (options.policyBlocker) {
+    await writeFile(join(home, 'memory-runtime', 'policy'), 'blocker', { mode: 0o600 });
+  }
   const fake = await startFakeCapability({ now });
   fake.setRecords([preference()]);
   const client = new CapabilityClient({ baseUrl: fake.baseUrl, token: 'cap-token', retries: 0, retryDelayMs: 0 });
@@ -1184,6 +1189,39 @@ describe('sidecar recall/context HTTP', () => {
 
     await rm(statePath, { recursive: true, force: true });
     expect(await runtime.flushPolicy()).toBe(true);
+    expect(runtime.degraded).toBe(false);
+    const recovered = await fetch(`${server.url}/status`, { headers: auth() });
+    const recoveredBody = await recovered.json() as any;
+    expect(recoveredBody.data.policy).toEqual({ degraded: false, lastError: null });
+  });
+
+  it('PolicyStore init 失败后由后台 flush 恢复：/status 不残留 stale degraded', async () => {
+    const { server, runtime, home } = await setup({
+      intervention: { mode: 'heuristic' },
+      policyBlocker: true,
+    });
+    expect(runtime.policyStore!.isDegraded).toBe(true);
+    const failed = await fetch(`${server.url}/status`, { headers: auth() });
+    const failedBody = await failed.json() as any;
+    expect(failedBody.data.policy.degraded).toBe(true);
+    expect(failedBody.data.policy.lastError?.code).toBeTruthy();
+
+    // 移除阻塞文件，让后续 write-behind 定时 flush 自行成功；不调用 flushPolicy/reset。
+    const policyDir = join(home, 'memory-runtime', 'policy');
+    await rm(policyDir, { force: true });
+    await mkdir(policyDir, { recursive: true });
+    await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_policy_recover',
+      turnId: 'turn_policy_recover',
+      query: '我的偏好是什么？',
+    });
+
+    const deadline = Date.now() + 3000;
+    while (runtime.policyStore!.isDegraded && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    expect(runtime.policyStore!.isDegraded).toBe(false);
     expect(runtime.degraded).toBe(false);
     const recovered = await fetch(`${server.url}/status`, { headers: auth() });
     const recoveredBody = await recovered.json() as any;

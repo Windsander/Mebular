@@ -10,10 +10,11 @@
   <img src="https://raw.githubusercontent.com/Windsander/Mebular/main/assets/roadmap-en.svg" alt="Mebular constellation roadmap: released foundation, current stability hardening, trusted desktop distribution and controlled updates next, protocol lifecycle topics under exploration">
 </picture>
 
-## Released — v0.3.4
+## Released — v0.3.5
 
-Available in the [v0.3.4 release](https://github.com/Windsander/Mebular/releases/tag/v0.3.4).
+Current release: [v0.3.5](https://github.com/Windsander/Mebular/releases/tag/v0.3.5). The foundation below shipped across v0.3.0–v0.3.4.
 
+- **v0.3.5 acceptance hardening** — Runtime page redesign plus DSH route authentication, home-path minimization, CLI help and test-isolation fixes. The 29-tool MCP surface, data formats and host adapters are unchanged.
 - **Memory Runtime** — opt-in sidecar for automatic capture, recall, durable details, checkpoints and local extraction/summary.
 - **Three host paths** — DSH, Hermes and OpenCode/OpenChamber adapters share one graph, event log and sync layer.
 - **Local model supply** — explicit model/engine installation with fixed revisions, size and SHA-256 verification; no silent download.
@@ -22,26 +23,27 @@ Available in the [v0.3.4 release](https://github.com/Windsander/Mebular/releases
 
 ## Now — v0.3.x
 
-The current stabilization focus after v0.3.4. Priorities can move in response to reproducible reports and first-run feedback.
+The current stabilization focus after v0.3.5. Priorities can move in response to reproducible reports and first-run feedback.
 
-- **Data lifecycle and privacy** — keep staging, settled details, host copies, retention and deletion boundaries explicit.
-- **Lifecycle and recovery** — validate managed/attached/manual sidecars, offline queues, Compact/Checkpoint/SelfRecord and host fail-open behavior.
-- **Evidence at real scale** — maintain the 1k/2k/10k audit, real-model canary, host E2E and upgrade/rollback evidence as release gates.
+- **Data lifecycle and privacy** — keep staging, settled details, host copies, retention and deletion boundaries explicit. Tracking: [#329](https://github.com/Windsander/Mebular/issues/329).
+- **Lifecycle and recovery** — validate managed/attached/manual sidecars, offline queues, Compact/Checkpoint/SelfRecord and host fail-open behavior. Tracking: [#266](https://github.com/Windsander/Mebular/issues/266).
+- **Evidence at real scale** — maintain the 1k/2k/10k audit, real-model canary, host E2E and upgrade/rollback evidence as release gates. Tracking: [#330](https://github.com/Windsander/Mebular/issues/330).
+- **First-run and cross-platform guidance** — turn macOS, Windows and Linux first-run reports into fixes and clearer setup or recovery guidance. Tracking: [#265](https://github.com/Windsander/Mebular/issues/265).
 
 ## Next — candidate themes
 
 Known follow-up work. These themes are **not** a committed v0.3.x scope or release schedule.
 
-- **Trusted desktop distribution** — advance the existing desktop signing and notarization plan.
-- **Controlled updates** — explore auto-update while preserving explicit consent, shared-runtime ownership and rollback.
+- **Trusted desktop distribution** — advance the existing desktop signing and notarization plan. Tracking: [#267](https://github.com/Windsander/Mebular/issues/267).
+- **Controlled updates** — explore auto-update while preserving explicit consent, shared-runtime ownership and rollback. Tracking: [#268](https://github.com/Windsander/Mebular/issues/268).
 
 ## Exploring
 
 Open problems only. Inclusion here does not commit to a design, version or date.
 
-- **Key rotation and recovery** — investigate master-key rotation, re-anchoring and an in-product recovery path.
-- **Domain lifecycle** — investigate safe deletion semantics for memory domains.
-- **Mixed-version compatibility** — investigate upgrade windows instead of requiring every device to run the same version.
+- **Key rotation and recovery** — investigate master-key rotation, re-anchoring and an in-product recovery path. Tracking: [#326](https://github.com/Windsander/Mebular/issues/326).
+- **Domain lifecycle** — investigate safe deletion semantics for memory domains. Tracking: [#327](https://github.com/Windsander/Mebular/issues/327).
+- **Mixed-version compatibility** — investigate upgrade windows instead of requiring every device to run the same version. Tracking: [#328](https://github.com/Windsander/Mebular/issues/328).
 
 The current behavior and trade-offs behind these topics are documented in [Limitations](https://github.com/Windsander/Mebular/blob/main/docs/limitations/LIMITATIONS.md).
 

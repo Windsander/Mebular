@@ -23,7 +23,7 @@
 // mocked. The script uses a temporary home and never touches a real Mebular home.
 
 import { spawn } from 'node:child_process';
-import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -130,10 +130,6 @@ function parseSessionID(output) {
     }
   }
   return null;
-}
-
-function traceText(trace) {
-  return JSON.stringify(trace ?? {});
 }
 
 async function listTraces(discovery, threadId) {

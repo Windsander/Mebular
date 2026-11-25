@@ -1,4 +1,4 @@
-// 介入策略单元测试：must_speak、depth、heuristic gate、探索/沉默上限、model 诚实回退。
+// 介入策略单元测试：must_speak、depth、heuristic gate、探索/沉默上限、model baseline 语义。
 
 import { describe, it, expect } from '@jest/globals';
 import { extractCue, type Cue } from '../../src/sidecar/cue.js';
@@ -169,10 +169,10 @@ describe('intervention planner', () => {
     expect(decision.reason).toBe('must_speak:after_silence');
   });
 
-  it('model 模式只返回 heuristic fallback + degraded，不伪造模型版本', () => {
+  it('model 模式的同步 baseline 不伪造模型版本（真实模型由 planInterventionAsync 负责）', () => {
     const decision = planIntervention(input({ mode: 'model', candidates: [candidate({ score: 0.8 })] }));
     expect(decision.action).toBe('speak');
-    expect(decision.degraded).toBe(true);
+    expect(decision.degraded).toBeUndefined();
     expect(decision.enforced).toBe(true);
     expect(decision.policyVersion).toMatch(/^heuristic:/);
     expect(decision.policyVersion).not.toMatch(/^model:/);

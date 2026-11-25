@@ -15,6 +15,8 @@ import type {
   InferenceProbe,
   InferenceQueryPlanRequest,
   InferenceQueryPlanResult,
+  InferenceInterventionRequest,
+  InferenceInterventionResult,
   SidecarInferenceProvider,
   InferenceStatus,
   InferenceSummaryRequest,
@@ -248,6 +250,12 @@ class FakeInferenceProvider implements SidecarInferenceProvider {
 
   async planQuery(_request: InferenceQueryPlanRequest): Promise<InferenceQueryPlanResult> {
     return { ok: true, query: '', degraded: false, warnings: [], latencyMs: 0 };
+  }
+
+  async planIntervention(
+    _request: InferenceInterventionRequest,
+  ): Promise<InferenceInterventionResult> {
+    return { ok: false, degraded: true, reasonCode: 'model_unavailable', warnings: [], latencyMs: 0 };
   }
 
   noteHostCandidates(): void {}

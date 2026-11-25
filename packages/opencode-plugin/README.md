@@ -171,8 +171,14 @@ Runtime 返回 `decision` / `traceId` 时，插件会把每次 `/context`（**�
 | 上轮 `silent`/`defer` + 本轮显式记忆追问或高实体/主题重叠 | `missed` | 该说没说 |
 | 上轮 `speak` + 本轮重问/复述 | `reasked` | 注入没阻止重问 |
 | 上轮 `speak` + 本轮纠正 | `corrected` | 注入内容被纠正 |
+| 上轮 `speak` + `gist` + 本轮明确要细节 | `too_shallow` | 深度不够 |
+| 上轮 `speak` + `detail`/`quote` + 本轮明确要更短或直接换话题 | `too_deep` | 深度过头 |
+| 上轮 `speak` + 本轮明确正向确认（对/有用/谢谢/没错/this helps/perfect） | `accepted` | 注入被接受 |
 | `session.idle` / `session.execution.succeeded` 后窗口内无追问 | `ignored` | 弱信号，延迟且去重 |
 
+- 深度反馈只在上轮实际 `speak` 且 `decision.depth` 已知时判断；普通继续、
+  同主题追问、问候不会触发 `too_shallow`/`too_deep`。
+- 明确要求更短/更浅优先于 `accepted`；纠正优先于其他正向或深度信号。
 - 只保留每个 thread/session 最近一次 decision；下一轮 user turn 或 idle 上报后消费。
 - 同一 `traceId` + `kind` 最多上报一次；失败不重试、不阻塞主流程，401 之外的
   网络/超时/404 一律静默丢弃。
@@ -219,8 +225,9 @@ node --experimental-vm-modules node_modules/jest/bin/jest.js tests/opencode-plug
 发现/token 文件权限、认证/API 版本失败禁用、无命中、超时、去重、工具遮蔽、
 原生 memory 不受影响、request-only 注入、`session.generate` 失败回退、
 compaction checkpoint 与 ingest 幂等，以及 0.4.0 outcome 归因（silent→missed、
-speak→reasked/corrected、idle→ignored、同 trace/kind 去重、旧 Runtime 与
-outcome 失败时 fail-open）。[真实 OpenCode E2E](../../tests/integration/host-e2e/README.md)
+speak→reasked/corrected/accepted、gist→too_shallow、detail→too_deep、
+idle→ignored、同 trace/kind 去重、普通继续不误报、旧 Runtime 与 outcome 失败时
+fail-open）。[真实 OpenCode E2E](../../tests/integration/host-e2e/README.md)
 启动真实 OpenCode、sidecar、capability 与 GraphStore，但模型侧使用 fake
 OpenAI-compatible provider，不跑真实 LLM。`--controller-fallback` 不启动真实
 OpenCode，只验证 plugin controller + 真实 sidecar，并会明确打印该边界。

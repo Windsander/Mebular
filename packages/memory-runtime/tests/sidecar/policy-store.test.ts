@@ -217,6 +217,61 @@ describe('PolicyStore', () => {
     expect(await policy.thresholdFor('opencode', 'user', 0.1)).toBe(0.45);
   }, 20_000);
 
+  it('adaptive：第 50 次决策按 useless/missed 调整 ±0.03，跨重启保留，reset 回 base', async () => {
+    const policy = store();
+    await policy.init();
+    for (let index = 0; index < 20; index += 1) {
+      await policy.recordOutcome({ agentId: 'opencode', domain: 'user', kind: 'reasked' });
+    }
+    // 49 次决策还不触发调权（tune 每 50 次）。
+    for (let index = 0; index < 49; index += 1) {
+      await policy.recordDecision({ agentId: 'opencode', domain: 'user', action: 'speak' });
+    }
+    expect(await policy.thresholdFor('opencode', 'user', 0.55)).toBeCloseTo(0.55, 5);
+
+    // 第 50 次：uselessRate=20/50=0.40 > 0.35 → +0.03。
+    await policy.recordDecision({ agentId: 'opencode', domain: 'user', action: 'speak' });
+    expect(await policy.thresholdFor('opencode', 'user', 0.55)).toBeCloseTo(0.58, 5);
+
+    // 重启后 offset 仍在。
+    await policy.flush();
+    const reopened = store();
+    await reopened.init();
+    expect(await reopened.thresholdFor('opencode', 'user', 0.55)).toBeCloseTo(0.58, 5);
+
+    // 再加 40 speak + 10 silent（第二个 50 次窗口），missed=3/10 > 0.20，
+    // 同时 useless 被稀释到 20/90 < 0.35 → 只向下调 -0.03。
+    for (let index = 0; index < 3; index += 1) {
+      await reopened.recordOutcome({ agentId: 'opencode', domain: 'user', kind: 'missed' });
+    }
+    for (let index = 0; index < 40; index += 1) {
+      await reopened.recordDecision({ agentId: 'opencode', domain: 'user', action: 'speak' });
+    }
+    for (let index = 0; index < 10; index += 1) {
+      await reopened.recordDecision({ agentId: 'opencode', domain: 'user', action: 'silent' });
+    }
+    expect(await reopened.thresholdFor('opencode', 'user', 0.55)).toBeCloseTo(0.55, 5);
+
+    // reset 后回到 base（再调权需要新的 50 次样本）。
+    await reopened.reset();
+    expect(await reopened.thresholdFor('opencode', 'user', 0.55)).toBeCloseTo(0.55, 5);
+  }, 30_000);
+
+  it('adaptive：域样本 <20 时（即使到期）不单独调权', async () => {
+    const policy = store();
+    await policy.init();
+    for (let index = 0; index < 18; index += 1) {
+      await policy.recordDecision({ agentId: 'opencode', domain: 'user', action: 'speak' });
+    }
+    for (let index = 0; index < 9; index += 1) {
+      await policy.recordOutcome({ agentId: 'opencode', domain: 'user', kind: 'reasked' });
+    }
+    now += 8 * DAY;
+    await policy.recordDecision({ agentId: 'opencode', domain: 'user', action: 'speak' });
+    // 19 个样本 → 仍向全局池化，不调本域阈值。
+    expect(await policy.thresholdFor('opencode', 'user', 0.55)).toBeCloseTo(0.55, 5);
+  });
+
   it('reset 清空统计并保留可用状态', async () => {
     const policy = store();
     await policy.init();

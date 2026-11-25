@@ -27,6 +27,13 @@ export interface ChatJsonRequest {
   responseSchema?: JsonResponseSchema;
   /** 附加请求字段；不能覆盖 messages/model/stream/response_format。 */
   extraBody?: Record<string, unknown>;
+  /**
+   * 本次请求的超时覆盖（毫秒）。用于交互式低延迟决策（如介入策略）把单次
+   * 调用限制在调用方预算内；不传时使用 gateway 构造时的 timeoutMs。
+   */
+  timeoutMs?: number;
+  /** 本次请求的重试次数覆盖；低延迟路径用 0，避免重试超出预算。 */
+  maxRetries?: number;
 }
 
 export interface ChatFetchResponse {
@@ -445,8 +452,9 @@ export class ChatCompletionGateway {
 
     let attempts = 0;
     let lastError: RequestError | null = null;
+    const maxRetries = Math.max(0, Math.floor(request.maxRetries ?? this.maxRetries));
 
-    for (let attempt = 0; attempt <= this.maxRetries; attempt += 1) {
+    for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
       attempts += 1;
       try {
         const content = await this.requestOnce(request);
@@ -475,7 +483,7 @@ export class ChatCompletionGateway {
           ? error
           : new RequestError('network', `model request failed: ${messageOf(error)}`, true);
         lastError = requestError;
-        if (!requestError.retryable || attempt >= this.maxRetries) break;
+        if (!requestError.retryable || attempt >= maxRetries) break;
         const delay = requestError.retryAfterMs ?? this.retryDelayMs;
         if (delay > 0) await this.sleep(delay);
       }
@@ -528,14 +536,15 @@ export class ChatCompletionGateway {
     if (this.apiKey) headers.Authorization = `Bearer ${this.apiKey}`;
 
     const controller = new AbortController();
+    const timeoutMs = Math.max(1, Math.floor(request.timeoutMs ?? this.timeoutMs));
     let timedOut = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
         timedOut = true;
         controller.abort();
-        reject(new RequestError('timeout', `model request timed out after ${this.timeoutMs}ms`, true));
-      }, this.timeoutMs);
+        reject(new RequestError('timeout', `model request timed out after ${timeoutMs}ms`, true));
+      }, timeoutMs);
       (timer as unknown as { unref?: () => void }).unref?.();
     });
 
@@ -588,7 +597,7 @@ export class ChatCompletionGateway {
     } catch (error) {
       if (error instanceof RequestError) throw error;
       if (timedOut || controller.signal.aborted) {
-        throw new RequestError('timeout', `model request timed out after ${this.timeoutMs}ms`, true);
+        throw new RequestError('timeout', `model request timed out after ${timeoutMs}ms`, true);
       }
       throw new RequestError('network', `model request failed: ${messageOf(error)}`, true);
     } finally {

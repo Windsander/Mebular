@@ -1,18 +1,27 @@
-// 记忆介入策略（0.4.0 Phase 1/2）。
+// 记忆介入策略（0.4.0 Phase 1–3）。
 //
 // 只决定「本次要不要带长期记忆片段」以及「带 gist/detail/quote」；
 // self/checkpoint 不经过这里，始终保持现有注入语义。
 //
-// - must_speak 是硬规则，任何策略都不能否决；
+// - must_speak 是硬规则，任何策略都不能否决，且命中时不调用模型；
 // - heuristic 用 score.final / cue 具体度 / novelty / 近期负例率；
 // - maxSilentStreak 与 explorationRate 防止策略学成哑巴；
-// - model 模式本轮只做诚实降级：返回 heuristic 结果 + degraded=true，
-//   绝不伪造模型输出（真实模型调用留给后续会话）。
+// - model 模式真实调用 SidecarInferenceProvider.planIntervention()：
+//   超时/非法/失败一律回退 heuristic + degraded + intervention_model_fallback。
 //
-// 本模块是纯函数：不做 I/O、不读配置、不写 trace，便于单元测试。
+// planIntervention() 是纯函数（heuristic baseline）；
+// planInterventionAsync() 只做模型编排，不做 I/O、不写 trace。
+// 两者都不读配置、不写 trace，便于单元测试。
 
 import { createHash } from 'node:crypto';
 import type { Cue } from './cue.js';
+import type {
+  InferenceInterventionCandidate,
+  InferenceInterventionRequest,
+  InferenceInterventionResult,
+  InferenceInterventionStats,
+  SidecarOptionalModelSelection,
+} from './inference-provider.js';
 import type {
   InterventionAction,
   InterventionDecision,
@@ -36,6 +45,10 @@ export interface InterventionCandidateView {
   domain: string;
   detailAvailable: boolean;
   conflict: boolean;
+  /** 给模型看的粗粒度摘要（截断）；绝不传 detail/正文。 */
+  gist?: string;
+  /** 候选年龄（天）；缺省 0。 */
+  ageDays?: number;
 }
 
 export interface InterventionPlannerInput {
@@ -277,15 +290,274 @@ function planHeuristic(input: InterventionPlannerInput): InterventionDecision {
 }
 
 /**
- * 计算一次介入决策。off 模式不调用本函数（由 RecallService 记录 baseline）。
- * model 模式返回 heuristic 决策并标记 degraded，避免伪造模型结果；
- * 真实模型调用需要后续会话接入 inference provider。
+ * 计算一次 heuristic 介入决策。off 模式不调用本函数（由 RecallService 记录 baseline）。
+ * model 模式的真实模型调用由 planInterventionAsync() 编排；本函数返回其 heuristic
+ * baseline，绝不伪造模型输出。
  */
 export function planIntervention(input: InterventionPlannerInput): InterventionDecision {
-  const decision = planHeuristic(input);
-  if (input.mode !== 'model') return decision;
+  return planHeuristic(input);
+}
+
+// ---------- 0.4.0 Phase 3：真实模型决策编排 ----------
+
+const MODEL_REASON_MAX_CHARS = 160;
+const MODEL_GIST_MAX_CHARS = 240;
+
+/** 只依赖 provider 的这两个方法，测试可注入替身。 */
+export interface InterventionModelPlanner {
+  selectOptionalSource(allowRemote: boolean): Promise<SidecarOptionalModelSelection>;
+  planIntervention(
+    request: InferenceInterventionRequest,
+    options?: { timeoutMs?: number },
+  ): Promise<InferenceInterventionResult>;
+}
+
+export interface InterventionModelContext {
+  planner: InterventionModelPlanner | null;
+  allowRemote: boolean;
+  /** 本次模型决策总预算（config.intervention.modelTimeoutMs）。 */
+  timeoutMs: number;
+  stats: InferenceInterventionStats;
+  hasCheckpoint: boolean;
+  now?: () => number;
+}
+
+export interface InterventionPlanResult {
+  decision: InterventionDecision;
+  source: 'heuristic' | 'local' | 'api';
+  model?: string;
+  latencyMs: number;
+  /** true 表示本次决策由模型给出。 */
+  fromModel: boolean;
+  /** true 表示本次尝试了模型但回退 heuristic。 */
+  modelFallback: boolean;
+  warnings: string[];
+  reasonCode?: string;
+}
+
+function dedupe(values: Iterable<string>): string[] {
+  return [...new Set([...values].filter((value) => value.length > 0))];
+}
+
+/** 超时/拒绝都归一为 null，保证 fail-open；不泄漏模型错误详情。 */
+function withinDeadline<T>(promise: Promise<T>, timeoutMs: number): Promise<T | null> {
+  return new Promise<T | null>((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve(null);
+    }, timeoutMs);
+    (timer as unknown as { unref?: () => void }).unref?.();
+    const finish = (value: T | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    promise.then((value) => finish(value), () => finish(null));
+  });
+}
+
+/**
+ * 组装模型请求：cue 聚合字段 + 候选 gist + 聚合统计。
+ * 不传 rawQuery、detail、checkpoint 正文、token、fragmentId/sourceIds。
+ */
+export function buildInterventionInferenceRequest(
+  input: InterventionPlannerInput,
+  stats: InferenceInterventionStats,
+  hasCheckpoint: boolean,
+  source: 'local' | 'api',
+  allowRemote: boolean,
+): InferenceInterventionRequest {
+  const candidates: InferenceInterventionCandidate[] = input.candidates.map((candidate) => ({
+    kind: candidate.kind,
+    domain: candidate.domain,
+    gist: (candidate.gist ?? '').replace(/\s+/g, ' ').trim().slice(0, MODEL_GIST_MAX_CHARS),
+    score: round4(candidate.score),
+    confidence: round4(candidate.confidence),
+    ageDays: Math.max(0, candidate.ageDays ?? 0),
+  }));
   return {
-    ...decision,
-    degraded: true,
+    source,
+    cue: {
+      specificity: input.cue.specificity,
+      topics: [...input.cue.topics],
+      entities: input.cue.entities.map((entity) => entity.name),
+      reasons: [...input.cue.detailIntent.reasons],
+      followUp: Boolean(input.cue.followUpRef)
+        || input.cue.detailIntent.reasons.includes('follow_up'),
+    },
+    candidates,
+    stats: { ...stats },
+    hasCheckpoint,
+    allowRemote,
+  };
+}
+
+function modelVersionOf(
+  request: InferenceInterventionRequest,
+  result: InferenceInterventionResult,
+): string {
+  const digest = createHash('sha256')
+    .update(JSON.stringify([
+      request.cue,
+      request.candidates,
+      request.stats,
+      result.action,
+      result.depth,
+      result.confidence,
+      result.reason,
+    ]), 'utf8')
+    .digest('hex');
+  return `model:${digest.slice(0, 8)}`;
+}
+
+function modelDecisionOf(
+  result: InferenceInterventionResult,
+  input: InterventionPlannerInput,
+  heuristic: InterventionDecision,
+  request: InferenceInterventionRequest,
+): { decision: InterventionDecision; warnings: string[] } | null {
+  if (result.action !== 'speak' && result.action !== 'defer' && result.action !== 'silent') return null;
+  if (result.depth !== 'gist' && result.depth !== 'detail' && result.depth !== 'quote') return null;
+  if (typeof result.confidence !== 'number'
+    || !Number.isFinite(result.confidence)
+    || result.confidence < 0
+    || result.confidence > 1) {
+    return null;
+  }
+  if (typeof result.reason !== 'string' || result.reason.trim().length === 0) return null;
+
+  const warnings: string[] = [];
+  let depth: RecallDepth = result.depth;
+  let degraded = false;
+  const top = input.candidates[0];
+  if (result.action === 'speak' && depth !== 'gist' && top && !top.detailAvailable) {
+    // 不要承诺不存在的 detail/quote；降为 gist，但不否决模型的 action。
+    depth = 'gist';
+    degraded = true;
+    warnings.push('intervention_model_depth_unavailable');
+  }
+
+  const scores: InterventionScores | undefined = heuristic.scores
+    ? {
+      ...heuristic.scores,
+      depthFit: round4(depth === depthForCue(input.cue) ? 1 : 0.6),
+    }
+    : undefined;
+
+  return {
+    decision: {
+      action: result.action,
+      depth,
+      confidence: round4(result.confidence),
+      reason: result.reason.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim()
+        .slice(0, MODEL_REASON_MAX_CHARS),
+      policyVersion: modelVersionOf(request, { ...result, depth }),
+      enforced: true,
+      ...(scores ? { scores } : {}),
+      ...(degraded ? { degraded: true } : {}),
+    },
+    warnings,
+  };
+}
+
+/**
+ * model 模式入口：must_speak 不调用模型；其余按 cue + top-3 gist + 统计决策。
+ * 任何失败（无模型/超时/非法/异常）都回退 heuristic，并标记 degraded + warning。
+ */
+export async function planInterventionAsync(
+  input: InterventionPlannerInput,
+  context: InterventionModelContext,
+): Promise<InterventionPlanResult> {
+  const heuristic = planIntervention({ ...input, mode: 'heuristic' });
+  const base: InterventionPlanResult = {
+    decision: heuristic,
+    source: 'heuristic',
+    latencyMs: 0,
+    fromModel: false,
+    modelFallback: false,
+    warnings: [],
+  };
+  if (input.mode !== 'model') return base;
+  // 硬规则优先且省延迟；没有候选时模型也无法改变注入结果。
+  if (heuristic.mustSpeak || input.candidates.length === 0) return base;
+
+  const now = context.now ?? Date.now;
+  const started = now();
+  const elapsedNow = (): number => Math.max(0, now() - started);
+  const timeoutMs = Math.max(1, Math.floor(context.timeoutMs));
+  const fallback = (
+    reasonCode: string,
+    warnings: string[],
+    extra: { model?: string } = {},
+  ): InterventionPlanResult => ({
+    decision: { ...heuristic, degraded: true },
+    source: 'heuristic',
+    ...(extra.model ? { model: extra.model } : {}),
+    latencyMs: elapsedNow(),
+    fromModel: false,
+    modelFallback: true,
+    warnings: dedupe(['intervention_model_fallback', ...warnings]),
+    reasonCode,
+  });
+
+  if (!context.planner) {
+    return fallback('model_unavailable', ['model_unavailable']);
+  }
+
+  const selection = await withinDeadline(
+    context.planner.selectOptionalSource(context.allowRemote),
+    timeoutMs,
+  );
+  if (!selection) return fallback('model_timeout', ['model_timeout']);
+  if (!selection.source) {
+    return fallback(
+      selection.reason ?? 'model_unavailable',
+      selection.warnings.length > 0 ? selection.warnings : ['model_unavailable'],
+    );
+  }
+
+  const remaining = timeoutMs - elapsedNow();
+  if (remaining <= 0) return fallback('model_timeout', ['model_timeout']);
+
+  const request = buildInterventionInferenceRequest(
+    input,
+    context.stats,
+    context.hasCheckpoint,
+    selection.source,
+    context.allowRemote,
+  );
+  const result = await withinDeadline(
+    context.planner.planIntervention(request, { timeoutMs: remaining }),
+    remaining,
+  );
+  if (!result) return fallback('model_timeout', ['model_timeout']);
+  if (!result.ok) {
+    return fallback(
+      result.reasonCode ?? 'model_failed',
+      result.warnings.length > 0 ? result.warnings : ['model_unavailable'],
+      result.model ? { model: result.model } : {},
+    );
+  }
+
+  const built = modelDecisionOf(result, input, heuristic, request);
+  if (!built) {
+    return fallback(
+      'invalid_model_response',
+      ['model_invalid_response'],
+      result.model ? { model: result.model } : {},
+    );
+  }
+
+  return {
+    decision: built.decision,
+    source: selection.source,
+    ...(result.model ? { model: result.model } : {}),
+    latencyMs: elapsedNow(),
+    fromModel: true,
+    modelFallback: false,
+    warnings: built.warnings,
   };
 }

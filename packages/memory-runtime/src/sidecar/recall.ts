@@ -62,7 +62,14 @@ import {
   type RecallOutcomeSource,
   type RecallTrace,
 } from '../runtime/types.js';
-import { planIntervention, type InterventionCandidateView, type InterventionMode } from './intervention.js';
+import {
+  planIntervention,
+  planInterventionAsync,
+  type InterventionCandidateView,
+  type InterventionMode,
+  type InterventionPlannerInput,
+} from './intervention.js';
+import type { InferenceInterventionStats } from './inference-provider.js';
 import type { PolicyStore } from './policy-store.js';
 
 const MAX_DOMAINS = 16;
@@ -3004,10 +3011,30 @@ export class RecallService {
 
     let threshold = config.minConfidence;
     let recentUselessRate = 0;
+    let policyStats: InferenceInterventionStats = {
+      spoken: 0,
+      silent: 0,
+      accepted: 0,
+      reasked: 0,
+      corrected: 0,
+      missed: 0,
+      tooShallow: 0,
+      tooDeep: 0,
+    };
     if (this.policyStore) {
       try {
         const stats = await this.policyStore.effectiveStats(run.request.agentId, domain);
         recentUselessRate = stats.uselessRate;
+        policyStats = {
+          spoken: Math.round(stats.spoken),
+          silent: Math.round(stats.silent),
+          accepted: Math.round(stats.accepted),
+          reasked: Math.round(stats.reasked),
+          corrected: Math.round(stats.corrected),
+          missed: Math.round(stats.missed),
+          tooShallow: Math.round(stats.too_shallow),
+          tooDeep: Math.round(stats.too_deep),
+        };
         threshold = await this.policyStore.thresholdFor(
           run.request.agentId,
           domain,
@@ -3019,18 +3046,31 @@ export class RecallService {
       }
     }
 
-    const candidates: InterventionCandidateView[] = selected.map((candidate) => ({
-      fragmentId: candidate.fragment.id,
-      sourceIds: candidate.fragment.sourceIds,
-      score: candidate.fragment.score.final,
-      confidence: candidate.fragment.confidence,
-      kind: candidate.fragment.kind,
-      domain: candidate.fragment.owner.domain,
-      detailAvailable: candidate.fragment.detailAvailable,
-      conflict: Boolean(candidate.fragment.conflictGroup),
-    }));
+    const now = this.now();
+    const candidates: InterventionCandidateView[] = selected.map((candidate) => {
+      const fragment = candidate.fragment;
+      const at = fragment.time?.to
+        ?? fragment.time?.at
+        ?? fragment.time?.from
+        ?? fragment.provenance.at;
+      return {
+        fragmentId: fragment.id,
+        sourceIds: fragment.sourceIds,
+        score: fragment.score.final,
+        confidence: fragment.confidence,
+        kind: fragment.kind,
+        domain: fragment.owner.domain,
+        detailAvailable: fragment.detailAvailable,
+        conflict: Boolean(fragment.conflictGroup),
+        // 只给模型 gist；detail/正文绝不进入请求。
+        gist: fragment.gist,
+        ageDays: typeof at === 'number' && Number.isFinite(at) && at > 0
+          ? Math.max(0, (now - at) / (24 * 60 * 60 * 1000))
+          : 0,
+      };
+    });
 
-    const decision = planIntervention({
+    const planInput: InterventionPlannerInput = {
       mode: config.mode as InterventionMode,
       cue: run.cue,
       candidates,
@@ -3041,7 +3081,20 @@ export class RecallService {
       lastDecision: this.lastDecisions.get(key) ?? null,
       maxSilentStreak: config.maxSilentStreak,
       explorationRate: config.explorationRate,
-    });
+    };
+    // model 模式：must_speak 不调用模型；其余真实调用 provider，失败 fail-open。
+    const planned = config.mode === 'model'
+      ? await planInterventionAsync(planInput, {
+        planner: this.models,
+        allowRemote: run.request.allowRemote,
+        timeoutMs: config.modelTimeoutMs,
+        stats: policyStats,
+        hasCheckpoint: Boolean(run.checkpointBlock),
+        now: this.now,
+      })
+      : { decision: planIntervention(planInput), warnings: [] as string[] };
+    const decision = planned.decision;
+    for (const warning of planned.warnings) pushWarning(warnings, warning);
 
     if (config.mode === 'shadow') {
       // shadow 只记录建议；实际注入保持 baseline，且不得改变 warning/预算行为。
@@ -3074,9 +3127,6 @@ export class RecallService {
       pushWarning(warnings, 'must_speak_unavailable');
     } else if (decision.mustSpeak && decision.degraded) {
       pushWarning(warnings, 'must_speak_gist');
-    }
-    if (config.mode === 'model' && decision.degraded) {
-      pushWarning(warnings, 'intervention_model_fallback');
     }
 
     const effective = {
@@ -3137,9 +3187,6 @@ export class RecallService {
     }
     if (decision.reason === 'must_speak_unavailable') {
       pushWarning(warnings, 'must_speak_unavailable');
-    }
-    if (config.mode === 'model' && decision.degraded) {
-      pushWarning(warnings, 'intervention_model_fallback');
     }
     run.decision = decision;
     run.effective = {

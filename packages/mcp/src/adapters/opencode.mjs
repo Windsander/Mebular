@@ -252,31 +252,77 @@ function stripFileRef(ref) {
   return ref.startsWith('file:') ? ref.slice('file:'.length) : ref;
 }
 
-/**
- * Path identity for a Mebular-managed OpenCode plugin install. Any
- * `<home>/adapters/opencode-plugin/<version>` entry belongs to us, including
- * paths from an older app version (`0.3.4`) after an upgrade to `0.3.5`.
- * `file:` refs and `~` paths are normalized by segment, not by one absolute
- * path, so an upgrade never leaves two plugins loaded.
- */
-function isManagedMebularPath(ref) {
-  const text = stripFileRef(ref).trim();
-  if (text.length === 0) return false;
-  const normalized = text.replace(/\\/g, '/').replace(/^~\/?/, '');
-  const segments = normalized.split('/').filter((part) => part.length > 0);
-  for (let index = 0; index < segments.length - 1; index += 1) {
-    if (segments[index] !== 'adapters' || segments[index + 1] !== MANAGED_NAME) continue;
-    const after = segments[index + 2];
-    // `<...>/adapters/opencode-plugin` or `<...>/adapters/opencode-plugin/<version>`.
-    if (after === undefined || /^\d+\.\d+\.\d+/.test(after)) return true;
+function normalizeLocalPath(ref, options = {}) {
+  let text = stripFileRef(ref).trim();
+  if (text.length === 0) return null;
+  const userHome = typeof options.userHome === 'string' && options.userHome.length > 0
+    ? options.userHome
+    : resolveUserHome(options);
+  if (text === '~') text = userHome;
+  else if (/^~[\\/]/.test(text)) text = join(userHome, text.slice(2));
+  try {
+    return resolve(text);
+  } catch {
+    return null;
   }
-  return false;
 }
 
-function isMebularEntry(entry, pluginPath) {
+/**
+ * Managed root for the *current* Mebular home. Without an explicit home the
+ * root is derived only when the resolved plugin path itself lives under
+ * `<...>/adapters/opencode-plugin/<version>`; a repository/dev path yields no
+ * managed root and therefore cannot claim unrelated user paths.
+ */
+function managedPluginRoot(options = {}, pluginPath = null) {
+  const home = options.home ?? options.mebularHome;
+  if (typeof home === 'string' && home.length > 0) {
+    const resolvedHome = normalizeLocalPath(home, options) ?? resolve(home);
+    return resolve(join(resolvedHome, 'adapters', MANAGED_NAME));
+  }
+  const resolved = normalizeLocalPath(pluginPath, options);
+  if (!resolved) return null;
+  const suffix = `${sep}adapters${sep}${MANAGED_NAME}`;
+  const index = resolved.lastIndexOf(suffix);
+  if (index <= 0) return null;
+  return resolved.slice(0, index + suffix.length);
+}
+
+function managedContext(options = {}, pluginPath = null) {
+  return {
+    ...options,
+    managedRoot: options.managedRoot ?? managedPluginRoot(options, pluginPath),
+  };
+}
+
+function normalizeMergeOptions(options) {
+  if (typeof options === 'string' && options.length > 0) return { home: options };
+  return isPlainObject(options) ? options : {};
+}
+
+/**
+ * Only `<current home>/adapters/opencode-plugin/...` is Mebular-owned. A user
+ * plugin that happens to live in `.../projects/adapters/opencode-plugin/...`
+ * must never be rewritten, verified as ours or rolled back.
+ */
+function isManagedMebularPath(ref, context = {}) {
+  if (typeof context.managedRoot !== 'string' || context.managedRoot.length === 0) return false;
+  const candidate = normalizeLocalPath(ref, context);
+  if (!candidate) return false;
+  const root = resolve(context.managedRoot);
+  const equals = process.platform === 'win32'
+    ? candidate.toLowerCase() === root.toLowerCase()
+    : candidate === root;
+  if (equals) return true;
+  return process.platform === 'win32'
+    ? candidate.toLowerCase().startsWith(`${root.toLowerCase()}${sep}`)
+    : candidate.startsWith(`${root}${sep}`);
+}
+
+function isMebularEntry(entry, pluginPath, options = {}) {
+  const context = managedContext(options, pluginPath);
   return entryRefs(entry).some((ref) => {
     if (ref === PACKAGE_NAME || ref.startsWith(`${PACKAGE_NAME}/`)) return true;
-    if (isManagedMebularPath(ref)) return true;
+    if (isManagedMebularPath(ref, context)) return true;
     if (samePath(ref, pluginPath)) return true;
     if (ref.startsWith('file:') && samePath(ref.slice('file:'.length), pluginPath)) return true;
     return false;
@@ -310,15 +356,20 @@ function canonicalEntry(existing, pluginPath) {
   return entry;
 }
 
-/** 合并 `plugins` 数组：按 package/path 去重，保留用户其他插件。 */
-export function mergePlugins(document, pluginPath) {
+/**
+ * 合并 `plugins` 数组：按 package/path 去重，保留用户其他插件。
+ * `options.home`（或第三个参数直接传 home）限定 managed path 身份；
+ * 不传时仅当 pluginPath 自身位于 managed root 下才推导。
+ */
+export function mergePlugins(document, pluginPath, options = {}) {
   if (!isPlainObject(document)) return { error: 'CONFIG_STRUCTURE_UNKNOWN' };
   const plugins = document.plugins;
   if (plugins !== undefined && !Array.isArray(plugins)) return { error: 'CONFIG_STRUCTURE_UNKNOWN' };
   const list = Array.isArray(plugins) ? plugins : [];
+  const context = managedContext(normalizeMergeOptions(options), pluginPath);
   const matches = [];
   list.forEach((entry, index) => {
-    if (isMebularEntry(entry, pluginPath)) matches.push(index);
+    if (isMebularEntry(entry, pluginPath, context)) matches.push(index);
   });
   const entry = canonicalEntry(matches.length > 0 ? list[matches[0]] : null, pluginPath);
   const nextPlugins = [];
@@ -340,11 +391,12 @@ export function mergePlugins(document, pluginPath) {
   };
 }
 
-function removeMebularPlugins(document, pluginPath) {
+function removeMebularPlugins(document, pluginPath, options = {}) {
   if (!isPlainObject(document)) return { error: 'CONFIG_STRUCTURE_UNKNOWN' };
   const plugins = document.plugins;
   if (!Array.isArray(plugins)) return { error: 'CONFIG_STRUCTURE_UNKNOWN' };
-  const nextPlugins = plugins.filter((entry) => !isMebularEntry(entry, pluginPath));
+  const context = managedContext(normalizeMergeOptions(options), pluginPath);
+  const nextPlugins = plugins.filter((entry) => !isMebularEntry(entry, pluginPath, context));
   return {
     changed: nextPlugins.length !== plugins.length,
     plugins: nextPlugins,
@@ -460,7 +512,11 @@ export async function configure(options = {}) {
     if (!isPlainObject(document)) return { ok: false, code: 'CONFIG_STRUCTURE_UNKNOWN' };
   }
 
-  const merged = mergePlugins(document, pluginPath);
+  const merged = mergePlugins(document, pluginPath, {
+    home: options.home ?? options.mebularHome,
+    userHome: resolveUserHome(options),
+    ...(typeof options.managedRoot === 'string' ? { managedRoot: options.managedRoot } : {}),
+  });
   if (merged.error) return { ok: false, code: merged.error };
   if (!merged.changed) {
     return {
@@ -567,9 +623,15 @@ export async function verify(options = {}) {
   const packageInfo = normalizedPackage(options) ?? await ensurePackage({ ...options, stagePackage: false });
   const pluginPath = packageInfo.ok ? packageInfo.path : null;
   // Count every Mebular entry (package name, current path, all managed
-  // `<home>/adapters/opencode-plugin/<version>` paths), not just the path this
-  // run resolved: an upgrade that leaves the old version behind must fail.
-  const matches = document.plugins.filter((entry) => isMebularEntry(entry, pluginPath));
+  // `<home>/adapters/opencode-plugin/<version>` paths for the *current* home),
+  // not just the path this run resolved: an upgrade that leaves the old version
+  // behind must fail, while unrelated user paths stay untouched.
+  const verifyContext = managedContext({
+    home: options.home ?? options.mebularHome,
+    userHome: resolveUserHome(options),
+    ...(typeof options.managedRoot === 'string' ? { managedRoot: options.managedRoot } : {}),
+  }, pluginPath);
+  const matches = document.plugins.filter((entry) => isMebularEntry(entry, pluginPath, verifyContext));
   const unique = matches.length === 1;
   checks.push({ name: 'entry-unique', ok: unique, count: matches.length });
   if (!unique) {
@@ -652,7 +714,11 @@ export async function rollback(options = {}) {
   }
   const packageInfoForPath = normalizedPackage(options) ?? await ensurePackage({ ...options, stagePackage: false });
   const pluginPath = packageInfoForPath.ok ? packageInfoForPath.path : null;
-  const removed = removeMebularPlugins(document, pluginPath);
+  const removed = removeMebularPlugins(document, pluginPath, {
+    home: options.home ?? options.mebularHome,
+    userHome: resolveUserHome(options),
+    ...(typeof options.managedRoot === 'string' ? { managedRoot: options.managedRoot } : {}),
+  });
   if (removed.error) return { ok: false, code: removed.error };
   if (!removed.changed) return { ok: true, removed: false, restoredFrom: null };
 

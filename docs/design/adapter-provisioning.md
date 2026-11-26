@@ -70,10 +70,12 @@ blocked.
   `{ package: "<absolute-path>", options: { agentId: "opencode", recall: true, ingest: true } }`.
 - Existing user plugins and unrelated keys are preserved. Mebular entries are deduplicated
   by package name, the resolved path, or the managed-path identity
-  `<home>/adapters/opencode-plugin/<version>` (including `file:` and `~` forms). An upgrade
-  from an older managed version therefore replaces the old entry instead of adding a
-  second plugin; verify fails with `VERIFY_ENTRY_DUPLICATE` if any two remain, and rollback
-  removes every Mebular entry.
+  `<home>/adapters/opencode-plugin/<version>` (including `file:` and `~` forms). The
+  managed identity is scoped to the *current* Mebular home; a user plugin under
+  `.../projects/adapters/opencode-plugin/...` is never claimed. An upgrade from an older
+  managed version therefore replaces the old entry instead of adding a second plugin;
+  verify fails with `VERIFY_ENTRY_DUPLICATE` if any two remain, and rollback removes every
+  Mebular entry for that home.
 - OpenChamber's private `opencode.managed.json` and `run/instances/**` are forbidden
   paths and are never written.
 - The plugin takes effect at the next host start (or an App-owned reload). Provisioning
@@ -169,7 +171,9 @@ Rules:
    `agentId=<host>` at/after `installedAt` **and** `counts.ingested>0` is `active`
    (`lastIngestedAt= trace.at`); the same host trace with `ingested=0` is
    `degraded` (`HEALTH_NO_INGEST`), and a failed provisioning step records
-   `degraded` with a stable `lastError`.
+   `degraded` with a stable `lastError`. A version change (or first install) resets
+   `installedAt` to the current run, so traces from the previous adapter version cannot
+   mark the new one healthy before it produces its own evidence.
 2. A missing, unreachable or unauthorized sidecar is `HEALTH_UNAVAILABLE` and
    stays deferred/`installed`; it is never reported as `degraded`. No host
    evidence yet is also deferred/`installed`.

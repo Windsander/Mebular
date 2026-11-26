@@ -157,11 +157,14 @@ Full run after the fix: **320 suites passed / 1 skipped, 3578 tests passed / 1 s
   `<home>/memory-runtime.json` + its `tokenFile` (JSON `{token}`) and probes the sidecar
   `/status` + `/traces?limit=…`. `ensureAdapter` now records `installedAt`,
   `lastIngestedAt` and one of `active` / `installed` / `degraded`; an unavailable sidecar
-  is deferred (`HEALTH_UNAVAILABLE`) and never falsely degraded.
+  is deferred (`HEALTH_UNAVAILABLE`) and never falsely degraded. A version change resets
+  `installedAt`, so a 0.3.4 trace cannot make the 0.3.5 adapter healthy before new evidence.
 - **OpenCode upgrade identity:** `mergePlugins` treats every
-  `<home>/adapters/opencode-plugin/<version>` (`file:`/`~` included) as Mebular-owned, so a
-  0.3.4 managed entry is replaced by 0.3.5. `verify` counts all Mebular entries
-  (`VERIFY_ENTRY_DUPLICATE` when >1) and rollback removes all of them.
+  `<current home>/adapters/opencode-plugin/<version>` (`file:`/`~` included) as
+  Mebular-owned, so a 0.3.4 managed entry is replaced by 0.3.5. The managed identity is
+  scoped to the current home: unrelated user paths containing `adapters/opencode-plugin`
+  are preserved. `verify` counts all Mebular entries (`VERIFY_ENTRY_DUPLICATE` when >1) and
+  rollback removes all of them for that home.
 - **Build lockstep:** `apps/desktop/scripts/prepare-build.mjs` exits 1 unless the
   opencode-plugin/dsh-plugin `package.json` and Hermes `plugin.yaml` versions equal
   `apps/desktop/package.json`.

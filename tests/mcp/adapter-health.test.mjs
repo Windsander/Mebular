@@ -51,14 +51,15 @@ describe('adapter health', () => {
 
   async function startSidecar({ ingested = 0, traces = [] } = {}) {
     const calls = [];
+    let state = { ingested, traces };
     const server = createServer((req, res) => {
       calls.push({ url: req.url, authorization: req.headers.authorization ?? null });
       if (req.url.startsWith('/memory-runtime/v1/status')) {
-        jsonResponse(res, { ok: true, data: { state: 'ready', counts: { ingested, settled: ingested } } });
+        jsonResponse(res, { ok: true, data: { state: 'ready', counts: { ingested: state.ingested, settled: state.ingested } } });
         return;
       }
       if (req.url.startsWith('/memory-runtime/v1/traces')) {
-        jsonResponse(res, { ok: true, data: { traces, total: traces.length } });
+        jsonResponse(res, { ok: true, data: { traces: state.traces, total: state.traces.length } });
         return;
       }
       jsonResponse(res, { ok: false, error: { code: 'not_found' } }, 404);
@@ -69,6 +70,9 @@ describe('adapter health', () => {
     return {
       url: `http://127.0.0.1:${port}/memory-runtime/v1`,
       calls,
+      set(next = {}) {
+        state = { ...state, ...next };
+      },
       async close() {
         await new Promise((resolve) => server.close(resolve));
       },
@@ -147,6 +151,48 @@ describe('adapter health', () => {
     expect(sidecar.calls.every((call) => call.authorization === `Bearer ${HOST_TOKEN}`)).toBe(true);
     expect(JSON.stringify(state)).not.toContain(HOST_TOKEN);
     expect(JSON.stringify(loadAdapterState({ home }))).not.toContain(tokenFile);
+  });
+
+  it('upgrade resets the health baseline: an old-version trace cannot make the new adapter healthy', async () => {
+    const oldInstalledAt = Date.now() - 120_000;
+    const oldTraceAt = Date.now() - 60_000;
+    await updateAdapterHost('opencode', {
+      connected: true,
+      adapter: 'active',
+      version: '0.3.4',
+      installedAt: oldInstalledAt,
+      lastIngestedAt: oldTraceAt,
+    }, { home });
+    const sidecar = await startSidecar({
+      ingested: 2,
+      traces: [{ id: 'tr_old', agentId: 'opencode', at: oldTraceAt }],
+    });
+    await writeDiscovery(sidecar.url);
+    await writeConfig({ theme: 'dark', plugins: [] });
+
+    const upgraded = await ensureAdapter('opencode', opts({ healthOptions: { timeoutMs: 2000 } }));
+
+    expect(upgraded.ok).toBe(true);
+    expect(upgraded.version).toBe(APP_VERSION);
+    expect(upgraded.health).toBe('deferred');
+    expect(upgraded.status).toBe('installed');
+    const afterUpgrade = loadAdapterState({ home }).hosts.opencode;
+    expect(afterUpgrade.version).toBe(APP_VERSION);
+    expect(afterUpgrade.installedAt).toBeGreaterThan(oldInstalledAt);
+    expect(afterUpgrade.adapter).toBe('installed');
+    expect(afterUpgrade.lastIngestedAt).toBeUndefined();
+
+    const newTraceAt = Date.now();
+    sidecar.set({ ingested: 3, traces: [{ id: 'tr_new', agentId: 'opencode', at: newTraceAt }] });
+    const settled = await ensureAdapter('opencode', opts({ healthOptions: { timeoutMs: 2000 } }));
+
+    expect(settled.health).toBe('healthy');
+    expect(settled.status).toBe('active');
+    expect(settled.lastIngestedAt).toBe(newTraceAt);
+    expect(loadAdapterState({ home }).hosts.opencode).toMatchObject({
+      adapter: 'active',
+      lastIngestedAt: newTraceAt,
+    });
   });
 
   it('host context trace but ingested = 0: degraded with HEALTH_NO_INGEST', async () => {

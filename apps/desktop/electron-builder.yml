@@ -23,6 +23,10 @@ extraResources:
   # 因此 packaged 态不再单独复制这些仓库目录。
   - from: runtime/node_modules
     to: node_modules
+  # W2：OpenCode/OpenChamber adapter 随 App bundle（版本 lockstep，不联网下载）。
+  # 运行时按 <resources>/adapters/opencode-plugin 读取，并 staging 到 <home>/adapters/<version>。
+  - from: ../packages/opencode-plugin
+    to: adapters/opencode-plugin
 asar: true
 mac:
   target: [dmg]

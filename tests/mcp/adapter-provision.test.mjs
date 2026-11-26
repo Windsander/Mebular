@@ -258,6 +258,23 @@ describe('adapter provisioning', () => {
     expect(loadAdapterState({ home }).hosts.opencode.adapter).toBe('absent');
   });
 
+  it('dry run with a bundled candidate: no <home>/adapters writes, config/state untouched', async () => {
+    const resources = join(root, 'resources-dry');
+    await makePlugin(join(resources, 'adapters', 'opencode-plugin'));
+    await writeConfig({ theme: 'dark', plugins: ['user-plugin'] });
+    const before = await readFile(configPath, 'utf-8');
+    const result = await dryRun('opencode', opts({ adapterPackagePath: undefined, resourcesPath: resources }));
+    expect(result.ok).toBe(true);
+    expect(result.dryRun).toBe(true);
+    expect(result.status).toBe('planned');
+    expect(result.changed).toBe(true);
+    expect(result.source).toBe('managed-dir');
+    expect(result.preview).toContain(join(home, 'adapters', 'opencode-plugin', APP_VERSION));
+    expect(existsSync(join(home, 'adapters'))).toBe(false);
+    expect(existsSync(adapterStatePath(home))).toBe(false);
+    expect(await readFile(configPath, 'utf-8')).toBe(before);
+  });
+
   it('dry run: reports planned change but writes neither config nor state', async () => {
     await writeConfig({ theme: 'dark' });
     const before = await readFile(configPath, 'utf-8');

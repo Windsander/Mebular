@@ -90,7 +90,12 @@ export async function ensureAdapter(hostId, options = {}) {
     return failure('HOST_NOT_DETECTED', { hostId, status: 'absent' });
   }
 
-  const packageInfo = await adapter.ensurePackage({ ...options, home, expectedVersion });
+  const packageInfo = await adapter.ensurePackage({
+    ...options,
+    home,
+    expectedVersion,
+    ...(dryRun ? { dryRun: true, stagePackage: false } : {}),
+  });
   if (!packageInfo?.ok) {
     if (!dryRun) {
       await record(hostId, {

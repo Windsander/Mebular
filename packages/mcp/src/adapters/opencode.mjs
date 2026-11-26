@@ -164,6 +164,38 @@ export async function ensurePackage(options = {}) {
       if (candidate.exclusive) break;
       continue;
     }
+    if (candidate.source === 'bundled' && (options.dryRun === true || options.stagePackage === false)) {
+      if (options.dryRun === true) {
+        const home = options.home ?? options.mebularHome;
+        const plannedPath = typeof home === 'string' && home.length > 0
+          ? join(home, MANAGED_DIR, MANAGED_NAME, expectedVersion)
+          : resolve(candidate.path);
+        const existingManaged = readManifest(plannedPath);
+        const alreadyManaged = existingManaged?.name === PACKAGE_NAME && existingManaged.version === expectedVersion;
+        return {
+          ok: true,
+          path: plannedPath,
+          version: expectedVersion,
+          source: 'managed-dir',
+          changed: !alreadyManaged,
+          created: false,
+          planned: !alreadyManaged,
+          managedPath: plannedPath,
+        };
+      }
+      // Read-only resolution (verify/rollback): inspect the bundled package
+      // itself; never stage it.
+      return {
+        ok: true,
+        path: resolve(candidate.path),
+        version: expectedVersion,
+        source: 'bundled',
+        changed: false,
+        created: false,
+        planned: false,
+        managedPath: null,
+      };
+    }
     if (candidate.source === 'bundled' && options.stagePackage !== false) {
       const staged = await stageBundledPackage(candidate.path, options, expectedVersion);
       if (staged) {
@@ -174,6 +206,7 @@ export async function ensurePackage(options = {}) {
           source: 'managed-dir',
           changed: staged.changed,
           created: staged.created,
+          planned: false,
           managedPath: staged.created ? staged.path : null,
         };
       }
@@ -375,7 +408,10 @@ async function formatPluginsWrite(existingText, plugins, fallbackDocument) {
 export async function configure(options = {}) {
   const configPath = configPathFor(options);
   if (isForbiddenPath(configPath, options)) return { ok: false, code: 'FORBIDDEN_PATH' };
-  const packageInfo = normalizedPackage(options) ?? await ensurePackage(options);
+  const packageInfo = normalizedPackage(options) ?? await ensurePackage({
+    ...options,
+    ...(options.dryRun === true ? { dryRun: true, stagePackage: false } : {}),
+  });
   if (!packageInfo.ok) return packageInfo;
   const pluginPath = packageInfo.path;
 
@@ -500,7 +536,7 @@ export async function verify(options = {}) {
     return { ok: false, code: 'VERIFY_STRUCTURE_UNKNOWN', checks: [...checks, { name: 'plugins-array', ok: false }], ingested: null };
   }
   checks.push({ name: 'plugins-array', ok: true });
-  const packageInfo = normalizedPackage(options) ?? await ensurePackage(options);
+  const packageInfo = normalizedPackage(options) ?? await ensurePackage({ ...options, stagePackage: false });
   const pluginPath = packageInfo.ok ? packageInfo.path : null;
   const matches = document.plugins.filter((entry) => isMebularEntry(entry, pluginPath));
   const unique = matches.length === 1;

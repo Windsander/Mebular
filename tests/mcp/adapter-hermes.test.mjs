@@ -292,7 +292,7 @@ describe('hermes adapter', () => {
       activation: 'next-start',
       lastError: null,
     });
-    expect(state.hosts.hermes.configPath).toBe('~/.hermes/config.yaml');
+    expect(state.hosts.hermes.configPath).toBe(join('~', '.hermes', 'config.yaml'));
 
     const second = await ensureAdapter('hermes', opts({ connected: true }));
     expect(second.ok).toBe(true);

@@ -147,7 +147,7 @@ describe('adapter provisioning', () => {
       activation: 'next-start',
       lastError: null,
     });
-    expect(state.hosts.opencode.configPath).toBe('~/.config/opencode/opencode.json');
+    expect(state.hosts.opencode.configPath).toBe(join('~', '.config', 'opencode', 'opencode.json'));
     if (process.platform !== 'win32') {
       expect((await stat(adapterStatePath(home))).mode & 0o777).toBe(0o600);
     }

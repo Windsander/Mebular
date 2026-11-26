@@ -28,7 +28,7 @@ import {
   getAdapter,
   listAdapters,
 } from '../../packages/mcp/src/adapters/index.mjs';
-import { mergePlugins, PACKAGE_NAME } from '../../packages/mcp/src/adapters/opencode.mjs';
+import { mergePlugins, PACKAGE_NAME, verify as verifyOpenCode } from '../../packages/mcp/src/adapters/opencode.mjs';
 import { connectClient } from '../../packages/mcp/src/clients.mjs';
 import { APP_VERSION } from '../../packages/mcp/src/version.mjs';
 
@@ -373,6 +373,81 @@ describe('adapter provisioning', () => {
       adapter: 'degraded',
       lastError: 'ADAPTER_PACKAGE_NOT_FOUND',
     });
+  });
+
+  // ---------- OpenCode upgrade: one managed entry only ----------
+
+  it('upgrade: old <home>/adapters/opencode-plugin/<version> entry is replaced, not duplicated', async () => {
+    const newPlugin = await makePlugin(join(root, 'plugin-new'));
+    const oldManaged = join(home, 'adapters', 'opencode-plugin', '0.3.4');
+    await writeConfig({
+      theme: 'dark',
+      plugins: [
+        'user-plugin',
+        { package: oldManaged, options: { userOption: 'keep' } },
+        { package: `file:${oldManaged}`, options: { legacy: true } },
+      ],
+    });
+
+    const result = await ensureAdapter('opencode', opts({ adapterPackagePath: newPlugin }));
+    expect(result.ok).toBe(true);
+
+    const config = await readConfig();
+    expect(config.theme).toBe('dark');
+    expect(config.plugins[0]).toBe('user-plugin');
+    const mebular = config.plugins.filter((entry) => typeof entry === 'object' && entry.package === newPlugin);
+    expect(mebular).toHaveLength(1);
+    expect(mebular[0].options).toMatchObject({ agentId: 'opencode', recall: true, ingest: true });
+    expect(JSON.stringify(config.plugins)).not.toContain('0.3.4');
+    expect(config.plugins).toHaveLength(2);
+  });
+
+  it('verify: more than one Mebular entry fails (old + new), not just the current path', async () => {
+    const newPlugin = await makePlugin(join(root, 'plugin-verify'));
+    await writeConfig({
+      plugins: [
+        { package: join(home, 'adapters', 'opencode-plugin', '0.3.4'), options: { agentId: 'opencode', recall: true, ingest: true } },
+        { package: newPlugin, options: { agentId: 'opencode', recall: true, ingest: true } },
+      ],
+    });
+    const result = await verifyOpenCode(opts({ adapterPackagePath: newPlugin }));
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe('VERIFY_ENTRY_DUPLICATE');
+    const unique = result.checks.find((check) => check.name === 'entry-unique');
+    expect(unique).toMatchObject({ ok: false, count: 2 });
+  });
+
+  it('rollback: removes every Mebular entry (old managed + current), keeps user plugins', async () => {
+    const current = await makePlugin(join(root, 'plugin-rollback'));
+    await writeConfig({
+      theme: 'dark',
+      plugins: [
+        'user-plugin',
+        { package: join(home, 'adapters', 'opencode-plugin', '0.3.4') },
+        { package: current },
+      ],
+    });
+    const result = await rollbackAdapter('opencode', opts({ adapterPackagePath: current }));
+    expect(result.ok).toBe(true);
+    const config = await readConfig();
+    expect(config.plugins).toEqual(['user-plugin']);
+    expect(config.theme).toBe('dark');
+  });
+
+  it('configure failure: removes the package staged by this run only', async () => {
+    const resources = join(root, 'resources-configure-fail');
+    await makePlugin(join(resources, 'adapters', 'opencode-plugin'));
+    const managedDir = join(home, 'adapters', 'opencode-plugin', APP_VERSION);
+    await writeConfig('{ not json');
+
+    const result = await ensureAdapter('opencode', opts({
+      adapterPackagePath: undefined,
+      resourcesPath: resources,
+    }));
+
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe('CONFIG_UNPARSEABLE');
+    expect(existsSync(managedDir)).toBe(false);
   });
 
   // ---------- state hygiene ----------

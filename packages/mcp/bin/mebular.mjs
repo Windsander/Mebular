@@ -381,7 +381,8 @@ async function runAdapter(action, flags) {
     VERIFY_CONFIG_MISSING: '适配器配置不存在',
     VERIFY_CONFIG_UNPARSEABLE: '适配器配置无法解析',
     VERIFY_STRUCTURE_UNKNOWN: '适配器配置结构未知',
-    VERIFY_ENTRY_MISSING: '适配器条目缺失或重复',
+    VERIFY_ENTRY_MISSING: '适配器条目缺失',
+    VERIFY_ENTRY_DUPLICATE: '适配器条目重复（旧版本未清理）',
     VERIFY_OPTIONS_MISMATCH: '适配器选项不完整',
     VERIFY_PACKAGE_MISSING: '适配器包缺失',
     ACTIVATION_FAILED: '适配器激活失败',
@@ -399,12 +400,24 @@ async function runAdapter(action, flags) {
     if (action === 'status') {
       const { adapterStatus } = await import('../src/adapter-provision.mjs');
       const view = adapterStatus({ home: homeDir() });
+      // Read-only CLI projection: always expose adapter/installedAt/lastIngestedAt
+      // (null when absent) without changing the on-disk state shape.
+      const projectedHosts = Object.fromEntries(Object.entries(view.hosts ?? {}).map(([hostId, record]) => [
+        hostId,
+        {
+          ...record,
+          adapter: record.adapter ?? 'absent',
+          installedAt: record.installedAt ?? null,
+          lastIngestedAt: record.lastIngestedAt ?? null,
+        },
+      ]));
+      const projected = { ...view, hosts: projectedHosts };
       if (asJson) {
-        out(view);
+        out(projected);
       } else {
-        const hosts = Object.entries(view.hosts ?? {});
-        if (hosts.length === 0) console.log('（尚无适配器状态；连接 AI 助手后会写入 adapters.json）');
-        for (const [hostId, record] of hosts) {
+        const entries = Object.entries(projected.hosts);
+        if (entries.length === 0) console.log('（尚无适配器状态；连接 AI 助手后会写入 adapters.json）');
+        for (const [hostId, record] of entries) {
           console.log(`${hostId}\t${record.adapter ?? 'absent'}${record.version ? `\tv${record.version}` : ''}${record.activation ? `\t${record.activation}` : ''}${record.lastError ? `\t${record.lastError}` : ''}`);
         }
       }

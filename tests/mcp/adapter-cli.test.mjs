@@ -67,6 +67,9 @@ describe('mebular adapter CLI', () => {
     const view = JSON.parse(status.stdout);
     expect(view.hosts.opencode.adapter).toBe('installed');
     expect(view.hosts.opencode.version).toBeTruthy();
+    // 只读诊断字段：安装时间与最近 ingest 时间总是出现（未摄入为 null）
+    expect(typeof view.hosts.opencode.installedAt).toBe('number');
+    expect(view.hosts.opencode).toHaveProperty('lastIngestedAt');
     // 输出只读视图，不含任何 token 字段
     expect(JSON.stringify(view)).not.toMatch(/token/i);
   });

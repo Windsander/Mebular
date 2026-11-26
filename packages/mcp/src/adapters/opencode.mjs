@@ -247,12 +247,40 @@ function entryRefs(entry) {
     .filter((value) => typeof value === 'string' && value.length > 0);
 }
 
+function stripFileRef(ref) {
+  if (typeof ref !== 'string') return '';
+  return ref.startsWith('file:') ? ref.slice('file:'.length) : ref;
+}
+
+/**
+ * Path identity for a Mebular-managed OpenCode plugin install. Any
+ * `<home>/adapters/opencode-plugin/<version>` entry belongs to us, including
+ * paths from an older app version (`0.3.4`) after an upgrade to `0.3.5`.
+ * `file:` refs and `~` paths are normalized by segment, not by one absolute
+ * path, so an upgrade never leaves two plugins loaded.
+ */
+function isManagedMebularPath(ref) {
+  const text = stripFileRef(ref).trim();
+  if (text.length === 0) return false;
+  const normalized = text.replace(/\\/g, '/').replace(/^~\/?/, '');
+  const segments = normalized.split('/').filter((part) => part.length > 0);
+  for (let index = 0; index < segments.length - 1; index += 1) {
+    if (segments[index] !== 'adapters' || segments[index + 1] !== MANAGED_NAME) continue;
+    const after = segments[index + 2];
+    // `<...>/adapters/opencode-plugin` or `<...>/adapters/opencode-plugin/<version>`.
+    if (after === undefined || /^\d+\.\d+\.\d+/.test(after)) return true;
+  }
+  return false;
+}
+
 function isMebularEntry(entry, pluginPath) {
-  return entryRefs(entry).some((ref) => (
-    ref === PACKAGE_NAME
-    || samePath(ref, pluginPath)
-    || (ref.startsWith('file:') && samePath(ref.slice('file:'.length), pluginPath))
-  ));
+  return entryRefs(entry).some((ref) => {
+    if (ref === PACKAGE_NAME || ref.startsWith(`${PACKAGE_NAME}/`)) return true;
+    if (isManagedMebularPath(ref)) return true;
+    if (samePath(ref, pluginPath)) return true;
+    if (ref.startsWith('file:') && samePath(ref.slice('file:'.length), pluginPath)) return true;
+    return false;
+  });
 }
 
 function stableStringify(value) {
@@ -538,11 +566,19 @@ export async function verify(options = {}) {
   checks.push({ name: 'plugins-array', ok: true });
   const packageInfo = normalizedPackage(options) ?? await ensurePackage({ ...options, stagePackage: false });
   const pluginPath = packageInfo.ok ? packageInfo.path : null;
+  // Count every Mebular entry (package name, current path, all managed
+  // `<home>/adapters/opencode-plugin/<version>` paths), not just the path this
+  // run resolved: an upgrade that leaves the old version behind must fail.
   const matches = document.plugins.filter((entry) => isMebularEntry(entry, pluginPath));
   const unique = matches.length === 1;
-  checks.push({ name: 'entry-unique', ok: unique });
+  checks.push({ name: 'entry-unique', ok: unique, count: matches.length });
   if (!unique) {
-    return { ok: false, code: 'VERIFY_ENTRY_MISSING', checks, ingested: null };
+    return {
+      ok: false,
+      code: matches.length > 1 ? 'VERIFY_ENTRY_DUPLICATE' : 'VERIFY_ENTRY_MISSING',
+      checks,
+      ingested: null,
+    };
   }
   const entry = matches[0];
   const optionsOk = isPlainObject(entry) && isPlainObject(entry.options)

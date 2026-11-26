@@ -169,7 +169,7 @@ describe('DSH adapter', () => {
     await rm(root, { recursive: true, force: true });
   });
 
-  it('detect: CLI + the only profile; explicit/env/multiple-profile resolution never guesses', async () => {
+  it('detect: CLI + canonical web profile; explicit/env/multiple-profile resolution', async () => {
     await writeProfile();
     const detection = await dshAdapter.detect(opts());
     expect(detection.detected).toBe(true);
@@ -185,10 +185,37 @@ describe('DSH adapter', () => {
     expect(noCli.cliPath).toBeNull();
     expect(noCli.detected).toBe(true);
     expect(noCli.profile).toBe('web');
-    expect(noCli.profileSource).toBe('single');
+    expect(noCli.profileSource).toBe('canonical-web');
 
     await mkdir(join(dshHome, 'profiles', 'sdk'), { recursive: true });
-    const ambiguous = resolveProfile({ env: { DSH_HOME: dshHome } });
+    const canonical = resolveProfile({ env: { DSH_HOME: dshHome } });
+    expect(canonical.id).toBe('web');
+    expect(canonical.source).toBe('canonical-web');
+  });
+
+  it('profile resolution: canonical web, explicit override, and no-web ambiguity', async () => {
+    const multiHome = join(root, 'multi-dsh');
+    const multiProfiles = join(multiHome, 'profiles');
+    const multiEnv = { DSH_HOME: multiHome };
+
+    // web + headless → canonical web (Mebular's DSH web-host plugin).
+    for (const name of ['web', 'headless']) {
+      // Directories only: resolution is pure and never needs profile internals.
+      await mkdir(join(multiProfiles, name), { recursive: true });
+    }
+    const canonical = resolveProfile({ env: multiEnv });
+    expect(canonical).toMatchObject({ id: 'web', source: 'canonical-web' });
+
+    // Explicit profile wins over canonical web.
+    const override = resolveProfile({ profile: 'headless', env: multiEnv });
+    expect(override).toMatchObject({ id: 'headless', source: 'option' });
+
+    // headless + sdk without web → still fail closed.
+    const noWebHome = join(root, 'no-web-dsh');
+    for (const name of ['headless', 'sdk']) {
+      await mkdir(join(noWebHome, 'profiles', name), { recursive: true });
+    }
+    const ambiguous = resolveProfile({ env: { DSH_HOME: noWebHome } });
     expect(ambiguous.id).toBeNull();
     expect(ambiguous.source).toBe('ambiguous');
   });

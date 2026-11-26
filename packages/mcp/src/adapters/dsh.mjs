@@ -9,6 +9,9 @@
 //   * never touches DSH databases, session storage or transcripts;
 //   * never downloads from npm: the package comes from the App bundle, a managed
 //     directory, or (dev/tests) an injected path / this repository;
+//   * profile resolution is explicit > `DSH_PROFILE` > canonical `web` (> a
+//     single profile); `web` is the documented profile of this web-host plugin,
+//     not a guess among arbitrary profiles;
 //   * never kills a host process: activation is an injected reload/restart
 //     callback, otherwise `next-start`;
 //   * idempotent configure, profile backup before the CLI runs, rollback via the
@@ -104,9 +107,13 @@ function listProfiles(dshHome) {
 }
 
 /**
- * Resolve the target profile without guessing: explicit option, `DSH_PROFILE`,
- * or the only profile under `<dshHome>/profiles`. Multiple profiles without an
- * explicit choice is ambiguous and must fail closed.
+ * Resolve the target profile:
+ *   1. explicit `options.profile`;
+ *   2. `DSH_PROFILE`;
+ *   3. `web` when present — the canonical profile of Mebular's DSH *web*
+ *      plugin (`@mebular/dsh-plugin`), not an arbitrary guess;
+ *   4. the only profile under `<dshHome>/profiles`;
+ *   5. otherwise fail closed (`DSH_PROFILE_UNKNOWN`).
  */
 export function resolveProfile(options = {}, profiles = listProfiles(resolveDshHome(options))) {
   const env = options.env ?? process.env;
@@ -119,6 +126,9 @@ export function resolveProfile(options = {}, profiles = listProfiles(resolveDshH
     if (!PROFILE_ID_RE.test(explicit)) return { id: null, source: 'invalid', profiles };
     return { id: explicit, source: options.profile ? 'option' : 'env', profiles };
   }
+  // Mebular's DSH plugin is a web-host plugin; `web` is its documented
+  // canonical profile. Prefer it over an ambiguous multi-profile set.
+  if (profiles.includes('web')) return { id: 'web', source: 'canonical-web', profiles };
   if (profiles.length === 1) return { id: profiles[0], source: 'single', profiles };
   if (profiles.length === 0) return { id: null, source: 'none', profiles };
   return { id: null, source: 'ambiguous', profiles };

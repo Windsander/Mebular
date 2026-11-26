@@ -75,6 +75,9 @@ describe('yamlEntryBlock：注释/空行不终止父段（复刻真实结构）'
     let calls = 0;
     const res = await connectClient('hermes', {
       home: mebularHome, userHome: home,
+      // 本测试只验证 MCP 接入的幂等预检；Adapter provisioning 有自己的测试，
+      // 否则 hermes adapter 会额外调用 CLI（4 次），污染“零写入”断言。
+      ensureAdapter: false,
       runAsync: async () => { calls += 1; return { ok: true, code: 0, stdout: '', stderr: '' }; },
     });
     expect(res.changed).toBe(false);           // 等价条目 → 不重写

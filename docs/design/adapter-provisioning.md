@@ -69,8 +69,11 @@ blocked.
 - Only `~/.config/opencode/opencode.json` → `plugins` is written. The entry is
   `{ package: "<absolute-path>", options: { agentId: "opencode", recall: true, ingest: true } }`.
 - Existing user plugins and unrelated keys are preserved. Mebular entries are deduplicated
-  by package name or resolved path; the first entry keeps user options and gains the
-  required ones.
+  by package name, the resolved path, or the managed-path identity
+  `<home>/adapters/opencode-plugin/<version>` (including `file:` and `~` forms). An upgrade
+  from an older managed version therefore replaces the old entry instead of adding a
+  second plugin; verify fails with `VERIFY_ENTRY_DUPLICATE` if any two remain, and rollback
+  removes every Mebular entry.
 - OpenChamber's private `opencode.managed.json` and `run/instances/**` are forbidden
   paths and are never written.
 - The plugin takes effect at the next host start (or an App-owned reload). Provisioning
@@ -128,6 +131,7 @@ authoritative. It is written atomically with mode `0600`:
       "activation": "next-start",   // reload | restart | next-start
       "lastError": null,            // stable code only
       "verifiedAt": 1790000000000,
+      "installedAt": 1790000000000,
       "lastIngestedAt": 1790000000000
     }
   }
@@ -161,13 +165,21 @@ The adapter layer reuses the existing sidecar diagnostics instead of adding UI:
 
 Rules:
 
-1. Configured but no recent `/context`/ingest evidence, or a failed provisioning step,
-   records `adapter=degraded` with a stable `lastError`.
-2. App startup/upgrade and `mebular adapter repair` call
-   `ensureAdaptersForConnected`, which touches **only connected** hosts. Detected but
-   unconnected hosts are never silently configured.
-3. Repair failure records `degraded` and a log line; it never pops UI and never blocks MCP.
-4. Success is `ingested>0` or a new trace with the expected `agentId`.
+1. `ensureAdapter` probes the sidecar after verification: a host trace with
+   `agentId=<host>` at/after `installedAt` **and** `counts.ingested>0` is `active`
+   (`lastIngestedAt= trace.at`); the same host trace with `ingested=0` is
+   `degraded` (`HEALTH_NO_INGEST`), and a failed provisioning step records
+   `degraded` with a stable `lastError`.
+2. A missing, unreachable or unauthorized sidecar is `HEALTH_UNAVAILABLE` and
+   stays deferred/`installed`; it is never reported as `degraded`. No host
+   evidence yet is also deferred/`installed`.
+3. App startup/upgrade and `mebular adapter repair` call
+   `ensureAdaptersForConnected`, which touches **only connected** hosts and makes
+   one repair attempt per host. Detected but unconnected hosts are never silently
+   configured.
+4. Repair failure or still-missing ingest records `degraded` and a log line; it
+   never pops UI, never blocks MCP and never loops.
+5. Success is `ingested>0` plus a new trace with the expected `agentId`.
 
 `connectClient` returns the adapter result as an additive `adapter` field. Existing UI and
 MCP callers ignore it.

@@ -59,6 +59,8 @@ export function sanitizeHostRecord(record) {
   out.lastError = stableErrorCode(input.lastError);
   const verifiedAt = safeNumber(input.verifiedAt);
   if (verifiedAt !== null) out.verifiedAt = verifiedAt;
+  const installedAt = safeNumber(input.installedAt);
+  if (installedAt !== null) out.installedAt = installedAt;
   const lastIngestedAt = safeNumber(input.lastIngestedAt);
   if (lastIngestedAt !== null) out.lastIngestedAt = lastIngestedAt;
   return out;

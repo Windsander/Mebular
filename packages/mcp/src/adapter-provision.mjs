@@ -5,15 +5,49 @@
 // persist `<home>/adapters.json`. Failures roll back the config/package and
 // record a stable code; MCP connection success is never affected.
 
+import { rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { sep } from 'node:path';
+import { join, sep } from 'node:path';
+import { probeAdapterHealth } from './adapter-health.mjs';
 import { getAdapter } from './adapters/index.mjs';
 import { loadAdapterState, updateAdapterHost, publicAdapterState } from './adapter-state.mjs';
 import { homeDir } from './home.mjs';
 import { APP_VERSION } from './version.mjs';
 
+const MANAGED_DIR = 'adapters';
+
 function failure(code, extra = {}) {
   return { ok: false, code, ...extra };
+}
+
+/**
+ * Remove a package this run staged into `<home>/adapters/...` after a failed
+ * configure. Only runs for `created` packages and only inside the managed root;
+ * pre-existing installs and user directories are never touched.
+ */
+async function cleanupStagedPackage(packageInfo, home) {
+  if (packageInfo?.created !== true || typeof packageInfo.managedPath !== 'string') return false;
+  if (typeof home !== 'string' || home.length === 0) return false;
+  const managedRoot = join(home, MANAGED_DIR);
+  const target = packageInfo.managedPath;
+  if (target !== managedRoot && !target.startsWith(`${managedRoot}${sep}`)) return false;
+  try {
+    await rm(target, { recursive: true, force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function deferredHealth() {
+  return {
+    state: 'deferred',
+    code: null,
+    health: 'deferred',
+    available: false,
+    ingested: null,
+    lastIngestedAt: null,
+  };
 }
 
 function resolveUserHome(options = {}) {
@@ -59,6 +93,9 @@ export async function ensureAdapter(hostId, options = {}) {
   const expectedVersion = options.expectedVersion ?? APP_VERSION;
   const adapter = getAdapter(hostId);
   const previousState = loadAdapterState({ home }).hosts[hostId] ?? null;
+  // Captured before any write so a fresh install's health window cannot skip
+  // evidence produced while provisioning runs.
+  const startedAt = Date.now();
 
   if (!adapter) {
     if (!dryRun) await record(hostId, { detected: false, ...(connected ? { connected: true } : {}), adapter: 'unsupported', lastError: 'ADAPTER_UNAVAILABLE' }, home);
@@ -116,6 +153,9 @@ export async function ensureAdapter(hostId, options = {}) {
     configPath: detection?.configPath ?? options.configPath,
   });
   if (!configured?.ok) {
+    // The plan's failure path rolls back a package staged by this run. Configure
+    // performs its own config restore; remove only the managed copy we created.
+    if (!dryRun) await cleanupStagedPackage(packageInfo, home);
     if (!dryRun) {
       await record(hostId, {
         detected: detection?.detected === true,
@@ -205,7 +245,41 @@ export async function ensureAdapter(hostId, options = {}) {
     });
   }
 
-  const status = activation.activation === 'next-start' ? 'installed' : 'active';
+  const installedAt = Number.isFinite(previousState?.installedAt) && previousState.installedAt >= 0
+    ? previousState.installedAt
+    : startedAt;
+  let health;
+  if (options.health === false) {
+    health = deferredHealth();
+  } else {
+    try {
+      health = await probeAdapterHealth(hostId, {
+        home,
+        installedAt,
+        ...(options.healthOptions ?? {}),
+        ...(typeof options.fetchImpl === 'function' ? { fetchImpl: options.fetchImpl } : {}),
+      });
+    } catch {
+      // Health is diagnostic only; provisioning success is authoritative.
+      health = deferredHealth();
+    }
+  }
+
+  let status;
+  let lastError = null;
+  let lastIngestedAt = Number.isFinite(previousState?.lastIngestedAt) ? previousState.lastIngestedAt : null;
+  if (health.state === 'healthy') {
+    status = 'active';
+    if (health.lastIngestedAt !== null && health.lastIngestedAt !== undefined) lastIngestedAt = health.lastIngestedAt;
+  } else if (health.state === 'degraded') {
+    status = 'degraded';
+    lastError = health.code ?? 'HEALTH_NO_INGEST';
+  } else {
+    // No positive evidence yet (or sidecar unavailable): stay installed so the
+    // next startup/repair re-checks health without a false degraded report.
+    status = 'installed';
+  }
+
   await record(hostId, {
     detected: detection?.detected === true,
     ...(connected ? { connected: true } : {}),
@@ -214,8 +288,10 @@ export async function ensureAdapter(hostId, options = {}) {
     source: packageInfo.source,
     configPath: displayPath(detection?.configPath ?? options.configPath, resolveUserHome(options)),
     activation: activation.activation,
-    lastError: null,
+    lastError,
     verifiedAt: Date.now(),
+    installedAt,
+    ...(lastIngestedAt !== null ? { lastIngestedAt } : {}),
   }, home);
 
   return {
@@ -227,8 +303,11 @@ export async function ensureAdapter(hostId, options = {}) {
     version: packageInfo.version,
     source: packageInfo.source,
     verified: true,
-    ingested: null,
-    health: 'deferred',
+    installedAt,
+    ingested: health.ingested ?? null,
+    health: health.state,
+    healthCode: health.code ?? null,
+    lastIngestedAt: lastIngestedAt ?? null,
     checks: verified.checks ?? [],
   };
 }

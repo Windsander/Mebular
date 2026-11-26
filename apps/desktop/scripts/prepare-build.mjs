@@ -5,7 +5,7 @@
 
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -82,10 +82,49 @@ try {
 // 先 staging 到 apps/desktop/build/adapters/，再由 electron-builder 放进 App bundle。
 // 版本 lockstep 由各 adapter 的 manifest 提供，运行时不联网下载。
 const ADAPTER_BUNDLES = [
-  { source: join(root, 'packages', 'opencode-plugin'), target: join(here, '..', 'build', 'adapters', 'opencode-plugin') },
-  { source: join(root, 'packages', 'dsh-plugin'), target: join(here, '..', 'build', 'adapters', 'dsh-plugin') },
-  { source: join(root, 'integrations', 'hermes', 'mebular-memory'), target: join(here, '..', 'build', 'adapters', 'hermes') },
+  { name: 'opencode-plugin', manifest: 'package.json', source: join(root, 'packages', 'opencode-plugin'), target: join(here, '..', 'build', 'adapters', 'opencode-plugin') },
+  { name: 'dsh-plugin', manifest: 'package.json', source: join(root, 'packages', 'dsh-plugin'), target: join(here, '..', 'build', 'adapters', 'dsh-plugin') },
+  { name: 'hermes', manifest: 'plugin.yaml', source: join(root, 'integrations', 'hermes', 'mebular-memory'), target: join(here, '..', 'build', 'adapters', 'hermes') },
 ];
+
+// 构建期 lockstep：三个 adapter manifest 必须与桌面 App 版本一致，否则拒绝打包。
+function readManifestVersion(file) {
+  const text = readFileSync(file, 'utf-8');
+  if (basename(file) === 'plugin.yaml') {
+    const match = /^version:\s*["']?([^"'\s#]+)["']?\s*(?:#.*)?$/m.exec(text);
+    return match ? match[1] : null;
+  }
+  const parsed = JSON.parse(text);
+  return parsed !== null && typeof parsed === 'object' && typeof parsed.version === 'string'
+    ? parsed.version
+    : null;
+}
+
+const desktopVersion = JSON.parse(readFileSync(join(here, '..', 'package.json'), 'utf-8')).version;
+const versionMismatches = [];
+for (const bundle of ADAPTER_BUNDLES) {
+  const manifestPath = join(bundle.source, bundle.manifest);
+  if (!existsSync(manifestPath)) {
+    versionMismatches.push(`${bundle.name}: 缺少 ${bundle.manifest}`);
+    continue;
+  }
+  let version = null;
+  try {
+    version = readManifestVersion(manifestPath);
+  } catch (error) {
+    versionMismatches.push(`${bundle.name}: ${bundle.manifest} 无法解析（${String(error?.message ?? error)}）`);
+    continue;
+  }
+  if (version !== desktopVersion) {
+    versionMismatches.push(`${bundle.name}: ${version ?? '(no version)'} != ${desktopVersion}`);
+  }
+}
+if (versionMismatches.length > 0) {
+  console.error(`[desktop] adapter 版本未与桌面 App lockstep（${desktopVersion}）：${versionMismatches.join('; ')}`);
+  process.exit(1);
+}
+console.log(`[desktop] adapter 版本 lockstep 通过（${ADAPTER_BUNDLES.length} 个 @ ${desktopVersion}）`);
+
 const skipAdapterArtifact = (source) => {
   const name = source.split(/[\\/]/).pop() ?? '';
   return name !== 'node_modules'

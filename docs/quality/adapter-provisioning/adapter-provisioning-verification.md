@@ -151,6 +151,24 @@ Full run after the fix: **320 suites passed / 1 skipped, 3578 tests passed / 1 s
 (472.7 s), including the adapter suites and `routing-e2e.test.ts`.
 
 
+## 5.1 Blocker follow-up (`feat/adapter-blockers`)
+
+- **Real health:** `packages/mcp/src/adapter-health.mjs` reads
+  `<home>/memory-runtime.json` + its `tokenFile` (JSON `{token}`) and probes the sidecar
+  `/status` + `/traces?limit=…`. `ensureAdapter` now records `installedAt`,
+  `lastIngestedAt` and one of `active` / `installed` / `degraded`; an unavailable sidecar
+  is deferred (`HEALTH_UNAVAILABLE`) and never falsely degraded.
+- **OpenCode upgrade identity:** `mergePlugins` treats every
+  `<home>/adapters/opencode-plugin/<version>` (`file:`/`~` included) as Mebular-owned, so a
+  0.3.4 managed entry is replaced by 0.3.5. `verify` counts all Mebular entries
+  (`VERIFY_ENTRY_DUPLICATE` when >1) and rollback removes all of them.
+- **Build lockstep:** `apps/desktop/scripts/prepare-build.mjs` exits 1 unless the
+  opencode-plugin/dsh-plugin `package.json` and Hermes `plugin.yaml` versions equal
+  `apps/desktop/package.json`.
+- Evidence: `tests/mcp/adapter-health.test.mjs` (fake sidecar HTTP: healthy, degraded,
+  unavailable, single degraded repair) and the upgrade/verify/rollback cases in
+  `tests/mcp/adapter-provision.test.mjs`.
+
 ## 6. Known limitations (explicit)
 
 1. OpenCode E2E uses the repository plugin path (`source=manual`), not the packaged App

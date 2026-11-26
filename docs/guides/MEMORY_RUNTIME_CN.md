@@ -57,6 +57,37 @@ sidecar 是**独立进程**（`mebular-memory-runtime serve`）和独立包
 两种模式读写的是**同一份** Mebular 记忆。切换模式不会复制、迁移、重写或删除节点。模式是
 设备级设置：同一忆云里可以一台设备保持轻量，另一台使用 sidecar。
 
+## 连接助手（MCP + adapter）
+
+现在从 App/Console（或 `clients:action connect`）连接助手会一次完成两层：
+
+1. 写入 MCP 条目（`mcp.servers.mebular` 或宿主等价位置），然后
+2. 安装让召回/采集自动化的宿主 adapter。
+
+| 宿主 | 自动 adapter | 结果 |
+|---|---|---|
+| OpenCode / OpenChamber | 把 `@mebular/opencode-plugin` 合并进全局 `plugins` | 宿主下次启动生效；无需 `npm install` 或手写 JSON |
+| DeepSeek Harness（DSH） | 通过 `dsh plugin ... add` 把 `@mebular/dsh-plugin` 加入解析到的 profile | DSH 下次会话/重启生效 |
+| Hermes | 把 `mebular` MemoryProvider 安装到 `$HERMES_HOME/plugins/mebular`，并用 `hermes config set memory.provider mebular` 选中 | Hermes 下次会话生效 |
+| Claude Code / Claude Desktop / Cursor / 其他 MCP 客户端 | 不适用 | **仅 MCP**：显式 `memory_*` / `task_*` 工具，无自动采集 |
+
+adapter 包随 App 一起分发（版本 lockstep），连接不会访问 npm，也不会改宿主私有数据
+（OpenChamber managed config/instances、DSH 数据库/会话、Hermes DB/会话/spool）。
+provisioning 不会杀进程或重启宿主：没有 App 拥有的 reload 时记录 `next-start`。
+
+adapter 失败是增量信息，绝不阻断 MCP：MCP 仍连接成功，失败写入
+`<home>/adapters.json`（`adapter=degraded`、稳定 `lastError`），App 下次启动/升级时修复
+已连接宿主。无需新 UI 即可诊断：
+
+```bash
+mebular adapter status --json
+mebular adapter ensure --host dsh --json     # 显式、幂等
+mebular adapter repair --json                # 仅已连接宿主
+```
+
+宿主矩阵、状态字段、回滚与安全边界见
+[adapter provisioning 设计](../design/adapter-provisioning.md)。
+
 ## 开启方式
 
 前置：

@@ -99,6 +99,32 @@ Requirements:
   or the desktop bundle); MCP does not download it. Automatic startup belongs to the HTTP
   MCP daemon (`mebular serve`); stdio `mebular mcp` does not start the sidecar.
 
+### Automatic provisioning (desktop app)
+
+Connecting OpenChamber/OpenCode from the Mebular App/Console also provisions the adapter,
+so the manual `npm install` + JSON edit below is only the fallback for a standalone
+install:
+
+- detects `~/.config/opencode/opencode.json` (or its config directory);
+- resolves the version-locked `@mebular/opencode-plugin` from the App bundle (staged under
+  `<home>/adapters/opencode-plugin/<version>`), never from npm;
+- merges **only** the `plugins` array, keeps existing user plugins and unrelated keys,
+  writes a `.bak-<timestamp>` backup and verifies the readback;
+- activates with `next-start` (it never sends `opencode reload` to, or kills, a running
+  host);
+- never writes OpenChamber's `opencode.managed.json` or `run/instances/**` — those paths
+  are rejected before any write.
+
+The plugin is only effective after OpenChamber/OpenCode starts again. If the host config
+is unparseable or structurally unknown, provisioning leaves it untouched and records the
+stable code (`CONFIG_UNPARSEABLE` / `CONFIG_STRUCTURE_UNKNOWN`) instead of faking success.
+An adapter failure never blocks the MCP connection; inspect it with
+`mebular adapter status --json` or repair only connected hosts with
+`mebular adapter repair --json`. See the
+[adapter provisioning design](../design/adapter-provisioning.md).
+
+### Manual install (standalone / fallback)
+
 `@mebular/opencode-plugin` is a **separate npm package**; it is not part of
 `@mebular/core`. After this release is published, install it from npm, then add it (or a
 local checkout path) to OpenCode's global `~/.config/opencode/opencode.json` (not

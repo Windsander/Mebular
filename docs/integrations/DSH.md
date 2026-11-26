@@ -58,6 +58,34 @@ The default config is minimal and attach-only:
 Restart the DSH session for the profile to take effect. Installing the Plugin
 never downloads or starts Mebular silently.
 
+### Automatic provisioning (desktop app)
+
+Connecting DSH from the Mebular App/Console also installs the adapter, so the
+`dsh plugin add` commands above are the manual/standalone path:
+
+- detects the official `dsh` CLI and `<DSH_HOME>/profiles` (no CLI is spawned for
+  detection);
+- resolves the profile deterministically: explicit `--profile`/`profileDir` >
+  `DSH_PROFILE` > the canonical `web` profile > a single existing profile. An
+  ambiguous set fails with `DSH_PROFILE_UNKNOWN` instead of guessing;
+- resolves the version-locked `@mebular/dsh-plugin` from the App bundle (staged
+  under `<home>/adapters/dsh-plugin/<version>`), never from npm;
+- adds it only through the official CLI
+  `dsh plugin --profile <profile> add <absolute-path>`, then reads the profile back
+  (`--dump-config` when available, otherwise `package.json` / `cordis*.yml`);
+- backs up the profile files under `<home>/adapters/backups/dsh-profile-*` before
+  the CLI runs and restores them if the add or readback fails;
+- activates with `next-start`; it never kills a running DSH process.
+
+Provisioning never hand-writes DSH YAML and never touches DSH databases, session
+storage or transcripts. It requires the `dsh` CLI: on a machine without it the
+adapter boundary is `DSH_CLI_NOT_FOUND` and nothing is written. An adapter failure
+never blocks the MCP connection; inspect it with `mebular adapter status --json`
+or repair only connected hosts with `mebular adapter repair --json`. Rollback uses
+`dsh plugin --profile <profile> remove @mebular/dsh-plugin`, then the profile
+backup. See the
+[adapter provisioning design](../design/adapter-provisioning.md).
+
 ### When no runtime exists
 
 If an App/CLI/service/shared runtime exists, the Plugin attaches and installs

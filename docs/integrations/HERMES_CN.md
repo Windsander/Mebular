@@ -126,6 +126,15 @@ Provider 需要 0.3 Memory Runtime sidecar 正在运行。只有 MCP 设置
    hermes memory status
    ```
 
+### 自动接入（桌面 App）
+
+Mebular 桌面 App 连接 Hermes 时，会同时把随 App 捆绑的 provider 安装到
+`$HERMES_HOME/plugins/mebular`，并通过
+`hermes config set memory.provider mebular` 选中它。provider 在 Hermes 的下一个会话
+生效；adapter 不会重启或杀死正在运行的 Hermes 进程。安装失败会恢复旧 provider 目录和
+字节级配置备份，adapter 失败也绝不阻断 MCP 接入。`mebular adapter status --json` 与
+`mebular adapter repair --json` 会报告已记录的 adapter 状态。
+
 通常**不需要**配置 token。sidecar 每次启动都会生成 host token，并把路径写进发现文件；
 provider 自动读取，并在 POSIX 上拒绝组/其他可读的 token 文件。
 `MEBULAR_MEMORY_RUNTIME_TOKEN` 只是测试/排障覆盖，**不是** MCP capability token；provider

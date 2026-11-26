@@ -133,6 +133,16 @@ when the MCP setting `memoryRuntime.enabled=true` (or when you start it manually
    hermes memory status
    ```
 
+### Automatic provisioning (desktop app)
+
+When the Mebular desktop app connects Hermes, it also installs the bundled provider at
+`$HERMES_HOME/plugins/mebular` and selects it with
+`hermes config set memory.provider mebular`. The provider takes effect on the next Hermes
+session; the adapter never restarts or kills a running Hermes process. A failed install
+restores the previous provider directory and the byte-level config backup, and an adapter
+failure never blocks the MCP connection. `mebular adapter status --json` and
+`mebular adapter repair --json` report the recorded adapter state.
+
 Normally you do **not** configure a token. The sidecar generates a host token on each
 start and publishes its path in discovery; the provider reads that file and rejects
 group/world-readable token files on POSIX. `MEBULAR_MEMORY_RUNTIME_TOKEN` is only a

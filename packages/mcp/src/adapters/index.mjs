@@ -1,15 +1,14 @@
 // Adapter registry (W1).
 //
 // Host adapters are data + methods; adding a host means adding a descriptor
-// module and one registration line. Host-specific install logic for DSH and
-// Hermes is intentionally *not* implemented in this foundation session:
-// their descriptors are explicit `pending` placeholders so callers get
-// `ADAPTER_UNAVAILABLE` instead of a fake install success.
+// module and one registration line. DSH is still an explicit `pending`
+// placeholder so callers get `ADAPTER_UNAVAILABLE` instead of a fake install
+// success.
 //
-// Reserved follow-up imports (uncomment when the host modules land):
+// Reserved follow-up import (uncomment when the DSH module lands):
 //   import { dshAdapter } from './dsh.mjs';
-//   import { hermesAdapter } from './hermes.mjs';
 
+import { hermesAdapter } from './hermes.mjs';
 import { openChamberAdapter, openCodeAdapter } from './opencode.mjs';
 
 const registry = new Map();
@@ -81,21 +80,15 @@ export const ADAPTER_HOST_IDS = Object.freeze([
 
 registerAdapter(openCodeAdapter);
 registerAdapter(openChamberAdapter);
+registerAdapter(hermesAdapter);
 
-// Host-specific adapters arrive in follow-up sessions on this branch. Until
-// then these placeholders are honest: MCP keeps working, adapter = unavailable.
-// Replace these two registrations with the imports above once
-// `adapters/dsh.mjs` / `adapters/hermes.mjs` land.
+// DSH arrives in a follow-up session on this branch. Until then its
+// placeholder is honest: MCP keeps working, adapter = unavailable.
+// Replace this registration with the import above once `adapters/dsh.mjs`
+// lands.
 registerAdapter(createUnsupportedAdapter({
   hostId: 'dsh',
   displayName: 'DeepSeek Harness (DSH)',
-  status: 'pending',
-  code: 'ADAPTER_UNAVAILABLE',
-  reason: 'adapter_not_implemented',
-}));
-registerAdapter(createUnsupportedAdapter({
-  hostId: 'hermes',
-  displayName: 'Hermes',
   status: 'pending',
   code: 'ADAPTER_UNAVAILABLE',
   reason: 'adapter_not_implemented',

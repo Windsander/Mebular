@@ -7,7 +7,9 @@
 // install exists, one read-only evidence test inspects it (detect + dry-run).
 
 import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals';
-import { existsSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { existsSync, statSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -39,6 +41,7 @@ const realUserHome = homedir();
 const realHermesHome = join(realUserHome, '.hermes');
 const realHermesCli = join(realUserHome, '.local', 'bin', 'hermes');
 const hasRealHermes = existsSync(realHermesHome) && existsSync(realHermesCli);
+const realHermesIt = hasRealHermes && process.platform !== 'win32' ? it : it.skip;
 
 const FAKE_CLI = `#!/usr/bin/env node
 const fs = require('node:fs');
@@ -536,7 +539,7 @@ describe('hermes adapter', () => {
 
   // ---------- real host evidence (read-only) ----------
 
-  (hasRealHermes ? it : it.skip)('real Hermes: detect + dry-run are strictly read-only', async () => {
+  realHermesIt('real Hermes: detect + dry-run are strictly read-only', async () => {
     const beforeConfig = existsSync(configPathFor({ hermesHome: realHermesHome }))
       ? await readFile(configPathFor({ hermesHome: realHermesHome }))
       : null;
@@ -572,5 +575,79 @@ describe('hermes adapter', () => {
     expect(Buffer.compare(afterConfig ?? Buffer.from(''), beforeConfig ?? Buffer.from(''))).toBe(0);
     const afterPlugins = existsSync(realPlugins) ? await readdir(realPlugins) : [];
     expect(afterPlugins).toEqual(beforePlugins);
+  });
+
+  // Real CLI write path in an isolated HERMES_HOME. A fresh data root has no
+  // committed dependency environment; Hermes normally bootstraps one (network +
+  // hundreds of MB). We set HERMES_DISABLE_LAZY_INSTALLS=1 so it fails fast with
+  // an explicit reason instead, and record HERMES_CLI_ENV_UNSUPPORTED rather
+  // than touching the real home or pretending the write happened.
+  realHermesIt('real Hermes CLI: isolated HERMES_HOME write path or explicit unsupported boundary', async () => {
+    const realConfig = join(realHermesHome, 'config.yaml');
+    const beforeBytes = existsSync(realConfig) ? await readFile(realConfig) : null;
+    const beforeStat = existsSync(realConfig) ? statSync(realConfig) : null;
+    const beforeHash = beforeBytes === null ? null : createHash('sha256').update(beforeBytes).digest('hex');
+
+    const tempHome = await mkdtemp(join(tmpdir(), 'hermes-real-cli-'));
+    const tempConfig = join(tempHome, 'config.yaml');
+    const env = {
+      ...process.env,
+      HERMES_HOME: tempHome,
+      HERMES_DISABLE_LAZY_INSTALLS: '1',
+    };
+
+    let outcome;
+    try {
+      try {
+        execFileSync(realHermesCli, ['config', 'set', 'memory.provider', 'mebular'], {
+          env,
+          encoding: 'utf-8',
+          timeout: 20_000,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        const written = existsSync(tempConfig) ? await readFile(tempConfig, 'utf-8') : null;
+        const readback = execFileSync(realHermesCli, ['config', 'get', 'memory.provider'], {
+          env,
+          encoding: 'utf-8',
+          timeout: 15_000,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        outcome = { ok: true, written, readback: String(readback).trim() };
+      } catch (error) {
+        outcome = {
+          ok: false,
+          code: error?.code ?? null,
+          signal: error?.signal ?? null,
+          stdout: String(error?.stdout ?? ''),
+          stderr: String(error?.stderr ?? ''),
+        };
+      }
+    } finally {
+      await rm(tempHome, { recursive: true, force: true });
+    }
+
+    // The isolated attempt must not have modified the real Hermes config.
+    const afterBytes = existsSync(realConfig) ? await readFile(realConfig) : null;
+    const afterStat = existsSync(realConfig) ? statSync(realConfig) : null;
+    const afterHash = afterBytes === null ? null : createHash('sha256').update(afterBytes).digest('hex');
+    expect(afterStat?.mtimeMs ?? null).toBe(beforeStat?.mtimeMs ?? null);
+    expect(afterStat?.size ?? null).toBe(beforeStat?.size ?? null);
+    expect(afterHash).toBe(beforeHash);
+
+    if (outcome.ok) {
+      expect(outcome.written).not.toBeNull();
+      expect(parseProviderFromConfigText(outcome.written)).toBe('mebular');
+      expect(outcome.readback).toBe('mebular');
+      console.log('[hermes-real] isolated HERMES_HOME write succeeded (config set + get)');
+      return;
+    }
+
+    const combined = `${outcome.stderr}\n${outcome.stdout}`;
+    const fixedReason = /no dependency environment is committed|preparing dependencies for this data root/i.test(combined);
+    if (!fixedReason) {
+      throw new Error(`real hermes config set failed unexpectedly (code=${outcome.code}, signal=${outcome.signal}): ${combined.trim()}`);
+    }
+    console.warn(`[hermes-real] HERMES_CLI_ENV_UNSUPPORTED: ${combined.trim().split('\n')[0]}`);
+    expect(outcome.stdout).not.toContain('mebular');
   });
 });

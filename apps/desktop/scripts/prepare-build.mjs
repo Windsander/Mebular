@@ -83,6 +83,7 @@ try {
 // 版本 lockstep 由各 adapter 的 manifest 提供，运行时不联网下载。
 const ADAPTER_BUNDLES = [
   { source: join(root, 'packages', 'opencode-plugin'), target: join(here, '..', 'build', 'adapters', 'opencode-plugin') },
+  { source: join(root, 'packages', 'dsh-plugin'), target: join(here, '..', 'build', 'adapters', 'dsh-plugin') },
   { source: join(root, 'integrations', 'hermes', 'mebular-memory'), target: join(here, '..', 'build', 'adapters', 'hermes') },
 ];
 const skipAdapterArtifact = (source) => {

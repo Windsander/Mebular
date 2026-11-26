@@ -3417,8 +3417,11 @@ html[lang="en-US"] .modal-settings .cfg-label { line-height: 19px; }
 @media (max-width: 760px) {
   .modal-settings .cfg-row {
     display: grid; grid-template-columns: minmax(0, 1fr);
-    height: auto; min-height: 40px; row-gap: 2px; padding: 6px 14px;
+    /* 两行字段（label 上 / 控件下）固定走设计稿的 58 行：19 + 2 + 27 + 上下各 5。
+       用 auto/不对称 padding 会随平台字体行高漂成 54 这类非 40/58 的高度。 */
+    height: 58px; min-height: 58px; align-content: center; row-gap: 2px; padding: 5px 14px;
   }
+  .modal-settings .cfg-row:first-child { padding-top: 5px; }
   .modal-settings .cfg-label { white-space: normal; }
   .modal-settings .cfg-control { justify-self: start; justify-content: flex-start; }
   .modal-settings .cfg-status { justify-self: start; }

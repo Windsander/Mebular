@@ -1450,6 +1450,8 @@ async function main() {
           && Boolean(p.querySelector('[data-rt-mode=lightweight]'))
           && Boolean(p.querySelector('[data-rt-mode=immersive]'))
           && Boolean(p.querySelector('#rt-model-source'))
+          && Boolean(p.querySelector('#rt-model-source').closest('.crt-select')?.querySelector('.crt-select-trigger'))
+          && p.querySelectorAll('[data-rt-sidecar-status] dd.rt-value').length === 5
           && !p.querySelector('[data-rt-enabled]') && !p.querySelector('.runtime-pack')
           && p.querySelectorAll('[data-rt-path]').length === 0
           && !/Sidecar 健康|PID|由 Mebular 管理|token/i.test(p.textContent);
@@ -1487,18 +1489,29 @@ async function main() {
         && /✓/.test(active?.textContent ?? '')
         && !document.querySelector('#settings-panel-runtime [data-rt-mode-chip]');
     })()`));
-    check('v2.2 运行状态：模式/状态纯文字右对齐、无 crt-tag、空值 faint', await evalJs(`(() => {
+    const runtimeStatusProbe = await evalJs(`(() => {
       const s = document.querySelector('#settings-panel-runtime [data-rt-sidecar-status]');
-      if (!s) return false;
+      if (!s) return { ok: false, why: 'missing-status' };
       const values = [...s.querySelectorAll('dd.rt-value')];
       const empty = values.find((el) => el.textContent.trim() === '—');
       const dd = s.querySelector('dd');
-      return values.length === 5
-        && s.querySelectorAll('.crt-tag').length === 0
-        && getComputedStyle(dd).justifyContent === 'flex-end'
-        && getComputedStyle(dd).textAlign === 'right'
-        && (!empty || getComputedStyle(empty).color === 'rgba(140, 255, 200, 0.35)');
-    })()`));
+      const detail = {
+        values: values.length,
+        tags: s.querySelectorAll('.crt-tag').length,
+        justify: dd ? getComputedStyle(dd).justifyContent : null,
+        align: dd ? getComputedStyle(dd).textAlign : null,
+        empty: empty ? getComputedStyle(empty).color : null,
+        texts: values.map((el) => el.textContent.trim()),
+      };
+      const ok = values.length === 5
+        && detail.tags === 0
+        && detail.justify === 'flex-end'
+        && detail.align === 'right'
+        && (!empty || detail.empty === 'rgba(140, 255, 200, 0.35)');
+      return { ok, detail };
+    })()`);
+    check('v2.2 运行状态：模式/状态纯文字右对齐、无 crt-tag、空值 faint',
+      Boolean(runtimeStatusProbe?.ok), JSON.stringify(runtimeStatusProbe?.detail ?? runtimeStatusProbe));
     await capture('c6-settings-runtime.jpg');
     // 轻量模式：模型状态卡消失，记忆页模型来源禁用并说明。
     await evalJs('document.querySelector("[data-rt-mode=lightweight]").click()');
@@ -1559,17 +1572,19 @@ async function main() {
     await waitFor(`/就绪/.test(document.querySelector('#settings-panel-runtime [data-rt-sidecar-status]')?.textContent ?? '')`, 30000);
     // 唯一新增控件 2：记忆 · 模型来源（仅下拉；不显示 endpoint/key/path）。
     await evalJs('document.querySelector("[data-settings-tab=runtime]").click()');
+    const modelSourceReady = await waitFor(`(() => {
+      const section = document.querySelector('#settings-panel-runtime [data-settings-section=model-source]');
+      const s = section?.querySelector('[data-rt-model-source]');
+      if (!s || s.disabled) return false;
+      const values = [...s.options].map((o) => o.value);
+      window.__modelSourceProbe = { disabled: s.disabled, value: s.value, values, text: (section?.textContent ?? '').slice(0, 240) };
+      return values.join(',') === 'heuristic,local,host,api,auto'
+        && s.value === 'heuristic'
+        && /模型来源/.test(section.textContent) && /立即应用|下次启动/.test(section.textContent)
+        && !/endpoint|keyRef|api key|token|Raw|模型路径|capture|host/i.test(section.textContent);
+    })()`, 30000);
     check('记忆模型来源：5 个来源、默认 heuristic、无 endpoint/key/path 明文',
-      await waitFor(`(() => {
-        const section = document.querySelector('#settings-panel-runtime [data-settings-section=model-source]');
-        const s = section?.querySelector('[data-rt-model-source]');
-        if (!s || s.disabled) return false;
-        const values = [...s.options].map((o) => o.value);
-        return values.join(',') === 'heuristic,local,host,api,auto'
-          && s.value === 'heuristic'
-          && /模型来源/.test(section.textContent) && /立即应用|下次启动/.test(section.textContent)
-          && !/endpoint|keyRef|api key|token|Raw|模型路径|capture|host/i.test(section.textContent);
-      })()`, 30000));
+      modelSourceReady, await evalJs('JSON.stringify(window.__modelSourceProbe ?? null)'));
     await capture('c6-settings-memory-model-source.jpg');
     // C8f · 本地模型：列表 / 下载进度 / 取消 / 失败 / 自动启用 / 停用 / 删除
     const modelAdminPath = join(home, 'ui-model-admin.jsonl');
@@ -2402,38 +2417,63 @@ async function main() {
       const modelRow = modelControl?.closest('.cfg-row');
       const modelPanel = modelControl?.closest('.settings-group-body');
       const modelStatus = modelRow?.querySelector(':scope > .cfg-status');
-      const dropdownOk = !modelControl || !visible(modelControl) || (Boolean(modelWrap && modelTrigger && modelRow && modelPanel)
-        && getComputedStyle(modelControl).justifyContent === 'flex-end'
-        && getComputedStyle(modelControl).justifySelf === 'end'
-        && getComputedStyle(modelRow).gridTemplateColumns.split(' ').filter(Boolean).length === ${checkRows ? '2' : '1'}
-        && (!modelStatus || getComputedStyle(modelStatus).display === 'none')
-        && getComputedStyle(modelWrap).flexGrow === '0' && getComputedStyle(modelWrap).flexShrink === '0'
-        && Math.abs(modelWrap.getBoundingClientRect().width - Math.min(280, modelControl.getBoundingClientRect().width)) <= 1
-        && Math.abs(modelTrigger.getBoundingClientRect().right - modelControl.getBoundingClientRect().right) <= 1
-        && Math.abs(modelPanel.getBoundingClientRect().right - modelTrigger.getBoundingClientRect().right - 14) <= 1
-        && Math.abs(modelTrigger.getBoundingClientRect().width - modelWrap.getBoundingClientRect().width) <= 1);
+      const dropdownReasons = [];
+      if (modelControl && visible(modelControl)) {
+        if (!modelWrap || !modelTrigger || !modelRow || !modelPanel) dropdownReasons.push('mount');
+        if (modelControl && getComputedStyle(modelControl).justifyContent !== 'flex-end') dropdownReasons.push('justify-content');
+        if (modelControl && getComputedStyle(modelControl).justifySelf !== 'end') dropdownReasons.push('justify-self');
+        if (modelRow && getComputedStyle(modelRow).gridTemplateColumns.split(' ').filter(Boolean).length !== ${checkRows ? '2' : '1'}) dropdownReasons.push('grid-columns');
+        if (modelStatus && getComputedStyle(modelStatus).display !== 'none') dropdownReasons.push('status-visible');
+        if (modelWrap && getComputedStyle(modelWrap).flexGrow !== '0') dropdownReasons.push('grow');
+        if (modelWrap && getComputedStyle(modelWrap).flexShrink !== '0') dropdownReasons.push('shrink');
+        if (modelWrap && modelControl && Math.abs(modelWrap.getBoundingClientRect().width - Math.min(280, modelControl.getBoundingClientRect().width)) > 1) dropdownReasons.push('wrap-width');
+        if (modelTrigger && modelControl && Math.abs(modelTrigger.getBoundingClientRect().right - modelControl.getBoundingClientRect().right) > 1) dropdownReasons.push('trigger-edge');
+        // 用行自身的内容右缘（row.right - row.paddingRight）判断 14px 内缩，
+        // 不再假设面板边框恰好 1px（border/scrollbar 的亚像素会让旧公式时而越界）。
+        if (modelTrigger && modelRow) {
+          const rowRect = modelRow.getBoundingClientRect();
+          const expectedRight = rowRect.right - (parseFloat(getComputedStyle(modelRow).paddingRight) || 0);
+          if (Math.abs(modelTrigger.getBoundingClientRect().right - expectedRight) > 1) dropdownReasons.push('inset');
+        }
+        if (modelTrigger && modelWrap && Math.abs(modelTrigger.getBoundingClientRect().width - modelWrap.getBoundingClientRect().width) > 1) dropdownReasons.push('trigger-width');
+      }
+      const dropdownOk = !modelControl || !visible(modelControl) || dropdownReasons.length === 0;
       const commonPanel = root.querySelector('#settings-panel-common');
       const commonActionButtons = commonPanel && !commonPanel.hidden
         ? [...commonPanel.querySelectorAll('.settings-row-actions .btn, #settings-resident > .asst-row > .btn, .cloud-actions .btn')].filter(visible)
         : [];
       const actionWidths = commonActionButtons.map((el) => Math.round(el.getBoundingClientRect().width * 10) / 10);
       const actionWidthsOk = commonActionButtons.length === 0 || actionWidths.every((width) => Math.abs(width - 116) <= 0.6);
+      const modelRowHeight = modelRow ? Math.round(modelRow.getBoundingClientRect().height * 10) / 10 : null;
       const cfgAlignOk = ${checkRows ? `[...root.querySelectorAll('.cfg-row')].filter(visible).every((row) => {
         const cells = ['.cfg-label', '.cfg-control', '.cfg-status'].map((selector) => row.querySelector(selector)).filter((el) => el && visible(el));
         const center = (el) => { const rect = el.getBoundingClientRect(); return rect.top + rect.height / 2; };
         return cells.every((el) => Math.abs(center(el) - center(row)) <= 1);
       })` : 'true'};
       return { controls: controls.length, badControls: badControls.slice(0, 8), rows: [...new Set(rows)].sort((a, b) => a - b), badRows: badRows.slice(0, 8), badRowDetails: badRowDetails.slice(0, 12), notes: notes.length, badNotes: badNotes.slice(0, 6), segOk,
-        layout: { hintsHidden, dropdownOk, cfgAlignOk, actionWidthsOk, actionWidths },
+        layout: { hintsHidden, dropdownOk, dropdownReasons, cfgAlignOk, actionWidthsOk, actionWidths, modelRowHeight },
         typo: { tabLs, scrollTop: scrollStyle.paddingTop, scrollLeft: scrollStyle.paddingLeft, scrollRight: scrollStyle.paddingRight, kvOk, kvInsetOk, detailTypeOk, badBodies: badBodies.slice(0, 6), metas: metas.length, badMeta: badMeta.slice(0, 6) } };
     })()`;
     const prevTokenViewport = await evalJs('({ w: window.innerWidth, h: window.innerHeight })');
+    // 设置页的运行时面板会被 3s 轮询/异步刷新重建；先等目标页签真正挂载，
+    // 且运行时模型来源下拉已被增强，再量尺寸，避免量到切换中的过渡 DOM。
+    const openSettingsTab = async (tab) => {
+      await evalJs(`document.querySelector('[data-settings-tab=${tab}]')?.click()`);
+      await waitFor(`(() => {
+        const panel = document.querySelector('#settings-panel-${tab}');
+        if (!panel || panel.hidden) return false;
+        if ('${tab}' !== 'runtime') return true;
+        const select = panel.querySelector('#rt-model-source');
+        return Boolean(select?.closest('.crt-select')?.querySelector('.crt-select-trigger'))
+          && panel.querySelectorAll('[data-rt-sidecar-status] dd.rt-value').length === 5;
+      })()`, 15000);
+      await sleep(250);
+    };
     await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
     await sleep(350);
     const tokenAudit = {};
     for (const tab of ['common', 'security', 'runtime', 'mcp', 'advanced', 'assistants']) {
-      await evalJs(`document.querySelector('[data-settings-tab=${tab}]')?.click()`);
-      await sleep(250);
+      await openSettingsTab(tab);
       tokenAudit[tab] = await evalJs(settingsTokenProbe(true));
     }
     const tokenBad = Object.entries(tokenAudit).filter(([, a]) => !a || a.badControls.length || a.badRows.length || a.badNotes.length || !a.segOk
@@ -2447,8 +2487,7 @@ async function main() {
     await sleep(350);
     const tokenAudit390 = {};
     for (const tab of ['common', 'security', 'runtime', 'mcp', 'advanced', 'assistants']) {
-      await evalJs(`document.querySelector('[data-settings-tab=${tab}]')?.click()`);
-      await sleep(250);
+      await openSettingsTab(tab);
       tokenAudit390[tab] = await evalJs(settingsTokenProbe(false));
     }
     const tokenBad390 = Object.entries(tokenAudit390).filter(([, a]) => !a || a.badControls.length || a.badNotes.length || !a.segOk
@@ -2457,6 +2496,10 @@ async function main() {
       || !a.typo.kvOk || !a.typo.detailTypeOk || a.typo.badBodies.length || a.typo.badMeta.length);
     check('v2.4 390 字体/间距：页签 2px、只读行 12/18、滚动区 16/20、面板 0、meta 11 + 控件 27/8',
       tokenBad390.length === 0, JSON.stringify(tokenBad390).slice(0, 1400));
+    // 窄屏字段行按设计稿固定 58（label 上 / 控件下），不再随平台字体行高漂成 54。
+    check('v2.4 390 设置行高：运行时模型来源字段行 = 58（40/58 规则）',
+      tokenAudit390.runtime?.layout?.modelRowHeight === 58,
+      JSON.stringify({ h: tokenAudit390.runtime?.layout?.modelRowHeight, bad: tokenAudit390.runtime?.badRowDetails }));
     // 全页面真实 rect 中线：关闭折叠 / 空动作容器不参与，窄屏堆叠只查横向溢出。
     const rowAlignProbe = `(() => {
       const bad = [];

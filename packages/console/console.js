@@ -2158,11 +2158,37 @@ settingsRailMedia?.addEventListener?.('change', () => {
   if (list) list.setAttribute('aria-orientation', settingsTabsOrientation());
 });
 
+/**
+ * 设置页可能被多条路径重建（轮询 / 局部 patch / mock 渲染）；正常路径在
+ * renderSettings 末尾统一 enhanceSelects，但任何新增的原生 select 都应在下一
+ * 微任务被增强，避免运行时的模型来源下拉退化成未增强的原生控件。
+ * 只观察 childList：enhance 内部的属性/文本同步不会再次触发。
+ */
+const settingsSelectObserver = typeof MutationObserver === 'function'
+  ? new MutationObserver((mutations) => {
+    for (const mutation of mutations) {
+      for (const node of mutation.addedNodes) {
+        if (node.nodeType !== 1) continue;
+        if (node.matches?.('select:not(.crt-select-native)')) enhanceSelect(node);
+        for (const select of node.querySelectorAll?.('select:not(.crt-select-native)') ?? []) {
+          enhanceSelect(select);
+        }
+      }
+    }
+  })
+  : null;
+
+function observeSettingsSelects(root) {
+  if (!settingsSelectObserver || !root) return;
+  settingsSelectObserver.observe(root, { childList: true, subtree: true });
+}
+
 function renderSettings(activeTab = state.settingsTab ?? 'common') {
   const prevTab = state.settingsTab ?? 'common';
   state.settingsTab = activeTab;
   if (activeTab !== 'runtime') stopRuntimeModelPolling();
   const body = $('#settings-body');
+  observeSettingsSelects(body);
   if (state.locked) {
     renderLockedSettings(body);
     return;
@@ -2218,6 +2244,7 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
         ${panel('advanced', `<p class="muted">${escapeHtml(t('settings.mock.config'))}</p>`)}
       `);
       bindSecurityCard(body);
+      enhanceSelects(body);
       return;
     }
     body.innerHTML = `<p class="muted">${escapeHtml(t('settings.loading'))}</p>`;

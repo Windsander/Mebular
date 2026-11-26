@@ -245,7 +245,14 @@ export async function ensureAdapter(hostId, options = {}) {
     });
   }
 
-  const installedAt = Number.isFinite(previousState?.installedAt) && previousState.installedAt >= 0
+  // A newer adapter version starts a new health baseline: traces produced by the
+  // previous version must not make the just-upgraded plugin look healthy before
+  // it has ingested anything itself. Same version keeps its original baseline.
+  const sameInstalledVersion = typeof previousState?.version === 'string'
+    && previousState.version === packageInfo.version;
+  const installedAt = sameInstalledVersion
+    && Number.isFinite(previousState?.installedAt)
+    && previousState.installedAt >= 0
     ? previousState.installedAt
     : startedAt;
   let health;
@@ -267,7 +274,11 @@ export async function ensureAdapter(hostId, options = {}) {
 
   let status;
   let lastError = null;
-  let lastIngestedAt = Number.isFinite(previousState?.lastIngestedAt) ? previousState.lastIngestedAt : null;
+  // A version change clears the previous adapter version's health evidence too;
+  // only evidence from the current installation counts.
+  let lastIngestedAt = sameInstalledVersion && Number.isFinite(previousState?.lastIngestedAt)
+    ? previousState.lastIngestedAt
+    : null;
   if (health.state === 'healthy') {
     status = 'active';
     if (health.lastIngestedAt !== null && health.lastIngestedAt !== undefined) lastIngestedAt = health.lastIngestedAt;
@@ -291,7 +302,8 @@ export async function ensureAdapter(hostId, options = {}) {
     lastError,
     verifiedAt: Date.now(),
     installedAt,
-    ...(lastIngestedAt !== null ? { lastIngestedAt } : {}),
+    // `null` clears a previous-version timestamp on upgrade (sanitizer drops it).
+    lastIngestedAt,
   }, home);
 
   return {

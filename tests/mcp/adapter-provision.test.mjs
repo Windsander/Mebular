@@ -402,6 +402,33 @@ describe('adapter provisioning', () => {
     expect(config.plugins).toHaveLength(2);
   });
 
+  it('managed path identity is scoped to the current home: unrelated user plugins survive merge/verify/rollback', async () => {
+    const thirdParty = await makePlugin(join(root, 'projects', 'adapters', 'opencode-plugin', '1.0.0'), {
+      name: 'third-party-opencode-plugin',
+      version: '1.0.0',
+    });
+    const mebular = await makePlugin(join(root, 'plugin-scoped'));
+    const userEntry = { package: thirdParty, options: { keep: true } };
+    await writeConfig({ theme: 'dark', plugins: ['user-plugin', userEntry] });
+
+    const ensured = await ensureAdapter('opencode', opts({ adapterPackagePath: mebular }));
+    expect(ensured.ok).toBe(true);
+    let config = await readConfig();
+    expect(config.plugins.filter((entry) => entry?.package === thirdParty)).toEqual([userEntry]);
+    expect(config.plugins.filter((entry) => entry?.package === mebular)).toHaveLength(1);
+
+    const verified = await verifyOpenCode(opts({ adapterPackagePath: mebular }));
+    expect(verified.ok).toBe(true);
+
+    // Force rollback's remove-entry path (no config backup available).
+    await rm(join(home, 'adapters', 'backups'), { recursive: true, force: true });
+    const rolled = await rollbackAdapter('opencode', opts({ adapterPackagePath: mebular }));
+    expect(rolled.ok).toBe(true);
+    config = await readConfig();
+    expect(config.plugins).toEqual(['user-plugin', userEntry]);
+    expect(config.theme).toBe('dark');
+  });
+
   it('verify: more than one Mebular entry fails (old + new), not just the current path', async () => {
     const newPlugin = await makePlugin(join(root, 'plugin-verify'));
     await writeConfig({

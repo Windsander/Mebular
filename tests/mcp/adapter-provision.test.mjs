@@ -92,10 +92,10 @@ describe('adapter provisioning', () => {
 
   // ---------- W1 registry / unsupported ----------
 
-  it('registry: opencode/openchamber supported, dsh/hermes pending, MCP-only unsupported', () => {
+  it('registry: opencode/openchamber/dsh supported, hermes pending, MCP-only unsupported', () => {
     expect(getAdapter('opencode').status).toBe('supported');
     expect(getAdapter('openchamber').status).toBe('supported');
-    expect(getAdapter('dsh').status).toBe('pending');
+    expect(getAdapter('dsh').status).toBe('supported');
     expect(getAdapter('hermes').status).toBe('pending');
     expect(getAdapter('claude-code').status).toBe('unsupported');
     expect(getAdapter('generic').status).toBe('unsupported');
@@ -115,7 +115,7 @@ describe('adapter provisioning', () => {
     expect(state.hosts.cursor).toMatchObject({ connected: true, adapter: 'unsupported', lastError: 'ADAPTER_UNSUPPORTED' });
   });
 
-  it('dsh/hermes placeholders return ADAPTER_UNAVAILABLE (no fake install)', async () => {
+  it('hermes placeholder returns ADAPTER_UNAVAILABLE (no fake install)', async () => {
     const result = await ensureAdapter('hermes', opts({ connected: true }));
     expect(result.ok).toBe(false);
     expect(result.code).toBe('ADAPTER_UNAVAILABLE');

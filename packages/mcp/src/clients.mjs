@@ -1606,6 +1606,33 @@ async function attachSkills(result, id, options = {}) {
   return result;
 }
 
+/** 接入成功后顺带 ensure 该客户端的 Adapter；失败只记录，绝不阻断 MCP 接入。 */
+async function attachAdapter(result, id, options = {}) {
+  if (!result?.ok || options.ensureAdapter === false) return result;
+  try {
+    const { ensureAdapter } = await import('./adapter-provision.mjs');
+    result.adapter = await ensureAdapter(id, {
+      ...(options.home ? { home: options.home } : {}),
+      ...(options.userHome ? { userHome: options.userHome } : {}),
+      ...(options.cwd ? { cwd: options.cwd } : {}),
+      ...(options.env ? { env: options.env } : {}),
+      ...(typeof options.adapterPackagePath === 'string' ? { adapterPackagePath: options.adapterPackagePath } : {}),
+      ...(typeof options.packagePath === 'string' ? { packagePath: options.packagePath } : {}),
+      ...(typeof options.resourcesPath === 'string' ? { resourcesPath: options.resourcesPath } : {}),
+      ...(typeof options.expectedVersion === 'string' ? { expectedVersion: options.expectedVersion } : {}),
+      ...(typeof options.run === 'function' ? { run: options.run } : {}),
+      ...(typeof options.runAsync === 'function' ? { runAsync: options.runAsync } : {}),
+      ...(options.canRestartHost !== undefined ? { canRestartHost: options.canRestartHost } : {}),
+      ...(typeof options.reloadHost === 'function' ? { reloadHost: options.reloadHost } : {}),
+      ...(typeof options.restartHost === 'function' ? { restartHost: options.restartHost } : {}),
+      connected: true,
+    });
+  } catch {
+    result.adapter = { ok: false, code: 'ADAPTER_FAILED' };
+  }
+  return result;
+}
+
 /** 接入：merge-key（备份 → 原子写）/ cli-set（官方 CLI）/ manual（仅片段）。 */
 export async function connectClient(id, options = {}) {
   const assistant = descriptorFor(id, options);
@@ -1618,7 +1645,7 @@ export async function connectClient(id, options = {}) {
   if (isForbidden(assistant, primary)) {
     return { ok: false, reason: `禁写路径（landing.forbiddenPaths）：${primary}` };
   }
-  if (strategy === 'cli-set') return attachSkills(await connectViaCli(assistant, options), id, options);
+  if (strategy === 'cli-set') return attachAdapter(await attachSkills(await connectViaCli(assistant, options), id, options), id, options);
   const existing = safeReadText(primary);
   const merged = computeMerged(assistant, existing, options);
   if (merged.error) {
@@ -1626,7 +1653,7 @@ export async function connectClient(id, options = {}) {
   }
   const preview = lineDiff(existing ?? '', merged.text);
   if (!merged.changed) {
-    return attachSkills({ ok: true, changed: false, configPath: primary, backupPath: null, preview, note: '已接入（幂等：无需改动）' }, id, options);
+    return attachAdapter(await attachSkills({ ok: true, changed: false, configPath: primary, backupPath: null, preview, note: '已接入（幂等：无需改动）' }, id, options), id, options);
   }
   const backupPath = existing !== null ? `${primary}.bak-${tsStamp()}` : null;
   if (backupPath) await copyFile(primary, backupPath);
@@ -1637,7 +1664,7 @@ export async function connectClient(id, options = {}) {
     if (backupPath) await copyFile(backupPath, primary); // 失败回滚
     return { ok: false, changed: false, rolledBack: Boolean(backupPath), backupPath, reason: `写入失败已回滚：${redactSecrets(error?.message ?? error)}` };
   }
-  return attachSkills({ ok: true, changed: true, configPath: primary, backupPath, preview }, id, options);
+  return attachAdapter(await attachSkills({ ok: true, changed: true, configPath: primary, backupPath, preview }, id, options), id, options);
 }
 
 /**
@@ -1794,6 +1821,16 @@ export async function rollbackClient(id, options = {}) {
 // 验证闭环（A-9/A-10/A-11）
 // ---------------------------------------------------------------------------
 
+/** 该 plugin 条目是否属于 Mebular 自己的 adapter（读回比对时忽略它，保留用户插件）。 */
+function isMebularPluginEntry(entry) {
+  const refs = typeof entry === 'string'
+    ? [entry]
+    : (entry !== null && typeof entry === 'object' && !Array.isArray(entry)
+      ? ['package', 'path', 'module', 'plugin'].map((key) => entry[key]).filter((value) => typeof value === 'string')
+      : []);
+  return refs.some((ref) => ref === '@mebular/opencode-plugin' || /(^|[/\\])opencode-plugin([/\\]|$)/.test(ref));
+}
+
 /** 回读校验：条目存在 ∧ 原配置其余键无损（有备份时逐键比对）。 */
 export function readbackCheck(assistant, options = {}) {
   const landing = landingState(assistant, options);
@@ -1830,6 +1867,13 @@ export function readbackCheck(assistant, options = {}) {
         let node = clone;
         for (const key of path.slice(0, -1)) { if (node?.[key] === undefined) return clone; node = node[key]; }
         if (node && typeof node === 'object') delete node[path[path.length - 1]];
+        // Adapter provisioning may also add its own entry to `plugins`; ignore
+        // only Mebular's entry so user plugins are still compared.
+        if (Array.isArray(clone.plugins)) {
+          const remaining = clone.plugins.filter((entry) => !isMebularPluginEntry(entry));
+          if (remaining.length === 0) delete clone.plugins;
+          else clone.plugins = remaining;
+        }
         return pruneEmpty(clone);
       };
       intact = JSON.stringify(strip(before)) === JSON.stringify(strip(after));
@@ -2285,7 +2329,13 @@ export async function repairClients(options = {}) {
       continue;
     }
     try {
-      base.connect = await connectClient(assistant.id, { ...options, skipSkills: true });
+      base.connect = await connectClient(assistant.id, {
+        ...options,
+        skipSkills: true,
+        // Repair fans out to detected hosts; adapter provisioning is only
+        // allowed for hosts that were already connected before this repair.
+        ensureAdapter: assistant.connected === true,
+      });
     } catch (error) {
       base.connect = { ok: false, reason: `接入失败：${redactSecrets(error?.message ?? error)}` };
     }

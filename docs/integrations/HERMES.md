@@ -133,6 +133,32 @@ when the MCP setting `memoryRuntime.enabled=true` (or when you start it manually
    hermes memory status
    ```
 
+### Automatic provisioning (desktop app)
+
+When the Mebular desktop app connects Hermes, it also installs the bundled provider at
+`$HERMES_HOME/plugins/mebular` and selects it with
+`hermes config set memory.provider mebular`. The provider takes effect on the next Hermes
+session; the adapter never restarts or kills a running Hermes process. A failed install
+restores the previous provider directory and the byte-level config backup, and an adapter
+failure never blocks the MCP connection. `mebular adapter status --json` and
+`mebular adapter repair --json` report the recorded adapter state.
+
+- The provider comes from the App bundle (staged under
+  `<home>/adapters/hermes/<version>`), version-locked to the App; there is no npm lookup
+  and no arbitrary version. The directory name is always `mebular`, because Hermes uses
+  it as the `memory.provider` value.
+- The provider directory is staged and verified (`plugin.yaml` name/version and
+  `__init__.py`), then swapped with the previous directory kept as `.bak-<timestamp>`.
+  Hermes' DB, session storage, `mebular-memory` spool and `MEMORY.md` / `USER.md` are
+  never written.
+- Rollback restores both the provider directory and the config bytes. Removing the
+  provider does not stop the sidecar or delete Mebular data.
+- **Known environment boundary:** a fresh `HERMES_HOME` may have no committed dependency
+  environment, so the real CLI refuses `config set` (`HERMES_CLI_ENV_UNSUPPORTED`, message
+  `run hermes pm repair`). In that case provisioning rolls back and records the boundary;
+  it does not write the real `~/.hermes`, install dependencies or pretend the provider is
+  selected. Setup Hermes for that data root, then connect again.
+
 Normally you do **not** configure a token. The sidecar generates a host token on each
 start and publishes its path in discovery; the provider reads that file and rejects
 group/world-readable token files on POSIX. `MEBULAR_MEMORY_RUNTIME_TOKEN` is only a

@@ -1,0 +1,188 @@
+{
+  "schema": 1,
+  "kind": "adapter-provisioning-verification",
+  "generatedAt": "2026-11-26T04:55:00.000Z",
+  "branch": "feat/adapter-provisioning-verification",
+  "baseCommit": "a1feea8007574974a9ae995ed1eea75ca418f5e7",
+  "baseCommitShort": "a1feea8",
+  "environment": {
+    "platform": "darwin",
+    "arch": "x86_64",
+    "node": "v26.8.1",
+    "opencodeBin": "/private/var/folders/86/gpjtr2p94dg7mz24pbkrj8pw0000gn/T/mebular-e2e-tools/node_modules/.bin/opencode",
+    "opencodeVersion": "2.4.1"
+  },
+  "scope": {
+    "changed": ["tests", "docs", "CHANGELOG"],
+    "productionCodeChanged": false,
+    "consoleChanged": false,
+    "localesChanged": false,
+    "memoryRuntimeChanged": false,
+    "newPublicMcpTools": false
+  },
+  "realOpencodeE2E": {
+    "script": "tests/integration/host-e2e/adapter-provision-opencode.mjs",
+    "command": "node tests/integration/host-e2e/adapter-provision-opencode.mjs",
+    "exitCode": 0,
+    "passed": 24,
+    "failed": 0,
+    "assertions": {
+      "hostDetected": true,
+      "ensureCommand": "node packages/mcp/bin/mebular.mjs adapter ensure --host opencode --json",
+      "ensureStatus": "installed",
+      "activation": "next-start",
+      "changed": true,
+      "verified": true,
+      "verifyChecks": [
+        "config-exists",
+        "plugins-array",
+        "entry-unique",
+        "options",
+        "package-exists",
+        "version-lockstep"
+      ],
+      "pluginEntryCount": 1,
+      "pluginPackage": "packages/opencode-plugin (repository path; source=manual in this dev E2E)",
+      "pluginOptions": { "agentId": "opencode", "recall": true, "ingest": true },
+      "adapterConfigKeys": ["plugins"],
+      "adapterState": {
+        "adapter": "installed",
+        "version": "0.3.5",
+        "configPath": "~/.config/opencode/opencode.json",
+        "activation": "next-start",
+        "lastError": null
+      },
+      "secondEnsure": { "changed": false, "configBytesStable": true },
+      "configWasAbsentBeforeEnsure": true,
+      "configBytesStableThroughServeAndTurn": true,
+      "configMtimeStableThroughServeAndTurn": true,
+      "adapterIsSoleConfigWriter": true,
+      "hostStarted": true,
+      "turnExitCode": 0,
+      "sidecar": {
+        "contexts": 1,
+        "ingested": 1,
+        "settled": 0,
+        "traces": 1,
+        "traceAgentIds": ["opencode"],
+        "traceThreadMatchesSession": true
+      },
+      "secretsPrinted": false
+    },
+    "notes": [
+      "The model/provider half of the opencode config arrived through OPENCODE_CONFIG_CONTENT so the adapter remained the only writer of opencode.json.",
+      "counts.ingested>0 is the acceptance signal; counts.settled can lag and was 0 at assertion time."
+    ]
+  },
+  "desktopBundles": {
+    "command": "node apps/desktop/scripts/prepare-build.mjs",
+    "exitCode": 0,
+    "bundleCount": 3,
+    "bundles": [
+      "apps/desktop/build/adapters/opencode-plugin",
+      "apps/desktop/build/adapters/dsh-plugin",
+      "apps/desktop/build/adapters/hermes"
+    ],
+    "versions": {
+      "opencode-plugin": "0.3.5",
+      "dsh-plugin": "0.3.5",
+      "hermes": "0.3.5"
+    }
+  },
+  "dsh": {
+    "realCli": "absent (`command -v dsh` empty)",
+    "boundary": "hermetic: no real DSH CLI on this machine",
+    "testCommand": "node --experimental-vm-modules node_modules/jest/bin/jest.js tests/mcp/adapter-dsh.test.mjs",
+    "suites": 1,
+    "passed": 16,
+    "failed": 0,
+    "realProfilesUnchanged": {
+      "path": "~/.dsh/profiles",
+      "profiles": ["web"],
+      "files": ["cordis.patch.yml", "cordis.yml", "package.json", "pnpm-workspace.yaml"],
+      "mtimeAndSizeStableAcrossSuite": true
+    }
+  },
+  "hermes": {
+    "realCli": "/Users/sobertli/.local/bin/hermes",
+    "testCommand": "node --experimental-vm-modules node_modules/jest/bin/jest.js tests/mcp/adapter-hermes.test.mjs",
+    "suites": 1,
+    "passed": 17,
+    "failed": 0,
+    "realHostTests": {
+      "command": "node --experimental-vm-modules node_modules/jest/bin/jest.js tests/mcp/adapter-hermes.test.mjs -t \"real Hermes\" --verbose",
+      "passed": 2,
+      "skipped": 15,
+      "boundaryCode": "HERMES_CLI_ENV_UNSUPPORTED",
+      "boundaryMessage": "hermes: no dependency environment is committed for this install; run `hermes pm repair`",
+      "realConfigUnchangedDuringTestWindow": {
+        "beforeSha256": "b5e4714b5f3b0577657d204cab1a73030444140f9dca4c68609f2327a2e99b28",
+        "afterSha256": "b5e4714b5f3b0577657d204cab1a73030444140f9dca4c68609f2327a2e99b28",
+        "size": 6518,
+        "mtimeMs": 1795667843596.2825
+      },
+      "realPluginsDir": [],
+      "realMemoryProvider": null
+    },
+    "notes": [
+      "A live Hermes desktop app/gateway is running on this machine and rewrote its own ~/.hermes/config.yaml (added an mcp_servers.mebular entry) outside the test window. The adapter tests assert hash/size/mtime immutability inside their own window and passed; no plugins/mebular directory and no memory.provider=mebular were written to the real host.",
+      "No Hermes dependency install or network access was attempted."
+    ]
+  },
+  "gates": {
+    "build": { "command": "npm run build", "exitCode": 0 },
+    "lint": { "command": "npm run lint", "exitCode": 0 },
+    "checkDocs": { "command": "npm run check:docs", "exitCode": 0, "passed": 7, "failed": 0 },
+    "jestAdapterClientsRepairDesktop": {
+      "command": "node --experimental-vm-modules node_modules/jest/bin/jest.js tests/mcp/adapter-provision.test.mjs tests/mcp/adapter-dsh.test.mjs tests/mcp/adapter-hermes.test.mjs tests/mcp/adapter-cli.test.mjs tests/mcp/clients.test.mjs tests/mcp/repair-api.test.mjs tests/desktop/adapter-repair.test.mjs",
+      "suites": 7,
+      "passed": 86,
+      "failed": 0
+    },
+    "jestDesktopPackaging": {
+      "command": "node --experimental-vm-modules node_modules/jest/bin/jest.js tests/desktop/release-packaging.test.mjs",
+      "suites": 1,
+      "passed": 20,
+      "failed": 0
+    },
+    "existingOpencodeHostE2E": {
+      "command": "PATH=<opencode-bin>:$PATH node tests/integration/host-e2e/opencode-real-runtime.mjs",
+      "passed": 41,
+      "failed": 0,
+      "skipped": 0
+    },
+    "existingInterventionOutcomeE2E": {
+      "command": "PATH=<opencode-bin>:$PATH node tests/integration/host-e2e/opencode-intervention-outcome.mjs",
+      "passed": 46,
+      "failed": 0
+    },
+    "newAdapterProvisionE2E": {
+      "command": "node tests/integration/host-e2e/adapter-provision-opencode.mjs",
+      "passed": 24,
+      "failed": 0
+    },
+    "fullSuite": {
+      "command": "npm test -- --runInBand",
+      "suitesPassed": 320,
+      "suitesSkipped": 1,
+      "testsPassed": 3578,
+      "testsSkipped": 1,
+      "durationMs": 472702
+    },
+    "forbiddenPaths": {
+      "rule": "git diff --name-only <base>...HEAD must not contain packages/console/**, locales/**, packages/memory-runtime/**",
+      "violations": []
+    },
+    "publicMcpTools": {
+      "count": 29,
+      "new": false,
+      "evidence": "no diff under packages/mcp/src/tools.mjs or tool registration"
+    }
+  },
+  "knownLimitations": [
+    "The OpenCode E2E resolves the plugin from the repository checkout (source=manual), because the App bundle is not installed in the test harness. Bundle staging into <home>/adapters is covered by unit tests and prepare-build verified all three bundles.",
+    "The DSH adapter has no real CLI on this machine; only hermetic tests and the DSH_CLI_NOT_FOUND boundary are evidenced.",
+    "The Hermes real CLI cannot commit a dependency environment for a fresh HERMES_HOME (HERMES_CLI_ENV_UNSUPPORTED), so real provider installation/ingest on a fresh root is not evidenced; the live host app concurrently rewrites its own config.",
+    "No real Assistant/Console UI E2E was run; the no-UI-diff gate is a source diff check, not a screenshot comparison."
+  ]
+}

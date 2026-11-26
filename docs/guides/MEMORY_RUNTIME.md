@@ -62,6 +62,40 @@ Both modes read and write the **same** Mebular memory. Switching modes does not 
 migrate, rewrite or delete nodes. Mode is device-local: one device can stay lightweight
 while another device in the same cloud uses the sidecar.
 
+## Connecting an assistant (MCP + adapter)
+
+Connecting an assistant from the App/Console (or `clients:action connect`) now provisions
+both layers in one action:
+
+1. the MCP entry (`mcp.servers.mebular`, or the host's equivalent), then
+2. the host adapter that makes recall/ingest automatic.
+
+| Host | Automatic adapter | Result |
+|---|---|---|
+| OpenCode / OpenChamber | `@mebular/opencode-plugin` added to the global `plugins` array | Loads on the next host start; no `npm install` or hand-written JSON |
+| DeepSeek Harness (DSH) | `@mebular/dsh-plugin` added to the resolved DSH profile through `dsh plugin ... add` | Loads on the next DSH session or restart |
+| Hermes | `mebular` MemoryProvider installed under `$HERMES_HOME/plugins/mebular` and selected by `hermes config set memory.provider mebular` | Takes effect on the next Hermes session |
+| Claude Code / Claude Desktop / Cursor / other MCP clients | Not applicable | **MCP only**; explicit `memory_*` / `task_*` tools, no automatic capture |
+
+The adapter packages ship with the App (version-locked), so connecting does not download
+from npm and does not modify host-private data (OpenChamber managed config/instances, DSH
+databases/sessions, Hermes DB/session/spool). Provisioning never kills or restarts a host:
+without an App-owned reload it records `next-start`.
+
+Adapter failures are additive and never block MCP: the MCP connection still succeeds, the
+failure is recorded in `<home>/adapters.json` (`adapter=degraded`, stable `lastError`), and
+the App repairs already-connected hosts on the next start/upgrade. Inspect it without any
+new UI:
+
+```bash
+mebular adapter status --json
+mebular adapter ensure --host dsh --json     # explicit, idempotent
+mebular adapter repair --json                # connected hosts only
+```
+
+See the [adapter provisioning design](../design/adapter-provisioning.md) for the host
+matrix, state fields, rollback and security boundaries.
+
 ## Turn it on
 
 Prerequisites:

@@ -3,9 +3,9 @@
 // App 只编排、不复制逻辑：需要 dist/（core）、packages/{mcp,service,fleet,console,skill}。
 // 缺失时调用仓库根 `npm run build`。
 
-import { existsSync, readFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -77,3 +77,69 @@ try {
   console.error(`[desktop] locales/manifest.json 无法解析：${String(error?.message ?? error)}`);
   process.exit(1);
 }
+
+// Adapter 源目录在 monorepo 根，electron-builder 的 `from` 必须位于桌面项目目录内。
+// 先 staging 到 apps/desktop/build/adapters/，再由 electron-builder 放进 App bundle。
+// 版本 lockstep 由各 adapter 的 manifest 提供，运行时不联网下载。
+const ADAPTER_BUNDLES = [
+  { name: 'opencode-plugin', manifest: 'package.json', source: join(root, 'packages', 'opencode-plugin'), target: join(here, '..', 'build', 'adapters', 'opencode-plugin') },
+  { name: 'dsh-plugin', manifest: 'package.json', source: join(root, 'packages', 'dsh-plugin'), target: join(here, '..', 'build', 'adapters', 'dsh-plugin') },
+  { name: 'hermes', manifest: 'plugin.yaml', source: join(root, 'integrations', 'hermes', 'mebular-memory'), target: join(here, '..', 'build', 'adapters', 'hermes') },
+];
+
+// 构建期 lockstep：三个 adapter manifest 必须与桌面 App 版本一致，否则拒绝打包。
+function readManifestVersion(file) {
+  const text = readFileSync(file, 'utf-8');
+  if (basename(file) === 'plugin.yaml') {
+    const match = /^version:\s*["']?([^"'\s#]+)["']?\s*(?:#.*)?$/m.exec(text);
+    return match ? match[1] : null;
+  }
+  const parsed = JSON.parse(text);
+  return parsed !== null && typeof parsed === 'object' && typeof parsed.version === 'string'
+    ? parsed.version
+    : null;
+}
+
+const desktopVersion = JSON.parse(readFileSync(join(here, '..', 'package.json'), 'utf-8')).version;
+const versionMismatches = [];
+for (const bundle of ADAPTER_BUNDLES) {
+  const manifestPath = join(bundle.source, bundle.manifest);
+  if (!existsSync(manifestPath)) {
+    versionMismatches.push(`${bundle.name}: 缺少 ${bundle.manifest}`);
+    continue;
+  }
+  let version = null;
+  try {
+    version = readManifestVersion(manifestPath);
+  } catch (error) {
+    versionMismatches.push(`${bundle.name}: ${bundle.manifest} 无法解析（${String(error?.message ?? error)}）`);
+    continue;
+  }
+  if (version !== desktopVersion) {
+    versionMismatches.push(`${bundle.name}: ${version ?? '(no version)'} != ${desktopVersion}`);
+  }
+}
+if (versionMismatches.length > 0) {
+  console.error(`[desktop] adapter 版本未与桌面 App lockstep（${desktopVersion}）：${versionMismatches.join('; ')}`);
+  process.exit(1);
+}
+console.log(`[desktop] adapter 版本 lockstep 通过（${ADAPTER_BUNDLES.length} 个 @ ${desktopVersion}）`);
+
+const skipAdapterArtifact = (source) => {
+  const name = source.split(/[\\/]/).pop() ?? '';
+  return name !== 'node_modules'
+    && name !== '.git'
+    && name !== '__pycache__'
+    && !name.endsWith('.pyc')
+    && !name.endsWith('.pyo');
+};
+for (const bundle of ADAPTER_BUNDLES) {
+  if (!existsSync(bundle.source)) {
+    console.error(`[desktop] 缺少 adapter 源目录：${bundle.source}`);
+    process.exit(1);
+  }
+  rmSync(bundle.target, { recursive: true, force: true });
+  mkdirSync(dirname(bundle.target), { recursive: true });
+  cpSync(bundle.source, bundle.target, { recursive: true, filter: skipAdapterArtifact });
+}
+console.log(`[desktop] adapter bundles 已就绪（${ADAPTER_BUNDLES.length} 个）`);

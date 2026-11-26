@@ -363,6 +363,121 @@ async function runPrintConfig(flags) {
   }
 }
 
+async function runAdapter(action, flags) {
+  const asJson = flags.json === true;
+  const out = (value) => console.log(JSON.stringify(value, null, 2));
+  const adapterErrorMessages = {
+    ADAPTER_UNSUPPORTED: '该宿主仅支持 MCP，不提供自动适配器',
+    ADAPTER_UNAVAILABLE: '该宿主的适配器尚未提供',
+    ADAPTER_PACKAGE_NOT_FOUND: '未找到适配器包',
+    ADAPTER_VERSION_MISMATCH: '适配器包版本与 App 不一致',
+    HOST_NOT_DETECTED: '未检测到宿主配置',
+    CONFIG_UNPARSEABLE: '宿主配置不是合法 JSON（未改写）',
+    CONFIG_STRUCTURE_UNKNOWN: '宿主配置结构未知（未改写）',
+    CONFIG_UNREADABLE: '宿主配置不可读（未改写）',
+    FORBIDDEN_PATH: '拒绝写入宿主私有配置',
+    NOT_CONNECTED: '宿主未连接，跳过适配器写入',
+    VERIFY_FAILED: '适配器验证失败',
+    VERIFY_CONFIG_MISSING: '适配器配置不存在',
+    VERIFY_CONFIG_UNPARSEABLE: '适配器配置无法解析',
+    VERIFY_STRUCTURE_UNKNOWN: '适配器配置结构未知',
+    VERIFY_ENTRY_MISSING: '适配器条目缺失',
+    VERIFY_ENTRY_DUPLICATE: '适配器条目重复（旧版本未清理）',
+    VERIFY_OPTIONS_MISMATCH: '适配器选项不完整',
+    VERIFY_PACKAGE_MISSING: '适配器包缺失',
+    ACTIVATION_FAILED: '适配器激活失败',
+    WRITE_FAILED: '写入失败',
+    ROLLBACK_FAILED: '回滚失败',
+  };
+  const fail = (code) => {
+    const message = adapterErrorMessages[code] ?? '适配器命令失败';
+    if (asJson) out({ ok: false, code, message });
+    else console.error(`✗ ${message}（${code}）`);
+    process.exit(2);
+  };
+
+  try {
+    if (action === 'status') {
+      const { adapterStatus } = await import('../src/adapter-provision.mjs');
+      const view = adapterStatus({ home: homeDir() });
+      // Read-only CLI projection: always expose adapter/installedAt/lastIngestedAt
+      // (null when absent) without changing the on-disk state shape.
+      const projectedHosts = Object.fromEntries(Object.entries(view.hosts ?? {}).map(([hostId, record]) => [
+        hostId,
+        {
+          ...record,
+          adapter: record.adapter ?? 'absent',
+          installedAt: record.installedAt ?? null,
+          lastIngestedAt: record.lastIngestedAt ?? null,
+        },
+      ]));
+      const projected = { ...view, hosts: projectedHosts };
+      if (asJson) {
+        out(projected);
+      } else {
+        const entries = Object.entries(projected.hosts);
+        if (entries.length === 0) console.log('（尚无适配器状态；连接 AI 助手后会写入 adapters.json）');
+        for (const [hostId, record] of entries) {
+          console.log(`${hostId}\t${record.adapter ?? 'absent'}${record.version ? `\tv${record.version}` : ''}${record.activation ? `\t${record.activation}` : ''}${record.lastError ? `\t${record.lastError}` : ''}`);
+        }
+      }
+      return;
+    }
+
+    if (action === 'ensure') {
+      const hostId = typeof flags.host === 'string' && flags.host.length > 0 ? flags.host : 'opencode';
+      const { ensureAdapter } = await import('../src/adapter-provision.mjs');
+      const { assistantUserHome } = await import('../src/clients.mjs');
+      const result = await ensureAdapter(hostId, {
+        home: homeDir(),
+        userHome: assistantUserHome(),
+        cwd: process.cwd(),
+        ...(typeof flags.config === 'string' ? { configPath: flags.config } : {}),
+        ...(typeof flags.package === 'string' ? { adapterPackagePath: flags.package } : {}),
+        ...(typeof flags['expected-version'] === 'string' ? { expectedVersion: flags['expected-version'] } : {}),
+        ...(typeof flags['resources-path'] === 'string' ? { resourcesPath: flags['resources-path'] } : {}),
+        ...(flags['dry-run'] === true ? { dryRun: true } : {}),
+        ...(flags.force === true ? { force: true } : {}),
+      });
+      if (!result.ok) return fail(result.code ?? 'ADAPTER_COMMAND_FAILED');
+      if (asJson) out(result);
+      else console.log(`✓ ${hostId}\t${result.status}${result.activation ? `\t${result.activation}` : ''}${result.changed ? '\t已更新' : '\t无改动'}`);
+      return;
+    }
+
+    if (action === 'repair') {
+      const { listAssistantsAsync, assistantUserHome } = await import('../src/clients.mjs');
+      const { ensureAdaptersForConnected } = await import('../src/adapter-provision.mjs');
+      const userHome = assistantUserHome();
+      const list = await listAssistantsAsync({ home: homeDir(), userHome, cwd: process.cwd(), refresh: true, ttlMs: 0 });
+      const connectedHostIds = list.assistants.filter((assistant) => assistant.connected === true).map((assistant) => assistant.id);
+      const result = await ensureAdaptersForConnected({
+        home: homeDir(),
+        userHome,
+        cwd: process.cwd(),
+        connectedHostIds,
+        ...(typeof flags['resources-path'] === 'string' ? { resourcesPath: flags['resources-path'] } : {}),
+      });
+      if (asJson) out(result);
+      else {
+        console.log(`适配器修复：${result.summary.active} 活跃 · ${result.summary.installed} 已安装 · ${result.summary.unsupported} 不支持 · ${result.summary.degraded} 降级`);
+        for (const host of result.hosts) {
+          console.log(`  ${host.hostId}\t${host.ok ? host.status : host.code}`);
+        }
+      }
+      if (!result.ok) process.exitCode = 2;
+      return;
+    }
+
+    fail('ADAPTER_COMMAND_FAILED');
+  } catch (error) {
+    const code = typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code)
+      ? error.code
+      : 'ADAPTER_COMMAND_FAILED';
+    fail(code);
+  }
+}
+
 async function runConsole(flags) {
   const { homeDir: home, loadConfigFile } = await import('../src/config.mjs');
   const dir = home();
@@ -2280,6 +2395,10 @@ async function main() {
       await runConsole(flags);
       return;
     }
+    case 'adapter': {
+      await runAdapter(argv[1], flags);
+      return;
+    }
     case 'cloud': {
       await runCloud(argv[1], argv.slice(2), flags);
       return;
@@ -2312,6 +2431,7 @@ async function main() {
           '  serve [--host --port --auth --tls-key --tls-cert --tokens-file]   Streamable HTTP server',
           '  service install|uninstall|restart|status|logs [--no-autostart --label L]  常驻服务管理（mebular-serve）',
           '  console [--host --port]      打印控制台 URL（需 serve 正在运行）',
+          '  adapter status|ensure|repair [--host H] [--json] [--dry-run] [--config P] [--package P]   宿主适配器状态/准备/修复',
           '  cloud list|use|rename [id] [name] [--force]   忆云管理（use 停旧/起新/失败回滚）',
           '  runtime resolve|ensure|status|supervise [--start auto|child|service] [--port N] [--json]  共享 runtime（supervise 持有 child）',
           '  runtime install|reinstall [--version V] [--json]  安装/重装共享 runtime（固定 @mebular/core 版本）',

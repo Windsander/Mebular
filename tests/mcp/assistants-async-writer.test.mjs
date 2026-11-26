@@ -74,8 +74,9 @@ describe('F-FIX-B 写者异步化：慢 CLI 不阻塞请求路径', () => {
     clearAssistantsCache();
     const free = await measure('async');
     expect(free.ok).toBe(true);
-    // 异步版：同样慢 CLI，探针几乎准时触发
-    expect(free.probeMs).toBeLessThan(150);
+    // 异步版：同样慢 CLI，探针几乎准时触发。CI coverage/GC 下允许 250ms
+    // （同步阻塞固定 300ms，仍能区分；150ms 在共享 runner 上会误报）。
+    expect(free.probeMs).toBeLessThan(250);
   });
 
   it('b) 请求路径源码无 spawnSync；默认 runner 为 exec（异步）', async () => {

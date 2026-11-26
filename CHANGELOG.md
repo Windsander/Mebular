@@ -24,6 +24,18 @@ Memory Intervention Policy. 0.4.0 moves immersive recall from “what to remembe
 
 ### Added
 
+- **Adapter provisioning** — connecting an assistant now installs its adapter as well as
+  the MCP server, so automatic recall/ingest no longer needs a manual npm install or JSON
+  edit. OpenCode/OpenChamber get `@mebular/opencode-plugin` in the global `plugins` array,
+  DSH gets `@mebular/dsh-plugin` through the official `dsh plugin ... add`, and Hermes gets
+  the `mebular` MemoryProvider under `$HERMES_HOME/plugins/mebular` plus
+  `memory.provider=mebular`. Packages ship with the App (version lockstep, no npm lookup);
+  writes are idempotent, backed up and atomic; activation is `next-start` unless an
+  App-owned reload/restart is injected. State and diagnostics live in
+  `<home>/adapters.json` and `mebular adapter status|ensure|repair --json`; adapter failure
+  never blocks MCP, and App startup/upgrade repairs already-connected hosts. MCP-only hosts
+  (Claude Code, Claude Desktop, Cursor, generic) stay explicitly `unsupported`. No new
+  public MCP tool and no Console/locale change.
 - **Memory Intervention Policy** — `intervention.mode` supports
   `off | shadow | heuristic | model`; the policy decides `speak` / `defer` / `silent`
   and `gist` / `detail` / `quote` for memory fragments only. `must_speak` is a hard
@@ -74,6 +86,12 @@ Memory Intervention Policy. 0.4.0 moves immersive recall from “what to remembe
 
 ### Documentation
 
+- Added the [adapter provisioning design](docs/design/adapter-provisioning.md), the
+  [verification report](docs/quality/adapter-provisioning/adapter-provisioning-verification.md)
+  with a real OpenCode v2.4.1 E2E, and automatic-provisioning sections in the
+  [Memory Runtime guide](docs/guides/MEMORY_RUNTIME.md),
+  [OpenChamber](docs/integrations/OPENCHAMBER.md), [DSH](docs/integrations/DSH.md) and
+  [Hermes](docs/integrations/HERMES.md) integration docs.
 - Added the [0.4.0 intervention design](docs/design/0.4.0-intervention-policy.md),
   the intervention section in the Memory Runtime guide, and the
   [0.4.0 verification report](docs/quality/0.4.0-intervention/0.4.0-verification.md).

@@ -23,6 +23,15 @@ extraResources:
   # 因此 packaged 态不再单独复制这些仓库目录。
   - from: runtime/node_modules
     to: node_modules
+  # W2/W3/W4：Adapter 随 App bundle（版本 lockstep，不联网下载）。
+  # prepare-build.mjs 先把 monorepo 源目录 staging 到 build/adapters/，
+  # 运行时读取 <resources>/adapters/opencode-plugin、dsh-plugin、hermes。
+  - from: build/adapters/opencode-plugin
+    to: adapters/opencode-plugin
+  - from: build/adapters/dsh-plugin
+    to: adapters/dsh-plugin
+  - from: build/adapters/hermes
+    to: adapters/hermes
 asar: true
 mac:
   target: [dmg]

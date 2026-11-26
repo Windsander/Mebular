@@ -29,6 +29,7 @@ import {
 import { closeAction, quitConfirm, quitDecision, stopConfirm, trayMenuModel, trayStatusLine, LOGIN_ITEM_ID } from './lifecycle.mjs';
 import { consoleNavSearch, consoleNavUrl, isConsoleUrl } from './console-nav.mjs';
 import { readDaemonLogs } from './logs.mjs';
+import { loadAdapterModules, repairConnectedAdapters } from './adapter-repair.mjs';
 import { loadDesktopI18n, resolveLocalesDir } from './i18n.mjs';
 import {
   buildRuntimeUpdateFailurePrompt,
@@ -1205,6 +1206,7 @@ async function cloudSwitchNowInner(rawId) {
   setWindowTitle();
   // 切换成功：控制台必须重载到新 home 的端口；updateTray 已先刷新名称/状态。
   await showConsoleWithRetry();
+  scheduleAdapterRepair();
   return {
     ok: true,
     changed: Boolean(result.changed),
@@ -1436,6 +1438,40 @@ function scheduleStartupRuntimeUpdateCheck() {
   });
 }
 
+/**
+ * App 启动/升级后修复已连接宿主的 Adapter（无 UI、失败不阻断）。
+ * 只处理 MCP `connected=true` 的宿主；未连接宿主不写配置。
+ */
+async function repairAdaptersAfterReady() {
+  if (typeof cliBin !== 'string' || cliBin.length === 0) return null;
+  const srcDir = join(dirname(cliBin), '..', 'src');
+  const modules = await loadAdapterModules(srcDir);
+  if (!modules) {
+    console.log('[desktop] adapter repair 跳过：模块不可用');
+    return null;
+  }
+  const result = await repairConnectedAdapters({
+    modules,
+    home,
+    cwd: process.cwd(),
+    resourcesPath: process.resourcesPath,
+  });
+  if (result?.skipped) {
+    if (result.reason !== 'no_connected_hosts') console.log(`[desktop] adapter repair 跳过：${result.reason}`);
+    return result;
+  }
+  if (result?.ok === false) {
+    console.log(`[desktop] adapter repair 完成但有降级：${result.summary?.degraded ?? 'unknown'}`);
+  }
+  return result;
+}
+
+function scheduleAdapterRepair() {
+  void repairAdaptersAfterReady().catch((error) => {
+    console.log(`[desktop] adapter repair 失败（静默跳过）：${error?.message ?? error}`);
+  });
+}
+
 // ---------- IPC（白名单） ----------
 
 function registerIpc() {
@@ -1557,6 +1593,8 @@ if (!gotLock) {
         await showConsoleWithRetry();
         // Phase 5b2a：窗口/控制台已就绪后再做非阻塞更新检查（不改变启动主流程）。
         scheduleStartupRuntimeUpdateCheck();
+        // Adapter 修复同样非阻塞、无 UI；只处理 connected=true 宿主。
+        scheduleAdapterRepair();
       } else {
         console.log(`[desktop] 未完成首次上手（待办：${state.current}）→ 打开向导`);
         await loadWizardView(); // 清缓存 + 缓存破坏参数：HTML/ESM 双保险（走查事故：旧版向导复活）

@@ -2188,6 +2188,7 @@ export async function startHttpServer({
     /^\/admin\/api\/namespaces\/([^/]+)\/(rejoin|leave)$/,
     /^\/admin\/api\/service\/(install|uninstall)$/,
     /^\/admin\/api\/repair$/,
+    /^\/admin\/api\/adapters\/repair$/,
     /^\/admin\/api\/clients\/([^/]+)\/(connect|rollback|skills|preview|verify|recheck)$/,
     /^\/admin\/api\/assistants$/,
     /^\/admin\/api\/assistants\/([^/]+)$/,
@@ -2733,6 +2734,29 @@ export async function startHttpServer({
     }
   }
 
+  // 内部：App 启动/升级后修复 connected=true 宿主的 Adapter（无 UI）。
+  // 同一 memory.admin + CSRF 门；只报告稳定 code，不回显路径/正文。
+  async function handleAdapterRepair(req, res) {
+    const { listAssistantsAsync, assistantUserHome, daemonMcpUrl } = await import('./clients.mjs');
+    const { ensureAdaptersForConnected } = await import('./adapter-provision.mjs');
+    const mcpUrl = daemonMcpUrl({ host: req.headers?.host, encrypted: Boolean(req.socket?.encrypted) });
+    try {
+      const userHome = assistantUserHome();
+      const list = await listAssistantsAsync({ home, cwd: process.cwd(), userHome, refresh: true, ttlMs: 0, mcpUrl });
+      const connectedHostIds = list.assistants.filter((assistant) => assistant.connected === true).map((assistant) => assistant.id);
+      const result = await ensureAdaptersForConnected({
+        home,
+        cwd: process.cwd(),
+        userHome,
+        connectedHostIds,
+        resourcesPath: process.resourcesPath,
+      });
+      return sendJson(res, 200, result);
+    } catch {
+      return sendJson(res, 500, { ok: false, scope: 'adapter-provisioning', error: 'adapter_repair_failed' });
+    }
+  }
+
   // D2 写端点实现（memory.admin scope + CSRF 已在 handleAdminWrite 校验）
   async function applyAdminWrite(req, res, path, body) {
     if (!app || !service) {
@@ -2750,6 +2774,8 @@ export async function startHttpServer({
 
     // 自动修复：客户端接入修复，**不**经 securityWriteGate（不写记忆/安全状态）。
     if (path === '/admin/api/repair') return handleRepair(req, res);
+    // 内部：App 启动/升级后的 Adapter 修复（仍是 memory.admin + CSRF；无 UI）。
+    if (path === '/admin/api/adapters/repair') return handleAdapterRepair(req, res);
 
     // 0.3 高级模型来源：sidecar 拥有 config.model.source；MCP 只做薄代理。
     // local 必须带 pack 并通过 sidecar activate；不直接写 config.json、不重启 sidecar。

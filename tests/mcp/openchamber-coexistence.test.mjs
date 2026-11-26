@@ -32,7 +32,8 @@ describe('OpenChamber 轻量接入 / 原生 memory 共存', () => {
   let root;
   let home;      // Mebular home
   let userHome;  // 用户主目录（assistant 落面基）
-  const opts = (extra = {}) => ({ home, userHome, cwd: userHome, platform: 'darwin', env: {}, ...extra });
+  // 本文件聚焦 MCP 条目合并的字节稳定性；Adapter provisioning 有独立测试。
+  const opts = (extra = {}) => ({ home, userHome, cwd: userHome, platform: 'darwin', env: {}, ensureAdapter: false, ...extra });
   const opencodeCfg = () => join(userHome, '.config', 'opencode', 'opencode.json');
   const managedConfig = () => join(userHome, '.config', 'openchamber', 'opencode.managed.json');
   const runManagedConfig = () => join(userHome, '.config', 'openchamber', 'run', 'instances', 'inst-1', 'opencode.managed.json');

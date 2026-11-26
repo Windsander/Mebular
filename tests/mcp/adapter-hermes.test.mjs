@@ -171,8 +171,20 @@ describe('hermes adapter', () => {
     await mkdir(home, { recursive: true });
     await mkdir(userHome, { recursive: true });
     await mkdir(fakeBin, { recursive: true });
-    const cli = join(fakeBin, 'hermes');
-    await writeFile(cli, FAKE_CLI, { mode: 0o755 });
+    if (process.platform === 'win32') {
+      // `execFile` cannot launch extensionless POSIX scripts on Windows. Use a
+      // standard `.cmd` shim so the test exercises the same PATH/PATHEXT path
+      // as a pipx/legacy Hermes install; the adapter routes it through cmd.exe.
+      const script = join(fakeBin, 'hermes-fake.js');
+      await writeFile(script, FAKE_CLI);
+      await writeFile(
+        join(fakeBin, 'hermes.cmd'),
+        `@echo off\r\n"${process.execPath}" "${script}" %*\r\n`,
+      );
+    } else {
+      const cli = join(fakeBin, 'hermes');
+      await writeFile(cli, FAKE_CLI, { mode: 0o755 });
+    }
     await writeFile(logPath, '');
   });
 

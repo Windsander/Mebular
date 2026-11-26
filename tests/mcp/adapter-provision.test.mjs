@@ -269,7 +269,10 @@ describe('adapter provisioning', () => {
     expect(result.status).toBe('planned');
     expect(result.changed).toBe(true);
     expect(result.source).toBe('managed-dir');
-    expect(result.preview).toContain(join(home, 'adapters', 'opencode-plugin', APP_VERSION));
+    // Preview is a JSON diff, so Windows backslashes are escaped. Compare
+    // against the JSON-encoded path instead of the raw filesystem path.
+    const plannedPath = join(home, 'adapters', 'opencode-plugin', APP_VERSION);
+    expect(result.preview).toContain(JSON.stringify(plannedPath).slice(1, -1));
     expect(existsSync(join(home, 'adapters'))).toBe(false);
     expect(existsSync(adapterStatePath(home))).toBe(false);
     expect(await readFile(configPath, 'utf-8')).toBe(before);

@@ -231,6 +231,10 @@ async function runHermesCli(args, options = {}, { timeoutMs = 10_000 } = {}) {
       encoding: 'utf-8',
       maxBuffer: 1 << 20,
       windowsHide: true,
+      // Hermes' Windows installer ships `hermes.exe`; pipx/legacy installs may
+      // expose a `.cmd` shim. `execFile` cannot launch `.cmd` without a shell,
+      // so route the trusted, fixed CLI arguments through cmd.exe on Windows.
+      shell: process.platform === 'win32',
       env,
     }, (error, stdout, stderr) => {
       if (error) {

@@ -13,7 +13,7 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { chmod, copyFile, cp, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { basename, dirname, join, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { APP_VERSION } from '../version.mjs';
 
@@ -231,7 +231,10 @@ function isPlainObject(value) {
 
 function samePath(value, target) {
   if (typeof value !== 'string' || value.length === 0) return false;
-  if (!(value.startsWith('/') || value.startsWith('./') || value.startsWith('../') || /^~[\\/]/.test(value))) return false;
+  // `isAbsolute` covers POSIX `/...` and Windows drive/UNC paths. The old
+  // prefix check rejected `C:\...`, which made every fresh Windows install
+  // fail verify even though the plugin entry had just been written.
+  if (!(isAbsolute(value) || value.startsWith('./') || value.startsWith('../') || /^~[\\/]/.test(value))) return false;
   try {
     return resolve(value) === resolve(target);
   } catch {

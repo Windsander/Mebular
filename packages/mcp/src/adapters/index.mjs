@@ -1,14 +1,11 @@
 // Adapter registry (W1).
 //
 // Host adapters are data + methods; adding a host means adding a descriptor
-// module and one registration line. DSH is implemented in `dsh.mjs`; Hermes is
-// still an explicit `pending` placeholder so callers get `ADAPTER_UNAVAILABLE`
-// instead of a fake install success.
-//
-// Reserved follow-up import (uncomment when the host module lands):
-//   import { hermesAdapter } from './hermes.mjs';
+// module and one registration line. DSH and Hermes are implemented in their
+// own modules; MCP-only hosts stay explicit `unsupported` descriptors.
 
 import { dshAdapter } from './dsh.mjs';
+import { hermesAdapter } from './hermes.mjs';
 import { openChamberAdapter, openCodeAdapter } from './opencode.mjs';
 
 const registry = new Map();
@@ -81,16 +78,7 @@ export const ADAPTER_HOST_IDS = Object.freeze([
 registerAdapter(openCodeAdapter);
 registerAdapter(openChamberAdapter);
 registerAdapter(dshAdapter);
-
-// Hermes arrives in a follow-up session on this branch. Until then the
-// placeholder is honest: MCP keeps working, adapter = unavailable.
-registerAdapter(createUnsupportedAdapter({
-  hostId: 'hermes',
-  displayName: 'Hermes',
-  status: 'pending',
-  code: 'ADAPTER_UNAVAILABLE',
-  reason: 'adapter_not_implemented',
-}));
+registerAdapter(hermesAdapter);
 
 for (const host of MCP_ONLY_HOSTS) {
   registerAdapter(createUnsupportedAdapter({

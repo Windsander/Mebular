@@ -249,6 +249,10 @@
       "**/tests/**/*.test.ts",
       "**/tests/**/*.test.mjs"
     ],
+    "modulePathIgnorePatterns": [
+      "<rootDir>/apps/desktop/build/",
+      "<rootDir>/apps/desktop/dist/"
+    ],
     "collectCoverageFrom": [
       "src/**/*.ts",
       "!src/**/*.d.ts",

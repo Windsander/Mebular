@@ -1620,6 +1620,8 @@ async function attachAdapter(result, id, options = {}) {
       ...(typeof options.packagePath === 'string' ? { packagePath: options.packagePath } : {}),
       ...(typeof options.resourcesPath === 'string' ? { resourcesPath: options.resourcesPath } : {}),
       ...(typeof options.expectedVersion === 'string' ? { expectedVersion: options.expectedVersion } : {}),
+      ...(typeof options.run === 'function' ? { run: options.run } : {}),
+      ...(typeof options.runAsync === 'function' ? { runAsync: options.runAsync } : {}),
       ...(options.canRestartHost !== undefined ? { canRestartHost: options.canRestartHost } : {}),
       ...(typeof options.reloadHost === 'function' ? { reloadHost: options.reloadHost } : {}),
       ...(typeof options.restartHost === 'function' ? { restartHost: options.restartHost } : {}),

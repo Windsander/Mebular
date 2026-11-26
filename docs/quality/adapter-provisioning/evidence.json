@@ -161,6 +161,14 @@
       "passed": 24,
       "failed": 0
     },
+    "fullSuite": {
+      "command": "npm test -- --runInBand",
+      "suitesPassed": 320,
+      "suitesSkipped": 1,
+      "testsPassed": 3578,
+      "testsSkipped": 1,
+      "durationMs": 472702
+    },
     "forbiddenPaths": {
       "rule": "git diff --name-only <base>...HEAD must not contain packages/console/**, locales/**, packages/memory-runtime/**",
       "violations": []

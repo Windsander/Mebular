@@ -55,7 +55,13 @@ function fleetConfig(dir: string, device: string, capabilities: string[], peers:
   };
 }
 
-async function waitFor(predicate: () => Promise<boolean>, timeoutMs = 30_000, pollMs = 50): Promise<boolean> {
+// Full-suite load boundary: under `npm test -- --runInBand` this file can run
+// after hundreds of suites and a live host-adapter suite. P2P anti-entropy then
+// occasionally needs more than the old 30 s budget while the process is under
+// GC/CPU pressure. Use the same 60 s bound as the outer `useHeavyTimeout` so a
+// slow sync is not misreported as a routing failure; a real hang still fails
+// within the test's bounded lifetime.
+async function waitFor(predicate: () => Promise<boolean>, timeoutMs = 60_000, pollMs = 50): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await predicate()) return true;

@@ -132,6 +132,25 @@ Expected and observed: only `tests/**`, `docs/**` and `CHANGELOG.md`. The diff c
 `packages/console/**`, `locales/**` or `packages/memory-runtime/**`, and no change to
 `packages/mcp/src/tools.mjs` or tool registration (29 public tools unchanged).
 
+### Full-suite stability (routing-e2e)
+
+`npm test -- --runInBand` also runs `tests/fleet/routing-e2e.test.ts` after the adapter
+suites. Its P2P sync helper used a 30 s inner `waitFor` while the Jest case budget was
+60 s; under full-suite heap/GC pressure the `cHasUi` sync could exhaust the inner budget
+and be reported as a routing failure even though the isolated case passed.
+
+Diagnosis: no adapter suite leaks global state. The adapter suites do not mutate
+`process.env`, create timers or leave child processes; a before/after `ps` snapshot around
+`adapter-cli` + `adapter-dsh` + `adapter-hermes` showed no new host/CLI processes, and Jest
+reported no open handles. The fix is test-only: `routing-e2e`'s `waitFor` default budget is
+now 60 s, matching the outer `useHeavyTimeout(60_000)`, with a comment recording the
+full-suite load boundary. A real hang still fails within the bounded case lifetime; no
+case was skipped.
+
+Full run after the fix: **320 suites passed / 1 skipped, 3578 tests passed / 1 skipped**
+(472.7 s), including the adapter suites and `routing-e2e.test.ts`.
+
+
 ## 6. Known limitations (explicit)
 
 1. OpenCode E2E uses the repository plugin path (`source=manual`), not the packaged App

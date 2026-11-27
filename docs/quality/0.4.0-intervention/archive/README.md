@@ -10,6 +10,8 @@ This directory is an **archive**, not current release evidence.
   [`../0.4.0-verification.md`](../0.4.0-verification.md) / [`../evidence.json`](../evidence.json).
 - Current status is 0.4.0 **Unreleased**, W8 **No-Go**, with the W7 matrix at 6/20 and the
   external cells still `blocked_external`.
+- The archived report links screenshots through `../console/`. That directory is shared
+  with the active evidence and is intentionally not moved, so active links keep working.
 
 See [`../0.4.0-release-readiness.md`](../0.4.0-release-readiness.md) for the current
 release decision.

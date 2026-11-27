@@ -1,14 +1,19 @@
 # W7 原始证据
 
-本目录保存 2026-11-28 在 W7 evidence 基座 `8e3005aa`（含 merge `96629f12`、B1 修复 `a9937c3`）与 outcome 契约修复 `033bbc1`（merge `edb1f87`）上重跑产生的原始 JSON/日志摘要，供 `../0.4.0-verification.md` 与 `../evidence.json` 交叉核对。文件包含 traceId、sessionId、hostInstanceId 等运行标识，不含 raw query 尾部、detail 正文、token、Authorization 或 keyRef。
+本目录保存 2026-11-28 的原始 JSON/日志摘要，供 `../0.4.0-verification.md` 与
+`../evidence.json` 交叉核对。W7 基座为 `8e3005aa`（含 merge `96629f12`、B1 修复
+`a9937c3`）与 outcome 契约修复 `033bbc1`（merge `edb1f87`）。W8 review 在 `553e212`
+重跑了 `w7-host-plan.json` 与 `w7-openchamber-heuristic.json`，用于关闭 10 条
+`3bbd284` pass 的 provenance；其余文件仍是 W7 原始运行。文件包含 traceId、sessionId、
+hostInstanceId 等运行标识，不含 raw query 尾部、detail 正文、token、Authorization 或 keyRef。
 
 | 文件 | 来源命令 | 结果 |
 |---|---|---|
 | `w7-local-model.json` | `MEBULAR_W7_SAMPLES=5 node tests/integration/host-e2e/w7-local-model-evidence.mjs` | 5/5 真实 Qwen3-4B 两轮命中；p50 40,544 ms / p95 46,050 ms（含冷启动） |
-| `w7-host-plan.json` | `node tests/integration/host-e2e/w7-host-plan-sidecar.mjs` | 6/6；真实 sidecar 消费/拒绝合成 host plan |
+| `w7-host-plan.json` | `node tests/integration/host-e2e/w7-host-plan-sidecar.mjs` | 6/6；真实 sidecar 消费/拒绝合成 host plan（W8 `553e212` rerun） |
 | `w7-local-opencode.json` | `w7-intervention-evidence.mjs --source local --host opencode` | **16/16**；R-RSM，真实 Qwen3-4B 预取命中并注入新鲜片段 |
 | `w7-host-opencode.json` | `w7-intervention-evidence.mjs --source host --host opencode` | **16/16**；RH+RS+FM，host plan 命中并注入新鲜片段（host 模型为确定性 fake） |
-| `w7-openchamber-heuristic.json` | `w7-intervention-evidence.mjs --source heuristic --host openchamber` | **14/14**；OpenChamber adapter identity + heuristic + outcome |
+| `w7-openchamber-heuristic.json` | `w7-intervention-evidence.mjs --source heuristic --host openchamber` | **14/14**；OpenChamber adapter identity + heuristic + outcome（W8 `553e212` rerun） |
 | `w7-local-openchamber.json` | `w7-intervention-evidence.mjs --source local --host openchamber` | **16/16**；R-RSM，adapter identity（不是 Desktop UI） |
 | `w7-host-openchamber.json` | `w7-intervention-evidence.mjs --source host --host openchamber` | **16/16**；RH+RS+FM，adapter identity（不是 Desktop UI） |
 | `opencode-outcome.txt` | `node tests/integration/host-e2e/opencode-intervention-outcome.mjs` | **47/47**（0 failed）；W4 note + W6 policy v2 契约，见验证报告 §4.1/§4.2 |

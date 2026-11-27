@@ -36,19 +36,19 @@
       "id": "opencode-serve",
       "name": "真实 opencode serve 启动",
       "ok": true,
-      "detail": "server listening on http://127.0.0.1:52365\n"
+      "detail": "server listening on http://127.0.0.1:52372\n"
     },
     {
       "id": "turn-1",
       "name": "真实 opencode turn 1 退出 0",
       "ok": true,
-      "detail": "\"prt_21dc723c9001Yyv60VWdBdnPG0\",\"sessionID\":\"ses_de2394e5affeA1prch2kscYnKI\",\"messageID\":\"msg_21dc722da0016dwVFRwuTy0C0R\",\"type\":\"step-finish\",\"reason\":\"stop\",\"snapshot\":\"93f3378b0b4d3867c9c391f830f31b05cb21f85f\",\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}}}}\n"
+      "detail": "\"prt_21e1cdcf1001UkeJFAYnmwg9YW\",\"sessionID\":\"ses_de1e37f09ffeFQ2Z1ltz3dE3Gm\",\"messageID\":\"msg_21e1cdc1a001PtTdCCKA6XyKzi\",\"type\":\"step-finish\",\"reason\":\"stop\",\"snapshot\":\"ef2b8afa9131a9f69495546aa44e168e677cd390\",\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}}}}\n"
     },
     {
       "id": "trace-1",
       "name": "真实 /context trace + host identity",
       "ok": true,
-      "detail": "{\"id\":\"tr_b4444904571b4b0993a44a63a2a6b79f\",\"hostApp\":\"openchamber\"}"
+      "detail": "{\"id\":\"tr_58bf90c60d374f699d8c533f2bfbb126\",\"hostApp\":\"openchamber\"}"
     },
     {
       "id": "heuristic-turn",
@@ -66,13 +66,13 @@
       "id": "outcome",
       "name": "真实宿主 outcome 归因落 trace（source=host）",
       "ok": true,
-      "detail": "{\"kind\":\"reasked\",\"at\":1795795920143,\"source\":\"host\",\"confidence\":0.65}"
+      "detail": "{\"kind\":\"reasked\",\"at\":1795801538060,\"source\":\"host\",\"confidence\":0.65}"
     },
     {
       "id": "host-new-cue",
       "name": "新 cue 第一轮 heuristic + prefetched=false（预期负向，不算能力失败）",
       "ok": true,
-      "detail": "{\"traceId\":\"tr_ba3c518d96934ca89bfc768421cbab32\",\"policyVersion\":\"heuristic:57334e4c\",\"reason\":\"no_candidates\",\"applied\":{\"action\":\"silent\",\"depth\":\"gist\",\"fragments\":0,\"domain\":\"user\",\"policyEligible\":true,\"adaptiveEligible\":true},\"injected\":[],\"meta\":null}"
+      "detail": "{\"traceId\":\"tr_593710fa597140f29a5e49982926bdee\",\"policyVersion\":\"heuristic:57334e4c\",\"reason\":\"no_candidates\",\"applied\":{\"action\":\"silent\",\"depth\":\"gist\",\"fragments\":0,\"domain\":\"user\",\"policyEligible\":true,\"adaptiveEligible\":true},\"injected\":[],\"meta\":null}"
     },
     {
       "id": "host-new-cue-turn",
@@ -96,7 +96,7 @@
   "traces": [
     {
       "phase": "turn1",
-      "traceId": "tr_b4444904571b4b0993a44a63a2a6b79f",
+      "traceId": "tr_58bf90c60d374f699d8c533f2bfbb126",
       "meta": {
         "configuredSource": "heuristic",
         "resolvedSource": "heuristic",
@@ -115,7 +115,7 @@
     },
     {
       "phase": "host-new-cue",
-      "traceId": "tr_ba3c518d96934ca89bfc768421cbab32",
+      "traceId": "tr_593710fa597140f29a5e49982926bdee",
       "policyVersion": "heuristic:57334e4c",
       "reason": "no_candidates",
       "applied": {
@@ -131,10 +131,10 @@
     }
   ],
   "timing": {},
-  "sessionId": "ses_de2394e5affeA1prch2kscYnKI",
+  "sessionId": "ses_de1e37f09ffeFQ2Z1ltz3dE3Gm",
   "traceCountAtTrace1": 1,
   "traceThreadIds": [
-    "ses_de2394e5affeA1prch2kscYnKI"
+    "ses_de1e37f09ffeFQ2Z1ltz3dE3Gm"
   ],
   "summary": {
     "passed": 14,

@@ -3,9 +3,21 @@
   "release": "0.4.0",
   "status": "unreleased",
   "theme": "memory-intervention",
-  "branch": "feat/0.4-w7-evidence-sync",
+  "branch": "feat/0.4-w8-release-prep",
   "baseCommit": "c18b65b128e847e4a32239e1d9b3e63fe8dd3e4f",
-  "evidenceCommit": "8bc55265ca36701f5fe3d88e38199b1446a0aa48",
+  "w7EvidenceBase": "0981dd55dfdf80dea278c44e3e92500a7dbaeece",
+  "evidenceCommit": "553e21296ba0d5eef3781dfeba65ca7f6c2359a6",
+  "evidenceRuns": {
+    "w8Review": "553e21296ba0d5eef3781dfeba65ca7f6c2359a6",
+    "w7OutcomeRerun": "96629f126800f26d49b035f79f4bb7a14a6766a8",
+    "w7EvidenceSync": "8bc55265ca36701f5fe3d88e38199b1446a0aa48"
+  },
+  "historicalCommits": {
+    "b1Fix": "a9937c304a006e1bc73e93d883236ebfb3fad872",
+    "outcomeFix": "033bbc1c2e0a1c8ea1b73b63336d0fdf720d6b7b",
+    "outcomeContractMerge": "edb1f87ac59d1c666b445974bfd91367ae4502d8",
+    "preB1Snapshot": "3bbd28454126c79be90b31b0fa8ea629549cdb73"
+  },
   "date": "2026-11-28",
   "environment": {
     "platform": "macOS 15.7.9",
@@ -508,13 +520,13 @@
       "state": "cue_mismatch",
       "evidenceLevel": "R-RS-synthetic-host-plan",
       "command": "node tests/integration/host-e2e/w7-host-plan-sidecar.mjs --json=/tmp/w7-host-plan.json",
-      "sha": "3bbd28454126c79be90b31b0fa8ea629549cdb73",
-      "hostVersion": "OpenCode v2.4.1 (open /tmp test tools)",
-      "modelId": "fake-openai-plan-json (host plan JSON only)",
+      "sha": "553e21296ba0d5eef3781dfeba65ca7f6c2359a6",
+      "hostVersion": "sidecar-only synthetic host plan (no host process)",
+      "modelId": "synthetic host-plan JSON (no host model)",
       "result": "pass",
       "fallback": null,
       "evidencePath": "docs/quality/0.4.0-intervention/w7/w7-host-plan.json",
-      "note": "Real sidecar rejects non-matching cue; plan is synthetic, not real host model."
+      "note": "Rerun at 553e212 with the real sidecar and a synthetic host plan; sidecar-only validation, not dependent on the adapter alreadyInjected/planner candidate window."
     },
     {
       "host": "opencode",
@@ -522,13 +534,13 @@
       "state": "expired",
       "evidenceLevel": "R-RS-synthetic-host-plan",
       "command": "node tests/integration/host-e2e/w7-host-plan-sidecar.mjs --json=/tmp/w7-host-plan.json",
-      "sha": "3bbd28454126c79be90b31b0fa8ea629549cdb73",
-      "hostVersion": "OpenCode v2.4.1 (open /tmp test tools)",
-      "modelId": "fake-openai-plan-json (host plan JSON only)",
+      "sha": "553e21296ba0d5eef3781dfeba65ca7f6c2359a6",
+      "hostVersion": "sidecar-only synthetic host plan (no host process)",
+      "modelId": "synthetic host-plan JSON (no host model)",
       "result": "pass",
       "fallback": null,
       "evidencePath": "docs/quality/0.4.0-intervention/w7/w7-host-plan.json",
-      "note": "Real sidecar host_plan_expired."
+      "note": "Rerun at 553e212 with the real sidecar and a synthetic host plan; sidecar-only expiry validation, not dependent on the adapter alreadyInjected/planner candidate window."
     },
     {
       "host": "opencode",
@@ -536,13 +548,13 @@
       "state": "replay",
       "evidenceLevel": "R-RS-synthetic-host-plan",
       "command": "node tests/integration/host-e2e/w7-host-plan-sidecar.mjs --json=/tmp/w7-host-plan.json",
-      "sha": "3bbd28454126c79be90b31b0fa8ea629549cdb73",
-      "hostVersion": "OpenCode v2.4.1 (open /tmp test tools)",
-      "modelId": "fake-openai-plan-json (host plan JSON only)",
+      "sha": "553e21296ba0d5eef3781dfeba65ca7f6c2359a6",
+      "hostVersion": "sidecar-only synthetic host plan (no host process)",
+      "modelId": "synthetic host-plan JSON (no host model)",
       "result": "pass",
       "fallback": null,
       "evidencePath": "docs/quality/0.4.0-intervention/w7/w7-host-plan.json",
-      "note": "Second use of same planId -> host_plan_replayed."
+      "note": "Rerun at 553e212 with the real sidecar and a synthetic host plan; sidecar-only replay validation, not dependent on the adapter alreadyInjected/planner candidate window."
     },
     {
       "host": "opencode",
@@ -848,56 +860,56 @@
       "source": "heuristic",
       "state": "first_turn",
       "evidenceLevel": "RH+RS",
-      "command": "PATH=\"/private/var/folders/86/gpjtr2p94dg7mz24pbkrj8pw0000gn/T/mebular-e2e-tools/node_modules/.bin:$PATH\" node tests/integration/host-e2e/w7-intervention-evidence.mjs --source heuristic --host openchamber --json=/tmp/w7-openchamber-heuristic.json",
-      "sha": "3bbd28454126c79be90b31b0fa8ea629549cdb73",
+      "command": "OPENCODE_BIN=\"/private/var/folders/86/gpjtr2p94dg7mz24pbkrj8pw0000gn/T/mebular-e2e-tools/node_modules/.bin/opencode\" node tests/integration/host-e2e/w7-intervention-evidence.mjs --source heuristic --host openchamber --json=/tmp/w7-openchamber-heuristic.json",
+      "sha": "553e21296ba0d5eef3781dfeba65ca7f6c2359a6",
       "hostVersion": "OpenCode v2.4.1 with MEBULAR_HOST_APP=openchamber; OpenChamber Desktop UI not executed (bundled CLI v2.0.29 < 2.2)",
       "modelId": "none",
       "result": "pass",
       "fallback": null,
       "evidencePath": "docs/quality/0.4.0-intervention/w7/w7-openchamber-heuristic.json",
-      "note": "Real OpenCode adapter with explicit MEBULAR_HOST_APP=openchamber; trace hostApp=openchamber; not Desktop UI."
+      "note": "Rerun at 553e212 with OpenCode v2.4.1 adapter identity (MEBULAR_HOST_APP=openchamber); first real host turn created a trace. Desktop UI not executed."
     },
     {
       "host": "openchamber",
       "source": "heuristic",
       "state": "new_cue",
       "evidenceLevel": "RH+RS",
-      "command": "PATH=\"/private/var/folders/86/gpjtr2p94dg7mz24pbkrj8pw0000gn/T/mebular-e2e-tools/node_modules/.bin:$PATH\" node tests/integration/host-e2e/w7-intervention-evidence.mjs --source heuristic --host openchamber --json=/tmp/w7-openchamber-heuristic.json",
-      "sha": "3bbd28454126c79be90b31b0fa8ea629549cdb73",
+      "command": "OPENCODE_BIN=\"/private/var/folders/86/gpjtr2p94dg7mz24pbkrj8pw0000gn/T/mebular-e2e-tools/node_modules/.bin/opencode\" node tests/integration/host-e2e/w7-intervention-evidence.mjs --source heuristic --host openchamber --json=/tmp/w7-openchamber-heuristic.json",
+      "sha": "553e21296ba0d5eef3781dfeba65ca7f6c2359a6",
       "hostVersion": "OpenCode v2.4.1 with MEBULAR_HOST_APP=openchamber; OpenChamber Desktop UI not executed (bundled CLI v2.0.29 < 2.2)",
       "modelId": "none",
       "result": "pass",
       "fallback": null,
       "evidencePath": "docs/quality/0.4.0-intervention/w7/w7-openchamber-heuristic.json",
-      "note": "Second turn real heuristic."
+      "note": "Rerun at 553e212; fresh cue produced no_candidates/silent with prefetched=false. Expected negative, not an injection pass."
     },
     {
       "host": "openchamber",
       "source": "heuristic",
       "state": "fallback",
       "evidenceLevel": "RH+RS",
-      "command": "PATH=\"/private/var/folders/86/gpjtr2p94dg7mz24pbkrj8pw0000gn/T/mebular-e2e-tools/node_modules/.bin:$PATH\" node tests/integration/host-e2e/w7-intervention-evidence.mjs --source heuristic --host openchamber --json=/tmp/w7-openchamber-heuristic.json",
-      "sha": "3bbd28454126c79be90b31b0fa8ea629549cdb73",
+      "command": "OPENCODE_BIN=\"/private/var/folders/86/gpjtr2p94dg7mz24pbkrj8pw0000gn/T/mebular-e2e-tools/node_modules/.bin/opencode\" node tests/integration/host-e2e/w7-intervention-evidence.mjs --source heuristic --host openchamber --json=/tmp/w7-openchamber-heuristic.json",
+      "sha": "553e21296ba0d5eef3781dfeba65ca7f6c2359a6",
       "hostVersion": "OpenCode v2.4.1 with MEBULAR_HOST_APP=openchamber; OpenChamber Desktop UI not executed (bundled CLI v2.0.29 < 2.2)",
       "modelId": "none",
       "result": "pass",
       "fallback": null,
       "evidencePath": "docs/quality/0.4.0-intervention/w7/w7-openchamber-heuristic.json",
-      "note": "No model call."
+      "note": "Rerun at 553e212; heuristic path made no model call and did not trigger a planner fallback."
     },
     {
       "host": "openchamber",
       "source": "heuristic",
       "state": "outcome",
       "evidenceLevel": "RH+RS",
-      "command": "PATH=\"/private/var/folders/86/gpjtr2p94dg7mz24pbkrj8pw0000gn/T/mebular-e2e-tools/node_modules/.bin:$PATH\" node tests/integration/host-e2e/w7-intervention-evidence.mjs --source heuristic --host openchamber --json=/tmp/w7-openchamber-heuristic.json",
-      "sha": "3bbd28454126c79be90b31b0fa8ea629549cdb73",
+      "command": "OPENCODE_BIN=\"/private/var/folders/86/gpjtr2p94dg7mz24pbkrj8pw0000gn/T/mebular-e2e-tools/node_modules/.bin/opencode\" node tests/integration/host-e2e/w7-intervention-evidence.mjs --source heuristic --host openchamber --json=/tmp/w7-openchamber-heuristic.json",
+      "sha": "553e21296ba0d5eef3781dfeba65ca7f6c2359a6",
       "hostVersion": "OpenCode v2.4.1 with MEBULAR_HOST_APP=openchamber; OpenChamber Desktop UI not executed (bundled CLI v2.0.29 < 2.2)",
       "modelId": "none",
       "result": "pass",
       "fallback": null,
       "evidencePath": "docs/quality/0.4.0-intervention/w7/w7-openchamber-heuristic.json",
-      "note": "reasked with source=host; bindingToken forged rejected."
+      "note": "Rerun at 553e212; real host outcome reasked/source=host recorded on the trace; forged bindingToken rejected with 404."
     },
     {
       "host": "openchamber",
@@ -1143,41 +1155,41 @@
       "state": "cue_mismatch",
       "evidenceLevel": "R-RS-synthetic-host-plan",
       "command": "node tests/integration/host-e2e/w7-host-plan-sidecar.mjs --json=/tmp/w7-host-plan.json",
-      "sha": "3bbd28454126c79be90b31b0fa8ea629549cdb73",
-      "hostVersion": "OpenCode v2.4.1 with MEBULAR_HOST_APP=openchamber; OpenChamber Desktop UI not executed (bundled CLI v2.0.29 < 2.2)",
-      "modelId": "fake-openai-plan-json (host plan JSON only)",
+      "sha": "553e21296ba0d5eef3781dfeba65ca7f6c2359a6",
+      "hostVersion": "sidecar-only synthetic host plan (no host process)",
+      "modelId": "synthetic host-plan JSON (no host model)",
       "result": "pass",
       "fallback": null,
       "evidencePath": "docs/quality/0.4.0-intervention/w7/w7-host-plan.json",
-      "note": "Sidecar synthetic host plan; not real OpenChamber host model."
+      "note": "Rerun at 553e212 with the real sidecar and a synthetic host plan; host-agnostic sidecar validation. OpenChamber Desktop UI not executed."
     },
     {
       "host": "openchamber",
       "source": "host",
       "state": "expired",
       "evidenceLevel": "R-RS-synthetic-host-plan",
-      "command": "PATH=\"/private/var/folders/86/gpjtr2p94dg7mz24pbkrj8pw0000gn/T/mebular-e2e-tools/node_modules/.bin:$PATH\" node tests/integration/host-e2e/w7-intervention-evidence.mjs --source heuristic --host openchamber --json=/tmp/w7-openchamber-heuristic.json",
-      "sha": "3bbd28454126c79be90b31b0fa8ea629549cdb73",
-      "hostVersion": "OpenCode v2.4.1 with MEBULAR_HOST_APP=openchamber; OpenChamber Desktop UI not executed (bundled CLI v2.0.29 < 2.2)",
-      "modelId": "fake-openai-plan-json (host plan JSON only)",
+      "command": "node tests/integration/host-e2e/w7-host-plan-sidecar.mjs --json=/tmp/w7-host-plan.json",
+      "sha": "553e21296ba0d5eef3781dfeba65ca7f6c2359a6",
+      "hostVersion": "sidecar-only synthetic host plan (no host process)",
+      "modelId": "synthetic host-plan JSON (no host model)",
       "result": "pass",
       "fallback": null,
-      "evidencePath": "docs/quality/0.4.0-intervention/w7/README.md",
-      "note": "Sidecar synthetic host plan."
+      "evidencePath": "docs/quality/0.4.0-intervention/w7/w7-host-plan.json",
+      "note": "Rerun at 553e212 with the real sidecar and a synthetic host plan; host-agnostic sidecar expiry validation. OpenChamber Desktop UI not executed."
     },
     {
       "host": "openchamber",
       "source": "host",
       "state": "replay",
       "evidenceLevel": "R-RS-synthetic-host-plan",
-      "command": "PATH=\"/private/var/folders/86/gpjtr2p94dg7mz24pbkrj8pw0000gn/T/mebular-e2e-tools/node_modules/.bin:$PATH\" node tests/integration/host-e2e/w7-intervention-evidence.mjs --source heuristic --host openchamber --json=/tmp/w7-openchamber-heuristic.json",
-      "sha": "3bbd28454126c79be90b31b0fa8ea629549cdb73",
-      "hostVersion": "OpenCode v2.4.1 with MEBULAR_HOST_APP=openchamber; OpenChamber Desktop UI not executed (bundled CLI v2.0.29 < 2.2)",
-      "modelId": "fake-openai-plan-json (host plan JSON only)",
+      "command": "node tests/integration/host-e2e/w7-host-plan-sidecar.mjs --json=/tmp/w7-host-plan.json",
+      "sha": "553e21296ba0d5eef3781dfeba65ca7f6c2359a6",
+      "hostVersion": "sidecar-only synthetic host plan (no host process)",
+      "modelId": "synthetic host-plan JSON (no host model)",
       "result": "pass",
       "fallback": null,
-      "evidencePath": "docs/quality/0.4.0-intervention/w7/README.md",
-      "note": "Sidecar synthetic host plan."
+      "evidencePath": "docs/quality/0.4.0-intervention/w7/w7-host-plan.json",
+      "note": "Rerun at 553e212 with the real sidecar and a synthetic host plan; host-agnostic sidecar replay validation. OpenChamber Desktop UI not executed."
     },
     {
       "host": "openchamber",
@@ -3135,10 +3147,6 @@
       "note": "No real Hermes sync_turn/companion outcome run."
     }
   ],
-  "mergeCommit": "edb1f87ac59d1c666b445974bfd91367ae4502d8",
-  "b1FixCommit": "a9937c304a006e1bc73e93d883236ebfb3fad872",
-  "evidenceNote": "Provenance only: edb1f87a (outcome contract merge) and 3bbd284 (pre-B1 snapshot) are historical SHAs, not current release acceptance. Cells measured by the 2026-11-28 W7 rerun use 8bc5526/96629f12; rows still stamped 3bbd284 are untouched blocked_external/unit_only/not_run carry-over and never count as pass evidence. Only result=passed rows count. Outcome 47/0 and shadow 15/0 are real opencode v2.4.1 runs; no fake fill.",
-  "outcomeFixCommit": "033bbc1c2e0a1c8ea1b73b63336d0fdf720d6b7b",
   "e2eSummary": {
     "opencodeOutcome": {
       "command": "node tests/integration/host-e2e/opencode-intervention-outcome.mjs",
@@ -3160,5 +3168,6 @@
       "p4Note": "New-protocol outcomes carry no note: token+note -> 400 outcome_note_unsupported; legacy 0.3 no-token note -> 200 outcome_note_ignored and not stored.",
       "policyV2": "policy/state.json version=2; heuristic/adaptive counts in global; model/shadow diagnostics in diagnostic; gate/non-intervention writes neither and its trace carries applied.policyEligible=false."
     }
-  }
+  },
+  "evidenceNote": "Per-cell SHA is provenance. The 10 former 3bbd284 pass rows were rerun at 553e212: OpenCode/OpenChamber host cue_mismatch, expired and replay use the real sidecar + synthetic host plan (no adapter alreadyInjected/candidate-window dependency); OpenChamber heuristic first_turn, new_cue, fallback and outcome use the real OpenCode v2.4.1 adapter identity. No pass row remains on 3bbd284. That SHA now covers only untouched blocked_external/unit_only/not_run carry-over. edb1f87a is the historical outcome-contract merge, not current acceptance. Only result=passed rows count; 30 pass rows remain. Outcome 47/0 and shadow 15/0 are real opencode v2.4.1 runs; no fake fill."
 }

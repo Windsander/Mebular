@@ -409,7 +409,9 @@ Phase 3（`model`）和 Phase 4（自适应阈值）是**代码完成 + fake gat
   实体/主题和 decision/outcome 元数据；不保存 raw query 正文、detail 正文或 token。
 - `model` 策略只看 cue 聚合、top-3 gist、分数和聚合统计，不看 raw query、detail 正文、
   checkpoint 内容或 token。
-- outcome note 由宿主适配器使用固定归因说明，不复制用户正文。
+- 新协议 outcome 不带 `note`：带 binding token 的 note 会被
+  `outcome_note_unsupported` 拒绝；旧 0.3 无 token 的 note 返回
+  `outcome_note_ignored` 但不落盘。用户正文不会复制进 outcome。
 - 0.4.0 不同步策略状态到其他设备。
 
 ## 详情、证据与保留

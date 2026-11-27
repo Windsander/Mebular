@@ -471,8 +471,9 @@ detail bodies or tokens.
   not store raw query bodies, detail bodies or tokens.
 - The `model` strategy sees cue aggregates, top-3 gists, scores and aggregate stats.
   It does not see raw query text, detail text, checkpoint content or tokens.
-- Outcome notes are fixed attribution strings from the host adapter; user text is not
-  copied into the outcome.
+- New-protocol outcomes carry no `note`: a note sent with a binding token is rejected
+  with `outcome_note_unsupported`, and a legacy 0.3 no-token note is accepted with
+  `outcome_note_ignored` but never stored. User text is not copied into the outcome.
 - Policy state is not synced across devices in 0.4.0.
 
 ## Details, evidence and retention

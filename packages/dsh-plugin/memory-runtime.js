@@ -90,7 +90,7 @@ const DEFAULT_CONFIG = Object.freeze({
   domains: Object.freeze([]),
   recallLimit: 3,
   recallTokenBudget: 2000,
-  recallTimeoutMs: 1500,
+  recallTimeoutMs: 2000,
   maxRecallChars: 6000,
   maxRecallBytes: 8192,
   maxQueryChars: 2000,
@@ -609,7 +609,14 @@ export function resolveMemoryRuntimeConfig(input = {}, options = {}) {
     domains,
     recallLimit: asInt(raw.recallLimit, DEFAULT_CONFIG.recallLimit, 1, 8),
     recallTokenBudget: asInt(raw.recallTokenBudget, DEFAULT_CONFIG.recallTokenBudget, 16, 2000),
-    recallTimeoutMs: asInt(raw.recallTimeoutMs, DEFAULT_CONFIG.recallTimeoutMs, 1, 10_000),
+    recallTimeoutMs: (() => {
+      const value = asInt(raw.recallTimeoutMs, DEFAULT_CONFIG.recallTimeoutMs, 1, 10_000);
+      // W5 / W0-A D5：低于 1600ms 的显式配置保留，但不作为能力通过证据。
+      if (Object.prototype.hasOwnProperty.call(raw, 'recallTimeoutMs') && value < 1600) {
+        warn('host_timeout_below_deadline');
+      }
+      return value;
+    })(),
     maxRecallChars: asInt(raw.maxRecallChars, DEFAULT_CONFIG.maxRecallChars, 16, 16_000),
     maxRecallBytes: asInt(raw.maxRecallBytes, DEFAULT_CONFIG.maxRecallBytes, 256, 8192),
     maxQueryChars: asInt(raw.maxQueryChars, DEFAULT_CONFIG.maxQueryChars, 16, 8000),

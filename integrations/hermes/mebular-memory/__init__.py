@@ -396,7 +396,7 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
     "extractor": "heuristic",
     "recall_limit": 8,
     "recall_token_budget": 2000,
-    "recall_timeout": 1.5,
+    "recall_timeout": 2.0,
     "ingest_timeout": 3.0,
     "archive_flush_timeout": 1.5,
     "checkpoint_timeout": 2.5,
@@ -1367,8 +1367,18 @@ def _load_plugin_config(hermes_home: Optional[Path]) -> Dict[str, Any]:
         config.get("recall_token_budget"), 2000, minimum=200, maximum=12000
     )
     config["recall_timeout"] = _coerce_float(
-        config.get("recall_timeout"), 1.5, minimum=0.2, maximum=10.0
+        config.get("recall_timeout"), 2.0, minimum=0.2, maximum=10.0
     )
+    # W5 / W0-A D5：宿主 transport 至少 2.0s；显式低值保留，但不作为能力通过证据。
+    explicit_recall_timeout = (
+        "recall_timeout" in raw
+        or bool(env.get("MEBULAR_MEMORY_RECALL_TIMEOUT", "").strip())
+    )
+    if explicit_recall_timeout and float(config["recall_timeout"]) < 1.6:
+        logger.warning(
+            "Mebular memory: host_timeout_below_deadline (recall_timeout<1.6s); "
+            "this configuration cannot count as capability evidence"
+        )
     config["ingest_timeout"] = _coerce_float(
         config.get("ingest_timeout"), 3.0, minimum=0.3, maximum=15.0
     )
@@ -3435,7 +3445,7 @@ class MebularMemoryProvider(MemoryProvider):
         self._spool: Optional[_Spool] = None
         self._spool_home: Optional[Path] = None
         self._queue_limit = _QUEUE_LIMIT_DEFAULT
-        self._recall_timeout = 1.5
+        self._recall_timeout = 2.0
         self._ingest_timeout = 3.0
         self._archive_flush_timeout = 1.5
         self._checkpoint_timeout = 2.5

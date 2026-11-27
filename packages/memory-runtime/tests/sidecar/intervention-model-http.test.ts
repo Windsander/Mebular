@@ -546,6 +546,15 @@ describe('intervention model HTTP path', () => {
       prefetched: false,
       fallbackReason: null,
     });
+    // W5：独立 planner 队列只读指标进入 /status.policy.planner。
+    expect(statusBody.data.policy.planner.queue).toMatchObject({
+      concurrency: 1,
+      maxQueue: 8,
+      priority: 'high',
+      running: 0,
+    });
+    expect(statusBody.data.policy.planner.queue.completed).toBeGreaterThanOrEqual(1);
+    expect(statusBody.data.policy.planner.queue.queued).toBe(0);
 
     const reset = await post(`${harness.server.url}/intervention/reset`, {});
     expect(reset.status).toBe(200);

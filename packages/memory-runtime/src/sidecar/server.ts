@@ -48,6 +48,7 @@ import {
   type InferenceStatusView,
 } from './inference/types.js';
 import type { InterventionPlannerTrace } from '../runtime/types.js';
+import type { InterventionPlannerQueueMetrics } from './intervention-queue.js';
 
 const REQUEST_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
@@ -117,8 +118,8 @@ export interface SidecarStatusIntervention {
   legacyModeIgnored: boolean;
   legacyModeConflict: boolean;
   diagnosticShadow: boolean;
-  /** W5 pending：`/context` 整体 1.5s deadline 尚未硬化；W2 只记录不冒充完成。 */
-  deadline: 'w5_pending';
+  /** W5：`/context` 单次绝对 deadline（毫秒）；已按 [200,1500] clamp。 */
+  deadline: number;
   warnings: string[];
 }
 
@@ -325,6 +326,8 @@ export interface SidecarStatusSnapshot {
     /** 最近一次介入 planner 诊断；只含枚举/计时/model id。 */
     planner?: {
       last: InterventionPlannerTrace | null;
+      /** W5：独立 planner 队列只读指标。 */
+      queue?: InterventionPlannerQueueMetrics;
     };
   };
   /** 模型安装/引擎/推荐状态；不包含 token/path。 */
@@ -458,6 +461,7 @@ function isObject(value: unknown): value is Record<string, unknown> {
 /** 只暴露枚举/布尔/稳定 code；绝不把 config 正文带进状态面。 */
 export function interventionStatusView(
   resolution: EffectiveInterventionResolution,
+  deadlineMs: number,
 ): SidecarStatusIntervention {
   return {
     mode: resolution.mode,
@@ -469,7 +473,7 @@ export function interventionStatusView(
     legacyModeIgnored: resolution.legacyModeIgnored,
     legacyModeConflict: resolution.legacyModeConflict,
     diagnosticShadow: resolution.diagnosticShadow,
-    deadline: 'w5_pending',
+    deadline: deadlineMs,
     warnings: [...resolution.warnings],
   };
 }
@@ -942,7 +946,7 @@ export class SidecarServer {
         credential: { configured: false, source: null },
         sources: ['heuristic', 'host'],
       },
-      intervention: interventionStatusView(this.effectiveIntervention),
+      intervention: interventionStatusView(this.effectiveIntervention, this.config.context.deadlineMs),
       counts: {
         stagingChunks: 0,
         localStagingChunks: 0,
@@ -1006,7 +1010,7 @@ export class SidecarServer {
       mode: this.mode,
       model: { ...fallback.model, ...(snapshot.model ?? {}) },
       intervention: {
-        ...(fallback.intervention ?? interventionStatusView(this.effectiveIntervention)),
+        ...(fallback.intervention ?? interventionStatusView(this.effectiveIntervention, this.config.context.deadlineMs)),
         ...(snapshot.intervention ?? {}),
       },
       counts: { ...fallback.counts, ...(snapshot.counts ?? {}) },
@@ -1164,7 +1168,7 @@ export class SidecarServer {
               legacyModeIgnored: this.effectiveIntervention.legacyModeIgnored,
               legacyModeConflict: this.effectiveIntervention.legacyModeConflict,
               diagnosticShadow: this.effectiveIntervention.diagnosticShadow,
-              deadline: 'w5_pending',
+              deadline: this.config.context.deadlineMs,
               warnings: [...this.effectiveIntervention.warnings],
             },
             models: {

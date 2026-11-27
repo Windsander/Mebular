@@ -89,7 +89,7 @@ Token 优先级：`MEBULAR_MEMORY_RUNTIME_TOKEN` > Hermes secret scope > discove
   "extractor": "heuristic",
   "recall_limit": 8,
   "recall_token_budget": 2000,
-  "recall_timeout": 1.5,
+  "recall_timeout": 2.0,
   "ingest_timeout": 3.0,
   "archive_flush_timeout": 1.5,
   "checkpoint_timeout": 2.5,
@@ -198,7 +198,7 @@ rm -rf "${HERMES_HOME:-$HOME/.hermes}/plugins/mebular"
 ## 已知限制
 
 - 依赖 Mebular 0.3.2 的独立 Memory Runtime sidecar `/memory-runtime/v1`；sidecar 未启动或端点不可用时 recall 返回空、ingest 留在 spool、checkpoint 保持 pending，不影响 Hermes 主流程。
-- `prefetch` 首次同步召回最多等待 `recall_timeout`（默认 1.5s）；用 `queue_prefetch` 预热后通常无等待。
+- `prefetch` 首次同步召回最多等待 `recall_timeout`（默认 2.0s）；用 `queue_prefetch` 预热后通常无等待。
 - Hermes `MemoryProvider` 不暴露当前模型；本插件不伪造，`extractor=host` 的候选抽取由可选 companion 插件负责。
 - 队列是单进程文件 spool，不是跨进程锁；不要在同一 `HERMES_HOME` 跑两个 Hermes 写者（Hermes 本身也不建议）。
 - 图片/音频/文件不进入 Mebular；只保留占位标记。

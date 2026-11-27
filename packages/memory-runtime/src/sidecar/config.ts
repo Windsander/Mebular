@@ -12,6 +12,7 @@ import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, join, resolve, sep } from 'node:path';
 import { readJsonFile } from './atomic-json.js';
+import { clampContextDeadline } from './deadline.js';
 
 export const SIDECAR_PACKAGE_NAME = '@mebular/memory-runtime';
 export const SIDECAR_RUNTIME_VERSION = '0.3.5';
@@ -115,6 +116,13 @@ export interface SidecarRecallSettings {
 export interface SidecarContextSettings {
   maxTokens: number;
   maxFragments: number;
+  /**
+   * `/context` 单次绝对 deadline，默认 1500ms，允许范围 [200,1500]。
+   * 配置超出范围时 clamp 并记 `context_deadline_clamped`；W5 只允许调低。
+   */
+  deadlineMs: number;
+  /** `deadlineMs` 是否在归一化时被 clamp；用于稳定 warning，不参与决策。 */
+  deadlineClamped: boolean;
 }
 
 /**
@@ -239,7 +247,12 @@ export function defaultSidecarConfig(): SidecarConfig {
       timeoutMs: 800,
       queryPlan: 'heuristic',
     },
-    context: { maxTokens: 12_000, maxFragments: 3 },
+    context: {
+      maxTokens: 12_000,
+      maxFragments: 3,
+      deadlineMs: 1500,
+      deadlineClamped: false,
+    },
     intervention: {
       mode: 'off',
       legacyModePresent: false,
@@ -589,10 +602,28 @@ export function normalizeSidecarConfig(raw: unknown, options: { warnings?: strin
       timeoutMs: intOf(recall, 'timeoutMs', defaults.recall.timeoutMs, { min: 1 }),
       queryPlan: enumOf(recall, 'queryPlan', ['heuristic', 'model'] as const, defaults.recall.queryPlan),
     },
-    context: {
-      maxTokens: intOf(context, 'maxTokens', defaults.context.maxTokens, { min: 1 }),
-      maxFragments: intOf(context, 'maxFragments', defaults.context.maxFragments, { min: 1 }),
-    },
+    context: (() => {
+      const configured = context.deadlineMs;
+      let deadlineMs = defaults.context.deadlineMs;
+      let deadlineClamped = false;
+      if (configured !== undefined && configured !== null) {
+        if (typeof configured !== 'number' || !Number.isInteger(configured)) {
+          throw new SidecarConfigError('config_invalid', 'context.deadlineMs 必须是整数毫秒');
+        }
+        deadlineMs = clampContextDeadline(configured);
+        deadlineClamped = deadlineMs !== configured;
+        if (deadlineClamped && options.warnings
+          && !options.warnings.includes('context_deadline_clamped')) {
+          options.warnings.push('context_deadline_clamped');
+        }
+      }
+      return {
+        maxTokens: intOf(context, 'maxTokens', defaults.context.maxTokens, { min: 1 }),
+        maxFragments: intOf(context, 'maxFragments', defaults.context.maxFragments, { min: 1 }),
+        deadlineMs,
+        deadlineClamped,
+      };
+    })(),
     intervention: {
       mode: enumOf(
         intervention,

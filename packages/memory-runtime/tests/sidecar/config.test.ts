@@ -274,6 +274,28 @@ describe('sidecar config', () => {
     expect(() => normalizeSidecarConfig({ recall: { queryPlan: 'always' } })).toThrow(SidecarConfigError);
   });
 
+  it('W5：context.deadlineMs 默认 1500，范围 [200,1500]，超限 clamp + warning', () => {
+    expect(defaultSidecarConfig().context.deadlineMs).toBe(1500);
+    expect(defaultSidecarConfig().context.deadlineClamped).toBe(false);
+    expect(normalizeSidecarConfig({ context: { deadlineMs: 800 } }).context).toMatchObject({
+      deadlineMs: 800,
+      deadlineClamped: false,
+    });
+
+    const warnings: string[] = [];
+    expect(normalizeSidecarConfig({ context: { deadlineMs: 9000 } }, { warnings }).context)
+      .toMatchObject({ deadlineMs: 1500, deadlineClamped: true });
+    expect(warnings).toContain('context_deadline_clamped');
+
+    const lowWarnings: string[] = [];
+    expect(normalizeSidecarConfig({ context: { deadlineMs: 10 } }, { warnings: lowWarnings }).context)
+      .toMatchObject({ deadlineMs: 200, deadlineClamped: true });
+    expect(lowWarnings).toContain('context_deadline_clamped');
+
+    expect(() => normalizeSidecarConfig({ context: { deadlineMs: 1.5 } }))
+      .toThrow(SidecarConfigError);
+  });
+
   it('旧 intervention.mode 逐字保留，加载不重写文件', async () => {
     const paths = resolveSidecarPaths({ home, env: {} });
     await mkdir(paths.dataDir, { recursive: true, mode: 0o700 });

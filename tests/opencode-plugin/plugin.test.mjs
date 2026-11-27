@@ -1514,6 +1514,27 @@ describe('sidecar discovery and host authentication', () => {
     expect(config.warnings).toContain('legacy_capture_ignored');
   });
 
+  it('W5：recallTimeoutMs 默认 2000；显式 <1600 保留但 warning', async () => {
+    const homeDir = await tempDir();
+    const defaults = resolvePluginConfig({ runtimeUrl: BASE }, { env: {}, homeDir });
+    expect(defaults.recallTimeoutMs).toBe(2000);
+    expect(defaults.warnings).not.toContain('host_timeout_below_deadline');
+
+    const below = resolvePluginConfig(
+      { runtimeUrl: BASE, recallTimeoutMs: 800 },
+      { env: {}, homeDir: await tempDir() },
+    );
+    expect(below.recallTimeoutMs).toBe(800);
+    expect(below.warnings).toContain('host_timeout_below_deadline');
+
+    const ok = resolvePluginConfig(
+      { runtimeUrl: BASE, recallTimeoutMs: 2000 },
+      { env: {}, homeDir: await tempDir() },
+    );
+    expect(ok.recallTimeoutMs).toBe(2000);
+    expect(ok.warnings).not.toContain('host_timeout_below_deadline');
+  });
+
   it('makes domain and recallLimit real context request fields', async () => {
     const fetchImpl = createFetch({ '/context': { blocks: [] } });
     const { controller } = controllerWith({

@@ -126,7 +126,7 @@ base；旧 `/runtime/v1` 路径会被拒绝（`runtime_url_legacy`）。非 loop
 | `hideMemoryTools` | `true` | 普通 agent 隐藏 `mebular_*` 工具 |
 | `governanceAgents` | `mebular-memory`、`mebular-governance` | 例外 agent（保留工具面） |
 | `modelSource` | `heuristic` | 仅 `host`/`current` 才调用 `ctx.session.generate` |
-| `recallTimeoutMs` | `800` | context 召回超时；失败/超时静默不注入 |
+| `recallTimeoutMs` | `2000` | context 召回超时；失败/超时静默不注入 |
 | `recallTokenBudget` | `2000` | Runtime context token 预算 |
 | `maxFragments` | `3` | 单次 context 最多片段数（1–3） |
 | `maxContextBytes` | `8192` | 注入块硬上限（不可超过 8 KiB） |

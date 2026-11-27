@@ -126,7 +126,22 @@ function preference(): FakeMemoryRecord {
   };
 }
 
-async function setup(options: { source?: 'local' | 'auto' | 'api' } = {}): Promise<Harness> {
+function freshFact(): FakeMemoryRecord {
+  return {
+    ...preference(),
+    id: '01JLOCALFRESH01',
+    type: 'fact',
+    kind: 'fact',
+    content: { subject: 'user', predicate: 'theme', object: 'fresh' },
+    text: 'THEME-GIST-FRESH',
+    score: 0.8,
+  };
+}
+
+async function setup(options: {
+  source?: 'local' | 'auto' | 'api';
+  records?: FakeMemoryRecord[];
+} = {}): Promise<Harness> {
   const home = await mkdtemp(join(tmpdir(), 'mebular-intervention-local-'));
   const clock = { now: NOW };
   const local = new SidecarLocalLayer({
@@ -135,7 +150,7 @@ async function setup(options: { source?: 'local' | 'auto' | 'api' } = {}): Promi
   });
   await local.init();
   const fake = await startFakeCapability({ now: () => clock.now });
-  fake.setRecords([preference()]);
+  fake.setRecords(options.records ?? [preference()]);
   const client = new CapabilityClient({
     baseUrl: fake.baseUrl,
     token: 'cap-token',
@@ -253,7 +268,7 @@ describe('local intervention prefetch (W2)', () => {
     expect(JSON.stringify(trace?.decision?.planner)).not.toContain('深色主题偏好');
   });
 
-  it('第二轮同 cue + alreadyInjectedIds：仍消费 fresh plan 并记录 prefetched=true，但不重复注入', async () => {
+  it('第二轮同 cue + alreadyInjectedIds：预取消费合法（prefetched=true），anti-repeat 不注入', async () => {
     const { service, model } = await setup();
     const first = await service.handleContext(contextBody('深色主题偏好', 'turn_1'));
     const injectedIds = first.data.fragments.map((fragment) => fragment.id);
@@ -280,7 +295,7 @@ describe('local intervention prefetch (W2)', () => {
     expect(model.calls).toBe(1);
   });
 
-  it('第二轮同 cue + source ID 同样不重复注入，但预取仍然命中', async () => {
+  it('第二轮同 cue + source ID：预取消费合法，anti-repeat 不注入', async () => {
     const { service, model } = await setup();
     const first = await service.handleContext(contextBody('深色主题偏好', 'turn_1'));
     const sourceIds = first.data.fragments.flatMap((fragment) => fragment.citations.map((citation) => citation.id));
@@ -297,6 +312,36 @@ describe('local intervention prefetch (W2)', () => {
     expect(response.data.blocks).toEqual([]);
     expect(response.data.applied).toMatchObject({ action: 'silent', fragments: 0 });
     expect(model.calls).toBe(1);
+  });
+
+  it('已注入高分 + 新鲜低分 + maxFragments=1：预取命中并注入新鲜候选', async () => {
+    const { service, model } = await setup({
+      records: [{ ...preference(), score: 0.99 }, { ...freshFact(), score: 0.5 }],
+    });
+    const first = await service.handleContext({
+      ...contextBody('深色主题偏好', 'turn_1'),
+      maxFragments: 1,
+    });
+    const injected = first.data.fragments.map((fragment) => fragment.id);
+    expect(first.data.fragments[0]!.citations[0]!.id).toBe('01JLOCALPREF001');
+    await flushPrefetch();
+
+    // Planner 窗口包含 fresh 候选，而不是只看到已注入的高分候选。
+    expect(model.requests[0]!.candidates).toHaveLength(2);
+
+    const second = await service.handleContext({
+      ...contextBody('深色主题偏好', 'turn_2'),
+      maxFragments: 1,
+      alreadyInjectedIds: injected,
+    });
+    expect(second.data.decision?.planner).toMatchObject({
+      resolvedSource: 'local',
+      prefetched: true,
+    });
+    expect(second.data.decision).toMatchObject({ action: 'speak' });
+    expect(second.data.fragments).toHaveLength(1);
+    expect(second.data.fragments[0]!.citations[0]!.id).toBe('01JLOCALFRESH01');
+    expect(second.data.applied).toMatchObject({ action: 'speak', fragments: 1 });
   });
 
   it('新 cue：cue_mismatch → heuristic + prefetched=false', async () => {

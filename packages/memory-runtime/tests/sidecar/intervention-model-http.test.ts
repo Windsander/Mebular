@@ -306,8 +306,11 @@ describe('intervention model HTTP path', () => {
     expect(prompt).not.toContain(CHECKPOINT_SECRET);
     expect(prompt).not.toContain(TOKEN_SECRET);
     expect(JSON.stringify(request)).not.toContain(TOKEN_SECRET);
-    // 最多 3 个候选 gist 进入 prompt。
-    expect((prompt.match(/<untrusted_data>/g) ?? []).length).toBeLessThanOrEqual(3);
+    // prompt 仍只渲染 top-3 候选 gist；candidate 段之外还有一个 cue 的
+    // untrusted 块，因此总块数最多 4。
+    const candidateSection = prompt.split('candidates (top', 2)[1] ?? '';
+    expect((candidateSection.match(/<untrusted_data>/g) ?? []).length).toBeLessThanOrEqual(3);
+    expect((prompt.match(/<untrusted_data>/g) ?? []).length).toBeLessThanOrEqual(4);
   });
 
   it('模型 speak/detail：按模型深度展开 detail，prompt 仍然只含 gist', async () => {

@@ -3036,6 +3036,12 @@ export function createController(dependencies = {}) {
             stats.ingest.skipped += 1;
             continue;
           }
+          if (plannerRecord && !plannerRecord.settled && isNonUserCapturedMessage(message)) {
+            // generate 未返回时 output hash 未知：只保留真实 user，assistant/tool 先不 ingest。
+            stats.hostPlan.suppressedEvents += 1;
+            stats.ingest.skipped += 1;
+            continue;
+          }
           bufferMessage(session, message);
         }
       } catch {
@@ -3332,7 +3338,7 @@ export function createController(dependencies = {}) {
     if (direct) return direct;
     const message = isObject(data.message) ? data.message : null;
     if (message) {
-      const text = messageText(message);
+      const text = rawMessageText(message);
       if (text) return text;
     }
     return '';
@@ -3352,6 +3358,35 @@ export function createController(dependencies = {}) {
     return text ? hashText(text) : '';
   }
 
+  function messageRoleOf(message) {
+    if (!isObject(message)) return '';
+    return (asText(message.role) || asText(message.type)).toLowerCase();
+  }
+
+  /** planner 输出是严格 JSON；不能走会解包 JSON 字符串的 messageText()。 */
+  function rawMessageText(message) {
+    if (!isObject(message)) return '';
+    if (typeof message.text === 'string') return message.text.trim();
+    if (typeof message.content === 'string') return message.content.trim();
+    const parts = Array.isArray(message.content)
+      ? message.content
+      : Array.isArray(message.parts) ? message.parts : [];
+    const texts = [];
+    for (const part of parts) {
+      if (typeof part === 'string') texts.push(part);
+      else if (isObject(part) && typeof part.text === 'string') texts.push(part.text);
+    }
+    return texts.join('\n').trim();
+  }
+
+  function isNonUserCapturedMessage(message) {
+    const role = messageRoleOf(message);
+    return role === 'assistant'
+      || role === 'tool'
+      || role === 'system'
+      || role === 'compaction';
+  }
+
   function isPlannerMessage(record, message) {
     if (!record || !isObject(message)) return false;
     const id = asText(message.id) || asText(message.messageID);
@@ -3361,7 +3396,7 @@ export function createController(dependencies = {}) {
         || message.source.kind === 'mebular-planner-message'))) {
       return true;
     }
-    const text = messageText(message);
+    const text = rawMessageText(message);
     if (!text) return false;
     const hash = plannerTextHash(text);
     if (record.outputHashes.has(hash) || record.promptHashes.has(hash)) return true;

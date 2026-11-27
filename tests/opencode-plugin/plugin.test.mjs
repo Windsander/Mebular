@@ -4133,6 +4133,74 @@ describe('0.4.0 W3 host plan isolation', () => {
     await controller.dispose();
   });
 
+  it('generate 未返回时 capture 只保留真实 user，pending planner assistant 不进 ingest', async () => {
+    let controllerRef = null;
+    const contextMessages = userMessages();
+    const realUser = {
+      id: 'u2',
+      role: 'user',
+      content: [{ type: 'text', text: 'real user while planner pending' }],
+    };
+    const routes = hostPlanRoutes();
+    const { controller, fetchImpl, calls } = controllerWith({
+      routes,
+      ctx: {
+        contextMessages,
+        generateImpl: async () => {
+          // generate 尚未 resolve：output hash 还不可用。
+          contextMessages.splice(
+            0,
+            contextMessages.length,
+            realUser,
+            {
+              id: 'planner-user-pending',
+              role: 'user',
+              content: [{ type: 'text', text: 'You plan whether the next assistant turn should surface long-term memory.' }],
+            },
+            {
+              id: 'planner-assistant-pending',
+              role: 'assistant',
+              content: [{ type: 'text', text: HOST_PLAN_JSON }],
+            },
+          );
+          await controllerRef.handleEvent({
+            type: 'session.inbox.delivered',
+            data: { sessionID: 'ses_test' },
+          });
+          await controllerRef.handleEvent({
+            type: 'session.text.ended',
+            data: { sessionID: 'ses_test', text: 'real assistant after pending capture', assistantMessageID: 'ra1' },
+          });
+          await controllerRef.handleEvent({
+            type: 'session.execution.succeeded',
+            data: { sessionID: 'ses_test', messageID: 'ra1' },
+          });
+          return { text: HOST_PLAN_JSON, id: 'pa1' };
+        },
+      },
+    });
+    controllerRef = controller;
+    await controller.start();
+    await controller.handleContext(hookEvent(userMessages('please use a dark theme')));
+    await controller.handleEvent({ type: 'session.idle', data: { sessionID: 'ses_test' } });
+    await waitFor(() => controller.getStatus().hostPlan.generated === 1);
+
+    expect(calls.generate).toHaveLength(1);
+    expect(fetchImpl.callsFor('/ingest')).toHaveLength(2);
+    const second = fetchImpl.callsFor('/ingest')[1].body;
+    expect(second.chunks.map((chunk) => chunk.text)).toEqual([
+      'real user while planner pending',
+      'real assistant after pending capture',
+    ]);
+    const allText = fetchImpl.callsFor('/ingest').flatMap((call) => (
+      call.body.chunks.map((chunk) => chunk.text)
+    ));
+    expect(allText).not.toContain(HOST_PLAN_JSON);
+    expect(allText.some((text) => text.includes('You plan whether the next assistant turn'))).toBe(false);
+    expect(controller.getStatus().hostPlan.suppressedEvents).toBeGreaterThanOrEqual(2);
+    await controller.dispose();
+  });
+
   it('captureSessionContext 过滤宿主 context 中的 planner prompt/assistant', async () => {
     const plannerText = HOST_PLAN_JSON;
     const contextMessages = [

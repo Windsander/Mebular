@@ -50,3 +50,50 @@ export function firstRunDisclosureAcknowledgement({
   if (!isElementActuallyVisible(element, container, view)) return null;
   return { version: disclosureVersion };
 }
+
+/**
+ * confirm 在途完成时的最终确认：
+ * - generation 必须仍是当前值（dismiss/open 会递增，作废在途 confirm）；
+ * - 启动状态仍必须是 first-run pending；
+ * - coach 不能处于隐藏/离场状态；
+ * - 披露元素仍实际可见。
+ *
+ * 返回 `{ version, generation }`；任何一项不满足返回 null。
+ */
+export function confirmFirstRunDisclosure({
+  pending,
+  disclosureVersion,
+  generation,
+  currentGeneration,
+  coachLeaving = false,
+  element,
+  container,
+  view = globalThis,
+} = {}) {
+  if (pending !== true) return null;
+  if (!Number.isInteger(generation) || generation !== currentGeneration) return null;
+  if (coachLeaving === true) return null;
+  if (container?.hidden === true) return null;
+  const ack = firstRunDisclosureAcknowledgement({
+    pending: true,
+    disclosureVersion,
+    element,
+    container,
+    view,
+  });
+  if (!ack) return null;
+  return { version: ack.version, generation };
+}
+
+/**
+ * 打开 create/join 前捕获 ack：只接受与当前 generation 相同的“当前可见”证据，
+ * 过期 generation 一律拒绝（关闭/隐藏后不得复用曾经可见）。
+ */
+export function firstRunDisclosureAckFor({ current, currentGeneration } = {}) {
+  if (!current) return null;
+  if (!Number.isInteger(current.version) || current.version < 1) return null;
+  if (!Number.isInteger(current.generation)) return null;
+  if (current.generation !== currentGeneration) return null;
+  return { version: current.version, generation: current.generation };
+}
+

@@ -11,6 +11,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from '@jest/globals';
 import {
+  confirmFirstRunDisclosure,
+  firstRunDisclosureAckFor,
   firstRunDisclosureAcknowledgement,
   isElementActuallyVisible,
 } from '../../packages/console/first-run-disclosure.js';
@@ -179,31 +181,84 @@ describe('首启披露：可见性判定（DOM 级）', () => {
   });
 });
 
+describe('首启披露：generation / 在途 confirm 竞态', () => {
+  const confirm = (overrides = {}) => confirmFirstRunDisclosure({
+    pending: true,
+    disclosureVersion: 1,
+    generation: 1,
+    currentGeneration: 1,
+    element: element(),
+    container: element({ kind: 'container' }),
+    view: view(),
+    ...overrides,
+  });
+
+  it('confirm 在途 → dismiss（generation 变化）→ 不产生 firstRunDisclosure', () => {
+    expect(confirm()).toEqual({ version: 1, generation: 1 });
+    // dismissOnboardingCoach() 会递增 generation；在途 confirm 完成时 generation 已过期。
+    expect(confirm({ generation: 1, currentGeneration: 2 })).toBeNull();
+  });
+
+  it('先打开 create/join（generation 递增）再完成 confirm → 不产生 ack', () => {
+    expect(confirm({ generation: 3, currentGeneration: 4 })).toBeNull();
+    // 即使元素仍可见，也不能用旧 generation 置位。
+    expect(confirm({ generation: 4, currentGeneration: 4 })).toEqual({ version: 1, generation: 4 });
+  });
+
+  it('关闭弹窗后重开：旧 ack 的 generation 过期 → 不复用', () => {
+    const current = { version: 1, generation: 1 };
+    expect(firstRunDisclosureAckFor({ current, currentGeneration: 1 })).toEqual({ version: 1, generation: 1 });
+    expect(firstRunDisclosureAckFor({ current, currentGeneration: 2 })).toBeNull();
+    expect(firstRunDisclosureAckFor({ current: null, currentGeneration: 2 })).toBeNull();
+  });
+
+  it('父层隐藏 + confirm 在途 → 不 ack', () => {
+    expect(confirm({ container: element({ kind: 'container', hidden: true }) })).toBeNull();
+  });
+
+  it('coach is-leaving / 非 pending → 不 ack', () => {
+    expect(confirm({ coachLeaving: true })).toBeNull();
+    expect(confirm({ pending: false })).toBeNull();
+  });
+});
+
 describe('首启披露：失败闭合与只出现一次', () => {
   it('render 只负责展示内容；真实可见由 confirm 判定后才置 shown', () => {
     const renderSource = functionSource('renderFirstRunDisclosure', 'nextAnimationFrame');
     expect(renderSource).toContain('firstRun?.pending === true');
     expect(renderSource).toContain('el.hidden = false');
+    expect(renderSource).toContain('firstRunDisclosureGeneration += 1');
     expect(renderSource).not.toContain('firstRunDisclosure = {');
     const confirmStart = consoleJs.indexOf('async function confirmFirstRunDisclosureShown(');
-    const confirmSource = consoleJs.slice(confirmStart, confirmStart + 1200);
-    expect(confirmSource).toContain('firstRunDisclosureAcknowledgement');
-    expect(confirmSource).toContain('element: $(\'#first-run-disclosure\')');
-    expect(confirmSource).toContain('container: $(\'#onboarding-coach\')');
-    expect(confirmSource).toContain('firstRunDisclosure = ack ?');
+    const confirmSource = consoleJs.slice(confirmStart, confirmStart + 1600);
+    expect(confirmSource).toContain('confirmFirstRunDisclosure({');
+    expect(confirmSource).toContain('currentGeneration: firstRunDisclosureGeneration');
+    expect(confirmSource).toContain("coach?.classList?.contains('is-leaving')");
+    expect(confirmSource).toContain("element: $('#first-run-disclosure')");
+    expect(confirmSource).toContain('container: coach');
+    expect(confirmSource).toContain('if (generation !== firstRunDisclosureGeneration) return');
+    expect(confirmSource).toContain('firstRunDisclosure = ack;');
   });
 
   it('打开建新/加入时先捕获可见 ack，再收起 coach；关闭弹窗清空', () => {
-    const createSource = functionSource('openOnboardCreate', 'closeOnboardCreate');
-    expect(createSource.indexOf('firstRunDisclosureAck = firstRunDisclosure'))
-      .toBeLessThan(createSource.indexOf('dismissOnboardingCoach()'));
-    const joinSource = functionSource('openOnboardJoin', 'closeOnboardJoin');
-    expect(joinSource.indexOf('firstRunDisclosureAck = firstRunDisclosure'))
-      .toBeLessThan(joinSource.indexOf('dismissOnboardingCoach()'));
+    const assertOpen = (source) => {
+      const capture = source.indexOf('captureFirstRunDisclosureAck()');
+      const bump = source.indexOf('firstRunDisclosureGeneration += 1');
+      const dismiss = source.indexOf('dismissOnboardingCoach({ keepAck: true })');
+      expect(capture).toBeGreaterThan(-1);
+      expect(capture).toBeLessThan(bump);
+      expect(bump).toBeLessThan(dismiss);
+    };
+    assertOpen(functionSource('openOnboardCreate', 'closeOnboardCreate'));
+    assertOpen(functionSource('openOnboardJoin', 'closeOnboardJoin'));
+    expect(functionSource('captureFirstRunDisclosureAck', 'openOnboardCreate'))
+      .toContain('currentGeneration: firstRunDisclosureGeneration');
     expect(functionSource('closeOnboardCreate', 'openOnboardJoin')).toContain('firstRunDisclosureAck = null');
     expect(functionSource('closeOnboardJoin', 'unlockConsole')).toContain('firstRunDisclosureAck = null');
-    expect(functionSource('dismissOnboardingCoach', 'renderFirstRunDisclosure'))
-      .toContain('firstRunDisclosure = null');
+    const dismissSource = functionSource('dismissOnboardingCoach', 'renderFirstRunDisclosure');
+    expect(dismissSource).toContain('firstRunDisclosureGeneration += 1');
+    expect(dismissSource).toContain('firstRunDisclosure = null');
+    expect(dismissSource).toContain('if (!keepAck) firstRunDisclosureAck = null');
   });
 
   it('未展示成功 → create/join 不带 ack 字段；解锁清空', () => {
@@ -213,6 +268,7 @@ describe('首启披露：失败闭合与只出现一次', () => {
     expect(submitSource).toContain('firstRunDisclosureVersion: firstRunDisclosureAck.version');
     const unlockStart = consoleJs.indexOf('async function unlockConsole(');
     const unlockSource = consoleJs.slice(unlockStart, unlockStart + 1500);
+    expect(unlockSource).toContain('firstRunDisclosureGeneration += 1');
     expect(unlockSource).toContain('firstRunDisclosure = null');
     expect(unlockSource).toContain('firstRunDisclosureAck = null');
     expect(unlockSource).toContain('firstRunEl.hidden = true');

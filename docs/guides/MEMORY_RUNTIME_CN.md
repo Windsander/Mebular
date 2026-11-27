@@ -277,7 +277,8 @@ config 并按现有生命周期重启/重载，使新配置生效。
   不是防恶意 host token 持有者。
 - `source=console` 必须使用 MCP admin 代理持有的独立 admin secret
   （`x-mebular-admin-token`），不能用 host token 或客户端 channel header 冒充。
-  `source=heuristic` 只允许 sidecar 内部。
+  Console 写入经 `POST /admin/api/memory-runtime/outcome`，MCP 在服务端附加 secret，
+  secret 不进入浏览器。`source=heuristic` 只允许 sidecar 内部。
 - token 不落盘、不写 trace/policy/log。新协议带 `note` 返回
   `outcome_note_unsupported`；无 token 的旧 0.3 客户端带 note 返回
   `outcome_note_ignored`，note 不落盘。

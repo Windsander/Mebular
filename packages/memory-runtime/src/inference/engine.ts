@@ -377,8 +377,12 @@ export class LlamaServerEngine {
 
     let child: ChildProcessLike;
     try {
+      // 本地推理引擎不需要任何 sidecar/host/MCP 凭据；尤其不能把 W4 独立
+      // admin secret 继承给 llama-server。
+      const childEnv: NodeJS.ProcessEnv = { ...process.env, ...this.options.env };
+      delete childEnv.MEBULAR_MEMORY_RUNTIME_ADMIN_TOKEN;
       child = this.spawnImpl(this.options.binaryPath, args, {
-        env: { ...process.env, ...this.options.env },
+        env: childEnv,
         stdio: 'ignore',
         windowsHide: true,
       });

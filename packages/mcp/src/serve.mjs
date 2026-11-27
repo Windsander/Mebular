@@ -2231,6 +2231,8 @@ export async function startHttpServer({
     /^\/admin\/api\/(?:models|inference)\/(install|select|download|pause|resume|cancel|import|uninstall|remove|start|stop|test)$/,
     // 0.3 记忆运行时：召回反馈经 MCP 薄代理转发 sidecar；host token 不出服务端。
     /^\/admin\/api\/memory-runtime\/feedback$/,
+    // 0.4 W4：console outcome 经 MCP admin 代理；独立 admin secret 不出服务端。
+    /^\/admin\/api\/memory-runtime\/outcome$/,
     // 0.4 记忆介入策略：重置本机策略状态；同样经薄代理，sidecar 未启用时明确失败。
     /^\/admin\/api\/memory-runtime\/policy\/reset$/,
     // 0.3 高级模型来源：经 sidecar `/inference/settings` 或 `/models/:pack/activate`。
@@ -2831,6 +2833,32 @@ export async function startHttpServer({
       const traceId = typeof input.traceId === 'string' ? input.traceId : '';
       const result = memoryRuntimeSupervisor
         ? await memoryRuntimeSupervisor.submitRecallFeedback(traceId, input)
+        : {
+            statusCode: 409,
+            body: {
+              ok: false,
+              error: 'memory_runtime_disabled',
+              enabled: false,
+              state: 'stopped',
+              message: '记忆运行时未启用',
+            },
+          };
+      return sendJson(res, result.statusCode, result.body);
+    }
+
+    // 0.4 W4 console outcome：同 feedback 的鉴权/CSRF；MCP 只附加独立 admin
+    // secret，host token 不能冒充 console，note/raw 不接受。
+    if (path === '/admin/api/memory-runtime/outcome') {
+      const input = parseJsonBody(body);
+      if (!input) {
+        return sendJson(res, 400, { ok: false, error: 'bad_request', message: '需要 JSON 请求体' });
+      }
+      const traceId = typeof input.traceId === 'string' ? input.traceId : '';
+      const result = memoryRuntimeSupervisor
+        ? await memoryRuntimeSupervisor.submitRecallOutcome(traceId, {
+            kind: input.kind,
+            ...(input.confidence !== undefined ? { confidence: input.confidence } : {}),
+          })
         : {
             statusCode: 409,
             body: {

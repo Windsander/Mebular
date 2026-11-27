@@ -313,7 +313,9 @@ and hosts must not report an outcome.
   holder of the host token.
 - `source=console` requires the independent admin secret held by the MCP admin proxy
   (`x-mebular-admin-token`), never the host token or a client-side channel header.
-  `source=heuristic` is internal to the sidecar only.
+  Console writes enter through `POST /admin/api/memory-runtime/outcome`; MCP attaches
+  the secret server-side, so it never reaches the browser. `source=heuristic` is
+  internal to the sidecar only.
 - Tokens are never written to disk, traces, policy, or logs. A new protocol request
   with `note` is rejected with `outcome_note_unsupported`; legacy 0.3 clients without
   a token are accepted with `outcome_note_ignored` and the note is not stored.

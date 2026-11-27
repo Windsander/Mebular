@@ -843,6 +843,40 @@ if (mode === 'hang') {
         }));
         return;
       }
+      if (relative.startsWith('recall/') && relative.endsWith('/outcome')) {
+        const body = await readBody(req);
+        const traceId = relative.split('/')[1] ?? '';
+        const expectedAdmin = String(env.MEBULAR_MEMORY_RUNTIME_ADMIN_TOKEN ?? '');
+        const adminHeader = String(req.headers['x-mebular-admin-token'] ?? '');
+        const adminTokenMatches = expectedAdmin.length > 0 && adminHeader === expectedAdmin;
+        const out = env.FAKE_SIDECAR_OUTCOME_OUT;
+        if (typeof out === 'string' && out.length > 0) {
+          // 只记录布尔/枚举，不记录 admin secret / host token / raw 正文。
+          appendFileSync(out, `${JSON.stringify({
+            traceId,
+            body,
+            source: body.source ?? null,
+            adminTokenPresent: adminHeader.length > 0,
+            adminTokenMatches,
+            hostApp: String(req.headers['x-mebular-host-app'] ?? ''),
+            channel: String(req.headers['x-mebular-outcome-channel'] ?? ''),
+          })}\n`);
+        }
+        if (!adminTokenMatches || body.source !== 'console') {
+          sendError(res, 403, 'outcome_source_invalid', 'console outcome 需要独立 admin token');
+          return;
+        }
+        sendEnvelope(res, 200, {
+          traceId,
+          outcome: { kind: body.kind, source: 'console', at: Date.now() },
+          duplicate: false,
+          recorded: true,
+          withinWindow: true,
+          warnings: [],
+          degraded: false,
+        });
+        return;
+      }
       if (relative.startsWith('recall/') && relative.endsWith('/feedback')) {
         const body = await readBody(req);
         const traceId = relative.split('/')[1] ?? '';

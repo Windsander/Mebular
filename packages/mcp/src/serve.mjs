@@ -35,6 +35,7 @@ import {
   normalizeMemoryRuntimeModelSource,
   readMemoryRuntimeModelSource,
 } from './memory-runtime-config.mjs';
+import { resolveMemoryRuntimeEffectiveMode } from './memory-runtime-effective.mjs';
 import { APP_VERSION } from './version.mjs';
 import { acquireConfigFileLock } from './config-lock.mjs';
 import { resolveStaticAssetRoots } from './asset-roots.mjs';
@@ -1952,6 +1953,25 @@ export async function startHttpServer({
         const detail = memoryRuntimeSupervisor
           ? await memoryRuntimeSupervisor.readStatus().catch(() => null)
           : null;
+        // sidecar 可用时以 sidecar 的 effective 为准；轻量/未就绪时用同一张表纯推导。
+        const fallbackSource = detail?.intervention
+          ? null
+          : await readMemoryRuntimeModelSource({ home }).catch(() => null);
+        const effective = resolveMemoryRuntimeEffectiveMode({
+          config,
+          modelSource: detail?.model?.configured ?? fallbackSource?.source,
+        });
+        const intervention = detail?.intervention ?? {
+          mode: effective.effective,
+          planner: effective.planner,
+          source: effective.source,
+          derivedMode: effective.derivedMode,
+          legacyModePresent: effective.legacyModePresent,
+          legacyModeIgnored: effective.legacyModeIgnored,
+          legacyModeConflict: effective.legacyModeConflict,
+          diagnosticShadow: effective.diagnosticShadow,
+          warnings: effective.warnings,
+        };
         // 进程、capability 与模型是独立观察；不得用进程存活伪造 capability ready。
         return sendJson(res, 200, {
           ...status,
@@ -1961,6 +1981,7 @@ export async function startHttpServer({
           capability: detail?.capability ?? null,
           capabilityError: detail?.error ?? null,
           model: detail?.model ?? null,
+          intervention,
         });
       }
       if (path === '/admin/api/memory-runtime/model-source') {

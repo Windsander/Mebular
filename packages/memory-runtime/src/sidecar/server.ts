@@ -27,6 +27,13 @@ import {
   type SidecarConfig,
 } from './config.js';
 import type { SidecarMode, SidecarState } from './discovery.js';
+import {
+  resolveEffectiveIntervention,
+  type EffectiveInterventionMode,
+  type EffectiveInterventionPlanner,
+  type EffectiveInterventionResolution,
+  type InterventionPlannerSource,
+} from './effective.js';
 import type {
   IngestExtractionResult,
   IngestExtractionView,
@@ -88,6 +95,26 @@ export interface SidecarStatusModel {
   };
   /** 本设备当前可用的模型来源。 */
   sources?: string[];
+}
+
+/**
+ * 0.4.0 介入 effective mode 的只读诊断视图。
+ * 只含枚举/布尔/稳定 warning code；不含 token、keyRef、endpoint 或配置正文。
+ */
+export interface SidecarStatusIntervention {
+  /** 实际生效的介入模式；shadow 仅内部 diagnostic。 */
+  mode: EffectiveInterventionMode;
+  /** recall 使用的 planner。 */
+  planner: EffectiveInterventionPlanner;
+  /** 用户配置的 model.source（逐字保留）。 */
+  source: InterventionPlannerSource;
+  /** 仅由 source 推导的 production 模式。 */
+  derivedMode: EffectiveInterventionPlanner;
+  legacyModePresent: boolean;
+  legacyModeIgnored: boolean;
+  legacyModeConflict: boolean;
+  diagnosticShadow: boolean;
+  warnings: string[];
 }
 
 export interface SidecarStatusCounts {
@@ -277,6 +304,8 @@ export interface SidecarStatusSnapshot {
   identity: SidecarStatusIdentity;
   capability: SidecarStatusCapability;
   model: SidecarStatusModel;
+  /** 0.4.0 effective intervention；旧 intervention.mode 不参与推导。 */
+  intervention?: SidecarStatusIntervention;
   counts: SidecarStatusCounts;
   details: SidecarStatusDetails;
   outbox: SidecarStatusOutbox;
@@ -382,6 +411,8 @@ export interface SidecarServerOptions {
   getStatus?: () => SidecarStatusSnapshot | Promise<SidecarStatusSnapshot>;
   /** `/version` 的模型状态；缺省从 getStatus().model 读取。 */
   getModelStatus?: () => SidecarStatusModel | Promise<SidecarStatusModel>;
+  /** main 统一解析的 effective intervention；缺省按 config 纯推导。 */
+  effectiveIntervention?: EffectiveInterventionResolution;
   ingest?: SidecarIngestApi;
   namespaces?: SidecarNamespacesApi;
   recall?: SidecarRecallApi;
@@ -411,6 +442,23 @@ export interface SidecarListenResult {
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+/** 只暴露枚举/布尔/稳定 code；绝不把 config 正文带进状态面。 */
+export function interventionStatusView(
+  resolution: EffectiveInterventionResolution,
+): SidecarStatusIntervention {
+  return {
+    mode: resolution.mode,
+    planner: resolution.planner,
+    source: resolution.source,
+    derivedMode: resolution.derivedMode,
+    legacyModePresent: resolution.legacyModePresent,
+    legacyModeIgnored: resolution.legacyModeIgnored,
+    legacyModeConflict: resolution.legacyModeConflict,
+    diagnosticShadow: resolution.diagnosticShadow,
+    warnings: [...resolution.warnings],
+  };
 }
 
 function requestIdOf(req: IncomingMessage): string {
@@ -537,6 +585,7 @@ export class SidecarServer {
   mode: SidecarMode = 'immersive';
 
   private readonly identity: SidecarStatusIdentity;
+  private readonly effectiveIntervention: EffectiveInterventionResolution;
   private readonly getStatus?: () => SidecarStatusSnapshot | Promise<SidecarStatusSnapshot>;
   private readonly getModelStatus?: () => SidecarStatusModel | Promise<SidecarStatusModel>;
   private readonly ingest?: SidecarIngestApi;
@@ -563,6 +612,12 @@ export class SidecarServer {
       profileId: options.identity?.profileId ?? null,
       hostId: options.identity?.hostId ?? null,
     };
+    this.effectiveIntervention = options.effectiveIntervention ?? resolveEffectiveIntervention({
+      source: this.config.model.source,
+      legacyMode: this.config.intervention.mode,
+      legacyModePresent: this.config.intervention.legacyModePresent,
+      diagnosticShadow: this.config.intervention.diagnosticShadow === true,
+    });
     this.getStatus = options.getStatus;
     this.getModelStatus = options.getModelStatus;
     this.ingest = options.ingest;
@@ -860,6 +915,7 @@ export class SidecarServer {
         credential: { configured: false, source: null },
         sources: ['heuristic', 'host'],
       },
+      intervention: interventionStatusView(this.effectiveIntervention),
       counts: {
         stagingChunks: 0,
         localStagingChunks: 0,
@@ -922,8 +978,16 @@ export class SidecarServer {
       ...snapshot,
       mode: this.mode,
       model: { ...fallback.model, ...(snapshot.model ?? {}) },
+      intervention: {
+        ...(fallback.intervention ?? interventionStatusView(this.effectiveIntervention)),
+        ...(snapshot.intervention ?? {}),
+      },
       counts: { ...fallback.counts, ...(snapshot.counts ?? {}) },
       details: { ...fallback.details, ...(snapshot.details ?? {}) },
+      warnings: [...new Set([
+        ...(snapshot.warnings ?? []),
+        ...this.effectiveIntervention.warnings,
+      ])],
       state: this.state,
       degraded: this.currentDegraded(),
       pid: process.pid,
@@ -1061,7 +1125,14 @@ export class SidecarServer {
               outcome: this.mode === 'immersive' && Boolean(this.recall),
               shadow: Boolean(this.recall),
               reset: this.mode === 'immersive' && Boolean(this.intervention),
-              mode: this.config.intervention.mode,
+              // 0.4.0：mode 是 effective；旧 intervention.mode 只作为诊断。
+              mode: this.effectiveIntervention.mode,
+              configuredSource: this.effectiveIntervention.source,
+              planner: this.effectiveIntervention.planner,
+              legacyModeIgnored: this.effectiveIntervention.legacyModeIgnored,
+              legacyModeConflict: this.effectiveIntervention.legacyModeConflict,
+              diagnosticShadow: this.effectiveIntervention.diagnosticShadow,
+              warnings: [...this.effectiveIntervention.warnings],
             },
             models: {
               install: this.mode === 'immersive' && modelCapabilities.install,
@@ -1080,7 +1151,7 @@ export class SidecarServer {
             quotaBytesCloud: this.config.detail.quotaBytesCloud,
             retentionDays: { conversation: 30, tool_output: 7, document_slice: 90 },
           },
-        }, [], this.currentDegraded()));
+        }, [...this.effectiveIntervention.warnings], this.currentDegraded()));
         return;
       }
 

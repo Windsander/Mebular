@@ -13,6 +13,7 @@ import {
   type SidecarConfig,
 } from '../../src/sidecar/config.js';
 import { defaultSidecarPolicy } from '../../src/sidecar/domains.js';
+import { resolveEffectiveIntervention } from '../../src/sidecar/effective.js';
 import { MemoryObjectService } from '../../src/sidecar/internal-objects.js';
 import { SidecarLocalLayer } from '../../src/sidecar/local-layer.js';
 import {
@@ -177,6 +178,8 @@ describe('optional model integration', () => {
       client,
       identity: { cloudId: 'cl_test', profileId: 'default', hostId: 'h_test', deviceId: 'device-local' },
       policy: defaultSidecarPolicy(),
+      // 这些用例验证 query plan，不验证介入策略；shadow 保留 baseline 注入且不调模型。
+      effectiveIntervention: resolveEffectiveIntervention({ source: 'heuristic', diagnosticShadow: true }),
       inference: model,
       now: () => NOW,
     });
@@ -227,6 +230,8 @@ describe('optional model integration', () => {
       client,
       identity: { cloudId: 'cl_test', profileId: 'default', hostId: 'h_test', deviceId: 'device-local' },
       policy: defaultSidecarPolicy(),
+      // 这些用例验证 query plan，不验证介入策略；shadow 保留 baseline 注入且不调模型。
+      effectiveIntervention: resolveEffectiveIntervention({ source: 'heuristic', diagnosticShadow: true }),
       inference: model,
       now: () => NOW,
     });

@@ -29,6 +29,10 @@ import {
   type SidecarPaths,
 } from './config.js';
 import {
+  isDiagnosticShadowEnabled,
+  resolveEffectiveIntervention,
+} from './effective.js';
+import {
   buildDiscovery,
   clearDiscovery,
   isDiscoveryDead,
@@ -421,6 +425,19 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
     throw startupFromUnknown(error);
   }
 
+  // effective mode 只由 source 推导；旧 intervention.mode 仅产生稳定 warning。
+  // shadow 只允许内部 diagnostic（配置文件或进程内 env），不因旧配置自动生效。
+  const effectiveIntervention = resolveEffectiveIntervention({
+    source: config.model.source,
+    legacyMode: config.intervention.mode,
+    legacyModePresent: config.intervention.legacyModePresent,
+    diagnosticShadow: config.intervention.diagnosticShadow === true
+      || isDiagnosticShadowEnabled(env.MEBULAR_INTERVENTION_DIAGNOSTIC_SHADOW),
+  });
+  for (const warning of effectiveIntervention.warnings) {
+    if (!configWarnings.includes(warning)) configWarnings.push(warning);
+  }
+
   const lifecycle = new LifecycleGate();
   const localOptions: SidecarLocalLayerOptions = {
     root: paths.dataDir,
@@ -633,6 +650,7 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
       policyPath: paths.policyPath,
       policyStatePath: paths.policyStatePath,
       inference: model,
+      effectiveIntervention,
       lifecycle,
       diagnostics,
       ...(options.restartReason ? { restartReason: options.restartReason } : {}),
@@ -751,6 +769,7 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
     identity,
     getStatus: statusSnapshot,
     getModelStatus: () => model.status(),
+    effectiveIntervention,
     ingest: settlement,
     namespaces: settlement,
     recall: settlement,

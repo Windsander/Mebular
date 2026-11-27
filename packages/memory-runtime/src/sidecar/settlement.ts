@@ -11,6 +11,7 @@ import { readFile } from 'node:fs/promises';
 import type { CapabilityClient } from './capability-client.js';
 import type { SidecarConfig } from './config.js';
 import type { DiagnosticLog } from './diagnostic-log.js';
+import type { EffectiveInterventionResolution } from './effective.js';
 import {
   agentDomain,
   canReadDomain,
@@ -58,6 +59,8 @@ export interface SettlementRuntimeOptions {
   identity: SettlementIdentity;
   policy?: SidecarPolicy | null;
   inference?: SidecarInferenceProvider | null;
+  /** main 统一解析的 effective intervention；缺省由 RecallService 按 config 推导。 */
+  effectiveIntervention?: EffectiveInterventionResolution;
   policyPath?: string;
   /** `<dataDir>/policy/state.json`；缺省不启用本机策略学习。 */
   policyStatePath?: string;
@@ -495,6 +498,7 @@ export class SettlementRuntime {
       checkpointSource: this.objects,
       policyStore,
       ...(this.inference ? { inference: this.inference } : {}),
+      ...(options.effectiveIntervention ? { effectiveIntervention: options.effectiveIntervention } : {}),
       ...(options.lifecycle ? { lifecycle: options.lifecycle } : {}),
       ...(options.now ? { now: options.now } : {}),
     });

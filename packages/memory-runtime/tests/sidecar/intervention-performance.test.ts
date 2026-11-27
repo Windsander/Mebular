@@ -59,7 +59,7 @@ function preference(): FakeMemoryRecord {
   };
 }
 
-async function createHarness(mode: 'off' | 'heuristic'): Promise<PerfHarness> {
+async function createHarness(): Promise<PerfHarness> {
   const home = await mkdtemp(join(tmpdir(), 'mebular-intervention-perf-'));
   const local = new SidecarLocalLayer({ root: join(home, 'memory-runtime'), now: () => NOW });
   await local.init();
@@ -67,7 +67,8 @@ async function createHarness(mode: 'off' | 'heuristic'): Promise<PerfHarness> {
   fake.setRecords([preference()]);
   const client = new CapabilityClient({ baseUrl: fake.baseUrl, token: 'cap-token', retries: 0, retryDelayMs: 0 });
   const config = defaultSidecarConfig();
-  config.intervention.mode = mode;
+  // 0.4.0：sidecar 不再有 off；production 由 model.source=heuristic 派生。
+  config.model.source = 'heuristic';
   config.intervention.explorationRate = 0;
   const runtime = new SettlementRuntime({
     config,
@@ -102,67 +103,37 @@ function percentile(values: number[], p: number): number {
 }
 
 describe('intervention /context performance', () => {
-  it('off 与 heuristic 的 /context p95；heuristic 额外开销有界', async () => {
-    const off = await createHarness('off');
-    const heuristic = await createHarness('heuristic');
+  it('heuristic /context p95 有界（0.4.0 不再有 sidecar off 模式）', async () => {
+    const heuristic = await createHarness();
     try {
       for (let index = 0; index < WARMUP; index += 1) {
-        await context(off, index, 'warm_off');
         await context(heuristic, index, 'warm_heuristic');
       }
 
       const ROUNDS = 3;
-      const rounds: Array<{ offP50: number; offP95: number; heuristicP50: number; heuristicP95: number; overhead: number }> = [];
+      const rounds: Array<{ heuristicP50: number; heuristicP95: number }> = [];
       for (let round = 0; round < ROUNDS; round += 1) {
-        const offTimes: number[] = [];
         const heuristicTimes: number[] = [];
         for (let index = 0; index < SAMPLES; index += 1) {
-          let started = performance.now();
-          await context(off, index, `off_r${round}`);
-          offTimes.push(performance.now() - started);
-
-          started = performance.now();
+          const started = performance.now();
           await context(heuristic, index, `heuristic_r${round}`);
           heuristicTimes.push(performance.now() - started);
         }
-        const offP50 = percentile(offTimes, 0.5);
-        const offP95 = percentile(offTimes, 0.95);
         const heuristicP50 = percentile(heuristicTimes, 0.5);
         const heuristicP95 = percentile(heuristicTimes, 0.95);
-        rounds.push({
-          offP50,
-          offP95,
-          heuristicP50,
-          heuristicP95,
-          overhead: heuristicP95 - offP95,
-        });
+        rounds.push({ heuristicP50, heuristicP95 });
         console.log(
           `[perf][intervention] round=${round + 1} `
-          + `off p50=${offP50.toFixed(2)}ms p95=${offP95.toFixed(2)}ms; `
-          + `heuristic p50=${heuristicP50.toFixed(2)}ms p95=${heuristicP95.toFixed(2)}ms; `
-          + `p95 overhead=${(heuristicP95 - offP95).toFixed(2)}ms`,
+          + `heuristic p50=${heuristicP50.toFixed(2)}ms p95=${heuristicP95.toFixed(2)}ms`,
         );
       }
 
-      // 取 3 轮 p95 overhead 的中位数，避免单轮抖动。
-      const overheadMedian = [...rounds.map((round) => round.overhead)].sort((a, b) => a - b)[1]!;
-      console.log(
-        `[perf][intervention] p95 overhead median=${overheadMedian.toFixed(2)}ms `
-        + `(rounds=${rounds.map((round) => round.overhead.toFixed(2)).join(',')})`,
-      );
-
-      // 绝对上限兜底；相对开销目标仍是计划里的 <5ms，CI 噪声下放宽到 10ms。
       for (const round of rounds) {
-        expect(round.offP95).toBeLessThan(500);
         expect(round.heuristicP95).toBeLessThan(500);
       }
-      expect(overheadMedian).toBeLessThan(10);
     } finally {
-      await off.runtime.stop();
       await heuristic.runtime.stop();
-      await off.fake.close();
       await heuristic.fake.close();
-      await rm(off.home, { recursive: true, force: true });
       await rm(heuristic.home, { recursive: true, force: true });
     }
   }, 120_000);

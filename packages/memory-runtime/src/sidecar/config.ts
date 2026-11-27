@@ -112,9 +112,18 @@ export interface SidecarContextSettings {
   maxFragments: number;
 }
 
-/** 0.4.0 记忆介入策略；默认 off，不改变 0.3.x 行为。 */
+/**
+ * 0.4.0 记忆介入策略。
+ *
+ * `mode` 是 0.3.x 的旧字段：0.4.0 起不再参与 production 决策，只保留文件原值并做
+ * diagnostic warning；effective mode 由 `model.source` 推导（见 effective.ts）。
+ */
 export interface SidecarInterventionSettings {
   mode: 'off' | 'shadow' | 'heuristic' | 'model';
+  /** 旧 `mode` 是否真的出现在配置文件中；用于区分“缺省 off”与“显式 off”。 */
+  legacyModePresent: boolean;
+  /** 仅内部 diagnostic/canary；不是用户 mode，不进入 Console schema。 */
+  diagnosticShadow: boolean;
   /** heuristic 说话最低 top score；adaptive 阈值以此为基准。 */
   minConfidence: number;
   /** 连续沉默上限；达到后强制至少注入一条 gist，避免学成哑巴。 */
@@ -227,6 +236,8 @@ export function defaultSidecarConfig(): SidecarConfig {
     context: { maxTokens: 12_000, maxFragments: 3 },
     intervention: {
       mode: 'off',
+      legacyModePresent: false,
+      diagnosticShadow: false,
       minConfidence: 0.55,
       maxSilentStreak: 3,
       explorationRate: 0.05,
@@ -579,6 +590,13 @@ export function normalizeSidecarConfig(raw: unknown, options: { warnings?: strin
         'mode',
         ['off', 'shadow', 'heuristic', 'model'] as const,
         defaults.intervention.mode,
+      ),
+      // presence 必须看原始输入，而不是归一化后的默认 off。
+      legacyModePresent: intervention.mode !== undefined && intervention.mode !== null,
+      diagnosticShadow: boolOf(
+        intervention,
+        'diagnosticShadow',
+        defaults.intervention.diagnosticShadow,
       ),
       minConfidence: numberOf(
         intervention,

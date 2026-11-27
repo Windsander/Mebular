@@ -48,7 +48,8 @@ outcome 正常写入；policy state / trace / Console admin 视图不含 raw que
 detail 正文或 host token。
 
 `opencode-intervention-shadow.mjs` 用同一条真实链路验证 shadow 归因：sidecar
-`intervention.mode=shadow` 下 decision=silent、applied=speak；下一轮显式记忆重问必须
+内部 `intervention.diagnosticShadow=true`（旧 `intervention.mode=shadow` 不再生效）
+下 decision=silent、applied=speak；下一轮显式记忆重问必须
 记成 `reasked` 而不是 `missed`，本机计数也按 applied 记 spoken。
 
 ```bash

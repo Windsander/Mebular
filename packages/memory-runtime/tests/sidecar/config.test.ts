@@ -2,7 +2,7 @@
 // capability URL/版本握手。
 
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -63,6 +63,8 @@ describe('sidecar config', () => {
     expect(defaults.trace).toBe('local');
     expect(defaults.intervention).toMatchObject({
       mode: 'off',
+      legacyModePresent: false,
+      diagnosticShadow: false,
       minConfidence: 0.55,
       maxSilentStreak: 3,
       explorationRate: 0.05,
@@ -117,6 +119,8 @@ describe('sidecar config', () => {
       },
     }).intervention).toEqual({
       mode: 'heuristic',
+      legacyModePresent: true,
+      diagnosticShadow: false,
       minConfidence: 0.62,
       maxSilentStreak: 5,
       explorationRate: 0.1,
@@ -124,6 +128,13 @@ describe('sidecar config', () => {
       policyTtlDays: 7,
       modelTimeoutMs: 800,
     });
+    // 缺省（含默认 off）不能误报为“旧字段显式存在”。
+    const missingMode = normalizeSidecarConfig({ intervention: { minConfidence: 0.6 } }).intervention;
+    expect(missingMode.mode).toBe('off');
+    expect(missingMode.legacyModePresent).toBe(false);
+    expect(normalizeSidecarConfig({ intervention: { mode: 'off' } }).intervention.legacyModePresent).toBe(true);
+    expect(normalizeSidecarConfig({ intervention: { diagnosticShadow: true } }).intervention.diagnosticShadow).toBe(true);
+    expect(() => normalizeSidecarConfig({ intervention: { diagnosticShadow: 'yes' } })).toThrow(SidecarConfigError);
 
     for (const bad of [
       { mode: 'always' },
@@ -256,5 +267,23 @@ describe('sidecar config', () => {
       .toThrow(SidecarConfigError);
     expect(() => normalizeSidecarConfig({ model: { source: 'other' } })).toThrow(SidecarConfigError);
     expect(() => normalizeSidecarConfig({ recall: { queryPlan: 'always' } })).toThrow(SidecarConfigError);
+  });
+
+  it('旧 intervention.mode 逐字保留，加载不重写文件', async () => {
+    const paths = resolveSidecarPaths({ home, env: {} });
+    await mkdir(paths.dataDir, { recursive: true, mode: 0o700 });
+    const original = JSON.stringify({
+      schema: 1,
+      model: { source: 'heuristic' },
+      intervention: { mode: 'model' },
+    }, null, 2);
+    await writeFile(paths.configPath, original, { mode: 0o600 });
+
+    const loaded = await loadSidecarConfig({ paths, env: {} });
+    expect(loaded.intervention.mode).toBe('model');
+    expect(loaded.intervention.legacyModePresent).toBe(true);
+    expect(loaded.model.source).toBe('heuristic');
+    // 不迁移、不删除、不补字段。
+    expect(await readFile(paths.configPath, 'utf8')).toBe(original);
   });
 });

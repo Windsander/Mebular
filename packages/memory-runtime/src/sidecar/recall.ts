@@ -66,9 +66,12 @@ import {
   planIntervention,
   planInterventionAsync,
   type InterventionCandidateView,
-  type InterventionMode,
   type InterventionPlannerInput,
 } from './intervention.js';
+import {
+  resolveEffectiveIntervention,
+  type EffectiveInterventionResolution,
+} from './effective.js';
 import type { InferenceInterventionStats } from './inference-provider.js';
 import type { PolicyStore } from './policy-store.js';
 
@@ -384,6 +387,8 @@ export interface RecallServiceOptions {
   } | null;
   /** 显式 SelfRecord 读取源；缺省复用 checkpointSource.getSelf。 */
   selfSource?: RecallServiceOptions['checkpointSource'];
+  /** 由 main 统一解析的 effective mode；缺省按 config 纯推导。 */
+  effectiveIntervention?: EffectiveInterventionResolution;
   now?: () => number;
 }
 
@@ -1171,6 +1176,8 @@ export class RecallService {
   readonly config: SidecarConfig;
   readonly local: SidecarLocalLayer;
   readonly identity: RecallServiceOptions['identity'];
+  /** 0.4.0：由 enabled+source 推导的 effective intervention（旧 mode 不参与）。 */
+  readonly effectiveIntervention: EffectiveInterventionResolution;
 
   private readonly client: CapabilityClient | null;
   private readonly models: SidecarInferenceProvider | null;
@@ -1214,6 +1221,12 @@ export class RecallService {
     this.identity = options.identity;
     this.policy = options.policy ?? null;
     this.getPolicy = options.getPolicy;
+    this.effectiveIntervention = options.effectiveIntervention ?? resolveEffectiveIntervention({
+      source: this.config.model.source,
+      legacyMode: this.config.intervention.mode,
+      legacyModePresent: this.config.intervention.legacyModePresent,
+      diagnosticShadow: this.config.intervention.diagnosticShadow === true,
+    });
     this.now = options.now ?? Date.now;
   }
 
@@ -3052,14 +3065,15 @@ export class RecallService {
   /**
    * user_negated 是显式 defer，不是 recall 层硬 short-circuit：
    * 不注入 memory fragments，但 self/checkpoint 已经在调用前按既有路径加载。
-   * 这是输入级审批例外，适用于所有 mode：
-   * - off：v0-baseline + enforced=false，不产生策略警告；
-   * - shadow：实际注入 defer，不走 baseline 的 speak；
-   * - heuristic/model：正常规则决策。
+   * 这是输入级审批例外，适用于所有 effective mode：
+   * - off（含 model.source 缺失）：v0-baseline + enforced=false，不产生策略警告；
+   * - shadow：同样记录输入级 defer，不进入 shadow 建议，也不记 baseline wouldAction；
+   * - heuristic/model：正常规则决策（规则层 defer_explicit，不调用模型）。
    */
   private negatedDeferDecision(run: RecallRun): InterventionDecision {
     const config = this.config.intervention;
-    if (config.mode === 'off') {
+    const intervention = this.effectiveIntervention;
+    if (intervention.planner === 'off' || intervention.mode === 'shadow') {
       return {
         action: 'defer',
         depth: 'gist',
@@ -3071,7 +3085,7 @@ export class RecallService {
     }
     const key = this.decisionKey(run);
     return planIntervention({
-      mode: config.mode as InterventionMode,
+      mode: intervention.planner,
       cue: run.cue,
       candidates: [],
       alreadyInjectedIds: this.resolveInjectedIds(run.request.alreadyInjectedIds),
@@ -3095,14 +3109,19 @@ export class RecallService {
     expansionPlan: Map<string, string>;
   }> {
     const config = this.config.intervention;
+    const intervention = this.effectiveIntervention;
     const basePlan = this.expansionPlan(selected, run.cue, warnings);
     const domain = selected[0]?.fragment.owner.domain ?? run.domains[0] ?? 'default';
     const key = this.decisionKey(run);
 
+    // 输入级 defer 优先于所有 mode：不注入 memory，但 self/checkpoint 保留。
+    // - off/baseline：v0-baseline + enforced=false；
+    // - shadow：不进入 shadow 建议路径，也不记录 baseline wouldAction；
+    // - heuristic/model：规则层 defer_explicit，模型不参与。
     if (this.isNegatedDefer(run.cue)) {
       const decision = this.negatedDeferDecision(run);
       // off 是输入级 defer，不是策略建议；不产生策略 warning。
-      if (config.mode !== 'off') pushWarning(warnings, 'intervention_defer');
+      if (intervention.planner !== 'off') pushWarning(warnings, 'intervention_defer');
       const effective = {
         action: 'defer' as InterventionAction,
         depth: 'gist' as RecallDepth,
@@ -3113,7 +3132,8 @@ export class RecallService {
       return { decision, effective, inject: [], expansionPlan: new Map() };
     }
 
-    if (config.mode === 'off') {
+    // model.source 缺失：保持 0.3 baseline/off，不静默开启 heuristic。
+    if (intervention.planner === 'off') {
       const decision = this.baselineDecision(run, selected, basePlan);
       const effective = {
         action: decision.action,
@@ -3187,7 +3207,7 @@ export class RecallService {
     });
 
     const planInput: InterventionPlannerInput = {
-      mode: config.mode as InterventionMode,
+      mode: intervention.planner,
       cue: run.cue,
       candidates,
       alreadyInjectedIds: this.resolveInjectedIds(run.request.alreadyInjectedIds),
@@ -3199,7 +3219,7 @@ export class RecallService {
       explorationRate: config.explorationRate,
     };
     // model 模式：must_speak 不调用模型；其余真实调用 provider，失败 fail-open。
-    const planned = config.mode === 'model'
+    const planned = intervention.planner === 'model'
       ? await planInterventionAsync(planInput, {
         planner: this.models,
         allowRemote: run.request.allowRemote,
@@ -3212,7 +3232,7 @@ export class RecallService {
     const decision = planned.decision;
     for (const warning of planned.warnings) pushWarning(warnings, warning);
 
-    if (config.mode === 'shadow') {
+    if (intervention.mode === 'shadow') {
       // shadow 只记录建议；实际注入保持 baseline，且不得改变 warning/预算行为。
       const baseline = this.baselineDecision(run, selected, basePlan);
       const effective = {
@@ -3222,7 +3242,13 @@ export class RecallService {
         shadow: true,
         domain,
       };
-      return { decision, effective, inject: selected, expansionPlan: basePlan };
+      // 建议不是生效决策，不能标 enforced。
+      return {
+        decision: { ...decision, enforced: false },
+        effective,
+        inject: selected,
+        expansionPlan: basePlan,
+      };
     }
 
     const speak = decision.action === 'speak';
@@ -3256,10 +3282,11 @@ export class RecallService {
   private async ensureDecision(run: RecallRun, warnings: string[]): Promise<void> {
     if (run.decision) return;
     const config = this.config.intervention;
+    const intervention = this.effectiveIntervention;
     const blocked = NON_INTERVENTION_SILENCE.has(run.silenceReason ?? '');
     if (!blocked && this.isNegatedDefer(run.cue)) {
       const domain = run.domains[0] ?? 'default';
-      if (config.mode !== 'off') pushWarning(warnings, 'intervention_defer');
+      if (intervention.planner !== 'off') pushWarning(warnings, 'intervention_defer');
       run.decision = this.negatedDeferDecision(run);
       run.effective = {
         action: 'defer',
@@ -3271,7 +3298,7 @@ export class RecallService {
       run.silenceReason = 'intervention_defer';
       return;
     }
-    if (config.mode === 'off' || blocked) {
+    if (intervention.planner === 'off' || blocked) {
       const decision = this.baselineDecision(run, run.selected, new Map());
       run.decision = decision;
       run.effective = {
@@ -3287,7 +3314,7 @@ export class RecallService {
     const key = this.decisionKey(run);
     const domain = run.domains[0] ?? 'default';
     const decision = planIntervention({
-      mode: config.mode as InterventionMode,
+      mode: intervention.planner,
       cue: run.cue,
       candidates: [],
       alreadyInjectedIds: this.resolveInjectedIds(run.request.alreadyInjectedIds),
@@ -3298,9 +3325,9 @@ export class RecallService {
       maxSilentStreak: config.maxSilentStreak,
       explorationRate: config.explorationRate,
     });
-    if (config.mode === 'shadow') {
+    if (intervention.mode === 'shadow') {
       const baseline = this.baselineDecision(run, run.selected, new Map());
-      run.decision = decision;
+      run.decision = { ...decision, enforced: false };
       run.effective = {
         action: baseline.action,
         depth: baseline.depth,

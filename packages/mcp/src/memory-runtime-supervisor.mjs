@@ -1161,6 +1161,7 @@ export class MemoryRuntimeSupervisor {
         degraded: result.state === 'degraded',
         capability: null,
         model: null,
+        intervention: null,
       };
     }
     const data = result.body?.data ?? result.body ?? {};
@@ -1200,6 +1201,22 @@ export class MemoryRuntimeSupervisor {
           }
         : null,
       model,
+      // 0.4.0 effective intervention：sidecar 已经是唯一推导源，这里只做白名单。
+      intervention: isObject(data.intervention)
+        ? {
+            mode: typeof data.intervention.mode === 'string' ? data.intervention.mode : null,
+            planner: typeof data.intervention.planner === 'string' ? data.intervention.planner : null,
+            source: typeof data.intervention.source === 'string' ? data.intervention.source : null,
+            derivedMode: typeof data.intervention.derivedMode === 'string' ? data.intervention.derivedMode : null,
+            legacyModePresent: data.intervention.legacyModePresent === true,
+            legacyModeIgnored: data.intervention.legacyModeIgnored === true,
+            legacyModeConflict: data.intervention.legacyModeConflict === true,
+            diagnosticShadow: data.intervention.diagnosticShadow === true,
+            warnings: Array.isArray(data.intervention.warnings)
+              ? data.intervention.warnings.filter((warning) => typeof warning === 'string')
+              : [],
+          }
+        : null,
     };
   }
 

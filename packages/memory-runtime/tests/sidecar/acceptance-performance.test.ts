@@ -128,7 +128,9 @@ describe('0.3.0 acceptance: performance and resource budgets', () => {
       });
       recallTimes.push(performance.now() - started);
       expect(result.data.blocks.length).toBeGreaterThan(0);
-      expect(result.data.degraded).toBe(false);
+      // 0.4.0 起 immersive 默认跑 heuristic：must_speak 命中但 detail 尚未同步时
+      // 预期会有 detail_pending_sync 与 degraded=true，不再是无介入 baseline。
+      expect(result.data.degraded).toBe(result.data.warnings.includes('detail_pending_sync'));
     }
     const recallP50 = percentile(recallTimes, 0.5);
     const recallP95 = percentile(recallTimes, 0.95);

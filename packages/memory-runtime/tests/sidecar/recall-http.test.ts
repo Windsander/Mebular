@@ -90,6 +90,7 @@ function interventionCheckpoint(threadId: string, domain: string, goal: string) 
 
 async function setup(options: {
   intervention?: Partial<ReturnType<typeof defaultSidecarConfig>['intervention']>;
+  modelSource?: ReturnType<typeof defaultSidecarConfig>['model']['source'];
   trace?: 'off' | 'local';
   now?: () => number;
   withPolicy?: boolean;
@@ -111,7 +112,14 @@ async function setup(options: {
   const config = defaultSidecarConfig();
   config.http.port = 0;
   if (options.trace) config.trace = options.trace;
-  if (options.intervention) config.intervention = { ...config.intervention, ...options.intervention };
+  if (options.modelSource) config.model.source = options.modelSource;
+  if (options.intervention) {
+    config.intervention = { ...config.intervention, ...options.intervention };
+    // 真实文件里显式写 mode 会由 normalize 置 true；测试注入时按同样语义处理。
+    if (Object.prototype.hasOwnProperty.call(options.intervention, 'mode')) {
+      config.intervention.legacyModePresent = true;
+    }
+  }
   const runtime = new SettlementRuntime({
     config,
     local,
@@ -202,7 +210,7 @@ describe('sidecar recall/context HTTP', () => {
       threadId: 'th_http_recall',
       turnId: 'turn_http_1',
       turnKind: 'human',
-      query: '我的偏好是什么？',
+      query: '你记得我的偏好吗？',
       maxFragments: 2,
       maxBytes: 4096,
       tokenBudget: 500,
@@ -568,7 +576,7 @@ describe('sidecar recall/context HTTP', () => {
       agentId: 'opencode',
       threadId: 'th_ckpt_ctx',
       turnId: 'turn_ckpt_1',
-      query: '继续上次任务',
+      query: '看看当前进度',
     });
     expect(context.status).toBe(200);
     expect(context.body.data.blocks[0]).toMatchObject({
@@ -593,7 +601,7 @@ describe('sidecar recall/context HTTP', () => {
       agentId: 'opencode',
       threadId: 'th_ckpt_ctx',
       turnId: 'turn_ckpt_budget',
-      query: '继续上次任务',
+      query: '看看当前进度',
       maxBytes: 520,
       maxTokens: 220,
     });
@@ -609,7 +617,7 @@ describe('sidecar recall/context HTTP', () => {
       agentId: 'opencode',
       threadId: 'th_ckpt_ctx',
       turnId: 'turn_ckpt_2',
-      query: '继续上次任务',
+      query: '看看当前进度',
       includeCheckpoint: false,
     });
     expect(noCheckpoint.body.data.blocks).toEqual([]);
@@ -639,7 +647,7 @@ describe('sidecar recall/context HTTP', () => {
       agentId: 'opencode',
       threadId: 'th_ckpt_ctx',
       turnId: 'turn_ckpt_3',
-      query: '继续上次任务',
+      query: '看看当前进度',
     });
     expect(summaryOnly.body.data.blocks[0]).toMatchObject({
       kind: 'checkpoint',
@@ -658,7 +666,7 @@ describe('sidecar recall/context HTTP', () => {
       agentId: 'opencode',
       threadId: 'th_ckpt_ctx',
       turnId: 'turn_ckpt_4',
-      query: '继续上次任务',
+      query: '看看当前进度',
     });
     expect(expired.body.data.blocks).toEqual([]);
     expect(expired.body.data.silenceReason).toBe('no_hits');
@@ -669,7 +677,7 @@ describe('sidecar recall/context HTTP', () => {
       agentId: 'opencode',
       threadId: 'th_ckpt_ctx',
       turnId: 'turn_ckpt_5',
-      query: '继续上次任务',
+      query: '看看当前进度',
     });
     expect(noSummary.body.data.blocks).toEqual([]);
     expect(noSummary.body.data.degraded).toBe(true);
@@ -718,7 +726,7 @@ describe('sidecar recall/context HTTP', () => {
       agentId: 'opencode',
       threadId: 'th_http_self',
       turnId: 'turn_http_self_1',
-      query: '我的偏好是什么？',
+      query: '你记得我的偏好吗？',
       includeSelf: true,
       includeCheckpoint: true,
     });
@@ -731,7 +739,7 @@ describe('sidecar recall/context HTTP', () => {
       agentId: 'opencode',
       threadId: 'th_http_self',
       turnId: 'turn_http_self_2',
-      query: '我的偏好是什么？',
+      query: '你记得我的偏好吗？',
       includeSelf: false,
       includeCheckpoint: true,
     });
@@ -835,8 +843,11 @@ describe('sidecar recall/context HTTP', () => {
     expect(context.body.data.estimatedTokens).toBeLessThanOrEqual(1200);
   });
 
-  it('off 模式不改变 baseline 注入，但始终返回 decision/applied', async () => {
-    const { server, runtime } = await setup({ intervention: { mode: 'off', minConfidence: 0.95 } });
+  it('旧 intervention.mode=off 被忽略：production 由 model.source=heuristic 派生', async () => {
+    const { server, runtime } = await setup({
+      modelSource: 'heuristic',
+      intervention: { mode: 'off', minConfidence: 0.5, explorationRate: 0, maxSilentStreak: 99 },
+    });
     const context = await post(`${server.url}/context`, {
       agentId: 'opencode',
       threadId: 'th_off',
@@ -845,75 +856,69 @@ describe('sidecar recall/context HTTP', () => {
     });
     expect(context.status).toBe(200);
     expect(context.body.data.fragments.length).toBeGreaterThan(0);
-    expect(context.body.data.decision).toMatchObject({
-      action: 'speak',
-      policyVersion: 'v0-baseline',
-      reason: 'baseline',
-      enforced: false,
-    });
-    expect(context.body.data.applied).toMatchObject({
-      action: 'speak',
-      fragments: expect.any(Number),
-    });
-    // off 也记录实际 baseline，而不是未生效的建议。
-    const offStats = await runtime.policyStore!.snapshot();
-    expect(offStats.global.spoken).toBe(1);
-    expect(offStats.global.silent).toBe(0);
+    expect(context.body.data.decision.policyVersion).toMatch(/^heuristic:/);
+    expect(context.body.data.decision.enforced).toBe(true);
+    expect(context.body.data.applied.wouldAction).toBeUndefined();
+    const stats = await runtime.policyStore!.snapshot();
+    expect(stats.global.spoken).toBe(1);
     const trace = await fetch(`${server.url}/traces/${context.body.data.traceId}`, { headers: auth() });
     const traceBody = await trace.json() as any;
-    expect(traceBody.data.decision.action).toBe('speak');
-    expect(traceBody.data.applied).toMatchObject({ action: 'speak', fragments: expect.any(Number) });
+    expect(traceBody.data.decision.policyVersion).toMatch(/^heuristic:/);
     expect(traceBody.data.applied.wouldAction).toBeUndefined();
-
-    const recall = await post(`${server.url}/recall`, {
-      agentId: 'opencode',
-      threadId: 'th_off',
-      query: '今天天气怎么样',
-    });
-    expect(recall.status).toBe(200);
-    expect(recall.body.data.decision).toMatchObject({ action: 'speak', reason: 'baseline' });
   });
 
-  it('shadow 只记录建议：注入块与 off 完全一致，并在 applied 记录 wouldAction/wouldDepth', async () => {
-    const off = await setup({ intervention: { mode: 'off' } });
-    const offContext = await post(`${off.server.url}/context`, {
+  it('旧 mode=shadow 不启用 shadow；只有内部 diagnosticShadow 才生效', async () => {
+    const legacy = await setup({
+      modelSource: 'heuristic',
+      intervention: { mode: 'shadow', minConfidence: 0.5, explorationRate: 0, maxSilentStreak: 99 },
+    });
+    const legacyContext = await post(`${legacy.server.url}/context`, {
       agentId: 'opencode',
-      threadId: 'th_shadow',
-      turnId: 'turn_shadow_1',
+      threadId: 'th_shadow_legacy',
+      turnId: 'turn_shadow_legacy_1',
       query: '你记得我的喜好吗？',
     });
-    const shadow = await setup({ intervention: { mode: 'shadow' } });
+    expect(legacyContext.status).toBe(200);
+    expect(legacyContext.body.data.decision.enforced).toBe(true);
+    expect(legacyContext.body.data.applied.wouldAction).toBeUndefined();
+    const version = await fetch(`${legacy.server.url}/version`, { headers: auth() });
+    const versionBody = await version.json() as any;
+    expect(versionBody.data.capabilities.intervention).toMatchObject({
+      mode: 'heuristic',
+      configuredSource: 'heuristic',
+      planner: 'heuristic',
+      legacyModeIgnored: true,
+      diagnosticShadow: false,
+    });
+    expect(versionBody.data.capabilities.intervention.warnings)
+      .toContain('legacy_intervention_mode_ignored');
+  });
+
+  it('diagnostic shadow 只记录建议：applied 记录 wouldAction/wouldDepth', async () => {
+    const shadow = await setup({
+      modelSource: 'heuristic',
+      intervention: { diagnosticShadow: true, explorationRate: 0, maxSilentStreak: 99 },
+    });
     const shadowContext = await post(`${shadow.server.url}/context`, {
       agentId: 'opencode',
       threadId: 'th_shadow',
       turnId: 'turn_shadow_1',
       query: '你记得我的喜好吗？',
     });
-    expect(offContext.status).toBe(200);
     expect(shadowContext.status).toBe(200);
-    const shape = (blocks: any[]) => blocks.map((block) => ({
-      kind: block.kind,
-      content: block.content,
-      domain: block.domain,
-      format: block.format ?? null,
-      tokens: block.tokens,
-      bytes: block.bytes,
-    }));
-    expect(shape(shadowContext.body.data.blocks)).toEqual(shape(offContext.body.data.blocks));
-    const fragmentsShape = (fragments: any[]) => fragments.map((fragment) => ({
-      kind: fragment.kind,
-      gist: fragment.gist,
-      detail: fragment.detail?.format ?? null,
-    }));
-    expect(fragmentsShape(shadowContext.body.data.fragments)).toEqual(fragmentsShape(offContext.body.data.fragments));
     expect(shadowContext.body.data.decision.policyVersion).toMatch(/^(v0-rules|heuristic:)/);
     expect(shadowContext.body.data.decision.enforced).toBe(false);
-    expect(offContext.body.data.decision.enforced).toBe(false);
     const trace = await fetch(`${shadow.server.url}/traces/${shadowContext.body.data.traceId}`, { headers: auth() });
     const traceBody = await trace.json() as any;
     expect(traceBody.data.applied).toMatchObject({
       wouldAction: shadowContext.body.data.decision.action,
       wouldDepth: shadowContext.body.data.decision.depth,
+    });
+    const version = await fetch(`${shadow.server.url}/version`, { headers: auth() });
+    const versionBody = await version.json() as any;
+    expect(versionBody.data.capabilities.intervention).toMatchObject({
+      mode: 'shadow',
+      diagnosticShadow: true,
     });
   });
 
@@ -1008,7 +1013,8 @@ describe('sidecar recall/context HTTP', () => {
 
   it('shadow 的策略计数用 applied baseline：decision silent / applied speak 记 spoken 而不是 silent', async () => {
     const { server, runtime } = await setup({
-      intervention: { mode: 'shadow', minConfidence: 0.95, explorationRate: 0, maxSilentStreak: 99 },
+      modelSource: 'heuristic',
+      intervention: { diagnosticShadow: true, minConfidence: 0.95, explorationRate: 0, maxSilentStreak: 99 },
     });
     const context = await post(`${server.url}/context`, {
       agentId: 'opencode',
@@ -1601,8 +1607,8 @@ describe('sidecar recall/context HTTP', () => {
     expect(finalStats.global.spoken + finalStats.global.silent).toBeGreaterThan(0);
   });
 
-  it('/version 暴露 intervention 能力位；旧字段保持兼容', async () => {
-    const { server } = await setup({ intervention: { mode: 'heuristic' } });
+  it('/version 暴露 effective intervention 能力位；旧字段保持兼容', async () => {
+    const { server } = await setup({ modelSource: 'heuristic', intervention: { mode: 'heuristic' } });
     const version = await fetch(`${server.url}/version`, { headers: auth() });
     const body = await version.json() as any;
     expect(version.status).toBe(200);
@@ -1618,7 +1624,35 @@ describe('sidecar recall/context HTTP', () => {
         shadow: true,
         reset: true,
         mode: 'heuristic',
+        configuredSource: 'heuristic',
+        planner: 'heuristic',
+        legacyModeIgnored: false,
+        diagnosticShadow: false,
+        warnings: [],
       },
     });
+  });
+
+  it('/status 返回 effective mode/source 与旧 mode warning；不泄漏密钥', async () => {
+    const { server } = await setup({
+      modelSource: 'api',
+      intervention: { mode: 'heuristic' },
+    });
+    const response = await fetch(`${server.url}/status`, { headers: auth() });
+    const body = await response.json() as any;
+    expect(response.status).toBe(200);
+    expect(body.data.intervention).toMatchObject({
+      mode: 'model',
+      planner: 'model',
+      source: 'api',
+      derivedMode: 'model',
+      legacyModePresent: true,
+      legacyModeIgnored: true,
+      legacyModeConflict: true,
+      diagnosticShadow: false,
+    });
+    expect(body.data.intervention.warnings).toContain('legacy_intervention_mode_ignored');
+    expect(body.warnings).toContain('legacy_intervention_mode_ignored');
+    expect(JSON.stringify(body)).not.toMatch(/keyRef|apiKey|authorization|bearer/i);
   });
 });

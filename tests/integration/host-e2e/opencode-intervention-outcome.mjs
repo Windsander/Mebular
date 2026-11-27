@@ -96,6 +96,63 @@ async function waitFor(predicate, { timeoutMs = 20000, intervalMs = 100 } = {}) 
   return null;
 }
 
+const sleep = (ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
+
+// `opencode run --server` 偶发在 server 刚打印 listening 时拿不到连接，退出码 1
+// 且 stderr 只有 "Could not reach server at ..."。这属于宿主启动竞争，不是产品
+// 断言失败；只对这种传输层症状做有界重试，其它失败立即交给最终 check 判定。
+const TRANSIENT_TRANSPORT_PATTERNS = [
+  /could not reach server/i,
+  /econnrefused/i,
+  /econnreset/i,
+  /connection refused/i,
+  /socket hang up/i,
+  /fetch failed/i,
+  /eai_again/i,
+  /etimedout/i,
+];
+
+function isTransientTransportFailure(stdout, stderr) {
+  const text = `${stdout ?? ''}\n${stderr ?? ''}`;
+  return TRANSIENT_TRANSPORT_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+/**
+ * Real readiness probe: use the same `opencode` CLI client path as
+ * `opencode run --server` and require a V2 `/api/info` JSON body. The serve
+ * log line alone only proves the listener started; it does not prove the CLI
+ * client can complete a request yet.
+ */
+async function waitForServerHealth(serverUrl, { env, cwd, timeoutMs = 30000, intervalMs = 250 } = {}) {
+  const startedAt = Date.now();
+  let attempts = 0;
+  let lastDetail = '';
+  while (Date.now() - startedAt < timeoutMs) {
+    attempts += 1;
+    const probe = await runProcess(OPENCODE_BIN, ['api', 'GET', '/api/info', '--server', serverUrl], {
+      env,
+      cwd,
+      timeoutMs: 8000,
+    });
+    const text = `${probe.stdout}\n${probe.stderr}`.trim();
+    if (probe.code === 0 && !probe.timedOut) {
+      try {
+        const info = JSON.parse(probe.stdout);
+        if (typeof info?.version === 'string' && info.version.length > 0) {
+          return { ok: true, attempts, elapsedMs: Date.now() - startedAt, version: info.version, detail: '' };
+        }
+        lastDetail = `unexpected /api/info payload: ${probe.stdout.slice(0, 200)}`;
+      } catch {
+        lastDetail = `unparseable /api/info payload: ${probe.stdout.slice(0, 200)}`;
+      }
+    } else {
+      lastDetail = text.slice(-300);
+    }
+    await sleep(intervalMs);
+  }
+  return { ok: false, attempts, elapsedMs: Date.now() - startedAt, version: null, detail: lastDetail };
+}
+
 function opencodeConfig({ providerUrl, pluginOptions }) {
   return {
     $schema: 'https://opencode.ai/config.json',
@@ -353,24 +410,76 @@ async function main() {
     const ready = await waitFor(() => /server listening on (http:\/\/\S+)/.test(serveOut), {
       timeoutMs: 30000,
     });
-    check('真实 opencode serve 启动', Boolean(ready), (serveOut || serveErr).slice(-500));
-    if (!ready) return 1;
+    if (!ready) {
+      check('真实 opencode serve 启动', false, (serveOut || serveErr).slice(-500));
+      return 1;
+    }
     const serverUrl = /server listening on (http:\/\/\S+)/.exec(serveOut)?.[1];
+
+    // 不只依赖 listening 日志：用真实 CLI 客户端探一次 V2 health，确认
+    // `opencode run --server` 走的客户端路径已经可用。
+    const health = await waitForServerHealth(serverUrl, { env: baseEnv, cwd: project });
+    console.log(`  · serve health /api/info：${health.ok ? 'ready' : 'not ready'}`
+      + `（${health.attempts} 次探测 / ${health.elapsedMs}ms${health.version ? `，v${health.version}` : ''}）`);
+    check('真实 opencode serve 启动', health.ok,
+      health.ok
+        ? `server listening + /api/info ${health.attempts} 次探测 / ${health.elapsedMs}ms`
+        : `health 未就绪：${health.attempts} 次探测 / ${health.elapsedMs}ms；${health.detail}`);
+    if (!health.ok) return 1;
+
+    // 可选的有界 warmup：首轮 `Could not reach server` 就是这条真实 run 路径与
+    // server 启动竞争。warmup 自身不是断言（保持 47 项契约不变），只吸收启动
+    // 抖动；上限 3 次、每次等待 120s、失败原因写日志，非传输类失败立即停止。
+    const parsedWarmupAttempts = Number.parseInt(process.env.MEBULAR_OUTCOME_WARMUP_ATTEMPTS ?? '3', 10);
+    const warmupAttempts = Number.isFinite(parsedWarmupAttempts)
+      ? Math.max(0, parsedWarmupAttempts)
+      : 3;
+    if (warmupAttempts === 0) {
+      console.log('  · warmup 已跳过（MEBULAR_OUTCOME_WARMUP_ATTEMPTS=0）');
+    }
+    for (let attempt = 1; attempt <= warmupAttempts; attempt += 1) {
+      const startedAt = Date.now();
+      const warmup = await runProcess(OPENCODE_BIN, [
+        'run', '--archived', '--server', serverUrl, '--format', 'json', 'hi',
+      ], { env: baseEnv, cwd: project, timeoutMs: 120000 });
+      const warmupSession = parseSessionID(warmup.stdout);
+      const warmupOk = warmup.code === 0 && !warmup.timedOut
+        && typeof warmupSession === 'string' && warmupSession.startsWith('ses');
+      console.log(`  · warmup run ${attempt}/${warmupAttempts}：${warmupOk ? 'ok' : 'failed'}`
+        + `（${Date.now() - startedAt}ms${warmupSession ? `，${warmupSession}` : ''}）`);
+      if (warmupOk) break;
+      if (!isTransientTransportFailure(warmup.stdout, warmup.stderr)) {
+        console.log(`  · warmup 非传输类失败，停止重试：${(warmup.stderr || warmup.stdout).slice(-200)}`);
+        break;
+      }
+      await sleep(500 * attempt);
+    }
 
     const turn = async (sessionID, prompt) => {
       const args = sessionID
         ? ['run', '--session', sessionID, '--server', serverUrl, '--format', 'json', prompt]
         : ['run', '--server', serverUrl, '--format', 'json', prompt];
-      // `opencode run` 偶发与刚启动的 server 竞争（本机约 1/5）：首轮没有拿到
-      // sessionID 时重试，避免把宿主启动抖动记成产品失败。只检查一次，断言数不变。
-      const attempts = sessionID ? 1 : 3;
-      let result;
-      let id;
-      for (let attempt = 0; attempt < attempts; attempt += 1) {
+      // 首轮最多 3 次、后续轮最多 2 次；只有传输层症状才重试，真实断言失败
+      // 不在重试里被吞掉。最终仍由同一个 check 判定，断言数不变。
+      const maxAttempts = sessionID ? 2 : 3;
+      let result = null;
+      let id = sessionID ?? null;
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
         result = await runProcess(OPENCODE_BIN, args, { env: baseEnv, cwd: project, timeoutMs: 120000 });
         id = sessionID ?? parseSessionID(result.stdout);
-        if (result.code === 0 && !result.timedOut && typeof id === 'string' && id.startsWith('ses')) break;
-        await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
+        const ok = result.code === 0 && !result.timedOut
+          && typeof id === 'string' && id.startsWith('ses');
+        if (ok) break;
+        if (!isTransientTransportFailure(result.stdout, result.stderr) || attempt === maxAttempts) {
+          if (attempt > 1) {
+            console.log(`  · turn 重试耗尽 ${attempt}/${maxAttempts}（${prompt.slice(0, 24)}…）：`
+              + `${(result.stderr || result.stdout).slice(-200)}`);
+          }
+          break;
+        }
+        console.log(`  · turn 传输失败重试 ${attempt}/${maxAttempts}（${prompt.slice(0, 24)}…）：`
+          + `${(result.stderr || result.stdout).slice(-200)}`);
+        await sleep(300 * attempt);
       }
       check(`真实 opencode turn 退出 0（${prompt.slice(0, 24)}…）`,
         result.code === 0 && !result.timedOut && typeof id === 'string' && id.startsWith('ses'),

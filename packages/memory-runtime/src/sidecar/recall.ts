@@ -3052,10 +3052,23 @@ export class RecallService {
   /**
    * user_negated 是显式 defer，不是 recall 层硬 short-circuit：
    * 不注入 memory fragments，但 self/checkpoint 已经在调用前按既有路径加载。
-   * 即使 intervention.mode=off，也保留这个输入级分类（enforced=false）。
+   * 这是输入级审批例外，适用于所有 mode：
+   * - off：v0-baseline + enforced=false，不产生策略警告；
+   * - shadow：实际注入 defer，不走 baseline 的 speak；
+   * - heuristic/model：正常规则决策。
    */
   private negatedDeferDecision(run: RecallRun): InterventionDecision {
     const config = this.config.intervention;
+    if (config.mode === 'off') {
+      return {
+        action: 'defer',
+        depth: 'gist',
+        confidence: 1,
+        reason: 'defer_explicit',
+        policyVersion: 'v0-baseline',
+        enforced: false,
+      };
+    }
     const key = this.decisionKey(run);
     return planIntervention({
       mode: config.mode as InterventionMode,
@@ -3088,7 +3101,8 @@ export class RecallService {
 
     if (this.isNegatedDefer(run.cue)) {
       const decision = this.negatedDeferDecision(run);
-      pushWarning(warnings, 'intervention_defer');
+      // off 是输入级 defer，不是策略建议；不产生策略 warning。
+      if (config.mode !== 'off') pushWarning(warnings, 'intervention_defer');
       const effective = {
         action: 'defer' as InterventionAction,
         depth: 'gist' as RecallDepth,
@@ -3245,7 +3259,7 @@ export class RecallService {
     const blocked = NON_INTERVENTION_SILENCE.has(run.silenceReason ?? '');
     if (!blocked && this.isNegatedDefer(run.cue)) {
       const domain = run.domains[0] ?? 'default';
-      pushWarning(warnings, 'intervention_defer');
+      if (config.mode !== 'off') pushWarning(warnings, 'intervention_defer');
       run.decision = this.negatedDeferDecision(run);
       run.effective = {
         action: 'defer',

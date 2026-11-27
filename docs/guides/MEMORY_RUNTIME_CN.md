@@ -254,8 +254,8 @@ ContextCheckpoint 始终是 `task:<threadId>` 或 `default` 中的图对象；�
 
 | 模式 | 行为 |
 |---|---|
-| `off` | 默认。不改变策略行为；`/context` 仍返回 baseline `decision`，`enforced:false`。`off` 仍会把 baseline 的 **applied** spoken/silent 写进本机 policy 统计与 trace，但不应用策略建议，也不做阈值自适应。 |
-| `shadow` | 计算策略建议（`decision`），但实际注入保持 baseline；trace 带 `wouldAction` / `wouldDepth`。 |
+| `off` | 默认。不改变策略行为；`/context` 仍返回 baseline `decision`，`enforced:false`。`off` 仍会把 baseline 的 **applied** spoken/silent 写进本机 policy 统计与 trace，但不应用策略建议，也不做阈值自适应。输入级 `defer_explicit` 仍返回 `defer`（`v0-baseline` / `enforced:false`），不产生策略警告。 |
+| `shadow` | 计算策略建议（`decision`），但实际注入保持 baseline；trace 带 `wouldAction` / `wouldDepth`。输入级 `defer_explicit` 是例外：实际注入 `defer`，不记录 baseline `wouldAction`。 |
 | `heuristic` | 启用本机规则策略；`must_speak` 仍是硬规则。 |
 | `model` | **实验性。** 用配置的模型做 `planIntervention()`；超时/非法输出/模型不可用回退 heuristic，并标 `degraded:true`。 |
 
@@ -317,6 +317,10 @@ checkpoint 仍按现有路径注入。它不会伪造片段，也不会静默失
 
 `defer_explicit` 不是策略沉默：trace 同时保留 `reason=defer_explicit` 与
 `applied.action=defer`，后续归因可以区分“用户/宿主主动推迟”和 `silent`。
+
+输入级 `defer_explicit`（包括 `user_negated`）适用于**所有** mode：`off` 记录
+`policyVersion=v0-baseline` / `enforced:false`，不产生策略警告；`shadow` 的实际注入
+是 `defer` 而不是 baseline，也不记录 baseline `wouldAction`，因为这不是策略建议。
 
 `trace=off` 时不做归因与策略学习；不读取 `decision` 的旧宿主看到的字段与 0.3.x 一致。
 

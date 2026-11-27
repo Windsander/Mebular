@@ -286,8 +286,8 @@ Configure the sidecar in `<home>/memory-runtime/config.json`:
 
 | Mode | Behavior |
 |---|---|
-| `off` | Default. No policy change; `/context` still returns a baseline `decision` with `enforced:false`. `off` still records the **applied** baseline counts in the local policy store and traces, but does not apply policy advice or adapt thresholds. |
-| `shadow` | Computes policy advice (`decision`) but injects the baseline result; traces carry `wouldAction` / `wouldDepth`. |
+| `off` | Default. No policy change; `/context` still returns a baseline `decision` with `enforced:false`. `off` still records the **applied** baseline counts in the local policy store and traces, but does not apply policy advice or adapt thresholds. Input-level `defer_explicit` still returns `defer` with `v0-baseline` / `enforced:false` and no policy warning. |
+| `shadow` | Computes policy advice (`decision`) but injects the baseline result; traces carry `wouldAction` / `wouldDepth`. Input-level `defer_explicit` is the exception: it applies as `defer` and records no baseline `wouldAction`. |
 | `heuristic` | Applies the local rule-based policy; `must_speak` remains a hard rule. |
 | `model` | **Experimental.** Uses the configured model for `planIntervention()`; timeout/invalid output/provider failure falls back to `heuristic` with `degraded:true`. |
 
@@ -361,6 +361,11 @@ existing path. It never invents a fragment or fails silently.
 `defer_explicit` is not policy silence: the trace keeps `reason=defer_explicit` and
 `applied.action=defer`, so later attribution can tell a deliberate user/host deferral
 from a `silent` decision.
+
+Input-level `defer_explicit` (including `user_negated`) applies in **every** mode. In
+`off` it records `policyVersion=v0-baseline` / `enforced:false` and emits no policy
+warning; in `shadow` the actual injection is `defer`, not the baseline, and no baseline
+`wouldAction` is recorded because the defer is not a policy suggestion.
 
 `trace=off` disables attribution and policy learning; a host that does not read
 `decision` sees the same response fields it saw in 0.3.x.

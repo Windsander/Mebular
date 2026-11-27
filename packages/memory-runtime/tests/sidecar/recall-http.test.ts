@@ -61,6 +61,33 @@ function preference(): FakeMemoryRecord {
   };
 }
 
+function interventionCheckpoint(threadId: string, domain: string, goal: string) {
+  return {
+    id: '01JINPUTDEFERCKPT',
+    domain,
+    agentId: 'opencode',
+    threadId,
+    revision: 1,
+    state: {
+      schema: 2,
+      contentMode: 'structured',
+      task: { key: domain, threadId, fleetTaskId: null },
+      goal,
+      constraints: [],
+      decisions: [],
+      progress: { done: [], doing: [], blocked: [] },
+      nextSteps: [{ id: 'n1', text: 'continue' }],
+      files: [],
+      openQuestions: [],
+      references: { recordIds: [], detailIds: [], messageIds: [], fleetTaskId: null, urls: [] },
+    },
+    summary: null,
+    recordIds: [],
+    lease: null,
+    expiresAt: 0,
+  };
+}
+
 async function setup(options: {
   intervention?: Partial<ReturnType<typeof defaultSidecarConfig>['intervention']>;
   trace?: 'off' | 'local';
@@ -888,6 +915,95 @@ describe('sidecar recall/context HTTP', () => {
       wouldAction: shadowContext.body.data.decision.action,
       wouldDepth: shadowContext.body.data.decision.depth,
     });
+  });
+
+  it('off + user_negated：输入级 defer，不注入 memory，checkpoint 保留，无策略警告', async () => {
+    const { server, fake } = await setup({ intervention: { mode: 'off', minConfidence: 0.55 } });
+    fake.setRecords([preference()]);
+    fake.checkpoints.push(interventionCheckpoint(
+      'th_off_negated',
+      'task:th_off_negated',
+      'OFF-NEGATED-CHECKPOINT',
+    ) as any);
+    const context = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_off_negated',
+      turnId: 'turn_off_negated',
+      query: '别用记忆回答我的偏好',
+    });
+    expect(context.status).toBe(200);
+    expect(context.body.data.decision).toMatchObject({
+      action: 'defer',
+      depth: 'gist',
+      reason: 'defer_explicit',
+      policyVersion: 'v0-baseline',
+      enforced: false,
+    });
+    expect(context.body.data.fragments).toEqual([]);
+    expect(context.body.data.blocks.map((block: any) => block.kind)).toEqual(['checkpoint']);
+    expect(context.body.data.blocks[0].content).toContain('OFF-NEGATED-CHECKPOINT');
+    expect(context.body.data.warnings).not.toContain('intervention_defer');
+    expect(context.body.data.applied).toMatchObject({
+      action: 'defer',
+      depth: 'gist',
+      fragments: 0,
+    });
+
+    const trace = await fetch(`${server.url}/traces/${context.body.data.traceId}`, { headers: auth() });
+    const traceBody = await trace.json() as any;
+    expect(traceBody.data.decision).toMatchObject({
+      action: 'defer',
+      reason: 'defer_explicit',
+      policyVersion: 'v0-baseline',
+      enforced: false,
+    });
+    expect(traceBody.data.applied).toMatchObject({ action: 'defer', depth: 'gist', fragments: 0 });
+    expect(traceBody.data.applied.wouldAction).toBeUndefined();
+  });
+
+  it('shadow + user_negated：实际注入 defer，不走 baseline，不记录 wouldAction', async () => {
+    const { server, fake } = await setup({ intervention: { mode: 'shadow' } });
+    fake.setRecords([preference()]);
+    fake.checkpoints.push(interventionCheckpoint(
+      'th_shadow_negated',
+      'task:th_shadow_negated',
+      'SHADOW-NEGATED-CHECKPOINT',
+    ) as any);
+    const context = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_shadow_negated',
+      turnId: 'turn_shadow_negated',
+      query: '别用记忆回答我的偏好',
+    });
+    expect(context.status).toBe(200);
+    expect(context.body.data.decision).toMatchObject({
+      action: 'defer',
+      depth: 'gist',
+      reason: 'defer_explicit',
+      policyVersion: 'v0-rules',
+      enforced: false,
+    });
+    expect(context.body.data.fragments).toEqual([]);
+    expect(context.body.data.blocks.map((block: any) => block.kind)).toEqual(['checkpoint']);
+    expect(context.body.data.blocks[0].content).toContain('SHADOW-NEGATED-CHECKPOINT');
+    expect(context.body.data.warnings).toContain('intervention_defer');
+    expect(context.body.data.applied).toMatchObject({
+      action: 'defer',
+      depth: 'gist',
+      fragments: 0,
+    });
+    // 输入级 defer 不是策略建议：shadow 不记录 baseline wouldAction，避免自相矛盾。
+    expect(context.body.data.applied.wouldAction).toBeUndefined();
+
+    const trace = await fetch(`${server.url}/traces/${context.body.data.traceId}`, { headers: auth() });
+    const traceBody = await trace.json() as any;
+    expect(traceBody.data.decision).toMatchObject({
+      action: 'defer',
+      reason: 'defer_explicit',
+      enforced: false,
+    });
+    expect(traceBody.data.applied).toMatchObject({ action: 'defer', depth: 'gist', fragments: 0 });
+    expect(traceBody.data.applied.wouldAction).toBeUndefined();
   });
 
   it('shadow 的策略计数用 applied baseline：decision silent / applied speak 记 spoken 而不是 silent', async () => {

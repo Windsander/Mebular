@@ -1,0 +1,168 @@
+{
+  "source": "host",
+  "host": "openchamber",
+  "identity": "adapter-identity-only",
+  "evidenceLevel": "RH+RS+FM",
+  "model": {
+    "id": "fake-openai-plan-json",
+    "note": "host model replaced by deterministic plan JSON; not R-RSM"
+  },
+  "checks": [
+    {
+      "id": "sidecar-discovery",
+      "name": "真实 sidecar discovery + host token",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "id": "capabilities",
+      "name": "intervention 能力位与 configuredSource",
+      "ok": true,
+      "detail": "{\"decision\":true,\"outcome\":true,\"shadow\":true,\"reset\":true,\"mode\":\"model\",\"hostPlan\":true,\"hostPlanScopes\":[\"session\",\"turn\"],\"hostPlanTtlMs\":60000,\"configuredSource\":\"host\",\"sourcePresent\":true,\"planner\":\"model\",\"legacyModeIgnored\":false,\"legacyModeConflict\":false,\"diagnosticShadow\":false,\"deadline\":1500,\"warnings\":[]}"
+    },
+    {
+      "id": "seed",
+      "name": "真实 capability 写入两条 seed",
+      "ok": true,
+      "detail": "{\"first\":{\"records\":1,\"duplicates\":0,\"failed\":0},\"second\":{\"records\":1,\"duplicates\":0,\"failed\":0}}"
+    },
+    {
+      "id": "opencode-version",
+      "name": "真实 opencode >= 2.2",
+      "ok": true,
+      "detail": "opencode v2.4.1"
+    },
+    {
+      "id": "opencode-serve",
+      "name": "真实 opencode serve 启动",
+      "ok": true,
+      "detail": "server listening on http://127.0.0.1:54096\n"
+    },
+    {
+      "id": "turn-1",
+      "name": "真实 opencode turn 1 退出 0",
+      "ok": true,
+      "detail": "\"prt_21dcab9190012Q7dv78dzaGg43\",\"sessionID\":\"ses_de235a4b3ffe5ArXj4yLK5cXnV\",\"messageID\":\"msg_21dcab825001XYQnp9tPbYghUk\",\"type\":\"step-finish\",\"reason\":\"stop\",\"snapshot\":\"93f3378b0b4d3867c9c391f830f31b05cb21f85f\",\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}}}}\n"
+    },
+    {
+      "id": "trace-1",
+      "name": "真实 /context trace + host identity",
+      "ok": true,
+      "detail": "{\"id\":\"tr_e8075fce70a447d9964e39bbad1b079a\",\"hostApp\":\"openchamber\"}"
+    },
+    {
+      "id": "host-first-turn",
+      "name": "第一轮 host 无 plan，立即 heuristic",
+      "ok": true,
+      "detail": "{\"configuredSource\":\"host\",\"resolvedSource\":\"heuristic\",\"latencyMs\":0,\"fallbackReason\":\"host_plan_missing\",\"prefetched\":false}"
+    },
+    {
+      "id": "host-hit",
+      "name": "真实宿主 session-prior 命中并消费",
+      "ok": true,
+      "detail": "{\"traceId\":\"tr_54d3fb7c52fa4c6cb6b2706a257581fe\",\"policyVersion\":\"host-plan:v1\",\"reason\":\"host_plan:high_relevance\",\"applied\":{\"action\":\"speak\",\"depth\":\"gist\",\"fragments\":1,\"domain\":\"default\",\"policyEligible\":true,\"degraded\":true},\"injected\":[{\"fragmentId\":\"mf_d4431b67140b46ddbe1a9dbccd35407a\",\"sourceId\":\"01M8EWJWVAGPBBH3F1J35NY5R7\"}],\"meta\":null}"
+    },
+    {
+      "id": "host-hit-source",
+      "name": "命中为 host plan（prefetched=true）且注入新鲜片段",
+      "ok": true,
+      "detail": "{\"hit\":{\"traceId\":\"tr_54d3fb7c52fa4c6cb6b2706a257581fe\",\"policyVersion\":\"host-plan:v1\",\"reason\":\"host_plan:high_relevance\",\"applied\":{\"action\":\"speak\",\"depth\":\"gist\",\"fragments\":1,\"domain\":\"default\",\"policyEligible\":true,\"degraded\":true},\"injected\":[{\"fragmentId\":\"mf_d4431b67140b46ddbe1a9dbccd35407a\",\"sourceId\":\"01M8EWJWVAGPBBH3F1J35NY5R7\"}],\"meta\":null},\"freshAgainstTurn1\":true}"
+    },
+    {
+      "id": "outcome-turn",
+      "name": "outcome 轮退出 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "id": "outcome",
+      "name": "真实宿主 outcome 归因落 trace（source=host）",
+      "ok": true,
+      "detail": "{\"kind\":\"reasked\",\"at\":1795796158504,\"source\":\"host\",\"confidence\":0.65}"
+    },
+    {
+      "id": "host-new-cue",
+      "name": "新 cue 第一轮 heuristic + prefetched=false（预期负向，不算能力失败）",
+      "ok": true,
+      "detail": "{\"traceId\":\"tr_463cf6ea254341f8b93a318b8c9195b3\",\"policyVersion\":\"heuristic:57334e4c\",\"reason\":\"no_candidates\",\"applied\":{\"action\":\"silent\",\"depth\":\"gist\",\"fragments\":0,\"domain\":\"user\",\"policyEligible\":true},\"injected\":[],\"meta\":null}"
+    },
+    {
+      "id": "host-new-cue-turn",
+      "name": "新 cue turn 退出 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "id": "binding-forged",
+      "name": "伪造 bindingToken 被拒绝",
+      "ok": true,
+      "detail": "404"
+    },
+    {
+      "id": "privacy",
+      "name": "trace 不含 seed 正文或 raw query 尾部",
+      "ok": true,
+      "detail": "no raw body/tail in traces"
+    }
+  ],
+  "traces": [
+    {
+      "phase": "turn1",
+      "traceId": "tr_e8075fce70a447d9964e39bbad1b079a",
+      "meta": {
+        "configuredSource": "host",
+        "resolvedSource": "heuristic",
+        "latencyMs": 0,
+        "fallbackReason": "host_plan_missing",
+        "prefetched": false
+      }
+    },
+    {
+      "phase": "host-hit",
+      "traceId": "tr_54d3fb7c52fa4c6cb6b2706a257581fe",
+      "policyVersion": "host-plan:v1",
+      "reason": "host_plan:high_relevance",
+      "applied": {
+        "action": "speak",
+        "depth": "gist",
+        "fragments": 1,
+        "domain": "default",
+        "policyEligible": true,
+        "degraded": true
+      },
+      "injected": [
+        {
+          "fragmentId": "mf_d4431b67140b46ddbe1a9dbccd35407a",
+          "sourceId": "01M8EWJWVAGPBBH3F1J35NY5R7"
+        }
+      ],
+      "meta": null
+    },
+    {
+      "phase": "host-new-cue",
+      "traceId": "tr_463cf6ea254341f8b93a318b8c9195b3",
+      "policyVersion": "heuristic:57334e4c",
+      "reason": "no_candidates",
+      "applied": {
+        "action": "silent",
+        "depth": "gist",
+        "fragments": 0,
+        "domain": "user",
+        "policyEligible": true
+      },
+      "injected": [],
+      "meta": null
+    }
+  ],
+  "timing": {},
+  "sessionId": "ses_de235a4b3ffe5ArXj4yLK5cXnV",
+  "traceCountAtTrace1": 1,
+  "traceThreadIds": [
+    "ses_de235a4b3ffe5ArXj4yLK5cXnV"
+  ],
+  "summary": {
+    "passed": 16,
+    "failed": 0,
+    "traceCount": 5
+  }
+}

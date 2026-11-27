@@ -149,6 +149,8 @@ node tests/integration/host-e2e/w7-host-plan-sidecar.mjs
 node tests/integration/host-e2e/w7-intervention-evidence.mjs --source local --host opencode
 node tests/integration/host-e2e/w7-intervention-evidence.mjs --source host --host opencode
 node tests/integration/host-e2e/w7-intervention-evidence.mjs --source heuristic --host openchamber
+node tests/integration/host-e2e/w7-intervention-evidence.mjs --source local --host openchamber
+node tests/integration/host-e2e/w7-intervention-evidence.mjs --source host --host openchamber
 ```
 
 模型/引擎路径可用 `MEBULAR_W7_MODEL_PATH` / `MEBULAR_W7_ENGINE_DIR` 覆盖；两者只从

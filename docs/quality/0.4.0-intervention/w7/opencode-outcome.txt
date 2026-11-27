@@ -1,39 +1,39 @@
 0.4.0 intervention outcome E2E（真实 opencode + 真实 sidecar + 真实插件）
 ==========================================================================
-  ✓ 真实 sidecar discovery 写出 /memory-runtime/v1（http://127.0.0.1:56839/memory-runtime/v1）
+  ✓ 真实 sidecar discovery 写出 /memory-runtime/v1（http://127.0.0.1:54777/memory-runtime/v1）
   ✓ host-token 文件包含真实 host token
   ✓ /version 声明 intervention decision/outcome/shadow/reset 能力（{"decision":true,"outcome":true,"shadow":true,"reset":true,"mode":"heuristic","hostPlan":true,"hostPlanScopes":["session","turn"],"hostPlanTtlMs":60000,"configuredSource":"heuristic","sourcePresent":true,"planner":"heuristic","legacyModeIgnored":false,"legacyModeConflict":false,"diagnosticShadow":false,"deadline":1500,"warnings":[]}）
-  ✓ 真实 capability 写入 memory + detail seed（{"records":1,"shallow":1,"detail":1,"detailId":"01M8ENQ4QS3X323V5GQQ100KXH"}）
+  ✓ 真实 capability 写入 memory + detail seed（{"records":1,"shallow":1,"detail":1,"detailId":"01M8EWP867YAQW73PTATQ35NDK"}）
   ✓ opencode 可启动且 >= 2.2（opencode v2.4.1）
-  ✓ 真实 opencode serve 启动（server listening on http://127.0.0.1:56845
+  ✓ 真实 opencode serve 启动（server listening on http://127.0.0.1:54791
 ）
-  ✓ 真实 opencode turn 退出 0（details redacted）
+  ✓ 真实 opencode turn 退出 0（以后 deepwork 主题用 interven…）（":"step_finish","timestamp":1795796228844,"sessionID":"ses_de2348a41ffeG6ucpInOuFQDIv","part":{"id":"prt_21dcbdaec0014lGjkWYaOSEL17","sessionID":"ses_de2348a41ffeG6ucpInOuFQDIv","messageID":"msg_21dcbd9e000107Y2la6L2H8I4h","type":"step-finish","reason":"stop","snapshot":"93f3378b0b4d3867c9c391f830f31b05cb21f85f","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}}}}
 ）
   ✓ A1 真实 /context 走 heuristic 并注入记忆（{"decision":{"action":"speak","depth":"gist","confidence":0.6355,"reason":"high_relevance","policyVersion":"heuristic:67731e08","enforced":true,"scores":{"top":0.6355,"specificity":0.7,"novelty":1,"recentUseless":0,"depthFit":1},"planner":{"configuredSource":"heuristic","resolvedSource":"heuristic","latencyMs":0,"fallbackReason":null,"prefetched":false,"adaptive":{"stage":"shadow","applied":false,"baseThreshold":0.45,"recommendedThreshold":0.45,"threshold":0.45,"offset":0}}},"applied":{"action":"speak","depth":"gist","fragments":1,"domain":"user","policyEligible":true,"adaptiveEligible":true}}）
   ✓ A1 trace 可经真实 GET /traces/:id 读取
   ✓ A1 注入进入真实 outgoing model request 且标记 untrusted/request-only
-  ✓ 真实 opencode turn 退出 0（details redacted）
+  ✓ 真实 opencode turn 退出 0（再说一遍 deepwork 主题是什么…）（":"step_finish","timestamp":1795796229290,"sessionID":"ses_de2348a41ffeG6ucpInOuFQDIv","part":{"id":"prt_21dcbdcaa001jARj4l1cEsewh5","sessionID":"ses_de2348a41ffeG6ucpInOuFQDIv","messageID":"msg_21dcbdc2a001HWvJOO1h81cFaE","type":"step-finish","reason":"stop","snapshot":"93f3378b0b4d3867c9c391f830f31b05cb21f85f","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}}}}
 ）
-  ✓ A2 用户重问 → 真实 /recall/:id/outcome 记录 reasked（{"kind":"reasked","at":1795788952667,"source":"host","confidence":0.65}）
-  ✓ 真实 opencode turn 退出 0（details redacted）
+  ✓ A2 用户重问 → 真实 /recall/:id/outcome 记录 reasked（{"kind":"reasked","at":1795796229169,"source":"host","confidence":0.65}）
+  ✓ 真实 opencode turn 退出 0（你好…）（":"step_finish","timestamp":1795796229695,"sessionID":"ses_de2342247ffeT2RRqJpREEr1Hw","part":{"id":"prt_21dcbde3f0016YxTMEFgL8S9KB","sessionID":"ses_de2342247ffeT2RRqJpREEr1Hw","messageID":"msg_21dcbdddb001OAKsyldqXFVi5b","type":"step-finish","reason":"stop","snapshot":"93f3378b0b4d3867c9c391f830f31b05cb21f85f","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}}}}
 ）
   ✓ B1 闲聊得到 silent 决策且未注入片段（{"decision":{"action":"silent","depth":"gist","confidence":0,"reason":"chitchat","policyVersion":"v0-baseline","enforced":false},"applied":{"action":"silent","depth":"gist","fragments":0,"domain":"default","policyEligible":false}}）
-  ✓ 真实 opencode turn 退出 0（details redacted）
+  ✓ 真实 opencode turn 退出 0（你还记得刚才那个 deepwork 主题吗…）（":"step_finish","timestamp":1795796230095,"sessionID":"ses_de2342247ffeT2RRqJpREEr1Hw","part":{"id":"prt_21dcbdfcf001wp2f4UGlxkpVwy","sessionID":"ses_de2342247ffeT2RRqJpREEr1Hw","messageID":"msg_21dcbdf56001dKsZopm1VccqTH","type":"step-finish","reason":"stop","snapshot":"93f3378b0b4d3867c9c391f830f31b05cb21f85f","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}}}}
 ）
-  ✓ B2 显式记忆追问 → 真实 outcome 记录 missed（{"kind":"missed","at":1795788953515,"source":"host","confidence":0.7}）
-  ✓ 真实 opencode turn 退出 0（details redacted）
+  ✓ B2 显式记忆追问 → 真实 outcome 记录 missed（{"kind":"missed","at":1795796229979,"source":"host","confidence":0.7}）
+  ✓ 真实 opencode turn 退出 0（deepwork 主题…）（":"step_finish","timestamp":1795796230528,"sessionID":"ses_de2341f2dffeJrTEDhnIOsDmbP","part":{"id":"prt_21dcbe180001sSeOBYAIf0vSjQ","sessionID":"ses_de2341f2dffeJrTEDhnIOsDmbP","messageID":"msg_21dcbe0f6001iYobjfgTexOgBk","type":"step-finish","reason":"stop","snapshot":"93f3378b0b4d3867c9c391f830f31b05cb21f85f","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}}}}
 ）
   ✓ C1 宽 cue 得到 gist 决策（{"action":"speak","depth":"gist","confidence":0.6355,"reason":"high_relevance","policyVersion":"heuristic:67731e08","enforced":true,"scores":{"top":0.6355,"specificity":0.7,"novelty":1,"recentUseless":0,"depthFit":1},"planner":{"configuredSource":"heuristic","resolvedSource":"heuristic","latencyMs":0,"fallbackReason":null,"prefetched":false,"adaptive":{"stage":"shadow","applied":false,"baseThreshold":0.45,"recommendedThreshold":0.45,"threshold":0.45,"offset":0}}}）
-  ✓ 真实 opencode turn 退出 0（details redacted）
+  ✓ 真实 opencode turn 退出 0（具体说说 deepwork 主题的细节…）（":"step_finish","timestamp":1795796230949,"sessionID":"ses_de2341f2dffeJrTEDhnIOsDmbP","part":{"id":"prt_21dcbe325001KHPoEtV9hNvar5","sessionID":"ses_de2341f2dffeJrTEDhnIOsDmbP","messageID":"msg_21dcbe2a8001LDp8dv1gIkWbq3","type":"step-finish","reason":"stop","snapshot":"93f3378b0b4d3867c9c391f830f31b05cb21f85f","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}}}}
 ）
-  ✓ C2 gist 后要求具体 → 真实 outcome 记录 too_shallow（{"kind":"too_shallow","at":1795788954347,"source":"host","confidence":0.65}）
-  ✓ 真实 opencode turn 退出 0（details redacted）
+  ✓ C2 gist 后要求具体 → 真实 outcome 记录 too_shallow（{"kind":"too_shallow","at":1795796230830,"source":"host","confidence":0.65}）
+  ✓ 真实 opencode turn 退出 0（deepwork 主题怎么配置…）（":"step_finish","timestamp":1795796231363,"sessionID":"ses_de2341bd7ffel0Y5PKoLEagvrH","part":{"id":"prt_21dcbe4c30012qAve4fNCv1Hql","sessionID":"ses_de2341bd7ffel0Y5PKoLEagvrH","messageID":"msg_21dcbe448001vdC3LIn8QOOzjK","type":"step-finish","reason":"stop","snapshot":"93f3378b0b4d3867c9c391f830f31b05cb21f85f","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}}}}
 ）
   ✓ D1 追问配置意图得到 detail 决策（{"action":"speak","depth":"detail","confidence":0.6355,"reason":"high_relevance","policyVersion":"heuristic:67731e08","enforced":true,"scores":{"top":0.6355,"specificity":0.7,"novelty":1,"recentUseless":0,"depthFit":1},"planner":{"configuredSource":"heuristic","resolvedSource":"heuristic","latencyMs":0,"fallbackReason":null,"prefetched":false,"adaptive":{"stage":"shadow","applied":false,"baseThreshold":0.45,"recommendedThreshold":0.45,"threshold":0.45,"offset":0}}}）
-  ✓ 真实 opencode turn 退出 0（details redacted）
+  ✓ 真实 opencode turn 退出 0（太长了，简单点说…）（":"step_finish","timestamp":1795796231775,"sessionID":"ses_de2341bd7ffel0Y5PKoLEagvrH","part":{"id":"prt_21dcbe65f001D2W7x737KGZh2V","sessionID":"ses_de2341bd7ffel0Y5PKoLEagvrH","messageID":"msg_21dcbe5d90016RzN7lfgNFG0nl","type":"step-finish","reason":"stop","snapshot":"93f3378b0b4d3867c9c391f830f31b05cb21f85f","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}}}}
 ）
-  ✓ D2 detail 后嫌太长 → 真实 outcome 记录 too_deep（{"kind":"too_deep","at":1795788955199,"source":"host","confidence":0.65}）
-  ✓ 真实 opencode turn 退出 0（details redacted）
+  ✓ D2 detail 后嫌太长 → 真实 outcome 记录 too_deep（{"kind":"too_deep","at":1795796231647,"source":"host","confidence":0.65}）
+  ✓ 真实 opencode turn 退出 0（隐私探针 。。。。。。。。。。。。。。。。。。。…）（":"step_finish","timestamp":1795796232208,"sessionID":"ses_de2341888ffe443szg3loFq7Ry","part":{"id":"prt_21dcbe8100011BtZE1ZjAO5xdH","sessionID":"ses_de2341888ffe443szg3loFq7Ry","messageID":"msg_21dcbe79b001b4HEQj5JlJnzJO","type":"step-finish","reason":"stop","snapshot":"93f3378b0b4d3867c9c391f830f31b05cb21f85f","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}}}}
 ）
   ✓ 隐私探针 turn 生成真实 silent trace（{"length":200}）
   ✗ 本机 policy/state.json 持久化 spoken/silent 与 outcome 计数
@@ -50,12 +50,12 @@
   ✓ 隐私：Console view 不含 raw query 尾部 / detail 正文 / host token
   ✓ 隐私：trace 不保存 rawQuery/query 原始正文字段（{"queryPreviewLength":11}）
   ✗ 隐私：outcome note 是固定归因说明，不含用户正文（{}）
-  ✓ 真实 opencode turn 退出 0（details redacted）
+  ✓ 真实 opencode turn 退出 0（deepwork 主题…）（":"step_finish","timestamp":1795796242775,"sessionID":"ses_de233ef4effeAWfJeEMZhWtVaU","part":{"id":"prt_21dcc115700136tojdGPqrNpbQ","sessionID":"ses_de233ef4effeAWfJeEMZhWtVaU","messageID":"msg_21dcc10d80013EhEcYlef4szko","type":"step-finish","reason":"stop","snapshot":"93f3378b0b4d3867c9c391f830f31b05cb21f85f","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}}}}
 ）
   ✓ reset 后新 trace 仍走真实 heuristic 并注入记忆（{"decision":{"action":"speak","depth":"gist","confidence":0.6355,"reason":"high_relevance","policyVersion":"heuristic:67731e08","enforced":true,"scores":{"top":0.6355,"specificity":0.7,"novelty":1,"recentUseless":0,"depthFit":1},"planner":{"configuredSource":"heuristic","resolvedSource":"heuristic","latencyMs":0,"fallbackReason":null,"prefetched":false,"adaptive":{"stage":"shadow","applied":false,"baseThreshold":0.45,"recommendedThreshold":0.45,"threshold":0.45,"offset":0}}},"applied":{"action":"speak","depth":"gist","fragments":3,"domain":"user","policyEligible":true,"adaptiveEligible":true}}）
-  ✓ 真实 opencode turn 退出 0（details redacted）
+  ✓ 真实 opencode turn 退出 0（再说一遍 deepwork 主题是什么…）（":"step_finish","timestamp":1795796243185,"sessionID":"ses_de233ef4effeAWfJeEMZhWtVaU","part":{"id":"prt_21dcc12f1001cdk4zjvc0aJ6q1","sessionID":"ses_de233ef4effeAWfJeEMZhWtVaU","messageID":"msg_21dcc126c0012ZVoiXa0bmYVXg","type":"step-finish","reason":"stop","snapshot":"93f3378b0b4d3867c9c391f830f31b05cb21f85f","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}}}}
 ）
-  ✓ reset 后新 trace 的 outcome 正常写入（{"kind":"reasked","at":1795788966688,"source":"host","confidence":0.65}）
+  ✓ reset 后新 trace 的 outcome 正常写入（{"kind":"reasked","at":1795796243058,"source":"host","confidence":0.65}）
   ✓ reset 后新 outcome 恢复写本机 policy 统计（{"spoken":1,"silent":1,"accepted":0,"ignored":0,"reasked":1,"corrected":0,"dismissed":0,"missed":0,"too_shallow":0,"too_deep":0}）
   ✓ opencode serve 全程存活
 

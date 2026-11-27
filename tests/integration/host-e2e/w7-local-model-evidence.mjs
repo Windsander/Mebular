@@ -90,7 +90,7 @@ async function main() {
   });
   const result = {
     evidenceLevel: 'R-SM',
-    host: 'none (real sidecar HTTP; adapter dedupe blocks host two-round)',
+    host: 'none (real sidecar HTTP; adapter two-round measured separately)',
     model: { id: 'Qwen3-4B-Q4_K_M.gguf', sha256: modelSha, engine: 'llama.cpp b12017' },
     samples: [],
     freshCue: null,

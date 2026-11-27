@@ -36,19 +36,19 @@
       "id": "opencode-serve",
       "name": "真实 opencode serve 启动",
       "ok": true,
-      "detail": "server listening on http://127.0.0.1:64922\n"
+      "detail": "server listening on http://127.0.0.1:52365\n"
     },
     {
       "id": "turn-1",
       "name": "真实 opencode turn 1 退出 0",
       "ok": true,
-      "detail": "\"prt_21d6d771f001Bwo56gKi0gst9Y\",\"sessionID\":\"ses_de292e08cffeNMBAIlfR3b9Fa4\",\"messageID\":\"msg_21d6d75fb001XTdX8QIn3kZctL\",\"type\":\"step-finish\",\"reason\":\"stop\",\"snapshot\":\"a9a6ead816b71bce5abb0ab60a93036ef3e39a9a\",\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}}}}\n"
+      "detail": "\"prt_21dc723c9001Yyv60VWdBdnPG0\",\"sessionID\":\"ses_de2394e5affeA1prch2kscYnKI\",\"messageID\":\"msg_21dc722da0016dwVFRwuTy0C0R\",\"type\":\"step-finish\",\"reason\":\"stop\",\"snapshot\":\"93f3378b0b4d3867c9c391f830f31b05cb21f85f\",\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}}}}\n"
     },
     {
       "id": "trace-1",
       "name": "真实 /context trace + host identity",
       "ok": true,
-      "detail": "{\"id\":\"tr_e40a9854de9e47ceb64977664ce8b4c5\",\"hostApp\":\"openchamber\"}"
+      "detail": "{\"id\":\"tr_b4444904571b4b0993a44a63a2a6b79f\",\"hostApp\":\"openchamber\"}"
     },
     {
       "id": "heuristic-turn",
@@ -66,7 +66,19 @@
       "id": "outcome",
       "name": "真实宿主 outcome 归因落 trace（source=host）",
       "ok": true,
-      "detail": "{\"kind\":\"reasked\",\"at\":1795790043254,\"source\":\"host\",\"confidence\":0.65}"
+      "detail": "{\"kind\":\"reasked\",\"at\":1795795920143,\"source\":\"host\",\"confidence\":0.65}"
+    },
+    {
+      "id": "host-new-cue",
+      "name": "新 cue 第一轮 heuristic + prefetched=false（预期负向，不算能力失败）",
+      "ok": true,
+      "detail": "{\"traceId\":\"tr_ba3c518d96934ca89bfc768421cbab32\",\"policyVersion\":\"heuristic:57334e4c\",\"reason\":\"no_candidates\",\"applied\":{\"action\":\"silent\",\"depth\":\"gist\",\"fragments\":0,\"domain\":\"user\",\"policyEligible\":true,\"adaptiveEligible\":true},\"injected\":[],\"meta\":null}"
+    },
+    {
+      "id": "host-new-cue-turn",
+      "name": "新 cue turn 退出 0",
+      "ok": true,
+      "detail": ""
     },
     {
       "id": "binding-forged",
@@ -84,7 +96,7 @@
   "traces": [
     {
       "phase": "turn1",
-      "traceId": "tr_e40a9854de9e47ceb64977664ce8b4c5",
+      "traceId": "tr_b4444904571b4b0993a44a63a2a6b79f",
       "meta": {
         "configuredSource": "heuristic",
         "resolvedSource": "heuristic",
@@ -100,17 +112,33 @@
           "offset": 0
         }
       }
+    },
+    {
+      "phase": "host-new-cue",
+      "traceId": "tr_ba3c518d96934ca89bfc768421cbab32",
+      "policyVersion": "heuristic:57334e4c",
+      "reason": "no_candidates",
+      "applied": {
+        "action": "silent",
+        "depth": "gist",
+        "fragments": 0,
+        "domain": "user",
+        "policyEligible": true,
+        "adaptiveEligible": true
+      },
+      "injected": [],
+      "meta": null
     }
   ],
   "timing": {},
-  "sessionId": "ses_de292e08cffeNMBAIlfR3b9Fa4",
+  "sessionId": "ses_de2394e5affeA1prch2kscYnKI",
   "traceCountAtTrace1": 1,
   "traceThreadIds": [
-    "ses_de292e08cffeNMBAIlfR3b9Fa4"
+    "ses_de2394e5affeA1prch2kscYnKI"
   ],
   "summary": {
-    "passed": 12,
+    "passed": 14,
     "failed": 0,
-    "traceCount": 3
+    "traceCount": 4
   }
 }

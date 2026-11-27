@@ -36,19 +36,19 @@
       "id": "opencode-serve",
       "name": "真实 opencode serve 启动",
       "ok": true,
-      "detail": "server listening on http://127.0.0.1:53810\n"
+      "detail": "server listening on http://127.0.0.1:51532\n"
     },
     {
       "id": "turn-1",
       "name": "真实 opencode turn 1 退出 0",
       "ok": true,
-      "detail": "\"prt_21d79db440016g9jHWrD92JBkg\",\"sessionID\":\"ses_de2868c3affekKoPwvEz7zpbg1\",\"messageID\":\"msg_21d79da58001RTmqGF5ty3WsbO\",\"type\":\"step-finish\",\"reason\":\"stop\",\"snapshot\":\"31aa32aca46e3625f880e0451549db3ab7a58198\",\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}}}}\n"
+      "detail": "\"prt_21dc53796001MVJhgFqasMXQqg\",\"sessionID\":\"ses_de23b333dffegaOLpMftC8uA2X\",\"messageID\":\"msg_21dc5369e001hJgo8cSKjUi2QR\",\"type\":\"step-finish\",\"reason\":\"stop\",\"snapshot\":\"93f3378b0b4d3867c9c391f830f31b05cb21f85f\",\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}}}}\n"
     },
     {
       "id": "trace-1",
       "name": "真实 /context trace + host identity",
       "ok": true,
-      "detail": "{\"id\":\"tr_e55831363a8f48728aad875d92ef9c50\",\"hostApp\":\"opencode\"}"
+      "detail": "{\"id\":\"tr_7ea64ff6ea2f4eb2bd2319ee79f18b0d\",\"hostApp\":\"opencode\"}"
     },
     {
       "id": "host-first-turn",
@@ -59,26 +59,14 @@
     {
       "id": "host-hit",
       "name": "真实宿主 session-prior 命中并消费",
-      "ok": false,
-      "detail": "null"
+      "ok": true,
+      "detail": "{\"traceId\":\"tr_a6c42851adaf476b8d04227af5983664\",\"policyVersion\":\"host-plan:v1\",\"reason\":\"host_plan:high_relevance\",\"applied\":{\"action\":\"speak\",\"depth\":\"gist\",\"fragments\":1,\"domain\":\"default\",\"policyEligible\":true,\"degraded\":true},\"injected\":[{\"fragmentId\":\"mf_8bb6a3811ffd496aa1e93b7685dec171\",\"sourceId\":\"01M8EW74K2FCH39GH4GEX8HCVE\"}],\"meta\":null}"
     },
     {
       "id": "host-hit-source",
-      "name": "命中元数据 resolvedSource=host 且 prefetched=true",
-      "ok": false,
-      "detail": "{}"
-    },
-    {
-      "id": "host-new-cue",
-      "name": "新 cue 不命中 host plan（prefetched=false）",
-      "ok": false,
-      "detail": "null"
-    },
-    {
-      "id": "host-new-cue-turn",
-      "name": "新 cue turn 退出 0",
+      "name": "命中为 host plan（prefetched=true）且注入新鲜片段",
       "ok": true,
-      "detail": ""
+      "detail": "{\"hit\":{\"traceId\":\"tr_a6c42851adaf476b8d04227af5983664\",\"policyVersion\":\"host-plan:v1\",\"reason\":\"host_plan:high_relevance\",\"applied\":{\"action\":\"speak\",\"depth\":\"gist\",\"fragments\":1,\"domain\":\"default\",\"policyEligible\":true,\"degraded\":true},\"injected\":[{\"fragmentId\":\"mf_8bb6a3811ffd496aa1e93b7685dec171\",\"sourceId\":\"01M8EW74K2FCH39GH4GEX8HCVE\"}],\"meta\":null},\"freshAgainstTurn1\":true}"
     },
     {
       "id": "outcome-turn",
@@ -90,7 +78,19 @@
       "id": "outcome",
       "name": "真实宿主 outcome 归因落 trace（source=host）",
       "ok": true,
-      "detail": "{\"kind\":\"missed\",\"at\":1795790872013,\"source\":\"host\",\"confidence\":0.55}"
+      "detail": "{\"kind\":\"reasked\",\"at\":1795795797620,\"source\":\"host\",\"confidence\":0.65}"
+    },
+    {
+      "id": "host-new-cue",
+      "name": "新 cue 第一轮 heuristic + prefetched=false（预期负向，不算能力失败）",
+      "ok": true,
+      "detail": "{\"traceId\":\"tr_975ff81c7c344562907cd05720aae955\",\"policyVersion\":\"heuristic:57334e4c\",\"reason\":\"no_candidates\",\"applied\":{\"action\":\"silent\",\"depth\":\"gist\",\"fragments\":0,\"domain\":\"user\",\"policyEligible\":true},\"injected\":[],\"meta\":null}"
+    },
+    {
+      "id": "host-new-cue-turn",
+      "name": "新 cue turn 退出 0",
+      "ok": true,
+      "detail": ""
     },
     {
       "id": "binding-forged",
@@ -108,7 +108,7 @@
   "traces": [
     {
       "phase": "turn1",
-      "traceId": "tr_e55831363a8f48728aad875d92ef9c50",
+      "traceId": "tr_7ea64ff6ea2f4eb2bd2319ee79f18b0d",
       "meta": {
         "configuredSource": "host",
         "resolvedSource": "heuristic",
@@ -118,20 +118,51 @@
       }
     },
     {
+      "phase": "host-hit",
+      "traceId": "tr_a6c42851adaf476b8d04227af5983664",
+      "policyVersion": "host-plan:v1",
+      "reason": "host_plan:high_relevance",
+      "applied": {
+        "action": "speak",
+        "depth": "gist",
+        "fragments": 1,
+        "domain": "default",
+        "policyEligible": true,
+        "degraded": true
+      },
+      "injected": [
+        {
+          "fragmentId": "mf_8bb6a3811ffd496aa1e93b7685dec171",
+          "sourceId": "01M8EW74K2FCH39GH4GEX8HCVE"
+        }
+      ],
+      "meta": null
+    },
+    {
       "phase": "host-new-cue",
-      "traceId": "tr_3c7c81fcf6a245ffb188ac740cf2f3a8",
+      "traceId": "tr_975ff81c7c344562907cd05720aae955",
+      "policyVersion": "heuristic:57334e4c",
+      "reason": "no_candidates",
+      "applied": {
+        "action": "silent",
+        "depth": "gist",
+        "fragments": 0,
+        "domain": "user",
+        "policyEligible": true
+      },
+      "injected": [],
       "meta": null
     }
   ],
   "timing": {},
-  "sessionId": "ses_de2868c3affekKoPwvEz7zpbg1",
+  "sessionId": "ses_de23b333dffegaOLpMftC8uA2X",
   "traceCountAtTrace1": 1,
   "traceThreadIds": [
-    "ses_de2868c3affekKoPwvEz7zpbg1"
+    "ses_de23b333dffegaOLpMftC8uA2X"
   ],
   "summary": {
-    "passed": 13,
-    "failed": 3,
-    "traceCount": 9
+    "passed": 16,
+    "failed": 0,
+    "traceCount": 5
   }
 }

@@ -37,19 +37,19 @@
       "id": "opencode-serve",
       "name": "真实 opencode serve 启动",
       "ok": true,
-      "detail": "server listening on http://127.0.0.1:53196\n"
+      "detail": "server listening on http://127.0.0.1:50416\n"
     },
     {
       "id": "turn-1",
       "name": "真实 opencode turn 1 退出 0",
       "ok": true,
-      "detail": "\"prt_21d77f270001tAaryS158tH2wP\",\"sessionID\":\"ses_de2889091ffeDiocCyOO8I54Mr\",\"messageID\":\"msg_21d77f15e001QoOIsniVJEiAsC\",\"type\":\"step-finish\",\"reason\":\"stop\",\"snapshot\":\"31aa32aca46e3625f880e0451549db3ab7a58198\",\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}}}}\n"
+      "detail": "\"prt_21dc20e55001zDrFvzfGQYQvmD\",\"sessionID\":\"ses_de23e288cffeiO4z00bDeV4IzQ\",\"messageID\":\"msg_21dc20d0b001CytQ7Swsmv7XIZ\",\"type\":\"step-finish\",\"reason\":\"stop\",\"snapshot\":\"93f3378b0b4d3867c9c391f830f31b05cb21f85f\",\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}}}}\n"
     },
     {
       "id": "trace-1",
       "name": "真实 /context trace + host identity",
       "ok": true,
-      "detail": "{\"id\":\"tr_eb352dbebe5b4bb7a3032fbf72235525\",\"hostApp\":\"opencode\"}"
+      "detail": "{\"id\":\"tr_4923a8e29c0649939dac4f55afc548e3\",\"hostApp\":\"opencode\"}"
     },
     {
       "id": "local-first-turn",
@@ -59,27 +59,15 @@
     },
     {
       "id": "local-hit",
-      "name": "第二轮同 cue 命中真实本地 Qwen3-4B 预取",
-      "ok": false,
-      "detail": "null"
+      "name": "第二轮同 cue 命中真实本地 Qwen3-4B 预取并注入新鲜片段",
+      "ok": true,
+      "detail": "{\"traceId\":\"tr_8caa8f50dad345e0b28eb504fbe92181\",\"policyVersion\":\"model:97f5fcd0\",\"reason\":\"The candidate data provides specific information about deepwork shortcuts and theme settings, which are relevant and actionable for the current turn.\",\"applied\":{\"action\":\"speak\",\"depth\":\"gist\",\"fragments\":1,\"domain\":\"default\",\"policyEligible\":true},\"injected\":[{\"fragmentId\":\"mf_63027f3b2ff4429cb42a4753ad31a34b\",\"sourceId\":\"01M8EW212H03SBWV3VC5657T1N\"}],\"meta\":{\"configuredSource\":\"local\",\"resolvedSource\":\"local\",\"latencyMs\":0,\"fallbackReason\":null,\"prefetched\":true,\"prefetchState\":\"hit\",\"planAgeMs\":41685,\"planId\":\"lp_6f3e83b4661d41f4ac98bf00364649b2\",\"cueMatched\":true,\"model\":\"Qwen3-4B-Q4_K_M.gguf\",\"attempts\":[{\"source\":\"local\",\"outcome\":\"hit\",\"latencyMs\":0}]}}"
     },
     {
       "id": "local-hit-not-fallback",
       "name": "命中未触发 fallback",
       "ok": true,
-      "detail": ""
-    },
-    {
-      "id": "local-new-cue",
-      "name": "新 cue 第一轮 heuristic + prefetched=false（预期负向，不算能力失败）",
-      "ok": false,
       "detail": "null"
-    },
-    {
-      "id": "local-new-cue-turn",
-      "name": "新 cue turn 退出 0",
-      "ok": true,
-      "detail": ""
     },
     {
       "id": "outcome-turn",
@@ -91,7 +79,19 @@
       "id": "outcome",
       "name": "真实宿主 outcome 归因落 trace（source=host）",
       "ok": true,
-      "detail": "{\"kind\":\"missed\",\"at\":1795790763437,\"source\":\"host\",\"confidence\":0.55}"
+      "detail": "{\"kind\":\"reasked\",\"at\":1795795647640,\"source\":\"host\",\"confidence\":0.65}"
+    },
+    {
+      "id": "local-new-cue",
+      "name": "新 cue 第一轮 heuristic + prefetched=false（预期负向，不算能力失败）",
+      "ok": true,
+      "detail": "{\"traceId\":\"tr_69738d5c74174d2bbfb9a24acd5d9a07\",\"policyVersion\":\"heuristic:57334e4c\",\"reason\":\"no_candidates\",\"applied\":{\"action\":\"silent\",\"depth\":\"gist\",\"fragments\":0,\"domain\":\"user\",\"policyEligible\":true},\"injected\":[],\"meta\":null}"
+    },
+    {
+      "id": "local-new-cue-turn",
+      "name": "新 cue turn 退出 0",
+      "ok": true,
+      "detail": ""
     },
     {
       "id": "binding-forged",
@@ -109,7 +109,7 @@
   "traces": [
     {
       "phase": "turn1",
-      "traceId": "tr_eb352dbebe5b4bb7a3032fbf72235525",
+      "traceId": "tr_4923a8e29c0649939dac4f55afc548e3",
       "meta": {
         "configuredSource": "local",
         "resolvedSource": null,
@@ -117,47 +117,120 @@
         "fallbackReason": "prefetch_miss",
         "prefetched": false,
         "prefetchState": "first_turn"
+      }
+    },
+    {
+      "phase": "local-hit",
+      "traceId": "tr_8caa8f50dad345e0b28eb504fbe92181",
+      "policyVersion": "model:97f5fcd0",
+      "reason": "The candidate data provides specific information about deepwork shortcuts and theme settings, which are relevant and actionable for the current turn.",
+      "applied": {
+        "action": "speak",
+        "depth": "gist",
+        "fragments": 1,
+        "domain": "default",
+        "policyEligible": true
+      },
+      "injected": [
+        {
+          "fragmentId": "mf_63027f3b2ff4429cb42a4753ad31a34b",
+          "sourceId": "01M8EW212H03SBWV3VC5657T1N"
+        }
+      ],
+      "meta": {
+        "configuredSource": "local",
+        "resolvedSource": "local",
+        "latencyMs": 0,
+        "fallbackReason": null,
+        "prefetched": true,
+        "prefetchState": "hit",
+        "planAgeMs": 41685,
+        "planId": "lp_6f3e83b4661d41f4ac98bf00364649b2",
+        "cueMatched": true,
+        "model": "Qwen3-4B-Q4_K_M.gguf",
+        "attempts": [
+          {
+            "source": "local",
+            "outcome": "hit",
+            "latencyMs": 0
+          }
+        ]
       }
     },
     {
       "phase": "local-new-cue",
-      "traceId": "tr_6adba1c2eaf94522926e74bf32edd719",
+      "traceId": "tr_69738d5c74174d2bbfb9a24acd5d9a07",
+      "policyVersion": "heuristic:57334e4c",
+      "reason": "no_candidates",
+      "applied": {
+        "action": "silent",
+        "depth": "gist",
+        "fragments": 0,
+        "domain": "user",
+        "policyEligible": true
+      },
+      "injected": [],
       "meta": null
     }
   ],
   "timing": {
-    "prefetchReadyMs": null
+    "prefetchReadyMs": 60558
   },
-  "sessionId": "ses_de2889091ffeDiocCyOO8I54Mr",
+  "sessionId": "ses_de23e288cffeiO4z00bDeV4IzQ",
   "traceCountAtTrace1": 1,
   "traceThreadIds": [
-    "ses_de2889091ffeDiocCyOO8I54Mr"
+    "ses_de23e288cffeiO4z00bDeV4IzQ"
   ],
   "localAttempts": [
     {
       "q": "deepwork",
-      "silence": "already_injected",
-      "meta": null
-    },
-    {
-      "q": "deepwork",
-      "silence": "already_injected",
-      "meta": null
-    },
-    {
-      "q": "deepwork",
-      "silence": "already_injected",
-      "meta": null
-    },
-    {
-      "q": "deepwork",
-      "silence": "already_injected",
-      "meta": null
-    },
-    {
-      "q": "deepwork",
-      "silence": "already_injected",
-      "meta": null
+      "silence": null,
+      "meta": {
+        "configuredSource": "local",
+        "resolvedSource": "local",
+        "latencyMs": 0,
+        "fallbackReason": null,
+        "prefetched": true,
+        "prefetchState": "hit",
+        "planAgeMs": 41685,
+        "planId": "lp_6f3e83b4661d41f4ac98bf00364649b2",
+        "cueMatched": true,
+        "model": "Qwen3-4B-Q4_K_M.gguf",
+        "attempts": [
+          {
+            "source": "local",
+            "outcome": "hit",
+            "latencyMs": 0
+          }
+        ]
+      },
+      "applied": {
+        "action": "speak",
+        "depth": "gist",
+        "fragments": 1,
+        "domain": "default",
+        "policyEligible": true
+      },
+      "injected": [
+        {
+          "fragmentId": "mf_63027f3b2ff4429cb42a4753ad31a34b",
+          "sourceId": "01M8EW212H03SBWV3VC5657T1N",
+          "layer": "fuzzy",
+          "bytes": 353,
+          "tokens": 96,
+          "citations": [
+            "01M8EW212H03SBWV3VC5657T1N"
+          ]
+        }
+      ],
+      "candidates": [
+        {
+          "id": "01M8EW212H03SBWV3VC5657T1N"
+        },
+        {
+          "id": "01M8EW212VKQ6A1NZSHV3D3XRC"
+        }
+      ]
     },
     {
       "q": "deepwork",
@@ -169,24 +242,39 @@
         "fallbackReason": "prefetch_miss",
         "prefetched": false,
         "prefetchState": "first_turn"
-      }
-    },
-    {
-      "q": "deepwork",
-      "silence": null,
-      "meta": {
-        "configuredSource": "local",
-        "resolvedSource": null,
-        "latencyMs": 0,
-        "fallbackReason": "prefetch_miss",
-        "prefetched": false,
-        "prefetchState": "first_turn"
-      }
+      },
+      "applied": {
+        "action": "speak",
+        "depth": "gist",
+        "fragments": 1,
+        "domain": "default",
+        "policyEligible": true
+      },
+      "injected": [
+        {
+          "fragmentId": "mf_34a4e1d69be84b0c990bd504b07d9d7c",
+          "sourceId": "01M8EW212VKQ6A1NZSHV3D3XRC",
+          "layer": "fuzzy",
+          "bytes": 350,
+          "tokens": 95,
+          "citations": [
+            "01M8EW212VKQ6A1NZSHV3D3XRC"
+          ]
+        }
+      ],
+      "candidates": [
+        {
+          "id": "01M8EW212H03SBWV3VC5657T1N"
+        },
+        {
+          "id": "01M8EW212VKQ6A1NZSHV3D3XRC"
+        }
+      ]
     }
   ],
   "summary": {
-    "passed": 14,
-    "failed": 2,
-    "traceCount": 10
+    "passed": 16,
+    "failed": 0,
+    "traceCount": 5
   }
 }

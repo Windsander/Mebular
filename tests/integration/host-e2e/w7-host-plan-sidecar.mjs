@@ -154,7 +154,7 @@ async function main() {
     const summary = {
       evidenceLevel: 'R-RS-synthetic-host-plan',
       host: 'opencode',
-      note: 'host plan 由脚本按契约合成；真实 adapter 两轮命中断言未通过（dedupe 全量 fragments）',
+      note: 'host plan 由脚本按契约合成；只证明 sidecar 消费/拒绝，真实 adapter 两轮见 w7-intervention-evidence',
       passed: checks.filter((entry) => entry.ok).length,
       failed: checks.filter((entry) => !entry.ok).length,
       checks,

@@ -1,0 +1,280 @@
+{
+  "source": "local",
+  "host": "openchamber",
+  "identity": "adapter-identity-only",
+  "evidenceLevel": "R-RSM",
+  "model": {
+    "id": "Qwen3-4B-Q4_K_M.gguf",
+    "sha256": "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
+    "engine": "llama.cpp b12017"
+  },
+  "checks": [
+    {
+      "id": "sidecar-discovery",
+      "name": "真实 sidecar discovery + host token",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "id": "capabilities",
+      "name": "intervention 能力位与 configuredSource",
+      "ok": true,
+      "detail": "{\"decision\":true,\"outcome\":true,\"shadow\":true,\"reset\":true,\"mode\":\"model\",\"hostPlan\":true,\"hostPlanScopes\":[\"session\",\"turn\"],\"hostPlanTtlMs\":60000,\"configuredSource\":\"local\",\"sourcePresent\":true,\"planner\":\"model\",\"legacyModeIgnored\":false,\"legacyModeConflict\":false,\"diagnosticShadow\":false,\"deadline\":1500,\"warnings\":[]}"
+    },
+    {
+      "id": "seed",
+      "name": "真实 capability 写入两条 seed",
+      "ok": true,
+      "detail": "{\"first\":{\"records\":1,\"duplicates\":0,\"failed\":0},\"second\":{\"records\":1,\"duplicates\":0,\"failed\":0}}"
+    },
+    {
+      "id": "opencode-version",
+      "name": "真实 opencode >= 2.2",
+      "ok": true,
+      "detail": "opencode v2.4.1"
+    },
+    {
+      "id": "opencode-serve",
+      "name": "真实 opencode serve 启动",
+      "ok": true,
+      "detail": "server listening on http://127.0.0.1:53315\n"
+    },
+    {
+      "id": "turn-1",
+      "name": "真实 opencode turn 1 退出 0",
+      "ok": true,
+      "detail": "\"prt_21dc82cbb001eRyJvahRaXq8BJ\",\"sessionID\":\"ses_de237ed74ffeWrFNeTXOsy63L6\",\"messageID\":\"msg_21dc82bb2001e9j7vf0YlTcLoI\",\"type\":\"step-finish\",\"reason\":\"stop\",\"snapshot\":\"93f3378b0b4d3867c9c391f830f31b05cb21f85f\",\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}}}}\n"
+    },
+    {
+      "id": "trace-1",
+      "name": "真实 /context trace + host identity",
+      "ok": true,
+      "detail": "{\"id\":\"tr_3369a21b9310479199a342bdf3cbb0aa\",\"hostApp\":\"openchamber\"}"
+    },
+    {
+      "id": "local-first-turn",
+      "name": "第一轮 local 未预取，heuristic + prefetched=false",
+      "ok": true,
+      "detail": "{\"configuredSource\":\"local\",\"resolvedSource\":null,\"latencyMs\":0,\"fallbackReason\":\"prefetch_miss\",\"prefetched\":false,\"prefetchState\":\"first_turn\"}"
+    },
+    {
+      "id": "local-hit",
+      "name": "第二轮同 cue 命中真实本地 Qwen3-4B 预取并注入新鲜片段",
+      "ok": true,
+      "detail": "{\"traceId\":\"tr_5b07ace48d404b63b9f6085ccf9f1d38\",\"policyVersion\":\"model:8b7d43f6\",\"reason\":\"The candidate provides a specific and actionable piece of information about deepwork, which is relevant to the current topic.\",\"applied\":{\"action\":\"speak\",\"depth\":\"gist\",\"fragments\":1,\"domain\":\"default\",\"policyEligible\":true},\"injected\":[{\"fragmentId\":\"mf_f9bbbee2d17b4e4a964ea0c504595bc5\",\"sourceId\":\"01M8EWG07DMSG00ARW6EDRD25X\"}],\"meta\":{\"configuredSource\":\"local\",\"resolvedSource\":\"local\",\"latencyMs\":0,\"fallbackReason\":null,\"prefetched\":true,\"prefetchState\":\"hit\",\"planAgeMs\":38629,\"planId\":\"lp_3ebd0121c2e4489c881dba8b6d0b0ab2\",\"cueMatched\":true,\"model\":\"Qwen3-4B-Q4_K_M.gguf\",\"attempts\":[{\"source\":\"local\",\"outcome\":\"hit\",\"latencyMs\":0}]}}"
+    },
+    {
+      "id": "local-hit-not-fallback",
+      "name": "命中未触发 fallback",
+      "ok": true,
+      "detail": "null"
+    },
+    {
+      "id": "outcome-turn",
+      "name": "outcome 轮退出 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "id": "outcome",
+      "name": "真实宿主 outcome 归因落 trace（source=host）",
+      "ok": true,
+      "detail": "{\"kind\":\"reasked\",\"at\":1795796048689,\"source\":\"host\",\"confidence\":0.65}"
+    },
+    {
+      "id": "local-new-cue",
+      "name": "新 cue 第一轮 heuristic + prefetched=false（预期负向，不算能力失败）",
+      "ok": true,
+      "detail": "{\"traceId\":\"tr_a776d4a332014bb3b9571f1ef483a996\",\"policyVersion\":\"heuristic:57334e4c\",\"reason\":\"no_candidates\",\"applied\":{\"action\":\"silent\",\"depth\":\"gist\",\"fragments\":0,\"domain\":\"user\",\"policyEligible\":true},\"injected\":[],\"meta\":null}"
+    },
+    {
+      "id": "local-new-cue-turn",
+      "name": "新 cue turn 退出 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "id": "binding-forged",
+      "name": "伪造 bindingToken 被拒绝",
+      "ok": true,
+      "detail": "404"
+    },
+    {
+      "id": "privacy",
+      "name": "trace 不含 seed 正文或 raw query 尾部",
+      "ok": true,
+      "detail": "no raw body/tail in traces"
+    }
+  ],
+  "traces": [
+    {
+      "phase": "turn1",
+      "traceId": "tr_3369a21b9310479199a342bdf3cbb0aa",
+      "meta": {
+        "configuredSource": "local",
+        "resolvedSource": null,
+        "latencyMs": 0,
+        "fallbackReason": "prefetch_miss",
+        "prefetched": false,
+        "prefetchState": "first_turn"
+      }
+    },
+    {
+      "phase": "local-hit",
+      "traceId": "tr_5b07ace48d404b63b9f6085ccf9f1d38",
+      "policyVersion": "model:8b7d43f6",
+      "reason": "The candidate provides a specific and actionable piece of information about deepwork, which is relevant to the current topic.",
+      "applied": {
+        "action": "speak",
+        "depth": "gist",
+        "fragments": 1,
+        "domain": "default",
+        "policyEligible": true
+      },
+      "injected": [
+        {
+          "fragmentId": "mf_f9bbbee2d17b4e4a964ea0c504595bc5",
+          "sourceId": "01M8EWG07DMSG00ARW6EDRD25X"
+        }
+      ],
+      "meta": {
+        "configuredSource": "local",
+        "resolvedSource": "local",
+        "latencyMs": 0,
+        "fallbackReason": null,
+        "prefetched": true,
+        "prefetchState": "hit",
+        "planAgeMs": 38629,
+        "planId": "lp_3ebd0121c2e4489c881dba8b6d0b0ab2",
+        "cueMatched": true,
+        "model": "Qwen3-4B-Q4_K_M.gguf",
+        "attempts": [
+          {
+            "source": "local",
+            "outcome": "hit",
+            "latencyMs": 0
+          }
+        ]
+      }
+    },
+    {
+      "phase": "local-new-cue",
+      "traceId": "tr_a776d4a332014bb3b9571f1ef483a996",
+      "policyVersion": "heuristic:57334e4c",
+      "reason": "no_candidates",
+      "applied": {
+        "action": "silent",
+        "depth": "gist",
+        "fragments": 0,
+        "domain": "user",
+        "policyEligible": true
+      },
+      "injected": [],
+      "meta": null
+    }
+  ],
+  "timing": {
+    "prefetchReadyMs": 60571
+  },
+  "sessionId": "ses_de237ed74ffeWrFNeTXOsy63L6",
+  "traceCountAtTrace1": 1,
+  "traceThreadIds": [
+    "ses_de237ed74ffeWrFNeTXOsy63L6"
+  ],
+  "localAttempts": [
+    {
+      "q": "deepwork",
+      "silence": null,
+      "meta": {
+        "configuredSource": "local",
+        "resolvedSource": "local",
+        "latencyMs": 0,
+        "fallbackReason": null,
+        "prefetched": true,
+        "prefetchState": "hit",
+        "planAgeMs": 38629,
+        "planId": "lp_3ebd0121c2e4489c881dba8b6d0b0ab2",
+        "cueMatched": true,
+        "model": "Qwen3-4B-Q4_K_M.gguf",
+        "attempts": [
+          {
+            "source": "local",
+            "outcome": "hit",
+            "latencyMs": 0
+          }
+        ]
+      },
+      "applied": {
+        "action": "speak",
+        "depth": "gist",
+        "fragments": 1,
+        "domain": "default",
+        "policyEligible": true
+      },
+      "injected": [
+        {
+          "fragmentId": "mf_f9bbbee2d17b4e4a964ea0c504595bc5",
+          "sourceId": "01M8EWG07DMSG00ARW6EDRD25X",
+          "layer": "fuzzy",
+          "bytes": 356,
+          "tokens": 97,
+          "citations": [
+            "01M8EWG07DMSG00ARW6EDRD25X"
+          ]
+        }
+      ],
+      "candidates": [
+        {
+          "id": "01M8EWG07DMSG00ARW6EDRD25X"
+        },
+        {
+          "id": "01M8EWG07PHAWS9JQGPVMVGYEQ"
+        }
+      ]
+    },
+    {
+      "q": "deepwork",
+      "silence": null,
+      "meta": {
+        "configuredSource": "local",
+        "resolvedSource": null,
+        "latencyMs": 0,
+        "fallbackReason": "prefetch_miss",
+        "prefetched": false,
+        "prefetchState": "first_turn"
+      },
+      "applied": {
+        "action": "speak",
+        "depth": "gist",
+        "fragments": 1,
+        "domain": "default",
+        "policyEligible": true
+      },
+      "injected": [
+        {
+          "fragmentId": "mf_6917faea783240609d848361d9b750ba",
+          "sourceId": "01M8EWG07PHAWS9JQGPVMVGYEQ",
+          "layer": "fuzzy",
+          "bytes": 353,
+          "tokens": 96,
+          "citations": [
+            "01M8EWG07PHAWS9JQGPVMVGYEQ"
+          ]
+        }
+      ],
+      "candidates": [
+        {
+          "id": "01M8EWG07DMSG00ARW6EDRD25X"
+        },
+        {
+          "id": "01M8EWG07PHAWS9JQGPVMVGYEQ"
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "passed": 16,
+    "failed": 0,
+    "traceCount": 5
+  }
+}

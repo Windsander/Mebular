@@ -149,12 +149,64 @@ async function fetchTrace(discovery, traceId) {
   return result.status === 200 ? result.data : null;
 }
 
+// GET /traces returns previews (no applied/injected/full decision). Capability
+// checks need the full trace, so resolve each preview through GET /traces/:id.
+async function listFullTraces(discovery, threadId) {
+  const summaries = await listTraces(discovery, threadId);
+  const traces = [];
+  for (const summary of summaries) {
+    const id = traceIdOf(summary);
+    const full = id ? await fetchTrace(discovery, id) : null;
+    traces.push(full ?? summary);
+  }
+  return traces;
+}
+
 function traceIdOf(trace) {
   return trace?.id ?? trace?.traceId ?? null;
 }
 
 function metaOf(trace) {
   return trace?.interventionMeta ?? trace?.decision?.planner ?? null;
+}
+
+// Persisted traces write `decision`/`applied`/`injected` but not the response's
+// top-level `interventionMeta`. A host-plan decision therefore has no
+// `decision.planner`; the authoritative persisted signature is the host-plan
+// policy version plus an applied speak that injected at least one fragment.
+function isHostPlanHit(trace) {
+  const policyVersion = String(trace?.decision?.policyVersion ?? '');
+  const injected = Array.isArray(trace?.injected) ? trace.injected : [];
+  return policyVersion.startsWith('host-plan:')
+    && trace?.applied?.action === 'speak'
+    && injected.length > 0;
+}
+
+function isLocalPrefetchHit(trace) {
+  const meta = metaOf(trace);
+  return meta?.prefetched === true
+    && meta?.resolvedSource === 'local'
+    && trace?.applied?.action === 'speak'
+    && Array.isArray(trace?.injected)
+    && trace.injected.length > 0;
+}
+
+function isPrefetched(trace) {
+  const meta = metaOf(trace);
+  return meta?.prefetched === true || isHostPlanHit(trace);
+}
+
+function hitEvidenceOf(trace) {
+  return {
+    traceId: traceIdOf(trace),
+    policyVersion: trace?.decision?.policyVersion ?? null,
+    reason: trace?.decision?.reason ?? null,
+    applied: trace?.applied ?? null,
+    injected: Array.isArray(trace?.injected)
+      ? trace.injected.map((entry) => ({ fragmentId: entry.fragmentId, sourceId: entry.sourceId }))
+      : [],
+    meta: metaOf(trace),
+  };
 }
 
 async function stageEngine(runtimeRoot) {
@@ -364,7 +416,15 @@ async function main() {
       return { ...output, id, latencyMs: Date.now() - started };
     };
 
-    const first = await turn(null, 'deepwork');
+    // `opencode run` can race the freshly listening server on this host
+    // (observed ~1/5 runs). Retry the same real turn; only a real exit 0 with a
+    // parsed session id counts.
+    let first = null;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (attempt > 0) await new Promise((resolvePromise) => setTimeout(resolvePromise, 1000));
+      first = await turn(null, 'deepwork');
+      if (first.code === 0 && typeof first.id === 'string') break;
+    }
     check('turn-1', '真实 opencode turn 1 退出 0', first.code === 0 && typeof first.id === 'string',
       (first.stderr || first.stdout).slice(-300));
     if (first.code !== 0) throw new Error('first turn failed');
@@ -391,12 +451,17 @@ async function main() {
       const pollStart = Date.now();
       let hitTurn = null;
       let hitTrace = null;
-      for (let attempt = 0; attempt < 6; attempt += 1) {
-        await new Promise((resolvePromise) => setTimeout(resolvePromise, 5000));
+      // Cold llama.cpp load is ~45-50s (W7 §2.1). Wait for the post-turn
+      // prefetch plan *without* issuing more same-cue user turns: every extra
+      // heuristic turn would inject another fresh fragment and exhaust the
+      // candidate window before the local plan is ready (anti-repeat, not a
+      // miss). The plan TTL is 60s from creation, so turn 2 at +60s is fresh.
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 60000));
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        if (attempt > 0) await new Promise((resolvePromise) => setTimeout(resolvePromise, 3000));
         const attemptTurn = await turn(threadId, 'deepwork');
-        const traces = await listTraces(discovery, threadId);
-        const trace = traces.find((entry) => entry.turnId && metaOf(entry)?.prefetched === true
-          && metaOf(entry)?.resolvedSource === 'local');
+        const traces = await listFullTraces(discovery, threadId);
+        const trace = traces.find((entry) => entry.turnId && isLocalPrefetchHit(entry));
         if (trace) {
           hitTurn = attemptTurn;
           hitTrace = trace;
@@ -404,26 +469,14 @@ async function main() {
         }
       }
       result.timing.prefetchReadyMs = hitTrace ? Date.now() - pollStart : null;
-      const debugTraces = await listTraces(discovery, threadId);
-      result.localAttempts = debugTraces.slice(0, 8).map((entry) => ({ q: entry.queryPreview, silence: entry.silenceReason, meta: metaOf(entry), candidates: entry.candidates?.map((c) => ({ id: c.id, filtered: c.filteredReason })) }));
-      check('local-hit', '第二轮同 cue 命中真实本地 Qwen3-4B 预取',
-        Boolean(hitTrace && metaOf(hitTrace)?.resolvedSource === 'local'),
-        JSON.stringify(metaOf(hitTrace)));
-      check('local-hit-not-fallback', '命中未触发 fallback', metaOf(hitTrace)?.fallbackReason === undefined,
+      const debugTraces = await listFullTraces(discovery, threadId);
+      result.localAttempts = debugTraces.slice(0, 8).map((entry) => ({ q: entry.queryPreview, silence: entry.silenceReason, meta: metaOf(entry), applied: entry.applied ?? null, injected: entry.injected ?? [], candidates: entry.candidates?.map((c) => ({ id: c.id, filtered: c.filteredReason })) }));
+      check('local-hit', '第二轮同 cue 命中真实本地 Qwen3-4B 预取并注入新鲜片段',
+        Boolean(hitTrace && isLocalPrefetchHit(hitTrace)),
+        JSON.stringify(hitTrace ? hitEvidenceOf(hitTrace) : null));
+      check('local-hit-not-fallback', '命中未触发 fallback', metaOf(hitTrace)?.fallbackReason == null,
         JSON.stringify(metaOf(hitTrace)?.fallbackReason));
-      if (hitTrace) result.traces.push({ phase: 'local-hit', traceId: traceIdOf(hitTrace), meta: metaOf(hitTrace) });
-
-      const freshTurn = await turn(threadId, '下周旅行预算怎么安排');
-      const freshTrace = await waitFor(async () => {
-        const traces = await listTraces(discovery, threadId);
-        const fresh = traces.filter((entry) => String(entry.queryPreview ?? '').includes('旅行预算'));
-        return fresh.length > 0 ? fresh[fresh.length - 1] : null;
-      }, { timeoutMs: 20000 });
-      check('local-new-cue', '新 cue 第一轮 heuristic + prefetched=false（预期负向，不算能力失败）',
-        metaOf(freshTrace)?.prefetched === false,
-        JSON.stringify(metaOf(freshTrace)));
-      result.traces.push({ phase: 'local-new-cue', traceId: traceIdOf(freshTrace), meta: metaOf(freshTrace) });
-      check('local-new-cue-turn', '新 cue turn 退出 0', freshTurn.code === 0);
+      if (hitTrace) result.traces.push({ phase: 'local-hit', ...hitEvidenceOf(hitTrace), meta: metaOf(hitTrace) });
     } else {
       check('host-first-turn', '第一轮 host 无 plan，立即 heuristic',
         metaOf(trace1)?.prefetched === false
@@ -431,44 +484,57 @@ async function main() {
         JSON.stringify(metaOf(trace1)));
 
       let hostTrace = null;
-      for (let attempt = 0; attempt < 5; attempt += 1) {
+      for (let attempt = 0; attempt < 6; attempt += 1) {
         await new Promise((resolvePromise) => setTimeout(resolvePromise, 3000));
         await turn(threadId, 'deepwork');
-        const traces = await listTraces(discovery, threadId);
-        hostTrace = traces.find((entry) => metaOf(entry)?.prefetched === true
-          && metaOf(entry)?.resolvedSource === 'host') ?? null;
+        const traces = await listFullTraces(discovery, threadId);
+        hostTrace = traces.find((entry) => (
+          (metaOf(entry)?.prefetched === true && metaOf(entry)?.resolvedSource === 'host')
+          || isHostPlanHit(entry)
+        )) ?? null;
         if (hostTrace) break;
       }
+      const firstInjected = new Set((trace1?.injected ?? []).map((entry) => entry.sourceId).filter(Boolean));
+      const hostInjected = Array.isArray(hostTrace?.injected) ? hostTrace.injected : [];
+      const hostFresh = hostInjected.length > 0
+        && hostInjected.some((entry) => entry.sourceId && !firstInjected.has(entry.sourceId));
       check('host-hit', '真实宿主 session-prior 命中并消费',
-        Boolean(hostTrace && metaOf(hostTrace)?.resolvedSource === 'host'),
-        JSON.stringify(metaOf(hostTrace)));
-      check('host-hit-source', '命中元数据 resolvedSource=host 且 prefetched=true',
-        metaOf(hostTrace)?.resolvedSource === 'host' && metaOf(hostTrace)?.prefetched === true,
-        JSON.stringify({ source: metaOf(hostTrace)?.source, prefetched: metaOf(hostTrace)?.prefetched }));
-      if (hostTrace) result.traces.push({ phase: 'host-hit', traceId: traceIdOf(hostTrace), meta: metaOf(hostTrace) });
-
-      const freshTurn = await turn(threadId, '完全不同的新话题：下周旅行预算怎么安排');
-      const freshTrace = await waitFor(async () => {
-        const traces = await listTraces(discovery, threadId);
-        const fresh = traces.filter((entry) => String(entry.queryPreview ?? '').includes('旅行预算'));
-        return fresh.length > 0 ? fresh[fresh.length - 1] : null;
-      }, { timeoutMs: 20000 });
-      check('host-new-cue', '新 cue 不命中 host plan（prefetched=false）',
-        metaOf(freshTrace)?.prefetched === false,
-        JSON.stringify(metaOf(freshTrace)));
-      result.traces.push({ phase: 'host-new-cue', traceId: traceIdOf(freshTrace), meta: metaOf(freshTrace) });
-      check('host-new-cue-turn', '新 cue turn 退出 0', freshTurn.code === 0);
+        Boolean(hostTrace && (isHostPlanHit(hostTrace)
+          || (metaOf(hostTrace)?.prefetched === true && metaOf(hostTrace)?.resolvedSource === 'host'))),
+        JSON.stringify(hostTrace ? hitEvidenceOf(hostTrace) : null));
+      check('host-hit-source', '命中为 host plan（prefetched=true）且注入新鲜片段',
+        Boolean(hostTrace && ((metaOf(hostTrace)?.resolvedSource === 'host'
+          && metaOf(hostTrace)?.prefetched === true) || isHostPlanHit(hostTrace)) && hostFresh),
+        JSON.stringify({ hit: hitEvidenceOf(hostTrace), freshAgainstTurn1: hostFresh }));
+      if (hostTrace) result.traces.push({ phase: 'host-hit', ...hitEvidenceOf(hostTrace), meta: metaOf(hostTrace) });
     }
 
-    // Outcome binding token：真实插件下一轮上报，trace 记录 outcome。
+    // Outcome binding token：必须紧接命中轮，否则上一轮 context 可能是无关的
+    // new-cue/silent，插件不会产生可归因 outcome。
     const reaskTurn = await turn(threadId, '再说一遍 deepwork 主题');
     check('outcome-turn', 'outcome 轮退出 0', reaskTurn.code === 0);
     const outcomeTrace = await waitFor(async () => {
-      const traces = await listTraces(discovery, threadId);
+      const traces = await listFullTraces(discovery, threadId);
       return traces.find((entry) => entry.outcome?.source === 'host' && entry.outcome?.kind) ?? null;
-    }, { timeoutMs: 25000, intervalMs: 500 });
+    }, { timeoutMs: 60000, intervalMs: 500 });
     check('outcome', '真实宿主 outcome 归因落 trace（source=host）', Boolean(outcomeTrace),
       JSON.stringify(outcomeTrace?.outcome));
+
+    const freshPrompt = source === 'local'
+      ? '下周旅行预算怎么安排'
+      : '完全不同的新话题：下周旅行预算怎么安排';
+    const freshTurn = await turn(threadId, freshPrompt);
+    const freshTrace = await waitFor(async () => {
+      const traces = await listFullTraces(discovery, threadId);
+      const fresh = traces.filter((entry) => String(entry.queryPreview ?? '').includes('旅行预算'));
+      return fresh.length > 0 ? fresh[fresh.length - 1] : null;
+    }, { timeoutMs: 60000 });
+    check(`${source === 'local' ? 'local' : 'host'}-new-cue`,
+      '新 cue 第一轮 heuristic + prefetched=false（预期负向，不算能力失败）',
+      Boolean(freshTrace) && !isPrefetched(freshTrace) && !isHostPlanHit(freshTrace),
+      JSON.stringify(freshTrace ? hitEvidenceOf(freshTrace) : null));
+    result.traces.push({ phase: `${source === 'local' ? 'local' : 'host'}-new-cue`, ...(freshTrace ? hitEvidenceOf(freshTrace) : {}), meta: metaOf(freshTrace) });
+    check(`${source === 'local' ? 'local' : 'host'}-new-cue-turn`, '新 cue turn 退出 0', freshTurn.code === 0);
 
     // bindingToken 负向：伪造 token 必须被拒绝。
     const forged = await requestSidecar(discovery, '/recall/forged-trace/outcome', {

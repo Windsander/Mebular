@@ -50,6 +50,8 @@ export type InterventionMode = 'off' | 'shadow' | 'heuristic' | 'model';
 
 export interface InterventionCandidateView {
   fragmentId: string;
+  /** 稳定候选键（优先 sourceIds[0]）；仅用于 host plan basis，不进入模型请求。 */
+  candidateKey?: string;
   sourceIds: string[];
   score: number;
   confidence: number;
@@ -326,7 +328,7 @@ const HARD_RULE_REASONS = new Set([
   'no_novelty',
 ]);
 
-function decidedByRules(decision: InterventionDecision): boolean {
+export function decidedByRules(decision: InterventionDecision): boolean {
   return decision.mustSpeak === true
     || decision.action === 'defer'
     || HARD_RULE_REASONS.has(decision.reason);

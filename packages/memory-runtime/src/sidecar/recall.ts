@@ -63,6 +63,7 @@ import {
   type RecallTrace,
 } from '../runtime/types.js';
 import {
+  decidedByRules,
   planIntervention,
   planInterventionAsync,
   type InterventionCandidateView,
@@ -72,6 +73,17 @@ import {
   resolveEffectiveIntervention,
   type EffectiveInterventionResolution,
 } from './effective.js';
+import {
+  HostPlanReplayGuard,
+  HOST_APPS,
+  HOST_PLAN_ACTIONS,
+  HOST_PLAN_DEPTHS,
+  candidateFingerprintOf,
+  cueTokenHashes,
+  hostPlanIdOf,
+  validateHostPlan,
+  type HostInterventionPlan,
+} from './host-plan.js';
 import type { InferenceInterventionStats } from './inference-provider.js';
 import type { PolicyStore } from './policy-store.js';
 
@@ -302,6 +314,8 @@ export interface RecallResponse {
   decision?: InterventionDecision;
   /** 0.4.0：实际生效的介入结果；shadow/预算裁剪下与 decision 不同。旧宿主忽略即可。 */
   applied?: AppliedIntervention;
+  /** 0.4.0 W3：来源/预取状态；只有 /context 会填充。 */
+  interventionMeta?: InterventionMeta;
   timing: {
     cueMs: number;
     fuzzyMs: number;
@@ -311,12 +325,37 @@ export interface RecallResponse {
   };
 }
 
+/**
+ * 0.4.0 W3 介入来源/预取元数据（additive、非公共 MCP 工具）。
+ *
+ * cueFingerprint / candidateFingerprint 是短 hash，不是 raw query：
+ * 宿主 adapter 在上一 turn 后把它们作为下一 plan 的 basis 回传；
+ * `/context` 用同一算法校验 freshness。旧宿主忽略即可。
+ */
+export interface InterventionMeta {
+  source: 'heuristic' | 'local' | 'host' | 'api';
+  resolvedSource: 'heuristic' | 'local' | 'host' | 'api' | null;
+  configuredSource: 'heuristic' | 'local' | 'host' | 'api' | 'auto';
+  prefetched: boolean;
+  planId?: string;
+  planScope?: 'session' | 'turn';
+  cueMatched?: boolean;
+  cueJaccard?: number;
+  fallbackReason?: string;
+  turnId: string | null;
+  hostApp?: string;
+  cueFingerprint: string[];
+  candidateFingerprint: string[];
+}
+
 export interface ContextResponse extends Omit<RecallResponse, 'records'> {
   blocks: ContextBlock[];
   records?: Array<Record<string, unknown>>;
   trusted: false;
   untrusted: true;
   notice: string;
+  /** 0.4.0 W3：预取命中/未命中的运行时状态；不是能力通过证据。 */
+  interventionMeta?: InterventionMeta;
 }
 
 export interface RecallExpandDetail {
@@ -409,6 +448,12 @@ interface NormalizedRequest {
   threadId: string | null;
   turnId: string | null;
   anchor: string | null;
+  /** W3：session prior 的 basis；仅 /context 使用。 */
+  previousTurnId: string | null;
+  /** W3：宿主显式上报的 host plan；只由 adapter 提供，不接受公共 MCP 工具。 */
+  hostPlan: unknown;
+  /** W3：宿主显式身份；来自 x-mebular-host-app 头或请求体（additive）。 */
+  hostApp: string | null;
   query: string;
   recentContext: string;
   domains: string[] | null;
@@ -470,6 +515,8 @@ interface RecallRun {
   /** 0.4.0：本次决策与实际生效结果。 */
   decision: InterventionDecision | null;
   applied: AppliedIntervention | null;
+  /** W3：host/local/api 解析与预取状态。 */
+  interventionMeta: InterventionMeta | null;
   effective: {
     action: InterventionAction;
     depth: RecallDepth;
@@ -1214,6 +1261,10 @@ export class RecallService {
   private readonly lastDecisions = new Map<string, { action: InterventionAction; depth: RecallDepth }>();
   /** reset 时间戳：早于它的 trace 视为迟到 outcome，不再写策略统计。 */
   private policyResetAt = 0;
+  /** W3：host planId 单次消费表；进程内，重启即失效。 */
+  private readonly hostPlanReplayGuard = new HostPlanReplayGuard();
+  /** W3：(agentId, threadId) → 最近一次 /context 的 turnId；用于拒绝伪造 basis。 */
+  private readonly lastContextTurns = new Map<string, string>();
 
   private recalls = 0;
   private contexts = 0;
@@ -1275,6 +1326,7 @@ export class RecallService {
   resetInterventionState(): void {
     this.silentStreaks.clear();
     this.lastDecisions.clear();
+    this.lastContextTurns.clear();
     this.policyResetAt = this.now();
   }
 
@@ -1316,6 +1368,7 @@ export class RecallService {
       traceId: base.traceId,
       ...(base.decision ? { decision: base.decision } : {}),
       ...(base.applied ? { applied: base.applied } : {}),
+      ...(base.interventionMeta ? { interventionMeta: base.interventionMeta } : {}),
       timing: base.timing,
       records: base.records,
       trusted: false,
@@ -1731,7 +1784,17 @@ export class RecallService {
     }
     const threadId = this.optionalThreadId(request.threadId);
     const turnId = this.optionalToken(request.turnId, 'turnId', 200);
+    const previousTurnId = context
+      ? this.optionalToken(request.previousTurnId, 'previousTurnId', 200)
+      : null;
     const anchor = this.optionalToken(request.anchor, 'anchor', 200);
+    const hostAppRaw = request.hostApp;
+    const hostApp = hostAppRaw === undefined || hostAppRaw === null
+      ? null
+      : typeof hostAppRaw === 'string' && (HOST_APPS as readonly string[]).includes(hostAppRaw)
+        ? hostAppRaw
+        : null;
+    const hostPlan = context ? request.hostPlan : undefined;
     const query = typeof request.query === 'string' ? request.query.normalize('NFKC').trim() : '';
     if (query.length > MAX_QUERY_CHARS) {
       throw new SidecarSettlementError('payload_too_large', `query 不能超过 ${MAX_QUERY_CHARS} 字符`, { status: 413 });
@@ -1806,6 +1869,9 @@ export class RecallService {
       agentId,
       threadId,
       turnId,
+      previousTurnId,
+      hostPlan,
+      hostApp,
       anchor,
       query,
       recentContext,
@@ -2317,6 +2383,7 @@ export class RecallService {
       timing: { cueMs, fuzzyMs: 0, expandMs: 0, assembleMs: 0, totalMs: 0 },
       decision: null,
       applied: null,
+      interventionMeta: null,
       effective: null,
     };
 
@@ -3208,6 +3275,7 @@ export class RecallService {
         ?? fragment.provenance.at;
       return {
         fragmentId: fragment.id,
+        candidateKey: fragment.sourceIds[0] ?? fragment.id,
         sourceIds: fragment.sourceIds,
         score: fragment.score.final,
         confidence: fragment.confidence,
@@ -3235,19 +3303,111 @@ export class RecallService {
       maxSilentStreak: config.maxSilentStreak,
       explorationRate: config.explorationRate,
     };
-    // model 模式：must_speak 不调用模型；其余真实调用 provider，失败 fail-open。
-    const planned = intervention.planner === 'model'
-      ? await planInterventionAsync(planInput, {
-        planner: this.models,
-        allowRemote: run.request.allowRemote,
-        timeoutMs: config.modelTimeoutMs,
-        stats: policyStats,
-        hasCheckpoint: Boolean(run.checkpointBlock),
-        now: this.now,
-      })
-      : { decision: planIntervention(planInput), warnings: [] as string[] };
-    const decision = planned.decision;
-    for (const warning of planned.warnings) pushWarning(warnings, warning);
+    // model 模式：must_speak/硬规则不调用模型；host 只消费预取 plan；
+    // local/api 仍走既有同步 provider 路径，失败 fail-open。
+    const heuristic = planIntervention({ ...planInput, mode: 'heuristic' });
+    const configuredSource = intervention.source;
+    const candidateFingerprint = candidateFingerprintOf(candidates);
+    const meta: InterventionMeta = {
+      source: 'heuristic',
+      resolvedSource: intervention.planner === 'heuristic' ? 'heuristic' : null,
+      configuredSource,
+      prefetched: false,
+      turnId: run.request.turnId,
+      ...(run.request.hostApp ? { hostApp: run.request.hostApp } : {}),
+      cueFingerprint: cueTokenHashes(run.cue),
+      candidateFingerprint,
+    };
+    let decision = heuristic;
+    let plannedWarnings: string[] = [];
+
+    if (intervention.planner === 'model') {
+      const hostEligible = configuredSource === 'host' || configuredSource === 'auto';
+      const hostPlan = run.request.hostPlan;
+      let hostHit = false;
+      let hostFallbackReason: string | null = null;
+
+      if (hostEligible && hostPlan !== undefined) {
+        const planId = hostPlanIdOf(hostPlan);
+        const now = this.now();
+        if (planId && this.hostPlanReplayGuard.has(planId, now)) {
+          hostFallbackReason = 'host_plan_replayed';
+          pushWarning(warnings, 'host_plan_replayed');
+        } else {
+          // 一旦接收就标记单次消费；即使后续 cue/候选不符，也不得再次消费。
+          if (planId) this.hostPlanReplayGuard.mark(planId, now);
+          const contextKey = this.contextTurnKey(run.request);
+          const validation = validateHostPlan(hostPlan, {
+            now,
+            agentId: run.request.agentId,
+            threadId: run.request.threadId,
+            turnId: run.request.turnId,
+            previousTurnId: run.request.previousTurnId,
+            lastContextTurnId: contextKey ? this.lastContextTurns.get(contextKey) ?? null : null,
+            hostApp: run.request.hostApp,
+            currentCue: run.cue,
+            currentCandidateFingerprint: candidateFingerprint,
+          });
+          if (!validation.ok) {
+            hostFallbackReason = validation.reason;
+            pushWarning(warnings, validation.warning);
+          } else if (decidedByRules(heuristic) || candidates.length === 0) {
+            // must_speak / defer / greeting / meta / no_candidates 仍由 sidecar 决定。
+            hostFallbackReason = 'host_plan_overridden_by_hard_rule';
+            pushWarning(warnings, 'host_plan_overridden_by_hard_rule');
+          } else {
+            const hostDecision = this.hostPlanDecision(validation.plan, heuristic, candidates, warnings);
+            if (hostDecision === null) {
+              hostFallbackReason = 'host_plan_invalid';
+              pushWarning(warnings, 'host_plan_invalid');
+            } else {
+              decision = hostDecision;
+              hostHit = true;
+              meta.source = 'host';
+              meta.resolvedSource = 'host';
+              meta.prefetched = true;
+              meta.planId = validation.plan.planId;
+              meta.planScope = validation.plan.scope;
+              meta.cueMatched = validation.cueMatched;
+              meta.cueJaccard = Number(validation.cueJaccard.toFixed(4));
+            }
+          }
+        }
+      }
+
+      if (!hostHit) {
+        if (configuredSource === 'host') {
+          // host source 不允许本轮同步调用宿主模型；missing/过期/cue 不符都立即 heuristic。
+          meta.fallbackReason = hostFallbackReason ?? 'host_plan_missing';
+          meta.source = 'heuristic';
+          meta.resolvedSource = 'heuristic';
+          if (hostPlan === undefined) pushWarning(warnings, 'host_plan_missing');
+          decision = heuristic;
+        } else {
+          const planned = await planInterventionAsync(planInput, {
+            planner: this.models,
+            allowRemote: run.request.allowRemote,
+            timeoutMs: config.modelTimeoutMs,
+            stats: policyStats,
+            hasCheckpoint: Boolean(run.checkpointBlock),
+            now: this.now,
+          });
+          decision = planned.decision;
+          plannedWarnings = planned.warnings;
+          meta.source = planned.fromModel ? planned.source : 'heuristic';
+          meta.resolvedSource = planned.fromModel ? planned.source : 'heuristic';
+          meta.prefetched = false;
+          meta.fallbackReason = hostFallbackReason ?? planned.reasonCode
+            ?? (planned.modelFallback ? 'source_unavailable' : undefined);
+        }
+      } else {
+        meta.fallbackReason = undefined;
+      }
+    } else {
+      meta.fallbackReason = undefined;
+    }
+    for (const warning of plannedWarnings) pushWarning(warnings, warning);
+    run.interventionMeta = meta;
 
     if (intervention.mode === 'shadow') {
       // shadow 只记录建议；实际注入保持 baseline，且不得改变 warning/预算行为。
@@ -3415,6 +3575,45 @@ export class RecallService {
 
   private decisionKey(run: RecallRun): string {
     return [run.request.agentId, run.request.threadId ?? '', run.request.checkpointDomain ?? ''].join('\u0000');
+  }
+
+  /** W3：按 (agentId, threadId) 记录上一轮 /context turnId；用于拒绝 adapter 伪造 basis。 */
+  private contextTurnKey(request: Pick<NormalizedRequest, 'agentId' | 'threadId'>): string | null {
+    if (!request.threadId) return null;
+    return `${request.agentId}\u0000${request.threadId}`;
+  }
+
+  /**
+   * 把通过校验的 host plan 转成 InterventionDecision。
+   * 只使用 plan 的枚举/置信度/来源；不复制任何 raw 文本。
+   */
+  private hostPlanDecision(
+    plan: HostInterventionPlan,
+    heuristic: InterventionDecision,
+    candidates: InterventionCandidateView[],
+    warnings: string[],
+  ): InterventionDecision | null {
+    if (!(HOST_PLAN_ACTIONS as readonly string[]).includes(plan.action)) return null;
+    if (!(HOST_PLAN_DEPTHS as readonly string[]).includes(plan.depth)) return null;
+    let depth: RecallDepth = plan.depth;
+    let degraded = false;
+    const top = candidates[0];
+    if (plan.action === 'speak' && depth !== 'gist' && top && !top.detailAvailable) {
+      // 不要承诺不存在的 detail/quote；不否决 host 的 action。
+      depth = 'gist';
+      degraded = true;
+      pushWarning(warnings, 'host_plan_depth_unavailable');
+    }
+    return {
+      action: plan.action,
+      depth,
+      confidence: Number(Math.min(1, Math.max(0, plan.confidence)).toFixed(4)),
+      reason: `host_plan:${plan.reasonCode}`,
+      policyVersion: plan.policyVersion ?? 'host-plan:v1',
+      enforced: true,
+      ...(heuristic.scores ? { scores: heuristic.scores } : {}),
+      ...(degraded ? { degraded: true } : {}),
+    };
   }
 
   private noteIntervention(key: string, action: InterventionAction, depth: RecallDepth): void {
@@ -4087,6 +4286,26 @@ export class RecallService {
     }
     this.degraded = degraded;
 
+    // W3：只有成功完成的 /context 才推进 basis turn；adapter 下一轮必须用它。
+    if (mode === 'context' && run.request.turnId) {
+      const contextKey = this.contextTurnKey(run.request);
+      if (contextKey) this.lastContextTurns.set(contextKey, run.request.turnId);
+    }
+    const interventionMeta: InterventionMeta = run.interventionMeta ?? {
+      source: 'heuristic',
+      resolvedSource: 'heuristic',
+      configuredSource: this.effectiveIntervention.source,
+      prefetched: false,
+      turnId: run.request.turnId,
+      ...(run.request.hostApp ? { hostApp: run.request.hostApp } : {}),
+      cueFingerprint: cueTokenHashes(run.cue),
+      candidateFingerprint: candidateFingerprintOf(run.selected.map((candidate) => ({
+        fragmentId: candidate.fragment.id,
+        candidateKey: candidate.fragment.sourceIds[0] ?? candidate.fragment.id,
+      }))),
+    };
+    run.interventionMeta = interventionMeta;
+
     const response: RecallResponse & { blocks?: ContextBlock[] } = {
       recallId: run.recallId,
       fragments,
@@ -4101,6 +4320,7 @@ export class RecallService {
       traceId: trace.traceId,
       decision,
       applied,
+      interventionMeta,
       timing,
     };
 

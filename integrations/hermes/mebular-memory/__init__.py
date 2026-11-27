@@ -1225,6 +1225,50 @@ def _fallback_hermes_home() -> Path:
         return Path.home() / ".hermes"
 
 
+_HOST_PLAN_TTL_MS = 60_000
+_MIN_HOST_PLAN_HERMES = (0, 21, 6)
+_HOST_PLAN_ACTIONS = frozenset({"speak", "defer", "silent"})
+_HOST_PLAN_DEPTHS = frozenset({"gist", "detail", "quote"})
+_HOST_PLAN_REASONS = frozenset({
+    "task_continuation", "explicit_memory_request", "correction_follow_up", "low_relevance",
+    "duplicate_context", "chitchat", "budget_pressure", "session_start", "unknown",
+    "high_relevance", "low_confidence", "no_candidates", "broad_cue", "no_novelty",
+    "recent_false_alarm", "task_continue", "after_silence", "user_requested_detail",
+    "user_requested_quote", "budget", "planner_timeout", "planner_unavailable",
+    "planner_invalid_output", "first_turn", "cue_changed", "candidates_changed",
+})
+
+
+def _host_plan_key(session_id: str) -> str:
+    return _sha256_text(str(session_id or "hermes-session"))[:16]
+
+
+def _host_plan_dir(hermes_home: Path) -> Path:
+    """Adapter-owned handoff only; never Hermes session/DB/log/spool."""
+    return Path(hermes_home) / "mebular-memory" / "hostplan"
+
+
+def _ensure_host_plan_dir(hermes_home: Path) -> Path:
+    directory = _host_plan_dir(hermes_home)
+    directory.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(directory, 0o700)
+    except OSError:
+        pass
+    return directory
+
+
+def _parse_version_tuple(value: Any) -> Optional[Tuple[int, int, int]]:
+    text = str(value or "").strip()
+    match = re.match(r"^[vV]?(\d+)\.(\d+)\.(\d+)", text)
+    if not match:
+        return None
+    try:
+        return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    except Exception:
+        return None
+
+
 def _atomic_write_json(path: Path, value: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f"{path.name}.tmp-{os.getpid()}")
@@ -1657,6 +1701,7 @@ class _RuntimeClient:
             "User-Agent": USER_AGENT,
             "X-Mebular-Adapter": ADAPTER_HEADER,
             "X-Mebular-Adapter-Api": "1",
+            "X-Mebular-Host-App": "hermes",
         }
         if body is not None:
             headers["Content-Type"] = "application/json; charset=utf-8"
@@ -3438,6 +3483,9 @@ class MebularMemoryProvider(MemoryProvider):
         self._last_sync_signature = ""
         self._last_sync_payload: Optional[Dict[str, Any]] = None
         self._last_sync_at = 0.0
+        # W3：session → 上一轮 /context turnId；host plan 只消费匹配的新鲜 plan。
+        self._last_context_turns: Dict[str, str] = {}
+        self._host_plan_status: Dict[str, Any] = {"state": "idle", "reason": "", "at": 0}
 
     # ------------------------------------------------------------------
     # Core lifecycle
@@ -3674,6 +3722,125 @@ class MebularMemoryProvider(MemoryProvider):
             return None
         return RecallStatus("Mebular", int(self._last_recall_count))
 
+    def _clear_host_plan_state(self, sid: str) -> None:
+        with self._lock:
+            self._last_context_turns.pop(str(sid or ""), None)
+        if self._hermes_home is None:
+            return
+        key = _host_plan_key(str(sid or ""))
+        directory = _host_plan_dir(self._hermes_home)
+        for name in (f"plan-{key}.json", f"state-{key}.json"):
+            try:
+                (directory / name).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    @property
+    def host_plan_status(self) -> Dict[str, Any]:
+        with self._lock:
+            return dict(self._host_plan_status)
+
+    def _remember_context_meta(
+        self, sid: str, thread_id: str, data: Dict[str, Any]
+    ) -> None:
+        """Persist the basis for the companion's next host plan (adapter-owned)."""
+        meta = data.get("interventionMeta") if isinstance(data, dict) else None
+        if not isinstance(meta, dict):
+            return
+        turn_id = str(meta.get("turnId") or "").strip()
+        cue = [str(item) for item in (meta.get("cueFingerprint") or []) if isinstance(item, str)][:32]
+        candidates = [
+            str(item) for item in (meta.get("candidateFingerprint") or [])
+            if isinstance(item, str)
+        ][:3]
+        if not turn_id or not cue:
+            return
+        with self._lock:
+            self._last_context_turns[sid] = turn_id
+        if self._hermes_home is None:
+            return
+        try:
+            directory = _ensure_host_plan_dir(self._hermes_home)
+            _atomic_write_json(
+                directory / f"state-{_host_plan_key(sid)}.json",
+                {
+                    "schema": 1,
+                    "threadId": thread_id,
+                    "agentId": self._agent_id,
+                    "turnId": turn_id,
+                    "cueFingerprint": cue,
+                    "candidateFingerprint": candidates,
+                    "configuredSource": str(meta.get("configuredSource") or ""),
+                    "at": _now_ms(),
+                },
+            )
+        except Exception as error:
+            logger.debug("Mebular host plan state write failed: %s", type(error).__name__)
+
+    def _take_host_plan(self, sid: str, thread_id: str) -> Optional[Dict[str, Any]]:
+        """Read and locally validate the adapter-owned plan; single use."""
+        if self._hermes_home is None:
+            return None
+        path = _host_plan_dir(self._hermes_home) / f"plan-{_host_plan_key(sid)}.json"
+        try:
+            raw = _read_json(path)
+            path.unlink(missing_ok=True)
+        except Exception:
+            return None
+        if not raw:
+            return None
+        reason = ""
+        now_ms = _now_ms()
+        plan_id = str(raw.get("planId") or "")
+        if raw.get("schema") != 1 or not re.fullmatch(r"hp_[A-Za-z0-9._:-]{1,124}", plan_id):
+            reason = "host_plan_invalid"
+        elif raw.get("host") != "hermes":
+            reason = "host_plan_scope_mismatch"
+        elif raw.get("agentId") != self._agent_id or raw.get("threadId") != thread_id:
+            reason = "host_plan_scope_mismatch"
+        elif raw.get("scope") != "session":
+            reason = "host_plan_scope_mismatch"
+        elif raw.get("basedOnTurnId") != self._last_context_turns.get(sid):
+            reason = "host_plan_scope_mismatch"
+        elif not isinstance(raw.get("expiresAt"), (int, float)) or raw.get("expiresAt") <= now_ms:
+            reason = "host_plan_expired"
+        elif not isinstance(raw.get("createdAt"), (int, float)) \
+                or raw.get("expiresAt") - raw.get("createdAt") > _HOST_PLAN_TTL_MS \
+                or raw.get("createdAt") > now_ms + 5_000:
+            reason = "host_plan_invalid"
+        elif raw.get("plannerKind") != "host-model":
+            reason = "host_plan_not_model"
+        elif raw.get("action") not in _HOST_PLAN_ACTIONS or raw.get("depth") not in _HOST_PLAN_DEPTHS:
+            reason = "host_plan_invalid"
+        elif raw.get("reasonCode") not in _HOST_PLAN_REASONS:
+            reason = "host_plan_invalid"
+        elif not isinstance(raw.get("confidence"), (int, float)) \
+                or not 0 <= float(raw.get("confidence")) <= 1:
+            reason = "host_plan_invalid"
+        elif not isinstance(raw.get("cueFingerprint"), list) or not raw.get("cueFingerprint"):
+            reason = "host_plan_invalid"
+        elif not isinstance(raw.get("basisCandidateFingerprint"), list):
+            reason = "host_plan_invalid"
+        else:
+            version = _parse_version_tuple(raw.get("hermesVersion"))
+            if version is None or version < _MIN_HOST_PLAN_HERMES:
+                reason = "hermes_version_unsupported"
+            elif raw.get("isolation") != "in_process":
+                reason = "hermes_isolation_unsupported"
+            elif raw.get("apiMode") == "codex_app_server":
+                reason = "hermes_api_mode_unsupported"
+        with self._lock:
+            self._host_plan_status = {
+                "state": "rejected" if reason else "consumed",
+                "reason": reason,
+                "planId": plan_id,
+                "at": now_ms,
+            }
+        if reason:
+            logger.debug("Mebular host plan discarded: %s", reason)
+            return None
+        return raw
+
     def _recall(self, query: str, sid: str) -> str:
         """Call the sidecar context endpoint; return a ready-to-inject block."""
         if self._client is None:
@@ -3687,6 +3854,7 @@ class MebularMemoryProvider(MemoryProvider):
             )
         self._refresh_token_if_due()
         thread_id = self._thread_id(sid)
+        host_plan = self._take_host_plan(sid, thread_id)
         payload: Dict[str, Any] = {
             "actor": {"type": "agent", "agentId": self._agent_id},
             "agentId": self._agent_id,
@@ -3703,11 +3871,15 @@ class MebularMemoryProvider(MemoryProvider):
         }
         if self._domain:
             payload["domains"] = [self._domain]
+        if host_plan is not None:
+            payload["hostPlan"] = host_plan
+            payload["previousTurnId"] = host_plan.get("basedOnTurnId")
 
         try:
             data = self._post_with_auth_retry(
                 "/context", payload, timeout=self._recall_timeout
             )
+            self._remember_context_meta(sid, thread_id, data)
             text = self._format_context(data)
             if text:
                 return text
@@ -4145,6 +4317,7 @@ class MebularMemoryProvider(MemoryProvider):
         """
         try:
             self._archive(messages, label="compress")
+            self._clear_host_plan_state(self._session_id)
             if self._spool is not None and self._client is not None:
                 self.flush(timeout=self._archive_flush_timeout)
             if (self._ready() and self._writes_enabled
@@ -4167,6 +4340,7 @@ class MebularMemoryProvider(MemoryProvider):
         except Exception as error:
             logger.debug("Mebular session-end snapshot skipped: %s", type(error).__name__)
         finally:
+            self._clear_host_plan_state(self._session_id)
             with self._lock:
                 self._prefetch_cache.clear()
                 self._last_recall_count = None
@@ -4195,6 +4369,7 @@ class MebularMemoryProvider(MemoryProvider):
                 self.flush(timeout=2.0)
         except Exception:
             pass
+        self._clear_host_plan_state(old_session_id)
         with self._lock:
             self._session_id = str(new_session_id or self._session_id)
             self._prefetch_cache.clear()

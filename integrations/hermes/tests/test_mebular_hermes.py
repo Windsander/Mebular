@@ -272,7 +272,7 @@ class _Handler(BaseHTTPRequestHandler):
                  {"kind": "fragment", "content": text, "trust": "untrusted"})
                 for text in fake.context_blocks
             ]
-            self._send(200, self._envelope({
+            payload: Dict[str, Any] = {
                 "recallId": "rr_test",
                 "fragments": fake.fragments,
                 "blocks": blocks,
@@ -287,7 +287,10 @@ class _Handler(BaseHTTPRequestHandler):
                 "traceId": "tr_test",
                 "timing": {"cueMs": 1, "fuzzyMs": 1, "expandMs": 1,
                            "assembleMs": 1, "totalMs": 4},
-            }))
+            }
+            if isinstance(fake.context_meta, dict):
+                payload["interventionMeta"] = dict(fake.context_meta)
+            self._send(200, self._envelope(payload))
             return
         if parsed.path == f"{API}/recall":
             if fake.mode == "slow":
@@ -377,6 +380,7 @@ class FakeSidecar:
         self.checkpoint_unconfirmed = False
         self.context_missing = False
         self.context_blocks: List[str] = []
+        self.context_meta: Optional[Dict[str, Any]] = None
         self.fragments: List[Dict[str, Any]] = []
         self.recall_records: List[Dict[str, Any]] = []
         self.requests: List[Dict[str, Any]] = []
@@ -411,6 +415,7 @@ class FakeSidecar:
             "body": body,
             "authorization": ((headers.get("Authorization") or "") if headers is not None else ""),
             "idempotency": ((headers.get("Idempotency-Key") or "") if headers is not None else ""),
+            "host_app": ((headers.get("X-Mebular-Host-App") or "") if headers is not None else ""),
         })
 
     def paths(self) -> List[str]:
@@ -428,6 +433,7 @@ class FakeSidecar:
         self.checkpoint_unconfirmed = False
         self.context_missing = False
         self.context_blocks = []
+        self.context_meta = None
         self.fragments = []
         self.recall_records = []
         self.requests.clear()
@@ -2456,6 +2462,8 @@ class CompanionTests(BaseCase):
         def __init__(self) -> None:
             self.llm = CompanionTests._Llm()
             self.hooks: Dict[str, Callable[..., Any]] = {}
+            self.version = "0.21.7"
+            self.config: Dict[str, Any] = {"plugins": {"isolation": "in_process"}}
 
         def register_hook(self, name: str, callback: Callable[..., Any]) -> None:
             self.hooks[name] = callback
@@ -2554,3 +2562,205 @@ class CompanionTests(BaseCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HostPlanBridgeTests(BaseCase):
+    """0.4.0 W3：Hermes companion 生成 plan、provider 消费 plan。"""
+
+    def _companion_config(self, server: Optional[FakeSidecar], enabled: bool = True) -> None:
+        config: Dict[str, Any] = {"enabled": enabled}
+        if server is not None:
+            config["runtime_url"] = server.url
+        (self.hermes_home / "mebular-companion.json").write_text(
+            json.dumps(config), encoding="utf-8"
+        )
+
+    def _plan_path(self, session_id: str = "s1") -> Path:
+        return memory_plugin._host_plan_dir(self.hermes_home) / (
+            f"plan-{memory_plugin._host_plan_key(session_id)}.json"
+        )
+
+    def _write_state(self, session_id: str = "s1", turn_id: str = "turn_1",
+                     thread_id: Optional[str] = None) -> None:
+        directory = memory_plugin._host_plan_dir(self.hermes_home)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / f"state-{memory_plugin._host_plan_key(session_id)}.json").write_text(
+            json.dumps({
+                "schema": 1,
+                "threadId": thread_id or f"th_{session_id}",
+                "agentId": "hermes",
+                "turnId": turn_id,
+                "cueFingerprint": ["aa11", "bb22"],
+                "candidateFingerprint": ["cc33", "dd44"],
+                "configuredSource": "host",
+                "at": int(time.time() * 1000),
+            }),
+            encoding="utf-8",
+        )
+
+    def _plan(self, **overrides: Any) -> Dict[str, Any]:
+        now = int(time.time() * 1000)
+        plan = {
+            "schema": 1,
+            "planId": "hp_01JHERMESPLAN0001",
+            "host": "hermes",
+            "hostInstanceId": "hi_hermes_test",
+            "agentId": "hermes",
+            "threadId": f"th_{memory_plugin._sha256_text('s1')[:32]}",
+            "scope": "session",
+            "basedOnTurnId": "turn_1",
+            "cueFingerprint": ["aa11", "bb22"],
+            "basisCandidateFingerprint": ["cc33", "dd44"],
+            "createdAt": now - 1000,
+            "expiresAt": now - 1000 + 60_000,
+            "action": "speak",
+            "depth": "gist",
+            "confidence": 0.74,
+            "reasonCode": "high_relevance",
+            "plannerKind": "host-model",
+            "plannerVersion": "hermes-companion:0.3.0",
+            "policyVersion": "host-plan:v1",
+            "hermesVersion": "0.21.7",
+            "isolation": "in_process",
+            "apiMode": "",
+            "sessionModel": "host/model",
+        }
+        plan.update(overrides)
+        return plan
+
+    def _write_plan(self, **overrides: Any) -> Path:
+        path = self._plan_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(self._plan(**overrides)), encoding="utf-8")
+        return path
+
+    def test_provider_writes_state_and_consumes_fresh_plan(self) -> None:
+        server = self.fake_server()
+        server.context_blocks = ["[F1] user prefers dark theme"]
+        server.context_meta = {
+            "source": "heuristic",
+            "configuredSource": "host",
+            "prefetched": False,
+            "turnId": "turn_1",
+            "cueFingerprint": ["aa11", "bb22"],
+            "candidateFingerprint": ["cc33", "dd44"],
+        }
+        provider = self.make_provider(server)
+        provider.prefetch("theme", session_id="s1")
+        state_path = memory_plugin._host_plan_dir(self.hermes_home) / (
+            f"state-{memory_plugin._host_plan_key('s1')}.json"
+        )
+        self.assertTrue(state_path.exists())
+
+        plan = self._plan(threadId=provider._thread_id("s1"))
+        self._plan_path().write_text(json.dumps(plan), encoding="utf-8")
+        provider.prefetch("theme details", session_id="s1")
+        contexts = [entry for entry in server.requests if entry["path"] == f"{API}/context"]
+        self.assertEqual(len(contexts), 2)
+        self.assertEqual(contexts[1]["host_app"], "hermes")
+        self.assertEqual(contexts[1]["body"]["previousTurnId"], "turn_1")
+        self.assertEqual(contexts[1]["body"]["hostPlan"]["planId"], "hp_01JHERMESPLAN0001")
+        self.assertFalse(self._plan_path().exists())
+        self.assertEqual(provider.host_plan_status["state"], "consumed")
+
+    def test_unsupported_isolation_falls_back_and_does_not_send_plan(self) -> None:
+        server = self.fake_server()
+        server.context_blocks = ["[F1] user prefers dark theme"]
+        server.context_meta = {
+            "configuredSource": "host",
+            "turnId": "turn_1",
+            "cueFingerprint": ["aa11", "bb22"],
+            "candidateFingerprint": ["cc33", "dd44"],
+        }
+        provider = self.make_provider(server)
+        provider._last_context_turns["s1"] = "turn_1"
+        self._write_plan(threadId=provider._thread_id("s1"), isolation="host")
+        provider.prefetch("theme", session_id="s1")
+        contexts = [entry for entry in server.requests if entry["path"] == f"{API}/context"]
+        self.assertEqual(contexts[-1]["body"].get("hostPlan"), None)
+        self.assertEqual(provider.host_plan_status["reason"], "hermes_isolation_unsupported")
+
+    def test_companion_unsupported_version_or_isolation_registers_no_post_hook(self) -> None:
+        self._companion_config(None)
+        for version, isolation, reason in (
+            ("0.21.5", "in_process", "hermes_version_unsupported"),
+            ("0.21.7", "host", "hermes_isolation_unsupported"),
+            ("0.21.7", "in_process", "hermes_api_mode_unsupported"),
+        ):
+            ctx = CompanionTests._Ctx()
+            ctx.version = version
+            ctx.config = {"plugins": {"isolation": isolation}}
+            if reason == "hermes_api_mode_unsupported":
+                ctx.api_mode = "codex_app_server"
+            companion_plugin.register(ctx)
+            self.assertNotIn("post_llm_call", ctx.hooks)
+            self.assertFalse(companion_plugin.MebularCompanion(ctx).host_plan_status["supported"])
+
+    def test_companion_post_llm_call_writes_plan_without_raw_text(self) -> None:
+        server = self.fake_server()
+        self._companion_config(server)
+        self._write_state()
+        ctx = CompanionTests._Ctx()
+
+        class _PlanLlm:
+            def __init__(self) -> None:
+                self.calls: List[Dict[str, Any]] = []
+
+            def complete_structured(self, **kwargs: Any) -> Any:
+                self.calls.append(kwargs)
+                return types.SimpleNamespace(
+                    parsed={
+                        "action": "speak",
+                        "depth": "gist",
+                        "confidence": 0.71,
+                        "reasonCode": "high_relevance",
+                    },
+                    text="",
+                    model="host/test-model",
+                )
+
+        ctx.llm = _PlanLlm()
+        plugin = companion_plugin.MebularCompanion(ctx)
+        companion_plugin.register(ctx)
+        self.assertIn("post_llm_call", ctx.hooks)
+        ctx.hooks["post_llm_call"](
+            session_id="s1",
+            task_id="task-1",
+            turn_id="host-turn-1",
+            user_message="MY SECRET RAW QUERY 1234567890",
+            assistant_response="assistant answer must not be stored",
+            conversation_history=[],
+            model="host/model",
+            platform="cli",
+        )
+        path = self._plan_path()
+        self.assertTrue(self.wait_until(path.exists, timeout=2.0))
+        plan = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(plan["host"], "hermes")
+        self.assertEqual(plan["basedOnTurnId"], "turn_1")
+        self.assertEqual(plan["action"], "speak")
+        self.assertEqual(plan["hermesVersion"], "0.21.7")
+        self.assertEqual(plan["isolation"], "in_process")
+        self.assertNotIn("user_message", plan)
+        self.assertNotIn("assistant_response", plan)
+        raw = path.read_text(encoding="utf-8")
+        self.assertNotIn("MY SECRET RAW QUERY", raw)
+        self.assertNotIn("assistant answer must not be stored", raw)
+
+    def test_companion_pre_llm_call_invalidates_plan_on_model_change(self) -> None:
+        server = self.fake_server()
+        self._companion_config(server)
+        self._write_plan()
+        ctx = CompanionTests._Ctx()
+        plugin = companion_plugin.MebularCompanion(ctx)
+        ctx.hooks["pre_llm_call"] = plugin.pre_llm_call
+        ctx.hooks["pre_llm_call"](
+            session_id="s1",
+            user_message="next",
+            conversation_history=[
+                {"role": "user", "content": "I prefer dark mode"},
+                {"role": "assistant", "content": "Noted."},
+            ],
+            model="host/other-model",
+        )
+        self.assertFalse(self._plan_path().exists())

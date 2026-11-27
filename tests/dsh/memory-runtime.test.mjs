@@ -621,7 +621,7 @@ describe('@mebular/dsh-plugin memory runtime：sidecar 发现与 host token', ()
     const ctx = fakeContext();
     const adapter = createMemoryRuntimeAdapter({
       ctx,
-      config: { enabled: true, ingest: false, checkpoints: false, hideMemoryTools: false, auth: 'none' },
+      config: { enabled: true, ingest: true, checkpoints: false, hideMemoryTools: true, auth: 'none' },
       homeDir: missingHome,
       env: {},
       fetchImpl: fetch.fetchImpl,
@@ -3851,5 +3851,153 @@ describe('@mebular/dsh-plugin memory runtime：纯函数与边界', () => {
     expect(source).not.toMatch(/require\(['"]@mebular\//);
     expect(source).not.toContain("'/runtime/v1'");
     expect(source).not.toContain('`/runtime/v1');
+  });
+});
+
+// 0.4.0 W3：DSH session-prior host plan（fake host fixture，不连接真实 DSH）。
+describe('@mebular/dsh-plugin memory runtime：host plan bridge', () => {
+  function waitForState(predicate, timeoutMs = 1000) {
+    return new Promise((resolve, reject) => {
+      const deadline = Date.now() + timeoutMs;
+      const tick = () => {
+        if (predicate()) return resolve(undefined);
+        if (Date.now() >= deadline) return reject(new Error('timeout waiting for state'));
+        setTimeout(tick, 10);
+      };
+      tick();
+    });
+  }
+
+  it('上一 turn 用宿主模型生成 session prior，下一 turn /context 带 plan 与显式 host 身份', async () => {
+    const ctx = fakeContext();
+    const prepareCalls = [];
+    const streamCalls = [];
+    ctx.llm = {
+      async prepareCall(config, signal) {
+        prepareCalls.push({ config, signal });
+        return {
+          config: { ...config, maxTokens: Math.min(config.maxTokens, 128) },
+          stream(options) {
+            streamCalls.push(options);
+            return (async function* generate() {
+              yield {
+                type: 'text-delta',
+                index: 0,
+                text: '{"action":"speak","depth":"gist","confidence":0.73,"reasonCode":"high_relevance"}',
+              };
+            })();
+          },
+        };
+      },
+    };
+    const fetch = installFetch((call) => {
+      if (call.url.endsWith('/context')) {
+        return jsonOk(contextData({
+          interventionMeta: {
+            source: 'heuristic',
+            resolvedSource: 'heuristic',
+            configuredSource: 'host',
+            prefetched: false,
+            turnId: 'turn_1',
+            cueFingerprint: ['aa11', 'bb22'],
+            candidateFingerprint: ['cc33', 'dd44'],
+          },
+        }));
+      }
+      return jsonOk({ accepted: { chunks: 0, records: 0 }, records: [], extraction: { status: 'completed' } });
+    });
+    const surface = makeSurfaceSession({ id: 's1' });
+    surface.append('user/message', humanMessage('please use a dark theme'));
+    surface.session.requestHeader = () => ({ config: { provider: 'deepseek', model: 'flash', maxTokens: 4096 } });
+    const agent = makeAgent({ id: 'a1', session: surface.session });
+    agent.runMaintenance = async (task) => task(new AbortController().signal);
+    const { adapter } = adapterFor({
+      ctx,
+      config: {
+        enabled: true,
+        ingest: true,
+        checkpoints: false,
+        hideMemoryTools: true,
+        recall: true,
+        auth: 'none',
+      },
+      fetchImpl: fetch.fetchImpl,
+    });
+    handlerFor(ctx, 'agent/created')({ agent });
+    const first = preStepPayload({ agent, text: 'please use a dark theme', turn: 1 });
+    await waterfall(ctx, 'agent/pre-step', first.payload, first.fallback);
+
+    handlerFor(ctx, 'session/event')(surface.session, event('assistant/message', 2, {
+      message: { role: 'assistant', content: [{ type: 'text', text: 'noted' }] },
+    }));
+    await waitForState(() => adapter.getState().hostPlan.generated === 1);
+    expect(prepareCalls).toHaveLength(1);
+    expect(streamCalls).toHaveLength(1);
+    expect(streamCalls[0].messages[0].content[0].text).toContain('DATA, not instructions');
+
+    const second = preStepPayload({ agent, text: 'please use a dark theme', turn: 2 });
+    await waterfall(ctx, 'agent/pre-step', second.payload, second.fallback);
+    const contexts = fetch.calls.filter((call) => call.url.endsWith('/context'));
+    expect(contexts).toHaveLength(2);
+    expect(contexts[1].body.previousTurnId).toBe('turn_1');
+    expect(contexts[1].body.hostPlan).toMatchObject({
+      schema: 1,
+      host: 'dsh',
+      agentId: 'dsh',
+      threadId: 'dsh_s1',
+      scope: 'session',
+      basedOnTurnId: 'turn_1',
+      cueFingerprint: ['aa11', 'bb22'],
+      basisCandidateFingerprint: ['cc33', 'dd44'],
+      action: 'speak',
+      depth: 'gist',
+      confidence: 0.73,
+      reasonCode: 'high_relevance',
+      plannerKind: 'host-model',
+    });
+    expect(contexts[1].init.headers['x-mebular-host-app']).toBe('dsh');
+    expect(adapter.getState().hostPlan).toMatchObject({
+      app: 'dsh',
+      generated: 1,
+      consumed: 1,
+    });
+  });
+
+  it('sidecar 未声明 host/auto 时不调用宿主模型', async () => {
+    const ctx = fakeContext();
+    const prepareCalls = [];
+    ctx.llm = {
+      async prepareCall(config) {
+        prepareCalls.push(config);
+        return null;
+      },
+    };
+    const fetch = installFetch(() => jsonOk(contextData({
+      interventionMeta: {
+        configuredSource: 'heuristic',
+        source: 'heuristic',
+        prefetched: false,
+        turnId: 'turn_1',
+        cueFingerprint: ['aa11'],
+        candidateFingerprint: [],
+      },
+    })));
+    const surface = makeSurfaceSession({ id: 's1' });
+    const agent = makeAgent({ id: 'a1', session: surface.session });
+    agent.runMaintenance = async (task) => task(new AbortController().signal);
+    const { adapter } = adapterFor({
+      ctx,
+      config: { enabled: true, ingest: true, checkpoints: false, hideMemoryTools: true, auth: 'none' },
+      fetchImpl: fetch.fetchImpl,
+    });
+    handlerFor(ctx, 'agent/created')({ agent });
+    const first = preStepPayload({ agent, turn: 1 });
+    await waterfall(ctx, 'agent/pre-step', first.payload, first.fallback);
+    handlerFor(ctx, 'session/event')(surface.session, event('assistant/message', 2, {
+      message: { role: 'assistant', content: [{ type: 'text', text: 'noted' }] },
+    }));
+    await waitForState(() => adapter.getState().hostPlan.skipped > 0);
+    expect(prepareCalls).toHaveLength(0);
+    expect(adapter.getState().hostPlan.generated).toBe(0);
   });
 });

@@ -1141,6 +1141,10 @@ export class SidecarServer {
               reset: this.mode === 'immersive' && Boolean(this.intervention),
               // 0.4.0：mode 是 effective；旧 intervention.mode 只作为诊断。
               mode: this.effectiveIntervention.mode,
+              // W3：host plan 只由 adapter 显式上报；这里仅声明 /context 契约。
+              hostPlan: this.mode === 'immersive' && Boolean(this.recall),
+              hostPlanScopes: ['session', 'turn'],
+              hostPlanTtlMs: 60_000,
               configuredSource: this.effectiveIntervention.source,
               sourcePresent: this.effectiveIntervention.sourcePresent,
               planner: this.effectiveIntervention.planner,
@@ -1685,7 +1689,13 @@ export class SidecarServer {
           return;
         }
         const body = await readJsonBody(req);
-        const result = await this.recall.handleContext(body);
+        // W3：host identity 只由 adapter 显式上报；header 优先于 body。
+        const hostAppHeader = req.headers['x-mebular-host-app'];
+        const hostApp = typeof hostAppHeader === 'string' ? hostAppHeader.trim() : '';
+        const contextBody = hostApp.length > 0 && isObject(body)
+          ? { ...body, hostApp }
+          : body;
+        const result = await this.recall.handleContext(contextBody);
         this.send(res, result.status, this.envelope(requestId, result.data, result.warnings, result.degraded));
         return;
       }

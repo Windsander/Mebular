@@ -88,12 +88,59 @@ export function confirmFirstRunDisclosure({
 /**
  * 打开 create/join 前捕获 ack：只接受与当前 generation 相同的“当前可见”证据，
  * 过期 generation 一律拒绝（关闭/隐藏后不得复用曾经可见）。
+ * 捕获时再校验一次元素/父层可见性，避免 generation 未变但布局已被隐藏。
  */
-export function firstRunDisclosureAckFor({ current, currentGeneration } = {}) {
+export function firstRunDisclosureAckFor({
+  current,
+  currentGeneration,
+  element,
+  container,
+  view = globalThis,
+} = {}) {
   if (!current) return null;
   if (!Number.isInteger(current.version) || current.version < 1) return null;
   if (!Number.isInteger(current.generation)) return null;
   if (current.generation !== currentGeneration) return null;
+  if (!isElementActuallyVisible(element, container, view)) return null;
   return { version: current.version, generation: current.generation };
+}
+
+/** 提交 body 的 ack 字段；没有合法 ack 时返回空对象（不带任何 ack）。 */
+export function firstRunDisclosureSubmitPayload(ack) {
+  if (!ack || !Number.isInteger(ack.version) || ack.version < 1) return {};
+  return { firstRunDisclosure: true, firstRunDisclosureVersion: ack.version };
+}
+
+const COACH_ACTIONS_SELECTOR = '.onboarding-coach-actions';
+
+/**
+ * 真实 coach CTA 的点击接线（生产与测试共用）：
+ * - create/join：先 stopPropagation，再调用 open（open 内部负责“捕获当前 ack → keepAck 收起 coach”）；
+ * - dismiss：关闭并清空 ack；
+ * - 容器点击：忽略 action buttons（避免二次 dismiss 清掉刚捕获的 ack），点说明文字仍可关闭。
+ */
+export function bindFirstRunCoachActions({
+  coach,
+  create,
+  join,
+  dismiss,
+  openCreate = () => {},
+  openJoin = () => {},
+  onDismiss = () => {},
+} = {}) {
+  const listen = (element, handler) => {
+    if (element && typeof element.addEventListener === 'function') element.addEventListener('click', handler);
+  };
+  const stop = (event) => event?.stopPropagation?.();
+  listen(create, (event) => { stop(event); openCreate(); });
+  listen(join, (event) => { stop(event); openJoin(); });
+  listen(dismiss, (event) => { stop(event); onDismiss(); });
+  listen(coach, (event) => {
+    const target = event?.target;
+    if (target && typeof target.closest === 'function' && target.closest(COACH_ACTIONS_SELECTOR)) {
+      return; // action button 区域不触发容器 dismiss（CTA 自己已处理）
+    }
+    onDismiss();
+  });
 }
 

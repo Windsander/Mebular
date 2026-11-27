@@ -16,8 +16,10 @@ import { createConsoleHost, markEmbeddedDocument } from './host.js';
 import { t, getLocale, setLocale, onLocaleChange, applyStaticI18n, languageSettingsRowHtml, initI18n, reconcileDesktopLocale, LOCALE_STORAGE_KEY, formatDate as formatLocaleDate, formatDateTime as formatLocaleDateTime, formatExpiry } from './i18n.mjs';
 import { enhanceSelect, enhanceSelects } from './dropdown.mjs';
 import {
+  bindFirstRunCoachActions,
   confirmFirstRunDisclosure,
   firstRunDisclosureAckFor,
+  firstRunDisclosureSubmitPayload,
 } from './first-run-disclosure.js';
 
 const $ = (selector) => document.querySelector(selector);
@@ -6257,13 +6259,16 @@ for (const [embedId, sourceId] of [
 ]) {
   $(embedId)?.addEventListener('click', () => $(sourceId)?.click());
 }
-$('#coach-create')?.addEventListener('click', () => {
-  dismissOnboardingCoach();
-  openOnboardCreate();
-});
-$('#coach-join')?.addEventListener('click', () => {
-  dismissOnboardingCoach();
-  openOnboardJoin();
+// 0.4.0 W1b：coach CTA 的真实点击路径（捕获可见 ack → keepAck 收起 coach）。
+// CTA 内 stopPropagation，容器忽略 action buttons，避免冒泡二次 dismiss 清掉刚捕获的 ack。
+bindFirstRunCoachActions({
+  coach: $('#onboarding-coach'),
+  create: $('#coach-create'),
+  join: $('#coach-join'),
+  dismiss: $('#coach-dismiss'),
+  openCreate: openOnboardCreate,
+  openJoin: openOnboardJoin,
+  onDismiss: () => dismissOnboardingCoach(),
 });
 $('#onboard-create-close')?.addEventListener('click', () => closeOnboardCreate());
 $('#onboard-create-cancel')?.addEventListener('click', () => closeOnboardCreate());
@@ -7962,6 +7967,7 @@ function renderFirstRunDisclosure(status) {
   firstRunDisclosureGeneration += 1;
   const generation = firstRunDisclosureGeneration;
   firstRunDisclosure = null;
+  firstRunDisclosureAck = null;
   if (!pending || !Number.isInteger(version) || version < 1) {
     if (el) el.hidden = true;
     return null;
@@ -8011,11 +8017,14 @@ async function confirmFirstRunDisclosureShown(version, generation) {
   }
 }
 
-/** 打开 create/join 前捕获 ack：只接受当前 generation 的可见证据。 */
+/** 打开 create/join 前捕获 ack：只接受当前 generation 且此刻仍实际可见的证据。 */
 function captureFirstRunDisclosureAck() {
   firstRunDisclosureAck = firstRunDisclosureAckFor({
     current: firstRunDisclosure,
     currentGeneration: firstRunDisclosureGeneration,
+    element: $('#first-run-disclosure'),
+    container: $('#onboarding-coach'),
+    view: window,
   });
 }
 
@@ -8136,9 +8145,7 @@ async function submitOnboard(kind) {
       body: {
         confirm: true,
         // 只有披露在被收起前确认“实际可见”才回传 ack；未展示 / 渲染失败 → 服务端保持 pending。
-        ...(firstRunDisclosureAck
-          ? { firstRunDisclosure: true, firstRunDisclosureVersion: firstRunDisclosureAck.version }
-          : {}),
+        ...firstRunDisclosureSubmitPayload(firstRunDisclosureAck),
         ...(deviceName ? { deviceName } : {}),
         ...(isCreate && cloudName ? { cloudName } : {}),
         ...(!isCreate ? { token } : {}),
@@ -8284,10 +8291,7 @@ async function enterNormalConsoleOnce() {
   }, POLL_MS);
 }
 
-// 引导遮罩：点击任意处/知道了关闭；ESC 在无弹层时关闭。
-$('#onboarding-coach')?.addEventListener('click', () => {
-  dismissOnboardingCoach();
-});
+// 引导遮罩：点击说明文字/背景关闭；action buttons 由 bindFirstRunCoachActions 处理，不再二次 dismiss。
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape' || event.defaultPrevented) return;
   if (visibleModalElements().length > 0) return;

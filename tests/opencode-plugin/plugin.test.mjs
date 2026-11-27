@@ -3932,6 +3932,7 @@ describe('0.4.0 W3 host plan bridge', () => {
       });
       expect(body.hostPlan.planId).toMatch(/^hp_/);
       expect(contexts[1].headers['x-mebular-host-app']).toBe(expectedHost);
+      expect(contexts[1].headers['x-mebular-host-instance']).toBe(body.hostPlan.hostInstanceId);
       expect(controller.getStatus().hostPlan.app).toBe(expectedHost);
       await controller.dispose();
     });
@@ -3987,6 +3988,99 @@ describe('0.4.0 W3 host plan bridge', () => {
     }]);
     await controller.handleContext(second);
     expect(fetchImpl.callsFor('/context')[1].body.hostPlan).toBeUndefined();
+    await controller.dispose();
+  });
+});
+
+describe('0.4.0 W3 host plan isolation', () => {
+  it('planner generate 期间的 session 事件不进入 ingest/event/checkpoint', async () => {
+    let controllerRef = null;
+    const routes = hostPlanRoutes();
+    const { controller, fetchImpl, calls } = controllerWith({
+      routes,
+      ctx: {
+        contextMessages: userMessages(),
+        generateImpl: async () => {
+          // 模拟宿主在 session.generate 期间回放同 session 事件。
+          await controllerRef.handleEvent({
+            type: 'session.text.ended',
+            data: { sessionID: 'ses_test', text: 'planner raw assistant text', assistantMessageID: 'pa1' },
+          });
+          await controllerRef.handleEvent({
+            type: 'session.execution.succeeded',
+            data: { sessionID: 'ses_test' },
+          });
+          return { text: HOST_PLAN_JSON };
+        },
+      },
+    });
+    controllerRef = controller;
+    await controller.start();
+    expect(fetchImpl.callsFor('/ingest')).toHaveLength(0);
+    await controller.handleContext(hookEvent(userMessages('please use a dark theme')));
+    await controller.handleEvent({ type: 'session.idle', data: { sessionID: 'ses_test' } });
+    await waitFor(() => controller.getStatus().hostPlan.generated === 1);
+
+    expect(calls.generate).toHaveLength(1);
+    expect(fetchImpl.callsFor('/ingest')).toHaveLength(1);
+    expect(fetchImpl.calls.filter((call) => call.path.startsWith('/checkpoints/'))).toHaveLength(0);
+    expect(fetchImpl.calls.filter((call) => call.path.startsWith('/self/'))).toHaveLength(0);
+    expect(controller.getStatus().hostPlan.suppressedEvents).toBeGreaterThanOrEqual(2);
+    expect(controller.getStatus().counts.ingest.contextReads).toBe(1);
+    await controller.dispose();
+  });
+
+  it('sidecar source 变化时 adapter 主动清空 host plan 缓存', async () => {
+    const routes = hostPlanRoutes();
+    let source = 'host';
+    routes['/context'] = (call) => jsonResponse({
+      ok: true,
+      data: {
+        recallId: 'rr_host_plan',
+        fragments: [],
+        blocks: [],
+        citations: [],
+        estimatedTokens: 0,
+        estimatedBytes: 0,
+        truncated: false,
+        degraded: false,
+        warnings: [],
+        silenceReason: 'no_hits',
+        traceId: 'tr_host_plan_1',
+        timing: { cueMs: 1, fuzzyMs: 1, expandMs: 0, assembleMs: 1, totalMs: 3 },
+        interventionMeta: {
+          source: 'heuristic',
+          resolvedSource: 'heuristic',
+          configuredSource: source,
+          prefetched: false,
+          turnId: call.body.turnId,
+          cueFingerprint: ['aa11', 'bb22'],
+          candidateFingerprint: ['cc33', 'dd44'],
+        },
+      },
+    });
+    const { controller, calls } = controllerWith({
+      routes,
+      ctx: {
+        contextMessages: userMessages(),
+        generateImpl: async () => ({ text: HOST_PLAN_JSON }),
+      },
+    });
+    await controller.start();
+    await controller.handleContext(hookEvent(userMessages('please use a dark theme')));
+    await controller.handleEvent({ type: 'session.idle', data: { sessionID: 'ses_test' } });
+    await waitFor(() => controller.getStatus().hostPlan.generated === 1);
+    expect(controller.getStatus().hostPlan.pending).toBe(1);
+
+    source = 'heuristic';
+    await controller.handleContext(hookEvent([{
+      id: 'u2',
+      role: 'user',
+      content: [{ type: 'text', text: 'please use a dark theme' }],
+    }]));
+    expect(controller.getStatus().hostPlan.invalidated).toBeGreaterThanOrEqual(1);
+    expect(controller.getStatus().hostPlan.pending).toBe(0);
+    expect(calls.generate).toHaveLength(1);
     await controller.dispose();
   });
 });

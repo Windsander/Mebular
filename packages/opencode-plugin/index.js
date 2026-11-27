@@ -1676,6 +1676,9 @@ export function createController(dependencies = {}) {
   const hostPlans = new Map();
   const hostBasis = new Map();
   const hostPlanInFlight = new Set();
+  /** W3：planner generate 期间的宿主事件必须隔离，不能进入 ingest/checkpoint。 */
+  const internalPlannerSessions = new Map();
+  let lastHostPlanSource = null;
   const reportedOutcomes = new Set();
   let outcomeSupport = null;
   const pendingCheckpoints = new Map();
@@ -1725,7 +1728,16 @@ export function createController(dependencies = {}) {
       retryAfterTruncated: 0,
     },
     model: { calls: 0, succeeded: 0, failed: 0, fallbacks: 0, skipped: 0 },
-    hostPlan: { attempts: 0, generated: 0, skipped: 0, failed: 0, consumed: 0, expired: 0 },
+    hostPlan: {
+      attempts: 0,
+      generated: 0,
+      skipped: 0,
+      failed: 0,
+      consumed: 0,
+      expired: 0,
+      invalidated: 0,
+      suppressedEvents: 0,
+    },
     outcomes: { attempted: 0, reported: 0, failed: 0, unsupported: 0, skipped: 0 },
     tools: { maskedAgents: 0, maskedTools: 0, governanceAgents: 0 },
     events: { received: 0, handled: 0, failures: 0, duplicates: 0, subscriptions: 0, reconnects: 0 },
@@ -1977,6 +1989,7 @@ export function createController(dependencies = {}) {
         'x-mebular-adapter-api': '1',
         // W3：宿主身份只由 adapter 显式上报；OpenChamber 通过 MEBULAR_HOST_APP 设置。
         'x-mebular-host-app': config.hostApp,
+        'x-mebular-host-instance': hostInstanceId,
         ...(body === undefined ? {} : { 'content-type': 'application/json' }),
       };
       const token = useAuth ? refreshToken(false) : '';
@@ -2891,6 +2904,13 @@ export function createController(dependencies = {}) {
 
   function bufferChunk(sessionID, role, text, messageId) {
     if (!ingestAllowed || closed) return false;
+    if (role !== 'user' && isInternalPlannerActive(safeThreadId(sessionID))) {
+      // planner 的 session.generate 文本不是用户内容；不得进入 ingest buffer。
+      // 真实 user chunk 仍保留，避免生成窗口吞掉下一轮输入。
+      stats.hostPlan.suppressedEvents += 1;
+      stats.ingest.skipped += 1;
+      return false;
+    }
     if (writesDisabled) {
       recordWriteRejected('ingest');
       stats.ingest.rejected += 1;
@@ -2999,6 +3019,10 @@ export function createController(dependencies = {}) {
   async function captureSessionContext(sessionID) {
     const session = safeThreadId(sessionID);
     if (!session || !ingestAllowed || writesDisabled || closed) return;
+    if (isInternalPlannerActive(session)) {
+      stats.hostPlan.suppressedEvents += 1;
+      return;
+    }
     const existing = contextReads.get(session);
     if (existing) return existing;
     const task = (async () => {
@@ -3266,6 +3290,27 @@ export function createController(dependencies = {}) {
     return source === 'host' || source === 'auto';
   }
 
+  function invalidateHostPlans(reason) {
+    hostPlans.clear();
+    hostBasis.clear();
+    hostPlanInFlight.clear();
+    stats.hostPlan.invalidated += 1;
+    noteFailure(`host_plan_invalidated_${reason}`);
+  }
+
+  function markInternalPlanner(session, ttlMs = config.hostPlanTimeoutMs + 2000) {
+    internalPlannerSessions.set(session ?? 'session', now() + Math.max(1000, ttlMs));
+  }
+
+  function isInternalPlannerActive(session) {
+    const key = session ?? 'session';
+    const until = internalPlannerSessions.get(key);
+    if (until === undefined) return false;
+    if (now() <= until) return true;
+    internalPlannerSessions.delete(key);
+    return false;
+  }
+
   /** W3 basis 与 outcome 开关解耦：即使 outcomes=false 也能生成 host plan。 */
   function rememberHostBasis(threadId, data) {
     const meta = isObject(data?.interventionMeta) ? data.interventionMeta : null;
@@ -3274,6 +3319,13 @@ export function createController(dependencies = {}) {
       ? meta.cueFingerprint.filter((entry) => typeof entry === 'string').slice(0, 32)
       : [];
     if (cueFingerprint.length === 0) return;
+    const configuredSource = asText(meta.configuredSource);
+    if (lastHostPlanSource !== null && configuredSource.length > 0
+      && configuredSource !== lastHostPlanSource) {
+      // source/canary/reconfigure 变化：adapter 侧主动失效，不只依赖 sidecar。
+      invalidateHostPlans('source_changed');
+    }
+    if (configuredSource.length > 0) lastHostPlanSource = configuredSource;
     hostBasis.set(threadId ?? 'session', {
       turnId: asText(meta.turnId),
       cueFingerprint,
@@ -3333,6 +3385,9 @@ export function createController(dependencies = {}) {
 
     hostPlanInFlight.add(inFlightKey);
     stats.hostPlan.attempts += 1;
+    const plannerSession = session ?? 'session';
+    // 隔离窗口覆盖 ctx.session.generate 全程；期间同 session 的事件不进 ingest。
+    markInternalPlanner(plannerSession);
     let timer = null;
     try {
       const result = await Promise.race([
@@ -3389,6 +3444,7 @@ export function createController(dependencies = {}) {
     } finally {
       if (timer !== null) clearTimeoutFn(timer);
       hostPlanInFlight.delete(inFlightKey);
+      internalPlannerSessions.delete(plannerSession);
     }
   }
 
@@ -3408,6 +3464,10 @@ export function createController(dependencies = {}) {
 
   async function finalizeSession(sessionID, options = {}) {
     const session = safeThreadId(sessionID);
+    if (isInternalPlannerActive(session)) {
+      stats.hostPlan.suppressedEvents += 1;
+      return false;
+    }
     const buffer = buffers.get(session);
     if (!buffer) return false;
     if (buffer.timer !== null) {
@@ -4253,6 +4313,10 @@ export function createController(dependencies = {}) {
     try {
       const data = isObject(event.data) ? event.data : {};
       const sessionID = data.sessionID ?? event.sessionID;
+      if (isInternalPlannerActive(safeThreadId(sessionID))) {
+        stats.hostPlan.suppressedEvents += 1;
+        return;
+      }
       switch (event.type) {
         case 'session.inbox.delivered':
           await captureSessionContext(sessionID);

@@ -1668,6 +1668,7 @@ class _RuntimeClient:
     def __init__(self, base_url: str, token: str) -> None:
         self._base_url = base_url.rstrip("/")
         self._token = token
+        self._host_instance = ""
 
     @property
     def base_url(self) -> str:
@@ -1675,6 +1676,9 @@ class _RuntimeClient:
 
     def set_token(self, token: str) -> None:
         self._token = token
+
+    def set_host_instance(self, value: str) -> None:
+        self._host_instance = str(value or "")
 
     def post(self, path: str, payload: Dict[str, Any], *,
              timeout: float, idempotency_key: str = "") -> Dict[str, Any]:
@@ -1703,6 +1707,8 @@ class _RuntimeClient:
             "X-Mebular-Adapter-Api": "1",
             "X-Mebular-Host-App": "hermes",
         }
+        if self._host_instance:
+            headers["X-Mebular-Host-Instance"] = self._host_instance
         if body is not None:
             headers["Content-Type"] = "application/json; charset=utf-8"
         if self._token:
@@ -3808,6 +3814,8 @@ class MebularMemoryProvider(MemoryProvider):
                 or raw.get("expiresAt") - raw.get("createdAt") > _HOST_PLAN_TTL_MS \
                 or raw.get("createdAt") > now_ms + 5_000:
             reason = "host_plan_invalid"
+        elif str(raw.get("configuredSource") or "") not in {"host", "auto"}:
+            reason = "source_not_host"
         elif raw.get("plannerKind") != "host-model":
             reason = "host_plan_not_model"
         elif raw.get("action") not in _HOST_PLAN_ACTIONS or raw.get("depth") not in _HOST_PLAN_DEPTHS:
@@ -3855,6 +3863,10 @@ class MebularMemoryProvider(MemoryProvider):
         self._refresh_token_if_due()
         thread_id = self._thread_id(sid)
         host_plan = self._take_host_plan(sid, thread_id)
+        if self._client is not None:
+            self._client.set_host_instance(
+                str(host_plan.get("hostInstanceId") or "") if host_plan is not None else ""
+            )
         payload: Dict[str, Any] = {
             "actor": {"type": "agent", "agentId": self._agent_id},
             "agentId": self._agent_id,

@@ -109,6 +109,8 @@ export interface HostPlanValidationInput {
   /** sidecar 自己记录的上一轮 /context turnId；用于拒绝 adapter 自报 basis。 */
   lastContextTurnId: string | null;
   hostApp: string | null;
+  /** 宿主 adapter 显式上报的进程实例；plan 必须与之绑定。 */
+  hostInstanceId: string | null;
   currentCue: Cue;
   currentCandidateFingerprint: string[];
 }
@@ -209,6 +211,9 @@ export function cueSignatureOf(cueFingerprint: readonly string[]): string {
  * 候选指纹只含稳定 candidateKey 的 hash；不含 gist/正文。
  * fragmentId 是每次召回随机的 mf_*，不能跨 turn 比较；必须优先用 sourceIds[0]
  * 这类稳定记录 ID（由 sidecar 内部提供 candidateKey）。
+ *
+ * 返回顺序必须保留候选相关性顺序：索引 0 就是 top-1。不能排序，
+ * 否则 top-1 会退化成字典序最小的 hash。
  */
 export function candidateFingerprintOf(
   candidates: ReadonlyArray<
@@ -218,8 +223,7 @@ export function candidateFingerprintOf(
 ): string[] {
   return candidates
     .slice(0, HOST_PLAN_CANDIDATE_TOP_N)
-    .map((candidate) => hashToken(candidate.candidateKey ?? candidate.fragmentId))
-    .sort();
+    .map((candidate) => hashToken(candidate.candidateKey ?? candidate.fragmentId));
 }
 
 /** 当前 top-1 的 hash 必须在 basis top-3 内；调用方保证 candidates 已按相关度排序。 */
@@ -363,6 +367,9 @@ export function validateHostPlan(
   }
 
   if (!input.hostApp || plan.host !== input.hostApp) {
+    return reject('host_plan_scope_mismatch', 'host_plan_scope_mismatch');
+  }
+  if (!input.hostInstanceId || plan.hostInstanceId !== input.hostInstanceId) {
     return reject('host_plan_scope_mismatch', 'host_plan_scope_mismatch');
   }
   if (plan.agentId !== input.agentId) {

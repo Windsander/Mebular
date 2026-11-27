@@ -344,6 +344,7 @@ export interface InterventionMeta {
   fallbackReason?: string;
   turnId: string | null;
   hostApp?: string;
+  hostInstanceId?: string;
   cueFingerprint: string[];
   candidateFingerprint: string[];
 }
@@ -452,8 +453,10 @@ interface NormalizedRequest {
   previousTurnId: string | null;
   /** W3：宿主显式上报的 host plan；只由 adapter 提供，不接受公共 MCP 工具。 */
   hostPlan: unknown;
-  /** W3：宿主显式身份；来自 x-mebular-host-app 头或请求体（additive）。 */
+  /** W3：宿主显式身份；只由 server 从 x-mebular-host-app 头注入。 */
   hostApp: string | null;
+  /** W3：宿主进程实例；只由 server 从 x-mebular-host-instance 头注入。 */
+  hostInstanceId: string | null;
   query: string;
   recentContext: string;
   domains: string[] | null;
@@ -1794,6 +1797,12 @@ export class RecallService {
       : typeof hostAppRaw === 'string' && (HOST_APPS as readonly string[]).includes(hostAppRaw)
         ? hostAppRaw
         : null;
+    const hostInstanceRaw = request.hostInstanceId;
+    const hostInstanceId = hostInstanceRaw === undefined || hostInstanceRaw === null
+      ? null
+      : typeof hostInstanceRaw === 'string' && /^hi_[A-Za-z0-9._:-]{1,124}$/.test(hostInstanceRaw)
+        ? hostInstanceRaw
+        : null;
     const hostPlan = context ? request.hostPlan : undefined;
     const query = typeof request.query === 'string' ? request.query.normalize('NFKC').trim() : '';
     if (query.length > MAX_QUERY_CHARS) {
@@ -1872,6 +1881,7 @@ export class RecallService {
       previousTurnId,
       hostPlan,
       hostApp,
+      hostInstanceId,
       anchor,
       query,
       recentContext,
@@ -3315,6 +3325,7 @@ export class RecallService {
       prefetched: false,
       turnId: run.request.turnId,
       ...(run.request.hostApp ? { hostApp: run.request.hostApp } : {}),
+      ...(run.request.hostInstanceId ? { hostInstanceId: run.request.hostInstanceId } : {}),
       cueFingerprint: cueTokenHashes(run.cue),
       candidateFingerprint,
     };
@@ -3345,6 +3356,7 @@ export class RecallService {
             previousTurnId: run.request.previousTurnId,
             lastContextTurnId: contextKey ? this.lastContextTurns.get(contextKey) ?? null : null,
             hostApp: run.request.hostApp,
+            hostInstanceId: run.request.hostInstanceId,
             currentCue: run.cue,
             currentCandidateFingerprint: candidateFingerprint,
           });
@@ -4298,6 +4310,7 @@ export class RecallService {
       prefetched: false,
       turnId: run.request.turnId,
       ...(run.request.hostApp ? { hostApp: run.request.hostApp } : {}),
+      ...(run.request.hostInstanceId ? { hostInstanceId: run.request.hostInstanceId } : {}),
       cueFingerprint: cueTokenHashes(run.cue),
       candidateFingerprint: candidateFingerprintOf(run.selected.map((candidate) => ({
         fragmentId: candidate.fragment.id,

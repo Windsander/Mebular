@@ -3872,6 +3872,7 @@ describe('@mebular/dsh-plugin memory runtime：host plan bridge', () => {
     const ctx = fakeContext();
     const prepareCalls = [];
     const streamCalls = [];
+    let emitPlannerEvent = null;
     ctx.llm = {
       async prepareCall(config, signal) {
         prepareCalls.push({ config, signal });
@@ -3880,6 +3881,7 @@ describe('@mebular/dsh-plugin memory runtime：host plan bridge', () => {
           stream(options) {
             streamCalls.push(options);
             return (async function* generate() {
+              emitPlannerEvent?.();
               yield {
                 type: 'text-delta',
                 index: 0,
@@ -3911,6 +3913,11 @@ describe('@mebular/dsh-plugin memory runtime：host plan bridge', () => {
     surface.session.requestHeader = () => ({ config: { provider: 'deepseek', model: 'flash', maxTokens: 4096 } });
     const agent = makeAgent({ id: 'a1', session: surface.session });
     agent.runMaintenance = async (task) => task(new AbortController().signal);
+    emitPlannerEvent = () => {
+      handlerFor(ctx, 'session/event')(surface.session, event('assistant/message', 99, {
+        message: { role: 'assistant', content: [{ type: 'text', text: 'planner raw text' }] },
+      }));
+    };
     const { adapter } = adapterFor({
       ctx,
       config: {
@@ -3956,11 +3963,19 @@ describe('@mebular/dsh-plugin memory runtime：host plan bridge', () => {
       plannerKind: 'host-model',
     });
     expect(contexts[1].init.headers['x-mebular-host-app']).toBe('dsh');
+    expect(contexts[1].init.headers['x-mebular-host-instance'])
+      .toBe(contexts[1].body.hostPlan.hostInstanceId);
+    await adapter.flush();
+    const ingestCalls = fetch.calls.filter((call) => call.url.endsWith('/ingest'));
+    expect(ingestCalls).toHaveLength(1);
+    expect(fetch.calls.filter((call) => call.url.includes('/checkpoints/'))).toHaveLength(0);
+    expect(fetch.calls.filter((call) => call.url.includes('/self/'))).toHaveLength(0);
     expect(adapter.getState().hostPlan).toMatchObject({
       app: 'dsh',
       generated: 1,
       consumed: 1,
     });
+    expect(adapter.getState().hostPlan.suppressedEvents).toBeGreaterThanOrEqual(1);
   });
 
   it('sidecar 未声明 host/auto 时不调用宿主模型', async () => {

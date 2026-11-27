@@ -1898,13 +1898,25 @@ export function createMemoryRuntimeAdapter(options = {}) {
     },
     tools: { restricted: 0, currentDenied: 0 },
     maintenance: { attempts: 0, sent: 0, failures: 0, skipped: 0 },
-    hostPlan: { attempts: 0, generated: 0, skipped: 0, failed: 0, consumed: 0, expired: 0 },
+    hostPlan: {
+      attempts: 0,
+      generated: 0,
+      skipped: 0,
+      failed: 0,
+      consumed: 0,
+      expired: 0,
+      invalidated: 0,
+      suppressedEvents: 0,
+    },
   };
   const anchors = new Map();
   const recalls = new Map();
   // W3：session → 上一轮 /context 的 basis meta；只含 hash/枚举。
   const contextMetas = new Map();
   const hostPlans = new Map();
+  /** W3：planner 生成期间的宿主事件隔离。 */
+  const internalPlannerSessions = new Map();
+  let lastHostPlanSource = null;
   const hostInstanceId = `hi_${randomUUID().replace(/-/g, '')}`;
   const trackers = new Map();
   const compactions = new Map();
@@ -2350,6 +2362,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
           'x-mebular-adapter': 'dsh/0.3.0',
           'x-mebular-adapter-api': '1',
           'x-mebular-host-app': HOST_APP,
+          'x-mebular-host-instance': hostInstanceId,
         };
         if (tokenInfo.token.length > 0) headers.authorization = `Bearer ${tokenInfo.token}`;
         if (typeof requestOptions.idempotencyKey === 'string' && requestOptions.idempotencyKey.length > 0) {
@@ -2582,6 +2595,24 @@ export function createMemoryRuntimeAdapter(options = {}) {
     }
   }
 
+  function invalidateHostPlans(reason) {
+    hostPlans.clear();
+    stats.hostPlan.invalidated += 1;
+    warnOnce(`host-plan:invalidated:${reason}`, `memory runtime host plan cache invalidated (${reason})`);
+  }
+
+  function markInternalPlanner(sessionId, ttlMs = config.hostPlanTimeoutMs + 2000) {
+    internalPlannerSessions.set(sessionId, now() + Math.max(1000, ttlMs));
+  }
+
+  function isInternalPlannerActive(sessionId) {
+    const until = internalPlannerSessions.get(sessionId);
+    if (until === undefined) return false;
+    if (now() <= until) return true;
+    internalPlannerSessions.delete(sessionId);
+    return false;
+  }
+
   /** 只保存 sidecar 返回的 hash/枚举；不保存 query/正文/gist。 */
   function rememberContextMeta(threadId, data) {
     const meta = isObject(data?.interventionMeta) ? data.interventionMeta : null;
@@ -2593,6 +2624,12 @@ export function createMemoryRuntimeAdapter(options = {}) {
       ? meta.candidateFingerprint.filter((entry) => typeof entry === 'string').slice(0, 3)
       : [];
     if (cueFingerprint.length === 0) return;
+    const configuredSource = typeof meta.configuredSource === 'string' ? meta.configuredSource : '';
+    if (lastHostPlanSource !== null && configuredSource.length > 0
+      && configuredSource !== lastHostPlanSource) {
+      invalidateHostPlans('source_changed');
+    }
+    if (configuredSource.length > 0) lastHostPlanSource = configuredSource;
     contextMetas.set(threadId, {
       turnId: meta.turnId,
       cueFingerprint,
@@ -2701,6 +2738,8 @@ export function createMemoryRuntimeAdapter(options = {}) {
       stats.hostPlan.skipped += 1;
       return;
     }
+    const plannerSessionId = safeThreadId(session?.id);
+    if (plannerSessionId) markInternalPlanner(plannerSessionId);
     try {
       await run.call(agent, async (agentSignal) => {
         const scope = createAbortScope(
@@ -2792,6 +2831,8 @@ export function createMemoryRuntimeAdapter(options = {}) {
       });
     } catch {
       stats.hostPlan.failed += 1;
+    } finally {
+      if (plannerSessionId) internalPlannerSessions.delete(plannerSessionId);
     }
   }
 
@@ -3969,6 +4010,13 @@ export function createMemoryRuntimeAdapter(options = {}) {
       stats.ingest.inherited += 1;
       return;
     }
+    if (isInternalPlannerActive(safeThreadId(session?.id)) && event.type !== 'user/message') {
+      // planner 的 ctx.llm 调用不是用户 turn；不得进入 ingest/checkpoint/plan 调度。
+      // 真实 user/message 仍保留，避免生成窗口吞掉下一轮输入。
+      stats.hostPlan.suppressedEvents += 1;
+      stats.ingest.skipped += 1;
+      return;
+    }
     if (COMPACTION_TYPES.has(event.type)) {
       if (config.checkpoints) {
         if (runtimeAllows('checkpoint') || event.type === 'compaction/end') {
@@ -4603,6 +4651,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
         recalls.clear();
         contextMetas.clear();
         hostPlans.clear();
+        internalPlannerSessions.clear();
         compactions.clear();
         checkpointRevisions.clear();
         checkpointLatest.clear();

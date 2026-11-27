@@ -416,6 +416,9 @@ class FakeSidecar:
             "authorization": ((headers.get("Authorization") or "") if headers is not None else ""),
             "idempotency": ((headers.get("Idempotency-Key") or "") if headers is not None else ""),
             "host_app": ((headers.get("X-Mebular-Host-App") or "") if headers is not None else ""),
+            "host_instance": (
+                (headers.get("X-Mebular-Host-Instance") or "") if headers is not None else ""
+            ),
         })
 
     def paths(self) -> List[str]:
@@ -2623,6 +2626,7 @@ class HostPlanBridgeTests(BaseCase):
             "hermesVersion": "0.21.7",
             "isolation": "in_process",
             "apiMode": "",
+            "configuredSource": "host",
             "sessionModel": "host/model",
         }
         plan.update(overrides)
@@ -2658,6 +2662,10 @@ class HostPlanBridgeTests(BaseCase):
         contexts = [entry for entry in server.requests if entry["path"] == f"{API}/context"]
         self.assertEqual(len(contexts), 2)
         self.assertEqual(contexts[1]["host_app"], "hermes")
+        self.assertEqual(
+            contexts[1]["host_instance"],
+            contexts[1]["body"]["hostPlan"]["hostInstanceId"],
+        )
         self.assertEqual(contexts[1]["body"]["previousTurnId"], "turn_1")
         self.assertEqual(contexts[1]["body"]["hostPlan"]["planId"], "hp_01JHERMESPLAN0001")
         self.assertFalse(self._plan_path().exists())
@@ -2746,6 +2754,8 @@ class HostPlanBridgeTests(BaseCase):
         raw = path.read_text(encoding="utf-8")
         self.assertNotIn("MY SECRET RAW QUERY", raw)
         self.assertNotIn("assistant answer must not be stored", raw)
+        # post_llm_call 只生成 plan；不得触发 ingest/event/checkpoint。
+        self.assertEqual(server.requests, [])
 
     def test_companion_pre_llm_call_invalidates_plan_on_model_change(self) -> None:
         server = self.fake_server()
@@ -2764,3 +2774,64 @@ class HostPlanBridgeTests(BaseCase):
             model="host/other-model",
         )
         self.assertFalse(self._plan_path().exists())
+
+    def test_companion_post_llm_call_reentrancy_guard(self) -> None:
+        server = self.fake_server()
+        self._companion_config(server)
+        self._write_state()
+        ctx = CompanionTests._Ctx()
+        entered = threading.Event()
+        release = threading.Event()
+        calls: List[Dict[str, Any]] = []
+
+        class _BlockingLlm:
+            def complete_structured(self, **kwargs: Any) -> Any:
+                calls.append(kwargs)
+                entered.set()
+                release.wait(timeout=2.0)
+                return types.SimpleNamespace(
+                    parsed={
+                        "action": "speak",
+                        "depth": "gist",
+                        "confidence": 0.7,
+                        "reasonCode": "high_relevance",
+                    },
+                    text="",
+                    model="host/test-model",
+                )
+
+        ctx.llm = _BlockingLlm()
+        plugin = companion_plugin.MebularCompanion(ctx)
+        kwargs = {
+            "session_id": "s1",
+            "user_message": "u",
+            "assistant_response": "a",
+            "model": "host/model",
+        }
+        plugin.post_llm_call(**kwargs)
+        self.assertTrue(entered.wait(timeout=1.0))
+        plugin.post_llm_call(**kwargs)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(plugin.host_plan_status["reason"], "reentrant_call")
+        release.set()
+        self.assertTrue(self.wait_until(self._plan_path().exists, timeout=2.0))
+
+    def test_plan_with_non_host_source_is_not_consumed(self) -> None:
+        server = self.fake_server()
+        server.context_blocks = ["[F1] user prefers dark theme"]
+        server.context_meta = {
+            "configuredSource": "host",
+            "turnId": "turn_1",
+            "cueFingerprint": ["aa11", "bb22"],
+            "candidateFingerprint": ["cc33", "dd44"],
+        }
+        provider = self.make_provider(server)
+        provider._last_context_turns["s1"] = "turn_1"
+        self._write_plan(
+            threadId=provider._thread_id("s1"),
+            configuredSource="heuristic",
+        )
+        provider.prefetch("theme", session_id="s1")
+        contexts = [entry for entry in server.requests if entry["path"] == f"{API}/context"]
+        self.assertEqual(contexts[-1]["body"].get("hostPlan"), None)
+        self.assertEqual(provider.host_plan_status["reason"], "source_not_host")

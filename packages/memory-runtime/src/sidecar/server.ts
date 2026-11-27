@@ -1689,12 +1689,21 @@ export class SidecarServer {
           return;
         }
         const body = await readJsonBody(req);
-        // W3：host identity 只由 adapter 显式上报；header 优先于 body。
+        // W3：host identity 只接受显式 header。body 里的 hostApp/hostInstanceId
+        // 一律丢弃，防止普通请求体伪造来源。
         const hostAppHeader = req.headers['x-mebular-host-app'];
+        const hostInstanceHeader = req.headers['x-mebular-host-instance'];
         const hostApp = typeof hostAppHeader === 'string' ? hostAppHeader.trim() : '';
-        const contextBody = hostApp.length > 0 && isObject(body)
-          ? { ...body, hostApp }
-          : body;
+        const hostInstanceId = typeof hostInstanceHeader === 'string'
+          ? hostInstanceHeader.trim()
+          : '';
+        const contextBody = isObject(body) ? { ...body } : body;
+        if (isObject(contextBody)) {
+          delete contextBody.hostApp;
+          delete contextBody.hostInstanceId;
+          if (hostApp.length > 0) contextBody.hostApp = hostApp;
+          if (hostInstanceId.length > 0) contextBody.hostInstanceId = hostInstanceId;
+        }
         const result = await this.recall.handleContext(contextBody);
         this.send(res, result.status, this.envelope(requestId, result.data, result.warnings, result.degraded));
         return;

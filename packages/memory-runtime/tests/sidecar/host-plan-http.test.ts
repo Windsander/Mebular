@@ -183,11 +183,15 @@ async function setup(source: 'host' | 'auto' = 'host'): Promise<Harness> {
   return harness;
 }
 
-function auth(hostApp: string | null = 'opencode'): Record<string, string> {
+function auth(
+  hostApp: string | null = 'opencode',
+  hostInstance = 'hi_opencode_test',
+): Record<string, string> {
   return {
     authorization: 'Bearer host-token',
     'content-type': 'application/json',
     ...(hostApp ? { 'x-mebular-host-app': hostApp } : {}),
+    ...(hostApp && hostInstance ? { 'x-mebular-host-instance': hostInstance } : {}),
   };
 }
 
@@ -195,10 +199,11 @@ async function post(
   url: string,
   body: unknown,
   hostApp: string | null = 'opencode',
+  hostInstance = 'hi_opencode_test',
 ): Promise<{ status: number; body: any }> {
   const response = await fetch(url, {
     method: 'POST',
-    headers: auth(hostApp),
+    headers: auth(hostApp, hostInstance),
     body: JSON.stringify(body),
   });
   return { status: response.status, body: await response.json() };
@@ -408,10 +413,32 @@ describe('host plan /context consumption', () => {
       turnId: 'turn_3',
       previousTurnId: 'turn_2',
       query: '深色主题',
+      // body 伪造必须被 server 丢弃；没有 header 就不算 host 身份。
+      hostApp: 'opencode',
+      hostInstanceId: 'hi_opencode_test',
       hostPlan: { ...planFrom(meta), planId: 'hp_01JNOHOST000001' },
     }, null);
     expect(noHost.status).toBe(200);
     expect(noHost.body.data.interventionMeta.fallbackReason).toBe('host_plan_scope_mismatch');
+    expect(noHost.body.data.interventionMeta.hostApp).toBeUndefined();
+  });
+
+  it('hostInstance 与 plan 不一致 → host_plan_scope_mismatch', async () => {
+    const harness = await setup('host');
+    const meta = await firstContext(harness);
+    const second = await post(`${harness.server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_host_plan',
+      turnId: 'turn_2',
+      previousTurnId: 'turn_1',
+      query: '深色主题',
+      hostPlan: planFrom(meta),
+    }, 'opencode', 'hi_other_instance');
+    expect(second.body.data.interventionMeta).toMatchObject({
+      source: 'heuristic',
+      prefetched: false,
+      fallbackReason: 'host_plan_scope_mismatch',
+    });
   });
 
   it('must_speak 硬规则优先；plan silent 不能覆盖，且 plan 被消费', async () => {

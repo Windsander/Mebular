@@ -718,6 +718,8 @@ class MebularCompanion:
             f"{os.getpid()}:{time.time()}:{id(self)}".encode("utf-8")
         ).hexdigest()[:32]
         self._host_plan_thread: Optional[threading.Thread] = None
+        self._host_plan_gate = threading.Lock()
+        self._host_plan_inflight = False
         self._host_plan_status = self._detect_host_plan_support()
 
     def _detect_host_plan_support(self) -> Dict[str, Any]:
@@ -929,6 +931,7 @@ class MebularCompanion:
             "hermesVersion": self._host_plan_status.get("version"),
             "isolation": self._host_plan_status.get("isolation") or "in_process",
             "apiMode": self._host_plan_status.get("apiMode") or "",
+            "configuredSource": str(basis.get("configuredSource") or ""),
             "sessionModel": str(model or ""),
         }
         try:
@@ -965,6 +968,17 @@ class MebularCompanion:
             return None
         model = str(kwargs.get("model") or "")
         self._invalidate_plan_on_model_change(session_id, model)
+        with self._host_plan_gate:
+            if self._host_plan_inflight:
+                # Reentrancy guard: ctx.llm/post_llm_call must never recurse.
+                self._host_plan_status = {
+                    **self._host_plan_status,
+                    "state": "skipped",
+                    "reason": "reentrant_call",
+                    "at": _now_ms(),
+                }
+                return None
+            self._host_plan_inflight = True
         target = self._generate_host_plan
         args = {
             "session_id": session_id,
@@ -972,19 +986,29 @@ class MebularCompanion:
             "assistant_response": assistant_response,
             "model": model,
         }
+
+        def worker() -> None:
+            try:
+                target(**args)
+            finally:
+                with self._host_plan_gate:
+                    self._host_plan_inflight = False
+
         spawn = getattr(getattr(self._ctx, "memory_provider", None), "spawn_context_thread", None)
         try:
             if callable(spawn):
                 self._host_plan_thread = spawn(
-                    target, name="mebular-host-plan", daemon=True, kwargs=args
+                    worker, name="mebular-host-plan", daemon=True
                 )
             else:
                 thread = threading.Thread(
-                    target=target, name="mebular-host-plan", daemon=True, kwargs=args
+                    target=worker, name="mebular-host-plan", daemon=True
                 )
                 thread.start()
                 self._host_plan_thread = thread
         except Exception:
+            with self._host_plan_gate:
+                self._host_plan_inflight = False
             # Fail closed: the next turn just gets heuristic.
             return None
         return None

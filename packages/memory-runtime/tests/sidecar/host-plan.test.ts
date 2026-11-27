@@ -6,6 +6,7 @@ import { describe, it, expect } from '@jest/globals';
 import { extractCue } from '../../src/sidecar/cue.js';
 import {
   candidateFingerprintOf,
+  candidateMatchesBasis,
   cueSignatureOf,
   cueTokenHashes,
   HOST_PLAN_TTL_MS,
@@ -72,6 +73,7 @@ function validationInput(overrides: Record<string, unknown> = {}) {
     previousTurnId: 'turn_1',
     lastContextTurnId: 'turn_1',
     hostApp: 'opencode',
+    hostInstanceId: 'hi_test',
     currentCue: cue,
     currentCandidateFingerprint: candidateFingerprintOf(candidates),
     ...overrides,
@@ -120,12 +122,43 @@ describe('host plan envelope', () => {
     if (!result.ok) expect(result.reason).toBe('host_plan_cue_mismatch');
   });
 
-  it('follow_up/task_continue/correction 豁免 cue Jaccard', () => {
+  it('follow_up/task_continue/conflict(correction) 豁免 cue Jaccard', () => {
     const raw = planOf();
-    const cue = cueOf('继续上次那个');
-    expect(cue.detailIntent.reasons).toContain('task_continue');
-    const result = validateHostPlan(raw, validationInput({ currentCue: cue }));
-    expect(result.ok).toBe(true);
+    for (const query of ['继续上次那个', '上次那个主题', '到底哪个对']) {
+      const cue = cueOf(query);
+      expect(
+        cue.detailIntent.reasons.some((reason) => ['task_continue', 'follow_up', 'conflict'].includes(reason)),
+      ).toBe(true);
+      const result = validateHostPlan(raw, validationInput({ currentCue: cue }));
+      expect(result.ok).toBe(true);
+    }
+  });
+
+  it('候选指纹保留相关性顺序，不按 hash 排序', () => {
+    const fingerprint = candidateFingerprintOf([
+      { fragmentId: 'mf_top' },
+      { fragmentId: 'mf_second' },
+      { fragmentId: 'mf_third' },
+    ]);
+    expect(fingerprint).toHaveLength(3);
+    expect(fingerprint[0]).toBe(candidateFingerprintOf([{ fragmentId: 'mf_top' }])[0]);
+    expect(fingerprint[1]).toBe(candidateFingerprintOf([{ fragmentId: 'mf_second' }])[0]);
+  });
+
+  it('当前 top-1 不在 basis、但 top-2/top-3 在 → 拒绝', () => {
+    expect(candidateMatchesBasis(['zzz_current_top', 'aaa_in_basis', 'bbb_in_basis'], [
+      'aaa_in_basis',
+      'bbb_in_basis',
+      'ccc_in_basis',
+    ])).toBe(false);
+  });
+
+  it('当前 top-1 在 basis 但不是字典序最小 → 接受', () => {
+    expect(candidateMatchesBasis(['zzz_top', 'aaa', 'bbb'], ['aaa', 'zzz_top', 'yyy'])).toBe(true);
+  });
+
+  it('当前候选与 basis 完全不相交 → 拒绝', () => {
+    expect(candidateMatchesBasis(['xxx', 'yyy'], ['aaa', 'bbb', 'ccc'])).toBe(false);
   });
 
   it('当前 top-1 不在 basis top-3 → host_plan_candidates_changed', () => {
@@ -153,6 +186,8 @@ describe('host plan envelope', () => {
       { agentId: 'dsh' },
       { threadId: 'th_other' },
       { hostApp: null },
+      { hostInstanceId: 'hi_other' },
+      { hostInstanceId: null },
     ]) {
       const result = validateHostPlan(planOf(), validationInput(override));
       expect(result.ok).toBe(false);

@@ -47,6 +47,7 @@ import {
   type InferenceApi,
   type InferenceStatusView,
 } from './inference/types.js';
+import type { InterventionPlannerTrace } from '../runtime/types.js';
 
 const REQUEST_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
@@ -116,6 +117,8 @@ export interface SidecarStatusIntervention {
   legacyModeIgnored: boolean;
   legacyModeConflict: boolean;
   diagnosticShadow: boolean;
+  /** W5 pending：`/context` 整体 1.5s deadline 尚未硬化；W2 只记录不冒充完成。 */
+  deadline: 'w5_pending';
   warnings: string[];
 }
 
@@ -319,6 +322,10 @@ export interface SidecarStatusSnapshot {
   policy?: {
     degraded: boolean;
     lastError: { code: string; at: number } | null;
+    /** 最近一次介入 planner 诊断；只含枚举/计时/model id。 */
+    planner?: {
+      last: InterventionPlannerTrace | null;
+    };
   };
   /** 模型安装/引擎/推荐状态；不包含 token/path。 */
   inference?: InferenceStatusView;
@@ -462,6 +469,7 @@ export function interventionStatusView(
     legacyModeIgnored: resolution.legacyModeIgnored,
     legacyModeConflict: resolution.legacyModeConflict,
     diagnosticShadow: resolution.diagnosticShadow,
+    deadline: 'w5_pending',
     warnings: [...resolution.warnings],
   };
 }
@@ -591,7 +599,12 @@ export class SidecarServer {
 
   private readonly identity: SidecarStatusIdentity;
   private readonly effectiveInterventionOverride?: EffectiveInterventionResolution;
-  private readonly diagnosticShadow: boolean;
+  private readonly diagnosticShadowOverride?: boolean;
+
+  private get diagnosticShadow(): boolean {
+    return this.diagnosticShadowOverride
+      ?? (this.config.intervention.diagnosticShadow === true);
+  }
   private readonly getStatus?: () => SidecarStatusSnapshot | Promise<SidecarStatusSnapshot>;
 
   /** 动态推导，保证 model.source 热切换后 /status、/version 立即反映。 */
@@ -602,6 +615,7 @@ export class SidecarServer {
       legacyMode: this.config.intervention.mode,
       legacyModePresent: this.config.intervention.legacyModePresent,
       diagnosticShadow: this.diagnosticShadow,
+      queryPlan: this.config.recall.queryPlan,
     });
   }
   private readonly getModelStatus?: () => SidecarStatusModel | Promise<SidecarStatusModel>;
@@ -630,8 +644,7 @@ export class SidecarServer {
       hostId: options.identity?.hostId ?? null,
     };
     this.effectiveInterventionOverride = options.effectiveIntervention;
-    this.diagnosticShadow = options.diagnosticShadow
-      ?? (this.config.intervention.diagnosticShadow === true);
+    this.diagnosticShadowOverride = options.diagnosticShadow;
     this.getStatus = options.getStatus;
     this.getModelStatus = options.getModelStatus;
     this.ingest = options.ingest;
@@ -1147,6 +1160,7 @@ export class SidecarServer {
               legacyModeIgnored: this.effectiveIntervention.legacyModeIgnored,
               legacyModeConflict: this.effectiveIntervention.legacyModeConflict,
               diagnosticShadow: this.effectiveIntervention.diagnosticShadow,
+              deadline: 'w5_pending',
               warnings: [...this.effectiveIntervention.warnings],
             },
             models: {

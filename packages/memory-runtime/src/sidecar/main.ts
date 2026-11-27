@@ -565,6 +565,8 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
     requireBinaryPath: true,
   });
   const inferenceHolder: { current: InferenceService | null } = { current: null };
+  /** inference service 先于 settlement 创建；reconfigure 通过 holder 通知介入预取失效。 */
+  const prefetchInvalidator: { current: (() => void) | null } = { current: null };
   const model = createSidecarInferenceProvider(config.model, {
     homeDir: paths.home,
     modelsDir: paths.modelsDir,
@@ -590,6 +592,7 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
     now,
     platform: process.platform,
     arch: process.arch,
+    onReconfigure: () => prefetchInvalidator.current?.(),
   });
   inferenceHolder.current = inferenceService;
   try {
@@ -646,6 +649,7 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
       ...(options.restartReason ? { restartReason: options.restartReason } : {}),
       now,
     });
+    prefetchInvalidator.current = () => settlement.recall.invalidateInterventionPrefetch();
     // main 拥有生命周期边界；不修改 replayer，也绝不为了等待而启动新 replay。
     const replayOnce = settlement.replayer.replayOnce.bind(settlement.replayer);
     settlement.replayer.replayOnce = () => {

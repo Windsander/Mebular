@@ -76,6 +76,8 @@ export interface InferenceServiceOptions {
   arch?: string;
   hardwareTtlMs?: number;
   createJobId?: () => string;
+  /** reconfigure() 后通知宿主失效介入预取缓存；不改变模型语义。 */
+  onReconfigure?: () => void;
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -214,6 +216,7 @@ export class InferenceService implements InferenceApi {
   private readonly arch: string;
   private readonly hardwareTtlMs: number;
   private readonly packs: ModelPack[];
+  private readonly onReconfigure?: () => void;
 
   private hardware: HardwareProfile | null = null;
   private hardwareAt = 0;
@@ -240,6 +243,7 @@ export class InferenceService implements InferenceApi {
       now: this.now,
     });
     this.hardwareTtlMs = Math.max(1_000, options.hardwareTtlMs ?? 60_000);
+    this.onReconfigure = options.onReconfigure;
     this.hardware = options.hardware ?? null;
     this.hardwareAt = this.hardware ? this.now() : 0;
     this.packs = createModelCatalog();
@@ -992,6 +996,9 @@ export class InferenceService implements InferenceApi {
       await this.inference.reconfigure(this.currentSettings());
     } catch {
       this.warnings = unique([...this.warnings, 'model_reconfigure_failed']);
+    } finally {
+      // 即使 reconfigure 失败，本地/API 配置可能已变化；旧介入预取必须失效。
+      this.onReconfigure?.();
     }
   }
 

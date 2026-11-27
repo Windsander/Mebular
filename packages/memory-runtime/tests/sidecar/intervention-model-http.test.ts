@@ -135,6 +135,8 @@ async function setup(options: {
   reply: () => Reply;
   timeoutMs?: number;
   checkpoint?: boolean;
+  allowRemote?: boolean;
+  credentialMissing?: boolean;
 }): Promise<Harness> {
   const home = await mkdtemp(join(tmpdir(), 'mebular-intervention-model-http-'));
   const local = new SidecarLocalLayer({ root: join(home, 'memory-runtime'), now: () => NOW });
@@ -191,7 +193,7 @@ async function setup(options: {
         baseUrl: 'https://api.example.test/v1',
         model: 'test-model',
         keyRef: 'env:TEST_INTERVENTION_KEY',
-        allowRemote: true,
+        allowRemote: options.allowRemote ?? true,
         timeoutMs: 5_000,
       },
     },
@@ -208,7 +210,7 @@ async function setup(options: {
   const { calls, fetchImpl } = beginFetch(options.reply);
   const model = createSidecarInferenceProvider(config.model, {
     homeDir: home,
-    env: { TEST_INTERVENTION_KEY: TOKEN_SECRET },
+    env: options.credentialMissing ? {} : { TEST_INTERVENTION_KEY: TOKEN_SECRET },
     fetch: fetchImpl,
     now: () => NOW,
   });
@@ -426,6 +428,10 @@ describe('intervention model HTTP path', () => {
     expect(took).toBeLessThan(260);
     expect(context.body.data.decision).toMatchObject({ action: 'speak', degraded: true });
     expect(context.body.data.decision.policyVersion).toMatch(/^heuristic:/);
+    expect(context.body.data.decision.planner).toMatchObject({
+      fallbackReason: 'timeout',
+      prefetched: false,
+    });
     expect(context.body.data.warnings).toEqual(expect.arrayContaining([
       'intervention_model_fallback',
       'model_timeout',
@@ -461,24 +467,60 @@ describe('intervention model HTTP path', () => {
     expect(context.body.data.decision.action).toBe('speak');
     expect(context.body.data.decision.degraded).toBe(true);
     expect(context.body.data.decision.policyVersion).toMatch(/^heuristic:/);
+    expect(context.body.data.decision.planner).toMatchObject({
+      prefetched: false,
+      fallbackReason: 'invalid_output',
+    });
     expect(context.body.data.warnings).toContain('intervention_model_fallback');
     expect(context.body.data.fragments.length).toBeGreaterThan(0);
   });
 
-  it('remote_not_allowed：没有 allowRemote 时不把正文发给远端，回退 heuristic', async () => {
-    const harness = await setup({ reply: () => ({ content: SPEAK_GIST }) });
+  it('remote_not_allowed：config 未允许远端时不把正文发给远端，回退 heuristic', async () => {
+    const harness = await setup({ reply: () => ({ content: SPEAK_GIST }), allowRemote: false });
     const context = await post(`${harness.server.url}/context`, {
       agentId: 'opencode',
       threadId: 'th_model_http',
       turnId: 'turn_model_remote',
       query: '深色主题',
-      allowRemote: false,
+      // 即使 `/context` body 声明 allowRemote，也不得越过 config 闸门。
+      allowRemote: true,
     });
     expect(context.status).toBe(200);
     expect(context.body.data.decision.policyVersion).toMatch(/^heuristic:/);
+    expect(context.body.data.decision.planner).toMatchObject({
+      configuredSource: 'api',
+      fallbackReason: 'allow_remote_false',
+      prefetched: false,
+    });
     expect(context.body.data.warnings).toEqual(expect.arrayContaining([
       'intervention_model_fallback',
       'remote_not_allowed',
+    ]));
+    expect(harness.calls).toHaveLength(0);
+  });
+
+  it('缺凭据：不发远端请求，heuristic + prefetched=false + source_unavailable', async () => {
+    const harness = await setup({
+      reply: () => ({ content: SPEAK_GIST }),
+      credentialMissing: true,
+    });
+    const context = await post(`${harness.server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_model_http',
+      turnId: 'turn_model_credential',
+      query: '深色主题',
+    });
+    expect(context.status).toBe(200);
+    expect(context.body.data.decision.policyVersion).toMatch(/^heuristic:/);
+    expect(context.body.data.decision.planner).toMatchObject({
+      configuredSource: 'api',
+      resolvedSource: null,
+      prefetched: false,
+      fallbackReason: 'source_unavailable',
+    });
+    expect(context.body.data.warnings).toEqual(expect.arrayContaining([
+      'intervention_model_fallback',
+      'model_credential_missing',
     ]));
     expect(harness.calls).toHaveLength(0);
   });
@@ -497,7 +539,13 @@ describe('intervention model HTTP path', () => {
 
     const status = await fetch(`${harness.server.url}/status`, { headers: auth() });
     const statusBody = await status.json() as any;
-    expect(statusBody.data.policy).toEqual({ degraded: false, lastError: null });
+    expect(statusBody.data.policy).toMatchObject({ degraded: false, lastError: null });
+    expect(statusBody.data.policy.planner.last).toMatchObject({
+      configuredSource: 'api',
+      resolvedSource: 'api',
+      prefetched: false,
+      fallbackReason: null,
+    });
 
     const reset = await post(`${harness.server.url}/intervention/reset`, {});
     expect(reset.status).toBe(200);

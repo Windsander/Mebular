@@ -24,6 +24,11 @@ export type EffectiveInterventionPlanner = 'off' | 'heuristic' | 'model';
 export const LEGACY_INTERVENTION_MODE_IGNORED = 'legacy_intervention_mode_ignored';
 /** model.source 缺失（不是显式 heuristic）时的稳定诊断 code。 */
 export const MODEL_SOURCE_MISSING = 'model_source_missing';
+/**
+ * W2 诚实边界：`source=local|auto` + `recall.queryPlan=model` 时，
+ * extraction 仍可能同步调用本地模型；这是 W5 整体 deadline 的待办，不是介入 planner。
+ */
+export const EXTRACTION_QUERY_PLAN_LOCAL_SYNC = 'extraction_query_plan_local_sync';
 
 export interface ResolveEffectiveInterventionInput {
   /** 已归一化的 `model.source`，不会被改写。 */
@@ -39,6 +44,8 @@ export interface ResolveEffectiveInterventionInput {
   legacyModePresent?: boolean;
   /** 仅内部 diagnostic/canary；不得来自用户配置的旧 mode。 */
   diagnosticShadow?: boolean;
+  /** extraction query plan 来源；只用于稳定 status warning，不改变 extraction 语义。 */
+  queryPlan?: 'heuristic' | 'model';
 }
 
 export interface EffectiveInterventionResolution {
@@ -92,6 +99,11 @@ export function resolveEffectiveIntervention(
   const warnings: string[] = [];
 
   if (!sourcePresent) warnings.push(MODEL_SOURCE_MISSING);
+  if (sourcePresent
+    && (source === 'local' || source === 'auto')
+    && input.queryPlan === 'model') {
+    warnings.push(EXTRACTION_QUERY_PLAN_LOCAL_SYNC);
+  }
 
   if (legacyModePresent && legacyMode !== null) {
     // 显式旧值一律不参与 production；与派生结果不同就忽略并给稳定 warning。

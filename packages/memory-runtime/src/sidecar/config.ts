@@ -249,7 +249,8 @@ export function defaultSidecarConfig(): SidecarConfig {
       explorationRate: 0.05,
       outcomeWindowMs: 120_000,
       policyTtlDays: 30,
-      modelTimeoutMs: 500,
+      // W2：API 是唯一同步模型来源；首版 sync 预算 1500ms（W5 硬化整体 deadline）。
+      modelTimeoutMs: 1500,
     },
     queue: { concurrency: 1 },
     http: { host: DEFAULT_SIDECAR_HOST, port: DEFAULT_SIDECAR_PORT },

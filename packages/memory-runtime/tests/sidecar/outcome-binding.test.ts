@@ -20,6 +20,7 @@ import { startFakeCapability, type FakeCapabilityServer, type FakeMemoryRecord }
 
 const NOW = 1_760_000_000_000;
 const HOST_TOKEN = 'host-token';
+const ADMIN_TOKEN = 'admin-secret';
 
 interface Harness {
   home: string;
@@ -107,6 +108,7 @@ async function setup(options: {
   const server = new SidecarServer({
     config,
     hostToken: HOST_TOKEN,
+    adminToken: ADMIN_TOKEN,
     identity,
     ingest: runtime,
     namespaces: runtime,
@@ -342,7 +344,7 @@ describe('outcome binding over HTTP', () => {
     expect(JSON.stringify(body)).not.toContain('raw follow-up text');
   });
 
-  it('source=console 仅 admin 通道；heuristic 仅内部；宿主不得自报', async () => {
+  it('source=console 只认独立 admin secret；host token 不能伪造；heuristic 仅内部', async () => {
     const harness = await setup();
     const a = await context(harness);
 
@@ -352,19 +354,33 @@ describe('outcome binding over HTTP', () => {
     expect(consoleDenied.status).toBe(403);
     expect(consoleDenied.body.error.code).toBe('outcome_source_invalid');
 
-    const consoleWithHostHeader = await post(`${harness.server.url}/recall/${a.traceId}/outcome`, {
+    // B1：host token 已在 Authorization；只加“admin”header、省略 host-app 仍拒绝。
+    const forgedByHostToken = await post(`${harness.server.url}/recall/${a.traceId}/outcome`, {
       kind: 'dismissed', source: 'console',
-    }, { 'x-mebular-outcome-channel': 'admin', 'x-mebular-host-app': 'opencode' });
-    expect(consoleWithHostHeader.status).toBe(403);
+    }, { 'x-mebular-outcome-channel': 'admin', 'x-mebular-admin-token': HOST_TOKEN });
+    expect(forgedByHostToken.status).toBe(403);
+    expect(forgedByHostToken.body.error.code).toBe('outcome_source_invalid');
 
+    const legacyHeaderOnly = await post(`${harness.server.url}/recall/${a.traceId}/outcome`, {
+      kind: 'dismissed', source: 'console',
+    }, { 'x-mebular-outcome-channel': 'admin' });
+    expect(legacyHeaderOnly.status).toBe(403);
+
+    const wrongAdminSecret = await post(`${harness.server.url}/recall/${a.traceId}/outcome`, {
+      kind: 'dismissed', source: 'console',
+    }, { 'x-mebular-admin-token': 'wrong-admin-secret' });
+    expect(wrongAdminSecret.status).toBe(403);
+
+    // 真正的 admin 代理：独立 secret 正确即可；host-app header 不是凭据。
     const consoleOk = await post(`${harness.server.url}/recall/${a.traceId}/outcome`, {
       kind: 'dismissed', source: 'console',
-    }, { 'x-mebular-outcome-channel': 'admin' });
+    }, { 'x-mebular-admin-token': ADMIN_TOKEN, 'x-mebular-host-app': 'opencode' });
     expect(consoleOk.status).toBe(200);
 
+    // 即使 admin secret 正确，console 也不接受 token/host 冒充 host 通道。
     const hostSelfConsole = await post(`${harness.server.url}/recall/${a.traceId}/outcome`, {
       kind: 'accepted', source: 'console', host: 'opencode', bindingToken: a.bindingToken,
-    }, { 'x-mebular-outcome-channel': 'admin' });
+    }, { 'x-mebular-admin-token': ADMIN_TOKEN });
     expect(hostSelfConsole.status).toBe(403);
 
     const heuristicHttp = await post(`${harness.server.url}/recall/${a.traceId}/outcome`, {
@@ -377,6 +393,58 @@ describe('outcome binding over HTTP', () => {
       kind: 'accepted', source: 'heuristic',
     }, { internal: true });
     expect(internal.recorded).toBe(true);
+  });
+
+  it('adminToken 缺省或等于 host token 时 console 通道 fail closed', async () => {
+    for (const adminToken of [undefined, HOST_TOKEN]) {
+      const home = await mkdtemp(join(tmpdir(), 'mebular-w4-outcome-admin-'));
+      const local = new SidecarLocalLayer({ root: join(home, 'memory-runtime'), now: () => NOW });
+      await local.init();
+      const fake = await startFakeCapability({ now: () => NOW });
+      fake.setRecords([preference()]);
+      const client = new CapabilityClient({
+        baseUrl: fake.baseUrl, token: 'cap-token', retries: 0, retryDelayMs: 0,
+      });
+      const identity = { cloudId: 'cl_test', profileId: 'default', hostId: 'h_test' };
+      const config = defaultSidecarConfig();
+      config.http.port = 0;
+      config.model.source = 'heuristic';
+      config.intervention = { ...config.intervention, mode: 'heuristic', legacyModePresent: true };
+      const runtime = new SettlementRuntime({
+        config, local, client, identity, policy: defaultSidecarPolicy(),
+        policyStatePath: join(home, 'memory-runtime', 'policy', 'state.json'),
+        autoStartReplayer: false, now: () => NOW,
+      });
+      await runtime.init();
+      const server = new SidecarServer({
+        config,
+        hostToken: HOST_TOKEN,
+        ...(adminToken ? { adminToken } : {}),
+        identity,
+        ingest: runtime,
+        namespaces: runtime,
+        recall: runtime,
+        objects: runtime,
+        intervention: runtime,
+        getDegraded: () => runtime.degraded,
+        now: () => NOW,
+      });
+      await server.listen();
+      try {
+        const ctx = await post(`${server.url}/context`, {
+          agentId: 'opencode', threadId: 'th_w4', turnId: 'turn_w4', query: '我的偏好是什么？',
+        }, { 'x-mebular-host-app': 'opencode' });
+        const denied = await post(`${server.url}/recall/${ctx.body.data.traceId}/outcome`, {
+          kind: 'dismissed', source: 'console',
+        }, { 'x-mebular-admin-token': HOST_TOKEN });
+        expect(denied.status).toBe(403);
+      } finally {
+        await runtime.stop();
+        await server.close();
+        await fake.close();
+        await rm(home, { recursive: true, force: true });
+      }
+    }
   });
 
   it('traceId null 不签发 token；宿主无法合法上报', async () => {

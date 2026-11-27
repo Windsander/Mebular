@@ -3761,13 +3761,14 @@ class MebularMemoryProvider(MemoryProvider):
             return ""
         try:
             sid = str(session_id or self._session_id)
+            # W4：新一轮 human query 到达时先归因上一轮；必须在 cache lookup
+            # 之前执行，cache hit 也要消费上一轮并取消 ignored timer。
+            self._attribute_previous_outcome(sid, query)
             key = (sid, _sha256_text(query.strip()))
             text = self._take_cached(key)
             if text is None:
                 if self._recall_blocked():
                     return ""
-                # W4：新一轮 human query 到达时先归因上一轮；不读宿主私有存储。
-                self._attribute_previous_outcome(sid, query)
                 try:
                     text = self._recall(query, sid)
                 except Exception as error:
@@ -3822,7 +3823,8 @@ class MebularMemoryProvider(MemoryProvider):
         text: Optional[str] = None
         try:
             if not self._recall_blocked() and self._mode_allows_work():
-                text = self._recall(query, sid)
+                # 背景预取只暖 cache；不能覆盖真实 turn 的 outcome context。
+                text = self._recall(query, sid, remember_outcome=False)
         except Exception as error:
             self._note_recall_failure(error)
         finally:
@@ -4130,8 +4132,13 @@ class MebularMemoryProvider(MemoryProvider):
             return None
         return raw
 
-    def _recall(self, query: str, sid: str) -> str:
-        """Call the sidecar context endpoint; return a ready-to-inject block."""
+    def _recall(self, query: str, sid: str, *, remember_outcome: bool = True) -> str:
+        """Call the sidecar context endpoint; return a ready-to-inject block.
+
+        ``remember_outcome=False`` is used by background ``queue_prefetch``:
+        that response is not a real user turn and must never overwrite or
+        impersonate the previous turn's outcome binding.
+        """
         if self._client is None:
             raise _RuntimeError("runtime_unavailable", "sidecar URL is not configured")
         if not self._mode_allows_work():
@@ -4173,8 +4180,9 @@ class MebularMemoryProvider(MemoryProvider):
                 "/context", payload, timeout=self._recall_timeout
             )
             self._remember_context_meta(sid, thread_id, data)
-            # W4：只保留 trace/token/枚举/短词；不落盘。
-            self._remember_outcome_context(sid, query, data)
+            # W4：只保留 trace/token/枚举/短词；背景预取不得写入 outcome context。
+            if remember_outcome:
+                self._remember_outcome_context(sid, query, data)
             text = self._format_context(data)
             if text:
                 return text

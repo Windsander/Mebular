@@ -262,6 +262,29 @@ ContextCheckpoint 始终是 `task:<threadId>` 或 `default` 中的图对象；�
 Console 不编辑这些值，只展示 trace 决策并提供二次确认的 reset。修改模式需改 sidecar
 config 并按现有生命周期重启/重载，使新配置生效。
 
+### Outcome binding（0.4.0 W4）
+
+`/context` 成功写本地 trace 时会同时返回 opaque `bindingToken`；`traceId:null`
+（trace 关闭或 W5 deadline skip）时返回 `bindingToken:null`，宿主不得上报 outcome。
+
+- token 是 **TTL 内绑定单个 trace 的 bearer，不是单次 nonce**：同一 trace 可以上报
+  不同 kind，同 kind 重复仍保持幂等。
+- 绑定 `traceId + agentId + threadId + turnId + hostApp`；`source=host` 必须带 token
+  和 `opencode|openchamber|dsh|hermes`。跨 trace、跨 session/agent/thread/turn、
+  tamper、过期、host token 轮换后的 token 一律拒绝。
+- HMAC key 是当前 host token。这是本机同用户信任边界：已经持有 host token 的进程
+  可以为该 trace 自签/重放 binding；binding 主要防跨 trace/scope/无 token 上报，
+  不是防恶意 host token 持有者。
+- `source=console` 必须使用 MCP admin 代理持有的独立 admin secret
+  （`x-mebular-admin-token`），不能用 host token 或客户端 channel header 冒充。
+  `source=heuristic` 只允许 sidecar 内部。
+- token 不落盘、不写 trace/policy/log。新协议带 `note` 返回
+  `outcome_note_unsupported`；无 token 的旧 0.3 客户端带 note 返回
+  `outcome_note_ignored`，note 不落盘。
+- host `ignored` 弱信号约在 outcome window 的 75% 调度，确保 token 过期前送达；
+  迟到的 host outcome 返回 `outcome_binding_expired`。console admin 路径保留更长的
+  迟到窗口，用于诊断/policy 回放。
+
 ### 决策、深度与 `must_speak`
 
 `POST /context` 新增 `decision` 字段：

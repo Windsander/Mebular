@@ -386,7 +386,7 @@ export interface ContextResponse extends Omit<RecallResponse, 'records'> {
 /**
  * outcome 提交通道（只由 server / sidecar 内部分类）：
  * - host：HTTP + host token，用于校验 bindingToken；
- * - console：server 识别的 MCP admin 代理（`x-mebular-outcome-channel: admin`）；
+ * - console：MCP admin 代理持有的独立 admin secret（`x-mebular-admin-token`）；
  * - internal：sidecar 自身 heuristic 归因。
  *
  * 宿主请求体不能选择通道；body 里的 source 只是声明，必须与该通道匹配。

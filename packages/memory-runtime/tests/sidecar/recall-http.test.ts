@@ -140,6 +140,7 @@ async function setup(options: {
   const server = new SidecarServer({
     config,
     hostToken: 'host-token',
+    adminToken: 'admin-token',
     identity,
     getStatus: () => runtime.statusSnapshot({
       mode: 'immersive',
@@ -1406,7 +1407,7 @@ describe('sidecar recall/context HTTP', () => {
     const second = await post(`${server.url}/recall/${traceId}/outcome`, {
       kind: 'dismissed',
       source: 'console',
-    }, { 'x-mebular-outcome-channel': 'admin' });
+    }, { 'x-mebular-admin-token': 'admin-token' });
     expect(second.status).toBe(200);
     expect(second.body.data.recorded).toBe(true);
 
@@ -1562,7 +1563,7 @@ describe('sidecar recall/context HTTP', () => {
 
     // 窗口语义由 console admin 路径验证：host token 的 TTL 是 outcomeWindowMs，
     // 超时后必须先被 binding 拒绝（见 outcome-binding.test.ts），不能绕过鉴权。
-    const admin = { 'x-mebular-outcome-channel': 'admin' };
+    const admin = { 'x-mebular-admin-token': 'admin-token' };
     const first = await trace('th_window_1');
     now += 5 * 60 * 1000;
     const ignored = await post(`${server.url}/recall/${first}/outcome`, {

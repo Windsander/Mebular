@@ -191,11 +191,16 @@ describe('MemoryRuntimeSupervisor：生命周期', () => {
     expect(record.env.MEBULAR_MEMORY_RUNTIME_HOME).toBe(join(home, 'memory-runtime'));
     expect(record.env.MEBULAR_CAPABILITY_TOKEN).toBe(capabilityToken);
     expect(record.env.MEBULAR_MEMORY_RUNTIME_TOKEN).toMatch(/^[A-Za-z0-9_-]{40,}$/);
+    // W4 B1：console 使用独立 admin secret，不能复用 host token。
+    expect(record.env.MEBULAR_MEMORY_RUNTIME_ADMIN_TOKEN).toMatch(/^[A-Za-z0-9_-]{40,}$/);
+    expect(record.env.MEBULAR_MEMORY_RUNTIME_ADMIN_TOKEN)
+      .not.toBe(record.env.MEBULAR_MEMORY_RUNTIME_TOKEN);
     expect(record.env.MEBULAR_MCP_URL).toMatch(/^http:\/\/127\.0\.0\.1:/);
 
     const json = JSON.stringify(await supervisor.status());
     expect(json).not.toContain(capabilityToken);
     expect(json).not.toContain(record.env.MEBULAR_MEMORY_RUNTIME_TOKEN);
+    expect(json).not.toContain(record.env.MEBULAR_MEMORY_RUNTIME_ADMIN_TOKEN);
     expect(json).not.toMatch(/tokenFile|host-token/);
 
     await supervisor.stop({ includeAttached: false });

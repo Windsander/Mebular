@@ -295,6 +295,33 @@ Console does not edit these values; it only shows trace decisions and offers a
 confirmed reset. Change the mode in the sidecar config, then restart the sidecar (or
 follow the existing lifecycle path) so the new mode is loaded.
 
+### Outcome binding (0.4.0 W4)
+
+When `/context` writes a local trace it also returns an opaque `bindingToken`;
+`traceId:null` (trace disabled, or the W5 deadline skip) returns `bindingToken:null`
+and hosts must not report an outcome.
+
+- The token is a **TTL-scoped bearer bound to one trace**, not a single-use nonce:
+  the same trace may report different kinds, and same-kind repeats stay idempotent.
+- It binds `traceId + agentId + threadId + turnId + hostApp`; `source=host` must
+  present it together with one of `opencode|openchamber|dsh|hermes`. Cross-trace,
+  cross-session/agent/thread/turn, tampered, expired, and rotated-host-token tokens
+  are rejected.
+- The HMAC key is the current host token. This is a local same-user trust boundary:
+  a process that already holds the host token can mint or replay a binding for that
+  trace. Binding mainly prevents cross-trace/scope/no-token reports, not a hostile
+  holder of the host token.
+- `source=console` requires the independent admin secret held by the MCP admin proxy
+  (`x-mebular-admin-token`), never the host token or a client-side channel header.
+  `source=heuristic` is internal to the sidecar only.
+- Tokens are never written to disk, traces, policy, or logs. A new protocol request
+  with `note` is rejected with `outcome_note_unsupported`; legacy 0.3 clients without
+  a token are accepted with `outcome_note_ignored` and the note is not stored.
+- Host `ignored` weak signals are scheduled at about 75% of the outcome window so
+  they arrive before the token expires. A late host outcome is rejected with
+  `outcome_binding_expired`; the console admin path keeps the longer late-outcome
+  window for diagnostics/policy replay.
+
 ### Decision, depth and `must_speak`
 
 `POST /context` returns an additive `decision`:

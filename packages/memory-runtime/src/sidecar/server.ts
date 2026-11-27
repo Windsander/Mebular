@@ -421,6 +421,11 @@ export interface SidecarRecallApi {
 export interface SidecarServerOptions {
   config: SidecarConfig;
   hostToken: string;
+  /**
+   * 0.4.0 W4：MCP admin 代理持有的独立 secret，只用于 `source=console`。
+   * 不写 discovery/磁盘/日志；缺省或与 hostToken 相同时 console 通道关闭。
+   */
+  adminToken?: string;
   identity?: Partial<SidecarStatusIdentity>;
   getStatus?: () => SidecarStatusSnapshot | Promise<SidecarStatusSnapshot>;
   /** `/version` 的模型状态；缺省从 getStatus().model 读取。 */
@@ -603,6 +608,8 @@ export class SidecarServer {
   mode: SidecarMode = 'immersive';
 
   private readonly identity: SidecarStatusIdentity;
+  /** 独立 admin secret；host token 永远不能冒充 console。 */
+  private readonly adminToken: string | null;
   private readonly effectiveInterventionOverride?: EffectiveInterventionResolution;
   private readonly diagnosticShadowOverride?: boolean;
 
@@ -643,6 +650,12 @@ export class SidecarServer {
   constructor(options: SidecarServerOptions) {
     this.config = options.config;
     this.hostToken = options.hostToken;
+    // fail closed：缺省、空值或与 host token 相同都不提供 console 通道。
+    this.adminToken = typeof options.adminToken === 'string'
+      && options.adminToken.length > 0
+      && !safeTokenEqual(options.adminToken, options.hostToken)
+      ? options.adminToken
+      : null;
     this.identity = {
       cloudId: options.identity?.cloudId ?? null,
       profileId: options.identity?.profileId ?? null,
@@ -1765,17 +1778,16 @@ export class SidecarServer {
           return;
         }
         if (parts[2] === 'outcome') {
-          // W4：host 通道用 host token 验 bindingToken。console 只允许 MCP admin
-          // 代理：必须显式带 admin channel 且不得带宿主身份 header，宿主 adapter
-          // 不得自报 console。`heuristic` 永不从 HTTP 通道放行。
-          const channel = req.headers['x-mebular-outcome-channel'];
-          const outcomeHostApp = req.headers['x-mebular-host-app'];
-          const consoleChannel = typeof channel === 'string'
-            && channel.trim().toLowerCase() === 'admin'
-            && (typeof outcomeHostApp !== 'string' || outcomeHostApp.trim().length === 0);
+          // W4：host 通道用 host token 验 bindingToken。console 只允许持有独立
+          // admin secret 的 MCP admin 代理；客户端 header 本身不是凭据，宿主
+          // 仅凭 host token 不能自报 console。`heuristic` 永不从 HTTP 放行。
+          const adminHeader = req.headers['x-mebular-admin-token'];
+          const adminVerified = typeof adminHeader === 'string'
+            && this.adminToken !== null
+            && safeTokenEqual(adminHeader.trim(), this.adminToken);
           const result = await this.recall.submitOutcome(traceId, body, {
             hostToken: this.hostToken,
-            console: consoleChannel,
+            console: adminVerified,
           });
           this.send(res, 200, this.envelope(requestId, result, result.warnings, result.degraded));
           return;

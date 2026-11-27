@@ -2966,6 +2966,69 @@ class OutcomeAttributionTests(BaseCase):
         self.assertEqual(outcome["body"].get("bindingToken"), "obt_test_binding")
         self.assertNotIn("note", outcome["body"])
 
+    def test_cache_hit_attributes_previous_and_cancels_ignored(self) -> None:
+        server = self.fake_server()
+        server.context_blocks = ["theme memory"]
+        server.binding_token = "obt_turn_token"
+        provider = self.make_provider(server, outcome_ignored_delay=0.2)
+
+        # 真实 turn：记录 outcome context，并在 sync_turn 后挂 ignored timer。
+        self.assertIn("theme memory", provider.prefetch("how do I change the theme"))
+        provider.sync_turn("how do I change the theme", "noted", session_id="s1")
+
+        # 后台 queue_prefetch 的 /context 是 silent，且 token 不同；若它覆盖
+        # outcome context，下一轮 cache hit 会被误判成 missed / worker token。
+        server.context_blocks = ["worker memory"]
+        server.binding_token = "obt_worker_token"
+        server.context_decision = {
+            "action": "silent",
+            "depth": "gist",
+            "confidence": 0.2,
+            "reason": "low_confidence",
+            "policyVersion": "v0-rules",
+            "enforced": True,
+        }
+        server.context_applied = {"action": "silent", "depth": "gist", "fragments": 0}
+        provider.queue_prefetch("再说一遍，深色主题怎么设置", session_id="s1")
+        key = ("s1", memory_plugin._sha256_text("再说一遍，深色主题怎么设置"))
+        self.assertTrue(self.wait_until(
+            lambda: key in provider._prefetch_cache and key not in provider._prefetch_inflight
+        ))
+        # 后台预取不得写入 outcome context。
+        self.assertEqual(
+            provider._outcome_contexts["s1"]["bindingToken"], "obt_turn_token"
+        )
+
+        # cache hit 仍然归因上一轮，并取消 sync_turn 留下的 ignored timer。
+        self.assertIn("worker memory", provider.prefetch(
+            "再说一遍，深色主题怎么设置", session_id="s1"
+        ))
+        self.assertTrue(self.wait_until(lambda: bool(server.outcomes)))
+        time.sleep(0.3)  # 超过 outcome_ignored_delay；timer 应已被取消
+        kinds = [entry["body"].get("kind") for entry in server.outcomes]
+        self.assertEqual(kinds, ["reasked"])
+        self.assertEqual(server.outcomes[0]["body"].get("bindingToken"), "obt_turn_token")
+        self.assertEqual(
+            [entry for entry in server.requests if entry["path"] == f"{API}/context"].__len__(),
+            2,
+        )
+
+    def test_queue_prefetch_never_overwrites_real_outcome_context(self) -> None:
+        server = self.fake_server()
+        server.context_blocks = ["real turn memory"]
+        server.binding_token = "obt_real_turn"
+        provider = self.make_provider(server)
+        provider.prefetch("real turn query")
+
+        server.binding_token = "obt_background"
+        provider.queue_prefetch("background warm query", session_id="s1")
+        key = ("s1", memory_plugin._sha256_text("background warm query"))
+        self.assertTrue(self.wait_until(
+            lambda: key in provider._prefetch_cache and key not in provider._prefetch_inflight
+        ))
+        self.assertEqual(provider._outcome_contexts["s1"]["bindingToken"], "obt_real_turn")
+        self.assertEqual(provider._outcome_contexts["s1"]["turnId"], "")
+
     def test_trace_null_reports_nothing(self) -> None:
         server = self.fake_server()
         server.context_blocks = ["deploy status memory"]

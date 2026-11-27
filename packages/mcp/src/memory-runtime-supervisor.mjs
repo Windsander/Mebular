@@ -626,6 +626,7 @@ export class MemoryRuntimeSupervisor {
 
     this.child = null;
     this.childToken = null;
+    this.adminToken = null;
     this.childSecrets = [];
     this.managedInstance = null;
     this.dormantLock = null;
@@ -2090,7 +2091,11 @@ export class MemoryRuntimeSupervisor {
 
     const hostToken = stringOrNull(this.env?.MEBULAR_MEMORY_RUNTIME_TOKEN)
       ?? randomBytes(32).toString('base64url');
-    this.childSecrets = [token, hostToken];
+    // W4：独立 admin secret 只注入 sidecar child；宿主 adapter 不持有，
+    // discovery/日志/状态都不暴露。console outcome 只走这个通道。
+    const adminToken = randomBytes(32).toString('base64url');
+    this.adminToken = adminToken;
+    this.childSecrets = [token, hostToken, adminToken];
     const spec = commandSpec(resolved.command);
     const args = [
       ...spec.args,
@@ -2104,6 +2109,7 @@ export class MemoryRuntimeSupervisor {
       MEBULAR_MEMORY_RUNTIME_HOME: this.paths.dataDir,
       MEBULAR_CAPABILITY_TOKEN: token,
       MEBULAR_MEMORY_RUNTIME_TOKEN: hostToken,
+      MEBULAR_MEMORY_RUNTIME_ADMIN_TOKEN: adminToken,
       ...(stringOrNull(this.getMcpUrl()) ? { MEBULAR_MCP_URL: stringOrNull(this.getMcpUrl()) } : {}),
     };
 

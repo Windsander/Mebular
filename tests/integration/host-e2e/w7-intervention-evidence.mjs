@@ -449,7 +449,6 @@ async function main() {
         JSON.stringify(metaOf(trace1)));
 
       const pollStart = Date.now();
-      let hitTurn = null;
       let hitTrace = null;
       // Cold llama.cpp load is ~45-50s (W7 §2.1). Wait for the post-turn
       // prefetch plan *without* issuing more same-cue user turns: every extra
@@ -459,11 +458,10 @@ async function main() {
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 60000));
       for (let attempt = 0; attempt < 8; attempt += 1) {
         if (attempt > 0) await new Promise((resolvePromise) => setTimeout(resolvePromise, 3000));
-        const attemptTurn = await turn(threadId, 'deepwork');
+        await turn(threadId, 'deepwork');
         const traces = await listFullTraces(discovery, threadId);
         const trace = traces.find((entry) => entry.turnId && isLocalPrefetchHit(entry));
         if (trace) {
-          hitTurn = attemptTurn;
           hitTrace = trace;
           break;
         }

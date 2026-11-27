@@ -164,15 +164,18 @@ async function waitOutcome(discovery, traceId, kind, { timeoutMs = 20000 } = {})
 
 const POLICY_COUNT_KEYS = ['spoken', 'silent', 'accepted', 'ignored', 'reasked', 'corrected', 'dismissed', 'missed', 'too_shallow', 'too_deep'];
 
+/** 完整核对 10 个计数：键必须都在且值为 0（避免只查 3 个的旧断言）。 */
+function countsAllZero(counts) {
+  return Boolean(counts) && typeof counts === 'object'
+    && POLICY_COUNT_KEYS.every((key) => key in counts && (counts[key] ?? 0) === 0);
+}
+
 // W6 起 policy state 是 v2：adaptive 计数在 global，model/shadow/gate 只写
 // diagnostic。reset 必须同时清空三者，而不是只清 v1 的单层计数。
 function policyAllZero(state) {
   if (!state || state.version !== 2) return false;
-  const allZero = (counts) => counts
-    && typeof counts === 'object'
-    && POLICY_COUNT_KEYS.every((key) => (counts[key] ?? 0) === 0);
-  if (!allZero(state.global ?? {})) return false;
-  if (!allZero(state.diagnostic ?? {})) return false;
+  if (!countsAllZero(state.global ?? {})) return false;
+  if (!countsAllZero(state.diagnostic ?? {})) return false;
   return state.domains && typeof state.domains === 'object' && Object.keys(state.domains).length === 0;
 }
 
@@ -358,8 +361,17 @@ async function main() {
       const args = sessionID
         ? ['run', '--session', sessionID, '--server', serverUrl, '--format', 'json', prompt]
         : ['run', '--server', serverUrl, '--format', 'json', prompt];
-      const result = await runProcess(OPENCODE_BIN, args, { env: baseEnv, cwd: project, timeoutMs: 120000 });
-      const id = sessionID ?? parseSessionID(result.stdout);
+      // `opencode run` 偶发与刚启动的 server 竞争（本机约 1/5）：首轮没有拿到
+      // sessionID 时重试，避免把宿主启动抖动记成产品失败。只检查一次，断言数不变。
+      const attempts = sessionID ? 1 : 3;
+      let result;
+      let id;
+      for (let attempt = 0; attempt < attempts; attempt += 1) {
+        result = await runProcess(OPENCODE_BIN, args, { env: baseEnv, cwd: project, timeoutMs: 120000 });
+        id = sessionID ?? parseSessionID(result.stdout);
+        if (result.code === 0 && !result.timedOut && typeof id === 'string' && id.startsWith('ses')) break;
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
+      }
       check(`真实 opencode turn 退出 0（${prompt.slice(0, 24)}…）`,
         result.code === 0 && !result.timedOut && typeof id === 'string' && id.startsWith('ses'),
         (result.stderr || result.stdout).slice(-400));
@@ -401,11 +413,15 @@ async function main() {
     // ---- Scenario B: silent -> explicit memory follow-up => missed ----------
     const sessionB = await turn(null, '你好');
     const traceB1 = await findTrace(discovery, { threadId: sessionB, includes: '你好' });
-    check('B1 闲聊得到 silent 决策且未注入片段',
+    check('B1 闲聊得到 silent 决策且未注入片段（gate trace policyEligible=false）',
       traceB1?.decision?.action === 'silent'
       && traceB1?.decision?.reason === 'chitchat'
       && traceB1?.applied?.fragments === 0
-      && (traceB1?.counts?.injected ?? 0) === 0,
+      && (traceB1?.counts?.injected ?? 0) === 0
+      // W6：chitchat 是 gate/non-intervention，trace 必须显式标 policyEligible=false，
+      // 否则后续 missed 会被错误写进 policy global/diagnostic。
+      && traceB1?.applied?.policyEligible === false
+      && traceB1?.applied?.adaptiveEligible === undefined,
       JSON.stringify({ decision: traceB1?.decision, applied: traceB1?.applied }));
     await turn(sessionB, '你还记得刚才那个 deepwork 主题吗');
     const traceB1Missed = await waitOutcome(discovery, traceB1.id, 'missed');
@@ -466,10 +482,9 @@ async function main() {
       // W6：B1 是 gate/non-intervention（policyEligible=false），missed 只落
       // trace，不得进入 policy global/diagnostic；旧 0.3 断言要求 missed=1。
       && (stateBefore.global.missed ?? 0) === 0
-      // 本场景的 eligible 决策都是 heuristic/adaptive，diagnostic 必须为空。
-      && (stateBefore.diagnostic.spoken ?? 0) === 0
-      && (stateBefore.diagnostic.silent ?? 0) === 0
-      && (stateBefore.diagnostic.missed ?? 0) === 0
+      // 本场景的 eligible 决策都是 heuristic/adaptive，diagnostic 必须完整为空：
+      // 逐项核对 10 个计数（不只 spoken/silent/missed）。
+      && countsAllZero(stateBefore.diagnostic)
       && Object.keys(stateBefore.domains ?? {}).length > 0,
       JSON.stringify({
         global: stateBefore?.global,

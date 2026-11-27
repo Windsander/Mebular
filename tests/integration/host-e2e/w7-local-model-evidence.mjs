@@ -13,15 +13,12 @@
 
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 
 import { startRealRuntime } from './lib/real-runtime.mjs';
 
-const here = dirname(fileURLToPath(import.meta.url));
-const repoRoot = resolve(here, '..', '..', '..');
 const ENGINE_DIR = process.env.MEBULAR_W7_ENGINE_DIR
   || '/Users/sobertli/.mebular/memory-runtime/inference/engine/llama-b12017';
 const MODEL_PATH = process.env.MEBULAR_W7_MODEL_PATH

@@ -3,7 +3,7 @@
   "release": "0.4.0",
   "status": "unreleased",
   "theme": "memory-intervention",
-  "branch": "feat/0.4-w7-rerun",
+  "branch": "feat/0.4-w7-evidence-sync",
   "baseCommit": "c18b65b128e847e4a32239e1d9b3e63fe8dd3e4f",
   "evidenceCommit": "96629f126800f26d49b035f79f4bb7a14a6766a8",
   "date": "2026-11-28",
@@ -89,8 +89,14 @@
     {
       "name": "opencode-outcome",
       "command": "OPENCODE_BIN=\"/private/var/folders/86/gpjtr2p94dg7mz24pbkrj8pw0000gn/T/mebular-e2e-tools/node_modules/.bin/opencode\" node tests/integration/host-e2e/opencode-intervention-outcome.mjs",
-      "result": "42 passed, 4 failed (policy persistence/reset/note assertions; unchanged by B1, not counted as pass)",
+      "result": "47 passed, 0 failed (W4 note + W6 policy v2; real host)",
       "evidencePath": "docs/quality/0.4.0-intervention/w7/opencode-outcome.txt"
+    },
+    {
+      "name": "opencode-shadow",
+      "command": "OPENCODE_BIN=\"/private/var/folders/86/gpjtr2p94dg7mz24pbkrj8pw0000gn/T/mebular-e2e-tools/node_modules/.bin/opencode\" node tests/integration/host-e2e/opencode-intervention-shadow.mjs",
+      "result": "15 passed, 0 failed (W6 diagnostic counts; global stays 0)",
+      "evidencePath": "docs/quality/0.4.0-intervention/w7/opencode-shadow.txt"
     }
   ],
   "localModelBaseline": {
@@ -165,56 +171,56 @@
       "source": "heuristic",
       "state": "first_turn",
       "evidenceLevel": "RH+RS",
-      "command": "PATH=\"/private/var/folders/86/gpjtr2p94dg7mz24pbkrj8pw0000gn/T/mebular-e2e-tools/node_modules/.bin:$PATH\" node tests/integration/host-e2e/opencode-intervention-outcome.mjs",
-      "sha": "3bbd28454126c79be90b31b0fa8ea629549cdb73",
+      "command": "OPENCODE_BIN=\"/private/var/folders/86/gpjtr2p94dg7mz24pbkrj8pw0000gn/T/mebular-e2e-tools/node_modules/.bin/opencode\" node tests/integration/host-e2e/opencode-intervention-outcome.mjs",
+      "sha": "edb1f87ac59d1c666b445974bfd91367ae4502d8",
       "hostVersion": "OpenCode v2.4.1 (open /tmp test tools)",
       "modelId": "none",
       "result": "pass",
       "fallback": null,
       "evidencePath": "docs/quality/0.4.0-intervention/w7/opencode-outcome.txt",
-      "note": "A1 real /context heuristic + injection; E2E overall 42/46 (4 unrelated policy/note failures)."
+      "note": "A1 real /context heuristic + injection; outcome E2E overall 47/47 (0 failed)."
     },
     {
       "host": "opencode",
       "source": "heuristic",
       "state": "new_cue",
       "evidenceLevel": "RH+RS",
-      "command": "PATH=\"/private/var/folders/86/gpjtr2p94dg7mz24pbkrj8pw0000gn/T/mebular-e2e-tools/node_modules/.bin:$PATH\" node tests/integration/host-e2e/opencode-intervention-outcome.mjs",
-      "sha": "3bbd28454126c79be90b31b0fa8ea629549cdb73",
+      "command": "OPENCODE_BIN=\"/private/var/folders/86/gpjtr2p94dg7mz24pbkrj8pw0000gn/T/mebular-e2e-tools/node_modules/.bin/opencode\" node tests/integration/host-e2e/opencode-intervention-outcome.mjs",
+      "sha": "edb1f87ac59d1c666b445974bfd91367ae4502d8",
       "hostVersion": "OpenCode v2.4.1 (open /tmp test tools)",
       "modelId": "none",
       "result": "pass",
       "fallback": null,
       "evidencePath": "docs/quality/0.4.0-intervention/w7/opencode-outcome.txt",
-      "note": "B1/C1/D1 distinct cues real host."
+      "note": "B1/C1/D1 distinct cues real host; B1 gate trace applied.policyEligible=false."
     },
     {
       "host": "opencode",
       "source": "heuristic",
       "state": "fallback",
       "evidenceLevel": "RH+RS",
-      "command": "PATH=\"/private/var/folders/86/gpjtr2p94dg7mz24pbkrj8pw0000gn/T/mebular-e2e-tools/node_modules/.bin:$PATH\" node tests/integration/host-e2e/opencode-intervention-outcome.mjs",
-      "sha": "3bbd28454126c79be90b31b0fa8ea629549cdb73",
+      "command": "OPENCODE_BIN=\"/private/var/folders/86/gpjtr2p94dg7mz24pbkrj8pw0000gn/T/mebular-e2e-tools/node_modules/.bin/opencode\" node tests/integration/host-e2e/opencode-intervention-outcome.mjs",
+      "sha": "edb1f87ac59d1c666b445974bfd91367ae4502d8",
       "hostVersion": "OpenCode v2.4.1 (open /tmp test tools)",
       "modelId": "none",
       "result": "pass",
       "fallback": null,
       "evidencePath": "docs/quality/0.4.0-intervention/w7/opencode-outcome.txt",
-      "note": "silent/chitchat path, no model call."
+      "note": "silent/chitchat path, no model call; gate is non-intervention."
     },
     {
       "host": "opencode",
       "source": "heuristic",
       "state": "outcome",
       "evidenceLevel": "RH+RS",
-      "command": "PATH=\"/private/var/folders/86/gpjtr2p94dg7mz24pbkrj8pw0000gn/T/mebular-e2e-tools/node_modules/.bin:$PATH\" node tests/integration/host-e2e/opencode-intervention-outcome.mjs",
-      "sha": "3bbd28454126c79be90b31b0fa8ea629549cdb73",
+      "command": "OPENCODE_BIN=\"/private/var/folders/86/gpjtr2p94dg7mz24pbkrj8pw0000gn/T/mebular-e2e-tools/node_modules/.bin/opencode\" node tests/integration/host-e2e/opencode-intervention-outcome.mjs",
+      "sha": "edb1f87ac59d1c666b445974bfd91367ae4502d8",
       "hostVersion": "OpenCode v2.4.1 (open /tmp test tools)",
       "modelId": "none",
       "result": "pass",
       "fallback": null,
       "evidencePath": "docs/quality/0.4.0-intervention/w7/opencode-outcome.txt",
-      "note": "reasked/missed/too_shallow/too_deep over real plugin + bindingToken."
+      "note": "reasked/missed/too_shallow/too_deep over real plugin + bindingToken; P4 note contract (400 outcome_note_unsupported / legacy ignored)."
     },
     {
       "host": "opencode",
@@ -3129,7 +3135,30 @@
       "note": "No real Hermes sync_turn/companion outcome run."
     }
   ],
-  "mergeCommit": "96629f126800f26d49b035f79f4bb7a14a6766a8",
+  "mergeCommit": "edb1f87ac59d1c666b445974bfd91367ae4502d8",
   "b1FixCommit": "a9937c304a006e1bc73e93d883236ebfb3fad872",
-  "evidenceNote": "Cells updated by the 2026-11-28 rerun use sha 96629f12; untouched blocked_external/unit_only cells retain their original evidence sha 3bbd284."
+  "evidenceNote": "Cells updated by the 2026-11-28 W7 evidence-sync rerun use sha edb1f87a (merge of 033bbc1); untouched blocked_external/unit_only cells retain their original evidence sha 3bbd284. Outcome 47/0 and shadow 15/0 are real opencode v2.4.1 runs; no fake fill.",
+  "outcomeFixCommit": "033bbc1c2e0a1c8ea1b73b63336d0fdf720d6b7b",
+  "e2eSummary": {
+    "opencodeOutcome": {
+      "command": "node tests/integration/host-e2e/opencode-intervention-outcome.mjs",
+      "passed": 47,
+      "failed": 0,
+      "total": 47,
+      "hostVersion": "OpenCode v2.4.1",
+      "evidencePath": "docs/quality/0.4.0-intervention/w7/opencode-outcome.txt"
+    },
+    "opencodeShadow": {
+      "command": "node tests/integration/host-e2e/opencode-intervention-shadow.mjs",
+      "passed": 15,
+      "failed": 0,
+      "total": 15,
+      "hostVersion": "OpenCode v2.4.1",
+      "evidencePath": "docs/quality/0.4.0-intervention/w7/opencode-shadow.txt"
+    },
+    "contracts": {
+      "p4Note": "New-protocol outcomes carry no note: token+note -> 400 outcome_note_unsupported; legacy 0.3 no-token note -> 200 outcome_note_ignored and not stored.",
+      "policyV2": "policy/state.json version=2; heuristic/adaptive counts in global; model/shadow diagnostics in diagnostic; gate/non-intervention writes neither and its trace carries applied.policyEligible=false."
+    }
+  }
 }

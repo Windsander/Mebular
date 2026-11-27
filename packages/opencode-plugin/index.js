@@ -1676,8 +1676,12 @@ export function createController(dependencies = {}) {
   const hostPlans = new Map();
   const hostBasis = new Map();
   const hostPlanInFlight = new Set();
-  /** W3：planner generate 期间的宿主事件必须隔离，不能进入 ingest/checkpoint。 */
-  const internalPlannerSessions = new Map();
+  /**
+   * W3：planner generate 期间只按“planner 消息”过滤，不做 session 级屏蔽。
+   * 记录本次 generate 的输出 hash / messageId；期间到达的事件先排队，等输出
+   * 已知后逐条判定：planner 丢弃，真实 user/assistant 事件照常重放。
+   */
+  const plannerGenerations = new Map();
   let lastHostPlanSource = null;
   const reportedOutcomes = new Set();
   let outcomeSupport = null;
@@ -2904,13 +2908,6 @@ export function createController(dependencies = {}) {
 
   function bufferChunk(sessionID, role, text, messageId) {
     if (!ingestAllowed || closed) return false;
-    if (role !== 'user' && isInternalPlannerActive(safeThreadId(sessionID))) {
-      // planner 的 session.generate 文本不是用户内容；不得进入 ingest buffer。
-      // 真实 user chunk 仍保留，避免生成窗口吞掉下一轮输入。
-      stats.hostPlan.suppressedEvents += 1;
-      stats.ingest.skipped += 1;
-      return false;
-    }
     if (writesDisabled) {
       recordWriteRejected('ingest');
       stats.ingest.rejected += 1;
@@ -3019,10 +3016,6 @@ export function createController(dependencies = {}) {
   async function captureSessionContext(sessionID) {
     const session = safeThreadId(sessionID);
     if (!session || !ingestAllowed || writesDisabled || closed) return;
-    if (isInternalPlannerActive(session)) {
-      stats.hostPlan.suppressedEvents += 1;
-      return;
-    }
     const existing = contextReads.get(session);
     if (existing) return existing;
     const task = (async () => {
@@ -3298,17 +3291,108 @@ export function createController(dependencies = {}) {
     noteFailure(`host_plan_invalidated_${reason}`);
   }
 
-  function markInternalPlanner(session, ttlMs = config.hostPlanTimeoutMs + 2000) {
-    internalPlannerSessions.set(session ?? 'session', now() + Math.max(1000, ttlMs));
+  const PLANNER_QUEUE_EVENTS = new Set([
+    'session.text.ended',
+    'session.execution.started',
+    'session.execution.succeeded',
+    'session.execution.failed',
+    'session.execution.interrupted',
+    'session.idle',
+    'session.tool.input.started',
+    'session.tool.called',
+    'session.tool.success',
+    'session.tool.failed',
+    'session.compaction.ended',
+  ]);
+
+  function plannerRecordFor(session) {
+    const record = plannerGenerations.get(session ?? 'session');
+    if (!record) return null;
+    if (record.expiresAt !== undefined && now() > record.expiresAt) {
+      plannerGenerations.delete(session ?? 'session');
+      return null;
+    }
+    return record;
   }
 
-  function isInternalPlannerActive(session) {
-    const key = session ?? 'session';
-    const until = internalPlannerSessions.get(key);
-    if (until === undefined) return false;
-    if (now() <= until) return true;
-    internalPlannerSessions.delete(key);
-    return false;
+  function plannerEventText(event) {
+    const data = isObject(event?.data) ? event.data : {};
+    const direct = asText(data.text) || asText(data.content);
+    if (direct) return direct;
+    const message = isObject(data.message) ? data.message : null;
+    if (message) {
+      const text = messageText(message);
+      if (text) return text;
+    }
+    return '';
+  }
+
+  function plannerEventMessageId(event) {
+    const data = isObject(event?.data) ? event.data : {};
+    return asText(data.assistantMessageID)
+      || asText(data.messageID)
+      || asText(data.message?.id)
+      || asText(data.id)
+      || '';
+  }
+
+  function plannerTextHash(value) {
+    const text = asText(value);
+    return text ? hashText(text) : '';
+  }
+
+  function classifyPlannerEvent(event, record) {
+    if (!record) return 'normal';
+    const messageId = plannerEventMessageId(event);
+    if (messageId && record.messageIds.has(messageId)) return 'planner';
+    const text = plannerEventText(event);
+    if (text) {
+      const hash = plannerTextHash(text);
+      if (hash && record.outputHashes.has(hash)) {
+        if (messageId) record.messageIds.add(messageId);
+        return 'planner';
+      }
+    }
+    if (!record.settled) return 'queue';
+    return 'normal';
+  }
+
+  function plannerEventIsInternal(event) {
+    return event?.internal === true
+      || event?.data?.internal === true
+      || (isObject(event?.data?.source) && event.data.source.kind === 'mebular-planner')
+      || (isObject(event?.data?.source) && event.data.source.kind === 'mebular-planner-message');
+  }
+
+  async function flushPlannerQueue(record) {
+    if (!record || record.flushing) return;
+    record.flushing = true;
+    try {
+      // 先把已排队文本与输出 hash 对上，收集 planner messageId，供 execution 事件判定。
+      for (const event of record.pending) {
+        const text = plannerEventText(event);
+        const messageId = plannerEventMessageId(event);
+        if (text && record.outputHashes.has(plannerTextHash(text)) && messageId) {
+          record.messageIds.add(messageId);
+        }
+      }
+      const queued = record.pending.splice(0);
+      for (const event of queued) {
+        const kind = classifyPlannerEvent(event, record);
+        if (kind === 'planner') {
+          stats.hostPlan.suppressedEvents += 1;
+          stats.ingest.skipped += 1;
+          continue;
+        }
+        await handleEventInternal(event, { skipPlannerIsolation: true });
+      }
+    } finally {
+      record.flushing = false;
+      record.settled = true;
+      record.expiresAt = now() + 5000;
+      // 保留短 TTL，吸收 generate 返回后才到达的 planner 事件。
+      record.pending.length = 0;
+    }
   }
 
   /** W3 basis 与 outcome 开关解耦：即使 outcomes=false 也能生成 host plan。 */
@@ -3386,8 +3470,16 @@ export function createController(dependencies = {}) {
     hostPlanInFlight.add(inFlightKey);
     stats.hostPlan.attempts += 1;
     const plannerSession = session ?? 'session';
-    // 隔离窗口覆盖 ctx.session.generate 全程；期间同 session 的事件不进 ingest。
-    markInternalPlanner(plannerSession);
+    const plannerRecord = {
+      outputHashes: new Set(),
+      messageIds: new Set(),
+      pending: [],
+      settled: false,
+      flushing: false,
+      expiresAt: undefined,
+    };
+    plannerGenerations.set(plannerSession, plannerRecord);
+    let outputText = '';
     let timer = null;
     try {
       const result = await Promise.race([
@@ -3403,8 +3495,11 @@ export function createController(dependencies = {}) {
           timer?.unref?.();
         }),
       ]);
-      const textValue = typeof result === 'string' ? result : asText(result?.text);
-      const parsed = parseHostPlanOutput(textValue);
+      outputText = typeof result === 'string' ? result : asText(result?.text);
+      if (outputText) plannerRecord.outputHashes.add(plannerTextHash(outputText));
+      const resultId = asText(result?.id) || asText(result?.messageID) || asText(result?.assistantMessageID);
+      if (resultId) plannerRecord.messageIds.add(resultId);
+      const parsed = parseHostPlanOutput(outputText);
       if (!parsed) {
         stats.hostPlan.failed += 1;
         return null;
@@ -3443,8 +3538,8 @@ export function createController(dependencies = {}) {
       return null;
     } finally {
       if (timer !== null) clearTimeoutFn(timer);
+      await flushPlannerQueue(plannerRecord);
       hostPlanInFlight.delete(inFlightKey);
-      internalPlannerSessions.delete(plannerSession);
     }
   }
 
@@ -3464,10 +3559,6 @@ export function createController(dependencies = {}) {
 
   async function finalizeSession(sessionID, options = {}) {
     const session = safeThreadId(sessionID);
-    if (isInternalPlannerActive(session)) {
-      stats.hostPlan.suppressedEvents += 1;
-      return false;
-    }
     const buffer = buffers.get(session);
     if (!buffer) return false;
     if (buffer.timer !== null) {
@@ -4298,8 +4389,31 @@ export function createController(dependencies = {}) {
     return track(handleEventInternal(event));
   }
 
-  async function handleEventInternal(event) {
+  async function handleEventInternal(event, options = {}) {
     if (!enabled || closed || !isObject(event)) return;
+    const data = isObject(event.data) ? event.data : {};
+    const sessionID = data.sessionID ?? event.sessionID;
+    const sessionKey = safeThreadId(sessionID);
+    if (!options.skipPlannerIsolation) {
+      if (plannerEventIsInternal(event)) {
+        stats.hostPlan.suppressedEvents += 1;
+        return;
+      }
+      const plannerRecord = plannerRecordFor(sessionKey);
+      if (plannerRecord) {
+        const kind = classifyPlannerEvent(event, plannerRecord);
+        if (kind === 'planner') {
+          stats.hostPlan.suppressedEvents += 1;
+          stats.ingest.skipped += 1;
+          return;
+        }
+        if (kind === 'queue' && PLANNER_QUEUE_EVENTS.has(event.type)) {
+          // 输出未知时先排队；generate 返回后按文本 hash/messageId 逐条判定。
+          plannerRecord.pending.push(event);
+          return;
+        }
+      }
+    }
     const eventKey = eventDedupeKey(event);
     if (eventKey && seenEvents.has(eventKey)) {
       // Host reconnects may replay an already handled event. The logical
@@ -4311,12 +4425,6 @@ export function createController(dependencies = {}) {
     if (eventKey) remember(seenEvents, eventKey);
     stats.events.received += 1;
     try {
-      const data = isObject(event.data) ? event.data : {};
-      const sessionID = data.sessionID ?? event.sessionID;
-      if (isInternalPlannerActive(safeThreadId(sessionID))) {
-        stats.hostPlan.suppressedEvents += 1;
-        return;
-      }
       switch (event.type) {
         case 'session.inbox.delivered':
           await captureSessionContext(sessionID);

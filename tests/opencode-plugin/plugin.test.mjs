@@ -3993,24 +3993,43 @@ describe('0.4.0 W3 host plan bridge', () => {
 });
 
 describe('0.4.0 W3 host plan isolation', () => {
-  it('planner generate 期间的 session 事件不进入 ingest/event/checkpoint', async () => {
+  it('planner 在途时只过滤 planner 消息；真实 user/assistant 仍正常 ingest', async () => {
     let controllerRef = null;
     const routes = hostPlanRoutes();
+    const contextMessages = userMessages();
+    const realUser = {
+      id: 'u2',
+      role: 'user',
+      content: [{ type: 'text', text: 'real next user turn' }],
+    };
     const { controller, fetchImpl, calls } = controllerWith({
       routes,
       ctx: {
-        contextMessages: userMessages(),
+        contextMessages,
         generateImpl: async () => {
-          // 模拟宿主在 session.generate 期间回放同 session 事件。
+          // 同一 session 同时出现真实 turn 与 planner generate 事件。
+          contextMessages.splice(0, contextMessages.length, realUser);
+          await controllerRef.handleEvent({
+            type: 'session.inbox.delivered',
+            data: { sessionID: 'ses_test' },
+          });
           await controllerRef.handleEvent({
             type: 'session.text.ended',
-            data: { sessionID: 'ses_test', text: 'planner raw assistant text', assistantMessageID: 'pa1' },
+            data: { sessionID: 'ses_test', text: 'real assistant reply', assistantMessageID: 'ra1' },
           });
           await controllerRef.handleEvent({
             type: 'session.execution.succeeded',
-            data: { sessionID: 'ses_test' },
+            data: { sessionID: 'ses_test', messageID: 'ra1' },
           });
-          return { text: HOST_PLAN_JSON };
+          await controllerRef.handleEvent({
+            type: 'session.text.ended',
+            data: { sessionID: 'ses_test', text: HOST_PLAN_JSON, assistantMessageID: 'pa1' },
+          });
+          await controllerRef.handleEvent({
+            type: 'session.execution.succeeded',
+            data: { sessionID: 'ses_test', messageID: 'pa1' },
+          });
+          return { text: HOST_PLAN_JSON, id: 'pa1' };
         },
       },
     });
@@ -4022,11 +4041,16 @@ describe('0.4.0 W3 host plan isolation', () => {
     await waitFor(() => controller.getStatus().hostPlan.generated === 1);
 
     expect(calls.generate).toHaveLength(1);
-    expect(fetchImpl.callsFor('/ingest')).toHaveLength(1);
+    // 第一轮 user + planner 窗口里的真实 user/assistant = 2 次 ingest。
+    expect(fetchImpl.callsFor('/ingest')).toHaveLength(2);
+    const realIngest = fetchImpl.callsFor('/ingest')[1].body;
+    expect(realIngest.chunks.map((chunk) => chunk.text)).toEqual([
+      'real next user turn',
+      'real assistant reply',
+    ]);
     expect(fetchImpl.calls.filter((call) => call.path.startsWith('/checkpoints/'))).toHaveLength(0);
     expect(fetchImpl.calls.filter((call) => call.path.startsWith('/self/'))).toHaveLength(0);
     expect(controller.getStatus().hostPlan.suppressedEvents).toBeGreaterThanOrEqual(2);
-    expect(controller.getStatus().counts.ingest.contextReads).toBe(1);
     await controller.dispose();
   });
 

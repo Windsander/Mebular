@@ -2835,3 +2835,45 @@ class HostPlanBridgeTests(BaseCase):
         contexts = [entry for entry in server.requests if entry["path"] == f"{API}/context"]
         self.assertEqual(contexts[-1]["body"].get("hostPlan"), None)
         self.assertEqual(provider.host_plan_status["reason"], "source_not_host")
+
+    def test_post_llm_call_does_not_swallow_real_sync_turn(self) -> None:
+        server = self.fake_server()
+        self._companion_config(server)
+        self._write_state()
+        ctx = CompanionTests._Ctx()
+        entered = threading.Event()
+        release = threading.Event()
+
+        class _BlockingLlm:
+            def complete_structured(self, **kwargs: Any) -> Any:
+                entered.set()
+                release.wait(timeout=2.0)
+                return types.SimpleNamespace(
+                    parsed={
+                        "action": "speak",
+                        "depth": "gist",
+                        "confidence": 0.7,
+                        "reasonCode": "high_relevance",
+                    },
+                    text="",
+                    model="host/test-model",
+                )
+
+        ctx.llm = _BlockingLlm()
+        plugin = companion_plugin.MebularCompanion(ctx)
+        plugin.post_llm_call(
+            session_id="s1",
+            user_message="planner input",
+            assistant_response="planner answer",
+            model="host/model",
+        )
+        self.assertTrue(entered.wait(timeout=1.0))
+        provider = self.make_provider(server)
+        provider.sync_turn("real user during planner", "real assistant during planner", session_id="s1")
+        self.assertTrue(provider.flush(timeout=2.0))
+        self.assertTrue(server.ingests)
+        self.assertTrue(
+            any("real user during planner" in json.dumps(item) for item in server.ingests)
+        )
+        release.set()
+        self.assertTrue(self.wait_until(self._plan_path().exists, timeout=2.0))

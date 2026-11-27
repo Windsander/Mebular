@@ -1914,8 +1914,6 @@ export function createMemoryRuntimeAdapter(options = {}) {
   // W3：session → 上一轮 /context 的 basis meta；只含 hash/枚举。
   const contextMetas = new Map();
   const hostPlans = new Map();
-  /** W3：planner 生成期间的宿主事件隔离。 */
-  const internalPlannerSessions = new Map();
   let lastHostPlanSource = null;
   const hostInstanceId = `hi_${randomUUID().replace(/-/g, '')}`;
   const trackers = new Map();
@@ -2601,16 +2599,13 @@ export function createMemoryRuntimeAdapter(options = {}) {
     warnOnce(`host-plan:invalidated:${reason}`, `memory runtime host plan cache invalidated (${reason})`);
   }
 
-  function markInternalPlanner(sessionId, ttlMs = config.hostPlanTimeoutMs + 2000) {
-    internalPlannerSessions.set(sessionId, now() + Math.max(1000, ttlMs));
-  }
-
-  function isInternalPlannerActive(sessionId) {
-    const until = internalPlannerSessions.get(sessionId);
-    if (until === undefined) return false;
-    if (now() <= until) return true;
-    internalPlannerSessions.delete(sessionId);
-    return false;
+  /** planner 生成的消息必须显式携带 internal 标记；不按 session 时间窗口猜。 */
+  function isInternalPlannerEvent(event) {
+    return event?.internal === true
+      || event?.data?.internal === true
+      || (isObject(event?.data?.source)
+        && (event.data.source.kind === 'mebular-planner'
+          || event.data.source.kind === 'mebular-planner-message'));
   }
 
   /** 只保存 sidecar 返回的 hash/枚举；不保存 query/正文/gist。 */
@@ -2738,8 +2733,6 @@ export function createMemoryRuntimeAdapter(options = {}) {
       stats.hostPlan.skipped += 1;
       return;
     }
-    const plannerSessionId = safeThreadId(session?.id);
-    if (plannerSessionId) markInternalPlanner(plannerSessionId);
     try {
       await run.call(agent, async (agentSignal) => {
         const scope = createAbortScope(
@@ -2831,8 +2824,6 @@ export function createMemoryRuntimeAdapter(options = {}) {
       });
     } catch {
       stats.hostPlan.failed += 1;
-    } finally {
-      if (plannerSessionId) internalPlannerSessions.delete(plannerSessionId);
     }
   }
 
@@ -4010,9 +4001,8 @@ export function createMemoryRuntimeAdapter(options = {}) {
       stats.ingest.inherited += 1;
       return;
     }
-    if (isInternalPlannerActive(safeThreadId(session?.id)) && event.type !== 'user/message') {
-      // planner 的 ctx.llm 调用不是用户 turn；不得进入 ingest/checkpoint/plan 调度。
-      // 真实 user/message 仍保留，避免生成窗口吞掉下一轮输入。
+    if (isInternalPlannerEvent(event)) {
+      // 只过滤显式 planner 消息；同 session 的真实 user/assistant 照常 ingest。
       stats.hostPlan.suppressedEvents += 1;
       stats.ingest.skipped += 1;
       return;
@@ -4651,7 +4641,6 @@ export function createMemoryRuntimeAdapter(options = {}) {
         recalls.clear();
         contextMetas.clear();
         hostPlans.clear();
-        internalPlannerSessions.clear();
         compactions.clear();
         checkpointRevisions.clear();
         checkpointLatest.clear();

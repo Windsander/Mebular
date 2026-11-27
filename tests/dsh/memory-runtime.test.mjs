@@ -3914,8 +3914,16 @@ describe('@mebular/dsh-plugin memory runtime：host plan bridge', () => {
     const agent = makeAgent({ id: 'a1', session: surface.session });
     agent.runMaintenance = async (task) => task(new AbortController().signal);
     emitPlannerEvent = () => {
-      handlerFor(ctx, 'session/event')(surface.session, event('assistant/message', 99, {
-        message: { role: 'assistant', content: [{ type: 'text', text: 'planner raw text' }] },
+      // planner 内部消息必须显式标记；同 session 真实消息不带标记。
+      handlerFor(ctx, 'session/event')(surface.session, {
+        ...event('assistant/message', 99, {
+          message: { role: 'assistant', content: [{ type: 'text', text: 'planner internal text' }] },
+          internal: true,
+        }),
+      });
+      handlerFor(ctx, 'session/event')(surface.session, event('user/message', 100, humanMessage('real user during planner')));
+      handlerFor(ctx, 'session/event')(surface.session, event('assistant/message', 101, {
+        message: { role: 'assistant', content: [{ type: 'text', text: 'real assistant during planner' }] },
       }));
     };
     const { adapter } = adapterFor({
@@ -3967,7 +3975,12 @@ describe('@mebular/dsh-plugin memory runtime：host plan bridge', () => {
       .toBe(contexts[1].body.hostPlan.hostInstanceId);
     await adapter.flush();
     const ingestCalls = fetch.calls.filter((call) => call.url.endsWith('/ingest'));
-    expect(ingestCalls).toHaveLength(1);
+    const ingestedText = ingestCalls.flatMap((call) => (
+      Array.isArray(call.body?.chunks) ? call.body.chunks.map((chunk) => chunk.text) : []
+    ));
+    expect(ingestedText).toContain('real user during planner');
+    expect(ingestedText).toContain('real assistant during planner');
+    expect(ingestedText).not.toContain('planner internal text');
     expect(fetch.calls.filter((call) => call.url.includes('/checkpoints/'))).toHaveLength(0);
     expect(fetch.calls.filter((call) => call.url.includes('/self/'))).toHaveLength(0);
     expect(adapter.getState().hostPlan).toMatchObject({

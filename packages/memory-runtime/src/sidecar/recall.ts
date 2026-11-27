@@ -3081,13 +3081,13 @@ export class RecallService {
    * 不注入 memory fragments，但 self/checkpoint 已经在调用前按既有路径加载。
    * 这是输入级审批例外，适用于所有 effective mode：
    * - off（含 model.source 缺失）：v0-baseline + enforced=false，不产生策略警告；
-   * - shadow：同样记录输入级 defer，不进入 shadow 建议，也不记 baseline wouldAction；
+   * - shadow：规则层记录输入级 defer，但不进入 shadow 建议，也不记 baseline wouldAction；
    * - heuristic/model：正常规则决策（规则层 defer_explicit，不调用模型）。
    */
   private negatedDeferDecision(run: RecallRun): InterventionDecision {
     const config = this.config.intervention;
     const intervention = this.effectiveIntervention;
-    if (intervention.planner === 'off' || intervention.mode === 'shadow') {
+    if (intervention.planner === 'off') {
       return {
         action: 'defer',
         depth: 'gist',
@@ -3098,8 +3098,9 @@ export class RecallService {
       };
     }
     const key = this.decisionKey(run);
-    return planIntervention({
-      mode: intervention.planner,
+    const decision = planIntervention({
+      // shadow 只计算规则建议，不调模型；defer 是硬规则，heuristic/model 结果一致。
+      mode: intervention.mode === 'shadow' ? 'heuristic' : intervention.planner,
       cue: run.cue,
       candidates: [],
       alreadyInjectedIds: this.resolveInjectedIds(run.request.alreadyInjectedIds),
@@ -3110,6 +3111,8 @@ export class RecallService {
       maxSilentStreak: config.maxSilentStreak,
       explorationRate: config.explorationRate,
     });
+    // shadow 的 decision 是建议，不是生效决策。
+    return intervention.mode === 'shadow' ? { ...decision, enforced: false } : decision;
   }
 
   private async decideIntervention(

@@ -768,7 +768,8 @@ describe('sidecar recall/context HTTP', () => {
   });
 
   it('/context includeSelf：SelfRecord 不存在时非 degraded 空且无 self 块', async () => {
-    const { server, fake } = await setup();
+    // 该用例只验证 self 缺失，不验证介入策略；用 baseline 避免 must_speak 降级噪声。
+    const { server, fake } = await setup({ sourceMissing: true });
     fake.selfRecords.length = 0;
     const context = await post(`${server.url}/context`, {
       agentId: 'opencode',
@@ -965,8 +966,8 @@ describe('sidecar recall/context HTTP', () => {
     });
   });
 
-  it('off + user_negated：输入级 defer，不注入 memory，checkpoint 保留，无策略警告', async () => {
-    const { server, fake } = await setup({ intervention: { mode: 'off', minConfidence: 0.55 } });
+  it('off（model.source 缺失）+ user_negated：输入级 defer，不注入 memory，checkpoint 保留，无策略警告', async () => {
+    const { server, fake } = await setup({ sourceMissing: true, intervention: { minConfidence: 0.55 } });
     fake.setRecords([preference()]);
     fake.checkpoints.push(interventionCheckpoint(
       'th_off_negated',
@@ -1010,7 +1011,7 @@ describe('sidecar recall/context HTTP', () => {
   });
 
   it('shadow + user_negated：实际注入 defer，不走 baseline，不记录 wouldAction', async () => {
-    const { server, fake } = await setup({ intervention: { mode: 'shadow' } });
+    const { server, fake } = await setup({ intervention: { diagnosticShadow: true } });
     fake.setRecords([preference()]);
     fake.checkpoints.push(interventionCheckpoint(
       'th_shadow_negated',
@@ -1052,6 +1053,43 @@ describe('sidecar recall/context HTTP', () => {
     });
     expect(traceBody.data.applied).toMatchObject({ action: 'defer', depth: 'gist', fragments: 0 });
     expect(traceBody.data.applied.wouldAction).toBeUndefined();
+  });
+
+  it('explicit heuristic + user_negated：输入级 defer 优先，规则决策但不注入 memory', async () => {
+    const { server, fake } = await setup({
+      modelSource: 'heuristic',
+      intervention: { explorationRate: 0, maxSilentStreak: 99 },
+    });
+    fake.setRecords([preference()]);
+    fake.checkpoints.push(interventionCheckpoint(
+      'th_heuristic_negated',
+      'task:th_heuristic_negated',
+      'HEURISTIC-NEGATED-CHECKPOINT',
+    ) as any);
+    const context = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_heuristic_negated',
+      turnId: 'turn_heuristic_negated',
+      query: '别用记忆回答我的偏好',
+    });
+    expect(context.status).toBe(200);
+    expect(context.body.data.decision).toMatchObject({
+      action: 'defer',
+      depth: 'gist',
+      reason: 'defer_explicit',
+      policyVersion: 'v0-rules',
+      enforced: true,
+    });
+    expect(context.body.data.fragments).toEqual([]);
+    expect(context.body.data.blocks.map((block: any) => block.kind)).toEqual(['checkpoint']);
+    expect(context.body.data.blocks[0].content).toContain('HEURISTIC-NEGATED-CHECKPOINT');
+    expect(context.body.data.warnings).toContain('intervention_defer');
+    expect(context.body.data.applied).toMatchObject({
+      action: 'defer',
+      depth: 'gist',
+      fragments: 0,
+    });
+    expect(context.body.data.applied.wouldAction).toBeUndefined();
   });
 
   it('shadow 的策略计数用 applied baseline：decision silent / applied speak 记 spoken 而不是 silent', async () => {

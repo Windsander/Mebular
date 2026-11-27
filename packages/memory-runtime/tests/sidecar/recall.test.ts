@@ -79,6 +79,7 @@ async function setup(options: {
   const config = defaultSidecarConfig();
   config.http.port = 0;
   // 这些用例验证召回/组装机制，不验证介入策略；用内部 diagnostic shadow 保留 baseline 注入。
+  config.model.sourcePresent = true;
   config.intervention.diagnosticShadow = true;
   options.mutateConfig?.(config);
   const service = new RecallService({

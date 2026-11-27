@@ -1960,11 +1960,14 @@ export async function startHttpServer({
         const effective = resolveMemoryRuntimeEffectiveMode({
           config,
           modelSource: detail?.model?.configured ?? fallbackSource?.source,
+          sourcePresent: fallbackSource?.sourcePresent
+            ?? (detail?.model?.configured !== undefined && detail?.model?.configured !== null),
         });
         const intervention = detail?.intervention ?? {
           mode: effective.effective,
           planner: effective.planner,
           source: effective.source,
+          sourcePresent: effective.sourcePresent,
           derivedMode: effective.derivedMode,
           legacyModePresent: effective.legacyModePresent,
           legacyModeIgnored: effective.legacyModeIgnored,

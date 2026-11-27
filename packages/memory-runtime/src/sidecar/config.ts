@@ -73,6 +73,11 @@ export interface SidecarDetailSettings {
 
 export interface InferenceSettings {
   source: 'heuristic' | 'local' | 'host' | 'api' | 'auto';
+  /**
+   * `source` 是否真的出现在配置文件中。
+   * 缺失 ≠ 显式 heuristic：缺失时 0.4.0 保持 0.3 baseline/off，不能静默开启介入。
+   */
+  sourcePresent: boolean;
   local: {
     pack: string | null;
     path: string | null;
@@ -210,6 +215,7 @@ export function defaultSidecarConfig(): SidecarConfig {
     },
     model: {
       source: 'heuristic',
+      sourcePresent: false,
       local: { pack: null, path: null, threads: 4, enginePath: null },
       api: {
         baseUrl: null,
@@ -552,6 +558,8 @@ export function normalizeSidecarConfig(raw: unknown, options: { warnings?: strin
     },
     model: {
       source: enumOf(model, 'source', ['heuristic', 'local', 'host', 'api', 'auto'] as const, defaults.model.source),
+      // presence 必须看原始输入，而不是归一化后的默认 heuristic。
+      sourcePresent: model.source !== undefined && model.source !== null,
       local: {
         pack: stringOrNullOf(local, 'pack', defaults.model.local.pack),
         path: stringOrNullOf(local, 'path', defaults.model.local.path),

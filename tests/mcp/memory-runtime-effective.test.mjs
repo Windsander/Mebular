@@ -5,6 +5,7 @@
 import { describe, it, expect } from '@jest/globals';
 import {
   LEGACY_INTERVENTION_MODE_IGNORED,
+  MODEL_SOURCE_MISSING,
   resolveMemoryRuntimeEffectiveMode,
 } from '../../packages/mcp/src/memory-runtime-effective.mjs';
 
@@ -16,24 +17,42 @@ describe('MCP memory runtime effective mode', () => {
         enabled: false,
         effective: 'off',
         planner: 'off',
-        derivedMode: 'off',
         source: 'heuristic',
+        sourcePresent: false,
         warnings: [],
       });
     }
     expect(resolveMemoryRuntimeEffectiveMode().mode).toBe('lightweight');
   });
 
-  it('enabled=true + heuristic → heuristic', () => {
+  it('enabled=true + source 缺失 → off/baseline，不能静默 heuristic', () => {
+    expect(resolveMemoryRuntimeEffectiveMode({
+      config: { memoryRuntime: { enabled: true } },
+      sourcePresent: false,
+    })).toMatchObject({
+      mode: 'immersive',
+      enabled: true,
+      effective: 'off',
+      planner: 'off',
+      derivedMode: 'off',
+      sourcePresent: false,
+      warnings: [MODEL_SOURCE_MISSING],
+    });
+  });
+
+  it('enabled=true + 显式 heuristic → heuristic', () => {
     expect(resolveMemoryRuntimeEffectiveMode({
       config: { memoryRuntime: { enabled: true } },
       modelSource: 'heuristic',
+      sourcePresent: true,
     })).toMatchObject({
       mode: 'immersive',
       enabled: true,
       effective: 'heuristic',
       planner: 'heuristic',
       source: 'heuristic',
+      sourcePresent: true,
+      warnings: [],
     });
   });
 
@@ -57,12 +76,19 @@ describe('MCP memory runtime effective mode', () => {
       modelSource: 'heuristic',
     }).warnings).toEqual([]);
 
+    // 显式旧 off 不再静默（W1a review B2）。
     expect(resolveMemoryRuntimeEffectiveMode({
       config: { memoryRuntime: { enabled: true } },
       modelSource: 'heuristic',
       legacyMode: 'off',
       legacyModePresent: true,
-    })).toMatchObject({ effective: 'heuristic', legacyModePresent: true, warnings: [] });
+    })).toMatchObject({
+      effective: 'heuristic',
+      legacyModePresent: true,
+      legacyModeIgnored: true,
+      legacyModeConflict: false,
+      warnings: [LEGACY_INTERVENTION_MODE_IGNORED],
+    });
 
     expect(resolveMemoryRuntimeEffectiveMode({
       config: { memoryRuntime: { enabled: true } },
@@ -83,6 +109,18 @@ describe('MCP memory runtime effective mode', () => {
       legacyModePresent: true,
     })).toMatchObject({
       effective: 'heuristic',
+      legacyModeIgnored: true,
+      legacyModeConflict: true,
+      warnings: [LEGACY_INTERVENTION_MODE_IGNORED],
+    });
+
+    expect(resolveMemoryRuntimeEffectiveMode({
+      config: { memoryRuntime: { enabled: true } },
+      modelSource: 'api',
+      legacyMode: 'off',
+      legacyModePresent: true,
+    })).toMatchObject({
+      effective: 'model',
       legacyModeIgnored: true,
       legacyModeConflict: true,
       warnings: [LEGACY_INTERVENTION_MODE_IGNORED],

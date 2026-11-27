@@ -126,7 +126,7 @@ async function setup(options: { fetch: ChatFetch; mutateConfig?: (config: Sideca
   const fake = await startFakeCapability({ now: () => NOW });
   const client = new CapabilityClient({ baseUrl: fake.baseUrl, token: 'cap-token', retries: 0, retryDelayMs: 0 });
   const config = defaultSidecarConfig();
-  config.model = modelSettings(modelPath);
+  config.model = { ...modelSettings(modelPath), sourcePresent: true };
   options.mutateConfig?.(config);
   const model = createSidecarInferenceProvider(config.model, {
     homeDir: home,

@@ -78,6 +78,8 @@ export async function readMemoryRuntimeModelSource({ home, env = process.env } =
   const normalized = normalizeMemoryRuntimeModelSource(model.source);
   return {
     source: normalized ?? DEFAULT_MEMORY_RUNTIME_MODEL_SOURCE,
+    /** 缺失 ≠ 显式 heuristic；effective mode 依赖这个标志。 */
+    sourcePresent: model.source !== undefined && model.source !== null,
     defaultSource: DEFAULT_MEMORY_RUNTIME_MODEL_SOURCE,
     values: [...MEMORY_RUNTIME_MODEL_SOURCES],
     exists,

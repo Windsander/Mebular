@@ -725,6 +725,7 @@ export class InferenceService implements InferenceApi {
       }
       this.activePackId = null;
       this.config.model.source = source;
+      this.config.model.sourcePresent = true;
       await this.reconfigure();
       const warnings = await this.persistModelSource(source);
       return this.settingsView(warnings);
@@ -980,6 +981,7 @@ export class InferenceService implements InferenceApi {
   private currentSettings(): InferenceSettings {
     return {
       source: this.config.model.source,
+      sourcePresent: this.config.model.sourcePresent,
       local: { ...this.config.model.local },
       api: { ...this.config.model.api },
     };
@@ -997,6 +999,7 @@ export class InferenceService implements InferenceApi {
     await this.engineAdapter.stop().catch(() => undefined);
     this.activePackId = null;
     this.config.model.source = 'heuristic';
+    this.config.model.sourcePresent = true;
     this.config.model.local.pack = packId;
     this.config.model.local.path = null;
     await this.reconfigure();
@@ -1010,6 +1013,7 @@ export class InferenceService implements InferenceApi {
     }
     this.activePackId = null;
     this.config.model.source = 'heuristic';
+    this.config.model.sourcePresent = true;
     this.config.model.local.pack = packId;
     this.config.model.local.path = null;
     await this.reconfigure();
@@ -1019,6 +1023,7 @@ export class InferenceService implements InferenceApi {
   private async applyLocal(packId: string): Promise<string[]> {
     this.activePackId = packId;
     this.config.model.source = 'local';
+    this.config.model.sourcePresent = true;
     this.config.model.local.pack = packId;
     this.config.model.local.path = null;
     await this.reconfigure();

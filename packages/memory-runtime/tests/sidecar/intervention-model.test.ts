@@ -351,6 +351,7 @@ describe('planInterventionAsync (model controller)', () => {
 function settings(): InferenceSettings {
   return {
     source: 'api',
+    sourcePresent: true,
     local: { pack: null, path: null, threads: 1, enginePath: null },
     api: {
       baseUrl: 'https://api.example.test/v1',

@@ -251,6 +251,11 @@ describe('sidecar config', () => {
       threads: 6,
       enginePath: '/opt/llama-server',
     });
+    // missing source 与显式 heuristic 必须可区分（W1a B1）。
+    expect(defaultSidecarConfig().model.sourcePresent).toBe(false);
+    expect(normalizeSidecarConfig({}).model.sourcePresent).toBe(false);
+    expect(normalizeSidecarConfig({ model: { source: 'heuristic' } }).model.sourcePresent).toBe(true);
+    expect(normalizeSidecarConfig({ model: { source: null } }).model.sourcePresent).toBe(false);
     expect(normalized.model.api.keyRef).toBe('env:MODEL_KEY');
     expect(normalized.recall.queryPlan).toBe('model');
 

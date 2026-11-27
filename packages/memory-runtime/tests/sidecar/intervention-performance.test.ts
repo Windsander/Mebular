@@ -67,8 +67,9 @@ async function createHarness(): Promise<PerfHarness> {
   fake.setRecords([preference()]);
   const client = new CapabilityClient({ baseUrl: fake.baseUrl, token: 'cap-token', retries: 0, retryDelayMs: 0 });
   const config = defaultSidecarConfig();
-  // 0.4.0：sidecar 不再有 off；production 由 model.source=heuristic 派生。
+  // 0.4.0：显式 model.source=heuristic 才进入 heuristic；缺失会保持 baseline。
   config.model.source = 'heuristic';
+  config.model.sourcePresent = true;
   config.intervention.explorationRate = 0;
   const runtime = new SettlementRuntime({
     config,

@@ -387,8 +387,10 @@ export interface RecallServiceOptions {
   } | null;
   /** 显式 SelfRecord 读取源；缺省复用 checkpointSource.getSelf。 */
   selfSource?: RecallServiceOptions['checkpointSource'];
-  /** 由 main 统一解析的 effective mode；缺省按 config 纯推导。 */
+  /** 测试/嵌入式覆盖；生产不建议传，缺省按当前 config 动态推导。 */
   effectiveIntervention?: EffectiveInterventionResolution;
+  /** main 解析的 internal diagnostic shadow（config 或 env）；缺省读 config。 */
+  diagnosticShadow?: boolean;
   now?: () => number;
 }
 
@@ -1176,8 +1178,23 @@ export class RecallService {
   readonly config: SidecarConfig;
   readonly local: SidecarLocalLayer;
   readonly identity: RecallServiceOptions['identity'];
-  /** 0.4.0：由 enabled+source 推导的 effective intervention（旧 mode 不参与）。 */
-  readonly effectiveIntervention: EffectiveInterventionResolution;
+
+  private readonly effectiveInterventionOverride?: EffectiveInterventionResolution;
+  private readonly diagnosticShadow: boolean;
+
+  /**
+   * 0.4.0：由 source presence/source 动态推导的 effective intervention。
+   * 用 getter 而不是构造时快照，保证 `model.source` 热切换后立即生效。
+   */
+  get effectiveIntervention(): EffectiveInterventionResolution {
+    return this.effectiveInterventionOverride ?? resolveEffectiveIntervention({
+      source: this.config.model.source,
+      sourcePresent: this.config.model.sourcePresent,
+      legacyMode: this.config.intervention.mode,
+      legacyModePresent: this.config.intervention.legacyModePresent,
+      diagnosticShadow: this.diagnosticShadow,
+    });
+  }
 
   private readonly client: CapabilityClient | null;
   private readonly models: SidecarInferenceProvider | null;
@@ -1221,12 +1238,9 @@ export class RecallService {
     this.identity = options.identity;
     this.policy = options.policy ?? null;
     this.getPolicy = options.getPolicy;
-    this.effectiveIntervention = options.effectiveIntervention ?? resolveEffectiveIntervention({
-      source: this.config.model.source,
-      legacyMode: this.config.intervention.mode,
-      legacyModePresent: this.config.intervention.legacyModePresent,
-      diagnosticShadow: this.config.intervention.diagnosticShadow === true,
-    });
+    this.effectiveInterventionOverride = options.effectiveIntervention;
+    this.diagnosticShadow = options.diagnosticShadow
+      ?? (this.config.intervention.diagnosticShadow === true);
     this.now = options.now ?? Date.now;
   }
 

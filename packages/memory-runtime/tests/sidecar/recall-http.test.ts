@@ -91,6 +91,8 @@ function interventionCheckpoint(threadId: string, domain: string, goal: string) 
 async function setup(options: {
   intervention?: Partial<ReturnType<typeof defaultSidecarConfig>['intervention']>;
   modelSource?: ReturnType<typeof defaultSidecarConfig>['model']['source'];
+  /** 模拟旧用户配置缺少 model.source；缺省按测试显式 source 处理。 */
+  sourceMissing?: boolean;
   trace?: 'off' | 'local';
   now?: () => number;
   withPolicy?: boolean;
@@ -112,6 +114,7 @@ async function setup(options: {
   const config = defaultSidecarConfig();
   config.http.port = 0;
   if (options.trace) config.trace = options.trace;
+  config.model.sourcePresent = options.sourceMissing !== true;
   if (options.modelSource) config.model.source = options.modelSource;
   if (options.intervention) {
     config.intervention = { ...config.intervention, ...options.intervention };
@@ -865,6 +868,46 @@ describe('sidecar recall/context HTTP', () => {
     const traceBody = await trace.json() as any;
     expect(traceBody.data.decision.policyVersion).toMatch(/^heuristic:/);
     expect(traceBody.data.applied.wouldAction).toBeUndefined();
+
+    const version = await fetch(`${server.url}/version`, { headers: auth() });
+    const versionBody = await version.json() as any;
+    expect(versionBody.data.capabilities.intervention).toMatchObject({
+      mode: 'heuristic',
+      configuredSource: 'heuristic',
+      sourcePresent: true,
+      legacyModeIgnored: true,
+      warnings: ['legacy_intervention_mode_ignored'],
+    });
+  });
+
+  it('enabled=true + model.source 缺失：保持 0.3 baseline，不静默 heuristic', async () => {
+    const { server } = await setup({
+      sourceMissing: true,
+      intervention: { minConfidence: 0.95, explorationRate: 0, maxSilentStreak: 99 },
+    });
+    const context = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_source_missing',
+      turnId: 'turn_source_missing_1',
+      query: '今天天气怎么样',
+    });
+    expect(context.status).toBe(200);
+    // baseline 会注入，但 decision 不是 heuristic。
+    expect(context.body.data.fragments.length).toBeGreaterThan(0);
+    expect(context.body.data.decision).toMatchObject({
+      policyVersion: 'v0-baseline',
+      enforced: false,
+    });
+    expect(context.body.data.applied.wouldAction).toBeUndefined();
+    const status = await fetch(`${server.url}/status`, { headers: auth() });
+    const statusBody = await status.json() as any;
+    expect(statusBody.data.intervention).toMatchObject({
+      mode: 'off',
+      planner: 'off',
+      sourcePresent: false,
+      legacyModeIgnored: false,
+    });
+    expect(statusBody.data.intervention.warnings).toContain('model_source_missing');
   });
 
   it('旧 mode=shadow 不启用 shadow；只有内部 diagnosticShadow 才生效', async () => {
@@ -1636,7 +1679,7 @@ describe('sidecar recall/context HTTP', () => {
   it('/status 返回 effective mode/source 与旧 mode warning；不泄漏密钥', async () => {
     const { server } = await setup({
       modelSource: 'api',
-      intervention: { mode: 'heuristic' },
+      intervention: { mode: 'off' },
     });
     const response = await fetch(`${server.url}/status`, { headers: auth() });
     const body = await response.json() as any;

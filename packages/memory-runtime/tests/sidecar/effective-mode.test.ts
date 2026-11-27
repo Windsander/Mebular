@@ -5,6 +5,7 @@
 import { describe, it, expect } from '@jest/globals';
 import {
   LEGACY_INTERVENTION_MODE_IGNORED,
+  MODEL_SOURCE_MISSING,
   isDiagnosticShadowEnabled,
   resolveEffectiveIntervention,
   type InterventionPlannerSource,
@@ -31,12 +32,46 @@ describe('effective intervention mode', () => {
     }
   });
 
-  it('字段缺失：按 source 派生，无 warning', () => {
+  it('旧 mode 字段缺失：按 source presence/source 派生，无 warning', () => {
     expect(resolveEffectiveIntervention({ source: 'heuristic' }).warnings).toEqual([]);
     expect(resolveEffectiveIntervention({ source: 'auto' }).warnings).toEqual([]);
   });
 
-  it('显式 off：历史默认值保持静默，不改变派生结果', () => {
+  it('model.source 缺失：off/baseline，不能静默 heuristic', () => {
+    const missing = resolveEffectiveIntervention({
+      source: 'heuristic',
+      sourcePresent: false,
+    });
+    expect(missing).toMatchObject({
+      mode: 'off',
+      planner: 'off',
+      derivedMode: 'off',
+      sourcePresent: false,
+      warnings: [MODEL_SOURCE_MISSING],
+    });
+    // 显式 heuristic 才进入 heuristic。
+    expect(resolveEffectiveIntervention({
+      source: 'heuristic',
+      sourcePresent: true,
+    })).toMatchObject({
+      mode: 'heuristic',
+      planner: 'heuristic',
+      sourcePresent: true,
+      warnings: [],
+    });
+    // 缺失 source 时 diagnostic shadow 也不能凭空生效。
+    expect(resolveEffectiveIntervention({
+      source: 'heuristic',
+      sourcePresent: false,
+      diagnosticShadow: true,
+    })).toMatchObject({
+      mode: 'off',
+      planner: 'off',
+      diagnosticShadow: false,
+    });
+  });
+
+  it('显式 off：不再静默，按 source 派生并给稳定 warning', () => {
     const heuristic = resolveEffectiveIntervention({
       source: 'heuristic',
       legacyMode: 'off',
@@ -45,12 +80,11 @@ describe('effective intervention mode', () => {
     expect(heuristic).toMatchObject({
       mode: 'heuristic',
       legacyModePresent: true,
-      legacyModeIgnored: false,
+      legacyModeIgnored: true,
       legacyModeConflict: false,
-      warnings: [],
+      warnings: [LEGACY_INTERVENTION_MODE_IGNORED],
     });
 
-    // off + model source 是诊断冲突，但显式 off 仍不产生 warning。
     const model = resolveEffectiveIntervention({
       source: 'local',
       legacyMode: 'off',
@@ -58,9 +92,9 @@ describe('effective intervention mode', () => {
     });
     expect(model).toMatchObject({
       mode: 'model',
-      legacyModeIgnored: false,
+      legacyModeIgnored: true,
       legacyModeConflict: true,
-      warnings: [],
+      warnings: [LEGACY_INTERVENTION_MODE_IGNORED],
     });
   });
 

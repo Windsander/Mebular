@@ -59,8 +59,10 @@ export interface SettlementRuntimeOptions {
   identity: SettlementIdentity;
   policy?: SidecarPolicy | null;
   inference?: SidecarInferenceProvider | null;
-  /** main 统一解析的 effective intervention；缺省由 RecallService 按 config 推导。 */
+  /** 测试/嵌入式覆盖；生产不传，RecallService 按当前 config 动态推导。 */
   effectiveIntervention?: EffectiveInterventionResolution;
+  /** main 解析的 internal diagnostic shadow（config 或 env）。 */
+  diagnosticShadow?: boolean;
   policyPath?: string;
   /** `<dataDir>/policy/state.json`；缺省不启用本机策略学习。 */
   policyStatePath?: string;
@@ -499,6 +501,7 @@ export class SettlementRuntime {
       policyStore,
       ...(this.inference ? { inference: this.inference } : {}),
       ...(options.effectiveIntervention ? { effectiveIntervention: options.effectiveIntervention } : {}),
+      ...(options.diagnosticShadow !== undefined ? { diagnosticShadow: options.diagnosticShadow } : {}),
       ...(options.lifecycle ? { lifecycle: options.lifecycle } : {}),
       ...(options.now ? { now: options.now } : {}),
     });

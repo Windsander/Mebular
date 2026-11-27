@@ -106,9 +106,11 @@ export interface SidecarStatusIntervention {
   mode: EffectiveInterventionMode;
   /** recall 使用的 planner。 */
   planner: EffectiveInterventionPlanner;
-  /** 用户配置的 model.source（逐字保留）。 */
+  /** 归一化后的 model.source（缺失时为默认 heuristic，但由 sourcePresent 区分）。 */
   source: InterventionPlannerSource;
-  /** 仅由 source 推导的 production 模式。 */
+  /** model.source 是否显式存在；false 表示 0.3 baseline/off。 */
+  sourcePresent: boolean;
+  /** 仅由 source presence/source 推导的 production 模式。 */
   derivedMode: EffectiveInterventionPlanner;
   legacyModePresent: boolean;
   legacyModeIgnored: boolean;
@@ -411,8 +413,10 @@ export interface SidecarServerOptions {
   getStatus?: () => SidecarStatusSnapshot | Promise<SidecarStatusSnapshot>;
   /** `/version` 的模型状态；缺省从 getStatus().model 读取。 */
   getModelStatus?: () => SidecarStatusModel | Promise<SidecarStatusModel>;
-  /** main 统一解析的 effective intervention；缺省按 config 纯推导。 */
+  /** 测试/嵌入式覆盖；生产不传，按当前 config 动态推导。 */
   effectiveIntervention?: EffectiveInterventionResolution;
+  /** main 解析的 internal diagnostic shadow（config 或 env）；缺省读 config。 */
+  diagnosticShadow?: boolean;
   ingest?: SidecarIngestApi;
   namespaces?: SidecarNamespacesApi;
   recall?: SidecarRecallApi;
@@ -452,6 +456,7 @@ export function interventionStatusView(
     mode: resolution.mode,
     planner: resolution.planner,
     source: resolution.source,
+    sourcePresent: resolution.sourcePresent,
     derivedMode: resolution.derivedMode,
     legacyModePresent: resolution.legacyModePresent,
     legacyModeIgnored: resolution.legacyModeIgnored,
@@ -585,8 +590,20 @@ export class SidecarServer {
   mode: SidecarMode = 'immersive';
 
   private readonly identity: SidecarStatusIdentity;
-  private readonly effectiveIntervention: EffectiveInterventionResolution;
+  private readonly effectiveInterventionOverride?: EffectiveInterventionResolution;
+  private readonly diagnosticShadow: boolean;
   private readonly getStatus?: () => SidecarStatusSnapshot | Promise<SidecarStatusSnapshot>;
+
+  /** 动态推导，保证 model.source 热切换后 /status、/version 立即反映。 */
+  private get effectiveIntervention(): EffectiveInterventionResolution {
+    return this.effectiveInterventionOverride ?? resolveEffectiveIntervention({
+      source: this.config.model.source,
+      sourcePresent: this.config.model.sourcePresent,
+      legacyMode: this.config.intervention.mode,
+      legacyModePresent: this.config.intervention.legacyModePresent,
+      diagnosticShadow: this.diagnosticShadow,
+    });
+  }
   private readonly getModelStatus?: () => SidecarStatusModel | Promise<SidecarStatusModel>;
   private readonly ingest?: SidecarIngestApi;
   private readonly namespaces?: SidecarNamespacesApi;
@@ -612,12 +629,9 @@ export class SidecarServer {
       profileId: options.identity?.profileId ?? null,
       hostId: options.identity?.hostId ?? null,
     };
-    this.effectiveIntervention = options.effectiveIntervention ?? resolveEffectiveIntervention({
-      source: this.config.model.source,
-      legacyMode: this.config.intervention.mode,
-      legacyModePresent: this.config.intervention.legacyModePresent,
-      diagnosticShadow: this.config.intervention.diagnosticShadow === true,
-    });
+    this.effectiveInterventionOverride = options.effectiveIntervention;
+    this.diagnosticShadow = options.diagnosticShadow
+      ?? (this.config.intervention.diagnosticShadow === true);
     this.getStatus = options.getStatus;
     this.getModelStatus = options.getModelStatus;
     this.ingest = options.ingest;
@@ -1128,6 +1142,7 @@ export class SidecarServer {
               // 0.4.0：mode 是 effective；旧 intervention.mode 只作为诊断。
               mode: this.effectiveIntervention.mode,
               configuredSource: this.effectiveIntervention.source,
+              sourcePresent: this.effectiveIntervention.sourcePresent,
               planner: this.effectiveIntervention.planner,
               legacyModeIgnored: this.effectiveIntervention.legacyModeIgnored,
               legacyModeConflict: this.effectiveIntervention.legacyModeConflict,

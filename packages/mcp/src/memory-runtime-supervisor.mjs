@@ -1207,6 +1207,7 @@ export class MemoryRuntimeSupervisor {
             mode: typeof data.intervention.mode === 'string' ? data.intervention.mode : null,
             planner: typeof data.intervention.planner === 'string' ? data.intervention.planner : null,
             source: typeof data.intervention.source === 'string' ? data.intervention.source : null,
+            sourcePresent: data.intervention.sourcePresent === true,
             derivedMode: typeof data.intervention.derivedMode === 'string' ? data.intervention.derivedMode : null,
             legacyModePresent: data.intervention.legacyModePresent === true,
             legacyModeIgnored: data.intervention.legacyModeIgnored === true,

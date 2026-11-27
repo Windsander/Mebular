@@ -524,6 +524,7 @@ function sha256(value: string): string {
 function cloneSettings(settings: InferenceSettings): InferenceSettings {
   return {
     source: settings.source,
+    sourcePresent: settings.sourcePresent,
     local: { ...settings.local },
     api: { ...settings.api },
   };

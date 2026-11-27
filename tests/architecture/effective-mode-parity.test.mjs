@@ -16,12 +16,14 @@ describe('effective mode parity (sidecar ↔ MCP)', () => {
         const legacyModePresent = legacyMode !== null;
         const sidecar = resolveEffectiveIntervention({
           source,
+          sourcePresent: true,
           legacyMode,
           legacyModePresent,
         });
         const mcp = resolveMemoryRuntimeEffectiveMode({
           config: { memoryRuntime: { enabled: true } },
           modelSource: source,
+          sourcePresent: true,
           legacyMode,
           legacyModePresent,
         });
@@ -30,6 +32,7 @@ describe('effective mode parity (sidecar ↔ MCP)', () => {
           effective: mcp.effective,
           planner: mcp.planner,
           source: mcp.source,
+          sourcePresent: mcp.sourcePresent,
           derivedMode: mcp.derivedMode,
           legacyModePresent: mcp.legacyModePresent,
           legacyModeIgnored: mcp.legacyModeIgnored,
@@ -41,6 +44,7 @@ describe('effective mode parity (sidecar ↔ MCP)', () => {
           effective: sidecar.mode,
           planner: sidecar.planner,
           source: sidecar.source,
+          sourcePresent: sidecar.sourcePresent,
           derivedMode: sidecar.derivedMode,
           legacyModePresent: sidecar.legacyModePresent,
           legacyModeIgnored: sidecar.legacyModeIgnored,
@@ -50,6 +54,22 @@ describe('effective mode parity (sidecar ↔ MCP)', () => {
         });
       }
     }
+  });
+
+  it('model.source 缺失时两边都回落到 off/baseline', () => {
+    const sidecar = resolveEffectiveIntervention({
+      source: 'heuristic',
+      sourcePresent: false,
+    });
+    const mcp = resolveMemoryRuntimeEffectiveMode({
+      config: { memoryRuntime: { enabled: true } },
+      modelSource: 'heuristic',
+      sourcePresent: false,
+    });
+    expect(mcp.effective).toBe(sidecar.mode);
+    expect(mcp.planner).toBe(sidecar.planner);
+    expect(mcp.planner).toBe('off');
+    expect(mcp.warnings).toEqual(sidecar.warnings);
   });
 
   it('diagnostic shadow 在两边都只影响 mode，不改变 planner', () => {

@@ -137,6 +137,7 @@ export async function createAcceptanceHarness(
   const config = defaultSidecarConfig();
   config.http.port = 0;
   // 验收矩阵验证召回/组装/预算，不验证介入策略；内部 diagnostic shadow 保留 baseline。
+  config.model.sourcePresent = true;
   config.intervention.diagnosticShadow = true;
   options.mutateConfig?.(config);
   const identity: AcceptanceIdentity = {

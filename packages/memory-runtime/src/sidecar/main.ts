@@ -28,10 +28,7 @@ import {
   type SidecarConfig,
   type SidecarPaths,
 } from './config.js';
-import {
-  isDiagnosticShadowEnabled,
-  resolveEffectiveIntervention,
-} from './effective.js';
+import { isDiagnosticShadowEnabled } from './effective.js';
 import {
   buildDiscovery,
   clearDiscovery,
@@ -425,18 +422,11 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
     throw startupFromUnknown(error);
   }
 
-  // effective mode 只由 source 推导；旧 intervention.mode 仅产生稳定 warning。
+  // effective mode 只由 source presence/source 推导；旧 intervention.mode 仅产生稳定 warning。
   // shadow 只允许内部 diagnostic（配置文件或进程内 env），不因旧配置自动生效。
-  const effectiveIntervention = resolveEffectiveIntervention({
-    source: config.model.source,
-    legacyMode: config.intervention.mode,
-    legacyModePresent: config.intervention.legacyModePresent,
-    diagnosticShadow: config.intervention.diagnosticShadow === true
-      || isDiagnosticShadowEnabled(env.MEBULAR_INTERVENTION_DIAGNOSTIC_SHADOW),
-  });
-  for (const warning of effectiveIntervention.warnings) {
-    if (!configWarnings.includes(warning)) configWarnings.push(warning);
-  }
+  // 推导本身在 RecallService/SidecarServer 中按当前 config 动态执行，支持 source 热切换。
+  const diagnosticShadow = config.intervention.diagnosticShadow === true
+    || isDiagnosticShadowEnabled(env.MEBULAR_INTERVENTION_DIAGNOSTIC_SHADOW);
 
   const lifecycle = new LifecycleGate();
   const localOptions: SidecarLocalLayerOptions = {
@@ -650,7 +640,7 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
       policyPath: paths.policyPath,
       policyStatePath: paths.policyStatePath,
       inference: model,
-      effectiveIntervention,
+      diagnosticShadow,
       lifecycle,
       diagnostics,
       ...(options.restartReason ? { restartReason: options.restartReason } : {}),
@@ -769,7 +759,7 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
     identity,
     getStatus: statusSnapshot,
     getModelStatus: () => model.status(),
-    effectiveIntervention,
+    diagnosticShadow,
     ingest: settlement,
     namespaces: settlement,
     recall: settlement,

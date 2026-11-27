@@ -959,6 +959,28 @@ describe('sidecar recall/context HTTP', () => {
     expect(traceBody.data.applied).toMatchObject({ action: 'silent', fragments: 0 });
     expect(traceBody.data.applied.suppressed.length).toBeGreaterThan(0);
 
+    // 显式 defer：decision 与 applied 都必须是 defer，而不是 silent；
+    // checkpoint 仍按原路径注入，后续归因才能区分「主动推迟」与「策略沉默」。
+    const deferred = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_intervention',
+      turnId: 'turn_intervention_defer',
+      query: '这个先放一放，我们晚点再聊记忆。',
+    });
+    expect(deferred.status).toBe(200);
+    expect(deferred.body.data.decision).toMatchObject({
+      action: 'defer',
+      depth: 'gist',
+      reason: 'defer_explicit',
+      enforced: true,
+    });
+    expect(deferred.body.data.fragments).toEqual([]);
+    expect(deferred.body.data.blocks.map((block: any) => block.kind)).toEqual(['checkpoint']);
+    expect(deferred.body.data.warnings).toContain('intervention_defer');
+    const deferTrace = await fetch(`${server.url}/traces/${deferred.body.data.traceId}`, { headers: auth() });
+    const deferTraceBody = await deferTrace.json() as any;
+    expect(deferTraceBody.data.applied).toMatchObject({ action: 'defer', depth: 'gist', fragments: 0 });
+
     // 没有 self/checkpoint 时，沉默原因必须保留策略原因而不是 budget_too_small。
     const bare = await post(`${server.url}/context`, {
       agentId: 'opencode',
@@ -1244,11 +1266,13 @@ describe('sidecar recall/context HTTP', () => {
     const { server, runtime, home } = await setup({ intervention: { mode: 'heuristic' } });
     const statePath = join(home, 'memory-runtime', 'policy', 'state.json');
     await mkdir(statePath, { recursive: true });
+    // 用普通 turn：must_speak 无候选会按设计 degraded=true，属于召回语义，
+    // 不应混进「policy flush 恢复」的 degraded 断言。
     await post(`${server.url}/context`, {
       agentId: 'opencode',
       threadId: 'th_policy_fail',
       turnId: 'turn_policy_fail',
-      query: '我的偏好是什么？',
+      query: '深色主题',
     });
 
     expect(await runtime.flushPolicy()).toBe(false);
@@ -1288,7 +1312,7 @@ describe('sidecar recall/context HTTP', () => {
       agentId: 'opencode',
       threadId: 'th_policy_recover',
       turnId: 'turn_policy_recover',
-      query: '我的偏好是什么？',
+      query: '深色主题',
     });
 
     const deadline = Date.now() + 3000;

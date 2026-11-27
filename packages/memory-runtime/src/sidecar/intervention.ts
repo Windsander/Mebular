@@ -78,12 +78,59 @@ function round4(value: number): number {
   return Number(clamp(value, 0, 1).toFixed(4));
 }
 
-const MEMORY_FOLLOW_UP_RE = /上次|之前|以前|记得|忘记|你忘了|不是说过|我说过|我说的是|原话|当时(?:说|讲|怎么)|last time|earlier|remember|forgot|you said/i;
+const MEMORY_FOLLOW_UP_RE = /上次|之前|以前|记得|忘记|你忘了|不是说过|我说过|我说的是|原话|当时(?:说|讲|怎么)|我的偏好是什么|last time|earlier|remember|forgot|you said|\brecall\b|\bremind me\b|\bwe (?:agreed|decided|settled)\b|\bwhat did (?:i|we) (?:say|decide|agree)\b/i;
 const CORRECTION_RE = /不对|不是(?:这个|这样|那条)?|错了|搞错|纠正|应该是|我说的是|准确(?:点|些)|重新说/i;
+
+// 显式 defer：用户要求本轮先不要回忆/注入旧上下文。
+// 与 Stage 0 的 test-only 口径一致；放在 must_speak 之前，避免「暂时不要提以前的方案」
+// 被 /以前/ 误判为显式回忆请求。
+const EXPLICIT_DEFER_RE = /(?:先|暂时|现在)?别(?:回忆|提|再提|注入|用记忆|提旧)|不要(?:回忆|提以前|用记忆)|不用(?:回忆|记)|先不(?:查|回忆|提|看历史)|先放一放|晚点再(?:聊|说|回顾)|下一轮再|等(?:我|你|把).{0,12}再(?:说|查|回顾|聊)|跳过(?:旧|以前|历史|旧上下文)|hold off|not (?:recall|bring up)|skip the memory|don'?t bring up|let'?s not recall|until i finish/i;
+
+// conflict 是独立硬规则：用户明确提出记录互相矛盾时，必须给 detail，
+// 不能被低分、broad cue 或 novelty=0 吞掉。
+const CONFLICT_QUERY_RE = /冲突|打架|矛盾|不一致|不一样|对不上|两个说法|哪个对|哪条为准|以哪条为准|到底用哪个|到底哪个|信哪个|which (?:one|record|.*?)\s+(?:is\s+)?(?:correct|right)|disagree|conflict/i;
+
+// 只匹配「整句寒暄/礼貌」；带实质请求的 turn 不会被这里吞掉。
+const GREETING_TOKEN = String.raw`(?:早上好|早安|早|上午好|中午好|下午好|晚上好|晚安|你好|您好|嗨|哈喽|在吗|收到|好的|好|嗯|谢谢|多谢|感谢|辛苦了|再见|拜拜|hi there|hello there|hi|hello|hey|good morning|good afternoon|good evening|good night|thanks|thank you|thankyou|bye|goodbye|ok|okay|got it|sure)`;
+const GREETING_RE = new RegExp(
+  `^${GREETING_TOKEN}(?:[\\s,，。.!！?？~～、]*${GREETING_TOKEN})*[\\s,，。.!！?？~～、呀啊哦啦呢吧]*$`,
+  'i',
+);
+
+// meta：问助手身份/能力/当前时间，不是长期记忆请求。
+const META_RE = /^(?:请问|打扰一下)?\s*(?:你是谁|你叫什么(?:名字)?|你是什么(?:模型|助手|东西)|你(?:能|会)(?:做|干)?什么|你有什么(?:能力|功能)|帮我解释(?:一下)?你的(?:能力|功能)|你(?:是)?怎么用|这个(?:东西)?怎么用|现在几点(?:了)?|今天几号|今天(?:是)?星期几|what model are you|who are you|what can you do|what are you|how do i use (?:this|it)|what time is it|what(?:'s| is) the (?:time|date)|what day is it)[\s!！。,.，？?~～]*$/i;
+
+// 英文精确值/引用词：与中文「端口/版本/路径/命令」对齐。
+// cue.ts 的 detailIntent 只覆盖中文词，这里补英文侧，避免同一意图在中英之间不对称。
+const EN_EXACT_INTENT_RE = /\b(?:exact|quote|verbatim|version|port|path|command|script|date)\b/i;
+
+function hasEnglishExactIntent(cue: Cue): boolean {
+  return cue.language === 'en' && EN_EXACT_INTENT_RE.test(cue.rawQuery);
+}
 
 /** 用户明确要求回忆/追问记忆。 */
 export function isExplicitMemoryRequest(cue: Cue): boolean {
   return MEMORY_FOLLOW_UP_RE.test(cue.rawQuery);
+}
+
+/** 用户明确要求本轮 defer（不注入记忆片段，但 checkpoint/self 照常）。 */
+export function isExplicitDefer(cue: Cue): boolean {
+  return EXPLICIT_DEFER_RE.test(cue.rawQuery)
+    || cue.detailIntent.reasons.includes('user_negated')
+    || cue.negations.includes('user_negated');
+}
+
+function isConflictRequest(cue: Cue): boolean {
+  return CONFLICT_QUERY_RE.test(cue.rawQuery);
+}
+
+function isGreeting(cue: Cue): boolean {
+  return cue.detailIntent.reasons.includes('chitchat')
+    || GREETING_RE.test(cue.rawQuery.trim());
+}
+
+function isMeta(cue: Cue): boolean {
+  return META_RE.test(cue.rawQuery.trim());
 }
 
 function isCorrection(cue: Cue): boolean {
@@ -94,7 +141,8 @@ function isCorrection(cue: Cue): boolean {
 function hasExactIntent(cue: Cue): boolean {
   return cue.detailIntent.reasons.includes('quote_request')
     || cue.detailIntent.reasons.includes('command_request')
-    || cue.detailIntent.reasons.includes('exact_value');
+    || cue.detailIntent.reasons.includes('exact_value')
+    || hasEnglishExactIntent(cue);
 }
 
 /** 命中即 must_speak 的原因；null 表示不强制。 */
@@ -116,9 +164,12 @@ export function mustSpeakReason(input: InterventionPlannerInput): string | null 
 /** 按 cue 意图选择深度：精确值/命令/引用 → quote；why/follow-up/task/entity/conflict → detail。 */
 export function depthForCue(cue: Cue): RecallDepth {
   const reasons = cue.detailIntent.reasons;
-  if (reasons.includes('quote_request')
+  const exactIntent = reasons.includes('quote_request')
     || reasons.includes('command_request')
-    || reasons.includes('exact_value')) {
+    || reasons.includes('exact_value');
+  // 冲突需要对照多条记录；但用户明确要精确值时，quote 仍然优先。
+  if (reasons.includes('conflict') && !exactIntent) return 'detail';
+  if (exactIntent || hasEnglishExactIntent(cue)) {
     return 'quote';
   }
   if (reasons.includes('why')
@@ -224,6 +275,50 @@ function mustSpeakDecision(
   };
 }
 
+interface RuleDecisionOptions {
+  action: InterventionAction;
+  reason: string;
+  depth: RecallDepth;
+  candidate: InterventionCandidateView | undefined;
+  novelty: number;
+  recentUselessRate: number;
+  degraded?: boolean;
+}
+
+/** 硬规则决策：与 must_speak 一样不依赖阈值/负例率，便于 trace 归因。 */
+function ruleDecision(
+  input: InterventionPlannerInput,
+  options: RuleDecisionOptions,
+): InterventionDecision {
+  const { action, reason, depth, candidate, novelty, recentUselessRate } = options;
+  return {
+    action,
+    depth,
+    confidence: 1,
+    reason,
+    policyVersion: RULES_POLICY_VERSION,
+    enforced: input.mode === 'heuristic' || input.mode === 'model',
+    scores: scoresOf(input.cue, candidate, novelty, recentUselessRate, depth),
+    ...(options.degraded ? { degraded: true } : {}),
+  };
+}
+
+/** 规则层已经决定的 reason；这些分支不再调用模型。 */
+const HARD_RULE_REASONS = new Set([
+  'defer_explicit',
+  'conflict',
+  'greeting',
+  'meta',
+  'no_candidates',
+  'no_novelty',
+]);
+
+function decidedByRules(decision: InterventionDecision): boolean {
+  return decision.mustSpeak === true
+    || decision.action === 'defer'
+    || HARD_RULE_REASONS.has(decision.reason);
+}
+
 function planHeuristic(input: InterventionPlannerInput): InterventionDecision {
   const candidate = input.candidates[0];
   const topScore = clamp(candidate?.score ?? 0, 0, 1);
@@ -234,6 +329,58 @@ function planHeuristic(input: InterventionPlannerInput): InterventionDecision {
   const explorationRate = clamp(input.explorationRate ?? 0, 0, 1);
   const random = input.random ?? Math.random;
 
+  // 0) 显式 defer 优先于 must_speak：用户本轮明确不想看旧记忆。
+  //    放在最前，避免 /以前/ 之类的回忆触发词把 defer 误判成 must_speak。
+  if (isExplicitDefer(input.cue)) {
+    return ruleDecision(input, {
+      action: 'defer',
+      reason: 'defer_explicit',
+      depth: 'gist',
+      candidate,
+      novelty,
+      recentUselessRate,
+    });
+  }
+
+  // 1) conflict 也要先于 must_speak：exact_value 只决定引用精度，
+  //    不能把「两个记录哪个对」的 detail 需求降成 quote。
+  if (candidate && isConflictRequest(input.cue)) {
+    const detailAvailable = candidate.detailAvailable;
+    return ruleDecision(input, {
+      action: 'speak',
+      reason: 'conflict',
+      depth: detailAvailable ? 'detail' : 'gist',
+      candidate,
+      novelty,
+      recentUselessRate,
+      degraded: !detailAvailable,
+    });
+  }
+
+  // 2) 寒暄 / meta / 纯礼貌默认 silent；它们都是整句锚定，
+  //    带实质记忆请求的 turn 不会命中，因此不会压过真正的 must_speak。
+  if (isGreeting(input.cue)) {
+    return ruleDecision(input, {
+      action: 'silent',
+      reason: 'greeting',
+      depth: 'gist',
+      candidate,
+      novelty,
+      recentUselessRate,
+    });
+  }
+  if (isMeta(input.cue)) {
+    return ruleDecision(input, {
+      action: 'silent',
+      reason: 'meta',
+      depth: 'gist',
+      candidate,
+      novelty,
+      recentUselessRate,
+    });
+  }
+
+  // 3) must_speak 是硬规则，不能被阈值、负例率或 novelty 否决。
   const mustReason = mustSpeakReason(input);
   if (mustReason) {
     const intended = depthForCue(input.cue);
@@ -245,6 +392,7 @@ function planHeuristic(input: InterventionPlannerInput): InterventionDecision {
     );
   }
 
+  // 4) 无候选 → checkpoint-only。除 must_speak 外不再猜测记忆。
   if (!candidate) {
     return {
       action: 'silent',
@@ -255,6 +403,18 @@ function planHeuristic(input: InterventionPlannerInput): InterventionDecision {
       enforced: input.mode === 'heuristic' || input.mode === 'model',
       scores: scoresOf(input.cue, candidate, novelty, recentUselessRate, 'gist'),
     };
+  }
+
+  // 5) 已注入过的候选是硬 silent，不再被 maxSilentStreak / exploration 抬成 speak。
+  if (novelty === 0) {
+    return ruleDecision(input, {
+      action: 'silent',
+      reason: 'no_novelty',
+      depth: 'gist',
+      candidate,
+      novelty,
+      recentUselessRate,
+    });
   }
 
   const depth = depthForCue(input.cue);
@@ -487,8 +647,9 @@ export async function planInterventionAsync(
     warnings: [],
   };
   if (input.mode !== 'model') return base;
-  // 硬规则优先且省延迟；没有候选时模型也无法改变注入结果。
-  if (heuristic.mustSpeak || input.candidates.length === 0) return base;
+  // 硬规则优先且省延迟；规则层已决定时不再调用模型。
+  // （无候选也在此短路；must_speak 无候选时走 must_speak_unavailable 的 checkpoint-only。）
+  if (decidedByRules(heuristic) || input.candidates.length === 0) return base;
 
   const now = context.now ?? Date.now;
   const started = now();

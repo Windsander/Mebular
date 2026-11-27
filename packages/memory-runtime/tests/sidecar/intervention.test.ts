@@ -205,4 +205,155 @@ describe('intervention planner', () => {
   it('mustSpeakReason 对普通 query 返回 null', () => {
     expect(mustSpeakReason(input({ cue: cue('深色主题') }))).toBeNull();
   });
+
+  it('defer：显式 defer 优先于 must_speak，即使 query 含 /以前/ 且候选高分', () => {
+    const decision = planIntervention(input({
+      cue: cue('暂时不要提以前的方案，让我自己想想。'),
+      candidates: [candidate({ score: 0.92 })],
+      threshold: 0.55,
+    }));
+    expect(decision).toMatchObject({
+      action: 'defer',
+      depth: 'gist',
+      reason: 'defer_explicit',
+      confidence: 1,
+      enforced: true,
+    });
+    // 优先级回归：/以前/ 本身会触发 must_speak，但 defer 必须先短路。
+    expect(mustSpeakReason(input({ cue: cue('暂时不要提以前的方案，让我自己想想。') })))
+      .toBe('must_speak:explicit_memory_request');
+  });
+
+  it('defer：cue 的 user_negated 也走显式 defer，不被低分/novelty 影响', () => {
+    const decision = planIntervention(input({
+      cue: cue('别用记忆回答我的偏好'),
+      candidates: [candidate({ score: 0.1, sourceIds: ['01JINJECTED'] })],
+      alreadyInjectedIds: ['01JINJECTED'],
+      threshold: 0.99,
+      recentUselessRate: 1,
+    }));
+    expect(decision).toMatchObject({ action: 'defer', reason: 'defer_explicit' });
+  });
+
+  it('conflict：明确返回 detail，不被低分或 novelty=0 吞掉', () => {
+    const conflict = planIntervention(input({
+      cue: cue('部署端口有 7331 和 7332 两个说法，哪个对？'),
+      candidates: [
+        candidate({ fragmentId: 'mf_a', score: 0.31, conflict: true }),
+        candidate({ fragmentId: 'mf_b', sourceIds: ['01JCONFLICTB'], score: 0.29, conflict: true }),
+      ],
+      threshold: 0.95,
+      recentUselessRate: 1,
+      silentStreak: 99,
+    }));
+    expect(conflict).toMatchObject({
+      action: 'speak',
+      depth: 'detail',
+      reason: 'conflict',
+      confidence: 1,
+    });
+
+    const repeated = planIntervention(input({
+      cue: cue('两条记录到底哪个对？'),
+      candidates: [candidate({ fragmentId: 'mf_repeat', conflict: true, score: 0.86 })],
+      alreadyInjectedIds: ['mf_repeat'],
+    }));
+    expect(repeated).toMatchObject({
+      action: 'speak',
+      depth: 'detail',
+      reason: 'conflict',
+    });
+  });
+
+  it('conflict：候选没有 detail 时降为 gist 并标记 degraded，但不改变 speak', () => {
+    const decision = planIntervention(input({
+      cue: cue('我的偏好记录前后不一致，信哪个？'),
+      candidates: [candidate({ conflict: true, detailAvailable: false, score: 0.84 })],
+    }));
+    expect(decision).toMatchObject({
+      action: 'speak',
+      depth: 'gist',
+      reason: 'conflict',
+      degraded: true,
+    });
+  });
+
+  it('greeting/meta：纯寒暄或 meta 默认 silent，不被高分/沉默上限/探索抬成 speak', () => {
+    const greeting = planIntervention(input({
+      cue: cue('早上好'),
+      candidates: [candidate({ score: 0.9 })],
+      silentStreak: 99,
+      maxSilentStreak: 1,
+      explorationRate: 1,
+    }));
+    expect(greeting).toMatchObject({ action: 'silent', depth: 'gist', reason: 'greeting' });
+
+    const meta = planIntervention(input({
+      cue: cue('这个怎么用？'),
+      candidates: [candidate({ score: 0.8 })],
+    }));
+    expect(meta).toMatchObject({ action: 'silent', depth: 'gist', reason: 'meta' });
+  });
+
+  it('greeting/meta 规则不会吞掉真正的 must_speak', () => {
+    const greetingPrefix = planIntervention(input({
+      cue: cue('早上好，帮我看看上次的部署端口'),
+      candidates: [candidate({ score: 0.8 })],
+    }));
+    expect(greetingPrefix.action).toBe('speak');
+    expect(greetingPrefix.mustSpeak).toBe(true);
+
+    const explicit = planIntervention(input({
+      cue: cue('你好，你还记得我的喜好吗？'),
+      candidates: [candidate({ score: 0.05 })],
+      threshold: 0.95,
+    }));
+    expect(explicit).toMatchObject({
+      action: 'speak',
+      reason: 'must_speak:explicit_memory_request',
+      mustSpeak: true,
+    });
+  });
+
+  it('英文触发词与中文对齐：recall / remember / last time 触发 must_speak', () => {
+    for (const query of [
+      'can you recall my preferred package manager?',
+      'do you remember my preferred package manager?',
+      'what did I say last time about the deploy port?',
+      'what was the release branch name we agreed on?',
+    ]) {
+      const decision = planIntervention(input({
+        cue: cue(query),
+        candidates: [candidate({ score: 0.9 })],
+      }));
+      expect(decision).toMatchObject({ action: 'speak', mustSpeak: true });
+      expect(decision.reason).toMatch(/^must_speak:/);
+    }
+  });
+
+  it('英文寒暄与中文寒暄一样 silent：hi there / good morning', () => {
+    for (const query of ['hi there', 'good morning', 'hello', 'thanks!']) {
+      const decision = planIntervention(input({
+        cue: cue(query),
+        candidates: [candidate({ score: 0.9 })],
+      }));
+      expect(decision).toMatchObject({ action: 'silent', reason: 'greeting' });
+    }
+  });
+
+  it('novelty=0 是硬 silent，不再被 maxSilentStreak / exploration 抬成 speak', () => {
+    const decision = planIntervention(input({
+      candidates: [candidate({ fragmentId: 'mf_repeat' })],
+      alreadyInjectedIds: ['mf_repeat'],
+      silentStreak: 99,
+      maxSilentStreak: 1,
+      explorationRate: 1,
+      random: () => 0,
+    }));
+    expect(decision).toMatchObject({
+      action: 'silent',
+      reason: 'no_novelty',
+      scores: { novelty: 0 },
+    });
+  });
 });

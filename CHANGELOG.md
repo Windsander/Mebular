@@ -116,9 +116,11 @@ Memory Intervention Policy. 0.4.0 moves immersive recall from “what to remembe
 - **One-way version handshake window.** The 0.4.0 sidecar accepts MCP `>=0.3.0` through
   the `0.4.x` line, so a 0.3 MCP can talk to a 0.4 sidecar. The reverse is **not**
   compatible: a 0.4 MCP talking to a 0.3 sidecar is rejected because that sidecar still
-  advertises `maxMcpVersion=0.3.x`. There is no wire/schema change. Upgrade or stop the old
-  sidecar first, or let the 0.4 supervisor replace the sidecar it owns; do not claim
-  bidirectional 0.3/0.4 compatibility.
+  advertises `maxMcpVersion=0.3.x`. There is no wire/schema change. Stop the old sidecar
+  with its own runtime/CLI/OS first, then upgrade MCP and sidecar together. The 0.4
+  supervisor reuses only compatible instances; it reports `version_incompatible` or
+  `orphaned_sidecar_alive` instead of terminating or replacing the old sidecar. Do not
+  claim bidirectional 0.3/0.4 compatibility or automatic replacement.
 
 ### Known limitations
 

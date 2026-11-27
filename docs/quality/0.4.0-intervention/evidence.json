@@ -3137,7 +3137,7 @@
   ],
   "mergeCommit": "edb1f87ac59d1c666b445974bfd91367ae4502d8",
   "b1FixCommit": "a9937c304a006e1bc73e93d883236ebfb3fad872",
-  "evidenceNote": "Cells updated by the 2026-11-28 W7 evidence-sync rerun use sha edb1f87a (merge of 033bbc1); untouched blocked_external/unit_only cells retain their original evidence sha 3bbd284. Outcome 47/0 and shadow 15/0 are real opencode v2.4.1 runs; no fake fill.",
+  "evidenceNote": "Provenance only: edb1f87a (outcome contract merge) and 3bbd284 (pre-B1 snapshot) are historical SHAs, not current release acceptance. Cells measured by the 2026-11-28 W7 rerun use 8bc5526/96629f12; rows still stamped 3bbd284 are untouched blocked_external/unit_only/not_run carry-over and never count as pass evidence. Only result=passed rows count. Outcome 47/0 and shadow 15/0 are real opencode v2.4.1 runs; no fake fill.",
   "outcomeFixCommit": "033bbc1c2e0a1c8ea1b73b63336d0fdf720d6b7b",
   "e2eSummary": {
     "opencodeOutcome": {

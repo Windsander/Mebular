@@ -9,6 +9,14 @@ tag、push、发布或合并 `main`；W8 Go/No-Go 仍被真实 API/DSH/Hermes/Op
 Desktop/宿主模型证据阻断，见
 [`0.4.0 release readiness`](../quality/0.4.0-intervention/0.4.0-release-readiness.md)。
 
+0.4.0 的 MCP/sidecar 握手是**单向**窗口：0.3 MCP 可以连接 0.4 sidecar；0.4 MCP **不能**
+连接仍声明 `maxMcpVersion=0.3.x` 的 0.3 sidecar。升级顺序：
+
+1. 先停止旧的 managed/attached/manual sidecar；或让 0.4 MCP supervisor 停掉并替换它
+   拥有的旧 managed sidecar。
+2. 将 sidecar 与 MCP 升级到同一 `0.4.0` 版本，再启动 sidecar 与宿主。
+3. 不要宣称双向 0.3/0.4 兼容；混合版本窗口仍不作为支持承诺。
+
 v0.3.5 的发布对象：
 
 - **8 个 npm 包**统一为 `0.3.5`（单版本 umbrella）：`core` / `service` / `skill` / `mcp` /

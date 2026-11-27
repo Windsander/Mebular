@@ -105,15 +105,20 @@ Memory Intervention Policy. 0.4.0 moves immersive recall from “what to remembe
   advice with a baseline `speak` is never reported as `missed`. `defer` remains
   distinguishable from `silent` in `applied`, and reset clears policy statistics plus
   runtime streaks/last-decision only, never memory or traces.
-- The former experimental framing is removed for shipped 0.4.0 behaviour: the local
+- The former experimental framing is removed for 0.4.0 release-prep behaviour: the local
   planner, API/host sources and adaptive thresholds are documented features with their
-  stated defaults and boundaries. The **legacy experimental configuration keys remain
+  stated defaults and boundaries. 0.4.0 remains **Unreleased** and the W8 readiness
+  report remains **No-Go**. The **legacy experimental configuration keys remain
   compatibility input only**: old `adaptive.enabled` / `adaptive.shadow` values are not
   deleted or silently honoured; they emit `adaptive_experimental_ignored`.
 - **Local-authoritative planning is not part of 0.4.0.** A local model never becomes the
   authoritative planner in this release; that remains a separate 0.4.2 line.
-- **Version handshake window.** The sidecar still accepts MCP `>=0.3.0` and now accepts the
-  `0.4.x` MCP line; the previous upper bound was `0.3.x`. No wire/schema change.
+- **One-way version handshake window.** The 0.4.0 sidecar accepts MCP `>=0.3.0` through
+  the `0.4.x` line, so a 0.3 MCP can talk to a 0.4 sidecar. The reverse is **not**
+  compatible: a 0.4 MCP talking to a 0.3 sidecar is rejected because that sidecar still
+  advertises `maxMcpVersion=0.3.x`. There is no wire/schema change. Upgrade or stop the old
+  sidecar first, or let the 0.4 supervisor replace the sidecar it owns; do not claim
+  bidirectional 0.3/0.4 compatibility.
 
 ### Known limitations
 

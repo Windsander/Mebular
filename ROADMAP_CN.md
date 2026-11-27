@@ -30,12 +30,15 @@
   `silent` 与 `gist` / `detail` / `quote`，带 `must_speak` 硬规则，默认 `off`。
 - **决策与结果 trace** —— 在现有本机 RecallTrace 上增加 `decision` / `applied` /
   `outcome`；先接 OpenCode 的 outcome 上报。
-- **Shadow 与 canary** —— `off → shadow → heuristic → model`；shadow 只记录建议、不改变
-  注入，便于先对比再开启。
+- **生效模式与 canary** —— 生产只有一个选择器 `model.source`：缺失即 `off`，
+  `heuristic` 走本机规则，`local` / `host` / `api` / `auto` 选择模型 planner。`shadow`
+  只是内部 diagnostic/canary 状态，不是用户可选模式；旧 `intervention.mode` 只发兼容
+  warning。
 - **Console 只做可观测性** —— Runtime trace 展示 decision/outcome/would*，并提供二次确认
   的本机策略 reset。0.4.0 的主题是介入机制，不是 Console UI 升级。
-- **实验性后续** —— 本地模型 planner（`model`）与按域自适应阈值仍由 flag 控制，标记为
-  experimental。
+- **模型来源与自适应** —— 0.4.0 的 local 是 assisted/shadow（权威 local planner 属于
+  独立的 0.4.2 线）；API 是唯一同步来源；host 消费上一轮后的 session-prior plan。按域
+  自适应阈值只作用于 `heuristic` 决策，内部 stage 默认 `shadow`。
 
 边界：默认 `off`；`self → checkpoint → compact/fragment` 的恢复语义不变；0.4.0 不做桌面
 弹窗、不做跨设备策略同步，也不做可见的主动提醒 UI。完整设计与限制见

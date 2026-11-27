@@ -1,3 +1,6 @@
+> **版本状态：** 已发布安装固定 **0.3.5**。`0.4.0` 是 release-prep，尚未发布；`dsh plugin
+> add` 的版本在 0.4.0 Go 之前保持 `0.3.5`。
+
 <div align="center">
 
 <picture>

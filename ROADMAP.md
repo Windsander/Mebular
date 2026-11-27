@@ -32,13 +32,18 @@ from recall to **timing**: when to bring a memory back, and how deep to bring it
   default `off`.
 - **Decision and outcome trace** — `decision` / `applied` / `outcome` on the existing
   local RecallTrace; outcome API and OpenCode attribution first.
-- **Shadow and canary** — `off → shadow → heuristic → model`; shadow records advice
-  without changing injection, so operators can compare before enabling.
+- **Effective mode and canary** — production has one selector, `model.source`; a missing
+  source stays `off`, `heuristic` runs local rules, and `local` / `host` / `api` / `auto`
+  select the model planner. `shadow` is an internal diagnostic/canary state, not a
+  user-selectable mode, and the old `intervention.mode` only emits a compatibility
+  warning.
 - **Console observability only** — decision/outcome/would* fields on Runtime traces and
   a confirmed local policy reset. 0.4.0 is the intervention mechanism, not a Console UI
   upgrade.
-- **Experimental follow-ups** — local model planner (`model`) and per-domain adaptive
-  thresholds remain flag-controlled and experimental.
+- **Model sources and adaptive** — local is assisted/shadow in 0.4.0 (authoritative local
+  planning is a separate 0.4.2 line); API is the only synchronous source; host consumes a
+  session-prior plan. Per-domain adaptive thresholds apply only to `heuristic` decisions
+  and default to the internal `shadow` stage.
 
 Boundaries: default `off`; `self → checkpoint → compact/fragment` recovery semantics are
 unchanged; no desktop pop-ups, no cross-device policy sync and no visible proactive

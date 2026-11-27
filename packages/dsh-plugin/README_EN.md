@@ -1,3 +1,6 @@
+> **Version status:** published installs pin **0.3.5**. The `0.4.0` release-prep line is
+> **not published**; keep `dsh plugin add` on `0.3.5` until 0.4.0 is Go.
+
 <div align="center">
 
 <picture>

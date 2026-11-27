@@ -2,6 +2,9 @@
 
 [English](HERMES.md) · [返回文档索引](../README.md) · [Memory Runtime 指南](../guides/MEMORY_RUNTIME_CN.md)
 
+> **版本状态：** 已发布安装包仍固定 **0.3.5**。`0.4.0` 只是 release-prep 线，**尚未发布**；
+> `v0.4.0` 的安装包与下载命令在 0.4.0 Go 之前不可用。
+
 Hermes 可以通过两层接入 Mebular，两层可以同时使用：
 
 | 层 | Hermes 得到什么 | 默认 |

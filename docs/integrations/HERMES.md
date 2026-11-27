@@ -2,6 +2,10 @@
 
 [中文](HERMES_CN.md) · [Documentation index](../README.md) · [Memory Runtime guide](../guides/MEMORY_RUNTIME.md)
 
+> **Version status:** published release bundles pin **0.3.5**. The `0.4.0` release-prep
+> line is **not published**; the `v0.4.0` bundle/install commands are not available until
+> 0.4.0 is Go.
+
 Hermes can use Mebular in two layers, and they can run together:
 
 | Layer | What Hermes gets | Default |

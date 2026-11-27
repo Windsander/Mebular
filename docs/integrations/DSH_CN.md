@@ -2,6 +2,9 @@
 
 [English](DSH.md) · [返回文档索引](../README.md)
 
+> **版本状态：** 已发布安装仍固定 **0.3.5**。`0.4.0` 只是 release-prep 线，**尚未发布**；
+> 在 0.4.0 Go 之前，安装命令保持 `0.3.5`。
+
 `@mebular/dsh-plugin` 把 Mebular 的记忆与任务图接入
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH），并在 DSH
 侧边栏嵌入共享的 Mebular Console。它是零构建 DSH bundle，不 import `@mebular/*`，

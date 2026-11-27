@@ -2,6 +2,9 @@
 
 [中文](OPENCHAMBER_CN.md) · [Documentation index](../README.md) · [Memory Runtime guide](../guides/MEMORY_RUNTIME.md)
 
+> **Version status:** published installs pin **0.3.5**. The `0.4.0` release-prep line is
+> **not published**; keep `@mebular/opencode-plugin` on `0.3.5` until 0.4.0 is Go.
+
 OpenChamber is an OpenCode-based desktop host. Mebular supports it in two layers:
 
 | Layer | What you get | Default |

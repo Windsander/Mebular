@@ -2,6 +2,9 @@
 
 [English](OPENCHAMBER.md) · [返回文档索引](../README.md) · [Memory Runtime 指南](../guides/MEMORY_RUNTIME_CN.md)
 
+> **版本状态：** 已发布安装仍固定 **0.3.5**。`0.4.0` 只是 release-prep 线，**尚未发布**；
+> 在 0.4.0 Go 之前 `@mebular/opencode-plugin` 保持 `0.3.5`。
+
 OpenChamber 是基于 OpenCode 的桌面宿主。Mebular 通过两层接入：
 
 | 层 | 得到什么 | 默认 |

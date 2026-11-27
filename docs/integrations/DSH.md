@@ -2,6 +2,9 @@
 
 [中文](DSH_CN.md) · [Documentation index](../README.md)
 
+> **Version status:** published installs pin **0.3.5**. The `0.4.0` release-prep line is
+> **not published**; keep install commands on `0.3.5` until 0.4.0 is Go.
+
 `@mebular/dsh-plugin` brings Mebular's memory and task graph into
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH), and
 embeds the shared Mebular Console in the DSH sidebar. It is a zero-build DSH

@@ -1,5 +1,8 @@
 # Hermes integration（Mebular 0.3）
 
+> **版本状态：** 已发布 Release 包固定 **0.3.5**。`0.4.0` 是 release-prep，尚未发布；
+> 0.4.0 的下载/安装命令在 0.4.0 Go 之前不可用。
+
 本目录包含 Python 侧集成与 Release 安装脚本，不依赖 Mebular TypeScript 源码，也不修改 Hermes 核心：
 
 | 目录/文件 | 类型 | 作用 |

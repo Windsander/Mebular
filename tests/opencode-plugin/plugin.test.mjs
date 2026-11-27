@@ -3814,3 +3814,484 @@ describe('host token rotation', () => {
     await controller.dispose();
   });
 });
+
+// 0.4.0 W3：session-prior host plan（OpenCode / OpenChamber 显式身份）。
+// 只证明 adapter 契约；真实宿主 E2E 由 W7 记录。
+function hostPlanRoutes() {
+  return {
+    'GET /status': () => jsonResponse({
+      ok: true,
+      data: {
+        runtimeVersion: '0.3.5',
+        mode: 'immersive',
+        state: 'ready',
+        degraded: false,
+        capabilities: {
+          ingest: true,
+          recall: true,
+          context: true,
+          checkpoint: true,
+          intervention: { configuredSource: 'host', hostPlan: true },
+        },
+      },
+    }),
+    '/context': (call) => jsonResponse({
+      ok: true,
+      data: {
+        recallId: 'rr_host_plan',
+        fragments: [],
+        blocks: [{
+          kind: 'fragment',
+          content: 'gist for host plan',
+          citations: [],
+          tokens: 8,
+          bytes: 16,
+          trust: 'untrusted',
+          fragments: ['mf_1'],
+        }],
+        citations: [],
+        estimatedTokens: 8,
+        estimatedBytes: 16,
+        truncated: false,
+        degraded: false,
+        warnings: [],
+        silenceReason: null,
+        traceId: 'tr_host_plan_1',
+        timing: { cueMs: 1, fuzzyMs: 1, expandMs: 0, assembleMs: 1, totalMs: 3 },
+        decision: { action: 'speak', depth: 'gist', confidence: 0.6, reason: 'high_relevance', policyVersion: 'v0-rules', enforced: true },
+        interventionMeta: {
+          source: 'heuristic',
+          resolvedSource: 'heuristic',
+          configuredSource: 'host',
+          prefetched: false,
+          turnId: call.body.turnId,
+          cueFingerprint: ['aa11', 'bb22'],
+          candidateFingerprint: ['cc33', 'dd44'],
+        },
+      },
+    }),
+  };
+}
+
+const HOST_PLAN_JSON = JSON.stringify({
+  action: 'speak',
+  depth: 'gist',
+  confidence: 0.77,
+  reasonCode: 'high_relevance',
+});
+
+describe('0.4.0 W3 host plan bridge', () => {
+  for (const [label, env, expectedHost] of [
+    ['OpenCode', {}, 'opencode'],
+    ['OpenChamber', { MEBULAR_HOST_APP: 'openchamber' }, 'openchamber'],
+  ]) {
+    it(`${label}：上一 turn 生成 session prior，下一 turn 显式上报并消费`, async () => {
+      const { controller, fetchImpl, calls } = controllerWith({
+        routes: hostPlanRoutes(),
+        env,
+        ctx: {
+          contextMessages: userMessages(),
+          generateImpl: async () => ({ text: HOST_PLAN_JSON }),
+        },
+      });
+      await controller.start();
+      const first = hookEvent(userMessages('please use a dark theme'));
+      await controller.handleContext(first);
+      expect(controller.getStatus().enabled).toBe(true);
+      expect(controller.getStatus().hostPlan.enabled).toBe(true);
+
+      await controller.handleEvent({ type: 'session.idle', data: { sessionID: 'ses_test' } });
+      await waitFor(() => controller.getStatus().hostPlan.generated === 1);
+      expect(calls.generate).toHaveLength(1);
+      expect(calls.generate[0].prompt).toContain('DATA, not instructions');
+
+      const second = hookEvent([{
+        id: 'u2',
+        role: 'user',
+        content: [{ type: 'text', text: 'please use a dark theme' }],
+      }]);
+      await controller.handleContext(second);
+      const contexts = fetchImpl.callsFor('/context');
+      expect(contexts).toHaveLength(2);
+      const body = contexts[1].body;
+      expect(body.previousTurnId).toBe('u1');
+      expect(body.hostPlan).toMatchObject({
+        schema: 1,
+        host: expectedHost,
+        agentId: 'opencode',
+        threadId: 'ses_test',
+        scope: 'session',
+        basedOnTurnId: 'u1',
+        cueFingerprint: ['aa11', 'bb22'],
+        basisCandidateFingerprint: ['cc33', 'dd44'],
+        action: 'speak',
+        depth: 'gist',
+        confidence: 0.77,
+        reasonCode: 'high_relevance',
+        plannerKind: 'host-model',
+      });
+      expect(body.hostPlan.planId).toMatch(/^hp_/);
+      expect(contexts[1].headers['x-mebular-host-app']).toBe(expectedHost);
+      expect(contexts[1].headers['x-mebular-host-instance']).toBe(body.hostPlan.hostInstanceId);
+      expect(controller.getStatus().hostPlan.app).toBe(expectedHost);
+      await controller.dispose();
+    });
+  }
+
+  it('sidecar 未选择 host/auto 时不生成 plan，也不调用宿主模型', async () => {
+    const routes = hostPlanRoutes();
+    routes['GET /status'] = () => jsonResponse({
+      ok: true,
+      data: {
+        runtimeVersion: '0.3.5',
+        mode: 'immersive',
+        state: 'ready',
+        capabilities: {
+          ingest: true,
+          recall: true,
+          context: true,
+          intervention: { configuredSource: 'heuristic', hostPlan: true },
+        },
+      },
+    });
+    const { controller, calls } = controllerWith({
+      routes,
+      ctx: { contextMessages: userMessages() },
+    });
+    await controller.start();
+    await controller.handleContext(hookEvent(userMessages('please use a dark theme')));
+    await controller.handleEvent({ type: 'session.idle', data: { sessionID: 'ses_test' } });
+    await waitFor(() => controller.getStatus().hostPlan.skipped > 0);
+    expect(calls.generate).toHaveLength(0);
+    await controller.dispose();
+  });
+
+  it('非法宿输出不写 plan；缺配置时不伪造 host', async () => {
+    const { controller, calls, fetchImpl } = controllerWith({
+      routes: hostPlanRoutes(),
+      ctx: {
+        contextMessages: userMessages(),
+        generateImpl: async () => ({ text: '{"action":"yell","depth":"gist","confidence":0.5,"reasonCode":"high_relevance"}' }),
+      },
+    });
+    await controller.start();
+    await controller.handleContext(hookEvent(userMessages('please use a dark theme')));
+    await controller.handleEvent({ type: 'session.idle', data: { sessionID: 'ses_test' } });
+    await waitFor(() => controller.getStatus().hostPlan.attempts === 1);
+    expect(calls.generate).toHaveLength(1);
+    expect(controller.getStatus().hostPlan.generated).toBe(0);
+    expect(controller.getStatus().hostPlan.failed).toBe(1);
+    const second = hookEvent([{
+      id: 'u2',
+      role: 'user',
+      content: [{ type: 'text', text: 'please use a dark theme' }],
+    }]);
+    await controller.handleContext(second);
+    expect(fetchImpl.callsFor('/context')[1].body.hostPlan).toBeUndefined();
+    await controller.dispose();
+  });
+});
+
+describe('0.4.0 W3 host plan isolation', () => {
+  it('planner 在途时只过滤 planner 消息；真实 user/assistant 仍正常 ingest', async () => {
+    let controllerRef = null;
+    const routes = hostPlanRoutes();
+    const contextMessages = userMessages();
+    const realUser = {
+      id: 'u2',
+      role: 'user',
+      content: [{ type: 'text', text: 'real next user turn' }],
+    };
+    const { controller, fetchImpl, calls } = controllerWith({
+      routes,
+      ctx: {
+        contextMessages,
+        generateImpl: async () => {
+          // 同一 session 同时出现真实 turn 与 planner generate 事件。
+          contextMessages.splice(0, contextMessages.length, realUser);
+          await controllerRef.handleEvent({
+            type: 'session.inbox.delivered',
+            data: { sessionID: 'ses_test' },
+          });
+          await controllerRef.handleEvent({
+            type: 'session.text.ended',
+            data: { sessionID: 'ses_test', text: 'real assistant reply', assistantMessageID: 'ra1' },
+          });
+          await controllerRef.handleEvent({
+            type: 'session.execution.succeeded',
+            data: { sessionID: 'ses_test', messageID: 'ra1' },
+          });
+          await controllerRef.handleEvent({
+            type: 'session.text.ended',
+            data: { sessionID: 'ses_test', text: HOST_PLAN_JSON, assistantMessageID: 'pa1' },
+          });
+          await controllerRef.handleEvent({
+            type: 'session.execution.succeeded',
+            data: { sessionID: 'ses_test', messageID: 'pa1' },
+          });
+          return { text: HOST_PLAN_JSON, id: 'pa1' };
+        },
+      },
+    });
+    controllerRef = controller;
+    await controller.start();
+    expect(fetchImpl.callsFor('/ingest')).toHaveLength(0);
+    await controller.handleContext(hookEvent(userMessages('please use a dark theme')));
+    await controller.handleEvent({ type: 'session.idle', data: { sessionID: 'ses_test' } });
+    await waitFor(() => controller.getStatus().hostPlan.generated === 1);
+
+    expect(calls.generate).toHaveLength(1);
+    // 第一轮 user + planner 窗口里的真实 user/assistant = 2 次 ingest。
+    expect(fetchImpl.callsFor('/ingest')).toHaveLength(2);
+    const realIngest = fetchImpl.callsFor('/ingest')[1].body;
+    expect(realIngest.chunks.map((chunk) => chunk.text)).toEqual([
+      'real next user turn',
+      'real assistant reply',
+    ]);
+    expect(fetchImpl.calls.filter((call) => call.path.startsWith('/checkpoints/'))).toHaveLength(0);
+    expect(fetchImpl.calls.filter((call) => call.path.startsWith('/self/'))).toHaveLength(0);
+    expect(controller.getStatus().hostPlan.suppressedEvents).toBeGreaterThanOrEqual(2);
+    await controller.dispose();
+  });
+
+  it('flush 重放期间到达的真实事件不被清空，也不重复 ingest', async () => {
+    let controllerRef = null;
+    let ingestCalls = 0;
+    const contextMessages = userMessages();
+    const realUser = {
+      id: 'u2',
+      role: 'user',
+      content: [{ type: 'text', text: 'real next user turn' }],
+    };
+    const lateUser = {
+      id: 'u3',
+      role: 'user',
+      content: [{ type: 'text', text: 'late user during flush' }],
+    };
+    const routes = hostPlanRoutes();
+    routes['/ingest'] = async (call) => {
+      ingestCalls += 1;
+      if (ingestCalls === 2) {
+        // 正在重放真实 turn 的 ingest 时，宿主又送来下一轮真实事件。
+        contextMessages.splice(0, contextMessages.length, lateUser);
+        await controllerRef.handleEvent({
+          type: 'session.inbox.delivered',
+          data: { sessionID: 'ses_test' },
+        });
+        await controllerRef.handleEvent({
+          type: 'session.text.ended',
+          data: { sessionID: 'ses_test', text: 'late assistant during flush', assistantMessageID: 'ra2' },
+        });
+        await controllerRef.handleEvent({
+          type: 'session.execution.succeeded',
+          data: { sessionID: 'ses_test', messageID: 'ra2' },
+        });
+      }
+      return jsonResponse({ ok: true, data: ingestResponse(call.body).data });
+    };
+    const { controller, fetchImpl, calls } = controllerWith({
+      routes,
+      ctx: {
+        contextMessages,
+        generateImpl: async () => {
+          contextMessages.splice(0, contextMessages.length, realUser);
+          await controllerRef.handleEvent({
+            type: 'session.inbox.delivered',
+            data: { sessionID: 'ses_test' },
+          });
+          await controllerRef.handleEvent({
+            type: 'session.text.ended',
+            data: { sessionID: 'ses_test', text: 'real assistant reply', assistantMessageID: 'ra1' },
+          });
+          await controllerRef.handleEvent({
+            type: 'session.execution.succeeded',
+            data: { sessionID: 'ses_test', messageID: 'ra1' },
+          });
+          await controllerRef.handleEvent({
+            type: 'session.text.ended',
+            data: { sessionID: 'ses_test', text: HOST_PLAN_JSON, assistantMessageID: 'pa1' },
+          });
+          return { text: HOST_PLAN_JSON, id: 'pa1' };
+        },
+      },
+    });
+    controllerRef = controller;
+    await controller.start();
+    await controller.handleContext(hookEvent(userMessages('please use a dark theme')));
+    await controller.handleEvent({ type: 'session.idle', data: { sessionID: 'ses_test' } });
+    await waitFor(() => controller.getStatus().hostPlan.generated === 1);
+
+    expect(calls.generate).toHaveLength(1);
+    expect(ingestCalls).toBe(3);
+    expect(fetchImpl.callsFor('/ingest')).toHaveLength(3);
+    const lateIngest = fetchImpl.callsFor('/ingest')[2].body;
+    expect(lateIngest.chunks.map((chunk) => chunk.text)).toEqual([
+      'late user during flush',
+      'late assistant during flush',
+    ]);
+    expect(controller.getStatus().hostPlan.suppressedEvents).toBeGreaterThanOrEqual(1);
+    await controller.dispose();
+  });
+
+  it('generate 未返回时 capture 只保留真实 user，pending planner assistant 不进 ingest', async () => {
+    let controllerRef = null;
+    const contextMessages = userMessages();
+    const realUser = {
+      id: 'u2',
+      role: 'user',
+      content: [{ type: 'text', text: 'real user while planner pending' }],
+    };
+    const routes = hostPlanRoutes();
+    const { controller, fetchImpl, calls } = controllerWith({
+      routes,
+      ctx: {
+        contextMessages,
+        generateImpl: async () => {
+          // generate 尚未 resolve：output hash 还不可用。
+          contextMessages.splice(
+            0,
+            contextMessages.length,
+            realUser,
+            {
+              id: 'planner-user-pending',
+              role: 'user',
+              content: [{ type: 'text', text: 'You plan whether the next assistant turn should surface long-term memory.' }],
+            },
+            {
+              id: 'planner-assistant-pending',
+              role: 'assistant',
+              content: [{ type: 'text', text: HOST_PLAN_JSON }],
+            },
+          );
+          await controllerRef.handleEvent({
+            type: 'session.inbox.delivered',
+            data: { sessionID: 'ses_test' },
+          });
+          await controllerRef.handleEvent({
+            type: 'session.text.ended',
+            data: { sessionID: 'ses_test', text: 'real assistant after pending capture', assistantMessageID: 'ra1' },
+          });
+          await controllerRef.handleEvent({
+            type: 'session.execution.succeeded',
+            data: { sessionID: 'ses_test', messageID: 'ra1' },
+          });
+          return { text: HOST_PLAN_JSON, id: 'pa1' };
+        },
+      },
+    });
+    controllerRef = controller;
+    await controller.start();
+    await controller.handleContext(hookEvent(userMessages('please use a dark theme')));
+    await controller.handleEvent({ type: 'session.idle', data: { sessionID: 'ses_test' } });
+    await waitFor(() => controller.getStatus().hostPlan.generated === 1);
+
+    expect(calls.generate).toHaveLength(1);
+    expect(fetchImpl.callsFor('/ingest')).toHaveLength(2);
+    const second = fetchImpl.callsFor('/ingest')[1].body;
+    expect(second.chunks.map((chunk) => chunk.text)).toEqual([
+      'real user while planner pending',
+      'real assistant after pending capture',
+    ]);
+    const allText = fetchImpl.callsFor('/ingest').flatMap((call) => (
+      call.body.chunks.map((chunk) => chunk.text)
+    ));
+    expect(allText).not.toContain(HOST_PLAN_JSON);
+    expect(allText.some((text) => text.includes('You plan whether the next assistant turn'))).toBe(false);
+    expect(controller.getStatus().hostPlan.suppressedEvents).toBeGreaterThanOrEqual(2);
+    await controller.dispose();
+  });
+
+  it('captureSessionContext 过滤宿主 context 中的 planner prompt/assistant', async () => {
+    const plannerText = HOST_PLAN_JSON;
+    const contextMessages = [
+      { id: 'u1', role: 'user', content: [{ type: 'text', text: 'please use a dark theme' }] },
+    ];
+    const { controller, fetchImpl } = controllerWith({
+      routes: hostPlanRoutes(),
+      ctx: {
+        contextMessages,
+        generateImpl: async () => ({ text: plannerText, id: 'pa1' }),
+      },
+    });
+    await controller.start();
+    await controller.handleContext(hookEvent(userMessages('please use a dark theme')));
+    // 让 planner 生成一次，写入 prompt/output 指纹。
+    await controller.handleEvent({ type: 'session.idle', data: { sessionID: 'ses_test' } });
+    await waitFor(() => controller.getStatus().hostPlan.generated === 1);
+    // 生成后宿主 history 才出现 planner prompt/assistant；再次 capture 必须过滤。
+    contextMessages.push(
+      {
+        id: 'planner-user',
+        role: 'user',
+        content: [{ type: 'text', text: 'You plan whether the next assistant turn should surface long-term memory.' }],
+      },
+      {
+        id: 'planner-assistant',
+        role: 'assistant',
+        content: [{ type: 'text', text: plannerText }],
+      },
+    );
+    await controller.handleEvent({ type: 'session.inbox.delivered', data: { sessionID: 'ses_test' } });
+    const texts = fetchImpl.callsFor('/ingest').flatMap((call) => (
+      Array.isArray(call.body?.chunks) ? call.body.chunks.map((chunk) => chunk.text) : []
+    ));
+    expect(texts).not.toContain(plannerText);
+    expect(texts.some((text) => text.includes('You plan whether the next assistant turn'))).toBe(false);
+    expect(controller.getStatus().hostPlan.suppressedEvents).toBeGreaterThanOrEqual(1);
+    await controller.dispose();
+  });
+
+  it('sidecar source 变化时 adapter 主动清空 host plan 缓存', async () => {
+    const routes = hostPlanRoutes();
+    let source = 'host';
+    routes['/context'] = (call) => jsonResponse({
+      ok: true,
+      data: {
+        recallId: 'rr_host_plan',
+        fragments: [],
+        blocks: [],
+        citations: [],
+        estimatedTokens: 0,
+        estimatedBytes: 0,
+        truncated: false,
+        degraded: false,
+        warnings: [],
+        silenceReason: 'no_hits',
+        traceId: 'tr_host_plan_1',
+        timing: { cueMs: 1, fuzzyMs: 1, expandMs: 0, assembleMs: 1, totalMs: 3 },
+        interventionMeta: {
+          source: 'heuristic',
+          resolvedSource: 'heuristic',
+          configuredSource: source,
+          prefetched: false,
+          turnId: call.body.turnId,
+          cueFingerprint: ['aa11', 'bb22'],
+          candidateFingerprint: ['cc33', 'dd44'],
+        },
+      },
+    });
+    const { controller, calls } = controllerWith({
+      routes,
+      ctx: {
+        contextMessages: userMessages(),
+        generateImpl: async () => ({ text: HOST_PLAN_JSON }),
+      },
+    });
+    await controller.start();
+    await controller.handleContext(hookEvent(userMessages('please use a dark theme')));
+    await controller.handleEvent({ type: 'session.idle', data: { sessionID: 'ses_test' } });
+    await waitFor(() => controller.getStatus().hostPlan.generated === 1);
+    expect(controller.getStatus().hostPlan.pending).toBe(1);
+
+    source = 'heuristic';
+    await controller.handleContext(hookEvent([{
+      id: 'u2',
+      role: 'user',
+      content: [{ type: 'text', text: 'please use a dark theme' }],
+    }]));
+    expect(controller.getStatus().hostPlan.invalidated).toBeGreaterThanOrEqual(1);
+    expect(controller.getStatus().hostPlan.pending).toBe(0);
+    expect(calls.generate).toHaveLength(1);
+    await controller.dispose();
+  });
+});

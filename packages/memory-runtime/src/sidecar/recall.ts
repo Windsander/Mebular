@@ -471,6 +471,8 @@ interface InterventionPrefetchSeed {
   stats: InferenceInterventionStats;
   hasCheckpoint: boolean;
   localFingerprint: string;
+  /** 发起预取时的 cache generation；reset/配置变化后旧在途结果必须丢弃。 */
+  generation: number;
 }
 
 interface RecallRun {
@@ -1206,7 +1208,13 @@ export class RecallService {
   readonly identity: RecallServiceOptions['identity'];
 
   private readonly effectiveInterventionOverride?: EffectiveInterventionResolution;
-  private readonly diagnosticShadow: boolean;
+  private readonly diagnosticShadowOverride?: boolean;
+
+  /** diagnosticShadow 允许内部 canary 在进程内切换；配置变化对预取缓存立即可见。 */
+  private get diagnosticShadow(): boolean {
+    return this.diagnosticShadowOverride
+      ?? (this.config.intervention.diagnosticShadow === true);
+  }
 
   /**
    * 0.4.0：由 source presence/source 动态推导的 effective intervention。
@@ -1219,6 +1227,7 @@ export class RecallService {
       legacyMode: this.config.intervention.mode,
       legacyModePresent: this.config.intervention.legacyModePresent,
       diagnosticShadow: this.diagnosticShadow,
+      queryPlan: this.config.recall.queryPlan,
     });
   }
 
@@ -1242,6 +1251,10 @@ export class RecallService {
   private policyResetAt = 0;
   /** W2：local plan 预取缓存；只在本进程内，reset/配置变化失效。 */
   private readonly prefetchCache = new InterventionPrefetchCache();
+  /** reset/本地配置变化递增；在途预取完成时不匹配即丢弃。 */
+  private prefetchGeneration = 0;
+  /** 当前本地模型配置指纹；变化时递增 generation 并清空缓存。 */
+  private prefetchFingerprint: string;
   /** 最近一次 planner 诊断；供 /status.policy.planner 只读展示。 */
   private lastPlanner: InterventionPlannerTrace | null = null;
 
@@ -1269,9 +1282,9 @@ export class RecallService {
     this.policy = options.policy ?? null;
     this.getPolicy = options.getPolicy;
     this.effectiveInterventionOverride = options.effectiveIntervention;
-    this.diagnosticShadow = options.diagnosticShadow
-      ?? (this.config.intervention.diagnosticShadow === true);
+    this.diagnosticShadowOverride = options.diagnosticShadow;
     this.now = options.now ?? Date.now;
+    this.prefetchFingerprint = this.localPrefetchFingerprint();
   }
 
   get isDegraded(): boolean {
@@ -1306,9 +1319,29 @@ export class RecallService {
   resetInterventionState(): void {
     this.silentStreaks.clear();
     this.lastDecisions.clear();
-    this.prefetchCache.clear();
+    this.bumpPrefetchEpoch();
     this.lastPlanner = null;
     this.policyResetAt = this.now();
+  }
+
+  /**
+   * 供 reconfigure()/canary 切换显式失效 local/host 预取缓存。
+   * 与 reset 共用同一 generation；在途预取完成后不会写回。
+   */
+  invalidateInterventionPrefetch(): void {
+    this.bumpPrefetchEpoch();
+  }
+
+  private bumpPrefetchEpoch(): void {
+    this.prefetchGeneration += 1;
+    this.prefetchFingerprint = this.localPrefetchFingerprint();
+    this.prefetchCache.clear();
+  }
+
+  /** 任何影响 local plan 结果或可用性的配置变化都递增 generation。 */
+  private syncPrefetchEpoch(): void {
+    if (this.localPrefetchFingerprint() === this.prefetchFingerprint) return;
+    this.bumpPrefetchEpoch();
   }
 
   private currentPolicy(): SidecarPolicy | null {
@@ -3279,7 +3312,8 @@ export class RecallService {
     const apiConfigured = Boolean(
       this.config.model.api.baseUrl && this.config.model.api.model,
     );
-    const localFingerprint = this.localModelFingerprint();
+    const localFingerprint = this.localPrefetchFingerprint();
+    this.syncPrefetchEpoch();
     const prefetchKey = prefetchKeyFor(run.request.agentId, run.request.threadId);
     const prefetched = this.prefetchCache.take(prefetchKey, run.cue, now, localFingerprint);
 
@@ -3332,6 +3366,7 @@ export class RecallService {
         stats: policyStats,
         hasCheckpoint: Boolean(run.checkpointBlock),
         localFingerprint,
+        generation: this.prefetchGeneration,
       };
     }
 
@@ -3382,9 +3417,22 @@ export class RecallService {
     return { decision, effective, inject, expansionPlan };
   }
 
-  /** 本地模型配置指纹；配置变化后旧预取 plan 立即失效。 */
-  private localModelFingerprint(): string {
-    return `${this.config.model.local.pack ?? ''}\u0000${this.config.model.local.path ?? ''}`;
+  /**
+   * 影响 local plan 的完整指纹：来源/effective mode/diagnostic canary/本地推理配置。
+   * 任一变化都递增 generation，清空 local（及未来 host）预取缓存。
+   */
+  private localPrefetchFingerprint(): string {
+    const local = this.config.model.local;
+    return JSON.stringify([
+      this.config.model.source,
+      this.config.model.sourcePresent,
+      local.pack,
+      local.path,
+      local.enginePath,
+      local.threads,
+      this.diagnosticShadow,
+      this.effectiveIntervention.mode,
+    ]);
   }
 
   /**
@@ -3403,6 +3451,12 @@ export class RecallService {
   private async runLocalPrefetch(seed: InterventionPrefetchSeed): Promise<void> {
     if (!this.models) return;
     try {
+      // reset/配置变化后，尚未开始的预取直接放弃。
+      if (seed.generation !== this.prefetchGeneration) return;
+      if (seed.localFingerprint !== this.localPrefetchFingerprint()) {
+        this.syncPrefetchEpoch();
+        return;
+      }
       const request = buildInterventionInferenceRequest(
         seed.input,
         seed.stats,
@@ -3414,6 +3468,12 @@ export class RecallService {
         timeoutMs: LOCAL_PREFETCH_TIMEOUT_MS,
       });
       if (!result.ok) return;
+      // 预取过程中 reset / reconfigure / source/canary 变化：丢弃在途结果。
+      this.syncPrefetchEpoch();
+      if (seed.generation !== this.prefetchGeneration
+        || seed.localFingerprint !== this.prefetchFingerprint) {
+        return;
+      }
       const now = this.now();
       const plan = createLocalPrefetchPlan({
         scope: seed.scope,
@@ -3422,8 +3482,6 @@ export class RecallService {
         localFingerprint: seed.localFingerprint,
         now,
       });
-      // 配置在异步调用期间变化：丢弃，避免旧模型 plan 污染下一轮。
-      if (seed.localFingerprint !== this.localModelFingerprint()) return;
       this.prefetchCache.put(seed.key, plan);
     } catch {
       // 预取失败不影响用户回合；provider 已记录失败状态，不重复抛错。

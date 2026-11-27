@@ -430,6 +430,7 @@ async function createService(options: {
   resolveManifest?: (packId: string) => Promise<ModelManifest>;
   resolveInstalledModel?: InstalledModelResolver;
   createJobId?: () => string;
+  onReconfigure?: () => void;
   config?: SidecarConfig;
   useCuratedManifest?: boolean;
 } = {}): Promise<ServiceHarness> {
@@ -482,6 +483,7 @@ async function createService(options: {
     detectHardware: async () => options.hardware ?? hardware(),
     now: () => NOW,
     ...(options.createJobId ? { createJobId: options.createJobId } : {}),
+    ...(options.onReconfigure ? { onReconfigure: options.onReconfigure } : {}),
   });
   await service.init();
   return { home, store, model, engine, engineInstaller, service, config };
@@ -984,5 +986,15 @@ describe('sidecar model runtime service', () => {
     expect(harness.engine.current?.packId).toBe(PACK_ID);
     expect(harness.engine.startCalls).toBe(0);
     expect(harness.engine.running).toBe(false);
+  });
+
+  it('reconfigure 通知介入预取失效回调（B3）', async () => {
+    let invalidations = 0;
+    const harness = await createService({
+      source: 'local',
+      onReconfigure: () => { invalidations += 1; },
+    });
+    await harness.service.activate(PACK_ID);
+    expect(invalidations).toBeGreaterThan(0);
   });
 });

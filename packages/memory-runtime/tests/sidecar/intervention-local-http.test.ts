@@ -29,6 +29,9 @@ class FakeLocalModel {
   calls = 0;
   requests: InferenceInterventionRequest[] = [];
   delayMs = 0;
+  /** 测试用 gate：预取在 provider 内挂起，模拟在途竞态。 */
+  private gate: Promise<void> | null = null;
+  private releaseGate: (() => void) | null = null;
   result: InferenceInterventionResult = {
     ok: true,
     action: 'speak',
@@ -41,11 +44,26 @@ class FakeLocalModel {
     latencyMs: 9,
   };
 
+  hold(): void {
+    this.gate = new Promise<void>((resolve) => {
+      this.releaseGate = resolve;
+    });
+  }
+
+  release(): void {
+    const release = this.releaseGate;
+    this.releaseGate = null;
+    this.gate = null;
+    release?.();
+  }
+
   async planIntervention(
     request: InferenceInterventionRequest,
   ): Promise<InferenceInterventionResult> {
     this.calls += 1;
     this.requests.push(request);
+    const gate = this.gate;
+    if (gate) await gate;
     if (this.delayMs > 0) {
       await new Promise((resolve) => setTimeout(resolve, this.delayMs));
     }
@@ -128,6 +146,9 @@ async function setup(options: { source?: 'local' | 'auto' | 'api' } = {}): Promi
   config.model.sourcePresent = true;
   config.model.source = options.source ?? 'local';
   config.model.local.pack = 'fake-pack';
+  config.model.local.path = null;
+  config.model.local.enginePath = '/fake/llama-server';
+  config.model.local.threads = 1;
   config.intervention = {
     ...config.intervention,
     minConfidence: 0.55,
@@ -293,5 +314,117 @@ describe('local intervention prefetch (W2)', () => {
       prefetched: false,
     });
     expect(model.calls).toBe(1);
+  });
+
+  // ---------- B3：generation/epoch 全量失效 ----------
+
+  it('policy reset 在途竞态：reset 后完成的 prefetch 不得写回', async () => {
+    const { service, model } = await setup();
+    model.hold();
+    await service.handleContext(contextBody('深色主题偏好', 'turn_1'));
+    await flushPrefetch();
+    expect(model.calls).toBe(1);
+
+    // 预取仍挂在 provider 内时执行 policy reset。
+    service.resetInterventionState();
+    model.release();
+    await flushPrefetch();
+
+    const response = await service.handleContext(contextBody('深色主题偏好', 'turn_2'));
+    expect(response.data.decision?.planner).toMatchObject({
+      resolvedSource: null,
+      prefetchState: 'first_turn',
+      prefetched: false,
+    });
+  });
+
+  it.each([
+    ['threads', (config: SidecarConfig) => { config.model.local.threads = 4; }],
+    ['enginePath', (config: SidecarConfig) => { config.model.local.enginePath = '/other/llama-server'; }],
+    ['pack', (config: SidecarConfig) => { config.model.local.pack = 'other-pack'; }],
+    ['path', (config: SidecarConfig) => { config.model.local.path = '/models/other.gguf'; }],
+  ])('本地配置 %s 变化后旧 plan 失效', async (_field, mutate) => {
+    const { service, config } = await setup();
+    await service.handleContext(contextBody('深色主题偏好', 'turn_1'));
+    await flushPrefetch();
+
+    mutate(config);
+    const response = await service.handleContext(contextBody('深色主题偏好', 'turn_2'));
+    expect(response.data.decision?.planner).toMatchObject({
+      resolvedSource: null,
+      prefetchState: 'first_turn',
+      prefetched: false,
+    });
+  });
+
+  it('model.source 变化：旧 local plan 不被消费；切回 local 也不复活', async () => {
+    const { service, config } = await setup();
+    await service.handleContext(contextBody('深色主题偏好', 'turn_1'));
+    await flushPrefetch();
+
+    config.model.source = 'heuristic';
+    const heuristic = await service.handleContext(contextBody('深色主题偏好', 'turn_2'));
+    expect(heuristic.data.decision?.planner).toMatchObject({
+      configuredSource: 'heuristic',
+      resolvedSource: 'heuristic',
+      prefetched: false,
+    });
+
+    // 即使切回 local，source 变化已清空旧 plan。
+    config.model.source = 'local';
+    const back = await service.handleContext(contextBody('深色主题偏好', 'turn_3'));
+    expect(back.data.decision?.planner).toMatchObject({
+      configuredSource: 'local',
+      resolvedSource: null,
+      prefetchState: 'first_turn',
+      prefetched: false,
+    });
+  });
+
+  it('canary / diagnosticShadow 切换清空预取缓存', async () => {
+    const { service, config } = await setup();
+    await service.handleContext(contextBody('深色主题偏好', 'turn_1'));
+    await flushPrefetch();
+
+    config.intervention.diagnosticShadow = true;
+    const shadow = await service.handleContext(contextBody('深色主题偏好', 'turn_2'));
+    expect(shadow.data.decision?.planner).toMatchObject({
+      resolvedSource: null,
+      prefetchState: 'first_turn',
+      prefetched: false,
+    });
+  });
+
+  it('显式 reconfigure 失效：invalidateInterventionPrefetch 清空旧 plan', async () => {
+    const { service } = await setup();
+    await service.handleContext(contextBody('深色主题偏好', 'turn_1'));
+    await flushPrefetch();
+
+    // main 在 InferenceService.reconfigure() 后调用同一入口。
+    service.invalidateInterventionPrefetch();
+    const response = await service.handleContext(contextBody('深色主题偏好', 'turn_2'));
+    expect(response.data.decision?.planner).toMatchObject({
+      resolvedSource: null,
+      prefetchState: 'first_turn',
+      prefetched: false,
+    });
+  });
+
+  it('配置变化发生在预取过程中：完成时丢弃，不写回', async () => {
+    const { service, model, config } = await setup();
+    model.hold();
+    await service.handleContext(contextBody('深色主题偏好', 'turn_1'));
+    await flushPrefetch();
+
+    config.model.local.threads = 8;
+    model.release();
+    await flushPrefetch();
+
+    const response = await service.handleContext(contextBody('深色主题偏好', 'turn_2'));
+    expect(response.data.decision?.planner).toMatchObject({
+      resolvedSource: null,
+      prefetchState: 'first_turn',
+      prefetched: false,
+    });
   });
 });

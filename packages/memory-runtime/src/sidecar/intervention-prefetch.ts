@@ -14,8 +14,14 @@ import type { InterventionPrefetchState } from '../runtime/types.js';
 
 /** local prefetch 缓存 TTL（W0-A 冻结 60s）。 */
 export const LOCAL_PREFETCH_TTL_MS = 60_000;
-/** 命中判定的 topic/entity Jaccard 下限（W0-A 冻结 0.8）。 */
+/**
+ * local 命中判定的 topic/entity Jaccard 下限（W0-A 冻结 0.8）。
+ * host plan 使用更宽松的 0.6（W3）；两者不能互相复用。
+ * 匹配公式冻结为 `max(topicJaccard, entityJaccard)`，不是 combined/weighted。
+ */
 export const LOCAL_PREFETCH_CUE_JACCARD = 0.8;
+/** host session-prior 的冻结阈值；W3 使用，避免与 local 0.8 混淆。 */
+export const HOST_PREFETCH_CUE_JACCARD = 0.6;
 /** 进程内缓存上限；超过时丢弃最旧条目。 */
 export const LOCAL_PREFETCH_MAX_ENTRIES = 64;
 /** 首轮/miss 标记上限；防止长时间运行按 thread 无限增长。 */
@@ -90,20 +96,41 @@ function jaccard(left: readonly string[], right: readonly string[]): number {
   return union === 0 ? 1 : shared / union;
 }
 
+export interface CueScopeSimilarity {
+  /** 两侧 topic 都非空时的 Jaccard；否则 null。 */
+  topic: number | null;
+  /** 两侧 entity 都非空时的 Jaccard；否则 null。 */
+  entity: number | null;
+  /** 冻结公式：max(topic, entity) ≥ 0.8；不是 combined。 */
+  matched: boolean;
+}
+
+/** 纯函数：只比较规范化 topic/entity 集合，不含 raw query。 */
+export function cueScopeSimilarity(
+  scope: InterventionCueScope,
+  current: InterventionCueScope,
+): CueScopeSimilarity {
+  const topic = scope.topics.length > 0 && current.topics.length > 0
+    ? jaccard(scope.topics, current.topics)
+    : null;
+  const entity = scope.entities.length > 0 && current.entities.length > 0
+    ? jaccard(scope.entities, current.entities)
+    : null;
+  return {
+    topic,
+    entity,
+    matched: Math.max(topic ?? 0, entity ?? 0) >= LOCAL_PREFETCH_CUE_JACCARD,
+  };
+}
+
 /** 当前 cue 是否命中 plan scope：签名相同或 topic/entity Jaccard ≥0.8。 */
 export function cueMatchesScope(scope: InterventionCueScope, cue: Cue): boolean {
   const current = cueScopeOf(cue);
   if (scope.signature === current.signature) return true;
-  const topicScore = scope.topics.length > 0 && current.topics.length > 0
-    ? jaccard(scope.topics, current.topics)
-    : null;
-  const entityScore = scope.entities.length > 0 && current.entities.length > 0
-    ? jaccard(scope.entities, current.entities)
-    : null;
   // 两侧都为空时 Jaccard=1；此时只认签名相同，避免空 cue 误命中。
-  if (topicScore === null && entityScore === null) return false;
-  // “topic/entity Jaccard ≥0.8”：topic 或 entity 任一侧足够接近即可。
-  return Math.max(topicScore ?? 0, entityScore ?? 0) >= LOCAL_PREFETCH_CUE_JACCARD;
+  if (scope.topics.length === 0 && scope.entities.length === 0) return false;
+  if (current.topics.length === 0 && current.entities.length === 0) return false;
+  return cueScopeSimilarity(scope, current).matched;
 }
 
 /** 缓存 key：按 (agentId, threadId) 隔离；同一 thread 内再校验 cue。 */

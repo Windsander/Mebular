@@ -6,12 +6,16 @@
 import { describe, it, expect } from '@jest/globals';
 import { extractCue } from '../../src/sidecar/cue.js';
 import {
+  HOST_PREFETCH_CUE_JACCARD,
   InterventionPrefetchCache,
+  LOCAL_PREFETCH_CUE_JACCARD,
   LOCAL_PREFETCH_TTL_MS,
   createLocalPrefetchPlan,
   cueMatchesScope,
   cueScopeOf,
+  cueScopeSimilarity,
   prefetchKeyFor,
+  type InterventionCueScope,
 } from '../../src/sidecar/intervention-prefetch.js';
 import type { InferenceInterventionResult } from '../../src/sidecar/inference-provider.js';
 
@@ -140,5 +144,61 @@ describe('InterventionPrefetchCache', () => {
     const empty = cue('');
     expect(cueMatchesScope(cueScopeOf(empty), empty)).toBe(true);
     expect(cueMatchesScope(cueScopeOf(empty), cue('深色主题'))).toBe(false);
+  });
+
+  // B4：local 0.8（topic/entity 取 max），host 0.6；公式冻结，不能改成 combined。
+  it('local 阈值 0.8：topic 0.8 命中，0.6 不命中；host 阈值保持 0.6', () => {
+    const scope = (topics: string[], entities: string[] = []): InterventionCueScope => ({
+      signature: 'scope',
+      topics,
+      entities,
+    });
+    const at08 = cueScopeSimilarity(
+      scope(['a', 'b', 'c', 'd', 'e']),
+      scope(['a', 'b', 'c', 'd']),
+    );
+    expect(at08.topic).toBeCloseTo(0.8);
+    expect(at08.matched).toBe(true);
+
+    const at06 = cueScopeSimilarity(
+      scope(['a', 'b', 'c', 'd']),
+      scope(['a', 'b', 'c', 'x']),
+    );
+    expect(at06.topic).toBeCloseTo(0.6);
+    expect(at06.matched).toBe(false);
+
+    expect(LOCAL_PREFETCH_CUE_JACCARD).toBe(0.8);
+    expect(LOCAL_PREFETCH_CUE_JACCARD).toBeGreaterThan(HOST_PREFETCH_CUE_JACCARD);
+    expect(HOST_PREFETCH_CUE_JACCARD).toBe(0.6);
+  });
+
+  it('topic-only / entity-only 都走 max 公式', () => {
+    // topic 不相似、entity 完全一致 → 命中（entity-only）。
+    const entityOnly = cueScopeSimilarity(
+      { signature: 'x', topics: ['a', 'b'], entities: ['user', 'theme'] },
+      { signature: 'y', topics: ['c', 'd'], entities: ['user', 'theme'] },
+    );
+    expect(entityOnly.topic).toBe(0);
+    expect(entityOnly.entity).toBe(1);
+    expect(entityOnly.matched).toBe(true);
+
+    // topic 完全一致、entity 不同 → 命中（topic-only）。
+    const topicOnly = cueScopeSimilarity(
+      { signature: 'x', topics: ['a', 'b'], entities: ['user'] },
+      { signature: 'y', topics: ['a', 'b'], entities: ['device'] },
+    );
+    expect(topicOnly.topic).toBe(1);
+    expect(topicOnly.entity).toBe(0);
+    expect(topicOnly.matched).toBe(true);
+  });
+
+  it('冻结为 max(topic, entity)：两侧 0.6 不能被“合并”成 0.8', () => {
+    const combined = cueScopeSimilarity(
+      { signature: 'x', topics: ['a', 'b', 'c', 'd'], entities: ['u1', 'u2', 'u3', 'u4'] },
+      { signature: 'y', topics: ['a', 'b', 'c', 'x'], entities: ['u1', 'u2', 'u3', 'v4'] },
+    );
+    expect(combined.topic).toBeCloseTo(0.6);
+    expect(combined.entity).toBeCloseTo(0.6);
+    expect(combined.matched).toBe(false);
   });
 });

@@ -470,7 +470,7 @@ describe('planInterventionAsync (model controller)', () => {
     expect(auto.requests).toHaveLength(1);
   });
 
-  it('auto：local 已配置但未命中 → heuristic，不串行切 api', async () => {
+  it('auto_local_miss_no_api：local 已配置但未命中 → heuristic，不串行切 api', async () => {
     const planner = new FakePlanner();
     const planned = await planInterventionAsync(
       input(),

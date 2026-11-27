@@ -659,7 +659,8 @@ export function resolveInterventionSource(
   }
   if (input.configuredSource === 'api') return resolveApi();
 
-  // auto
+  // auto（W0-A §6.3，冻结）：local 已配置时，miss/失败也走 heuristic，绝不切 api；
+  // 只有 local 未配置才继续尝试 api。reviewer 的 miss→api 建议与契约冲突，不要改。
   if (input.hostPlanAvailable) {
     return { source: 'host', prefetched: true, fallbackReason: null, expected: false, warnings: [] };
   }

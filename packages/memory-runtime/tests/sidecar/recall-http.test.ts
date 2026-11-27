@@ -91,6 +91,8 @@ function interventionCheckpoint(threadId: string, domain: string, goal: string) 
 async function setup(options: {
   intervention?: Partial<ReturnType<typeof defaultSidecarConfig>['intervention']>;
   modelSource?: ReturnType<typeof defaultSidecarConfig>['model']['source'];
+  /** 模拟 `recall.queryPlan='model'` 的 extraction 配置；只用于 B2 status warning。 */
+  recallQueryPlan?: ReturnType<typeof defaultSidecarConfig>['recall']['queryPlan'];
   /** 模拟旧用户配置缺少 model.source；缺省按测试显式 source 处理。 */
   sourceMissing?: boolean;
   trace?: 'off' | 'local';
@@ -116,6 +118,7 @@ async function setup(options: {
   if (options.trace) config.trace = options.trace;
   config.model.sourcePresent = options.sourceMissing !== true;
   if (options.modelSource) config.model.source = options.modelSource;
+  if (options.recallQueryPlan) config.recall.queryPlan = options.recallQueryPlan;
   if (options.intervention) {
     config.intervention = { ...config.intervention, ...options.intervention };
     // 真实文件里显式写 mode 会由 normalize 置 true；测试注入时按同样语义处理。
@@ -1731,9 +1734,28 @@ describe('sidecar recall/context HTTP', () => {
       legacyModeIgnored: true,
       legacyModeConflict: true,
       diagnosticShadow: false,
+      deadline: 'w5_pending',
     });
     expect(body.data.intervention.warnings).toContain('legacy_intervention_mode_ignored');
     expect(body.warnings).toContain('legacy_intervention_mode_ignored');
     expect(JSON.stringify(body)).not.toMatch(/keyRef|apiKey|authorization|bearer/i);
+  });
+
+  it('B2：local/auto + queryPlan=model 在 /status 给可见 warning；不改 extraction 语义', async () => {
+    const { server } = await setup({
+      modelSource: 'local',
+      recallQueryPlan: 'model',
+    });
+    const response = await fetch(`${server.url}/status`, { headers: auth() });
+    const body = await response.json() as any;
+    expect(response.status).toBe(200);
+    expect(body.data.intervention).toMatchObject({
+      source: 'local',
+      planner: 'model',
+      deadline: 'w5_pending',
+    });
+    expect(body.data.intervention.warnings).toContain('extraction_query_plan_local_sync');
+    // queryPlan 仍是配置原值；W2 不修改 extraction。
+    expect(body.data.intervention.warnings).not.toContain('model_source_missing');
   });
 });

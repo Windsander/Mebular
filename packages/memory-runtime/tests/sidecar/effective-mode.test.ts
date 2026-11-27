@@ -4,6 +4,7 @@
 
 import { describe, it, expect } from '@jest/globals';
 import {
+  EXTRACTION_QUERY_PLAN_LOCAL_SYNC,
   LEGACY_INTERVENTION_MODE_IGNORED,
   MODEL_SOURCE_MISSING,
   isDiagnosticShadowEnabled,
@@ -173,6 +174,21 @@ describe('effective intervention mode', () => {
       planner: 'model',
       diagnosticShadow: true,
     });
+  });
+
+  it('B2：local/auto + queryPlan=model 给稳定 extraction warning，不改 extraction 语义', () => {
+    for (const source of ['local', 'auto'] as const) {
+      const resolved = resolveEffectiveIntervention({ source, queryPlan: 'model' });
+      expect(resolved.warnings).toContain(EXTRACTION_QUERY_PLAN_LOCAL_SYNC);
+      // 介入 planner 仍是 model；warning 只提示 W5 待办。
+      expect(resolved.planner).toBe('model');
+    }
+    expect(resolveEffectiveIntervention({ source: 'local', queryPlan: 'heuristic' }).warnings)
+      .not.toContain(EXTRACTION_QUERY_PLAN_LOCAL_SYNC);
+    expect(resolveEffectiveIntervention({ source: 'api', queryPlan: 'model' }).warnings)
+      .not.toContain(EXTRACTION_QUERY_PLAN_LOCAL_SYNC);
+    expect(resolveEffectiveIntervention({ source: 'heuristic', queryPlan: 'model' }).warnings)
+      .not.toContain(EXTRACTION_QUERY_PLAN_LOCAL_SYNC);
   });
 
   it('diagnostic env 只接受明确 truthy 值', () => {

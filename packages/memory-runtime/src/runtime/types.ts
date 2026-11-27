@@ -366,9 +366,15 @@ export interface AppliedIntervention {
   wouldDepth?: RecallDepth;
   /**
    * W6：本次实际生效决策是否来自 heuristic，可作为 adaptive 样本。
-   * model/shadow/off 为 false/缺省；outcome 归因据此决定是否调参。
+   * model/shadow/off/gate 为 false/缺省；outcome 归因据此决定是否调参。
    */
   adaptiveEligible?: boolean;
+  /**
+   * W6：本次是否真的产生了可计入 policy 的介入决策。
+   * gate/non-intervention 路径（muted/chitchat/no_cue/...）为 false，
+   * 后续 outcome 不得写入 global 或 diagnostic。
+   */
+  policyEligible?: boolean;
   degraded?: boolean;
 }
 

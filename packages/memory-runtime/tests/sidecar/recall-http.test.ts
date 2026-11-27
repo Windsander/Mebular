@@ -1202,6 +1202,92 @@ describe('sidecar recall/context HTTP', () => {
     expect(stats.global.spoken).toBe(51);
   }, 30_000);
 
+  it('W6/B1：gate/non-intervention 不产生 adaptive 样本，也没有“无 decision 的 outcome”', async () => {
+    const { server, runtime } = await setup({ modelSource: 'heuristic' });
+    const cases = [
+      { thread: 'th_gate_chitchat', body: { query: '你好' } },
+      { thread: 'th_gate_muted', body: { query: '我的偏好是什么？', mute: true } },
+    ];
+    for (const entry of cases) {
+      const context = await post(`${server.url}/context`, {
+        agentId: 'opencode',
+        threadId: entry.thread,
+        turnId: `turn_${entry.thread}`,
+        ...entry.body,
+      }, { 'x-mebular-host-app': 'opencode' });
+      expect(context.status).toBe(200);
+      expect(context.body.data.applied.adaptiveEligible).toBeUndefined();
+      expect(context.body.data.applied.policyEligible).toBe(false);
+
+      const snapshot = await runtime.policyStore!.snapshot();
+      expect(snapshot.global.spoken + snapshot.global.silent).toBe(0);
+      expect(snapshot.diagnostic.spoken + snapshot.diagnostic.silent).toBe(0);
+
+      const traceId = context.body.data.traceId as string;
+      const token = context.body.data.bindingToken as string;
+      expect(traceId).toMatch(/^tr_/);
+      expect(token.length).toBeGreaterThan(0);
+      const outcome = await post(`${server.url}/recall/${traceId}/outcome`, {
+        kind: 'accepted',
+        source: 'host',
+        host: 'opencode',
+        bindingToken: token,
+      });
+      expect(outcome.status).toBe(200);
+      const after = await runtime.policyStore!.snapshot();
+      expect(after.global.accepted).toBe(0);
+      expect(after.diagnostic.accepted).toBe(0);
+      expect(after.domains).toEqual([]);
+    }
+  });
+
+  it('W6/B2：shadow / canary miss 不通过 recentUselessRate 改变行为', async () => {
+    const seedHighUseless = async (runtime: any) => {
+      for (let index = 0; index < 20; index += 1) {
+        await runtime.policyStore!.recordDecision({
+          agentId: 'opencode', domain: 'user', action: 'speak',
+        });
+      }
+      for (let index = 0; index < 20; index += 1) {
+        await runtime.policyStore!.recordOutcome({
+          agentId: 'opencode', domain: 'user', kind: 'reasked',
+        });
+      }
+    };
+    const decide = async (stage: 'off' | 'shadow' | 'canary' | 'on', ratio = 0) => {
+      const harness = await setup({
+        modelSource: 'heuristic',
+        intervention: {
+          mode: 'heuristic',
+          minConfidence: 0.55,
+          explorationRate: 0,
+          maxSilentStreak: 99,
+          adaptive: { stage, canaryRatio: ratio },
+        },
+      });
+      await seedHighUseless(harness.runtime);
+      const context = await post(`${harness.server.url}/context`, {
+        agentId: 'opencode',
+        threadId: `th_control_${stage}_${ratio}`,
+        turnId: `turn_control_${stage}_${ratio}`,
+        query: '今天天气怎么样',
+      });
+      expect(context.status).toBe(200);
+      return context.body.data.decision;
+    };
+
+    const off = await decide('off');
+    const shadow = await decide('shadow');
+    const canaryMiss = await decide('canary', 0);
+    // 干净控制组：没有 adaptive 时行为必须一致。
+    expect(off).toMatchObject({ action: 'speak', reason: 'high_relevance' });
+    expect(shadow).toMatchObject({ action: off.action, reason: off.reason });
+    expect(canaryMiss).toMatchObject({ action: off.action, reason: off.reason });
+    // treatment 仍可读 recentUselessRate：高负例率时沉默，证明差异来自 adaptive 应用。
+    const on = await decide('on');
+    expect(on).toMatchObject({ action: 'silent', reason: 'recent_false_alarm' });
+  }, 60_000);
+
   it('W6：diagnostic shadow 不读也不写 adaptive；只记 diagnostic 计数', async () => {
     const { server, runtime } = await setup({
       modelSource: 'heuristic',

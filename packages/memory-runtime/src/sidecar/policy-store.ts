@@ -63,7 +63,8 @@ interface PolicyDomainEntry {
 }
 
 interface PolicyState {
-  version: 1;
+  /** v2：W6 拆分 adaptive/diagnostic；旧 v1 计数可能混入 model/shadow，读取时整体 reset。 */
+  version: 2;
   updatedAt: number;
   global: PolicyCounts;
   /** 非 heuristic 诊断计数；与 adaptive 分开，避免污染阈值学习。 */
@@ -183,7 +184,7 @@ function outcomeKey(kind: RecallOutcomeKind): keyof PolicyCounts {
 
 function emptyState(now: number): PolicyState {
   return {
-    version: 1,
+    version: 2,
     updatedAt: now,
     global: emptyCounts(),
     diagnostic: emptyCounts(),
@@ -340,7 +341,7 @@ export class PolicyStore {
   }
 
   async snapshot(): Promise<{
-    version: 1;
+    version: 2;
     updatedAt: number;
     global: PolicyCounts;
     diagnostic: PolicyCounts;
@@ -357,7 +358,7 @@ export class PolicyStore {
       await this.ensureLoaded();
       this.state = stateAfterTtl(this.state, this.now(), this.ttlDays);
       return {
-        version: 1,
+        version: 2,
         updatedAt: this.state.updatedAt,
         global: { ...this.state.global },
         diagnostic: { ...this.state.diagnostic },
@@ -578,9 +579,11 @@ export class PolicyStore {
 
   private async readState(): Promise<PolicyState> {
     const raw = await readJsonFile<Record<string, unknown>>(this.path);
-    if (!raw || raw.version !== 1) return emptyState(this.now());
+    // W6 迁移：v1 的 global 可能混入 model/shadow 决策，不能继续用于 adaptive；
+    // 0.4.0 未发布，直接 reset 旧计数最安全。未知版本同样 fail-open 为空。
+    if (!raw || raw.version !== 2) return emptyState(this.now());
     const state: PolicyState = {
-      version: 1,
+      version: 2,
       updatedAt: counterOf(raw.updatedAt) || this.now(),
       global: countsOf(raw.global),
       diagnostic: countsOf(raw.diagnostic),

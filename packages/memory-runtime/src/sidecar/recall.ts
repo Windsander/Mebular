@@ -619,8 +619,10 @@ interface RecallRun {
     shadow: boolean;
     domain: string;
   } | null;
-  /** W6：本轮实际生效决策是否可作为 adaptive 样本（仅 heuristic、非 shadow）。 */
+  /** W6：本轮实际生效决策是否可作为 adaptive 样本（仅 heuristic、非 shadow、非 gate）。 */
   adaptiveEligible?: boolean;
+  /** W6：本轮是否真的产生了可计入 policy 的介入决策；gate/non-intervention 为 false。 */
+  policyEligible?: boolean;
   /** W5：`/context` 绝对 deadline；`recall` 不设置。 */
   deadlineAt?: number;
   /** W5：handleContext 入口时间，用于计时/证据。 */
@@ -3878,8 +3880,14 @@ export class RecallService {
     const basePlan = this.expansionPlan(selected, run.cue, warnings);
     const domain = selected[0]?.fragment.owner.domain ?? run.domains[0] ?? 'default';
     const key = this.decisionKey(run);
-    // W6：adaptive 只服务 heuristic 实际生效决策；diagnostic shadow、model 与 stage=off 都不算样本。
-    const adaptiveEligible = config.adaptive.stage !== 'off'
+    // W6：gate/non-intervention 没有真正的介入决策，既不写 policy decision，
+    // 也不能让后续 outcome 进入 global/diagnostic。
+    const blocked = NON_INTERVENTION_SILENCE.has(run.silenceReason ?? '');
+    const policyEligible = !blocked;
+    run.policyEligible = policyEligible;
+    // W6：adaptive 只服务 heuristic 实际生效决策；diagnostic shadow、model、gate 与 stage=off 都不算样本。
+    const adaptiveEligible = policyEligible
+      && config.adaptive.stage !== 'off'
       && intervention.mode !== 'shadow'
       && intervention.planner === 'heuristic';
     run.adaptiveEligible = adaptiveEligible;
@@ -3931,37 +3939,42 @@ export class RecallService {
     };
     let adaptiveTrace: NonNullable<InterventionPlannerTrace['adaptive']> | undefined;
     const adaptiveStage = config.adaptive.stage;
+    // canary 桶只由 (agentId, domain) 决定，不含 host/source。
+    const canaryHit = adaptiveEligible && adaptiveStage === 'canary'
+      ? adaptiveCanaryHit(run.request.agentId, domain, config.adaptive.canaryRatio)
+      : undefined;
+    // B2：只有真正处于 treatment（on / canary 命中）才把 adaptive 统计注入决策；
+    // shadow 与 canary 未命中桶保持干净控制组，recentUselessRate/policyStats 必须为 0。
+    const applyAdaptive = adaptiveEligible
+      && (adaptiveStage === 'on' || canaryHit === true);
     // W6：model/shadow 不读 adaptive；off 阶段也完全不触碰 PolicyStore。
     if (this.policyStore && adaptiveEligible && adaptiveStage !== 'off') {
       try {
-        const stats = await this.policyStore.effectiveStats(run.request.agentId, domain);
-        recentUselessRate = stats.uselessRate;
-        policyStats = {
-          spoken: Math.round(stats.spoken),
-          silent: Math.round(stats.silent),
-          accepted: Math.round(stats.accepted),
-          reasked: Math.round(stats.reasked),
-          corrected: Math.round(stats.corrected),
-          missed: Math.round(stats.missed),
-          tooShallow: Math.round(stats.too_shallow),
-          tooDeep: Math.round(stats.too_deep),
-        };
-        // canary 桶只由 (agentId, domain) 决定，不含 host/source。
-        const canaryHit = adaptiveStage === 'canary'
-          ? adaptiveCanaryHit(run.request.agentId, domain, config.adaptive.canaryRatio)
-          : undefined;
-        const apply = adaptiveStage === 'on' || canaryHit === true;
+        if (applyAdaptive) {
+          const stats = await this.policyStore.effectiveStats(run.request.agentId, domain);
+          recentUselessRate = stats.uselessRate;
+          policyStats = {
+            spoken: Math.round(stats.spoken),
+            silent: Math.round(stats.silent),
+            accepted: Math.round(stats.accepted),
+            reasked: Math.round(stats.reasked),
+            corrected: Math.round(stats.corrected),
+            missed: Math.round(stats.missed),
+            tooShallow: Math.round(stats.too_shallow),
+            tooDeep: Math.round(stats.too_deep),
+          };
+        }
         const result: AdaptiveThresholdResult = await this.policyStore.adaptiveThresholdFor(
           run.request.agentId,
           domain,
           config.minConfidence,
-          { apply },
+          { apply: applyAdaptive },
         );
         threshold = result.threshold;
         const round4 = (value: number): number => Number(value.toFixed(4));
         adaptiveTrace = {
           stage: adaptiveStage,
-          applied: apply && result.offset !== 0,
+          applied: applyAdaptive && result.offset !== 0,
           baseThreshold: round4(config.minConfidence),
           recommendedThreshold: round4(result.recommended),
           threshold: round4(result.threshold),
@@ -4265,12 +4278,18 @@ export class RecallService {
   }
 
   private async ensureDecision(run: RecallRun, warnings: string[]): Promise<void> {
-    if (run.decision) return;
     const config = this.config.intervention;
     const intervention = this.effectiveIntervention;
     const blocked = NON_INTERVENTION_SILENCE.has(run.silenceReason ?? '');
-    // W6：无候选/gate 路径仍按 heuristic 样本计数；model/shadow/off 只记诊断。
-    run.adaptiveEligible = config.adaptive.stage !== 'off'
+    // W6：gate/non-intervention 没有介入决策；任何已存在的 decision 也不得计入 policy。
+    run.policyEligible = !blocked;
+    if (run.decision) {
+      if (blocked) run.adaptiveEligible = false;
+      return;
+    }
+    // W6：无候选路径仍按 heuristic 样本计数；model/shadow/off/gate 只记诊断或不记。
+    run.adaptiveEligible = !blocked
+      && config.adaptive.stage !== 'off'
       && intervention.mode !== 'shadow'
       && intervention.planner === 'heuristic';
     if (!blocked && this.isNegatedDefer(run.cue)) {
@@ -4456,9 +4475,12 @@ export class RecallService {
     kind: RecallOutcomeKind,
   ): Promise<void> {
     if (!this.policyStore || this.config.trace !== 'local') return;
+    // W6：没有真正的介入 decision（gate/non-intervention）就不写 policy outcome，
+    // 也不制造“无 decision 有 outcome”的不对称。旧 trace 缺字段时同样跳过。
+    if (trace.applied?.policyEligible !== true) return;
     const domain = trace.applied?.domain ?? trace.domains?.[0] ?? 'default';
     // W6：只有实际生效的 heuristic 决策可以作为 adaptive 样本；
-    // model/shadow/off（或旧 trace 缺字段）只写诊断计数，不调阈值。
+    // model/shadow（或旧 trace 缺字段）只写诊断计数，不调阈值。
     const adaptive = trace.applied?.adaptiveEligible === true;
     try {
       await this.policyStore.recordOutcome({ agentId: trace.agentId, domain, kind, adaptive });
@@ -5033,6 +5055,9 @@ export class RecallService {
     const warnings = dedupe(run.warnings);
     // gate / 非人类 turn / mute 等不是策略决策，不能计入 spoken/silent。
     const policyBlocked = NON_INTERVENTION_SILENCE.has(run.silenceReason ?? '');
+    const policyEligible = !policyBlocked;
+    run.policyEligible = policyEligible;
+    if (!policyEligible) run.adaptiveEligible = false;
     await this.ensureDecision(run, warnings);
     const fragments = run.selected.map((candidate) => ({
       ...candidate.fragment,
@@ -5106,6 +5131,7 @@ export class RecallService {
       ...(run.effective?.shadow
         ? { wouldAction: decision.action, wouldDepth: decision.depth }
         : {}),
+      policyEligible: run.policyEligible === true,
       ...(run.adaptiveEligible === true ? { adaptiveEligible: true } : {}),
       ...(decision.degraded ? { degraded: true } : {}),
     };
@@ -5114,7 +5140,8 @@ export class RecallService {
 
     // 决策计数与连续沉默都必须在实际注入结果之后：shadow 记 baseline、
     // 预算裁剪记 silent，不能记未生效的建议。每个 /context 只记一次。
-    if (!policyBlocked) {
+    // W6：gate/non-intervention 不写 policy decision；model/shadow 由 adaptive 标记分流。
+    if (run.policyEligible === true) {
       this.noteIntervention(this.decisionKey(run), applied.action, applied.depth);
       await awaitWithinDeadline(
         this.recordPolicyDecision(

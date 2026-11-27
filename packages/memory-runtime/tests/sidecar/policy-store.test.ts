@@ -327,6 +327,36 @@ describe('PolicyStore', () => {
       .toBe(adaptiveCanaryHit('opencode', 'user', 0.37));
   });
 
+  it('W6：v1 policy state 迁移直接 reset，避免旧 global 污染 adaptive', async () => {
+    await mkdir(join(dir, 'policy'), { recursive: true, mode: 0o700 });
+    await writeFile(path, JSON.stringify({
+      version: 1,
+      updatedAt: now,
+      global: { spoken: 99, silent: 1, reasked: 50 },
+      domains: {
+        'opencode\u0000user': {
+          agentId: 'opencode',
+          domain: 'user',
+          counts: { spoken: 99, silent: 1, reasked: 50 },
+          thresholdOffset: 0.03,
+          updatedAt: now,
+          tunedAt: now,
+          decisionsSinceTune: 10,
+        },
+      },
+    }), { mode: 0o600 });
+    const policy = store();
+    await policy.init();
+    const snapshot = await policy.snapshot();
+    expect(snapshot.version).toBe(2);
+    expect(snapshot.global.spoken).toBe(0);
+    expect(snapshot.domains).toEqual([]);
+    expect(await policy.thresholdFor('opencode', 'user', 0.55)).toBeCloseTo(0.55, 5);
+    await policy.recordDecision({ agentId: 'opencode', domain: 'user', action: 'speak' });
+    await policy.flush();
+    expect((JSON.parse(await readFile(path, 'utf8')) as any).version).toBe(2);
+  });
+
   it('损坏文件 fail-open 为空统计，之后仍可写', async () => {
     const creator = store();
     await creator.init();

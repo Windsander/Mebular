@@ -117,6 +117,7 @@
     "onboard.coach.join": "加入忆云",
     "onboard.coach.dismiss": "知道了",
     "onboard.coach.closeTitle": "关闭引导",
+    "provision.firstRun.disclosure.body": "Mebular 将在本机启动记忆运行时：自动整理对话记忆，并在新对话中注入相关背景。记忆默认保存在本机；只有你在设置中显式允许远端 API 时才会发送到远端。你可以随时在「设置 → 记忆运行时」切换为轻量模式。继续建新或加入即表示了解。",
     "onboard.create.title": "新建忆云",
     "onboard.create.tag": "本机为根",
     "onboard.create.desc": "生成 root 主密钥并在当前进程内完成初始化；完成后共享、记忆、审计与设备卡立即解锁，无需重启。",

@@ -117,6 +117,7 @@
     "onboard.coach.join": "Join cloud",
     "onboard.coach.dismiss": "Got it",
     "onboard.coach.closeTitle": "Dismiss guide",
+    "provision.firstRun.disclosure.body": "Mebular will start Memory Runtime on this device: it organizes conversation memories and injects relevant background into new conversations. Memories stay on this device by default; they are sent to a remote API only if you explicitly allow it in Settings. You can switch to Lightweight anytime in Settings → Memory Runtime. Continuing with Create or Join means you understand this.",
     "onboard.create.title": "New cloud",
     "onboard.create.tag": "This device is root",
     "onboard.create.desc": "Generates the root master key and initializes in this process. Sharing, Memories, Audit, and the device card unlock immediately; no restart needed.",

@@ -7870,6 +7870,9 @@ const ONBOARD_COACH_MS = 6000;
 let onboardBusy = false;
 let onboardCoachTimer = null;
 let onboardCoachHideTimer = null;
+// 0.4.0 W1b：首启披露是否真的展示成功；只有它为真时才在 create/join 请求里 ack。
+// DOM 被隐藏/缺失/渲染异常时保持 null → 服务端不会启用 immersive（fail closed）。
+let firstRunDisclosure = null;
 
 async function fetchProvisionStatus() {
   try {
@@ -7910,6 +7913,11 @@ function showOnboardingCoach() {
   el.classList.remove('is-leaving');
   positionOnboardingCoach();
   requestAnimationFrame(() => el.classList.add('is-visible'));
+  // 首启披露必须一直可见到用户点击「建新 / 加入」；不能因为引导卡自动淡出而变成“未披露”。
+  if (firstRunDisclosure) {
+    if (onboardCoachTimer) { clearTimeout(onboardCoachTimer); onboardCoachTimer = null; }
+    return;
+  }
   if (onboardCoachTimer) clearTimeout(onboardCoachTimer);
   onboardCoachTimer = setTimeout(() => dismissOnboardingCoach(), ONBOARD_COACH_MS);
 }
@@ -7931,6 +7939,34 @@ function dismissOnboardingCoach() {
     el.hidden = true;
     el.classList.remove('is-leaving');
   }, 320);
+}
+
+/** 0.4.0 W1b：全新空 home 的首启披露；返回是否真的展示成功（失败即 fail closed）。 */
+function renderFirstRunDisclosure(status) {
+  const el = $('#first-run-disclosure');
+  const firstRun = status?.firstRun;
+  const pending = firstRun?.pending === true;
+  const version = firstRun?.disclosureVersion;
+  if (!pending || !Number.isInteger(version)) {
+    if (el) el.hidden = true;
+    firstRunDisclosure = null;
+    return false;
+  }
+  if (!el) {
+    firstRunDisclosure = null;
+    return false;
+  }
+  try {
+    el.hidden = false;
+    el.dataset.firstRunShown = '1';
+    el.dataset.disclosureVersion = String(version);
+    firstRunDisclosure = { version, shown: true };
+    return true;
+  } catch {
+    el.hidden = true;
+    firstRunDisclosure = null;
+    return false;
+  }
 }
 
 function openOnboardCreate() {
@@ -7983,6 +8019,9 @@ function closeOnboardJoin() {
  */
 async function unlockConsole(kind) {
   onboardBusy = false;
+  firstRunDisclosure = null;
+  const firstRunEl = $('#first-run-disclosure');
+  if (firstRunEl) firstRunEl.hidden = true;
   const createModal = $('#onboard-create');
   const joinModal = $('#onboard-join');
   if (createModal) createModal.hidden = true;
@@ -8037,6 +8076,10 @@ async function submitOnboard(kind) {
       method: 'POST',
       body: {
         confirm: true,
+        // 只有披露真的展示过才回传 ack；未展示 / 渲染失败 → 服务端保持 pending，不启用 immersive。
+        ...(firstRunDisclosure
+          ? { firstRunDisclosure: true, firstRunDisclosureVersion: firstRunDisclosure.version }
+          : {}),
         ...(deviceName ? { deviceName } : {}),
         ...(isCreate && cloudName ? { cloudName } : {}),
         ...(!isCreate ? { token } : {}),
@@ -8082,6 +8125,8 @@ async function enterLockedConsole(status) {
   stage.start();
   setView('map');
   render();
+  // 0.4.0 W1b：全新空 home 先展示一次性披露（不新增控制项），再显示现有上手引导。
+  renderFirstRunDisclosure(status);
   showOnboardingCoach();
   if (status?.phase === 'INITIALIZING') {
     // 极端并发：初始化进行中，入口禁用并给出提示，等待用户重试。

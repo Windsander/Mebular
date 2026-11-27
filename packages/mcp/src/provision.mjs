@@ -180,7 +180,14 @@ export function normalizeExplicitDeviceId(value) {
   return /^device-+/i.test(raw) ? deriveDeviceId(raw) : (sanitize(raw) || null);
 }
 
-export function provisionStatus({ home, mcpPort, phase = 'UNINITIALIZED', provisioned = false } = {}) {
+export function provisionStatus({
+  home,
+  mcpPort,
+  phase = 'UNINITIALIZED',
+  provisioned = false,
+  firstRun = null,
+  firstRunWarning = null,
+} = {}) {
   const name = defaultDeviceName();
   const base = {
     ok: true,
@@ -195,6 +202,9 @@ export function provisionStatus({ home, mcpPort, phase = 'UNINITIALIZED', provis
     // 兼容旧控制台字段：P1 起初始化不再需要重启。
     restartRequired: false,
     restarting: false,
+    // 0.4.0 W1b：全新空 home 的一次性首启披露状态；已有用户/完成后为 null。
+    ...(firstRun ? { firstRun } : {}),
+    ...(firstRunWarning ? { firstRunWarning } : {}),
   };
   if (phase === 'INITIALIZING') {
     return {

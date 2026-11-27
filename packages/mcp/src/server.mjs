@@ -15,6 +15,13 @@ import { createJoinServer } from './jointoken.mjs';
 import { clearApplyPending, readApplyPending, recoverPendingRollback, writeApplyResult, writeServeReady } from './config-apply.mjs';
 import { buildSettings } from './admin.mjs';
 import { isProvisionHome } from './provision.mjs';
+import {
+  detectFreshHome,
+  FIRST_RUN_INIT_FAILED,
+  initializeFirstRunHome,
+  markFirstRunPending,
+  readFirstRunMarker,
+} from './first-run.mjs';
 import { acquireActiveLock, profileIdForHome, resolveCloudRoot } from './profiles.mjs';
 import { advertiseHost, endpointHostname, isLoopbackHost } from './lan-host.mjs';
 
@@ -147,6 +154,16 @@ export async function startServeServer(options = {}) {
   // F-NET-1（C）：**先取单实例锁，再初始化网络**——第二写者应在绑定监听端口前就得到
   // 可读的 MCP_STORAGE_LOCKED（此前 createMebular 先启网络 → 抢 4001 → 裸 EADDRINUSE）。
   let preConfig = provisionStart ? {} : await loadConfigFile(home).catch(() => ({}));
+  // 0.4.0 W1b：空 home 判定必须在取 `<home>/lock` 之前——锁文件本身会让目录看起来“非空”。
+  // 只写 pending marker，绝不启用；已有 home 不命中。
+  let firstRunWarning = null;
+  try {
+    if (await detectFreshHome({ home, env: process.env })) {
+      await markFirstRunPending({ home, env: process.env });
+    }
+  } catch (error) {
+    console.error(`FIRST_RUN_MARKER_FAILED ${error?.code ?? 'ERROR'}`);
+  }
   const { storagePathForHome } = await import('./home-identity.mjs');
   const preStoragePath = storagePathForHome(home, preConfig, process.env);
   const lock = await acquireLock(home, preStoragePath);
@@ -163,6 +180,24 @@ export async function startServeServer(options = {}) {
   // 恢复/跳过/失败后都以磁盘现状重新判定启动模式与 HTTP/TLS 初值。
   provisionStart = isProvisionHome(home, { storagePath: process.env.MEBULAR_STORAGE_PATH });
   preConfig = provisionStart ? {} : await loadConfigFile(home).catch(() => ({}));
+
+  // 0.4.0 W1b：acked 的首启初始化在正常启动前重试；任一步失败只记录 warning，
+  // 不阻塞 serve，也不把失败当成 heuristic 默认启用。
+  if (!provisionStart) {
+    try {
+      const marker = await readFirstRunMarker({ home });
+      if (marker?.state === 'acked') {
+        const initialized = await initializeFirstRunHome({ home, env: process.env });
+        if (initialized.ok !== true) {
+          firstRunWarning = FIRST_RUN_INIT_FAILED;
+          console.error(`FIRST_RUN_INIT_FAILED ${initialized.reason ?? 'unknown'}`);
+        }
+      }
+    } catch (error) {
+      firstRunWarning = FIRST_RUN_INIT_FAILED;
+      console.error(`FIRST_RUN_INIT_FAILED ${error?.code ?? 'ERROR'}`);
+    }
+  }
 
   // 热初始化 / 正常启动共用：app、join 服务、运行时快照与生命周期资源。
   let current = null;
@@ -391,6 +426,7 @@ export async function startServeServer(options = {}) {
       writesEnabled: options.writesEnabled ?? process.env.MEBULAR_CONSOLE_WRITES !== '0',
       manageMemoryRuntime: true,
       provision: provisionStart,
+      firstRunWarning,
       initializeRuntime: async ({ action, result, server }) => {
         const next = await startRuntime({ action, result, serverContext: server, hot: true });
         current = next;

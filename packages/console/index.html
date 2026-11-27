@@ -348,6 +348,9 @@
   <!-- P3：无 current 时的非阻塞上手引导（指向顶栏两个入口；数秒自动淡出，可点/ESC 关闭） -->
   <div id="onboarding-coach" class="onboarding-coach" role="status" aria-live="polite" hidden>
     <p class="onboarding-coach-title" data-i18n="onboard.coach.title">先新建一个忆云，或加入已有忆云</p>
+    <!-- 0.4.0 W1b：全新空 home 一次性首启披露（唯一允许的 UI 增量）。
+         只是说明，不是 consent；不新增开关/勾选，也不改「建新 / 加入」流程。 -->
+    <p id="first-run-disclosure" class="onboarding-coach-body" data-first-run-disclosure data-i18n="provision.firstRun.disclosure.body" hidden>Mebular 将在本机启动记忆运行时：自动整理对话记忆，并在新对话中注入相关背景。记忆默认保存在本机；只有你在设置中显式允许远端 API 时才会发送到远端。你可以随时在「设置 → 记忆运行时」切换为轻量模式。继续建新或加入即表示了解。</p>
     <p class="onboarding-coach-body"><span data-i18n="onboard.coach.bodyBefore">忆云是本机记忆的共享空间。从右上角开始：</span><b data-i18n="onboard.coach.bodyCreate">新建忆云</b> <span data-i18n="onboard.coach.bodyOr">或</span> <b data-i18n="onboard.coach.bodyJoin">加入忆云</b><span data-i18n="onboard.coach.bodyAfter">。</span></p>
     <div class="onboarding-coach-actions">
       <button id="coach-create" class="btn btn-primary btn-small" type="button" data-i18n="onboard.coach.create">新建忆云</button>

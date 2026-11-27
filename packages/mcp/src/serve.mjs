@@ -59,6 +59,14 @@ import {
   writeProvisionRecord,
 } from './provision.mjs';
 import {
+  FIRST_RUN_DISCLOSURE_VERSION,
+  FIRST_RUN_INIT_FAILED,
+  firstRunPublicView,
+  initializeFirstRunHome,
+  markFirstRunAcked,
+  readFirstRunMarker,
+} from './first-run.mjs';
+import {
   acquireActiveLock,
   cloudError,
   homeKey,
@@ -909,6 +917,8 @@ export async function startHttpServer({
   afterConfigRename = null,
   // 引导态（空家目录）：只服务 /healthz + /console 引导页 + /app/provision/*；其余 409 provision_required
   provision: initialProvision = false,
+  // 0.4.0 W1b：首启初始化失败时给控制台的稳定 warning（不阻塞 READY）。
+  firstRunWarning = null,
   // P1：同一进程内热初始化。返回新的运行时上下文；成功后本 server 从 UNINITIALIZED → READY。
   initializeRuntime = null,
   // 关闭钩子：热初始化后由 server.mjs 关闭 app / join / 广播计时器（HTTP server 本身由本函数关闭）
@@ -4313,11 +4323,14 @@ export async function startHttpServer({
           if (done !== false) return done;
         }
         if (path === '/app/provision/status' && req.method === 'GET') {
+          const firstRunMarker = await readFirstRunMarker({ home }).catch(() => null);
           return sendJson(res, 200, provisionStatus({
             home,
             mcpPort: boundPort,
             phase,
             provisioned: !isProvisionHome(home),
+            firstRun: firstRunPublicView(firstRunMarker),
+            firstRunWarning,
           }));
         }
         if (path === '/app/provision/create' || path === '/app/provision/join' || path === '/app/provision/restore') {
@@ -4432,11 +4445,60 @@ export async function startHttpServer({
                 }
               })
               .catch((error) => console.error(`CLIENT_ENDPOINT_RECONCILE_FAILED ${error?.code ?? 'ERROR'}`));
+            // 0.4.0 W1b：先确保 provision/应用本身成功，再 ack 披露并初始化 immersive。
+            // 披露成功（Console 显式回传且版本匹配）才写 enabled=true；未回传 / 版本不符 →
+            // marker 保持 pending，不写 enabled=true（fail closed）；应用初始化失败时不会 ack。
+            let firstRun = null;
+            if (input.firstRunDisclosure === true) {
+              try {
+                const acked = await markFirstRunAcked({
+                  home,
+                  disclosureVersion: Number.isInteger(input.firstRunDisclosureVersion)
+                    ? input.firstRunDisclosureVersion
+                    : FIRST_RUN_DISCLOSURE_VERSION,
+                });
+                if (acked) {
+                  const initialized = await initializeFirstRunHome({ home, env: process.env });
+                  firstRun = {
+                    acknowledged: true,
+                    initialized: initialized.ok === true,
+                    ...(initialized.ok === true ? {} : { warning: FIRST_RUN_INIT_FAILED }),
+                  };
+                  if (initialized.ok !== true) {
+                    console.error(`FIRST_RUN_INIT_FAILED ${initialized.reason ?? 'unknown'}`);
+                  }
+                  if (initialized.ok === true && initialized.enabled === true) {
+                    // 同步路由可见的配置快照，让 supervisor/capability 看到 enabled=true。
+                    config = {
+                      ...config,
+                      memoryRuntime: { ...(config.memoryRuntime ?? {}), enabled: true },
+                    };
+                  }
+                } else {
+                  firstRun = { acknowledged: false };
+                }
+              } catch (error) {
+                console.error(`FIRST_RUN_INIT_FAILED ${error?.code ?? 'ERROR'}`);
+                firstRun = { acknowledged: false, warning: FIRST_RUN_INIT_FAILED };
+              }
+            }
+            // 同进程首次启用：准备 capability token 并启动 sidecar（与设置页开启走同一生命周期）。
+            if (firstRun?.initialized === true && isMemoryRuntimeEnabled(config)) {
+              void enqueueMemoryRuntimeLifecycle(async () => {
+                await memoryCapability.prepare().catch(() => undefined);
+                if (memoryRuntimeSupervisor && isMemoryRuntimeEnabled(config)) {
+                  await memoryRuntimeSupervisor.start().catch((error) => {
+                    console.error(`MEMORY_RUNTIME_START_FAILED ${error?.code ?? 'ERROR'}`);
+                  });
+                }
+              }).catch((error) => console.error(`MEMORY_RUNTIME_START_FAILED ${error?.code ?? 'ERROR'}`));
+            }
             return sendJson(res, 200, {
               ok: true,
               ...result,
               initialized: true,
               phase: 'READY',
+              ...(firstRun ? { firstRun } : {}),
             });
           } catch (error) {
             // 回滚本次新建的落盘产物；home 锁仍由当前进程持有（不释放/不重抢）。

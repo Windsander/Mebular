@@ -3914,13 +3914,16 @@ describe('@mebular/dsh-plugin memory runtime：host plan bridge', () => {
     const agent = makeAgent({ id: 'a1', session: surface.session });
     agent.runMaintenance = async (task) => task(new AbortController().signal);
     emitPlannerEvent = () => {
-      // planner 内部消息必须显式标记；同 session 真实消息不带标记。
-      handlerFor(ctx, 'session/event')(surface.session, {
-        ...event('assistant/message', 99, {
-          message: { role: 'assistant', content: [{ type: 'text', text: 'planner internal text' }] },
-          internal: true,
-        }),
-      });
+      // 模拟真实宿主：planner 事件没有 internal 标记，只能靠输出 hash/messageId 判定。
+      handlerFor(ctx, 'session/event')(surface.session, event('assistant/message', 99, {
+        message: {
+          role: 'assistant',
+          content: [{
+            type: 'text',
+            text: '{"action":"speak","depth":"gist","confidence":0.73,"reasonCode":"high_relevance"}',
+          }],
+        },
+      }));
       handlerFor(ctx, 'session/event')(surface.session, event('user/message', 100, humanMessage('real user during planner')));
       handlerFor(ctx, 'session/event')(surface.session, event('assistant/message', 101, {
         message: { role: 'assistant', content: [{ type: 'text', text: 'real assistant during planner' }] },
@@ -3980,7 +3983,7 @@ describe('@mebular/dsh-plugin memory runtime：host plan bridge', () => {
     ));
     expect(ingestedText).toContain('real user during planner');
     expect(ingestedText).toContain('real assistant during planner');
-    expect(ingestedText).not.toContain('planner internal text');
+    expect(ingestedText).not.toContain('{"action":"speak","depth":"gist","confidence":0.73,"reasonCode":"high_relevance"}');
     expect(fetch.calls.filter((call) => call.url.includes('/checkpoints/'))).toHaveLength(0);
     expect(fetch.calls.filter((call) => call.url.includes('/self/'))).toHaveLength(0);
     expect(adapter.getState().hostPlan).toMatchObject({

@@ -4054,6 +4054,125 @@ describe('0.4.0 W3 host plan isolation', () => {
     await controller.dispose();
   });
 
+  it('flush 重放期间到达的真实事件不被清空，也不重复 ingest', async () => {
+    let controllerRef = null;
+    let ingestCalls = 0;
+    const contextMessages = userMessages();
+    const realUser = {
+      id: 'u2',
+      role: 'user',
+      content: [{ type: 'text', text: 'real next user turn' }],
+    };
+    const lateUser = {
+      id: 'u3',
+      role: 'user',
+      content: [{ type: 'text', text: 'late user during flush' }],
+    };
+    const routes = hostPlanRoutes();
+    routes['/ingest'] = async (call) => {
+      ingestCalls += 1;
+      if (ingestCalls === 2) {
+        // 正在重放真实 turn 的 ingest 时，宿主又送来下一轮真实事件。
+        contextMessages.splice(0, contextMessages.length, lateUser);
+        await controllerRef.handleEvent({
+          type: 'session.inbox.delivered',
+          data: { sessionID: 'ses_test' },
+        });
+        await controllerRef.handleEvent({
+          type: 'session.text.ended',
+          data: { sessionID: 'ses_test', text: 'late assistant during flush', assistantMessageID: 'ra2' },
+        });
+        await controllerRef.handleEvent({
+          type: 'session.execution.succeeded',
+          data: { sessionID: 'ses_test', messageID: 'ra2' },
+        });
+      }
+      return jsonResponse({ ok: true, data: ingestResponse(call.body).data });
+    };
+    const { controller, fetchImpl, calls } = controllerWith({
+      routes,
+      ctx: {
+        contextMessages,
+        generateImpl: async () => {
+          contextMessages.splice(0, contextMessages.length, realUser);
+          await controllerRef.handleEvent({
+            type: 'session.inbox.delivered',
+            data: { sessionID: 'ses_test' },
+          });
+          await controllerRef.handleEvent({
+            type: 'session.text.ended',
+            data: { sessionID: 'ses_test', text: 'real assistant reply', assistantMessageID: 'ra1' },
+          });
+          await controllerRef.handleEvent({
+            type: 'session.execution.succeeded',
+            data: { sessionID: 'ses_test', messageID: 'ra1' },
+          });
+          await controllerRef.handleEvent({
+            type: 'session.text.ended',
+            data: { sessionID: 'ses_test', text: HOST_PLAN_JSON, assistantMessageID: 'pa1' },
+          });
+          return { text: HOST_PLAN_JSON, id: 'pa1' };
+        },
+      },
+    });
+    controllerRef = controller;
+    await controller.start();
+    await controller.handleContext(hookEvent(userMessages('please use a dark theme')));
+    await controller.handleEvent({ type: 'session.idle', data: { sessionID: 'ses_test' } });
+    await waitFor(() => controller.getStatus().hostPlan.generated === 1);
+
+    expect(calls.generate).toHaveLength(1);
+    expect(ingestCalls).toBe(3);
+    expect(fetchImpl.callsFor('/ingest')).toHaveLength(3);
+    const lateIngest = fetchImpl.callsFor('/ingest')[2].body;
+    expect(lateIngest.chunks.map((chunk) => chunk.text)).toEqual([
+      'late user during flush',
+      'late assistant during flush',
+    ]);
+    expect(controller.getStatus().hostPlan.suppressedEvents).toBeGreaterThanOrEqual(1);
+    await controller.dispose();
+  });
+
+  it('captureSessionContext 过滤宿主 context 中的 planner prompt/assistant', async () => {
+    const plannerText = HOST_PLAN_JSON;
+    const contextMessages = [
+      { id: 'u1', role: 'user', content: [{ type: 'text', text: 'please use a dark theme' }] },
+    ];
+    const { controller, fetchImpl } = controllerWith({
+      routes: hostPlanRoutes(),
+      ctx: {
+        contextMessages,
+        generateImpl: async () => ({ text: plannerText, id: 'pa1' }),
+      },
+    });
+    await controller.start();
+    await controller.handleContext(hookEvent(userMessages('please use a dark theme')));
+    // 让 planner 生成一次，写入 prompt/output 指纹。
+    await controller.handleEvent({ type: 'session.idle', data: { sessionID: 'ses_test' } });
+    await waitFor(() => controller.getStatus().hostPlan.generated === 1);
+    // 生成后宿主 history 才出现 planner prompt/assistant；再次 capture 必须过滤。
+    contextMessages.push(
+      {
+        id: 'planner-user',
+        role: 'user',
+        content: [{ type: 'text', text: 'You plan whether the next assistant turn should surface long-term memory.' }],
+      },
+      {
+        id: 'planner-assistant',
+        role: 'assistant',
+        content: [{ type: 'text', text: plannerText }],
+      },
+    );
+    await controller.handleEvent({ type: 'session.inbox.delivered', data: { sessionID: 'ses_test' } });
+    const texts = fetchImpl.callsFor('/ingest').flatMap((call) => (
+      Array.isArray(call.body?.chunks) ? call.body.chunks.map((chunk) => chunk.text) : []
+    ));
+    expect(texts).not.toContain(plannerText);
+    expect(texts.some((text) => text.includes('You plan whether the next assistant turn'))).toBe(false);
+    expect(controller.getStatus().hostPlan.suppressedEvents).toBeGreaterThanOrEqual(1);
+    await controller.dispose();
+  });
+
   it('sidecar source 变化时 adapter 主动清空 host plan 缓存', async () => {
     const routes = hostPlanRoutes();
     let source = 'host';

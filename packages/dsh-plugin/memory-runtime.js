@@ -42,6 +42,14 @@ const HOST_PLAN_REASONS = new Set([
 ]);
 const HOST_PLAN_TTL_MS = 60_000;
 const MAX_HOST_PLANS = 64;
+const PLANNER_FINGERPRINT_TTL_MS = 10 * 60_000;
+const PLANNER_QUEUE_EVENTS = new Set([
+  'assistant/message',
+  'turn/end',
+  'tool/call',
+  'tool/result',
+  'compaction/end',
+]);
 const HOST_PLAN_PROMPT = `You plan whether the next assistant turn should surface long-term memory.
 
 Return ONLY one JSON object:
@@ -1914,6 +1922,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
   // W3：session → 上一轮 /context 的 basis meta；只含 hash/枚举。
   const contextMetas = new Map();
   const hostPlans = new Map();
+  const plannerRecords = new Map();
   let lastHostPlanSource = null;
   const hostInstanceId = `hi_${randomUUID().replace(/-/g, '')}`;
   const trackers = new Map();
@@ -2599,13 +2608,101 @@ export function createMemoryRuntimeAdapter(options = {}) {
     warnOnce(`host-plan:invalidated:${reason}`, `memory runtime host plan cache invalidated (${reason})`);
   }
 
-  /** planner 生成的消息必须显式携带 internal 标记；不按 session 时间窗口猜。 */
+  /** 显式 internal 标记始终抑制；没有标记时再用输出 hash/messageId 判定。 */
   function isInternalPlannerEvent(event) {
     return event?.internal === true
       || event?.data?.internal === true
       || (isObject(event?.data?.source)
         && (event.data.source.kind === 'mebular-planner'
           || event.data.source.kind === 'mebular-planner-message'));
+  }
+
+  function plannerRecordFor(sessionId) {
+    const record = plannerRecords.get(sessionId);
+    if (!record) return null;
+    if (now() > record.expiresAt) {
+      plannerRecords.delete(sessionId);
+      return null;
+    }
+    return record;
+  }
+
+  function plannerEventText(event) {
+    const data = isObject(event?.data) ? event.data : {};
+    if (typeof data.text === 'string' && data.text.trim().length > 0) return data.text.trim();
+    const message = isObject(data.message) ? data.message : null;
+    if (message) {
+      const text = contentText(message.content ?? message.text).trim();
+      if (text.length > 0) return text;
+    }
+    if (typeof data.content !== 'undefined') {
+      const text = contentText(data.content).trim();
+      if (text.length > 0) return text;
+    }
+    return '';
+  }
+
+  function plannerEventMessageId(event) {
+    const data = isObject(event?.data) ? event.data : {};
+    return asText(data.assistantMessageID)
+      || asText(data.messageID)
+      || asText(data.message?.id)
+      || asText(data.id);
+  }
+
+  function plannerTextHash(value) {
+    const text = asText(value);
+    return text.length > 0 ? hashText(text) : '';
+  }
+
+  function classifyPlannerEvent(event, record) {
+    if (!record) return 'normal';
+    const messageId = plannerEventMessageId(event);
+    if (messageId && record.messageIds.has(messageId)) return 'planner';
+    const text = plannerEventText(event);
+    if (text) {
+      const hash = plannerTextHash(text);
+      if (hash && (record.outputHashes.has(hash) || record.promptHashes.has(hash))) {
+        if (messageId) record.messageIds.add(messageId);
+        return 'planner';
+      }
+      if (text.includes(HOST_PLAN_PROMPT.slice(0, 48)) || text.includes('<<<TRANSCRIPT')) {
+        if (messageId) record.messageIds.add(messageId);
+        return 'planner';
+      }
+    }
+    if (!record.settled) return 'queue';
+    return 'normal';
+  }
+
+  function flushPlannerQueue(record) {
+    if (!record || record.flushing) return;
+    record.flushing = true;
+    // 重放前先 settled：期间新到事件直接 normal/planner 判定，不再入 pending。
+    record.settled = true;
+    record.expiresAt = now() + PLANNER_FINGERPRINT_TTL_MS;
+    try {
+      for (const entry of record.pending) {
+        const text = plannerEventText(entry.event);
+        const messageId = plannerEventMessageId(entry.event);
+        if (text && record.outputHashes.has(plannerTextHash(text)) && messageId) {
+          record.messageIds.add(messageId);
+        }
+      }
+      const queued = record.pending.splice(0);
+      for (const entry of queued) {
+        const kind = classifyPlannerEvent(entry.event, record);
+        if (kind === 'planner') {
+          stats.hostPlan.suppressedEvents += 1;
+          stats.ingest.skipped += 1;
+          continue;
+        }
+        onSessionEvent(entry.session, entry.event, { skipPlannerIsolation: true });
+      }
+    } finally {
+      record.flushing = false;
+      record.pending.length = 0;
+    }
   }
 
   /** 只保存 sidecar 返回的 hash/枚举；不保存 query/正文/gist。 */
@@ -2733,6 +2830,18 @@ export function createMemoryRuntimeAdapter(options = {}) {
       stats.hostPlan.skipped += 1;
       return;
     }
+    const plannerPrompt = `${HOST_PLAN_PROMPT}\n\n<<<TRANSCRIPT\n${transcript}\nTRANSCRIPT>>>`;
+    const plannerSessionId = safeThreadId(session?.id);
+    const plannerRecord = plannerSessionId ? {
+      outputHashes: new Set(),
+      promptHashes: new Set([plannerTextHash(plannerPrompt)]),
+      messageIds: new Set(),
+      pending: [],
+      settled: false,
+      flushing: false,
+      expiresAt: now() + PLANNER_FINGERPRINT_TTL_MS,
+    } : null;
+    if (plannerSessionId && plannerRecord) plannerRecords.set(plannerSessionId, plannerRecord);
     try {
       await run.call(agent, async (agentSignal) => {
         const scope = createAbortScope(
@@ -2764,7 +2873,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
             maxTokens: Math.min(256, Number.isFinite(preparedConfig.maxTokens) ? preparedConfig.maxTokens : 256),
             messages: [{
               role: 'user',
-              content: [{ type: 'text', text: `${HOST_PLAN_PROMPT}\n\n<<<TRANSCRIPT\n${transcript}\nTRANSCRIPT>>>` }],
+              content: [{ type: 'text', text: plannerPrompt }],
             }],
             signal: scope.signal,
           });
@@ -2779,6 +2888,9 @@ export function createMemoryRuntimeAdapter(options = {}) {
           if (scope.signal.aborted || closing || disposed) {
             stats.hostPlan.skipped += 1;
             return;
+          }
+          if (output.length > 0 && plannerRecord) {
+            plannerRecord.outputHashes.add(plannerTextHash(output));
           }
           const parsed = parseHostPlanOutput(output);
           if (!parsed) {
@@ -2824,6 +2936,8 @@ export function createMemoryRuntimeAdapter(options = {}) {
       });
     } catch {
       stats.hostPlan.failed += 1;
+    } finally {
+      if (plannerRecord) flushPlannerQueue(plannerRecord);
     }
   }
 
@@ -3995,17 +4109,32 @@ export function createMemoryRuntimeAdapter(options = {}) {
     }
   }
 
-  function onSessionEvent(session, event) {
+  function onSessionEvent(session, event, options = {}) {
     if (closing || disposed || !isObject(event) || typeof event.type !== 'string') return;
     if (!isLiveOwnEvent(session, event)) {
       stats.ingest.inherited += 1;
       return;
     }
-    if (isInternalPlannerEvent(event)) {
-      // 只过滤显式 planner 消息；同 session 的真实 user/assistant 照常 ingest。
-      stats.hostPlan.suppressedEvents += 1;
-      stats.ingest.skipped += 1;
-      return;
+    if (!options.skipPlannerIsolation) {
+      if (isInternalPlannerEvent(event)) {
+        stats.hostPlan.suppressedEvents += 1;
+        stats.ingest.skipped += 1;
+        return;
+      }
+      const record = plannerRecordFor(safeThreadId(session?.id));
+      if (record) {
+        const kind = classifyPlannerEvent(event, record);
+        if (kind === 'planner') {
+          stats.hostPlan.suppressedEvents += 1;
+          stats.ingest.skipped += 1;
+          return;
+        }
+        if (kind === 'queue' && event.type !== 'user/message'
+          && PLANNER_QUEUE_EVENTS.has(event.type)) {
+          record.pending.push({ session, event });
+          return;
+        }
+      }
     }
     if (COMPACTION_TYPES.has(event.type)) {
       if (config.checkpoints) {
@@ -4641,6 +4770,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
         recalls.clear();
         contextMetas.clear();
         hostPlans.clear();
+        plannerRecords.clear();
         compactions.clear();
         checkpointRevisions.clear();
         checkpointLatest.clear();

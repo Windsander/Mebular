@@ -69,6 +69,8 @@ const HOST_PLAN_REASONS = new Set([
 ]);
 const HOST_PLAN_TTL_MS = 60_000;
 const MAX_HOST_PLANS = 64;
+/** planner prompt/assistant 指纹保留时间；宿主 context 可能在生成后一段时间仍含该消息。 */
+const PLANNER_FINGERPRINT_TTL_MS = 10 * 60_000;
 const HOST_PLAN_PROMPT = `You plan whether the next assistant turn should surface long-term memory.
 
 Return ONLY one JSON object:
@@ -3025,8 +3027,17 @@ export function createController(dependencies = {}) {
         if (closed || !enabled || !ingestAllowed) return;
         const messages = asArray(result);
         const recent = messages.slice(-config.maxCaptureMessages);
+        const plannerRecord = plannerRecordFor(session);
         stats.ingest.contextReads += 1;
-        for (const message of recent) bufferMessage(session, message);
+        for (const message of recent) {
+          if (isPlannerMessage(plannerRecord, message)) {
+            // ctx.session.context() 可能包含 planner prompt/assistant；不得进 ingest。
+            stats.hostPlan.suppressedEvents += 1;
+            stats.ingest.skipped += 1;
+            continue;
+          }
+          bufferMessage(session, message);
+        }
       } catch {
         stats.ingest.contextFailures += 1;
       }
@@ -3341,6 +3352,23 @@ export function createController(dependencies = {}) {
     return text ? hashText(text) : '';
   }
 
+  function isPlannerMessage(record, message) {
+    if (!record || !isObject(message)) return false;
+    const id = asText(message.id) || asText(message.messageID);
+    if (id && record.messageIds.has(id)) return true;
+    if (message.internal === true
+      || (isObject(message.source) && (message.source.kind === 'mebular-planner'
+        || message.source.kind === 'mebular-planner-message'))) {
+      return true;
+    }
+    const text = messageText(message);
+    if (!text) return false;
+    const hash = plannerTextHash(text);
+    if (record.outputHashes.has(hash) || record.promptHashes.has(hash)) return true;
+    // 宿主可能把 planner prompt 包进别的消息形状；用固定标记兜底。
+    return text.includes(HOST_PLAN_PROMPT.slice(0, 48)) || text.includes('<<<TRANSCRIPT');
+  }
+
   function classifyPlannerEvent(event, record) {
     if (!record) return 'normal';
     const messageId = plannerEventMessageId(event);
@@ -3367,6 +3395,10 @@ export function createController(dependencies = {}) {
   async function flushPlannerQueue(record) {
     if (!record || record.flushing) return;
     record.flushing = true;
+    // 重放前先 settled：期间新到事件直接按 normal/planner 判定，
+    // 不再 push 回 pending，避免 finally 清空丢事件。
+    record.settled = true;
+    record.expiresAt = now() + PLANNER_FINGERPRINT_TTL_MS;
     try {
       // 先把已排队文本与输出 hash 对上，收集 planner messageId，供 execution 事件判定。
       for (const event of record.pending) {
@@ -3388,9 +3420,6 @@ export function createController(dependencies = {}) {
       }
     } finally {
       record.flushing = false;
-      record.settled = true;
-      record.expiresAt = now() + 5000;
-      // 保留短 TTL，吸收 generate 返回后才到达的 planner 事件。
       record.pending.length = 0;
     }
   }
@@ -3470,13 +3499,15 @@ export function createController(dependencies = {}) {
     hostPlanInFlight.add(inFlightKey);
     stats.hostPlan.attempts += 1;
     const plannerSession = session ?? 'session';
+    const plannerPrompt = `${HOST_PLAN_PROMPT}\n\n<<<TRANSCRIPT\n${transcript}\nTRANSCRIPT>>>`;
     const plannerRecord = {
       outputHashes: new Set(),
+      promptHashes: new Set([plannerTextHash(plannerPrompt)]),
       messageIds: new Set(),
       pending: [],
       settled: false,
       flushing: false,
-      expiresAt: undefined,
+      expiresAt: now() + PLANNER_FINGERPRINT_TTL_MS,
     };
     plannerGenerations.set(plannerSession, plannerRecord);
     let outputText = '';
@@ -3485,7 +3516,7 @@ export function createController(dependencies = {}) {
       const result = await Promise.race([
         waitForLifecycle(ctx.session.generate({
           sessionID: session,
-          prompt: `${HOST_PLAN_PROMPT}\n\n<<<TRANSCRIPT\n${transcript}\nTRANSCRIPT>>>`,
+          prompt: plannerPrompt,
         })),
         new Promise((_, reject) => {
           timer = setTimeoutFn(

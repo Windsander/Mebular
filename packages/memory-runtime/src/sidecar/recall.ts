@@ -98,7 +98,10 @@ import {
   type HostApp,
   type HostInterventionPlan,
 } from './host-plan.js';
-import type { InferenceInterventionStats } from './inference-provider.js';
+import {
+  INTERVENTION_MAX_CANDIDATES,
+  type InferenceInterventionStats,
+} from './inference-provider.js';
 import { adaptiveCanaryHit, type AdaptiveThresholdResult, type PolicyStore } from './policy-store.js';
 import {
   issueOutcomeBinding,
@@ -2985,7 +2988,17 @@ export class RecallService {
       return this.finish(run, mode, degraded);
     }
 
-    const candidates = await this.buildCandidates(rawRecords, cue, request, warnings);
+    const plannerWindowFull = mode === 'context'
+      && this.effectiveIntervention.mode !== 'shadow'
+      && this.effectiveIntervention.planner !== 'off';
+    const candidates = await this.buildCandidates(rawRecords, cue, request, warnings, {
+      // /context with an enforced planner must not prune already-injected
+      // candidates before planning: novelty is a planner input (`no_novelty`)
+      // and prefetch/host-plan consumption has to happen even when every
+      // candidate was injected last turn. off/shadow and /recall keep the
+      // legacy pre-filter.
+      deferInjectedToPlanner: plannerWindowFull,
+    });
     run.candidates = candidates;
     const eligible = candidates.filter((candidate) => !candidate.filteredReason);
 
@@ -2994,7 +3007,14 @@ export class RecallService {
       return this.finish(run, mode, degraded);
     }
 
-    const selected = this.selectCandidates(eligible, cue, warnings);
+    // Enforced /context: planner sees the full eligible window so an old
+    // already-injected high-score fragment cannot squeeze a fresh lower-score
+    // one out of `maxFragments` before planning. The final injectable subset is
+    // selected after the decision, with maxFragments/conflict/novelty rules.
+    // off/shadow//recall keep the legacy pre-planner truncation.
+    const selected = plannerWindowFull
+      ? this.rankCandidates(eligible)
+      : this.selectCandidates(eligible, cue, warnings);
     run.selected = selected;
     if (selected.length === 0) {
       if (!run.selfBlock && !run.checkpointBlock) run.silenceReason = this.silenceReasonFor(candidates);
@@ -3003,7 +3023,9 @@ export class RecallService {
 
     // 在这里决定「要不要带 memory fragments、带多深」；self/checkpoint 已经加载，
     // 不受影响。off 只记录 baseline；shadow 只记录建议；heuristic/model 实际生效。
-    const intervention = await this.decideIntervention(run, selected, warnings);
+    const intervention = await this.decideIntervention(run, selected, warnings, {
+      finalSelection: plannerWindowFull,
+    });
     run.decision = intervention.decision;
     run.effective = intervention.effective;
 
@@ -3453,14 +3475,48 @@ export class RecallService {
     return [...resolved];
   }
 
+  /**
+   * The model prompt only renders the first `INTERVENTION_MAX_CANDIDATES`
+   * views. Keep the global top-1 stable (host basis/cue validation) but make
+   * sure fresh candidates outside that window replace already-injected slots
+   * at the end of the window, so an old high-score candidate cannot hide them.
+   */
+  private promoteFreshForPlanner(
+    candidates: InterventionCandidateView[],
+    alreadyInjected: readonly string[],
+  ): InterventionCandidateView[] {
+    const limit = Math.min(INTERVENTION_MAX_CANDIDATES, candidates.length);
+    if (limit <= 1) return candidates;
+    const injected = new Set(alreadyInjected);
+    const isInjected = (candidate: InterventionCandidateView): boolean => (
+      injected.has(candidate.fragmentId)
+      || candidate.sourceIds.some((id) => injected.has(id))
+    );
+    const result = [...candidates];
+    let target = limit - 1;
+    for (let index = limit; index < result.length; index += 1) {
+      const candidate = result[index]!;
+      if (isInjected(candidate)) continue;
+      while (target > 0 && !isInjected(result[target]!)) target -= 1;
+      if (target <= 0) break;
+      const replaced = result[target]!;
+      result[target] = candidate;
+      result[index] = replaced;
+      target -= 1;
+    }
+    return result;
+  }
+
   private async buildCandidates(
     rawRecords: RawCandidate[],
     cue: Cue,
     request: NormalizedRequest,
     warnings: string[],
+    options: { deferInjectedToPlanner?: boolean } = {},
   ): Promise<Candidate[]> {
     const candidates: Candidate[] = [];
     const quota = new Set(this.resolveInjectedIds(request.alreadyInjectedIds));
+    const deferInjected = options.deferInjectedToPlanner === true;
     const now = this.now();
     for (const entry of rawRecords) {
       const record = entry.record;
@@ -3554,10 +3610,15 @@ export class RecallService {
       // 宿主级去重：quota 已把旧的 fragment ID（mf_…）通过别名表展开为 source ID；
       // 这里再直接检查本轮 fragment.id，兼容在同一次召回上下文内回传 ID 的调用方。
       // 顺序保持 sourceIds 优先；同一 ID 上 quarantine 仍优先于普通去重。
-      const sourceHit = [...sourceIds, fragment.id].find((id) => quota.has(id)
-        || (this.quarantined.get(id) ?? 0) > now);
-      if (sourceHit) {
-        candidate.filteredReason = (this.quarantined.get(sourceHit) ?? 0) > now ? 'quarantined' : 'already_injected';
+      // 有 enforced planner 的 /context 不在这里剪枝：候选要进入 planner 才能记录
+      // no_novelty、消费 local/host plan；实际注入在 planner 之后再做 novelty 过滤。
+      const idCandidates = [...sourceIds, fragment.id];
+      const quarantinedHit = idCandidates.find((id) => (this.quarantined.get(id) ?? 0) > now);
+      const injectedHit = idCandidates.find((id) => quota.has(id));
+      if (quarantinedHit) {
+        candidate.filteredReason = 'quarantined';
+      } else if (injectedHit && !deferInjected) {
+        candidate.filteredReason = 'already_injected';
       } else if (stale && !request.includeHistory) {
         candidate.filteredReason = 'stale';
       } else if (candidate.fragment.score.final < 0.35) {
@@ -3599,16 +3660,37 @@ export class RecallService {
     }
   }
 
-  private selectCandidates(eligible: Candidate[], cue: Cue, warnings: string[]): Candidate[] {
-    const maxFragments = cue.budget.maxFragments;
-    const broad = cue.specificity === 'broad' && cue.detailIntent.level === 'gist';
-    const effectiveMax = broad ? Math.min(maxFragments, 2) : maxFragments;
-    const sorted = [...eligible].sort((a, b) => (
-      b.fragment.score.final - a.fragment.score.final
+  private sortCandidatesByScore(
+    eligible: Candidate[],
+    preferFreshIds?: ReadonlySet<string>,
+  ): Candidate[] {
+    const freshness = (candidate: Candidate): number => (
+      preferFreshIds?.has(candidate.fragment.id) ? 0 : 1
+    );
+    return [...eligible].sort((a, b) => (
+      (preferFreshIds ? freshness(a) - freshness(b) : 0)
+      || b.fragment.score.final - a.fragment.score.final
       || b.fragment.confidence - a.fragment.confidence
       || (b.fragment.time?.at ?? 0) - (a.fragment.time?.at ?? 0)
       || a.fragment.id.localeCompare(b.fragment.id)
     ));
+  }
+
+  /** Full planner-visible window: score order with conflict groups kept adjacent. */
+  private rankCandidates(eligible: Candidate[]): Candidate[] {
+    return this.orderWithConflictGroups(this.sortCandidatesByScore(eligible), groupNameOf);
+  }
+
+  private selectCandidates(
+    eligible: Candidate[],
+    cue: Cue,
+    warnings: string[],
+    options: { preferFreshIds?: ReadonlySet<string> } = {},
+  ): Candidate[] {
+    const maxFragments = cue.budget.maxFragments;
+    const broad = cue.specificity === 'broad' && cue.detailIntent.level === 'gist';
+    const effectiveMax = broad ? Math.min(maxFragments, 2) : maxFragments;
+    const sorted = this.sortCandidatesByScore(eligible, options.preferFreshIds);
 
     const selected: Candidate[] = [];
     const selectedIds = new Set<string>();
@@ -3783,8 +3865,11 @@ export class RecallService {
         if (!validation.ok) {
           hostFallbackReason = validation.reason;
           pushWarning(warnings, validation.warning);
-        } else if (decidedByRules(heuristic) || candidates.length === 0) {
+        } else if ((decidedByRules(heuristic) && heuristic.reason !== 'no_novelty')
+          || candidates.length === 0) {
           // must_speak / defer / greeting / meta / no_candidates 仍由 sidecar 决定。
+          // no_novelty 不阻止 host plan 消费：先记录 prefetched=true，再由 novelty
+          // guard 决定不重复注入。
           hostFallbackReason = 'host_plan_overridden_by_hard_rule';
           pushWarning(warnings, 'host_plan_overridden_by_hard_rule');
         } else {
@@ -3869,6 +3954,7 @@ export class RecallService {
     run: RecallRun,
     selected: Candidate[],
     warnings: string[],
+    options: { finalSelection?: boolean } = {},
   ): Promise<{
     decision: InterventionDecision;
     effective: NonNullable<RecallRun['effective']>;
@@ -3989,7 +4075,8 @@ export class RecallService {
     }
 
     const now = this.now();
-    const candidates: InterventionCandidateView[] = selected.map((candidate) => {
+    const alreadyInjected = this.resolveInjectedIds(run.request.alreadyInjectedIds);
+    const candidateViews: InterventionCandidateView[] = selected.map((candidate) => {
       const fragment = candidate.fragment;
       const at = fragment.time?.to
         ?? fragment.time?.at
@@ -4012,12 +4099,13 @@ export class RecallService {
           : 0,
       };
     });
+    const candidates = this.promoteFreshForPlanner(candidateViews, alreadyInjected);
 
     const planInput: InterventionPlannerInput = {
       mode: intervention.planner,
       cue: run.cue,
       candidates,
-      alreadyInjectedIds: this.resolveInjectedIds(run.request.alreadyInjectedIds),
+      alreadyInjectedIds: alreadyInjected,
       threshold,
       recentUselessRate,
       silentStreak: this.silentStreaks.get(key) ?? 0,
@@ -4178,13 +4266,39 @@ export class RecallService {
       };
     }
 
+    // novelty guard：planner 看到的是完整 eligible 窗口，但最终注入仍只取
+    // 未注入候选（显式 must_speak / conflict 允许重复，但新鲜候选优先，
+    // 不能被旧的已注入高分候选挤出 maxFragments）。
+    const injected = new Set(alreadyInjected);
+    const allowRepeat = decision.mustSpeak === true || decision.reason === 'conflict';
+    const fresh = injected.size === 0
+      ? selected
+      : selected.filter((candidate) => !injected.has(candidate.fragment.id)
+        && !candidate.fragment.sourceIds.some((id) => injected.has(id)));
+    const finalInject = options.finalSelection === true
+      ? this.selectCandidates(
+        allowRepeat ? selected : fresh,
+        run.cue,
+        warnings,
+        allowRepeat ? { preferFreshIds: new Set(fresh.map((candidate) => candidate.fragment.id)) } : {},
+      )
+      : selected;
+    if (decision.action === 'speak' && finalInject.length === 0 && !allowRepeat) {
+      decision = {
+        ...decision,
+        action: 'silent',
+        depth: 'gist',
+        reason: 'no_novelty',
+      };
+    }
+
     const speak = decision.action === 'speak';
-    const inject = speak ? selected : [];
+    const inject = speak ? finalInject : [];
     const suppressed = speak ? [] : selected.map((candidate) => candidate.fragment.id);
     const expansionPlan = speak
       ? decision.depth === 'gist'
         ? new Map<string, string>()
-        : this.ensureExpansionPlan(basePlan, selected, decision.depth)
+        : this.ensureExpansionPlan(basePlan, inject, decision.depth)
       : new Map<string, string>();
 
     if (!speak) {

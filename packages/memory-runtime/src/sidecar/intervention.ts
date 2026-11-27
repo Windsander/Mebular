@@ -887,8 +887,13 @@ export async function planInterventionAsync(
   }
 
   // 硬规则优先且省延迟；规则层已决定时不再调用模型。
-  // （无候选也在此短路；must_speak 无候选时走 must_speak_unavailable 的 checkpoint-only。）
-  if (decidedByRules(heuristic) || input.candidates.length === 0) {
+  // no_novelty 例外：已有 local 预取 plan 时仍要消费它并记录 prefetched=true；
+  // 最终注入由调用方的 novelty guard 抑制，模型不能借此重复注入。没有预取 plan
+  // 的 api/no_novelty 继续省掉远端调用。
+  const prefetchReady = Boolean(context.prefetchedPlan);
+  const ruleShortCircuit = decidedByRules(heuristic)
+    && !(heuristic.reason === 'no_novelty' && prefetchReady);
+  if (ruleShortCircuit || input.candidates.length === 0) {
     return {
       decision: { ...heuristic, planner: initialTrace },
       source: 'heuristic',

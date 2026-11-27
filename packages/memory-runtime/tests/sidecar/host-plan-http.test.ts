@@ -88,6 +88,30 @@ function preferences(): FakeMemoryRecord[] {
   }));
 }
 
+function freshHostFact(): FakeMemoryRecord {
+  return {
+    ...preferences()[0]!,
+    id: '01JHOSTFRESH01',
+    type: 'fact',
+    kind: 'fact',
+    content: { subject: 'user', predicate: 'theme', object: 'fresh' },
+    text: 'THEME-GIST-FRESH',
+    score: 0.5,
+  };
+}
+
+function plainHostFact(id: string, score: number): FakeMemoryRecord {
+  return {
+    ...preferences()[0]!,
+    id,
+    type: 'fact',
+    kind: 'fact',
+    content: { subject: 'user', predicate: id, object: 'theme' },
+    text: `THEME-GIST-${id}`,
+    score,
+  };
+}
+
 function noModelFetch(calls: Array<Record<string, any>>): ChatFetch {
   return async (_url, init) => {
     calls.push(JSON.parse(init.body) as Record<string, any>);
@@ -103,12 +127,15 @@ function noModelFetch(calls: Array<Record<string, any>>): ChatFetch {
   };
 }
 
-async function setup(source: 'host' | 'auto' = 'host'): Promise<Harness> {
+async function setup(
+  source: 'host' | 'auto' = 'host',
+  records: FakeMemoryRecord[] = preferences(),
+): Promise<Harness> {
   const home = await mkdtemp(join(tmpdir(), 'mebular-host-plan-http-'));
   const local = new SidecarLocalLayer({ root: join(home, 'memory-runtime'), now: () => NOW });
   await local.init();
   const fake = await startFakeCapability({ now: () => NOW });
-  fake.setRecords(preferences());
+  fake.setRecords(records);
 
   const client = new CapabilityClient({ baseUrl: fake.baseUrl, token: 'cap-token', retries: 0, retryDelayMs: 0 });
   const identity = { cloudId: 'cl_test', profileId: 'default', hostId: 'h_test' };
@@ -296,6 +323,132 @@ describe('host plan /context consumption', () => {
       planScope: 'session',
       cueMatched: true,
     });
+    expect(harness.modelCalls).toHaveLength(0);
+  });
+
+  it('host plan 混合候选：已注入高分不挤掉新鲜低分（maxFragments=1）', async () => {
+    const harness = await setup('host', [
+      { ...preferences()[0]!, score: 0.99 },
+      freshHostFact(),
+    ]);
+    const first = await post(`${harness.server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_host_plan',
+      turnId: 'turn_1',
+      turnKind: 'human',
+      query: '深色主题',
+      maxFragments: 1,
+    });
+    expect(first.status).toBe(200);
+    const injectedIds = first.body.data.fragments.map((fragment: any) => fragment.id);
+    expect(first.body.data.fragments[0].citations[0].id).toBe('01JHOSTPLAN1');
+    const meta = first.body.data.interventionMeta;
+
+    const second = await post(`${harness.server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_host_plan',
+      turnId: 'turn_2',
+      previousTurnId: 'turn_1',
+      turnKind: 'human',
+      query: '深色主题',
+      hostPlan: planFrom(meta),
+      alreadyInjectedIds: injectedIds,
+      maxFragments: 1,
+    });
+    expect(second.status).toBe(200);
+    expect(second.body.data.interventionMeta).toMatchObject({
+      source: 'host',
+      resolvedSource: 'host',
+      prefetched: true,
+    });
+    expect(second.body.data.decision).toMatchObject({
+      action: 'speak',
+      reason: 'host_plan:high_relevance',
+    });
+    // 新鲜候选进入最终注入，而不是被已注入的旧高分候选挤出。
+    expect(second.body.data.fragments).toHaveLength(1);
+    expect(second.body.data.fragments[0].citations[0].id).toBe('01JHOSTFRESH01');
+    expect(second.body.data.applied).toMatchObject({ action: 'speak', fragments: 1 });
+    expect(harness.modelCalls).toHaveLength(0);
+  });
+
+  it('host plan 混合候选：前 3 高分均已注入时，prompt/fingerprint 窗口仍纳入新鲜候选', async () => {
+    const harness = await setup('host', [
+      plainHostFact('01JHOSTPLAN1', 0.99),
+      plainHostFact('01JHOSTPLAN2', 0.9),
+      plainHostFact('01JHOSTPLAN3', 0.8),
+      plainHostFact('01JHOSTFRESH04', 0.5),
+    ]);
+    const first = await post(`${harness.server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_host_plan',
+      turnId: 'turn_1',
+      turnKind: 'human',
+      query: '深色主题',
+      maxFragments: 3,
+    });
+    expect(first.status).toBe(200);
+    const injectedIds = first.body.data.fragments.map((fragment: any) => fragment.id);
+    expect(injectedIds).toHaveLength(3);
+    const meta = first.body.data.interventionMeta;
+
+    const second = await post(`${harness.server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_host_plan',
+      turnId: 'turn_2',
+      previousTurnId: 'turn_1',
+      turnKind: 'human',
+      query: '深色主题',
+      hostPlan: planFrom(meta),
+      alreadyInjectedIds: injectedIds,
+      maxFragments: 1,
+    });
+    expect(second.status).toBe(200);
+    expect(second.body.data.decision).toMatchObject({ action: 'speak' });
+    expect(second.body.data.fragments).toHaveLength(1);
+    expect(second.body.data.fragments[0].citations[0].id).toBe('01JHOSTFRESH04');
+  });
+
+  it('全部候选已注入：host plan 消费合法（prefetched=true），anti-repeat silent/no_novelty', async () => {
+    const harness = await setup('host', [
+      plainHostFact('01JHOSTPLAN1', 0.9),
+      plainHostFact('01JHOSTPLAN2', 0.8),
+    ]);
+    const first = await post(`${harness.server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_host_plan',
+      turnId: 'turn_1',
+      turnKind: 'human',
+      query: '深色主题',
+      maxFragments: 2,
+    });
+    expect(first.status).toBe(200);
+    const injectedIds = first.body.data.fragments.map((fragment: any) => fragment.id);
+    expect(injectedIds).toHaveLength(2);
+    const meta = first.body.data.interventionMeta;
+
+    const second = await post(`${harness.server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_host_plan',
+      turnId: 'turn_2',
+      previousTurnId: 'turn_1',
+      turnKind: 'human',
+      query: '深色主题',
+      hostPlan: planFrom(meta),
+      alreadyInjectedIds: injectedIds,
+      maxFragments: 2,
+    });
+    expect(second.status).toBe(200);
+    expect(second.body.data.interventionMeta).toMatchObject({
+      source: 'host',
+      resolvedSource: 'host',
+      prefetched: true,
+      planId: 'hp_01JHOSTPLAN0001',
+    });
+    expect(second.body.data.decision).toMatchObject({ action: 'silent', reason: 'no_novelty' });
+    expect(second.body.data.fragments).toEqual([]);
+    expect(second.body.data.blocks).toEqual([]);
+    expect(second.body.data.applied).toMatchObject({ action: 'silent', fragments: 0 });
     expect(harness.modelCalls).toHaveLength(0);
   });
 

@@ -444,7 +444,7 @@ const QUERY_PLAN_SYSTEM_PROMPT = [
 ].join(' ');
 
 /** 介入决策只使用 top-3 候选，且只给 gist（截断），绝不传 detail/正文。 */
-const INTERVENTION_MAX_CANDIDATES = 3;
+export const INTERVENTION_MAX_CANDIDATES = 3;
 const INTERVENTION_MAX_GIST_CHARS = 240;
 const INTERVENTION_MAX_LIST_ITEMS = 8;
 const INTERVENTION_MAX_REASON_CHARS = 160;

@@ -1177,8 +1177,13 @@ function contextBlockText(block) {
 /**
  * Build the request-only injection block. Always <= maxBytes and visibly
  * marked as untrusted background.
+ *
+ * Also reports which input blocks actually contributed text to the rendered
+ * block. Callers must use that list (never the raw `/context` fragments) for
+ * host-side already-injected dedupe: a fragment dropped by the byte budget was
+ * not injected and must remain eligible on the next turn.
  */
-export function buildContextBlock(blocks, options = {}) {
+function renderContextBlock(blocks, options = {}) {
   const maxBytes = Math.min(
     Math.max(asInt(options.maxBytes, CONTEXT_BLOCK_MAX_BYTES, 256, CONTEXT_BLOCK_MAX_BYTES), 256),
     CONTEXT_BLOCK_MAX_BYTES,
@@ -1192,6 +1197,7 @@ export function buildContextBlock(blocks, options = {}) {
 
   let body = '';
   let truncated = false;
+  const included = [];
   for (const block of Array.isArray(blocks) ? blocks : []) {
     if (!isObject(block)) continue;
     const kind = asText(block.kind);
@@ -1210,19 +1216,22 @@ export function buildContextBlock(blocks, options = {}) {
     if (sectionBytes <= budget) {
       body += section;
       budget -= sectionBytes;
+      included.push(block);
       continue;
     }
     if (budget > 80) {
       const partial = truncateBytes(safeContent, budget - 32);
       if (partial.length > 0) {
         body += `${heading}${partial}\n[truncated]\n\n`;
+        // A partially rendered block still reached the request context.
+        included.push(block);
       }
     }
     truncated = true;
     break;
   }
 
-  if (body.trim().length === 0) return '';
+  if (body.trim().length === 0) return { text: '', included: [] };
   if (truncated && !body.includes('[truncated]')) body += '[truncated]\n';
   let text = `${open}\n${notice}\n\n${body}${close}`;
   if (byteLength(text) > maxBytes) {
@@ -1230,7 +1239,13 @@ export function buildContextBlock(blocks, options = {}) {
     const shortened = truncateBytes(body, Math.max(0, byteLength(body) - overflow - 16));
     text = `${open}\n${notice}\n\n${shortened}\n[truncated]\n${close}`;
   }
-  return byteLength(text) <= maxBytes ? text : '';
+  return byteLength(text) <= maxBytes
+    ? { text, included }
+    : { text: '', included: [] };
+}
+
+export function buildContextBlock(blocks, options = {}) {
+  return renderContextBlock(blocks, options).text;
 }
 
 function asArray(value) {
@@ -2531,18 +2546,19 @@ export function createController(dependencies = {}) {
     return [];
   }
 
-  function rememberInjected(threadId, data, blocks) {
+  /**
+   * Record fragment IDs that were actually rendered into this turn's request
+   * context. Scope is the host session/thread (cross-turn), so a fragment the
+   * sidecar returned but the planner suppressed — or the adapter dropped for
+   * its byte budget — stays eligible next turn. Same-turn dedupe is handled by
+   * `seenTurns` before /context, not by this set.
+   */
+  function rememberInjected(threadId, blocks) {
     const key = threadId ?? 'session';
     let set = injectedIds.get(key);
     if (!set) {
       set = new Set();
       injectedIds.set(key, set);
-    }
-    if (Array.isArray(data?.fragments)) {
-      for (const fragment of data.fragments) {
-        const id = asText(fragment?.id);
-        if (id) set.add(id);
-      }
     }
     for (const block of blocks) {
       if (!Array.isArray(block?.fragments)) continue;
@@ -2874,10 +2890,11 @@ export function createController(dependencies = {}) {
       stats.context.empty += 1;
       return;
     }
-    const text = buildContextBlock(blocks, {
+    const rendered = renderContextBlock(blocks, {
       maxBytes: config.maxContextBytes,
       recallId: result.data?.recallId,
     });
+    const text = rendered.text;
     if (!text) {
       stats.context.empty += 1;
       return;
@@ -2891,7 +2908,7 @@ export function createController(dependencies = {}) {
       text,
       metadata: { source: 'mebular', trust: 'untrusted', requestOnly: true },
     });
-    rememberInjected(threadId, result.data, blocks);
+    rememberInjected(threadId, rendered.included);
     if (asText(result.data?.recallId)) {
       recalls.set(asText(result.data.recallId), {
         at: now(),

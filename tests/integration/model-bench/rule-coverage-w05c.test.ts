@@ -333,6 +333,10 @@ describe('W0.5c rule-layer retest', () => {
       }));
     const goldenDefer = golden.filter((outcome) => outcome.slice === 'defer');
     const goldenConflict = golden.filter((outcome) => outcome.slice === 'conflict');
+    const goldenConflictByReason = goldenConflict.filter((outcome) => outcome.reason === 'conflict');
+    const goldenConflictQuote = goldenConflictByReason.filter((outcome) => outcome.depth === 'quote');
+    const goldenConflictDetail = goldenConflictByReason.filter((outcome) => outcome.depth === 'detail');
+    const goldenConflictNonExplicit = goldenConflict.filter((outcome) => outcome.reason !== 'conflict');
     const goldenGreetingMeta = golden.filter((outcome) =>
       outcome.slice === 'greeting' || outcome.slice === 'meta');
 
@@ -395,7 +399,15 @@ describe('W0.5c rule-layer retest', () => {
         },
         conflict: {
           count: goldenConflict.length,
-          detail: goldenConflict.filter((outcome) => outcome.action === 'speak' && outcome.depth === 'detail').length,
+          explicitConflict: goldenConflictByReason.length,
+          detail: goldenConflictDetail.length,
+          quote: goldenConflictQuote.length,
+          nonExplicit: goldenConflictNonExplicit.map((outcome) => ({
+            id: outcome.id,
+            reason: outcome.reason,
+            action: outcome.action,
+          })),
+          note: 'B2: only an explicit which-is-right question with conflict candidates enters the conflict branch; exact intent uses quote, otherwise detail. "两条记忆说的发布流程不一样" is intentionally not a conflict trigger.',
         },
         greetingMeta: {
           count: goldenGreetingMeta.length,
@@ -435,7 +447,9 @@ describe('W0.5c rule-layer retest', () => {
     expect(expectedDepthMismatches).toEqual([]);
 
     // runtime cue 不应把已经实现的硬规则再降级。
-    expect(runtimeDowngraded).toEqual([]);
+    // B2 明确移除“不一样/对不上”触发后，x_conf_release_zh 按设计回落到 heuristic；
+    // 它不再属于 conflict hard slice，但仍应 speak（不能误 silent）。
+    expect(runtimeDowngraded.map((outcome) => outcome.id).sort()).toEqual(['x_conf_release_zh']);
     // 两个已知的 runtime-cue 残余洞（非 W0.5c 新增，均在 Stage 0 已存在）：
     //   - x_nov_port_zh：真实 cue 的 exact_value 让 must_speak 先于 novelty=0；
     //   - x_sil_physics_zh：泛化「是多少」被当成 exact intent，低分候选仍 speak。
@@ -445,17 +459,23 @@ describe('W0.5c rule-layer retest', () => {
       'x_sil_physics_zh',
     ]);
 
-    // 88 条 golden：defer 必须全部可达，conflict 必须 detail，寒暄/meta 不 speak。
+    // 88 条 golden：defer 必须全部可达；conflict 只对显式问句生效；
+    // exact 冲突用 quote，其余 detail；“发布流程不一样”按 B2 不触发 conflict。
     expect(goldenDefer.length).toBe(8);
     expect(goldenDefer.filter((outcome) => outcome.action === 'defer')).toHaveLength(8);
-    expect(goldenConflict.filter((outcome) => outcome.action === 'speak' && outcome.depth === 'detail'))
-      .toHaveLength(goldenConflict.length);
+    expect(goldenConflict).toHaveLength(8);
+    expect(goldenConflictByReason).toHaveLength(7);
+    expect(goldenConflictQuote).toHaveLength(2);
+    expect(goldenConflictDetail).toHaveLength(5);
+    expect(goldenConflictNonExplicit.map((outcome) => outcome.id)).toEqual(['conflict_release_flow']);
     expect(goldenGreetingMeta.filter((outcome) => outcome.action === 'silent'))
       .toHaveLength(goldenGreetingMeta.length);
 
     // 生产硬判覆盖必须显著高于 Stage 0，且 action 正确率不回退。
     expect(round4(ratio(goldenHard, golden.length))).toBeGreaterThan(STAGE0.goldenShippedHardShare);
     expect(round4(ratio(goldenActionHits, golden.length))).toBeGreaterThanOrEqual(0.95);
-    expect(goldenDepthHits / goldenSpeak.length).toBeGreaterThanOrEqual(0.95);
+    // B2 让 exact 冲突使用 quote，2 条旧标签（expected detail）不再匹配规则契约；
+    // 其余 depth 标签保持一致。
+    expect(goldenDepthHits / goldenSpeak.length).toBeGreaterThanOrEqual(0.90);
   }, 60_000);
 });

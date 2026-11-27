@@ -1,4 +1,8 @@
-// 0.4.0 W0.5b Stage 0：规则优先 hybrid 的覆盖 / 灰区测量（test-only，无模型）。
+// 0.4.0 W0.5b Stage 0 baseline：规则优先 hybrid 的覆盖 / 灰区测量（test-only，无模型）。
+//
+// 这是 **Stage 0 baseline**（commit 591ef6d）的 test-only 规则口径，冻结用于对比；
+// 它不代表 W0.5c 之后的生产规则。W0.5c 的生产 planIntervention() 复测在
+// rule-coverage-w05c.test.ts；本文件只回答 Stage 0 当时的“灰区是否值得进入 Stage 1”。
 //
 // 目标不是证明某个模型好坏，而是回答：在「规则硬判 + 分数档明确的 heuristic」之外，
 // 还有多少 turn 必须交给模型（灰区）。只有灰区足够大，Stage 1 SFT 才值得做。
@@ -465,7 +469,7 @@ function accuracy(results: CaseResult[]): Accuracy {
   };
 }
 
-describe('W0.5b Stage 0 rule coverage', () => {
+describe('W0.5b Stage 0 baseline rule coverage', () => {
   it('classifies the 88-case golden set and the extended rule corpus without a model', async () => {
     expect(GOLDEN_SET_SIZE).toBe(88);
     expect(GOLDEN_CORE_SIZE).toBeGreaterThan(0);

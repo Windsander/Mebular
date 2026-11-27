@@ -315,9 +315,9 @@ follow the existing lifecycle path) so the new mode is loaded.
   in `applied` for later attribution.
 - `depth`: `gist → detail → quote`; speak/gist is the default, `silent` is the last
   resort.
-- `reason`: `must_speak:*`, `high_relevance`, `low_confidence`, `broad_cue`,
-  `no_novelty`, `recent_false_alarm`, `no_candidates`, `max_silent_streak`,
-  `exploration`, and related reasons.
+- `reason`: `must_speak:*`, `defer_explicit`, `conflict`, `greeting`, `meta`,
+  `high_relevance`, `low_confidence`, `broad_cue`, `no_novelty`, `recent_false_alarm`,
+  `no_candidates`, `max_silent_streak`, `exploration`, and related reasons.
 - `policyVersion`: `v0-baseline` for off/baseline, `v0-rules`, `heuristic:<hash>` or
   `model:<hash>`.
 - `enforced`: `false` for `off` and `shadow`; `true` when the decision changed the
@@ -325,16 +325,40 @@ follow the existing lifecycle path) so the new mode is loaded.
 - `applied`: actual action/depth/fragment count, suppressed fragment IDs, and shadow
   `wouldAction` / `wouldDepth`.
 
-Hard rules that the policy cannot veto: an explicit memory request (“上次 / 之前 /
-记得 / 你忘了”), a high-confidence exact intent, task continuation/checkpoint
-follow-up, a follow-up or correction after the previous silent/defer, and a follow-up
-reference to the last fragment.
+Hard-rule priority (first match wins):
+
+1. `defer_explicit`: the user/host explicitly says “not now / hold off / don't use
+   memory”. This is a deliberate `defer`; it may override an automatic `must_speak`,
+   keeps `self`/checkpoint on the existing path, and records `applied.action=defer`.
+2. `conflict`: only when the user explicitly asks which record is right and a
+   candidate belongs to a conflict group. Exact intent uses `depthForCue()` → `quote`;
+   otherwise `detail`; unavailable detail falls back to `gist` + `degraded`.
+3. `greeting` / `meta`: whole-turn greeting, thanks, assistant identity/capability/time
+   → `silent`. The regex is anchored to the whole turn; a mixed turn with a real memory
+   request falls through to `must_speak`.
+4. `must_speak`: an automatic policy floor, not an upper bound on explicit user intent.
+   The heuristic threshold, negative rate, novelty, exploration and max-silent-streak
+   cannot veto it.
+5. `no_candidates`: `silent`.
+6. `no_novelty`: the anti-repeat exception — `silent` only when **all** candidates are
+   already injected. It does not disable `maxSilentStreak` / exploration for fresh
+   candidates, and `must_speak` still wins when both apply.
+7. heuristic: the remaining turns.
+
+An explicit memory request (“上次 / 之前 / 记得 / 你忘了 / last time / remember / recall”),
+a high-confidence exact intent, task continuation/checkpoint follow-up, a follow-up or
+correction after the previous silent/defer, and a follow-up reference to the last
+fragment feed the automatic `must_speak` floor.
 
 `must_speak` is a hard rule, not a 100% `speak` guarantee. With a candidate it speaks
 (using `gist` if the requested detail is unavailable). With **no candidate at all** it
 degrades to checkpoint-only: `action=silent`, `reason=must_speak_unavailable`,
 `degraded:true`, `applied.fragments=0`; `self`/checkpoint still inject through the
 existing path. It never invents a fragment or fails silently.
+
+`defer_explicit` is not policy silence: the trace keeps `reason=defer_explicit` and
+`applied.action=defer`, so later attribution can tell a deliberate user/host deferral
+from a `silent` decision.
 
 `trace=off` disables attribution and policy learning; a host that does not read
 `decision` sees the same response fields it saw in 0.3.x.

@@ -54,13 +54,15 @@ function input(overrides: Partial<InterventionPlannerInput> = {}): InterventionP
 }
 
 describe('intervention planner', () => {
-  it('must_speak：显式记忆追问即使分数极低也 speak', () => {
+  it('must_speak：显式记忆追问即使分数极低/高负例/高探索也 speak', () => {
     const decision = planIntervention(input({
       cue: cue('你还记得我的喜好吗？'),
       candidates: [candidate({ score: 0.05 })],
       threshold: 0.95,
       recentUselessRate: 1,
       silentStreak: 99,
+      explorationRate: 1,
+      random: () => 0,
     }));
     expect(decision).toMatchObject({
       action: 'speak',
@@ -235,8 +237,8 @@ describe('intervention planner', () => {
     expect(decision).toMatchObject({ action: 'defer', reason: 'defer_explicit' });
   });
 
-  it('conflict：明确返回 detail，不被低分或 novelty=0 吞掉', () => {
-    const conflict = planIntervention(input({
+  it('conflict：exact intent 用 quote，非 exact 用 detail，不被低分或 novelty=0 吞掉', () => {
+    const exact = planIntervention(input({
       cue: cue('部署端口有 7331 和 7332 两个说法，哪个对？'),
       candidates: [
         candidate({ fragmentId: 'mf_a', score: 0.31, conflict: true }),
@@ -246,12 +248,20 @@ describe('intervention planner', () => {
       recentUselessRate: 1,
       silentStreak: 99,
     }));
-    expect(conflict).toMatchObject({
+    expect(exact).toMatchObject({
       action: 'speak',
-      depth: 'detail',
+      depth: 'quote',
       reason: 'conflict',
       confidence: 1,
     });
+
+    const detail = planIntervention(input({
+      cue: cue('两条记录到底哪个对？'),
+      candidates: [candidate({ fragmentId: 'mf_detail', conflict: true, score: 0.31 })],
+      threshold: 0.95,
+      recentUselessRate: 1,
+    }));
+    expect(detail).toMatchObject({ action: 'speak', depth: 'detail', reason: 'conflict' });
 
     const repeated = planIntervention(input({
       cue: cue('两条记录到底哪个对？'),
@@ -262,10 +272,27 @@ describe('intervention planner', () => {
       action: 'speak',
       depth: 'detail',
       reason: 'conflict',
+      scores: { novelty: 0 },
     });
   });
 
-  it('conflict：候选没有 detail 时降为 gist 并标记 degraded，但不改变 speak', () => {
+  it('conflict：只有显式冲突问句 + conflict 候选才触发', () => {
+    const noConflictCandidate = planIntervention(input({
+      cue: cue('两条记录到底哪个对？'),
+      candidates: [candidate({ conflict: false, score: 0.86 })],
+    }));
+    expect(noConflictCandidate.reason).toBe('high_relevance');
+    expect(noConflictCandidate.reason).not.toBe('conflict');
+
+    // “和旧方案不一样”是普通比较句，没有问“哪个对”，不能仅凭措辞触发。
+    const notExplicit = planIntervention(input({
+      cue: cue('这个方案和旧方案不一样'),
+      candidates: [candidate({ conflict: true, score: 0.86 })],
+    }));
+    expect(notExplicit.reason).not.toBe('conflict');
+  });
+
+  it('conflict：detail 不可用降为 gist + degraded，但不改变 speak', () => {
     const decision = planIntervention(input({
       cue: cue('我的偏好记录前后不一致，信哪个？'),
       candidates: [candidate({ conflict: true, detailAvailable: false, score: 0.84 })],
@@ -276,6 +303,19 @@ describe('intervention planner', () => {
       reason: 'conflict',
       degraded: true,
     });
+  });
+
+  it('conflict + must_speak：冲突分支决定深度，但仍必须 speak', () => {
+    const query = '上次的部署端口有 7331 和 7332 两个说法，哪个对？';
+    expect(mustSpeakReason(input({ cue: cue(query) }))).not.toBeNull();
+    const decision = planIntervention(input({
+      cue: cue(query),
+      candidates: [
+        candidate({ fragmentId: 'mf_x', score: 0.9, conflict: true }),
+        candidate({ fragmentId: 'mf_y', score: 0.88, conflict: true }),
+      ],
+    }));
+    expect(decision).toMatchObject({ action: 'speak', depth: 'quote', reason: 'conflict' });
   });
 
   it('greeting/meta：纯寒暄或 meta 默认 silent，不被高分/沉默上限/探索抬成 speak', () => {
@@ -341,10 +381,29 @@ describe('intervention planner', () => {
     }
   });
 
-  it('novelty=0 是硬 silent，不再被 maxSilentStreak / exploration 抬成 speak', () => {
+  it('novelty：top-1 已注入时选 top-2 新鲜候选，trace scores 同步', () => {
     const decision = planIntervention(input({
-      candidates: [candidate({ fragmentId: 'mf_repeat' })],
-      alreadyInjectedIds: ['mf_repeat'],
+      candidates: [
+        candidate({ fragmentId: 'mf_top1', sourceIds: ['01JTOP1'], score: 0.9 }),
+        candidate({ fragmentId: 'mf_top2', sourceIds: ['01JTOP2'], score: 0.8 }),
+      ],
+      alreadyInjectedIds: ['01JTOP1'],
+    }));
+    expect(decision).toMatchObject({
+      action: 'speak',
+      reason: 'high_relevance',
+      depth: 'gist',
+      scores: { top: 0.8, novelty: 1 },
+    });
+  });
+
+  it('novelty：全部已注入时 hard silent，maxSilentStreak / exploration 不重复注入', () => {
+    const decision = planIntervention(input({
+      candidates: [
+        candidate({ fragmentId: 'mf_repeat1', sourceIds: ['01JREPEAT1'] }),
+        candidate({ fragmentId: 'mf_repeat2', sourceIds: ['01JREPEAT2'] }),
+      ],
+      alreadyInjectedIds: ['01JREPEAT1', '01JREPEAT2'],
       silentStreak: 99,
       maxSilentStreak: 1,
       explorationRate: 1,
@@ -355,5 +414,45 @@ describe('intervention planner', () => {
       reason: 'no_novelty',
       scores: { novelty: 0 },
     });
+  });
+
+  it('novelty：全部已注入 + must_speak → must_speak 仍 speak（不被 anti-repeat 否决）', () => {
+    const decision = planIntervention(input({
+      cue: cue('你还记得我的喜好吗？'),
+      candidates: [candidate({ fragmentId: 'mf_repeat', sourceIds: ['01JREPEAT'] })],
+      alreadyInjectedIds: ['01JREPEAT'],
+      threshold: 0.95,
+      recentUselessRate: 1,
+    }));
+    expect(decision).toMatchObject({
+      action: 'speak',
+      reason: 'must_speak:explicit_memory_request',
+      mustSpeak: true,
+      scores: { novelty: 0 },
+    });
+  });
+
+  it('greeting/meta 只匹配整句：混合句继续落到 must_speak', () => {
+    for (const query of [
+      '这个怎么用，帮我查一下上次的配置',
+      'what can you do? what was the deploy port?',
+      'hi 你好，还记得我上次说的端口吗',
+    ]) {
+      const decision = planIntervention(input({
+        cue: cue(query),
+        candidates: [candidate({ score: 0.86 })],
+      }));
+      expect(decision.action).toBe('speak');
+      expect(decision.mustSpeak).toBe(true);
+    }
+  });
+
+  it('上一轮 silent 后纯 meta 仍然 silent，不被 after_silence 抬成 must_speak', () => {
+    const decision = planIntervention(input({
+      cue: cue('现在几点了？'),
+      candidates: [candidate({ score: 0.8 })],
+      lastDecision: { action: 'silent', depth: 'gist' },
+    }));
+    expect(decision).toMatchObject({ action: 'silent', reason: 'meta' });
   });
 });

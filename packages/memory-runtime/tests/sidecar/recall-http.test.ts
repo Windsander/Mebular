@@ -992,6 +992,49 @@ describe('sidecar recall/context HTTP', () => {
     expect(bare.body.data.silenceReason).toBe('intervention_silent');
   });
 
+  it('novelty：top-1 已注入时选择 top-2 新鲜候选，trace scores/reason 一致', async () => {
+    const { server, fake } = await setup({
+      intervention: { mode: 'heuristic', minConfidence: 0.55, explorationRate: 0, maxSilentStreak: 99 },
+    });
+    const top = preference();
+    const fresh = {
+      ...preference(),
+      id: '01JHTTPPREF2',
+      content: { entity: 'user', preferenceType: 'theme', value: 'light', confidence: 0.82 },
+      text: '用户偏好：theme=light',
+      score: 0.8,
+    };
+    fake.setRecords([top, fresh]);
+
+    const context = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_novelty',
+      turnId: 'turn_novelty_fresh',
+      query: '深色主题',
+      alreadyInjectedIds: ['01JHTTPPREF1'],
+    });
+    expect(context.status).toBe(200);
+    const fragment = context.body.data.fragments[0];
+    expect(fragment.sourceIds).toContain('01JHTTPPREF2');
+    expect(context.body.data.decision).toMatchObject({
+      action: 'speak',
+      reason: 'high_relevance',
+      scores: { novelty: 1 },
+    });
+    expect(context.body.data.decision.scores.top).toBeCloseTo(fragment.score.final, 3);
+    expect(context.body.data.fragments).toHaveLength(1);
+
+    const trace = await fetch(`${server.url}/traces/${context.body.data.traceId}`, { headers: auth() });
+    const traceBody = await trace.json() as any;
+    expect(traceBody.data.decision).toMatchObject({
+      action: 'speak',
+      reason: 'high_relevance',
+      scores: { novelty: 1 },
+    });
+    expect(traceBody.data.decision.scores.top).toBe(context.body.data.decision.scores.top);
+    expect(traceBody.data.applied).toMatchObject({ action: 'speak', fragments: 1 });
+  });
+
   it('must_speak 不能被低阈值/高负例率否决；gist 不生详情', async () => {
     const { server, runtime } = await setup({
       intervention: { mode: 'heuristic', minConfidence: 0.95, explorationRate: 0, maxSilentStreak: 1 },

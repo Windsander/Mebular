@@ -280,23 +280,43 @@ config 并按现有生命周期重启/重载，使新配置生效。
 - `action`：`speak | defer | silent`。`defer` 表示本轮不注入 memory fragments，保留
   既有 `self`/checkpoint 路径，并在 `applied` 中与 `silent` 区分，供后续归因。
 - `depth`：`gist → detail → quote`；默认 speak/gist，`silent` 是最后手段。
-- `reason`：`must_speak:*`、`high_relevance`、`low_confidence`、`broad_cue`、
-  `no_novelty`、`recent_false_alarm`、`no_candidates`、`max_silent_streak`、
-  `exploration` 等。
+- `reason`：`must_speak:*`、`defer_explicit`、`conflict`、`greeting`、`meta`、
+  `high_relevance`、`low_confidence`、`broad_cue`、`no_novelty`、`recent_false_alarm`、
+  `no_candidates`、`max_silent_streak`、`exploration` 等。
 - `policyVersion`：off/baseline 为 `v0-baseline`，另有 `v0-rules`、
   `heuristic:<hash>`、`model:<hash>`。
 - `enforced`：`off`/`shadow` 为 `false`；真正改变注入时为 `true`。
 - `applied`：实际 action/depth/片段数、被裁掉的 fragment ID，以及 shadow 的
   `wouldAction` / `wouldDepth`。
 
-策略不可否决的硬规则：显式记忆追问（“上次/之前/记得/你忘了”）、高置信 exact 意图、
-任务续接/checkpoint follow-up、上一轮 silent/defer 后的追问或纠正、指向刚注入片段的
-follow-up。
+硬规则优先级（先命中先返回）：
+
+1. `defer_explicit`：用户/宿主明确“暂时不要提 / 先别用记忆”。这是主动 `defer`，
+   可以覆盖自动 `must_speak`；`self`/checkpoint 仍按原路径注入，trace 记录
+   `applied.action=defer`。
+2. `conflict`：只有用户明确问“哪个对 / 以哪条为准”，且候选确实属于 conflict
+   group 时才触发。exact 意图用 `depthForCue()` → `quote`，否则 `detail`；detail
+   不可用降为 `gist` + `degraded`。仅“和以前不一样 / 对不上”不触发。
+3. `greeting` / `meta`：整句寒暄、致谢、助手身份/能力/时间 → `silent`。正则整句
+   锚定，混合了真实记忆请求的 turn 会继续落到 `must_speak`。
+4. `must_speak`：自动策略下限，不是用户显式意图的上限。heuristic 的阈值、负例率、
+   novelty、探索和沉默上限都不能否决。
+5. `no_candidates`：`silent`。
+6. `no_novelty`：anti-repeat 例外——只有**全部**候选都已注入时才 `silent`；它不影响
+   `maxSilentStreak` / exploration 对新颖候选的作用，且 `must_speak` 同时命中时仍优先。
+7. heuristic：其余 turn。
+
+显式记忆追问（“上次/之前/记得/你忘了/last time/remember/recall”）、高置信 exact
+意图、任务续接/checkpoint follow-up、上一轮 silent/defer 后的追问或纠正、指向刚注入
+片段的 follow-up，都会进入自动 `must_speak` 下限。
 
 `must_speak` 是硬规则，但不是 100% `speak` 的保证：有候选时会说（请求的 detail 不可用
 则降为 gist）；**完全没有候选**时降级为 checkpoint-only：`action=silent`、
 `reason=must_speak_unavailable`、`degraded:true`、`applied.fragments=0`，`self`/
 checkpoint 仍按现有路径注入。它不会伪造片段，也不会静默失败。
+
+`defer_explicit` 不是策略沉默：trace 同时保留 `reason=defer_explicit` 与
+`applied.action=defer`，后续归因可以区分“用户/宿主主动推迟”和 `silent`。
 
 `trace=off` 时不做归因与策略学习；不读取 `decision` 的旧宿主看到的字段与 0.3.x 一致。
 

@@ -156,7 +156,7 @@ const DEFAULT_CONFIG = Object.freeze({
   recallLimit: 8,
   recallTokenBudget: 2000,
   maxFragments: 3,
-  recallTimeoutMs: 800,
+  recallTimeoutMs: 2000,
   maxContextBytes: CONTEXT_BLOCK_MAX_BYTES,
   includeSelf: true,
   includeCheckpoint: true,
@@ -942,6 +942,19 @@ export function resolvePluginConfig(input, options = {}) {
   }
 
   const merged = { ...DEFAULT_CONFIG, ...fileValue, ...fromEnv, ...optionsValue };
+  // W5 / W0-A D5：宿主 transport 至少 2000ms；显式低值保留但不得作为能力通过证据。
+  const explicitRecallTimeout = optionsValue.recallTimeoutMs
+    ?? fromEnv.recallTimeoutMs
+    ?? fileValue.recallTimeoutMs;
+  if (explicitRecallTimeout !== undefined && explicitRecallTimeout !== null) {
+    const normalizedTimeout = asInt(
+      explicitRecallTimeout,
+      DEFAULT_CONFIG.recallTimeoutMs,
+      10,
+      5000,
+    );
+    if (normalizedTimeout < 1600) warnings.push('host_timeout_below_deadline');
+  }
   for (const key of ['enabled', 'capture', 'rawCapture', 'localCapture']) {
     if (Object.prototype.hasOwnProperty.call(fileValue, key)
       || Object.prototype.hasOwnProperty.call(optionsValue, key)) {

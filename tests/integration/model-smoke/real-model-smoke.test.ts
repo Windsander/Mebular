@@ -920,6 +920,7 @@ class SmokeRun {
     const modelsDir = join(this.root, 'models');
     const settings: InferenceSettings = {
       source: 'local',
+      sourcePresent: true,
       local: {
         pack: PACK_ID,
         path: null,

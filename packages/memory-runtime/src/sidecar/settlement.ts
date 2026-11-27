@@ -979,7 +979,7 @@ export class SettlementRuntime {
       policy: {
         degraded: this.policyStore?.isDegraded === true,
         lastError: this.policyStore?.lastError ?? null,
-        planner: { last: recall.lastPlanner },
+        planner: { last: recall.lastPlanner, queue: recall.plannerQueue },
       },
     };
   }

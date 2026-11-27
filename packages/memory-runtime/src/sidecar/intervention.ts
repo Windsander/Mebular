@@ -26,6 +26,10 @@
 // 两者都不读配置、不写 trace，便于单元测试。
 
 import { createHash } from 'node:crypto';
+import {
+  CONTEXT_RESPONSE_RESERVE_MS,
+  MIN_PLANNER_BUDGET_MS,
+} from './deadline.js';
 import type { Cue } from './cue.js';
 import type {
   InferenceInterventionCandidate,
@@ -515,14 +519,14 @@ export interface InterventionModelPlanner {
 }
 
 /**
- * W2 首版 API 同步硬上限。W5 会把 `/context` 整体 deadline 硬化；
- * 这里先保证单次介入调用不会把用户回合拖过 1.5s。
+ * W2 首版 API 同步硬上限。W5 已把 `/context` 整体 deadline 硬化；
+ * 这里仍保证单次介入调用不会把用户回合拖过 1.5s。
  */
 export const INTERVENTION_API_SYNC_DEADLINE_MS = 1500;
 /** 剩余预算低于该值时不再尝试模型（W0-A §6.1）。 */
-export const MIN_PLANNER_BUDGET_MS = 200;
-/** 响应组装/序列化预留；W5 硬 deadline 会复用同一 seam。 */
-export const INTERVENTION_RESPONSE_RESERVE_MS = 150;
+export { MIN_PLANNER_BUDGET_MS };
+/** 响应组装/序列化预留；与 `/context` 总 deadline 共用同一 seam。 */
+export const INTERVENTION_RESPONSE_RESERVE_MS = CONTEXT_RESPONSE_RESERVE_MS;
 
 export interface InterventionModelContext {
   planner: InterventionModelPlanner | null;

@@ -531,6 +531,20 @@ describe('planInterventionAsync (model controller)', () => {
     expect(planner.requests).toHaveLength(0);
   });
 
+  it('W5 seam：planner 预算 = deadlineAt - now - 150ms response reserve', async () => {
+    const planner = new FakePlanner();
+    await planInterventionAsync(
+      input(),
+      context(planner, {
+        configuredSource: 'api',
+        timeoutMs: 1500,
+        deadlineAt: NOW + 500,
+        now: () => NOW,
+      }),
+    );
+    expect(planner.timeouts).toEqual([350]);
+  });
+
   it('auto 一个总 deadline：api 只拿剩余预算，不串行累加', async () => {
     const planner = new FakePlanner();
     planner.delayMs = 600;

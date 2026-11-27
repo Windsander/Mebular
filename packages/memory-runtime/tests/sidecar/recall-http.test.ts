@@ -1798,7 +1798,7 @@ describe('sidecar recall/context HTTP', () => {
       legacyModeIgnored: true,
       legacyModeConflict: true,
       diagnosticShadow: false,
-      deadline: 'w5_pending',
+      deadline: 1500,
     });
     expect(body.data.intervention.warnings).toContain('legacy_intervention_mode_ignored');
     expect(body.warnings).toContain('legacy_intervention_mode_ignored');
@@ -1816,7 +1816,7 @@ describe('sidecar recall/context HTTP', () => {
     expect(body.data.intervention).toMatchObject({
       source: 'local',
       planner: 'model',
-      deadline: 'w5_pending',
+      deadline: 1500,
     });
     expect(body.data.intervention.warnings).toContain('extraction_query_plan_local_sync');
     // queryPlan 仍是配置原值；W2 不修改 extraction。

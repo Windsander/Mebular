@@ -1175,6 +1175,30 @@ class ProviderTests(BaseCase):
         self.assertEqual(status["features"]["checkpoints"], True)
 
 
+class HostTimeoutTests(BaseCase):
+    def test_recall_timeout_default_and_below_deadline_warning(self) -> None:
+        self.assertEqual(memory_plugin._DEFAULT_CONFIG["recall_timeout"], 2.0)
+        default_config = memory_plugin._load_plugin_config(self.hermes_home)
+        self.assertEqual(default_config["recall_timeout"], 2.0)
+
+        (self.hermes_home / "mebular-memory.json").write_text(
+            json.dumps({"recall_timeout": 0.8}), encoding="utf-8"
+        )
+        with mock.patch.object(memory_plugin.logger, "warning") as warning:
+            config = memory_plugin._load_plugin_config(self.hermes_home)
+        self.assertEqual(config["recall_timeout"], 0.8)
+        messages = [str(call.args[0]) for call in warning.call_args_list if call.args]
+        self.assertTrue(any("host_timeout_below_deadline" in item for item in messages))
+
+        (self.hermes_home / "mebular-memory.json").write_text(
+            json.dumps({"recall_timeout": 2.0}), encoding="utf-8"
+        )
+        with mock.patch.object(memory_plugin.logger, "warning") as warning:
+            memory_plugin._load_plugin_config(self.hermes_home)
+        messages = [str(call.args[0]) for call in warning.call_args_list if call.args]
+        self.assertFalse(any("host_timeout_below_deadline" in item for item in messages))
+
+
 class SpoolContractTests(BaseCase):
     def test_spool_redacts_and_minimises_before_disk_and_network(self) -> None:
         server = self.fake_server()

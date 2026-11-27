@@ -393,6 +393,27 @@ describe('@mebular/dsh-plugin memory runtime：配置与自动模式', () => {
     });
   });
 
+  it('W5：recallTimeoutMs 默认 2000；显式 <1600 保留但 warning', () => {
+    const defaults = resolveMemoryRuntimeConfig({});
+    expect(defaults.recallTimeoutMs).toBe(2000);
+
+    const warnings = [];
+    const below = resolveMemoryRuntimeConfig(
+      { recallTimeoutMs: 800 },
+      { warn: (message) => warnings.push(message) },
+    );
+    expect(below.recallTimeoutMs).toBe(800);
+    expect(warnings).toContain('host_timeout_below_deadline');
+
+    const okWarnings = [];
+    const ok = resolveMemoryRuntimeConfig(
+      { recallTimeoutMs: 2000 },
+      { warn: (message) => okWarnings.push(message) },
+    );
+    expect(ok.recallTimeoutMs).toBe(2000);
+    expect(okWarnings).not.toContain('host_timeout_below_deadline');
+  });
+
   it('旧 enabled/capture 字段忽略并 warning，不控制行为', () => {
     const warnings = [];
     const config = resolveMemoryRuntimeConfig(

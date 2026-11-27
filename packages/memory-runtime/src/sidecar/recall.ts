@@ -56,6 +56,7 @@ import {
   type AppliedIntervention,
   type InterventionAction,
   type InterventionDecision,
+  type InterventionFallbackReason,
   type InterventionPlannerTrace,
   type RecallDepth,
   type RecallOutcome,
@@ -78,10 +79,12 @@ import {
   cueScopeOf,
   prefetchKeyFor,
   type InterventionCueScope,
+  type InterventionPrefetchLookup,
 } from './intervention-prefetch.js';
 import {
   resolveEffectiveIntervention,
   type EffectiveInterventionResolution,
+  type InterventionPlannerSource,
 } from './effective.js';
 import {
   HostPlanReplayGuard,
@@ -102,6 +105,16 @@ import {
   verifyOutcomeBinding,
   type OutcomeBindingScope,
 } from './outcome-token.js';
+import {
+  CONTEXT_RESPONSE_RESERVE_MS,
+  CONTEXT_TRACE_RESERVE_MS,
+  awaitWithinDeadline,
+  clampContextDeadline,
+} from './deadline.js';
+import {
+  InterventionPlannerQueue,
+  type InterventionPlannerQueueMetrics,
+} from './intervention-queue.js';
 
 const MAX_DOMAINS = 16;
 const MAX_QUERY_CHARS = 2000;
@@ -115,6 +128,10 @@ const EXPAND_TRACE_TTL_MS = 10 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** 后台 local plan 预取硬上限；不进入 `/context` 同步路径（W5 会换成独立队列）。 */
 const LOCAL_PREFETCH_TIMEOUT_MS = 20_000;
+/** trace 写入来不及时的稳定 warning；响应同时返回 traceId/bindingToken=null。 */
+const TRACE_SKIPPED_DEADLINE = 'trace_write_skipped_deadline';
+/** 慢 self/checkpoint/提取/组装被 deadline 截断时的稳定 warning。 */
+const CONTEXT_DEADLINE_EXCEEDED = 'context_deadline_exceeded';
 const MAX_OUTCOME_NOTE_CHARS = 200;
 const MAX_OUTCOME_HISTORY = 5;
 /** fragment ID → source ID 的进程内别名表上限；防止长时间运行无限增长。 */
@@ -328,6 +345,17 @@ export interface RecallResponse {
   warnings: string[];
   silenceReason: string | null;
   traceId: string | null;
+  /**
+   * 0.4.0 W5 integration seam：本地 trace 是否真的持久化成功。
+   * W4 签发 bindingToken 前必须同时看 traceId 与 tracePersisted；
+   * trace skip-on-deadline / trace off / 写入失败都为 false。
+   */
+  tracePersisted?: boolean;
+  /**
+   * 0.4.0 W5：trace skip-on-deadline 时显式为 null；宿主不得对 null 上报 outcome。
+   * 正常路径由 W4 `handleContext` 在 trace 落盘（tracePersisted=true）后签发。
+   */
+  bindingToken?: string | null;
   /** 0.4.0：本次 memory fragments 的介入决策；旧宿主忽略即可。 */
   decision?: InterventionDecision;
   /** 0.4.0：实际生效的介入结果；shadow/预算裁剪下与 decision 不同。旧宿主忽略即可。 */
@@ -472,6 +500,11 @@ export interface RecallServiceOptions {
   effectiveIntervention?: EffectiveInterventionResolution;
   /** main 解析的 internal diagnostic shadow（config 或 env）；缺省读 config。 */
   diagnosticShadow?: boolean;
+  /**
+   * 测试/嵌入式覆盖 planner 队列；生产使用默认 concurrency=1/maxQueue=8。
+   * 不改变 ingest/checkpoint/self/extraction 的既有队列。
+   */
+  plannerQueue?: InterventionPlannerQueue;
   now?: () => number;
 }
 
@@ -485,6 +518,8 @@ export interface RecallStatsSnapshot {
   lastError: { code: string; message: string; at: number } | null;
   /** 0.4.0 最近一次介入 planner 诊断；只含枚举/计时/model id。 */
   lastPlanner: InterventionPlannerTrace | null;
+  /** W5：planner 队列只读指标。 */
+  plannerQueue: InterventionPlannerQueueMetrics;
 }
 
 interface NormalizedRequest {
@@ -584,6 +619,26 @@ interface RecallRun {
     shadow: boolean;
     domain: string;
   } | null;
+  /** W5：`/context` 绝对 deadline；`recall` 不设置。 */
+  deadlineAt?: number;
+  /** W5：handleContext 入口时间，用于计时/证据。 */
+  deadlineStartedAt?: number;
+  /** W5：慢阶段被 deadline 截断时置位，避免继续启动新调用。 */
+  deadlineExceeded?: boolean;
+}
+
+interface ModelPlanOutcome {
+  decision: InterventionDecision;
+  warnings: string[];
+  hostHit: boolean;
+  source: InterventionMeta['source'];
+  resolvedSource: InterventionMeta['resolvedSource'];
+  prefetched: boolean;
+  fallbackReason?: string;
+  planId?: string;
+  planScope?: 'session' | 'turn';
+  cueMatched?: boolean;
+  cueJaccard?: number;
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -1336,6 +1391,8 @@ export class RecallService {
   private prefetchFingerprint: string;
   /** 最近一次 planner 诊断；供 /status.policy.planner 只读展示。 */
   private lastPlanner: InterventionPlannerTrace | null = null;
+  /** W5：介入 planner 独立队列；不包 ingest/checkpoint/self/extraction/query plan。 */
+  private readonly plannerQueue: InterventionPlannerQueue;
   /** W3：host planId 单次消费表；进程内，重启即失效。 */
   private readonly hostPlanReplayGuard = new HostPlanReplayGuard();
   /** W3：(agentId, threadId) → 最近一次 /context 的 turnId；用于拒绝伪造 basis。 */
@@ -1367,6 +1424,7 @@ export class RecallService {
     this.effectiveInterventionOverride = options.effectiveIntervention;
     this.diagnosticShadowOverride = options.diagnosticShadow;
     this.now = options.now ?? Date.now;
+    this.plannerQueue = options.plannerQueue ?? new InterventionPlannerQueue({ now: this.now });
     this.prefetchFingerprint = this.localPrefetchFingerprint();
   }
 
@@ -1388,6 +1446,7 @@ export class RecallService {
       degraded: this.degraded,
       lastError: this.lastError ? { ...this.lastError } : null,
       lastPlanner: this.lastPlanner ? { ...this.lastPlanner } : null,
+      plannerQueue: this.plannerQueue.metrics(),
     };
   }
 
@@ -1432,6 +1491,34 @@ export class RecallService {
     return this.getPolicy ? this.getPolicy() : this.policy;
   }
 
+  /** 配置已在加载时 clamp；这里再防御异常构造的 config。 */
+  private contextDeadlineMs(): number {
+    return clampContextDeadline(this.config.context.deadlineMs);
+  }
+
+  /**
+   * W5：planner 的硬预算终点。`/context` 总 deadline 再留出响应组装时间；
+   * 超过后不再启动 self/checkpoint/提取/模型等新调用。
+   */
+  private workDeadlineAt(run: RecallRun): number | undefined {
+    return run.deadlineAt === undefined
+      ? undefined
+      : run.deadlineAt - CONTEXT_RESPONSE_RESERVE_MS;
+  }
+
+  private isWorkExpired(run: RecallRun): boolean {
+    const deadlineAt = this.workDeadlineAt(run);
+    return deadlineAt !== undefined && deadlineAt <= this.now();
+  }
+
+  private expireContext(run: RecallRun, warnings: string[], stage: string): void {
+    if (run.deadlineExceeded) return;
+    run.deadlineExceeded = true;
+    run.degraded = true;
+    pushWarning(warnings, CONTEXT_DEADLINE_EXCEEDED);
+    pushWarning(warnings, `${stage}_deadline_exceeded`);
+  }
+
   private noteError(error: unknown): void {
     const code = isObject(error) && typeof error.code === 'string' ? error.code : 'internal';
     const message = (error as Error)?.message ?? '召回失败';
@@ -1459,10 +1546,21 @@ export class RecallService {
     hostToken?: string,
   ): Promise<RecallHttpResult<ContextResponse>> {
     this.lifecycle?.assertAccepting('context');
+    // W5：计时从入口开始，到响应可写为止；单次绝对 deadline，不随阶段串行延长。
+    const startedAt = this.now();
+    const deadlineMs = this.contextDeadlineMs();
+    const deadlineAt = startedAt + deadlineMs;
+    const deadlineClamped = this.config.context.deadlineClamped === true
+      || this.config.context.deadlineMs !== deadlineMs;
     const normalized = this.normalizeRequest(request, true);
     this.contexts += 1;
-    const base = await this.execute(normalized, 'context');
-    const bindingToken = base.traceId && hostToken
+    const base = await this.execute(normalized, 'context', { startedAt, deadlineAt, deadlineClamped });
+    // W4 × W5：只有 trace 真正落盘才签发 binding token；
+    // skip-on-deadline / trace off / 写入失败都会让 tracePersisted=false，
+    // 此时 traceId（skip 为 null）与 bindingToken 都不能作为 outcome 凭据。
+    const bindingToken = base.traceId
+      && base.tracePersisted === true
+      && hostToken
       ? issueOutcomeBinding({
         scope: {
           traceId: base.traceId,
@@ -1488,6 +1586,8 @@ export class RecallService {
       warnings: base.warnings,
       silenceReason: base.silenceReason,
       traceId: base.traceId,
+      ...(base.tracePersisted !== undefined ? { tracePersisted: base.tracePersisted } : {}),
+      ...(base.bindingToken !== undefined ? { bindingToken: base.bindingToken } : {}),
       ...(base.decision ? { decision: base.decision } : {}),
       ...(base.applied ? { applied: base.applied } : {}),
       ...(base.interventionMeta ? { interventionMeta: base.interventionMeta } : {}),
@@ -2594,11 +2694,16 @@ export class RecallService {
     return { block: null, degraded: degraded || sawSummaryOnly };
   }
 
-  private async execute(request: NormalizedRequest, mode: 'recall' | 'context'): Promise<RecallResponse & { blocks?: ContextBlock[] }> {
+  private async execute(
+    request: NormalizedRequest,
+    mode: 'recall' | 'context',
+    deadline?: { startedAt: number; deadlineAt: number; deadlineClamped: boolean },
+  ): Promise<RecallResponse & { blocks?: ContextBlock[] }> {
     this.lifecycle?.assertAccepting('recall.execute');
     const recallId = shortId('rr');
     const warnings: string[] = [];
     let degraded = false;
+    if (deadline?.deadlineClamped) pushWarning(warnings, 'context_deadline_clamped');
     let searchQuery = request.query;
     let queryPlan: RecallRun['queryPlan'] = { source: 'heuristic' };
 
@@ -2606,26 +2711,50 @@ export class RecallService {
     if (this.config.recall.queryPlan === 'model' && this.models && !request.mute
       && request.turnKind === 'human' && request.query.trim().length > 0) {
       this.lifecycle?.assertAccepting('recall.model');
-      const selection = await this.models.selectOptionalSource(request.allowRemote);
+      // W5：selection 与 planQuery 共享同一 deadline；selection 慢时不再启动 planQuery。
+      const queryPlanDeadline = deadline?.deadlineAt === undefined
+        ? undefined
+        : deadline.deadlineAt - CONTEXT_RESPONSE_RESERVE_MS;
+      const selectionOutcome = queryPlanDeadline !== undefined && queryPlanDeadline <= this.now()
+        ? { ok: false as const, timedOut: true }
+        : await awaitWithinDeadline(
+          this.models.selectOptionalSource(request.allowRemote),
+          queryPlanDeadline,
+          this.now,
+        );
+      const selection = selectionOutcome.ok
+        ? selectionOutcome.value
+        : {
+          source: null,
+          warnings: [selectionOutcome.timedOut ? 'query_plan_deadline_exceeded' : 'model_unavailable'],
+          degraded: true,
+          reason: selectionOutcome.timedOut ? 'deadline' : 'model_unavailable',
+        };
       for (const warning of selection.warnings) pushWarning(warnings, warning);
       degraded = degraded || selection.degraded;
       if (selection.source) {
-        let plan;
-        try {
-          plan = await this.models.planQuery({
-            source: selection.source,
-            query: request.query,
-            allowRemote: request.allowRemote,
-          });
-        } catch {
-          plan = {
+        // W5：query plan 与 intervention 共享同一个绝对 deadline；
+        // 超时只影响检索词，不阻塞后续 heuristic 介入或响应组装。
+        const planOutcome = queryPlanDeadline !== undefined && queryPlanDeadline <= this.now()
+          ? { ok: false as const, timedOut: true }
+          : await awaitWithinDeadline(
+            this.models.planQuery({
+              source: selection.source,
+              query: request.query,
+              allowRemote: request.allowRemote,
+            }),
+            queryPlanDeadline,
+            this.now,
+          );
+        const plan = planOutcome.ok
+          ? planOutcome.value
+          : {
             ok: false,
             degraded: true,
-            reason: 'model_unavailable',
-            warnings: ['model_unavailable'],
+            reason: planOutcome.timedOut ? 'deadline' : 'model_unavailable',
+            warnings: [planOutcome.timedOut ? 'query_plan_deadline_exceeded' : 'model_unavailable'],
             latencyMs: 0,
           };
-        }
         if (plan.ok && plan.query) {
           searchQuery = plan.query;
           queryPlan = {
@@ -2691,6 +2820,13 @@ export class RecallService {
       prefetchSeed: null,
       interventionMeta: null,
       effective: null,
+      ...(deadline
+        ? {
+          deadlineAt: deadline.deadlineAt,
+          deadlineStartedAt: deadline.startedAt,
+          deadlineExceeded: false,
+        }
+        : {}),
     };
 
     const gate = this.gate(request, cue);
@@ -2706,7 +2842,27 @@ export class RecallService {
       return this.finish(run, mode);
     }
 
-    const domains = await this.resolveDomains(request, cue, warnings);
+    const domainWarnings: string[] = [];
+    const domainOutcome = await awaitWithinDeadline(
+      this.resolveDomains(request, cue, domainWarnings),
+      this.workDeadlineAt(run),
+      this.now,
+    );
+    let domains: string[];
+    if (domainOutcome.ok) {
+      domains = domainOutcome.value;
+      for (const warning of domainWarnings) pushWarning(warnings, warning);
+    } else {
+      // W5：慢 namespaces 不得把 /context 拖过 deadline；降级到策略可读的默认域。
+      this.expireContext(run, warnings, 'domains');
+      const explicit = request.domains;
+      const fallbackCandidates = explicit && explicit.length > 0
+        ? [...explicit]
+        : this.defaultDomainCandidates(request);
+      domains = this.readableDomains(request, fallbackCandidates, warnings);
+      degraded = true;
+      run.degraded = true;
+    }
     run.domains = domains;
     if (domains.length === 0) {
       run.silenceReason = 'domain_forbidden';
@@ -2718,23 +2874,68 @@ export class RecallService {
       bytes: Math.max(0, Math.min(2048, cue.budget.maxBytes)),
       tokens: Math.max(0, Math.min(500, cue.budget.maxTokens)),
     };
-    const selfResult = mode === 'context'
-      ? await this.loadSelf(request, warnings, selfBudget)
-      : { block: null, degraded: false };
+    const selfWarnings: string[] = [];
+    let selfResult: { block: ContextBlock | null; degraded: boolean };
+    if (mode !== 'context') {
+      selfResult = { block: null, degraded: false };
+    } else if (run.deadlineExceeded || this.isWorkExpired(run)) {
+      this.expireContext(run, warnings, 'self');
+      selfResult = { block: null, degraded: true };
+    } else {
+      const selfOutcome = await awaitWithinDeadline(
+        this.loadSelf(request, selfWarnings, selfBudget),
+        this.workDeadlineAt(run),
+        this.now,
+      );
+      if (selfOutcome.ok) {
+        selfResult = selfOutcome.value;
+        for (const warning of selfWarnings) pushWarning(warnings, warning);
+      } else {
+        this.expireContext(run, warnings, 'self');
+        selfResult = { block: null, degraded: true };
+      }
+    }
     const selfBytes = selfResult.block?.bytes ?? 0;
     const selfTokens = selfResult.block?.tokens ?? 0;
     const checkpointBudget = {
       bytes: Math.max(0, Math.min(4096, cue.budget.maxBytes - selfBytes)),
       tokens: Math.max(0, Math.min(1000, cue.budget.maxTokens - selfTokens)),
     };
-    const checkpointResult = mode === 'context'
-      ? await this.loadCheckpoint(request, warnings, checkpointBudget)
-      : { block: null, degraded: false };
+    const checkpointWarnings: string[] = [];
+    let checkpointResult: { block: ContextBlock | null; degraded: boolean };
+    if (mode !== 'context') {
+      checkpointResult = { block: null, degraded: false };
+    } else if (run.deadlineExceeded || this.isWorkExpired(run)) {
+      this.expireContext(run, warnings, 'checkpoint');
+      checkpointResult = { block: null, degraded: true };
+    } else {
+      const checkpointOutcome = await awaitWithinDeadline(
+        this.loadCheckpoint(request, checkpointWarnings, checkpointBudget),
+        this.workDeadlineAt(run),
+        this.now,
+      );
+      if (checkpointOutcome.ok) {
+        checkpointResult = checkpointOutcome.value;
+        for (const warning of checkpointWarnings) pushWarning(warnings, warning);
+      } else {
+        this.expireContext(run, warnings, 'checkpoint');
+        checkpointResult = { block: null, degraded: true };
+      }
+    }
     run.selfBlock = selfResult.block;
     run.checkpointBlock = checkpointResult.block;
     run.estimatedBytes = selfBytes + (checkpointResult.block?.bytes ?? 0);
     run.estimatedTokens = selfTokens + (checkpointResult.block?.tokens ?? 0);
     degraded = degraded || selfResult.degraded || checkpointResult.degraded;
+
+    // W5：self/checkpoint 已经耗尽预算时不再启动提取/组装；保留已拿到的块，
+    // 用 heuristic 收尾，响应仍必须在总 deadline 内可写。
+    if (run.deadlineExceeded || this.isWorkExpired(run)) {
+      this.expireContext(run, warnings, 'prefetch');
+      run.degraded = true;
+      if (!run.selfBlock && !run.checkpointBlock) run.silenceReason = 'deadline_exceeded';
+      return this.finish(run, mode, true);
+    }
 
     if (!this.client) {
       degraded = true;
@@ -2749,19 +2950,30 @@ export class RecallService {
 
     const fuzzyStart = this.now();
     let rawRecords: RawCandidate[] = [];
-    try {
-      const collected = await this.collectCandidates(request, cue, domains, warnings, searchQuery);
-      rawRecords = collected.records;
-      degraded = degraded || collected.degraded;
-      run.degraded = degraded;
-    } catch (error) {
+    const candidateWarnings: string[] = [];
+    const collected = await awaitWithinDeadline(
+      this.collectCandidates(request, cue, domains, candidateWarnings, searchQuery),
+      this.workDeadlineAt(run),
+      this.now,
+    );
+    if (!collected.ok) {
       degraded = true;
-      pushWarning(warnings, 'fuzzy_failed');
       run.degraded = true;
-      if (!run.selfBlock && !run.checkpointBlock) run.silenceReason = 'runtime_unavailable';
-      this.noteError(error);
+      if (collected.timedOut) {
+        this.expireContext(run, warnings, 'extraction');
+        if (!run.selfBlock && !run.checkpointBlock) run.silenceReason = 'deadline_exceeded';
+      } else {
+        pushWarning(warnings, 'fuzzy_failed');
+        if (!run.selfBlock && !run.checkpointBlock) run.silenceReason = 'runtime_unavailable';
+        this.noteError({ code: 'fuzzy_failed', message: '候选提取失败' });
+      }
+      run.timing.fuzzyMs = elapsed(fuzzyStart, this.now());
       return this.finish(run, mode, degraded);
     }
+    for (const warning of candidateWarnings) pushWarning(warnings, warning);
+    rawRecords = collected.value.records;
+    degraded = degraded || collected.value.degraded;
+    run.degraded = degraded;
     run.timing.fuzzyMs = elapsed(fuzzyStart, this.now());
 
     if (rawRecords.length === 0) {
@@ -2800,7 +3012,13 @@ export class RecallService {
     } else {
       run.selected = intervention.inject;
       const expandStart = this.now();
-      await this.expandSelected(intervention.inject, cue, warnings, intervention.expansionPlan);
+      await this.expandSelected(
+        intervention.inject,
+        cue,
+        warnings,
+        intervention.expansionPlan,
+        this.workDeadlineAt(run),
+      );
       run.timing.expandMs = elapsed(expandStart, this.now());
     }
 
@@ -2903,16 +3121,10 @@ export class RecallService {
   }
 
   private async resolveDomains(request: NormalizedRequest, cue: Cue, warnings: string[]): Promise<string[]> {
-    const policy = this.currentPolicy();
     const explicit = request.domains;
     const candidates: string[] = explicit && explicit.length > 0
       ? [...explicit]
-      : [
-        'user',
-        agentDomain(request.agentId),
-        'default',
-        ...(request.threadId ? [taskDomain(request.threadId)] : []),
-      ];
+      : this.defaultDomainCandidates(request);
 
     if ((!explicit || explicit.length === 0) && request.includeOtherAgents && this.client) {
       try {
@@ -2933,6 +3145,26 @@ export class RecallService {
       }
     }
 
+    return this.readableDomains(request, candidates, warnings);
+  }
+
+  /** 不访问 capability 的默认候选域；deadline 超时时用于快速降级。 */
+  private defaultDomainCandidates(request: NormalizedRequest): string[] {
+    return [
+      'user',
+      agentDomain(request.agentId),
+      'default',
+      ...(request.threadId ? [taskDomain(request.threadId)] : []),
+    ];
+  }
+
+  private readableDomains(
+    request: NormalizedRequest,
+    candidates: string[],
+    warnings: string[],
+  ): string[] {
+    const policy = this.currentPolicy();
+    const explicit = request.domains;
     const readable: string[] = [];
     for (const domain of dedupe(candidates)) {
       if (domain === 'system' || domain.startsWith('__')) {
@@ -3488,6 +3720,147 @@ export class RecallService {
     return intervention.mode === 'shadow' ? { ...decision, enforced: false } : decision;
   }
 
+  /**
+   * 模型/host plan 决策本体；只由 `InterventionPlannerQueue` 调用。
+   * 不包 self/checkpoint/提取/query plan，也不在调用点之外启动模型。
+   */
+  private async planModelDecision(input: {
+    run: RecallRun;
+    candidates: InterventionCandidateView[];
+    heuristic: InterventionDecision;
+    planInput: InterventionPlannerInput;
+    warnings: string[];
+    configuredSource: InterventionPlannerSource;
+    localConfigured: boolean;
+    apiConfigured: boolean;
+    prefetched: InterventionPrefetchLookup;
+    policyStats: InferenceInterventionStats;
+    candidateFingerprint: string[];
+  }): Promise<ModelPlanOutcome> {
+    const {
+      run,
+      candidates,
+      heuristic,
+      planInput,
+      warnings,
+      configuredSource,
+      localConfigured,
+      apiConfigured,
+      prefetched,
+      policyStats,
+      candidateFingerprint,
+    } = input;
+    const hostEligible = configuredSource === 'host' || configuredSource === 'auto';
+    const hostPlan = run.request.hostPlan;
+    let hostFallbackReason: string | null = null;
+
+    if (hostEligible && hostPlan !== undefined) {
+      const planId = hostPlanIdOf(hostPlan);
+      const planNow = this.now();
+      if (planId && this.hostPlanReplayGuard.has(planId, planNow)) {
+        hostFallbackReason = 'host_plan_replayed';
+        pushWarning(warnings, 'host_plan_replayed');
+      } else {
+        // 一旦接收就标记单次消费；即使后续 cue/候选不符，也不得再次消费。
+        if (planId) this.hostPlanReplayGuard.mark(planId, planNow);
+        const contextKey = this.contextTurnKey(run.request);
+        const validation = validateHostPlan(hostPlan, {
+          now: planNow,
+          agentId: run.request.agentId,
+          threadId: run.request.threadId,
+          turnId: run.request.turnId,
+          previousTurnId: run.request.previousTurnId,
+          lastContextTurnId: contextKey ? this.lastContextTurns.get(contextKey) ?? null : null,
+          hostApp: run.request.hostApp,
+          hostInstanceId: run.request.hostInstanceId,
+          currentCue: run.cue,
+          currentCandidateFingerprint: candidateFingerprint,
+        });
+        if (!validation.ok) {
+          hostFallbackReason = validation.reason;
+          pushWarning(warnings, validation.warning);
+        } else if (decidedByRules(heuristic) || candidates.length === 0) {
+          // must_speak / defer / greeting / meta / no_candidates 仍由 sidecar 决定。
+          hostFallbackReason = 'host_plan_overridden_by_hard_rule';
+          pushWarning(warnings, 'host_plan_overridden_by_hard_rule');
+        } else {
+          const hostDecision = this.hostPlanDecision(validation.plan, heuristic, candidates, warnings);
+          if (hostDecision === null) {
+            hostFallbackReason = 'host_plan_invalid';
+            pushWarning(warnings, 'host_plan_invalid');
+          } else {
+            return {
+              decision: hostDecision,
+              warnings,
+              hostHit: true,
+              source: 'host',
+              resolvedSource: 'host',
+              prefetched: true,
+              planId: validation.plan.planId,
+              planScope: validation.plan.scope,
+              cueMatched: validation.cueMatched,
+              cueJaccard: Number(validation.cueJaccard.toFixed(4)),
+            };
+          }
+        }
+      }
+    }
+
+    if (configuredSource === 'host') {
+      // host source 不允许本轮同步调用宿主模型；missing/过期/cue 不符都立即 heuristic。
+      if (hostPlan === undefined) pushWarning(warnings, 'host_plan_missing');
+      const fallbackReason = hostFallbackReason ?? 'host_plan_missing';
+      return {
+        decision: {
+          ...heuristic,
+          planner: {
+            configuredSource,
+            resolvedSource: 'heuristic',
+            latencyMs: 0,
+            fallbackReason: fallbackReason as InterventionFallbackReason,
+            prefetched: false,
+          },
+        },
+        warnings,
+        hostHit: false,
+        source: 'heuristic',
+        resolvedSource: 'heuristic',
+        prefetched: false,
+        fallbackReason,
+      };
+    }
+
+    // local/api：W2 预取消费与来源解析；host miss 不冒充 host。
+    const planned = await planInterventionAsync(planInput, {
+      planner: this.models,
+      configuredSource,
+      // 契约 §6.3：介入的远端许可只读 config，不信任 `/context` body。
+      allowRemote: this.config.model.api.allowRemote,
+      timeoutMs: this.config.intervention.modelTimeoutMs,
+      // W5：绝对 deadline 优先级高于 modelTimeoutMs；API 单次、maxRetries=0。
+      ...(run.deadlineAt !== undefined ? { deadlineAt: run.deadlineAt } : {}),
+      localConfigured,
+      apiConfigured,
+      ...(prefetched.plan ? { prefetchedPlan: prefetched.plan } : {}),
+      prefetchState: prefetched.state,
+      ...(prefetched.ageMs !== undefined ? { prefetchAgeMs: prefetched.ageMs } : {}),
+      stats: policyStats,
+      hasCheckpoint: Boolean(run.checkpointBlock),
+      now: this.now,
+    });
+    for (const warning of planned.warnings) pushWarning(warnings, warning);
+    const fallbackReason = hostFallbackReason ?? planned.planner.fallbackReason ?? undefined;
+    return {
+      decision: planned.decision,
+      warnings,
+      hostHit: false,
+      source: planned.fromModel ? planned.source : 'heuristic',
+      resolvedSource: planned.planner.resolvedSource,
+      prefetched: planned.prefetched,
+      ...(fallbackReason !== undefined ? { fallbackReason } : {}),
+    };
+  }
+
   private async decideIntervention(
     run: RecallRun,
     selected: Candidate[],
@@ -3643,94 +4016,66 @@ export class RecallService {
     let decision: InterventionDecision = heuristic;
     let plannedWarnings: string[] = [];
     let hostHit = false;
-    let hostFallbackReason: string | null = null;
 
     if (intervention.planner === 'model') {
-      const hostEligible = configuredSource === 'host' || configuredSource === 'auto';
-      const hostPlan = run.request.hostPlan;
-
-      if (hostEligible && hostPlan !== undefined) {
-        const planId = hostPlanIdOf(hostPlan);
-        const planNow = this.now();
-        if (planId && this.hostPlanReplayGuard.has(planId, planNow)) {
-          hostFallbackReason = 'host_plan_replayed';
-          pushWarning(warnings, 'host_plan_replayed');
-        } else {
-          // 一旦接收就标记单次消费；即使后续 cue/候选不符，也不得再次消费。
-          if (planId) this.hostPlanReplayGuard.mark(planId, planNow);
-          const contextKey = this.contextTurnKey(run.request);
-          const validation = validateHostPlan(hostPlan, {
-            now: planNow,
-            agentId: run.request.agentId,
-            threadId: run.request.threadId,
-            turnId: run.request.turnId,
-            previousTurnId: run.request.previousTurnId,
-            lastContextTurnId: contextKey ? this.lastContextTurns.get(contextKey) ?? null : null,
-            hostApp: run.request.hostApp,
-            hostInstanceId: run.request.hostInstanceId,
-            currentCue: run.cue,
-            currentCandidateFingerprint: candidateFingerprint,
-          });
-          if (!validation.ok) {
-            hostFallbackReason = validation.reason;
-            pushWarning(warnings, validation.warning);
-          } else if (decidedByRules(heuristic) || candidates.length === 0) {
-            // must_speak / defer / greeting / meta / no_candidates 仍由 sidecar 决定。
-            hostFallbackReason = 'host_plan_overridden_by_hard_rule';
-            pushWarning(warnings, 'host_plan_overridden_by_hard_rule');
-          } else {
-            const hostDecision = this.hostPlanDecision(validation.plan, heuristic, candidates, warnings);
-            if (hostDecision === null) {
-              hostFallbackReason = 'host_plan_invalid';
-              pushWarning(warnings, 'host_plan_invalid');
-            } else {
-              decision = hostDecision;
-              hostHit = true;
-              meta.source = 'host';
-              meta.resolvedSource = 'host';
-              meta.prefetched = true;
-              meta.planId = validation.plan.planId;
-              meta.planScope = validation.plan.scope;
-              meta.cueMatched = validation.cueMatched;
-              meta.cueJaccard = Number(validation.cueJaccard.toFixed(4));
-            }
-          }
-        }
-      }
-
-      if (hostHit) {
-        meta.fallbackReason = undefined;
-      } else if (configuredSource === 'host') {
-        // host source 不允许本轮同步调用宿主模型；missing/过期/cue 不符都立即 heuristic。
-        meta.fallbackReason = hostFallbackReason ?? 'host_plan_missing';
-        meta.source = 'heuristic';
-        meta.resolvedSource = 'heuristic';
-        if (hostPlan === undefined) pushWarning(warnings, 'host_plan_missing');
-        decision = heuristic;
-      } else {
-        // local/api：W2 预取消费与来源解析；host miss 不冒充 host。
-        const planned = await planInterventionAsync(planInput, {
-          planner: this.models,
+      // W5：只把模型决策/ host plan 校验放进独立队列；其余阶段不经过这里。
+      const queued = await this.plannerQueue.enqueue(
+        () => this.planModelDecision({
+          run,
+          candidates,
+          heuristic,
+          planInput,
+          warnings: [],
           configuredSource,
-          // 契约 §6.3：介入的远端许可只读 config，不信任 `/context` body。
-          allowRemote: this.config.model.api.allowRemote,
-          timeoutMs: config.modelTimeoutMs,
           localConfigured,
           apiConfigured,
-          ...(prefetched.plan ? { prefetchedPlan: prefetched.plan } : {}),
-          prefetchState: prefetched.state,
-          ...(prefetched.ageMs !== undefined ? { prefetchAgeMs: prefetched.ageMs } : {}),
-          stats: policyStats,
-          hasCheckpoint: Boolean(run.checkpointBlock),
-          now: this.now,
-        });
-        decision = planned.decision;
-        plannedWarnings = planned.warnings;
-        meta.source = planned.fromModel ? planned.source : 'heuristic';
-        meta.resolvedSource = planned.planner.resolvedSource;
-        meta.prefetched = planned.prefetched;
-        // host 阶段的失败原因优先保留（例如 cue_mismatch/expired）。
-        meta.fallbackReason = hostFallbackReason ?? planned.planner.fallbackReason ?? undefined;
+          prefetched,
+          policyStats,
+          candidateFingerprint,
+        }),
+        {
+          deadlineAt: run.deadlineAt,
+          reserveMs: CONTEXT_RESPONSE_RESERVE_MS,
+        },
+      );
+      if (queued.status === 'completed') {
+        const outcome = queued.value;
+        decision = outcome.decision;
+        hostHit = outcome.hostHit;
+        meta.source = outcome.source;
+        meta.resolvedSource = outcome.resolvedSource;
+        meta.prefetched = outcome.prefetched;
+        if (outcome.fallbackReason === undefined) delete meta.fallbackReason;
+        else meta.fallbackReason = outcome.fallbackReason;
+        if (outcome.planId !== undefined) meta.planId = outcome.planId;
+        if (outcome.planScope !== undefined) meta.planScope = outcome.planScope;
+        if (outcome.cueMatched !== undefined) meta.cueMatched = outcome.cueMatched;
+        if (outcome.cueJaccard !== undefined) meta.cueJaccard = outcome.cueJaccard;
+        plannedWarnings = outcome.warnings;
+      } else {
+        // 超限/超时/异常：不等待、不重试，立即 heuristic。
+        const reason: InterventionFallbackReason = queued.status === 'overflow'
+          ? 'planner_queue_overflow'
+          : queued.status === 'timeout' ? 'deadline' : 'error';
+        const warning = reason === 'planner_queue_overflow'
+          ? 'planner_queue_overflow'
+          : reason === 'deadline' ? 'planner_deadline_exceeded' : 'planner_failed';
+        decision = {
+          ...heuristic,
+          degraded: true,
+          planner: {
+            configuredSource,
+            resolvedSource: 'heuristic',
+            latencyMs: 0,
+            fallbackReason: reason,
+            prefetched: false,
+          },
+        };
+        meta.source = 'heuristic';
+        meta.resolvedSource = 'heuristic';
+        meta.prefetched = false;
+        meta.fallbackReason = reason;
+        pushWarning(warnings, warning);
       }
     } else {
       // heuristic：不触模型；planner trace 仍记录来源/预取状态。
@@ -4090,13 +4435,29 @@ export class RecallService {
     cue: Cue,
     warnings: string[],
     plan: Map<string, string>,
+    deadlineAt?: number,
   ): Promise<void> {
     for (const candidate of selected) {
       const reason = plan.get(candidate.fragment.id);
       if (!reason) continue;
+      if (deadlineAt !== undefined && deadlineAt <= this.now()) {
+        pushWarning(warnings, 'context_deadline_exceeded');
+        pushWarning(warnings, 'detail_deadline_exceeded');
+        return;
+      }
       const started = this.now();
       candidate.expandReason = reason;
-      candidate.detail = await this.expandCandidate(candidate, cue, reason, warnings);
+      const expanded = await awaitWithinDeadline(
+        this.expandCandidate(candidate, cue, reason, warnings),
+        deadlineAt,
+        this.now,
+      );
+      if (!expanded.ok) {
+        pushWarning(warnings, 'context_deadline_exceeded');
+        pushWarning(warnings, 'detail_deadline_exceeded');
+        return;
+      }
+      candidate.detail = expanded.value;
       candidate.detail.tookMs = elapsed(started, this.now());
       candidate.fragment.detail = candidate.detail;
       candidate.fragment.hasDetail = candidate.detail.availability.includes('available')
@@ -4643,7 +5004,7 @@ export class RecallService {
     const citations = this.collectCitations(fragments);
     const timing = {
       ...run.timing,
-      totalMs: elapsed(run.cue.at, this.now()),
+      totalMs: elapsed(run.deadlineStartedAt ?? run.cue.at, this.now()),
     };
     const contextBlocks = mode === 'context'
       ? [
@@ -4658,7 +5019,26 @@ export class RecallService {
     if (mode === 'context' && contextBlocks.length > 0) run.silenceReason = null;
 
     // 任何路径（gate/无命中/策略沉默）都有 decision；off 与早期返回使用 baseline。
-    const decision = run.decision ?? this.baselineDecision(run, run.selected, new Map());
+    let decision = run.decision ?? this.baselineDecision(run, run.selected, new Map());
+    // W5：慢阶段被 deadline 截断时，即使没走到 planner，也要给宿主稳定的
+    // heuristic + fallbackReason=deadline，不能伪装成普通 silent。
+    if (mode === 'context'
+      && run.deadlineExceeded === true
+      && !decision.planner
+      && this.effectiveIntervention.planner === 'model') {
+      decision = {
+        ...decision,
+        degraded: true,
+        planner: {
+          configuredSource: this.effectiveIntervention.source,
+          resolvedSource: 'heuristic',
+          latencyMs: 0,
+          fallbackReason: 'deadline',
+          prefetched: false,
+        },
+      };
+      degraded = true;
+    }
     if (decision.degraded) degraded = true;
     // context 以实际展开后的 blocks 为准；预算裁掉或未注入时不能报成 speak。
     const injectedIds = mode === 'context'
@@ -4698,10 +5078,14 @@ export class RecallService {
     // 预算裁剪记 silent，不能记未生效的建议。每个 /context 只记一次。
     if (!policyBlocked) {
       this.noteIntervention(this.decisionKey(run), applied.action, applied.depth);
-      await this.recordPolicyDecision(
-        run.request.agentId,
-        applied.domain ?? run.domains[0] ?? 'default',
-        applied.action,
+      await awaitWithinDeadline(
+        this.recordPolicyDecision(
+          run.request.agentId,
+          applied.domain ?? run.domains[0] ?? 'default',
+          applied.action,
+        ),
+        run.deadlineAt === undefined ? undefined : run.deadlineAt - CONTEXT_TRACE_RESERVE_MS,
+        this.now,
       );
     }
 
@@ -4713,11 +5097,32 @@ export class RecallService {
 
     // 模型/召回已完成的晚到结果：drain 后不得再写 trace 或返回可注入结果。
     this.lifecycle?.assertAccepting('recall.commit');
-    const trace = await this.writeTrace(run, mode, fragments, warnings, degraded, silenceReason, timing);
-    if (trace.failed) {
+    // W5 trace skip-on-deadline：trace 不是权威，不能为了它突破总 deadline。
+    const traceDeadlineAt = run.deadlineAt === undefined
+      ? undefined
+      : run.deadlineAt - CONTEXT_TRACE_RESERVE_MS;
+    let trace: { traceId: string | null; failed: boolean } = { traceId: null, failed: false };
+    let traceSkipped = false;
+    if (traceDeadlineAt !== undefined && traceDeadlineAt <= this.now()) {
+      traceSkipped = true;
+    } else {
+      const traceOutcome = await awaitWithinDeadline(
+        this.writeTrace(run, mode, fragments, warnings, degraded, silenceReason, timing),
+        traceDeadlineAt,
+        this.now,
+      );
+      if (traceOutcome.ok) trace = traceOutcome.value;
+      else traceSkipped = true;
+    }
+    if (traceSkipped) {
+      degraded = true;
+      pushWarning(warnings, TRACE_SKIPPED_DEADLINE);
+    } else if (trace.failed) {
       degraded = true;
       if (warnings.length === 0) warnings.push('trace_write_failed');
     }
+    // W5 integration seam：只有 trace 真正落盘且没有 skip/fail 时才为 true。
+    const tracePersisted = !traceSkipped && !trace.failed && trace.traceId !== null;
     this.degraded = degraded;
 
     // W3：只有成功完成的 /context 才推进 basis turn；adapter 下一轮必须用它。
@@ -4753,6 +5158,8 @@ export class RecallService {
       warnings: dedupe(warnings),
       silenceReason,
       traceId: trace.traceId,
+      tracePersisted,
+      ...(traceSkipped ? { bindingToken: null } : {}),
       decision,
       applied,
       interventionMeta,

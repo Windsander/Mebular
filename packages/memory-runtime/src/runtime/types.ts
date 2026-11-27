@@ -262,6 +262,60 @@ export interface InterventionScores {
   depthFit: number;
 }
 
+/**
+ * 0.4.0 介入 planner 的稳定 fallback 原因（W0-A §6.4）。
+ * 只记录枚举，不含 raw query/detail/token/endpoint。
+ */
+export type InterventionFallbackReason =
+  | 'none'
+  | 'deadline'
+  | 'prefetch_miss'
+  | 'source_unavailable'
+  | 'model_not_installed'
+  | 'allow_remote_false'
+  | 'host_plan_missing'
+  | 'host_plan_expired'
+  | 'host_plan_replayed'
+  | 'host_plan_invalid'
+  | 'host_plan_scope_mismatch'
+  | 'host_plan_cue_mismatch'
+  | 'invalid_output'
+  | 'timeout'
+  | 'planner_queue_overflow'
+  | 'error';
+
+/** 预取状态；first_turn/miss/expired/cue_mismatch 都是预期运行时状态。 */
+export type InterventionPrefetchState =
+  | 'hit'
+  | 'miss'
+  | 'expired'
+  | 'cue_mismatch'
+  | 'first_turn';
+
+export interface InterventionPlannerAttempt {
+  source: 'host' | 'local' | 'api';
+  outcome: 'hit' | 'miss' | 'timeout' | 'invalid' | 'unavailable' | 'remote_not_allowed' | 'error';
+  latencyMs: number;
+}
+
+/**
+ * 只读 planner 诊断（W0-A §6.4）。
+ * 只含枚举、布尔、计时与模型 id；不含 endpoint/keyRef/凭据/正文。
+ */
+export interface InterventionPlannerTrace {
+  configuredSource: 'heuristic' | 'local' | 'host' | 'api' | 'auto';
+  resolvedSource: 'heuristic' | 'local' | 'host' | 'api' | null;
+  latencyMs: number;
+  fallbackReason: InterventionFallbackReason | null;
+  prefetched: boolean;
+  prefetchState?: InterventionPrefetchState;
+  planAgeMs?: number;
+  planId?: string;
+  cueMatched?: boolean;
+  model?: string;
+  attempts?: InterventionPlannerAttempt[];
+}
+
 export interface InterventionDecision {
   action: InterventionAction;
   depth: RecallDepth;
@@ -278,6 +332,8 @@ export interface InterventionDecision {
   mustSpeak?: boolean;
   /** 降级标记：must_speak 无候选/详情不可用，或 model 回退 heuristic。 */
   degraded?: boolean;
+  /** 0.4.0 additive 诊断：来源/预取/延迟/fallback；不含正文与凭据。 */
+  planner?: InterventionPlannerTrace;
 }
 
 /** 实际生效的介入结果；与 decision 在 shadow/off 下可能不同。 */

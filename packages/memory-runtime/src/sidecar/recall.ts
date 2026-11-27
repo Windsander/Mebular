@@ -56,6 +56,7 @@ import {
   type AppliedIntervention,
   type InterventionAction,
   type InterventionDecision,
+  type InterventionPlannerTrace,
   type RecallDepth,
   type RecallOutcome,
   type RecallOutcomeKind,
@@ -63,11 +64,20 @@ import {
   type RecallTrace,
 } from '../runtime/types.js';
 import {
+  buildInterventionInferenceRequest,
+  interventionVersionSeed,
   planIntervention,
   planInterventionAsync,
   type InterventionCandidateView,
   type InterventionPlannerInput,
 } from './intervention.js';
+import {
+  InterventionPrefetchCache,
+  createLocalPrefetchPlan,
+  cueScopeOf,
+  prefetchKeyFor,
+  type InterventionCueScope,
+} from './intervention-prefetch.js';
 import {
   resolveEffectiveIntervention,
   type EffectiveInterventionResolution,
@@ -85,6 +95,8 @@ const ANCHOR_TTL_MS = 10 * 60 * 1000;
 const QUARANTINE_MS = 7 * 24 * 60 * 60 * 1000;
 const EXPAND_TRACE_TTL_MS = 10 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
+/** 后台 local plan 预取硬上限；不进入 `/context` 同步路径（W5 会换成独立队列）。 */
+const LOCAL_PREFETCH_TIMEOUT_MS = 20_000;
 const MAX_OUTCOME_NOTE_CHARS = 200;
 const MAX_OUTCOME_HISTORY = 5;
 /** fragment ID → source ID 的进程内别名表上限；防止长时间运行无限增长。 */
@@ -402,6 +414,8 @@ export interface RecallStatsSnapshot {
   traceWrites: number;
   degraded: boolean;
   lastError: { code: string; message: string; at: number } | null;
+  /** 0.4.0 最近一次介入 planner 诊断；只含枚举/计时/model id。 */
+  lastPlanner: InterventionPlannerTrace | null;
 }
 
 interface NormalizedRequest {
@@ -449,6 +463,16 @@ interface Candidate {
   filteredReason?: string;
 }
 
+/** 本轮结束后异步 seed local 预取所需的最小上下文；不进入响应/trace。 */
+interface InterventionPrefetchSeed {
+  key: string;
+  scope: InterventionCueScope;
+  input: InterventionPlannerInput;
+  stats: InferenceInterventionStats;
+  hasCheckpoint: boolean;
+  localFingerprint: string;
+}
+
 interface RecallRun {
   request: NormalizedRequest;
   cue: Cue;
@@ -470,6 +494,8 @@ interface RecallRun {
   /** 0.4.0：本次决策与实际生效结果。 */
   decision: InterventionDecision | null;
   applied: AppliedIntervention | null;
+  /** 0.4.0：本轮结束后用于 seed 下一轮 local 预取；不进入响应。 */
+  prefetchSeed: InterventionPrefetchSeed | null;
   effective: {
     action: InterventionAction;
     depth: RecallDepth;
@@ -1214,6 +1240,10 @@ export class RecallService {
   private readonly lastDecisions = new Map<string, { action: InterventionAction; depth: RecallDepth }>();
   /** reset 时间戳：早于它的 trace 视为迟到 outcome，不再写策略统计。 */
   private policyResetAt = 0;
+  /** W2：local plan 预取缓存；只在本进程内，reset/配置变化失效。 */
+  private readonly prefetchCache = new InterventionPrefetchCache();
+  /** 最近一次 planner 诊断；供 /status.policy.planner 只读展示。 */
+  private lastPlanner: InterventionPlannerTrace | null = null;
 
   private recalls = 0;
   private contexts = 0;
@@ -1261,6 +1291,7 @@ export class RecallService {
       traceWrites: this.traceWrites,
       degraded: this.degraded,
       lastError: this.lastError ? { ...this.lastError } : null,
+      lastPlanner: this.lastPlanner ? { ...this.lastPlanner } : null,
     };
   }
 
@@ -1275,6 +1306,8 @@ export class RecallService {
   resetInterventionState(): void {
     this.silentStreaks.clear();
     this.lastDecisions.clear();
+    this.prefetchCache.clear();
+    this.lastPlanner = null;
     this.policyResetAt = this.now();
   }
 
@@ -2317,6 +2350,7 @@ export class RecallService {
       timing: { cueMs, fuzzyMs: 0, expandMs: 0, assembleMs: 0, totalMs: 0 },
       decision: null,
       applied: null,
+      prefetchSeed: null,
       effective: null,
     };
 
@@ -3137,6 +3171,7 @@ export class RecallService {
     // - heuristic/model：规则层 defer_explicit，模型不参与。
     if (this.isNegatedDefer(run.cue)) {
       const decision = this.negatedDeferDecision(run);
+      this.lastPlanner = null;
       // off 是输入级 defer，不是策略建议；不产生策略 warning。
       if (intervention.planner !== 'off') pushWarning(warnings, 'intervention_defer');
       const effective = {
@@ -3152,6 +3187,7 @@ export class RecallService {
     // model.source 缺失：保持 0.3 baseline/off，不静默开启 heuristic。
     if (intervention.planner === 'off') {
       const decision = this.baselineDecision(run, selected, basePlan);
+      this.lastPlanner = null;
       const effective = {
         action: decision.action,
         depth: decision.depth,
@@ -3235,19 +3271,69 @@ export class RecallService {
       maxSilentStreak: config.maxSilentStreak,
       explorationRate: config.explorationRate,
     };
-    // model 模式：must_speak 不调用模型；其余真实调用 provider，失败 fail-open。
-    const planned = intervention.planner === 'model'
-      ? await planInterventionAsync(planInput, {
+    // W2：来源解析与 local 预取消费都在本轮完成；`/context` 不触发本地模型。
+    const configuredSource = this.config.model.source;
+    const localConfigured = Boolean(
+      this.config.model.local.pack || this.config.model.local.path,
+    );
+    const apiConfigured = Boolean(
+      this.config.model.api.baseUrl && this.config.model.api.model,
+    );
+    const localFingerprint = this.localModelFingerprint();
+    const prefetchKey = prefetchKeyFor(run.request.agentId, run.request.threadId);
+    const prefetched = this.prefetchCache.take(prefetchKey, run.cue, now, localFingerprint);
+
+    let decision: InterventionDecision;
+    if (intervention.planner === 'model') {
+      const planned = await planInterventionAsync(planInput, {
         planner: this.models,
-        allowRemote: run.request.allowRemote,
+        configuredSource,
+        // 契约 §6.3：介入的远端许可只读 config，不信任 `/context` body。
+        allowRemote: this.config.model.api.allowRemote,
         timeoutMs: config.modelTimeoutMs,
+        localConfigured,
+        apiConfigured,
+        ...(prefetched.plan ? { prefetchedPlan: prefetched.plan } : {}),
+        prefetchState: prefetched.state,
+        ...(prefetched.ageMs !== undefined ? { prefetchAgeMs: prefetched.ageMs } : {}),
         stats: policyStats,
         hasCheckpoint: Boolean(run.checkpointBlock),
         now: this.now,
-      })
-      : { decision: planIntervention(planInput), warnings: [] as string[] };
-    const decision = planned.decision;
-    for (const warning of planned.warnings) pushWarning(warnings, warning);
+      });
+      decision = planned.decision;
+      for (const warning of planned.warnings) pushWarning(warnings, warning);
+    } else {
+      // heuristic：不触模型；planner trace 仍记录来源/预取状态。
+      decision = {
+        ...planIntervention(planInput),
+        planner: {
+          configuredSource,
+          resolvedSource: 'heuristic',
+          latencyMs: 0,
+          fallbackReason: null,
+          prefetched: false,
+          ...(configuredSource === 'local' || configuredSource === 'auto' || configuredSource === 'host'
+            ? (prefetched.state !== 'hit' ? { prefetchState: prefetched.state } : {})
+            : {}),
+        },
+      };
+    }
+    this.lastPlanner = decision.planner ? { ...decision.planner } : null;
+
+    // 本轮结束后（post-response、不 await）为下一轮 seed local plan。
+    if (intervention.planner === 'model'
+      && (configuredSource === 'local' || configuredSource === 'auto')
+      && localConfigured
+      && candidates.length > 0) {
+      run.prefetchSeed = {
+        key: prefetchKey,
+        scope: cueScopeOf(run.cue),
+        input: planInput,
+        stats: policyStats,
+        hasCheckpoint: Boolean(run.checkpointBlock),
+        localFingerprint,
+      };
+    }
 
     if (intervention.mode === 'shadow') {
       // shadow 只记录建议；实际注入保持 baseline，且不得改变 warning/预算行为。
@@ -3294,6 +3380,54 @@ export class RecallService {
       domain,
     };
     return { decision, effective, inject, expansionPlan };
+  }
+
+  /** 本地模型配置指纹；配置变化后旧预取 plan 立即失效。 */
+  private localModelFingerprint(): string {
+    return `${this.config.model.local.pack ?? ''}\u0000${this.config.model.local.path ?? ''}`;
+  }
+
+  /**
+   * 本轮响应完成后异步 seed 下一轮 local plan。
+   * 用 setImmediate 确保不在 `/context` 同步路径里启动本地模型；不 await、不改变响应。
+   */
+  private scheduleLocalPrefetch(run: RecallRun): void {
+    const seed = run.prefetchSeed;
+    if (!seed || !this.models) return;
+    run.prefetchSeed = null;
+    setImmediate(() => {
+      void this.runLocalPrefetch(seed).catch(() => undefined);
+    });
+  }
+
+  private async runLocalPrefetch(seed: InterventionPrefetchSeed): Promise<void> {
+    if (!this.models) return;
+    try {
+      const request = buildInterventionInferenceRequest(
+        seed.input,
+        seed.stats,
+        seed.hasCheckpoint,
+        'local',
+        false,
+      );
+      const result = await this.models.planIntervention(request, {
+        timeoutMs: LOCAL_PREFETCH_TIMEOUT_MS,
+      });
+      if (!result.ok) return;
+      const now = this.now();
+      const plan = createLocalPrefetchPlan({
+        scope: seed.scope,
+        result,
+        versionSeed: interventionVersionSeed(request),
+        localFingerprint: seed.localFingerprint,
+        now,
+      });
+      // 配置在异步调用期间变化：丢弃，避免旧模型 plan 污染下一轮。
+      if (seed.localFingerprint !== this.localModelFingerprint()) return;
+      this.prefetchCache.put(seed.key, plan);
+    } catch {
+      // 预取失败不影响用户回合；provider 已记录失败状态，不重复抛错。
+    }
   }
 
   private async ensureDecision(run: RecallRun, warnings: string[]): Promise<void> {
@@ -4119,6 +4253,7 @@ export class RecallService {
     } else {
       response.blocks = contextBlocks;
     }
+    if (mode === 'context') this.scheduleLocalPrefetch(run);
     return response;
   }
 

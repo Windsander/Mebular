@@ -1562,7 +1562,7 @@ describe('sidecar recall/context HTTP', () => {
     expect(runtime.degraded).toBe(false);
     const recovered = await fetch(`${server.url}/status`, { headers: auth() });
     const recoveredBody = await recovered.json() as any;
-    expect(recoveredBody.data.policy).toEqual({ degraded: false, lastError: null });
+    expect(recoveredBody.data.policy).toMatchObject({ degraded: false, lastError: null });
   });
 
   it('PolicyStore init 失败后由后台 flush 恢复：/status 不残留 stale degraded', async () => {
@@ -1595,7 +1595,7 @@ describe('sidecar recall/context HTTP', () => {
     expect(runtime.degraded).toBe(false);
     const recovered = await fetch(`${server.url}/status`, { headers: auth() });
     const recoveredBody = await recovered.json() as any;
-    expect(recoveredBody.data.policy).toEqual({ degraded: false, lastError: null });
+    expect(recoveredBody.data.policy).toMatchObject({ degraded: false, lastError: null });
   });
 
   it('POST /intervention/reset：成功、重复 reset、未启用与错误路径', async () => {

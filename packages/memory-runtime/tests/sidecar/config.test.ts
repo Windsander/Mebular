@@ -70,7 +70,7 @@ describe('sidecar config', () => {
       explorationRate: 0.05,
       outcomeWindowMs: 120_000,
       policyTtlDays: 30,
-      modelTimeoutMs: 500,
+      modelTimeoutMs: 1500,
     });
     expect(defaults.detail.stagingHours).toBe(24);
     expect(defaults.detail.stagingBytes).toBe(268_435_456);

@@ -47,6 +47,7 @@ import {
   type InferenceApi,
   type InferenceStatusView,
 } from './inference/types.js';
+import type { InterventionPlannerTrace } from '../runtime/types.js';
 
 const REQUEST_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
@@ -319,6 +320,10 @@ export interface SidecarStatusSnapshot {
   policy?: {
     degraded: boolean;
     lastError: { code: string; at: number } | null;
+    /** 最近一次介入 planner 诊断；只含枚举/计时/model id。 */
+    planner?: {
+      last: InterventionPlannerTrace | null;
+    };
   };
   /** 模型安装/引擎/推荐状态；不包含 token/path。 */
   inference?: InferenceStatusView;

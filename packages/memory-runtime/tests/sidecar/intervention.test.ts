@@ -305,6 +305,70 @@ describe('intervention planner', () => {
     });
   });
 
+  it('conflict：top-1 普通 fresh + top-2 conflict 时使用 conflict 候选', () => {
+    const decision = planIntervention(input({
+      cue: cue('两条记录到底哪个对？'),
+      candidates: [
+        candidate({ fragmentId: 'mf_plain', sourceIds: ['01JPLAIN'], score: 0.9, conflict: false }),
+        candidate({ fragmentId: 'mf_conf', sourceIds: ['01JCONF'], score: 0.8, conflict: true }),
+      ],
+    }));
+    expect(decision).toMatchObject({
+      action: 'speak',
+      reason: 'conflict',
+      depth: 'detail',
+      scores: { top: 0.8, novelty: 1 },
+    });
+  });
+
+  it('conflict：conflict 候选已注入 + 普通 fresh 时不得误入 conflict', () => {
+    const decision = planIntervention(input({
+      cue: cue('两条记录到底哪个对？'),
+      candidates: [
+        candidate({ fragmentId: 'mf_conf', sourceIds: ['01JCONF'], score: 0.9, conflict: true }),
+        candidate({ fragmentId: 'mf_plain', sourceIds: ['01JPLAIN'], score: 0.8, conflict: false }),
+      ],
+      alreadyInjectedIds: ['01JCONF'],
+    }));
+    expect(decision).toMatchObject({
+      action: 'speak',
+      reason: 'high_relevance',
+      scores: { top: 0.8, novelty: 1 },
+    });
+    expect(decision.reason).not.toBe('conflict');
+  });
+
+  it('conflict：全部 conflict 候选已注入时仍优先 conflict，而不是 no_novelty', () => {
+    const decision = planIntervention(input({
+      cue: cue('两条记录到底哪个对？'),
+      candidates: [
+        candidate({ fragmentId: 'mf_conf1', sourceIds: ['01JCONF1'], score: 0.9, conflict: true }),
+        candidate({ fragmentId: 'mf_conf2', sourceIds: ['01JCONF2'], score: 0.8, conflict: true }),
+      ],
+      alreadyInjectedIds: ['01JCONF1', '01JCONF2'],
+    }));
+    expect(decision).toMatchObject({
+      action: 'speak',
+      reason: 'conflict',
+      depth: 'detail',
+      scores: { novelty: 0 },
+    });
+  });
+
+  it('conflict：“不一致”普通陈述句不触发，只有明确问哪个对才触发', () => {
+    const statement = planIntervention(input({
+      cue: cue('这两条记录不一致'),
+      candidates: [candidate({ conflict: true, score: 0.86 })],
+    }));
+    expect(statement.reason).not.toBe('conflict');
+
+    const question = planIntervention(input({
+      cue: cue('这两条记录不一致，以哪条为准？'),
+      candidates: [candidate({ conflict: true, score: 0.86 })],
+    }));
+    expect(question).toMatchObject({ action: 'speak', reason: 'conflict' });
+  });
+
   it('conflict + must_speak：冲突分支决定深度，但仍必须 speak', () => {
     const query = '上次的部署端口有 7331 和 7332 两个说法，哪个对？';
     expect(mustSpeakReason(input({ cue: cue(query) }))).not.toBeNull();

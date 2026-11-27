@@ -407,7 +407,7 @@ describe('W0.5c rule-layer retest', () => {
             reason: outcome.reason,
             action: outcome.action,
           })),
-          note: 'B2: only an explicit which-is-right question with conflict candidates enters the conflict branch; exact intent uses quote, otherwise detail. "两条记忆说的发布流程不一样" is intentionally not a conflict trigger.',
+          note: 'B2: only an explicit which-is-right question with conflict candidates enters the conflict branch; exact intent uses quote, otherwise detail. Bare statements (不一致/打架/they disagree) are intentionally heuristic.',
         },
         greetingMeta: {
           count: goldenGreetingMeta.length,
@@ -447,9 +447,14 @@ describe('W0.5c rule-layer retest', () => {
     expect(expectedDepthMismatches).toEqual([]);
 
     // runtime cue 不应把已经实现的硬规则再降级。
-    // B2 明确移除“不一样/对不上”触发后，x_conf_release_zh 按设计回落到 heuristic；
-    // 它不再属于 conflict hard slice，但仍应 speak（不能误 silent）。
-    expect(runtimeDowngraded.map((outcome) => outcome.id).sort()).toEqual(['x_conf_release_zh']);
+    // B2 的 conflict 契约只认“哪个对/以哪条为准”这类明确问句：
+    // x_conf_release_zh（不一样）、x_conf_theme_zh（打架了）、x_conf_flow_en
+    // （they disagree）都是陈述句，按设计回落到 heuristic；它们仍应 speak。
+    expect(runtimeDowngraded.map((outcome) => outcome.id).sort()).toEqual([
+      'x_conf_flow_en',
+      'x_conf_release_zh',
+      'x_conf_theme_zh',
+    ]);
     // 两个已知的 runtime-cue 残余洞（非 W0.5c 新增，均在 Stage 0 已存在）：
     //   - x_nov_port_zh：真实 cue 的 exact_value 让 must_speak 先于 novelty=0；
     //   - x_sil_physics_zh：泛化「是多少」被当成 exact intent，低分候选仍 speak。

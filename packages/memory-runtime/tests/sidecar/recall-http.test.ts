@@ -912,7 +912,7 @@ describe('sidecar recall/context HTTP', () => {
     expect(traceBody.data.applied).toMatchObject({ action: 'speak', wouldAction: 'silent' });
   });
 
-  it('heuristic silent/defer：跳过 memory fragments，self/checkpoint 仍按原顺序注入', async () => {
+  it('heuristic silent/defer：跳过 memory fragments，self/checkpoint 仍按原顺序注入；user_negated=defer', async () => {
     const { server, fake } = await setup({
       intervention: { mode: 'heuristic', minConfidence: 0.95, explorationRate: 0, maxSilentStreak: 99 },
     });
@@ -980,6 +980,32 @@ describe('sidecar recall/context HTTP', () => {
     const deferTrace = await fetch(`${server.url}/traces/${deferred.body.data.traceId}`, { headers: auth() });
     const deferTraceBody = await deferTrace.json() as any;
     expect(deferTraceBody.data.applied).toMatchObject({ action: 'defer', depth: 'gist', fragments: 0 });
+
+    // user_negated 也是显式 defer：不注入 memory fragments，但 checkpoint 仍加载；
+    // decision/applied 都必须是 defer，而不是 recall 层的 user_negated silent。
+    const negated = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_intervention',
+      turnId: 'turn_intervention_negated',
+      query: '别用记忆回答我的偏好',
+    });
+    expect(negated.status).toBe(200);
+    expect(negated.body.data.decision).toMatchObject({
+      action: 'defer',
+      depth: 'gist',
+      reason: 'defer_explicit',
+    });
+    expect(negated.body.data.fragments).toEqual([]);
+    expect(negated.body.data.blocks.map((block: any) => block.kind)).toEqual(['checkpoint']);
+    expect(negated.body.data.blocks[0].content).toContain('保持 self/checkpoint 注入');
+    expect(negated.body.data.warnings).toContain('intervention_defer');
+    const negatedTrace = await fetch(`${server.url}/traces/${negated.body.data.traceId}`, { headers: auth() });
+    const negatedTraceBody = await negatedTrace.json() as any;
+    expect(negatedTraceBody.data.decision).toMatchObject({
+      action: 'defer',
+      reason: 'defer_explicit',
+    });
+    expect(negatedTraceBody.data.applied).toMatchObject({ action: 'defer', fragments: 0 });
 
     // 没有 self/checkpoint 时，沉默原因必须保留策略原因而不是 budget_too_small。
     const bare = await post(`${server.url}/context`, {

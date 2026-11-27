@@ -328,11 +328,13 @@ follow the existing lifecycle path) so the new mode is loaded.
 Hard-rule priority (first match wins):
 
 1. `defer_explicit`: the user/host explicitly says “not now / hold off / don't use
-   memory”. This is a deliberate `defer`; it may override an automatic `must_speak`,
-   keeps `self`/checkpoint on the existing path, and records `applied.action=defer`.
+   memory”, including cue-level `user_negated`. This is a deliberate `defer`; it may
+   override an automatic `must_speak`, keeps `self`/checkpoint on the existing path,
+   and records `applied.action=defer`.
 2. `conflict`: only when the user explicitly asks which record is right and a
    candidate belongs to a conflict group. Exact intent uses `depthForCue()` → `quote`;
-   otherwise `detail`; unavailable detail falls back to `gist` + `degraded`.
+   otherwise `detail`; unavailable detail falls back to `gist` + `degraded`. Bare
+   statements such as “records disagree / 不一致” do not trigger conflict.
 3. `greeting` / `meta`: whole-turn greeting, thanks, assistant identity/capability/time
    → `silent`. The regex is anchored to the whole turn; a mixed turn with a real memory
    request falls through to `must_speak`.

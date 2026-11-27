@@ -291,12 +291,12 @@ config 并按现有生命周期重启/重载，使新配置生效。
 
 硬规则优先级（先命中先返回）：
 
-1. `defer_explicit`：用户/宿主明确“暂时不要提 / 先别用记忆”。这是主动 `defer`，
-   可以覆盖自动 `must_speak`；`self`/checkpoint 仍按原路径注入，trace 记录
-   `applied.action=defer`。
-2. `conflict`：只有用户明确问“哪个对 / 以哪条为准”，且候选确实属于 conflict
-   group 时才触发。exact 意图用 `depthForCue()` → `quote`，否则 `detail`；detail
-   不可用降为 `gist` + `degraded`。仅“和以前不一样 / 对不上”不触发。
+1. `defer_explicit`：用户/宿主明确“暂时不要提 / 先别用记忆”，包括 cue 层的
+   `user_negated`。这是主动 `defer`，可以覆盖自动 `must_speak`；`self`/checkpoint
+   仍按原路径注入，trace 记录 `applied.action=defer`。
+2. `conflict`：只有用户明确问“哪个对 / 以哪条为准 / 该信哪个”，且候选确实属于
+   conflict group 时才触发。exact 意图用 `depthForCue()` → `quote`，否则 `detail`；
+   detail 不可用降为 `gist` + `degraded`。仅陈述“记录不一致 / 记录打架”不触发。
 3. `greeting` / `meta`：整句寒暄、致谢、助手身份/能力/时间 → `silent`。正则整句
    锚定，混合了真实记忆请求的 turn 会继续落到 `must_speak`。
 4. `must_speak`：自动策略下限，不是用户显式意图的上限。heuristic 的阈值、负例率、

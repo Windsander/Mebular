@@ -98,10 +98,10 @@ const CORRECTION_RE = /不对|不是(?:这个|这样|那条)?|错了|搞错|纠�
 // 被 /以前/ 误判为显式回忆请求。
 const EXPLICIT_DEFER_RE = /(?:先|暂时|现在)?别(?:回忆|提|再提|注入|用记忆|提旧)|不要(?:回忆|提以前|用记忆)|不用(?:回忆|记)|先不(?:查|回忆|提|看历史)|先放一放|晚点再(?:聊|说|回顾)|下一轮再|等(?:我|你|把).{0,12}再(?:说|查|回顾|聊)|跳过(?:旧|以前|历史|旧上下文)|hold off|not (?:recall|bring up)|skip the memory|don'?t bring up|let'?s not recall|until i finish/i;
 
-// conflict 是独立硬规则：用户明确提出记录互相矛盾、并问“哪个对/以哪条为准”，
-// 且候选确实带 conflict group 时，才给 detail/quote；不能被低分或 novelty=0 吞掉。
-// 仅凭“和以前不一样/对不上”不触发，避免把普通比较句误判成冲突。
-const CONFLICT_QUERY_RE = /冲突|打架|矛盾|不一致|两个说法|哪个对|哪条为准|以哪条为准|到底用哪个|到底哪个|信哪个|which (?:one|record|.*?)\s+(?:is\s+)?(?:correct|right)|disagree|conflict/i;
+// conflict 是独立硬规则：用户必须明确提出“哪个对/以哪条为准/该信哪个”。
+// 仅陈述“记录冲突/不一致/和以前不一样”不触发；候选还必须确实带 conflict group。
+// exact intent 用 depthForCue() 的 quote，否则 detail。
+const CONFLICT_QUERY_RE = /哪个对|哪条为准|以哪条为准|到底用哪个|到底哪个|信哪个|该信哪个|怎么处理|怎么办|如何取舍|which (?:one|record|.*?)\s+(?:is\s+)?(?:correct|right)|which (?:should i|to) trust/i;
 
 // 只匹配「整句寒暄/礼貌」；带实质请求的 turn 不会被这里吞掉。
 const GREETING_TOKEN = String.raw`(?:早上好|早安|早|上午好|中午好|下午好|晚上好|晚安|你好|您好|嗨|哈喽|在吗|收到|好的|好|嗯|谢谢|多谢|感谢|辛苦了|再见|拜拜|hi there|hello there|hi|hello|hey|good morning|good afternoon|good evening|good night|thanks|thank you|thankyou|bye|goodbye|ok|okay|got it|sure)`;
@@ -133,13 +133,8 @@ export function isExplicitDefer(cue: Cue): boolean {
     || cue.negations.includes('user_negated');
 }
 
-function isConflictRequest(
-  cue: Cue,
-  candidates: readonly InterventionCandidateView[],
-): boolean {
-  // 两边都必须成立：用户在问冲突，且候选确实属于一个 conflict group。
-  return candidates.some((candidate) => candidate.conflict)
-    && CONFLICT_QUERY_RE.test(cue.rawQuery);
+function isConflictRequest(cue: Cue): boolean {
+  return CONFLICT_QUERY_RE.test(cue.rawQuery);
 }
 
 function isGreeting(cue: Cue): boolean {
@@ -344,6 +339,16 @@ function planHeuristic(input: InterventionPlannerInput): InterventionDecision {
   // 选第一个 novelty>0 的候选；只有全部已注入时才回落到 top-1 用于 no_novelty 归因。
   const candidate = freshCandidate ?? input.candidates[0];
   const allInjected = input.candidates.length > 0 && freshCandidate === undefined;
+  const conflictCandidates = input.candidates.filter((view) => view.conflict);
+  const freshConflictCandidate = conflictCandidates.find(
+    (view) => noveltyOf(view, input.alreadyInjectedIds) > 0,
+  );
+  // conflict 分支只使用 conflict 候选：
+  // - 优先第一个新鲜 conflict 候选；
+  // - 只有全部候选都已注入时，才用 top conflict 候选（conflict 优先于 anti-repeat）；
+  // - conflict 候选已注入但存在普通新鲜候选时，不进入 conflict 分支。
+  const conflictCandidate = freshConflictCandidate
+    ?? (allInjected ? conflictCandidates[0] : undefined);
   const topScore = clamp(candidate?.score ?? 0, 0, 1);
   const novelty = noveltyOf(candidate, input.alreadyInjectedIds);
   const threshold = clamp(input.threshold, 0, 1);
@@ -367,16 +372,16 @@ function planHeuristic(input: InterventionPlannerInput): InterventionDecision {
 
   // 1) conflict 也要先于 must_speak：冲突问句要对照多条记录。
   //    exact intent 用 depthForCue() 的 quote；否则 detail；detail 不可用降 gist+degraded。
-  if (candidate && isConflictRequest(input.cue, input.candidates)) {
+  if (conflictCandidate && isConflictRequest(input.cue)) {
     const intended = depthForCue(input.cue);
     const requestedDepth: RecallDepth = intended === 'quote' ? 'quote' : 'detail';
-    const detailAvailable = candidate.detailAvailable;
+    const detailAvailable = conflictCandidate.detailAvailable;
     return ruleDecision(input, {
       action: 'speak',
       reason: 'conflict',
       depth: detailAvailable ? requestedDepth : 'gist',
-      candidate,
-      novelty,
+      candidate: conflictCandidate,
+      novelty: noveltyOf(conflictCandidate, input.alreadyInjectedIds),
       recentUselessRate,
       degraded: !detailAvailable,
     });

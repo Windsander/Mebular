@@ -106,7 +106,6 @@ const NON_INTERVENTION_SILENCE = new Set([
   'muted',
   'non_human_turn',
   'memory_governance',
-  'user_negated',
   'chitchat',
   'no_cue',
   'duplicate_turn',
@@ -2455,9 +2454,14 @@ export class RecallService {
     if (request.mute) return 'muted';
     if (request.turnKind !== 'human') return 'non_human_turn';
     if (cue.negations.includes('memory_governance')) return 'memory_governance';
-    if (cue.negations.includes('user_negated')) return 'user_negated';
+    // user_negated 不再在 recall 层短路：它由 intervention 层作为显式 defer 处理，
+    // 这样 self/checkpoint 仍会先按既有路径加载，decision/applied 记录 defer。
+    const negatedDefer = cue.negations.includes('user_negated')
+      || cue.detailIntent.reasons.includes('user_negated');
+    if (!negatedDefer && cue.detailIntent.level === 'silent') {
+      return cue.detailIntent.reasons[0] ?? 'silent';
+    }
     if (request.query.length === 0 && request.recentContext.length === 0) return 'no_cue';
-    if (cue.detailIntent.level === 'silent') return cue.detailIntent.reasons[0] ?? 'silent';
     return null;
   }
 
@@ -3040,6 +3044,33 @@ export class RecallService {
     return this.orderWithConflictGroups(selected, groupNameOf);
   }
 
+  private isNegatedDefer(cue: Cue): boolean {
+    return cue.negations.includes('user_negated')
+      || cue.detailIntent.reasons.includes('user_negated');
+  }
+
+  /**
+   * user_negated 是显式 defer，不是 recall 层硬 short-circuit：
+   * 不注入 memory fragments，但 self/checkpoint 已经在调用前按既有路径加载。
+   * 即使 intervention.mode=off，也保留这个输入级分类（enforced=false）。
+   */
+  private negatedDeferDecision(run: RecallRun): InterventionDecision {
+    const config = this.config.intervention;
+    const key = this.decisionKey(run);
+    return planIntervention({
+      mode: config.mode as InterventionMode,
+      cue: run.cue,
+      candidates: [],
+      alreadyInjectedIds: this.resolveInjectedIds(run.request.alreadyInjectedIds),
+      threshold: config.minConfidence,
+      recentUselessRate: 0,
+      silentStreak: this.silentStreaks.get(key) ?? 0,
+      lastDecision: this.lastDecisions.get(key) ?? null,
+      maxSilentStreak: config.maxSilentStreak,
+      explorationRate: config.explorationRate,
+    });
+  }
+
   private async decideIntervention(
     run: RecallRun,
     selected: Candidate[],
@@ -3054,6 +3085,19 @@ export class RecallService {
     const basePlan = this.expansionPlan(selected, run.cue, warnings);
     const domain = selected[0]?.fragment.owner.domain ?? run.domains[0] ?? 'default';
     const key = this.decisionKey(run);
+
+    if (this.isNegatedDefer(run.cue)) {
+      const decision = this.negatedDeferDecision(run);
+      pushWarning(warnings, 'intervention_defer');
+      const effective = {
+        action: 'defer' as InterventionAction,
+        depth: 'gist' as RecallDepth,
+        suppressed: selected.map((candidate) => candidate.fragment.id),
+        shadow: false,
+        domain,
+      };
+      return { decision, effective, inject: [], expansionPlan: new Map() };
+    }
 
     if (config.mode === 'off') {
       const decision = this.baselineDecision(run, selected, basePlan);
@@ -3199,6 +3243,20 @@ export class RecallService {
     if (run.decision) return;
     const config = this.config.intervention;
     const blocked = NON_INTERVENTION_SILENCE.has(run.silenceReason ?? '');
+    if (!blocked && this.isNegatedDefer(run.cue)) {
+      const domain = run.domains[0] ?? 'default';
+      pushWarning(warnings, 'intervention_defer');
+      run.decision = this.negatedDeferDecision(run);
+      run.effective = {
+        action: 'defer',
+        depth: 'gist',
+        suppressed: [],
+        shadow: false,
+        domain,
+      };
+      run.silenceReason = 'intervention_defer';
+      return;
+    }
     if (config.mode === 'off' || blocked) {
       const decision = this.baselineDecision(run, run.selected, new Map());
       run.decision = decision;

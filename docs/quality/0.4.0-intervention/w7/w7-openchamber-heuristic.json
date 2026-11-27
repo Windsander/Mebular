@@ -1,0 +1,116 @@
+{
+  "source": "heuristic",
+  "host": "openchamber",
+  "identity": "adapter-identity-only",
+  "evidenceLevel": "RH+RS",
+  "model": {
+    "id": "fake-openai-plan-json",
+    "note": "host model replaced by deterministic plan JSON; not R-RSM"
+  },
+  "checks": [
+    {
+      "id": "sidecar-discovery",
+      "name": "真实 sidecar discovery + host token",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "id": "capabilities",
+      "name": "intervention 能力位与 configuredSource",
+      "ok": true,
+      "detail": "{\"decision\":true,\"outcome\":true,\"shadow\":true,\"reset\":true,\"mode\":\"heuristic\",\"hostPlan\":true,\"hostPlanScopes\":[\"session\",\"turn\"],\"hostPlanTtlMs\":60000,\"configuredSource\":\"heuristic\",\"sourcePresent\":true,\"planner\":\"heuristic\",\"legacyModeIgnored\":false,\"legacyModeConflict\":false,\"diagnosticShadow\":false,\"deadline\":1500,\"warnings\":[]}"
+    },
+    {
+      "id": "seed",
+      "name": "真实 capability 写入两条 seed",
+      "ok": true,
+      "detail": "{\"first\":{\"records\":1,\"duplicates\":0,\"failed\":0},\"second\":{\"records\":1,\"duplicates\":0,\"failed\":0}}"
+    },
+    {
+      "id": "opencode-version",
+      "name": "真实 opencode >= 2.2",
+      "ok": true,
+      "detail": "opencode v2.4.1"
+    },
+    {
+      "id": "opencode-serve",
+      "name": "真实 opencode serve 启动",
+      "ok": true,
+      "detail": "server listening on http://127.0.0.1:64922\n"
+    },
+    {
+      "id": "turn-1",
+      "name": "真实 opencode turn 1 退出 0",
+      "ok": true,
+      "detail": "\"prt_21d6d771f001Bwo56gKi0gst9Y\",\"sessionID\":\"ses_de292e08cffeNMBAIlfR3b9Fa4\",\"messageID\":\"msg_21d6d75fb001XTdX8QIn3kZctL\",\"type\":\"step-finish\",\"reason\":\"stop\",\"snapshot\":\"a9a6ead816b71bce5abb0ab60a93036ef3e39a9a\",\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}}}}\n"
+    },
+    {
+      "id": "trace-1",
+      "name": "真实 /context trace + host identity",
+      "ok": true,
+      "detail": "{\"id\":\"tr_e40a9854de9e47ceb64977664ce8b4c5\",\"hostApp\":\"openchamber\"}"
+    },
+    {
+      "id": "heuristic-turn",
+      "name": "heuristic /context 真实决策",
+      "ok": true,
+      "detail": "{\"configuredSource\":\"heuristic\",\"resolvedSource\":\"heuristic\",\"latencyMs\":0,\"fallbackReason\":null,\"prefetched\":false,\"adaptive\":{\"stage\":\"shadow\",\"applied\":false,\"baseThreshold\":0.3,\"recommendedThreshold\":0.45,\"threshold\":0.45,\"offset\":0}}"
+    },
+    {
+      "id": "outcome-turn",
+      "name": "outcome 轮退出 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "id": "outcome",
+      "name": "真实宿主 outcome 归因落 trace（source=host）",
+      "ok": true,
+      "detail": "{\"kind\":\"reasked\",\"at\":1795790043254,\"source\":\"host\",\"confidence\":0.65}"
+    },
+    {
+      "id": "binding-forged",
+      "name": "伪造 bindingToken 被拒绝",
+      "ok": true,
+      "detail": "404"
+    },
+    {
+      "id": "privacy",
+      "name": "trace 不含 seed 正文或 raw query 尾部",
+      "ok": true,
+      "detail": "no raw body/tail in traces"
+    }
+  ],
+  "traces": [
+    {
+      "phase": "turn1",
+      "traceId": "tr_e40a9854de9e47ceb64977664ce8b4c5",
+      "meta": {
+        "configuredSource": "heuristic",
+        "resolvedSource": "heuristic",
+        "latencyMs": 0,
+        "fallbackReason": null,
+        "prefetched": false,
+        "adaptive": {
+          "stage": "shadow",
+          "applied": false,
+          "baseThreshold": 0.3,
+          "recommendedThreshold": 0.45,
+          "threshold": 0.45,
+          "offset": 0
+        }
+      }
+    }
+  ],
+  "timing": {},
+  "sessionId": "ses_de292e08cffeNMBAIlfR3b9Fa4",
+  "traceCountAtTrace1": 1,
+  "traceThreadIds": [
+    "ses_de292e08cffeNMBAIlfR3b9Fa4"
+  ],
+  "summary": {
+    "passed": 12,
+    "failed": 0,
+    "traceCount": 3
+  }
+}

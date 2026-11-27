@@ -1,0 +1,411 @@
+{
+  "evidenceLevel": "R-SM",
+  "host": "none (real sidecar HTTP; adapter dedupe blocks host two-round)",
+  "model": {
+    "id": "Qwen3-4B-Q4_K_M.gguf",
+    "sha256": "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
+    "engine": "llama.cpp b12017"
+  },
+  "samples": [
+    {
+      "sample": 0,
+      "threadId": "th_w7_local_0",
+      "seed": {
+        "records": 1,
+        "duplicates": 0,
+        "failed": 0
+      },
+      "first": {
+        "latencyMs": 82,
+        "meta": {
+          "source": "heuristic",
+          "resolvedSource": null,
+          "configuredSource": "local",
+          "prefetched": false,
+          "turnId": "turn_seed_0",
+          "cueFingerprint": [
+            "d0d7cd975516463f"
+          ],
+          "candidateFingerprint": [
+            "3713ebcd60345acc"
+          ],
+          "fallbackReason": "prefetch_miss"
+        }
+      },
+      "hit": {
+        "latencyMs": 47,
+        "meta": {
+          "source": "local",
+          "resolvedSource": "local",
+          "configuredSource": "local",
+          "prefetched": true,
+          "turnId": "turn_hit_0_8",
+          "cueFingerprint": [
+            "d0d7cd975516463f"
+          ],
+          "candidateFingerprint": [
+            "3713ebcd60345acc"
+          ]
+        },
+        "decision": {
+          "action": "speak",
+          "depth": "gist",
+          "confidence": 0.72,
+          "policyVersion": "model:527959ea",
+          "enforced": true,
+          "planner": {
+            "configuredSource": "local",
+            "resolvedSource": "local",
+            "latencyMs": 2,
+            "fallbackReason": null,
+            "prefetched": true,
+            "prefetchState": "hit",
+            "planAgeMs": 1225,
+            "planId": "lp_340cb1833e6c47fcae888f35d6c722a1",
+            "cueMatched": true,
+            "model": "Qwen3-4B-Q4_K_M.gguf",
+            "attempts": [
+              {
+                "source": "local",
+                "outcome": "hit",
+                "latencyMs": 0
+              }
+            ]
+          }
+        },
+        "traceId": "tr_abb9312ad8ae449d8ebbed9f6c6f6f7c"
+      },
+      "prefetchReadyMs": 45506,
+      "ok": true
+    },
+    {
+      "sample": 1,
+      "threadId": "th_w7_local_1",
+      "seed": {
+        "records": 1,
+        "duplicates": 0,
+        "failed": 0
+      },
+      "first": {
+        "latencyMs": 96,
+        "meta": {
+          "source": "heuristic",
+          "resolvedSource": null,
+          "configuredSource": "local",
+          "prefetched": false,
+          "turnId": "turn_seed_1",
+          "cueFingerprint": [
+            "d0d7cd975516463f"
+          ],
+          "candidateFingerprint": [
+            "e95d4224cef0aee0",
+            "3713ebcd60345acc"
+          ],
+          "fallbackReason": "prefetch_miss"
+        }
+      },
+      "hit": {
+        "latencyMs": 59,
+        "meta": {
+          "source": "local",
+          "resolvedSource": "local",
+          "configuredSource": "local",
+          "prefetched": true,
+          "turnId": "turn_hit_1_8",
+          "cueFingerprint": [
+            "d0d7cd975516463f"
+          ],
+          "candidateFingerprint": [
+            "e95d4224cef0aee0",
+            "3713ebcd60345acc"
+          ]
+        },
+        "decision": {
+          "action": "speak",
+          "depth": "gist",
+          "confidence": 0.72,
+          "policyVersion": "model:2d17618b",
+          "enforced": true,
+          "planner": {
+            "configuredSource": "local",
+            "resolvedSource": "local",
+            "latencyMs": 0,
+            "fallbackReason": null,
+            "prefetched": true,
+            "prefetchState": "hit",
+            "planAgeMs": 726,
+            "planId": "lp_40bcf352b94d4aaebe95443aef90af37",
+            "cueMatched": true,
+            "model": "Qwen3-4B-Q4_K_M.gguf",
+            "attempts": [
+              {
+                "source": "local",
+                "outcome": "hit",
+                "latencyMs": 0
+              }
+            ]
+          }
+        },
+        "traceId": "tr_fd84049b838c46db86290fc28c0442d8"
+      },
+      "prefetchReadyMs": 45667,
+      "ok": true
+    },
+    {
+      "sample": 2,
+      "threadId": "th_w7_local_2",
+      "seed": {
+        "records": 1,
+        "duplicates": 0,
+        "failed": 0
+      },
+      "first": {
+        "latencyMs": 52,
+        "meta": {
+          "source": "heuristic",
+          "resolvedSource": null,
+          "configuredSource": "local",
+          "prefetched": false,
+          "turnId": "turn_seed_2",
+          "cueFingerprint": [
+            "d0d7cd975516463f"
+          ],
+          "candidateFingerprint": [
+            "d2112331f5380f20",
+            "e95d4224cef0aee0",
+            "3713ebcd60345acc"
+          ],
+          "fallbackReason": "prefetch_miss"
+        }
+      },
+      "hit": {
+        "latencyMs": 64,
+        "meta": {
+          "source": "local",
+          "resolvedSource": "local",
+          "configuredSource": "local",
+          "prefetched": true,
+          "turnId": "turn_hit_2_8",
+          "cueFingerprint": [
+            "d0d7cd975516463f"
+          ],
+          "candidateFingerprint": [
+            "d2112331f5380f20",
+            "e95d4224cef0aee0",
+            "3713ebcd60345acc"
+          ]
+        },
+        "decision": {
+          "action": "speak",
+          "depth": "gist",
+          "confidence": 0.72,
+          "policyVersion": "model:c582870a",
+          "enforced": true,
+          "planner": {
+            "configuredSource": "local",
+            "resolvedSource": "local",
+            "latencyMs": 0,
+            "fallbackReason": null,
+            "prefetched": true,
+            "prefetchState": "hit",
+            "planAgeMs": 2493,
+            "planId": "lp_08253130729143e6ab2424e825baf388",
+            "cueMatched": true,
+            "model": "Qwen3-4B-Q4_K_M.gguf",
+            "attempts": [
+              {
+                "source": "local",
+                "outcome": "hit",
+                "latencyMs": 0
+              }
+            ]
+          }
+        },
+        "traceId": "tr_914525c0314a46509df5b538b42aea29"
+      },
+      "prefetchReadyMs": 45471,
+      "ok": true
+    },
+    {
+      "sample": 3,
+      "threadId": "th_w7_local_3",
+      "seed": {
+        "records": 1,
+        "duplicates": 0,
+        "failed": 0
+      },
+      "first": {
+        "latencyMs": 60,
+        "meta": {
+          "source": "heuristic",
+          "resolvedSource": null,
+          "configuredSource": "local",
+          "prefetched": false,
+          "turnId": "turn_seed_3",
+          "cueFingerprint": [
+            "d0d7cd975516463f"
+          ],
+          "candidateFingerprint": [
+            "d2abb76c014f1040",
+            "d2112331f5380f20",
+            "e95d4224cef0aee0"
+          ],
+          "fallbackReason": "prefetch_miss"
+        }
+      },
+      "hit": {
+        "latencyMs": 78,
+        "meta": {
+          "source": "local",
+          "resolvedSource": "local",
+          "configuredSource": "local",
+          "prefetched": true,
+          "turnId": "turn_hit_3_7",
+          "cueFingerprint": [
+            "d0d7cd975516463f"
+          ],
+          "candidateFingerprint": [
+            "d2abb76c014f1040",
+            "d2112331f5380f20",
+            "e95d4224cef0aee0"
+          ]
+        },
+        "decision": {
+          "action": "speak",
+          "depth": "gist",
+          "confidence": 0.72,
+          "policyVersion": "model:efd2549a",
+          "enforced": true,
+          "planner": {
+            "configuredSource": "local",
+            "resolvedSource": "local",
+            "latencyMs": 0,
+            "fallbackReason": null,
+            "prefetched": true,
+            "prefetchState": "hit",
+            "planAgeMs": 422,
+            "planId": "lp_1edb62691ab344f69fbb6202b66eb079",
+            "cueMatched": true,
+            "model": "Qwen3-4B-Q4_K_M.gguf",
+            "attempts": [
+              {
+                "source": "local",
+                "outcome": "hit",
+                "latencyMs": 0
+              }
+            ]
+          }
+        },
+        "traceId": "tr_7aef3b33b70a4a08b99b650e79e6b99d"
+      },
+      "prefetchReadyMs": 40504,
+      "ok": true
+    },
+    {
+      "sample": 4,
+      "threadId": "th_w7_local_4",
+      "seed": {
+        "records": 1,
+        "duplicates": 0,
+        "failed": 0
+      },
+      "first": {
+        "latencyMs": 43,
+        "meta": {
+          "source": "heuristic",
+          "resolvedSource": null,
+          "configuredSource": "local",
+          "prefetched": false,
+          "turnId": "turn_seed_4",
+          "cueFingerprint": [
+            "d0d7cd975516463f"
+          ],
+          "candidateFingerprint": [
+            "78b193c6a1ac9f46",
+            "d2abb76c014f1040",
+            "d2112331f5380f20"
+          ],
+          "fallbackReason": "prefetch_miss"
+        }
+      },
+      "hit": {
+        "latencyMs": 58,
+        "meta": {
+          "source": "local",
+          "resolvedSource": "local",
+          "configuredSource": "local",
+          "prefetched": true,
+          "turnId": "turn_hit_4_7",
+          "cueFingerprint": [
+            "d0d7cd975516463f"
+          ],
+          "candidateFingerprint": [
+            "78b193c6a1ac9f46",
+            "d2abb76c014f1040",
+            "d2112331f5380f20"
+          ]
+        },
+        "decision": {
+          "action": "speak",
+          "depth": "gist",
+          "confidence": 0.72,
+          "policyVersion": "model:9d85f412",
+          "enforced": true,
+          "planner": {
+            "configuredSource": "local",
+            "resolvedSource": "local",
+            "latencyMs": 0,
+            "fallbackReason": null,
+            "prefetched": true,
+            "prefetchState": "hit",
+            "planAgeMs": 1974,
+            "planId": "lp_7357eaf463814c308335456321d845c4",
+            "cueMatched": true,
+            "model": "Qwen3-4B-Q4_K_M.gguf",
+            "attempts": [
+              {
+                "source": "local",
+                "outcome": "hit",
+                "latencyMs": 0
+              }
+            ]
+          }
+        },
+        "traceId": "tr_baef7c4c763446839c220e8042cc0b1d"
+      },
+      "prefetchReadyMs": 40509,
+      "ok": true
+    }
+  ],
+  "freshCue": {
+    "ok": true,
+    "meta": {
+      "source": "heuristic",
+      "resolvedSource": "heuristic",
+      "configuredSource": "local",
+      "prefetched": false,
+      "turnId": "turn_fresh",
+      "cueFingerprint": [
+        "0df8f75737ec8721",
+        "30e4e247e3e641ad",
+        "5ee8091a38eee188",
+        "7ad924a1c328e13c",
+        "7f5fab4d966e23f6",
+        "bd8dbd5724735390",
+        "c8b877f41c4f00c3",
+        "e751bca25e1fc515",
+        "f95c573777b426ca"
+      ],
+      "candidateFingerprint": []
+    }
+  },
+  "summary": {
+    "samples": 5,
+    "passed": 5,
+    "failed": 0,
+    "prefetchReadyP50Ms": 45471,
+    "prefetchReadyP95Ms": 45667,
+    "firstContextP95Ms": 96,
+    "hitContextP95Ms": 78
+  }
+}

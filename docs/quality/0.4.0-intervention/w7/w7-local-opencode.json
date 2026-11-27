@@ -1,0 +1,192 @@
+{
+  "source": "local",
+  "host": "opencode",
+  "identity": "opencode-host",
+  "evidenceLevel": "R-RSM",
+  "model": {
+    "id": "Qwen3-4B-Q4_K_M.gguf",
+    "sha256": "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
+    "engine": "llama.cpp b12017"
+  },
+  "checks": [
+    {
+      "id": "sidecar-discovery",
+      "name": "真实 sidecar discovery + host token",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "id": "capabilities",
+      "name": "intervention 能力位与 configuredSource",
+      "ok": true,
+      "detail": "{\"decision\":true,\"outcome\":true,\"shadow\":true,\"reset\":true,\"mode\":\"model\",\"hostPlan\":true,\"hostPlanScopes\":[\"session\",\"turn\"],\"hostPlanTtlMs\":60000,\"configuredSource\":\"local\",\"sourcePresent\":true,\"planner\":\"model\",\"legacyModeIgnored\":false,\"legacyModeConflict\":false,\"diagnosticShadow\":false,\"deadline\":1500,\"warnings\":[]}"
+    },
+    {
+      "id": "seed",
+      "name": "真实 capability 写入两条 seed",
+      "ok": true,
+      "detail": "{\"first\":{\"records\":1,\"duplicates\":0,\"failed\":0},\"second\":{\"records\":1,\"duplicates\":0,\"failed\":0}}"
+    },
+    {
+      "id": "opencode-version",
+      "name": "真实 opencode >= 2.2",
+      "ok": true,
+      "detail": "opencode v2.4.1"
+    },
+    {
+      "id": "opencode-serve",
+      "name": "真实 opencode serve 启动",
+      "ok": true,
+      "detail": "server listening on http://127.0.0.1:53196\n"
+    },
+    {
+      "id": "turn-1",
+      "name": "真实 opencode turn 1 退出 0",
+      "ok": true,
+      "detail": "\"prt_21d77f270001tAaryS158tH2wP\",\"sessionID\":\"ses_de2889091ffeDiocCyOO8I54Mr\",\"messageID\":\"msg_21d77f15e001QoOIsniVJEiAsC\",\"type\":\"step-finish\",\"reason\":\"stop\",\"snapshot\":\"31aa32aca46e3625f880e0451549db3ab7a58198\",\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}}}}\n"
+    },
+    {
+      "id": "trace-1",
+      "name": "真实 /context trace + host identity",
+      "ok": true,
+      "detail": "{\"id\":\"tr_eb352dbebe5b4bb7a3032fbf72235525\",\"hostApp\":\"opencode\"}"
+    },
+    {
+      "id": "local-first-turn",
+      "name": "第一轮 local 未预取，heuristic + prefetched=false",
+      "ok": true,
+      "detail": "{\"configuredSource\":\"local\",\"resolvedSource\":null,\"latencyMs\":0,\"fallbackReason\":\"prefetch_miss\",\"prefetched\":false,\"prefetchState\":\"first_turn\"}"
+    },
+    {
+      "id": "local-hit",
+      "name": "第二轮同 cue 命中真实本地 Qwen3-4B 预取",
+      "ok": false,
+      "detail": "null"
+    },
+    {
+      "id": "local-hit-not-fallback",
+      "name": "命中未触发 fallback",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "id": "local-new-cue",
+      "name": "新 cue 第一轮 heuristic + prefetched=false（预期负向，不算能力失败）",
+      "ok": false,
+      "detail": "null"
+    },
+    {
+      "id": "local-new-cue-turn",
+      "name": "新 cue turn 退出 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "id": "outcome-turn",
+      "name": "outcome 轮退出 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "id": "outcome",
+      "name": "真实宿主 outcome 归因落 trace（source=host）",
+      "ok": true,
+      "detail": "{\"kind\":\"missed\",\"at\":1795790763437,\"source\":\"host\",\"confidence\":0.55}"
+    },
+    {
+      "id": "binding-forged",
+      "name": "伪造 bindingToken 被拒绝",
+      "ok": true,
+      "detail": "404"
+    },
+    {
+      "id": "privacy",
+      "name": "trace 不含 seed 正文或 raw query 尾部",
+      "ok": true,
+      "detail": "no raw body/tail in traces"
+    }
+  ],
+  "traces": [
+    {
+      "phase": "turn1",
+      "traceId": "tr_eb352dbebe5b4bb7a3032fbf72235525",
+      "meta": {
+        "configuredSource": "local",
+        "resolvedSource": null,
+        "latencyMs": 0,
+        "fallbackReason": "prefetch_miss",
+        "prefetched": false,
+        "prefetchState": "first_turn"
+      }
+    },
+    {
+      "phase": "local-new-cue",
+      "traceId": "tr_6adba1c2eaf94522926e74bf32edd719",
+      "meta": null
+    }
+  ],
+  "timing": {
+    "prefetchReadyMs": null
+  },
+  "sessionId": "ses_de2889091ffeDiocCyOO8I54Mr",
+  "traceCountAtTrace1": 1,
+  "traceThreadIds": [
+    "ses_de2889091ffeDiocCyOO8I54Mr"
+  ],
+  "localAttempts": [
+    {
+      "q": "deepwork",
+      "silence": "already_injected",
+      "meta": null
+    },
+    {
+      "q": "deepwork",
+      "silence": "already_injected",
+      "meta": null
+    },
+    {
+      "q": "deepwork",
+      "silence": "already_injected",
+      "meta": null
+    },
+    {
+      "q": "deepwork",
+      "silence": "already_injected",
+      "meta": null
+    },
+    {
+      "q": "deepwork",
+      "silence": "already_injected",
+      "meta": null
+    },
+    {
+      "q": "deepwork",
+      "silence": null,
+      "meta": {
+        "configuredSource": "local",
+        "resolvedSource": null,
+        "latencyMs": 0,
+        "fallbackReason": "prefetch_miss",
+        "prefetched": false,
+        "prefetchState": "first_turn"
+      }
+    },
+    {
+      "q": "deepwork",
+      "silence": null,
+      "meta": {
+        "configuredSource": "local",
+        "resolvedSource": null,
+        "latencyMs": 0,
+        "fallbackReason": "prefetch_miss",
+        "prefetched": false,
+        "prefetchState": "first_turn"
+      }
+    }
+  ],
+  "summary": {
+    "passed": 14,
+    "failed": 2,
+    "traceCount": 10
+  }
+}

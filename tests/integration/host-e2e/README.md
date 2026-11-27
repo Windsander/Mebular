@@ -135,3 +135,22 @@ verify-host-e2e：三个宿主全部 exit 0
 - tap 只记录 `auth: bearer|missing|other`，不记录 token 值；断言 tap / sidecar status / capability status / OpenCode state/log / Hermes profile 不含 token。
 - DSH 复用现有 `scripts/lib/dsh-e2e-world.mjs` 的临时 DSH profile 与 artifacts 脱敏；OpenCode 使用独立 `HOME` / `XDG_*`。
 - 不改 `src/`、`packages/` 或宿主实现；只改 `tests/integration/host-e2e/**`。
+
+## 0.4.0 W7 真实证据 harness
+
+```bash
+# 真实 sidecar + 真实 Qwen3-4B + 真实 llama.cpp（两轮预取）
+MEBULAR_W7_SAMPLES=5 node tests/integration/host-e2e/w7-local-model-evidence.mjs
+
+# 真实 sidecar 消费/拒绝合成 host plan（不是真实 host model）
+node tests/integration/host-e2e/w7-host-plan-sidecar.mjs
+
+# 真实 OpenCode / OpenChamber adapter identity；local/host 两轮
+node tests/integration/host-e2e/w7-intervention-evidence.mjs --source local --host opencode
+node tests/integration/host-e2e/w7-intervention-evidence.mjs --source host --host opencode
+node tests/integration/host-e2e/w7-intervention-evidence.mjs --source heuristic --host openchamber
+```
+
+模型/引擎路径可用 `MEBULAR_W7_MODEL_PATH` / `MEBULAR_W7_ENGINE_DIR` 覆盖；两者只从
+本机 cache 读取，不提交到仓库。W7 结论与阻断项见
+`docs/quality/0.4.0-intervention/0.4.0-verification.md`。

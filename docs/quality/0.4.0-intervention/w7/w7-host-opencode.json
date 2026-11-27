@@ -1,0 +1,137 @@
+{
+  "source": "host",
+  "host": "opencode",
+  "identity": "opencode-host",
+  "evidenceLevel": "RH+RS+FM",
+  "model": {
+    "id": "fake-openai-plan-json",
+    "note": "host model replaced by deterministic plan JSON; not R-RSM"
+  },
+  "checks": [
+    {
+      "id": "sidecar-discovery",
+      "name": "真实 sidecar discovery + host token",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "id": "capabilities",
+      "name": "intervention 能力位与 configuredSource",
+      "ok": true,
+      "detail": "{\"decision\":true,\"outcome\":true,\"shadow\":true,\"reset\":true,\"mode\":\"model\",\"hostPlan\":true,\"hostPlanScopes\":[\"session\",\"turn\"],\"hostPlanTtlMs\":60000,\"configuredSource\":\"host\",\"sourcePresent\":true,\"planner\":\"model\",\"legacyModeIgnored\":false,\"legacyModeConflict\":false,\"diagnosticShadow\":false,\"deadline\":1500,\"warnings\":[]}"
+    },
+    {
+      "id": "seed",
+      "name": "真实 capability 写入两条 seed",
+      "ok": true,
+      "detail": "{\"first\":{\"records\":1,\"duplicates\":0,\"failed\":0},\"second\":{\"records\":1,\"duplicates\":0,\"failed\":0}}"
+    },
+    {
+      "id": "opencode-version",
+      "name": "真实 opencode >= 2.2",
+      "ok": true,
+      "detail": "opencode v2.4.1"
+    },
+    {
+      "id": "opencode-serve",
+      "name": "真实 opencode serve 启动",
+      "ok": true,
+      "detail": "server listening on http://127.0.0.1:53810\n"
+    },
+    {
+      "id": "turn-1",
+      "name": "真实 opencode turn 1 退出 0",
+      "ok": true,
+      "detail": "\"prt_21d79db440016g9jHWrD92JBkg\",\"sessionID\":\"ses_de2868c3affekKoPwvEz7zpbg1\",\"messageID\":\"msg_21d79da58001RTmqGF5ty3WsbO\",\"type\":\"step-finish\",\"reason\":\"stop\",\"snapshot\":\"31aa32aca46e3625f880e0451549db3ab7a58198\",\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}}}}\n"
+    },
+    {
+      "id": "trace-1",
+      "name": "真实 /context trace + host identity",
+      "ok": true,
+      "detail": "{\"id\":\"tr_e55831363a8f48728aad875d92ef9c50\",\"hostApp\":\"opencode\"}"
+    },
+    {
+      "id": "host-first-turn",
+      "name": "第一轮 host 无 plan，立即 heuristic",
+      "ok": true,
+      "detail": "{\"configuredSource\":\"host\",\"resolvedSource\":\"heuristic\",\"latencyMs\":0,\"fallbackReason\":\"host_plan_missing\",\"prefetched\":false}"
+    },
+    {
+      "id": "host-hit",
+      "name": "真实宿主 session-prior 命中并消费",
+      "ok": false,
+      "detail": "null"
+    },
+    {
+      "id": "host-hit-source",
+      "name": "命中元数据 resolvedSource=host 且 prefetched=true",
+      "ok": false,
+      "detail": "{}"
+    },
+    {
+      "id": "host-new-cue",
+      "name": "新 cue 不命中 host plan（prefetched=false）",
+      "ok": false,
+      "detail": "null"
+    },
+    {
+      "id": "host-new-cue-turn",
+      "name": "新 cue turn 退出 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "id": "outcome-turn",
+      "name": "outcome 轮退出 0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "id": "outcome",
+      "name": "真实宿主 outcome 归因落 trace（source=host）",
+      "ok": true,
+      "detail": "{\"kind\":\"missed\",\"at\":1795790872013,\"source\":\"host\",\"confidence\":0.55}"
+    },
+    {
+      "id": "binding-forged",
+      "name": "伪造 bindingToken 被拒绝",
+      "ok": true,
+      "detail": "404"
+    },
+    {
+      "id": "privacy",
+      "name": "trace 不含 seed 正文或 raw query 尾部",
+      "ok": true,
+      "detail": "no raw body/tail in traces"
+    }
+  ],
+  "traces": [
+    {
+      "phase": "turn1",
+      "traceId": "tr_e55831363a8f48728aad875d92ef9c50",
+      "meta": {
+        "configuredSource": "host",
+        "resolvedSource": "heuristic",
+        "latencyMs": 0,
+        "fallbackReason": "host_plan_missing",
+        "prefetched": false
+      }
+    },
+    {
+      "phase": "host-new-cue",
+      "traceId": "tr_3c7c81fcf6a245ffb188ac740cf2f3a8",
+      "meta": null
+    }
+  ],
+  "timing": {},
+  "sessionId": "ses_de2868c3affekKoPwvEz7zpbg1",
+  "traceCountAtTrace1": 1,
+  "traceThreadIds": [
+    "ses_de2868c3affekKoPwvEz7zpbg1"
+  ],
+  "summary": {
+    "passed": 13,
+    "failed": 3,
+    "traceCount": 9
+  }
+}

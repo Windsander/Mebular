@@ -2985,7 +2985,16 @@ export class RecallService {
       return this.finish(run, mode, degraded);
     }
 
-    const candidates = await this.buildCandidates(rawRecords, cue, request, warnings);
+    const candidates = await this.buildCandidates(rawRecords, cue, request, warnings, {
+      // /context with an enforced planner must not prune already-injected
+      // candidates before planning: novelty is a planner input (`no_novelty`)
+      // and prefetch/host-plan consumption has to happen even when every
+      // candidate was injected last turn. off/shadow and /recall keep the
+      // legacy pre-filter.
+      deferInjectedToPlanner: mode === 'context'
+        && this.effectiveIntervention.mode !== 'shadow'
+        && this.effectiveIntervention.planner !== 'off',
+    });
     run.candidates = candidates;
     const eligible = candidates.filter((candidate) => !candidate.filteredReason);
 
@@ -3458,9 +3467,11 @@ export class RecallService {
     cue: Cue,
     request: NormalizedRequest,
     warnings: string[],
+    options: { deferInjectedToPlanner?: boolean } = {},
   ): Promise<Candidate[]> {
     const candidates: Candidate[] = [];
     const quota = new Set(this.resolveInjectedIds(request.alreadyInjectedIds));
+    const deferInjected = options.deferInjectedToPlanner === true;
     const now = this.now();
     for (const entry of rawRecords) {
       const record = entry.record;
@@ -3554,10 +3565,15 @@ export class RecallService {
       // 宿主级去重：quota 已把旧的 fragment ID（mf_…）通过别名表展开为 source ID；
       // 这里再直接检查本轮 fragment.id，兼容在同一次召回上下文内回传 ID 的调用方。
       // 顺序保持 sourceIds 优先；同一 ID 上 quarantine 仍优先于普通去重。
-      const sourceHit = [...sourceIds, fragment.id].find((id) => quota.has(id)
-        || (this.quarantined.get(id) ?? 0) > now);
-      if (sourceHit) {
-        candidate.filteredReason = (this.quarantined.get(sourceHit) ?? 0) > now ? 'quarantined' : 'already_injected';
+      // 有 enforced planner 的 /context 不在这里剪枝：候选要进入 planner 才能记录
+      // no_novelty、消费 local/host plan；实际注入在 planner 之后再做 novelty 过滤。
+      const idCandidates = [...sourceIds, fragment.id];
+      const quarantinedHit = idCandidates.find((id) => (this.quarantined.get(id) ?? 0) > now);
+      const injectedHit = idCandidates.find((id) => quota.has(id));
+      if (quarantinedHit) {
+        candidate.filteredReason = 'quarantined';
+      } else if (injectedHit && !deferInjected) {
+        candidate.filteredReason = 'already_injected';
       } else if (stale && !request.includeHistory) {
         candidate.filteredReason = 'stale';
       } else if (candidate.fragment.score.final < 0.35) {
@@ -3783,8 +3799,11 @@ export class RecallService {
         if (!validation.ok) {
           hostFallbackReason = validation.reason;
           pushWarning(warnings, validation.warning);
-        } else if (decidedByRules(heuristic) || candidates.length === 0) {
+        } else if ((decidedByRules(heuristic) && heuristic.reason !== 'no_novelty')
+          || candidates.length === 0) {
           // must_speak / defer / greeting / meta / no_candidates 仍由 sidecar 决定。
+          // no_novelty 不阻止 host plan 消费：先记录 prefetched=true，再由 novelty
+          // guard 决定不重复注入。
           hostFallbackReason = 'host_plan_overridden_by_hard_rule';
           pushWarning(warnings, 'host_plan_overridden_by_hard_rule');
         } else {
@@ -4178,13 +4197,31 @@ export class RecallService {
       };
     }
 
+    // novelty guard：planner 可能因为 local/host plan 或模型建议 speak，但宿主已
+    // 回传同一片段为已注入。显式 must_speak 和 conflict 是文档允许的重复例外；
+    // 其余 speak 只注入尚未注入的候选，全部命中时降级为 no_novelty silent。
+    const injected = new Set(this.resolveInjectedIds(run.request.alreadyInjectedIds));
+    const allowRepeat = decision.mustSpeak === true || decision.reason === 'conflict';
+    const fresh = injected.size === 0 || allowRepeat
+      ? selected
+      : selected.filter((candidate) => !injected.has(candidate.fragment.id)
+        && !candidate.fragment.sourceIds.some((id) => injected.has(id)));
+    if (decision.action === 'speak' && fresh.length === 0 && !allowRepeat) {
+      decision = {
+        ...decision,
+        action: 'silent',
+        depth: 'gist',
+        reason: 'no_novelty',
+      };
+    }
+
     const speak = decision.action === 'speak';
-    const inject = speak ? selected : [];
+    const inject = speak ? fresh : [];
     const suppressed = speak ? [] : selected.map((candidate) => candidate.fragment.id);
     const expansionPlan = speak
       ? decision.depth === 'gist'
         ? new Map<string, string>()
-        : this.ensureExpansionPlan(basePlan, selected, decision.depth)
+        : this.ensureExpansionPlan(basePlan, inject, decision.depth)
       : new Map<string, string>();
 
     if (!speak) {

@@ -299,6 +299,45 @@ describe('host plan /context consumption', () => {
     expect(harness.modelCalls).toHaveLength(0);
   });
 
+  it('fresh session prior + alreadyInjectedIds → 仍消费 host plan（prefetched=true），但不重复注入', async () => {
+    const harness = await setup('host');
+    const first = await post(`${harness.server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_host_plan',
+      turnId: 'turn_1',
+      turnKind: 'human',
+      query: '深色主题',
+      maxFragments: 5,
+    });
+    expect(first.status).toBe(200);
+    const injectedIds = first.body.data.fragments.map((fragment: any) => fragment.id);
+    const meta = first.body.data.interventionMeta;
+
+    const second = await post(`${harness.server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_host_plan',
+      turnId: 'turn_2',
+      previousTurnId: 'turn_1',
+      turnKind: 'human',
+      query: '深色主题',
+      hostPlan: planFrom(meta),
+      alreadyInjectedIds: injectedIds,
+      maxFragments: 5,
+    });
+    expect(second.status).toBe(200);
+    expect(second.body.data.interventionMeta).toMatchObject({
+      source: 'host',
+      resolvedSource: 'host',
+      prefetched: true,
+      planId: 'hp_01JHOSTPLAN0001',
+    });
+    expect(second.body.data.decision).toMatchObject({ action: 'silent', reason: 'no_novelty' });
+    expect(second.body.data.fragments).toEqual([]);
+    expect(second.body.data.blocks).toEqual([]);
+    expect(second.body.data.applied).toMatchObject({ action: 'silent', fragments: 0 });
+    expect(harness.modelCalls).toHaveLength(0);
+  });
+
   it('过期 plan → host_plan_expired，立即 heuristic，不等待宿主模型', async () => {
     const harness = await setup('host');
     const meta = await firstContext(harness);

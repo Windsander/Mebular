@@ -834,6 +834,37 @@ describe('RecallService', () => {
     expect(response.data.silenceReason).toBe('already_injected');
   });
 
+  it('heuristic planner：alreadyInjectedIds 在 planner 之后生效，记录 no_novelty 且不剪掉候选', async () => {
+    const { service } = await setup({
+      records: [preferenceRecord()],
+      mutateConfig: (config) => {
+        config.model.source = 'heuristic';
+        config.model.sourcePresent = true;
+        config.intervention = {
+          ...config.intervention,
+          minConfidence: 0.55,
+          maxSilentStreak: 99,
+          explorationRate: 0,
+        };
+      },
+    });
+    const response = await service.handleContext({
+      agentId: 'opencode',
+      threadId: 'th_recall',
+      query: '深色主题',
+      turnKind: 'human',
+      alreadyInjectedIds: ['01JPREF0001'],
+    });
+    expect(response.data.fragments).toEqual([]);
+    expect(response.data.blocks).toEqual([]);
+    expect(response.data.decision).toMatchObject({ action: 'silent', reason: 'no_novelty' });
+    expect(response.data.applied).toMatchObject({ action: 'silent', fragments: 0 });
+
+    const trace = await service.getTrace(response.data.traceId!);
+    // 候选没有在 planner 之前被标成 already_injected；它作为 novelty 输入进入决策。
+    expect(trace?.candidates?.find((entry) => entry.id === '01JPREF0001')?.filteredReason).toBeUndefined();
+  });
+
   it('alreadyInjectedIds 中的无关 ID 不影响召回', async () => {
     const { service } = await setup({ records: [preferenceRecord()] });
     const response = await service.handleContext({

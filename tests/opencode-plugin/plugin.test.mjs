@@ -1935,6 +1935,99 @@ describe('fragmented context contract', () => {
     expect(secondBody.alreadyInjectedIds).toContain('mf_01JTEST');
   });
 
+  it('only records fragments that were actually rendered, not every returned fragment', async () => {
+    const returnedOnly = {
+      recallId: 'rr_returned_only',
+      fragments: [
+        { id: 'mf_rendered', kind: 'fact', gist: 'rendered', citations: [{ id: '01JR' }] },
+        { id: 'mf_suppressed', kind: 'fact', gist: 'not in blocks', citations: [{ id: '01JS' }] },
+      ],
+      blocks: [{
+        kind: 'fragment',
+        content: 'rendered',
+        citations: [{ id: '01JR' }],
+        fragments: ['mf_rendered'],
+      }],
+      silenceReason: null,
+    };
+    const fetchImpl = createFetch({ '/context': returnedOnly });
+    const { controller } = controllerWith({ fetchImpl });
+    await controller.handleContext(hookEvent(userMessages()));
+    const second = hookEvent([
+      ...userMessages(),
+      { id: 'a1', role: 'assistant', content: [{ type: 'text', text: 'Done.' }] },
+      { id: 'u2', role: 'user', content: [{ type: 'text', text: 'same cue again' }] },
+    ]);
+    await controller.handleContext(second);
+    const secondBody = fetchImpl.callsFor('/context')[1].body;
+    expect(secondBody.alreadyInjectedIds).toEqual(['mf_rendered']);
+    expect(secondBody.alreadyInjectedIds).not.toContain('mf_suppressed');
+  });
+
+  it('does not record blocks dropped by the adapter byte budget', async () => {
+    const big = 'x'.repeat(600);
+    const budgetDropped = {
+      recallId: 'rr_budget',
+      fragments: [
+        { id: 'mf_kept', kind: 'fact', gist: 'kept', citations: [{ id: '01JK' }] },
+        { id: 'mf_dropped', kind: 'fact', gist: 'dropped', citations: [{ id: '01JD' }] },
+      ],
+      blocks: [
+        {
+          kind: 'fragment',
+          content: big,
+          citations: [{ id: '01JK' }],
+          fragments: ['mf_kept'],
+        },
+        {
+          kind: 'fragment',
+          content: big,
+          citations: [{ id: '01JD' }],
+          fragments: ['mf_dropped'],
+        },
+      ],
+      silenceReason: null,
+    };
+    const fetchImpl = createFetch({ '/context': budgetDropped });
+    const { controller } = controllerWith({ fetchImpl, config: { maxContextBytes: 512 } });
+    const first = hookEvent(userMessages());
+    await controller.handleContext(first);
+    expect(first.system).toHaveLength(1);
+    const second = hookEvent([
+      ...userMessages(),
+      { id: 'a1', role: 'assistant', content: [{ type: 'text', text: 'Done.' }] },
+      { id: 'u2', role: 'user', content: [{ type: 'text', text: 'same cue again' }] },
+    ]);
+    await controller.handleContext(second);
+    const secondBody = fetchImpl.callsFor('/context')[1].body;
+    expect(secondBody.alreadyInjectedIds).toContain('mf_kept');
+    expect(secondBody.alreadyInjectedIds).not.toContain('mf_dropped');
+  });
+
+  it.each([
+    ['OpenCode', {}],
+    ['OpenChamber', { hostApp: 'openchamber' }],
+  ])('%s two-round same cue keeps the second /context call eligible and dedupes only injected IDs', async (_label, config) => {
+    const fetchImpl = createFetch({ '/context': FRAGMENT_HIT });
+    const { controller } = controllerWith({ fetchImpl, config });
+    const first = hookEvent(userMessages());
+    await controller.handleContext(first);
+    expect(first.system).toHaveLength(1);
+    expect(first.system[0].text).toContain('部署命令');
+
+    const second = hookEvent([
+      ...userMessages(),
+      { id: 'a1', role: 'assistant', content: [{ type: 'text', text: 'Done.' }] },
+      { id: 'u2', role: 'user', content: [{ type: 'text', text: 'same cue again' }] },
+    ]);
+    await controller.handleContext(second);
+    // The second turn still calls /context with the actual injected fragment;
+    // the sidecar/planner, not the adapter, decides whether to reuse it.
+    expect(fetchImpl.callsFor('/context')).toHaveLength(2);
+    expect(fetchImpl.callsFor('/context')[1].body.alreadyInjectedIds).toEqual(['mf_01JTEST']);
+    expect(second.system).toHaveLength(1);
+  });
+
   it('renders a sidecar detail block without reading local raw', async () => {
     const fetchImpl = createFetch({
       '/context': {

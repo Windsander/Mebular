@@ -253,6 +253,52 @@ describe('local intervention prefetch (W2)', () => {
     expect(JSON.stringify(trace?.decision?.planner)).not.toContain('深色主题偏好');
   });
 
+  it('第二轮同 cue + alreadyInjectedIds：仍消费 fresh plan 并记录 prefetched=true，但不重复注入', async () => {
+    const { service, model } = await setup();
+    const first = await service.handleContext(contextBody('深色主题偏好', 'turn_1'));
+    const injectedIds = first.data.fragments.map((fragment) => fragment.id);
+    expect(injectedIds[0]).toMatch(/^mf_/);
+    await flushPrefetch();
+    expect(model.calls).toBe(1);
+
+    const response = await service.handleContext({
+      ...contextBody('深色主题偏好', 'turn_2'),
+      alreadyInjectedIds: injectedIds,
+    });
+    // planner 仍在候选被 novelty 剪枝之前运行：local 预取被消费并写入 trace。
+    expect(response.data.decision?.planner).toMatchObject({
+      configuredSource: 'local',
+      resolvedSource: 'local',
+      prefetched: true,
+      prefetchState: 'hit',
+    });
+    expect(response.data.decision).toMatchObject({ action: 'silent', reason: 'no_novelty' });
+    // 实际注入为空：同一片段不会在下一轮重复出现。
+    expect(response.data.fragments).toEqual([]);
+    expect(response.data.blocks).toEqual([]);
+    expect(response.data.applied).toMatchObject({ action: 'silent', fragments: 0 });
+    expect(model.calls).toBe(1);
+  });
+
+  it('第二轮同 cue + source ID 同样不重复注入，但预取仍然命中', async () => {
+    const { service, model } = await setup();
+    const first = await service.handleContext(contextBody('深色主题偏好', 'turn_1'));
+    const sourceIds = first.data.fragments.flatMap((fragment) => fragment.citations.map((citation) => citation.id));
+    await flushPrefetch();
+
+    const response = await service.handleContext({
+      ...contextBody('深色主题偏好', 'turn_2'),
+      alreadyInjectedIds: sourceIds,
+    });
+    expect(response.data.decision?.planner).toMatchObject({
+      resolvedSource: 'local',
+      prefetched: true,
+    });
+    expect(response.data.blocks).toEqual([]);
+    expect(response.data.applied).toMatchObject({ action: 'silent', fragments: 0 });
+    expect(model.calls).toBe(1);
+  });
+
   it('新 cue：cue_mismatch → heuristic + prefetched=false', async () => {
     const { service, model } = await setup();
     await service.handleContext(contextBody('深色主题偏好', 'turn_1'));

@@ -391,7 +391,7 @@ async function main() {
       const pollStart = Date.now();
       let hitTurn = null;
       let hitTrace = null;
-      for (let attempt = 0; attempt < 18; attempt += 1) {
+      for (let attempt = 0; attempt < 6; attempt += 1) {
         await new Promise((resolvePromise) => setTimeout(resolvePromise, 5000));
         const attemptTurn = await turn(threadId, 'deepwork');
         const traces = await listTraces(discovery, threadId);
@@ -431,7 +431,7 @@ async function main() {
         JSON.stringify(metaOf(trace1)));
 
       let hostTrace = null;
-      for (let attempt = 0; attempt < 8; attempt += 1) {
+      for (let attempt = 0; attempt < 5; attempt += 1) {
         await new Promise((resolvePromise) => setTimeout(resolvePromise, 3000));
         await turn(threadId, 'deepwork');
         const traces = await listTraces(discovery, threadId);

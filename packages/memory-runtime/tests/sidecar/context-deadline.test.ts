@@ -52,13 +52,17 @@ function hang(): Promise<never> {
 function fakeModel(options: {
   queryDelayMs?: number;
   planDelayMs?: number;
+  selectionHang?: boolean;
 } = {}): FakeModel {
   const model: FakeModel = {
     planQueryCalls: 0,
     planInterventionCalls: 0,
     planInterventionTimeout: null,
     lastPlannerDeadline: null,
-    selectOptionalSource: async () => ({ source: 'api', warnings: [], degraded: false }),
+    selectOptionalSource: async () => {
+      if (options.selectionHang) await hang();
+      return { source: 'api', warnings: [], degraded: false };
+    },
     planQuery: async () => {
       model.planQueryCalls += 1;
       if (options.queryDelayMs) await hang();
@@ -155,6 +159,8 @@ interface SetupOptions {
   queryPlan?: 'heuristic' | 'model';
   plannerQueue?: unknown;
   traceDelayMs?: number;
+  traceFail?: boolean;
+  namespacesHang?: boolean;
 }
 
 interface SlowSourceState {
@@ -213,16 +219,29 @@ async function setup(options: SetupOptions = {}): Promise<Harness & {
     // 永不返回：模拟慢 store；deadline 必须跳过 trace，而不是等它写完。
     store.putTrace = async () => hang();
   }
+  if (options.traceFail) {
+    const store = local.store as unknown as {
+      putTrace: (trace: unknown) => Promise<void>;
+    };
+    store.putTrace = async () => {
+      throw new Error('trace store unavailable');
+    };
+  }
+
+  const client = new CapabilityClient({
+    baseUrl: fake.baseUrl,
+    token: 'cap-token',
+    retries: 0,
+    retryDelayMs: 0,
+  });
+  if (options.namespacesHang) {
+    client.getNamespaces = async () => hang() as never;
+  }
 
   const service = new RecallService({
     config,
     local,
-    client: new CapabilityClient({
-      baseUrl: fake.baseUrl,
-      token: 'cap-token',
-      retries: 0,
-      retryDelayMs: 0,
-    }),
+    client,
     identity: { cloudId: 'cl_test', profileId: 'default', hostId: 'h_test' },
     checkpointSource: slowSource as never,
     selfSource: slowSource as never,
@@ -284,7 +303,7 @@ describe('/context hard deadline (W5)', () => {
     expect(response.data.timing.totalMs).toBeLessThanOrEqual(1000);
   });
 
-  it('trace 来不及时 skip-on-deadline：traceId/bindingToken=null，不产生 outcome token', async () => {
+  it('trace 来不及时 skip-on-deadline：traceId/bindingToken=null，tracePersisted=false', async () => {
     const { service } = await setup({
       deadlineMs: 600,
       traceDelayMs: 900,
@@ -296,8 +315,62 @@ describe('/context hard deadline (W5)', () => {
     expect(elapsed).toBeLessThanOrEqual(600);
     expect(response.data.traceId).toBeNull();
     expect(response.data.bindingToken).toBeNull();
+    expect(response.data.tracePersisted).toBe(false);
     expect(response.data.degraded).toBe(true);
     expect(response.data.warnings).toContain('trace_write_skipped_deadline');
+  });
+
+  it('正常 trace 写入成功：tracePersisted=true 且 traceId 非空', async () => {
+    const { service } = await setup({ deadlineMs: 1000 });
+    const response = await service.handleContext(body());
+    expect(response.data.traceId).not.toBeNull();
+    expect(response.data.tracePersisted).toBe(true);
+  });
+
+  it('trace 写入失败：tracePersisted=false，W4 不得据此签发 token', async () => {
+    const { service } = await setup({ deadlineMs: 1000, traceFail: true });
+    const response = await service.handleContext(body('turn_trace_fail'));
+    expect(response.data.traceId).toBeNull();
+    expect(response.data.tracePersisted).toBe(false);
+    expect(response.data.warnings).toContain('trace_write_failed');
+  });
+
+  it('慢 namespaces 不突破 deadline；降级到策略可读默认域', async () => {
+    const { service } = await setup({
+      deadlineMs: 600,
+      namespacesHang: true,
+    });
+    const started = Date.now();
+    const response = await service.handleContext({ ...body('turn_namespaces'), includeOtherAgents: true });
+    const elapsed = Date.now() - started;
+
+    expect(elapsed).toBeLessThanOrEqual(600);
+    expect(response.data.timing.totalMs).toBeLessThanOrEqual(600);
+    expect(response.data.warnings).toContain('context_deadline_exceeded');
+    expect(response.data.warnings).toContain('domains_deadline_exceeded');
+    // 降级仍使用默认可读域，而不是空域/ forbidden 状态。
+    expect(response.data.silenceReason).not.toBe('domain_forbidden');
+  });
+
+  it('慢 selectOptionalSource 不启动 planQuery，保留原 query + heuristic', async () => {
+    const model = fakeModel({ selectionHang: true });
+    const { service } = await setup({
+      deadlineMs: 700,
+      source: 'api',
+      queryPlan: 'model',
+      inference: model,
+    });
+    const started = Date.now();
+    const response = await service.handleContext(body('turn_selection'));
+    const elapsed = Date.now() - started;
+
+    expect(elapsed).toBeLessThanOrEqual(700);
+    expect(model.planQueryCalls).toBe(0);
+    expect(response.data.warnings).toContain('query_plan_deadline_exceeded');
+    expect(response.data.warnings).toContain('query_plan_fallback_heuristic');
+    expect(response.data.decision?.planner).toMatchObject({
+      fallbackReason: 'deadline',
+    });
   });
 
   it('剩余预算 <200ms：不启动 API，fallbackReason=deadline', async () => {

@@ -340,6 +340,12 @@ export interface RecallResponse {
   silenceReason: string | null;
   traceId: string | null;
   /**
+   * 0.4.0 W5 integration seam：本地 trace 是否真的持久化成功。
+   * W4 签发 bindingToken 前必须同时看 traceId 与 tracePersisted；
+   * trace skip-on-deadline / trace off / 写入失败都为 false。
+   */
+  tracePersisted?: boolean;
+  /**
    * 0.4.0 W5：trace skip-on-deadline 时显式为 null；宿主不得对 null 上报 outcome。
    * W4 binding token 尚未实现，当前只保留 null 保护。
    */
@@ -1522,6 +1528,7 @@ export class RecallService {
       warnings: base.warnings,
       silenceReason: base.silenceReason,
       traceId: base.traceId,
+      ...(base.tracePersisted !== undefined ? { tracePersisted: base.tracePersisted } : {}),
       ...(base.bindingToken !== undefined ? { bindingToken: base.bindingToken } : {}),
       ...(base.decision ? { decision: base.decision } : {}),
       ...(base.applied ? { applied: base.applied } : {}),
@@ -2470,15 +2477,30 @@ export class RecallService {
     if (this.config.recall.queryPlan === 'model' && this.models && !request.mute
       && request.turnKind === 'human' && request.query.trim().length > 0) {
       this.lifecycle?.assertAccepting('recall.model');
-      const selection = await this.models.selectOptionalSource(request.allowRemote);
+      // W5：selection 与 planQuery 共享同一 deadline；selection 慢时不再启动 planQuery。
+      const queryPlanDeadline = deadline?.deadlineAt === undefined
+        ? undefined
+        : deadline.deadlineAt - CONTEXT_RESPONSE_RESERVE_MS;
+      const selectionOutcome = queryPlanDeadline !== undefined && queryPlanDeadline <= this.now()
+        ? { ok: false as const, timedOut: true }
+        : await awaitWithinDeadline(
+          this.models.selectOptionalSource(request.allowRemote),
+          queryPlanDeadline,
+          this.now,
+        );
+      const selection = selectionOutcome.ok
+        ? selectionOutcome.value
+        : {
+          source: null,
+          warnings: [selectionOutcome.timedOut ? 'query_plan_deadline_exceeded' : 'model_unavailable'],
+          degraded: true,
+          reason: selectionOutcome.timedOut ? 'deadline' : 'model_unavailable',
+        };
       for (const warning of selection.warnings) pushWarning(warnings, warning);
       degraded = degraded || selection.degraded;
       if (selection.source) {
         // W5：query plan 与 intervention 共享同一个绝对 deadline；
         // 超时只影响检索词，不阻塞后续 heuristic 介入或响应组装。
-        const queryPlanDeadline = deadline?.deadlineAt === undefined
-          ? undefined
-          : deadline.deadlineAt - CONTEXT_RESPONSE_RESERVE_MS;
         const planOutcome = queryPlanDeadline !== undefined && queryPlanDeadline <= this.now()
           ? { ok: false as const, timedOut: true }
           : await awaitWithinDeadline(
@@ -2586,7 +2608,27 @@ export class RecallService {
       return this.finish(run, mode);
     }
 
-    const domains = await this.resolveDomains(request, cue, warnings);
+    const domainWarnings: string[] = [];
+    const domainOutcome = await awaitWithinDeadline(
+      this.resolveDomains(request, cue, domainWarnings),
+      this.workDeadlineAt(run),
+      this.now,
+    );
+    let domains: string[];
+    if (domainOutcome.ok) {
+      domains = domainOutcome.value;
+      for (const warning of domainWarnings) pushWarning(warnings, warning);
+    } else {
+      // W5：慢 namespaces 不得把 /context 拖过 deadline；降级到策略可读的默认域。
+      this.expireContext(run, warnings, 'domains');
+      const explicit = request.domains;
+      const fallbackCandidates = explicit && explicit.length > 0
+        ? [...explicit]
+        : this.defaultDomainCandidates(request);
+      domains = this.readableDomains(request, fallbackCandidates, warnings);
+      degraded = true;
+      run.degraded = true;
+    }
     run.domains = domains;
     if (domains.length === 0) {
       run.silenceReason = 'domain_forbidden';
@@ -2845,16 +2887,10 @@ export class RecallService {
   }
 
   private async resolveDomains(request: NormalizedRequest, cue: Cue, warnings: string[]): Promise<string[]> {
-    const policy = this.currentPolicy();
     const explicit = request.domains;
     const candidates: string[] = explicit && explicit.length > 0
       ? [...explicit]
-      : [
-        'user',
-        agentDomain(request.agentId),
-        'default',
-        ...(request.threadId ? [taskDomain(request.threadId)] : []),
-      ];
+      : this.defaultDomainCandidates(request);
 
     if ((!explicit || explicit.length === 0) && request.includeOtherAgents && this.client) {
       try {
@@ -2875,6 +2911,26 @@ export class RecallService {
       }
     }
 
+    return this.readableDomains(request, candidates, warnings);
+  }
+
+  /** 不访问 capability 的默认候选域；deadline 超时时用于快速降级。 */
+  private defaultDomainCandidates(request: NormalizedRequest): string[] {
+    return [
+      'user',
+      agentDomain(request.agentId),
+      'default',
+      ...(request.threadId ? [taskDomain(request.threadId)] : []),
+    ];
+  }
+
+  private readableDomains(
+    request: NormalizedRequest,
+    candidates: string[],
+    warnings: string[],
+  ): string[] {
+    const policy = this.currentPolicy();
+    const explicit = request.domains;
     const readable: string[] = [];
     for (const domain of dedupe(candidates)) {
       if (domain === 'system' || domain.startsWith('__')) {
@@ -4831,6 +4887,8 @@ export class RecallService {
       degraded = true;
       if (warnings.length === 0) warnings.push('trace_write_failed');
     }
+    // W5 integration seam：只有 trace 真正落盘且没有 skip/fail 时才为 true。
+    const tracePersisted = !traceSkipped && !trace.failed && trace.traceId !== null;
     this.degraded = degraded;
 
     // W3：只有成功完成的 /context 才推进 basis turn；adapter 下一轮必须用它。
@@ -4866,6 +4924,7 @@ export class RecallService {
       warnings: dedupe(warnings),
       silenceReason,
       traceId: trace.traceId,
+      tracePersisted,
       ...(traceSkipped ? { bindingToken: null } : {}),
       decision,
       applied,

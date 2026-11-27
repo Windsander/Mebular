@@ -4,7 +4,7 @@ import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { PolicyStore } from '../../src/sidecar/policy-store.js';
+import { PolicyStore, adaptiveCanaryHit } from '../../src/sidecar/policy-store.js';
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -284,8 +284,47 @@ describe('PolicyStore', () => {
     const snapshot = await policy.snapshot();
     expect(snapshot.domains).toEqual([]);
     expect(snapshot.global.spoken).toBe(0);
+    expect(snapshot.diagnostic.spoken).toBe(0);
+    expect(snapshot.diagnostic.accepted).toBe(0);
     await policy.recordDecision({ agentId: 'opencode', domain: 'user', action: 'silent' });
     expect((await policy.snapshot()).global.silent).toBe(1);
+  });
+
+  it('W6：adaptive=false 只写 diagnostic，不调阈值也不占用 50 次窗口', async () => {
+    const policy = store();
+    await policy.init();
+    for (let index = 0; index < 20; index += 1) {
+      await policy.recordOutcome({
+        agentId: 'opencode', domain: 'user', kind: 'reasked', adaptive: false,
+      });
+    }
+    // 60 次 model/shadow/off 决策远超 50 次窗口，但不得触发 tuneEntry。
+    for (let index = 0; index < 60; index += 1) {
+      await policy.recordDecision({
+        agentId: 'opencode', domain: 'user', action: 'speak', adaptive: false,
+      });
+    }
+    await policy.recordDecision({
+      agentId: 'opencode', domain: 'user', action: 'speak', adaptive: true,
+    });
+    const snapshot = await policy.snapshot();
+    expect(snapshot.global.spoken).toBe(1);
+    expect(snapshot.global.reasked).toBe(0);
+    expect(snapshot.diagnostic.spoken).toBe(60);
+    expect(snapshot.diagnostic.reasked).toBe(20);
+    expect(snapshot.domains[0]!.counts.spoken).toBe(1);
+    expect(snapshot.domains[0]!.diagnostic.spoken).toBe(60);
+    expect(await policy.thresholdFor('opencode', 'user', 0.55)).toBeCloseTo(0.55, 5);
+  });
+
+  it('W6：canary 桶只由 (agentId, domain) 决定，ratio 边界可预期', () => {
+    expect(adaptiveCanaryHit('opencode', 'user', 0)).toBe(false);
+    expect(adaptiveCanaryHit('opencode', 'user', 1)).toBe(true);
+    // 同一桶稳定；不同 agent/domain 独立；函数签名不含 host/source。
+    expect(adaptiveCanaryHit('opencode', 'user', 0.5))
+      .toBe(adaptiveCanaryHit('opencode', 'user', 0.5));
+    expect(adaptiveCanaryHit('opencode', 'user', 0.37))
+      .toBe(adaptiveCanaryHit('opencode', 'user', 0.37));
   });
 
   it('损坏文件 fail-open 为空统计，之后仍可写', async () => {

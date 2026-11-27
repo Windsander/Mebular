@@ -99,7 +99,7 @@ import {
   type HostInterventionPlan,
 } from './host-plan.js';
 import type { InferenceInterventionStats } from './inference-provider.js';
-import type { PolicyStore } from './policy-store.js';
+import { adaptiveCanaryHit, type AdaptiveThresholdResult, type PolicyStore } from './policy-store.js';
 import {
   issueOutcomeBinding,
   verifyOutcomeBinding,
@@ -619,6 +619,8 @@ interface RecallRun {
     shadow: boolean;
     domain: string;
   } | null;
+  /** W6：本轮实际生效决策是否可作为 adaptive 样本（仅 heuristic、非 shadow）。 */
+  adaptiveEligible?: boolean;
   /** W5：`/context` 绝对 deadline；`recall` 不设置。 */
   deadlineAt?: number;
   /** W5：handleContext 入口时间，用于计时/证据。 */
@@ -3876,6 +3878,11 @@ export class RecallService {
     const basePlan = this.expansionPlan(selected, run.cue, warnings);
     const domain = selected[0]?.fragment.owner.domain ?? run.domains[0] ?? 'default';
     const key = this.decisionKey(run);
+    // W6：adaptive 只服务 heuristic 实际生效决策；diagnostic shadow、model 与 stage=off 都不算样本。
+    const adaptiveEligible = config.adaptive.stage !== 'off'
+      && intervention.mode !== 'shadow'
+      && intervention.planner === 'heuristic';
+    run.adaptiveEligible = adaptiveEligible;
 
     // 输入级 defer 优先于所有 mode：不注入 memory，但 self/checkpoint 保留。
     // - off/baseline：v0-baseline + enforced=false；
@@ -3922,7 +3929,10 @@ export class RecallService {
       tooShallow: 0,
       tooDeep: 0,
     };
-    if (this.policyStore) {
+    let adaptiveTrace: NonNullable<InterventionPlannerTrace['adaptive']> | undefined;
+    const adaptiveStage = config.adaptive.stage;
+    // W6：model/shadow 不读 adaptive；off 阶段也完全不触碰 PolicyStore。
+    if (this.policyStore && adaptiveEligible && adaptiveStage !== 'off') {
       try {
         const stats = await this.policyStore.effectiveStats(run.request.agentId, domain);
         recentUselessRate = stats.uselessRate;
@@ -3936,14 +3946,32 @@ export class RecallService {
           tooShallow: Math.round(stats.too_shallow),
           tooDeep: Math.round(stats.too_deep),
         };
-        threshold = await this.policyStore.thresholdFor(
+        // canary 桶只由 (agentId, domain) 决定，不含 host/source。
+        const canaryHit = adaptiveStage === 'canary'
+          ? adaptiveCanaryHit(run.request.agentId, domain, config.adaptive.canaryRatio)
+          : undefined;
+        const apply = adaptiveStage === 'on' || canaryHit === true;
+        const result: AdaptiveThresholdResult = await this.policyStore.adaptiveThresholdFor(
           run.request.agentId,
           domain,
           config.minConfidence,
+          { apply },
         );
+        threshold = result.threshold;
+        const round4 = (value: number): number => Number(value.toFixed(4));
+        adaptiveTrace = {
+          stage: adaptiveStage,
+          applied: apply && result.offset !== 0,
+          baseThreshold: round4(config.minConfidence),
+          recommendedThreshold: round4(result.recommended),
+          threshold: round4(result.threshold),
+          offset: round4(result.offset),
+          ...(canaryHit !== undefined ? { canaryHit } : {}),
+        };
       } catch {
         threshold = config.minConfidence;
         recentUselessRate = 0;
+        adaptiveTrace = undefined;
       }
     }
 
@@ -4087,6 +4115,7 @@ export class RecallService {
           latencyMs: 0,
           fallbackReason: null,
           prefetched: false,
+          ...(adaptiveTrace ? { adaptive: adaptiveTrace } : {}),
           ...(configuredSource === 'local' || configuredSource === 'auto' || configuredSource === 'host'
             ? (prefetched.state !== 'hit' ? { prefetchState: prefetched.state } : {})
             : {}),
@@ -4240,6 +4269,10 @@ export class RecallService {
     const config = this.config.intervention;
     const intervention = this.effectiveIntervention;
     const blocked = NON_INTERVENTION_SILENCE.has(run.silenceReason ?? '');
+    // W6：无候选/gate 路径仍按 heuristic 样本计数；model/shadow/off 只记诊断。
+    run.adaptiveEligible = config.adaptive.stage !== 'off'
+      && intervention.mode !== 'shadow'
+      && intervention.planner === 'heuristic';
     if (!blocked && this.isNegatedDefer(run.cue)) {
       const domain = run.domains[0] ?? 'default';
       if (intervention.planner !== 'off') pushWarning(warnings, 'intervention_defer');
@@ -4408,10 +4441,11 @@ export class RecallService {
     agentId: string,
     domain: string,
     action: InterventionAction,
+    adaptive: boolean,
   ): Promise<void> {
     if (!this.policyStore || this.config.trace !== 'local') return;
     try {
-      await this.policyStore.recordDecision({ agentId, domain, action });
+      await this.policyStore.recordDecision({ agentId, domain, action, adaptive });
     } catch {
       // 策略统计失败不得影响召回主流程。
     }
@@ -4423,8 +4457,11 @@ export class RecallService {
   ): Promise<void> {
     if (!this.policyStore || this.config.trace !== 'local') return;
     const domain = trace.applied?.domain ?? trace.domains?.[0] ?? 'default';
+    // W6：只有实际生效的 heuristic 决策可以作为 adaptive 样本；
+    // model/shadow/off（或旧 trace 缺字段）只写诊断计数，不调阈值。
+    const adaptive = trace.applied?.adaptiveEligible === true;
     try {
-      await this.policyStore.recordOutcome({ agentId: trace.agentId, domain, kind });
+      await this.policyStore.recordOutcome({ agentId: trace.agentId, domain, kind, adaptive });
     } catch {
       // fail-open：outcome 已写入 trace，统计失败不阻塞宿主。
     }
@@ -5069,6 +5106,7 @@ export class RecallService {
       ...(run.effective?.shadow
         ? { wouldAction: decision.action, wouldDepth: decision.depth }
         : {}),
+      ...(run.adaptiveEligible === true ? { adaptiveEligible: true } : {}),
       ...(decision.degraded ? { degraded: true } : {}),
     };
     run.decision = decision;
@@ -5083,6 +5121,7 @@ export class RecallService {
           run.request.agentId,
           applied.domain ?? run.domains[0] ?? 'default',
           applied.action,
+          run.adaptiveEligible === true,
         ),
         run.deadlineAt === undefined ? undefined : run.deadlineAt - CONTEXT_TRACE_RESERVE_MS,
         this.now,

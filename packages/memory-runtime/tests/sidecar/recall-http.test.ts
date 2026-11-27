@@ -1,7 +1,7 @@
 // W4b host API 闭环：/recall /context /traces /feedback /status /version。
 // 使用 fake capability server；不启动真实 MCP/core。
 
-import { describe, it, expect, afterEach } from '@jest/globals';
+import { describe, it, expect, afterEach, jest } from '@jest/globals';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1111,13 +1111,206 @@ describe('sidecar recall/context HTTP', () => {
     expect(context.body.data.decision).toMatchObject({ action: 'silent', enforced: false });
     expect(context.body.data.applied).toMatchObject({ action: 'speak', wouldAction: 'silent' });
     expect(context.body.data.fragments.length).toBeGreaterThan(0);
+    expect(context.body.data.decision.planner.adaptive).toBeUndefined();
     const stats = await runtime.policyStore!.snapshot();
-    expect(stats.global.spoken).toBe(1);
+    // W6：shadow 的实际 baseline 只记 diagnostic，不参与 adaptive 调参。
+    expect(stats.global.spoken).toBe(0);
     expect(stats.global.silent).toBe(0);
+    expect(stats.diagnostic.spoken).toBe(1);
     const trace = await fetch(`${server.url}/traces/${context.body.data.traceId}`, { headers: auth() });
     const traceBody = await trace.json() as any;
     expect(traceBody.data.applied).toMatchObject({ action: 'speak', wouldAction: 'silent' });
+    expect(traceBody.data.applied.adaptiveEligible).toBeUndefined();
   });
+
+  it('W6：adaptive 只服务 heuristic；shadow 只观测、canary 未命中不生效、on 才应用', async () => {
+    const seedOffset = async (runtime: any) => {
+      for (let index = 0; index < 20; index += 1) {
+        await runtime.policyStore!.recordOutcome({
+          agentId: 'opencode', domain: 'user', kind: 'reasked',
+        });
+      }
+      for (let index = 0; index < 50; index += 1) {
+        await runtime.policyStore!.recordDecision({
+          agentId: 'opencode', domain: 'user', action: 'speak',
+        });
+      }
+    };
+    const base = { mode: 'heuristic' as const, minConfidence: 0.55, explorationRate: 0, maxSilentStreak: 99 };
+
+    const shadow = await setup({
+      modelSource: 'heuristic',
+      intervention: { ...base, adaptive: { stage: 'shadow', canaryRatio: 0.1 } },
+    });
+    await seedOffset(shadow.runtime);
+    const shadowContext = await post(`${shadow.server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_adaptive_shadow',
+      turnId: 'turn_adaptive_shadow',
+      query: '我的偏好是什么？',
+    });
+    expect(shadowContext.status).toBe(200);
+    expect(shadowContext.body.data.decision.planner.adaptive).toMatchObject({
+      stage: 'shadow',
+      applied: false,
+      baseThreshold: 0.55,
+      threshold: 0.55,
+      recommendedThreshold: 0.58,
+      offset: 0.03,
+    });
+
+    const canaryMiss = await setup({
+      modelSource: 'heuristic',
+      intervention: { ...base, adaptive: { stage: 'canary', canaryRatio: 0 } },
+    });
+    await seedOffset(canaryMiss.runtime);
+    const canaryContext = await post(`${canaryMiss.server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_adaptive_canary',
+      turnId: 'turn_adaptive_canary',
+      query: '我的偏好是什么？',
+    });
+    expect(canaryContext.status).toBe(200);
+    expect(canaryContext.body.data.decision.planner.adaptive).toMatchObject({
+      stage: 'canary',
+      applied: false,
+      canaryHit: false,
+      threshold: 0.55,
+      recommendedThreshold: 0.58,
+    });
+
+    const on = await setup({
+      modelSource: 'heuristic',
+      intervention: { ...base, adaptive: { stage: 'on', canaryRatio: 0.1 } },
+    });
+    await seedOffset(on.runtime);
+    const onContext = await post(`${on.server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_adaptive_on',
+      turnId: 'turn_adaptive_on',
+      query: '我的偏好是什么？',
+    });
+    expect(onContext.status).toBe(200);
+    expect(onContext.body.data.decision.planner.adaptive).toMatchObject({
+      stage: 'on',
+      applied: true,
+      threshold: 0.58,
+      offset: 0.03,
+    });
+    // heuristic 决策进入 adaptive 计数；总样本 = 种子 50 + 本次 1。
+    const stats = await on.runtime.policyStore!.snapshot();
+    expect(stats.global.spoken).toBe(51);
+  }, 30_000);
+
+  it('W6：diagnostic shadow 不读也不写 adaptive；只记 diagnostic 计数', async () => {
+    const { server, runtime } = await setup({
+      modelSource: 'heuristic',
+      intervention: {
+        diagnosticShadow: true,
+        minConfidence: 0.55,
+        explorationRate: 0,
+        maxSilentStreak: 99,
+        adaptive: { stage: 'on', canaryRatio: 1 },
+      },
+    });
+    for (let index = 0; index < 20; index += 1) {
+      await runtime.policyStore!.recordOutcome({
+        agentId: 'opencode', domain: 'user', kind: 'reasked',
+      });
+    }
+    for (let index = 0; index < 50; index += 1) {
+      await runtime.policyStore!.recordDecision({
+        agentId: 'opencode', domain: 'user', action: 'speak',
+      });
+    }
+    const effectiveStatsSpy = jest.spyOn(runtime.policyStore!, 'effectiveStats');
+    const thresholdSpy = jest.spyOn(runtime.policyStore!, 'adaptiveThresholdFor');
+    const context = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_adaptive_shadow_mode',
+      turnId: 'turn_adaptive_shadow_mode',
+      query: '今天天气怎么样',
+    });
+    expect(context.status).toBe(200);
+    expect(context.body.data.decision.planner.adaptive).toBeUndefined();
+    expect(effectiveStatsSpy).not.toHaveBeenCalled();
+    expect(thresholdSpy).not.toHaveBeenCalled();
+    const stats = await runtime.policyStore!.snapshot();
+    // 种子 50 次是 adaptive；shadow 的 applied baseline 只进 diagnostic。
+    expect(stats.global.spoken).toBe(50);
+    expect(stats.diagnostic.spoken).toBe(1);
+    effectiveStatsSpy.mockRestore();
+    thresholdSpy.mockRestore();
+  }, 30_000);
+
+
+  it('W6：policy 桶只有 (agentId, domain)；host/source 不进入桶', async () => {
+    const { server, runtime } = await setup({ modelSource: 'heuristic' });
+    for (const host of ['opencode', 'dsh']) {
+      const context = await post(`${server.url}/context`, {
+        agentId: 'opencode',
+        threadId: `th_bucket_${host}`,
+        turnId: `turn_bucket_${host}`,
+        query: '我的偏好是什么？',
+      }, { 'x-mebular-host-app': host });
+      expect(context.status).toBe(200);
+    }
+    const snapshot = await runtime.policyStore!.snapshot();
+    expect(snapshot.domains).toHaveLength(1);
+    expect(Object.keys(snapshot.domains[0]!).sort()).toEqual([
+      'agentId',
+      'counts',
+      'diagnostic',
+      'domain',
+      'thresholdOffset',
+      'updatedAt',
+    ]);
+    expect(snapshot.domains[0]!.agentId).toBe('opencode');
+    expect(snapshot.domains[0]!.domain).toBe('user');
+  });
+
+  it('W6：outcome 归因只调 heuristic；model/shadow 只写 diagnostic', async () => {
+    const settle = async (
+      harness: Harness,
+      thread: string,
+    ): Promise<number> => {
+      const context = await post(`${harness.server.url}/context`, {
+        agentId: 'opencode',
+        threadId: thread,
+        turnId: `turn_${thread}`,
+        query: '我的偏好是什么？',
+      }, { 'x-mebular-host-app': 'opencode' });
+      expect(context.status).toBe(200);
+      const traceId = context.body.data.traceId as string;
+      const token = context.body.data.bindingToken as string;
+      const outcome = await post(`${harness.server.url}/recall/${traceId}/outcome`, {
+        kind: 'accepted',
+        source: 'host',
+        host: 'opencode',
+        bindingToken: token,
+      });
+      expect(outcome.status).toBe(200);
+      expect(outcome.body.data.recorded).toBe(true);
+      const stats = await harness.runtime.policyStore!.snapshot();
+      return stats.global.accepted;
+    };
+
+    const heuristic = await setup({ modelSource: 'heuristic' });
+    expect(await settle(heuristic, 'th_outcome_heuristic')).toBe(1);
+    expect((await heuristic.runtime.policyStore!.snapshot()).diagnostic.accepted).toBe(0);
+
+    // api 未配置 → 运行时 fallback heuristic，但 planner 仍是 model，不得调参。
+    const model = await setup({ modelSource: 'api' });
+    expect(await settle(model, 'th_outcome_model')).toBe(0);
+    expect((await model.runtime.policyStore!.snapshot()).diagnostic.accepted).toBe(1);
+
+    const shadow = await setup({
+      modelSource: 'heuristic',
+      intervention: { diagnosticShadow: true, minConfidence: 0.55, explorationRate: 0 },
+    });
+    expect(await settle(shadow, 'th_outcome_shadow')).toBe(0);
+    expect((await shadow.runtime.policyStore!.snapshot()).diagnostic.accepted).toBe(1);
+  }, 30_000);
 
   it('heuristic silent/defer：跳过 memory fragments，self/checkpoint 仍按原顺序注入；user_negated=defer', async () => {
     const { server, fake } = await setup({
@@ -1656,12 +1849,13 @@ describe('sidecar recall/context HTTP', () => {
 
   it('POST /intervention/reset：成功、重复 reset、未启用与错误路径', async () => {
     const { server, runtime } = await setup({ intervention: { mode: 'heuristic' } });
-    await post(`${server.url}/context`, {
+    const context = await post(`${server.url}/context`, {
       agentId: 'opencode',
       threadId: 'th_reset',
       turnId: 'turn_reset',
       query: '我的偏好是什么？',
     });
+    const traceId = context.body.data.traceId as string;
     const before = await runtime.policyStore!.snapshot();
     expect(before.global.spoken + before.global.silent).toBeGreaterThan(0);
 
@@ -1675,7 +1869,12 @@ describe('sidecar recall/context HTTP', () => {
     expect(reset.body.data.removedDomains).toBeGreaterThanOrEqual(1);
     const after = await runtime.policyStore!.snapshot();
     expect(after.global).toMatchObject({ spoken: 0, silent: 0 });
+    expect(after.diagnostic).toMatchObject({ spoken: 0, silent: 0 });
     expect(after.domains).toEqual([]);
+    // reset 只清 policy + 运行态，不删 trace / 记忆。
+    const traceAfterReset = await fetch(`${server.url}/traces/${traceId}`, { headers: auth() });
+    expect(traceAfterReset.status).toBe(200);
+    expect((await traceAfterReset.json() as any).data.id).toBe(traceId);
 
     const repeated = await post(`${server.url}/intervention/reset`, {});
     expect(repeated.status).toBe(200);

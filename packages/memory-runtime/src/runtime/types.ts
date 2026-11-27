@@ -314,6 +314,21 @@ export interface InterventionPlannerTrace {
   cueMatched?: boolean;
   model?: string;
   attempts?: InterventionPlannerAttempt[];
+  /**
+   * W6：仅 heuristic 决策带 adaptive 诊断；model/shadow 不读 adaptive，因此不出现。
+   * 只含阈值/阶段，不含 query 或正文。
+   */
+  adaptive?: {
+    stage: 'shadow' | 'canary' | 'on';
+    /** 本次 threshold 是否真的应用了 adaptive offset。 */
+    applied: boolean;
+    baseThreshold: number;
+    recommendedThreshold: number;
+    threshold: number;
+    offset: number;
+    /** 仅 canary 阶段出现。 */
+    canaryHit?: boolean;
+  };
 }
 
 export interface InterventionDecision {
@@ -349,6 +364,11 @@ export interface AppliedIntervention {
   /** shadow 模式下策略建议但未生效的 action/depth。 */
   wouldAction?: InterventionAction;
   wouldDepth?: RecallDepth;
+  /**
+   * W6：本次实际生效决策是否来自 heuristic，可作为 adaptive 样本。
+   * model/shadow/off 为 false/缺省；outcome 归因据此决定是否调参。
+   */
+  adaptiveEligible?: boolean;
   degraded?: boolean;
 }
 

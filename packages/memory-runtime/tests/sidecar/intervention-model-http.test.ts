@@ -2,7 +2,7 @@
 // 覆盖 model 模式的 silent / speak+detail / defer / must_speak / timeout /
 // 非法输出 / 隐私 / policyVersion / status.policy / reset。
 
-import { describe, it, expect, afterEach } from '@jest/globals';
+import { describe, it, expect, afterEach, jest } from '@jest/globals';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -525,17 +525,24 @@ describe('intervention model HTTP path', () => {
     expect(harness.calls).toHaveLength(0);
   });
 
-  it('Phase 4：model 决策后 /status.policy 可读，reset 清空统计并保留可用状态', async () => {
+  it('Phase 4：model 决策只写 diagnostic；/status.policy 可读，reset 清空统计', async () => {
     const harness = await setup({ reply: () => ({ content: SPEAK_GIST }) });
-    await post(`${harness.server.url}/context`, {
+    const statsSpy = jest.spyOn(harness.runtime.policyStore!, 'effectiveStats');
+    const thresholdSpy = jest.spyOn(harness.runtime.policyStore!, 'adaptiveThresholdFor');
+    const context = await post(`${harness.server.url}/context`, {
       agentId: 'opencode',
       threadId: 'th_model_http',
       turnId: 'turn_model_policy',
       query: '深色主题',
       allowRemote: true,
     });
+    // W6：model 决策不读 adaptive，也不进入 adaptive 计数。
+    expect(context.body.data.decision.planner.adaptive).toBeUndefined();
+    expect(statsSpy).not.toHaveBeenCalled();
+    expect(thresholdSpy).not.toHaveBeenCalled();
     const before = await harness.runtime.policyStore!.snapshot();
-    expect(before.global.spoken).toBeGreaterThan(0);
+    expect(before.global.spoken).toBe(0);
+    expect(before.diagnostic.spoken).toBeGreaterThan(0);
 
     const status = await fetch(`${harness.server.url}/status`, { headers: auth() });
     const statusBody = await status.json() as any;
@@ -561,6 +568,9 @@ describe('intervention model HTTP path', () => {
     expect(reset.body.data).toMatchObject({ reset: true, policyVersion: 'v0-rules' });
     const after = await harness.runtime.policyStore!.snapshot();
     expect(after.global).toMatchObject({ spoken: 0, silent: 0 });
+    expect(after.diagnostic).toMatchObject({ spoken: 0, silent: 0 });
     expect(after.domains).toEqual([]);
+    statsSpy.mockRestore();
+    thresholdSpy.mockRestore();
   });
 });

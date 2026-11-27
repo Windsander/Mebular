@@ -107,6 +107,11 @@ describe('sidecar config', () => {
   it('intervention 配置：默认 off；严格校验；旧配置兼容', () => {
     // 旧配置（无 intervention）保持默认 off。
     expect(normalizeSidecarConfig({ schema: 1 }).intervention.mode).toBe('off');
+    // W6：adaptive 默认先 shadow 观测，不直接应用到 heuristic。
+    expect(normalizeSidecarConfig({ schema: 1 }).intervention.adaptive).toEqual({
+      stage: 'shadow',
+      canaryRatio: 0.1,
+    });
     expect(normalizeSidecarConfig({
       intervention: {
         mode: 'heuristic',
@@ -121,6 +126,7 @@ describe('sidecar config', () => {
       mode: 'heuristic',
       legacyModePresent: true,
       diagnosticShadow: false,
+      adaptive: { stage: 'shadow', canaryRatio: 0.1 },
       minConfidence: 0.62,
       maxSilentStreak: 5,
       explorationRate: 0.1,
@@ -135,6 +141,25 @@ describe('sidecar config', () => {
     expect(normalizeSidecarConfig({ intervention: { mode: 'off' } }).intervention.legacyModePresent).toBe(true);
     expect(normalizeSidecarConfig({ intervention: { diagnosticShadow: true } }).intervention.diagnosticShadow).toBe(true);
     expect(() => normalizeSidecarConfig({ intervention: { diagnosticShadow: 'yes' } })).toThrow(SidecarConfigError);
+
+    // W6：adaptive 阶段只接受内部枚举；旧 experimental 布尔/开关只 warning 且不改变 stage。
+    expect(normalizeSidecarConfig({
+      intervention: { adaptive: { stage: 'on', canaryRatio: 0.25 } },
+    }).intervention.adaptive).toEqual({ stage: 'on', canaryRatio: 0.25 });
+    expect(() => normalizeSidecarConfig({
+      intervention: { adaptive: { stage: 'always' } },
+    })).toThrow(SidecarConfigError);
+    const legacyAdaptiveWarnings: string[] = [];
+    const legacyAdaptive = normalizeSidecarConfig({
+      intervention: { adaptive: true },
+    }, { warnings: legacyAdaptiveWarnings });
+    expect(legacyAdaptive.intervention.adaptive.stage).toBe('shadow');
+    expect(legacyAdaptiveWarnings).toContain('adaptive_experimental_ignored');
+    const legacyAdaptiveShadowWarnings: string[] = [];
+    normalizeSidecarConfig({
+      intervention: { adaptive: { shadow: true } },
+    }, { warnings: legacyAdaptiveShadowWarnings });
+    expect(legacyAdaptiveShadowWarnings).toContain('adaptive_experimental_ignored');
 
     for (const bad of [
       { mode: 'always' },

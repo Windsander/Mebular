@@ -1,0 +1,62 @@
+0.4.0 intervention outcome E2E（真实 opencode + 真实 sidecar + 真实插件）
+==========================================================================
+  ✓ 真实 sidecar discovery 写出 /memory-runtime/v1（http://127.0.0.1:56839/memory-runtime/v1）
+  ✓ host-token 文件包含真实 host token
+  ✓ /version 声明 intervention decision/outcome/shadow/reset 能力（{"decision":true,"outcome":true,"shadow":true,"reset":true,"mode":"heuristic","hostPlan":true,"hostPlanScopes":["session","turn"],"hostPlanTtlMs":60000,"configuredSource":"heuristic","sourcePresent":true,"planner":"heuristic","legacyModeIgnored":false,"legacyModeConflict":false,"diagnosticShadow":false,"deadline":1500,"warnings":[]}）
+  ✓ 真实 capability 写入 memory + detail seed（{"records":1,"shallow":1,"detail":1,"detailId":"01M8ENQ4QS3X323V5GQQ100KXH"}）
+  ✓ opencode 可启动且 >= 2.2（opencode v2.4.1）
+  ✓ 真实 opencode serve 启动（server listening on http://127.0.0.1:56845
+）
+  ✓ 真实 opencode turn 退出 0（details redacted）
+）
+  ✓ A1 真实 /context 走 heuristic 并注入记忆（{"decision":{"action":"speak","depth":"gist","confidence":0.6355,"reason":"high_relevance","policyVersion":"heuristic:67731e08","enforced":true,"scores":{"top":0.6355,"specificity":0.7,"novelty":1,"recentUseless":0,"depthFit":1},"planner":{"configuredSource":"heuristic","resolvedSource":"heuristic","latencyMs":0,"fallbackReason":null,"prefetched":false,"adaptive":{"stage":"shadow","applied":false,"baseThreshold":0.45,"recommendedThreshold":0.45,"threshold":0.45,"offset":0}}},"applied":{"action":"speak","depth":"gist","fragments":1,"domain":"user","policyEligible":true,"adaptiveEligible":true}}）
+  ✓ A1 trace 可经真实 GET /traces/:id 读取
+  ✓ A1 注入进入真实 outgoing model request 且标记 untrusted/request-only
+  ✓ 真实 opencode turn 退出 0（details redacted）
+）
+  ✓ A2 用户重问 → 真实 /recall/:id/outcome 记录 reasked（{"kind":"reasked","at":1795788952667,"source":"host","confidence":0.65}）
+  ✓ 真实 opencode turn 退出 0（details redacted）
+）
+  ✓ B1 闲聊得到 silent 决策且未注入片段（{"decision":{"action":"silent","depth":"gist","confidence":0,"reason":"chitchat","policyVersion":"v0-baseline","enforced":false},"applied":{"action":"silent","depth":"gist","fragments":0,"domain":"default","policyEligible":false}}）
+  ✓ 真实 opencode turn 退出 0（details redacted）
+）
+  ✓ B2 显式记忆追问 → 真实 outcome 记录 missed（{"kind":"missed","at":1795788953515,"source":"host","confidence":0.7}）
+  ✓ 真实 opencode turn 退出 0（details redacted）
+）
+  ✓ C1 宽 cue 得到 gist 决策（{"action":"speak","depth":"gist","confidence":0.6355,"reason":"high_relevance","policyVersion":"heuristic:67731e08","enforced":true,"scores":{"top":0.6355,"specificity":0.7,"novelty":1,"recentUseless":0,"depthFit":1},"planner":{"configuredSource":"heuristic","resolvedSource":"heuristic","latencyMs":0,"fallbackReason":null,"prefetched":false,"adaptive":{"stage":"shadow","applied":false,"baseThreshold":0.45,"recommendedThreshold":0.45,"threshold":0.45,"offset":0}}}）
+  ✓ 真实 opencode turn 退出 0（details redacted）
+）
+  ✓ C2 gist 后要求具体 → 真实 outcome 记录 too_shallow（{"kind":"too_shallow","at":1795788954347,"source":"host","confidence":0.65}）
+  ✓ 真实 opencode turn 退出 0（details redacted）
+）
+  ✓ D1 追问配置意图得到 detail 决策（{"action":"speak","depth":"detail","confidence":0.6355,"reason":"high_relevance","policyVersion":"heuristic:67731e08","enforced":true,"scores":{"top":0.6355,"specificity":0.7,"novelty":1,"recentUseless":0,"depthFit":1},"planner":{"configuredSource":"heuristic","resolvedSource":"heuristic","latencyMs":0,"fallbackReason":null,"prefetched":false,"adaptive":{"stage":"shadow","applied":false,"baseThreshold":0.45,"recommendedThreshold":0.45,"threshold":0.45,"offset":0}}}）
+  ✓ 真实 opencode turn 退出 0（details redacted）
+）
+  ✓ D2 detail 后嫌太长 → 真实 outcome 记录 too_deep（{"kind":"too_deep","at":1795788955199,"source":"host","confidence":0.65}）
+  ✓ 真实 opencode turn 退出 0（details redacted）
+）
+  ✓ 隐私探针 turn 生成真实 silent trace（{"length":200}）
+  ✗ 本机 policy/state.json 持久化 spoken/silent 与 outcome 计数
+  ✓ POST /intervention/reset 返回真实成功结果（{"reset":true,"policyVersion":"v0-rules","removedDomains":1}）
+  ✗ reset 后本机 policy 统计清零（{"spoken":0,"silent":0,"accepted":0,"ignored":0,"reasked":0,"corrected":0,"dismissed":0,"missed":0,"too_shallow":0,"too_deep":0}）
+  ✓ reset 后 /status.policy 无降级/错误（{"degraded":false,"lastError":null,"planner":{"last":null,"queue":{"concurrency":1,"maxQueue":8,"priority":"high","queued":0,"running":0,"completed":0,"timeout":0,"overflow":0}}}）
+  ✓ reset 不删 trace：数量不变且旧 trace 仍可读（{"before":9,"after":9}）
+  ✓ reset 不删记忆：capability 仍可召回 seed（{"before":4,"after":4}）
+  ✓ reset 前旧 trace 的迟到 outcome 不写入（recorded=false + outcome_before_reset）（{"recorded":false,"warnings":["outcome_before_reset"]}）
+  ✗ 迟到 outcome 不重新写脏 policy/state.json（{"spoken":0,"silent":0,"accepted":0,"ignored":0,"reasked":0,"corrected":0,"dismissed":0,"missed":0,"too_shallow":0,"too_deep":0}）
+  ✓ Console 真实 admin 代理可读取 trace（浏览器不接触 host token）（{"status":200,"traces":9}）
+  ✓ 隐私：policy state 不含 raw query / detail 正文 / host token
+  ✓ 隐私：trace 不含 raw query 尾部 / detail 正文 / host token
+  ✓ 隐私：Console view 不含 raw query 尾部 / detail 正文 / host token
+  ✓ 隐私：trace 不保存 rawQuery/query 原始正文字段（{"queryPreviewLength":11}）
+  ✗ 隐私：outcome note 是固定归因说明，不含用户正文（{}）
+  ✓ 真实 opencode turn 退出 0（details redacted）
+）
+  ✓ reset 后新 trace 仍走真实 heuristic 并注入记忆（{"decision":{"action":"speak","depth":"gist","confidence":0.6355,"reason":"high_relevance","policyVersion":"heuristic:67731e08","enforced":true,"scores":{"top":0.6355,"specificity":0.7,"novelty":1,"recentUseless":0,"depthFit":1},"planner":{"configuredSource":"heuristic","resolvedSource":"heuristic","latencyMs":0,"fallbackReason":null,"prefetched":false,"adaptive":{"stage":"shadow","applied":false,"baseThreshold":0.45,"recommendedThreshold":0.45,"threshold":0.45,"offset":0}}},"applied":{"action":"speak","depth":"gist","fragments":3,"domain":"user","policyEligible":true,"adaptiveEligible":true}}）
+  ✓ 真实 opencode turn 退出 0（details redacted）
+）
+  ✓ reset 后新 trace 的 outcome 正常写入（{"kind":"reasked","at":1795788966688,"source":"host","confidence":0.65}）
+  ✓ reset 后新 outcome 恢复写本机 policy 统计（{"spoken":1,"silent":1,"accepted":0,"ignored":0,"reasked":1,"corrected":0,"dismissed":0,"missed":0,"too_shallow":0,"too_deep":0}）
+  ✓ opencode serve 全程存活
+
+✗ Intervention outcome E2E：42 passed, 4 failed

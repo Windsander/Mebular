@@ -78,7 +78,7 @@
       "name": "opencode-outcome",
       "command": "PATH=\"/private/var/folders/86/gpjtr2p94dg7mz24pbkrj8pw0000gn/T/mebular-e2e-tools/node_modules/.bin:$PATH\" node tests/integration/host-e2e/opencode-intervention-outcome.mjs",
       "result": "42 passed, 4 failed (policy persistence/reset/note assertions; not counted as pass)",
-      "evidencePath": "docs/quality/0.4.0-intervention/w7/opencode-outcome.log"
+      "evidencePath": "docs/quality/0.4.0-intervention/w7/opencode-outcome.txt"
     }
   ],
   "localModelBaseline": {
@@ -156,7 +156,7 @@
       "modelId": "none",
       "result": "pass",
       "fallback": null,
-      "evidencePath": "docs/quality/0.4.0-intervention/w7/opencode-outcome.log",
+      "evidencePath": "docs/quality/0.4.0-intervention/w7/opencode-outcome.txt",
       "note": "A1 real /context heuristic + injection; E2E overall 42/46 (4 unrelated policy/note failures)."
     },
     {
@@ -170,7 +170,7 @@
       "modelId": "none",
       "result": "pass",
       "fallback": null,
-      "evidencePath": "docs/quality/0.4.0-intervention/w7/opencode-outcome.log",
+      "evidencePath": "docs/quality/0.4.0-intervention/w7/opencode-outcome.txt",
       "note": "B1/C1/D1 distinct cues real host."
     },
     {
@@ -184,7 +184,7 @@
       "modelId": "none",
       "result": "pass",
       "fallback": null,
-      "evidencePath": "docs/quality/0.4.0-intervention/w7/opencode-outcome.log",
+      "evidencePath": "docs/quality/0.4.0-intervention/w7/opencode-outcome.txt",
       "note": "silent/chitchat path, no model call."
     },
     {
@@ -198,7 +198,7 @@
       "modelId": "none",
       "result": "pass",
       "fallback": null,
-      "evidencePath": "docs/quality/0.4.0-intervention/w7/opencode-outcome.log",
+      "evidencePath": "docs/quality/0.4.0-intervention/w7/opencode-outcome.txt",
       "note": "reasked/missed/too_shallow/too_deep over real plugin + bindingToken."
     },
     {

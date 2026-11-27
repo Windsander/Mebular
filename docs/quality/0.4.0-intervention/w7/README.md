@@ -11,6 +11,6 @@
 | `w7-local-opencode.json` | `w7-intervention-evidence.mjs --source local --host opencode` | 14/16；local 首轮 fallback 通过，命中被 adapter dedupe 阻断 |
 | `w7-host-opencode.json` | `w7-intervention-evidence.mjs --source host --host opencode` | 13/16；host 首轮 fallback 通过，命中被 adapter dedupe 阻断 |
 | `w7-openchamber-heuristic.json` | `w7-intervention-evidence.mjs --source heuristic --host openchamber` | 12/12；OpenChamber adapter identity + heuristic + outcome |
-| `opencode-outcome.log` | `node tests/integration/host-e2e/opencode-intervention-outcome.mjs` | 42 passed / 4 failed；失败项见验证报告 §2.3 |
+| `opencode-outcome.txt` | `node tests/integration/host-e2e/opencode-intervention-outcome.mjs` | 42 passed / 4 failed；失败项见验证报告 §2.3 |
 
 复现时使用临时 home；不要把模型权重、引擎二进制或用户凭据复制进仓库。

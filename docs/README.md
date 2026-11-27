@@ -11,7 +11,7 @@ main [`README.md`](../README.md); this index only describes document structure.
 
 - [README](../README.md) · [中文 README](../README_CN.md)
 - [Quickstart](getting-started/QUICKSTART.md) · [快速上手](getting-started/QUICKSTART_CN.md)
-- [Memory Runtime guide (0.3.2)](guides/MEMORY_RUNTIME.md) · [Memory Runtime 用户指南（0.3.2）](guides/MEMORY_RUNTIME_CN.md)
+- [Memory Runtime guide (0.4.0)](guides/MEMORY_RUNTIME.md) · [Memory Runtime 用户指南（0.4.0）](guides/MEMORY_RUNTIME_CN.md)
 - [Roadmap](../ROADMAP.md) · [路线图](../ROADMAP_CN.md) — public themes, current focus and exploration
 - [Contributing & quality gates](../CONTRIBUTING.md)
 - [Security policy](../SECURITY.md)
@@ -74,7 +74,8 @@ main [`README.md`](../README.md); this index only describes document structure.
 ## Quality and release evidence
 
 - [Adapter provisioning verification](quality/adapter-provisioning/adapter-provisioning-verification.md) — real OpenCode v2.4.1 adapter E2E, DSH/Hermes boundaries and no-UI-diff evidence
-- [v0.4.0 intervention verification](quality/0.4.0-intervention/0.4.0-verification.md) — real sidecar + real OpenCode plugin outcome E2E, privacy and Console evidence
+- [v0.4.0 intervention verification](quality/0.4.0-intervention/0.4.0-verification.md) — real sidecar + real OpenCode plugin outcome E2E, privacy and Console evidence; W7 matrix at 6/20
+- [v0.4.0 release readiness](quality/0.4.0-intervention/0.4.0-release-readiness.md) — version/docs prep, full gate results and the explicit `blocked_external` Go/No-Go
 - [v0.3.4 verification](quality/0.3.4-verification.md) — Console settings redesign scope, SSOT/build/lint/docs checks and release dry-run
 - [v0.3.2 verification matrix](quality/0.3.2-verification.md) — final test counts, host boundaries, scale/model evidence and explicit pending items
 - [v0.3.2 scale benchmark](quality/0.3.2-scale-benchmark.md) — 1k/2k/10k count audits, performance, resources, failure injection and preserved 10k failure history

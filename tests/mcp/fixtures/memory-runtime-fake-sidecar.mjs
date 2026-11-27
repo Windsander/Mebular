@@ -462,7 +462,7 @@ function writeDiscovery(port) {
     apiVersion: 1,
     capabilityApiVersion: 1,
     minMcpVersion: '0.3.0',
-    maxMcpVersion: '0.3.x',
+    maxMcpVersion: '0.4.x',
     state: sidecarMode === 'immersive' ? 'ready' : 'stopped',
     mode: sidecarMode,
     degraded: sidecarMode !== 'immersive',

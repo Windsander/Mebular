@@ -185,6 +185,11 @@ await mebular.initialize();
 
 </details>
 
+**发布状态。** v0.3.5 是当前稳定版本。v0.4.0（记忆介入策略）正在发布准备中，仍为
+**未发布**：W8 Go/No-Go 必须等真实 API、DSH、Hermes、OpenChamber Desktop 与宿主模型
+证据。当前真实证据矩阵为 6/20 格；外部格保持 `blocked_external`，绝不用 fake/stub 补格。
+详见[发布准备报告](docs/quality/0.4.0-intervention/0.4.0-release-readiness.md)。
+
 <div align="center">
 
 v0.3.5 · early · MIT · © 2026 Sobert Li

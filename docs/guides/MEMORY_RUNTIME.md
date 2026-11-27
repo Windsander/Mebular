@@ -152,6 +152,27 @@ editors for API `baseUrl`/`model`/`keyRef`, raw capture or trace retention. Conf
 supported sidecar values directly in `<home>/memory-runtime/config.json`; there is no
 raw-capture switch.
 
+## First run: the immersive disclosure
+
+A genuinely empty home (no config, master key, store, identity, `runtime.json`,
+`memory-runtime/` or `net/`, and no `MEBULAR_CONFIG` / `MEBULAR_MEMORY_RUNTIME_HOME` /
+`MEBULAR_STORAGE_PATH` override) gets a one-time disclosure in the existing first-run
+Console page. 0.4.0 does not add a new page or a second mode.
+
+- The marker is `<home>/first-run.json` (`0600`, atomic). It expresses only the
+  disclosure lifecycle (`pending` / `acked` / `done`), not the intervention mode.
+- An existing home never writes the marker and never receives a retroactive disclosure.
+- Immersive is enabled only after the user clicks create/join **and** the Console returns
+  `firstRunDisclosure=true` with the matching integer disclosure version. A missing,
+  invalid or mismatched version is not acknowledged.
+- On success the server seeds `<home>/memory-runtime/config.json` with
+  `{"schema":1,"model":{"source":"auto"}}` **only when that file does not exist**, and
+  merges `memoryRuntime.enabled=true` into `<home>/config.json` without dropping other
+  fields. It does not write `intervention.mode`, does not rewrite an existing
+  `model.source`, and does not migrate data.
+- A write failure leaves the runtime `off` and reports `first_run_init_failed`; it never
+  falls back to heuristic or blocks `mebular serve`.
+
 ## Turn it off: managed, attached and manual
 
 There are three ownership modes. They share one rule: **after a clean disable, the
@@ -256,44 +277,118 @@ coarse-to-fine recall: the sidecar decides whether this turn should carry long-t
 memory fragments, and how deep they should be. It is still **unreleased** on this line
 and is documented here as the 0.4.0 target, not as a shipped default.
 
-The default is unchanged: `intervention.mode` is `off`. Upgrading does not change
-0.3.x behavior. `self → checkpoint → compact/fragment` stays in the same order, and
-`self` / checkpoint are always injected by the existing path. The policy only filters
-and expands the **memory fragment** part of the context.
+The default is unchanged: with no `model.source` in the sidecar config, the effective
+mode is `off` (0.3.x baseline). Upgrading does not change 0.3.x behavior.
+`self → checkpoint → compact/fragment` stays in the same order, and `self` /
+checkpoint are always injected by the existing path. The policy only filters and
+expands the **memory fragment** part of the context.
 
 The design and boundaries are in
 [0.4.0 Intervention Policy](../design/0.4.0-intervention-policy.md); the 0.4.0
 verification evidence is in
 [0.4.0 intervention verification](../quality/0.4.0-intervention/0.4.0-verification.md).
 
-### Modes and configuration
+### Effective mode and `model.source`
 
-Configure the sidecar in `<home>/memory-runtime/config.json`:
+0.4.0 has **one production selector**: `model.source`. There is no separate
+persisted intervention mode. Configure the sidecar in
+`<home>/memory-runtime/config.json`:
 
 ```jsonc
 {
+  "model": {
+    // Omit `source` to keep the 0.3.x baseline (`off`).
+    "source": "heuristic",     // heuristic | local | host | api | auto
+    "local": { "pack": "qwen3-4b-q4_k_m" },
+    "api": {
+      "baseUrl": "https://example.invalid/v1",
+      "model": "example-model",
+      "keyRef": "env:EXAMPLE_API_KEY",
+      "allowRemote": false
+    }
+  },
+  "context": { "deadlineMs": 1500 },
   "intervention": {
-    "mode": "off",          // off | shadow | heuristic | model
     "minConfidence": 0.55,
     "maxSilentStreak": 3,
     "explorationRate": 0.05,
     "outcomeWindowMs": 120000,
     "policyTtlDays": 30,
-    "modelTimeoutMs": 500
+    "modelTimeoutMs": 500,
+    "adaptive": { "stage": "shadow", "canaryRatio": 0.1 }
   }
 }
 ```
 
-| Mode | Behavior |
+| `model.source` | Effective behavior |
 |---|---|
-| `off` | Default. No policy change; `/context` still returns a baseline `decision` with `enforced:false`. `off` still records the **applied** baseline counts in the local policy store and traces, but does not apply policy advice or adapt thresholds. Input-level `defer_explicit` still returns `defer` with `v0-baseline` / `enforced:false` and no policy warning. |
-| `shadow` | Computes policy advice (`decision`) but injects the baseline result; traces carry `wouldAction` / `wouldDepth`. Input-level `defer_explicit` is the exception: it applies as `defer` and records no baseline `wouldAction`. |
-| `heuristic` | Applies the local rule-based policy; `must_speak` remains a hard rule. |
-| `model` | **Experimental.** Uses the configured model for `planIntervention()`; timeout/invalid output/provider failure falls back to `heuristic` with `degraded:true`. |
+| missing | `off`. `/context` returns a `v0-baseline` decision with `enforced:false`; the stable warning is `model_source_missing`. Missing is **not** treated as explicit heuristic. |
+| `heuristic` | Applies the local rule-based policy; `must_speak` remains a hard rule. No model call. |
+| `local` | Model planner fed by an assisted prefetch plan generated after the previous turn. 0.4.0 local is **assisted/shadow**, not authoritative. |
+| `host` | Model planner fed by a session-prior host plan generated by the adapter after the previous turn. No host call is made on the `/context` path. |
+| `api` | The only synchronous model planner; requires an explicit endpoint/model/`keyRef` and `allowRemote=true`, is capped at 1500 ms and never retries. |
+| `auto` | Prefetch resolution order: host → fresh local plan → API only when local is not configured → heuristic. A configured local miss stays heuristic; it never falls through to API. |
 
-Console does not edit these values; it only shows trace decisions and offers a
-confirmed reset. Change the mode in the sidecar config, then restart the sidecar (or
-follow the existing lifecycle path) so the new mode is loaded.
+The old `intervention.mode` value is read only for compatibility: it stays in the file
+but does not decide production behavior. If it differs from the derived mode it emits
+`legacy_intervention_mode_ignored`; an explicit `off` is not silently honoured either.
+`shadow` is an internal diagnostic/canary state, not a user-configured mode. No second
+persisted mode field exists.
+
+Console does not edit these values; it shows `model.source` in Advanced, displays
+sidecar/model status, shows trace decisions and offers a confirmed reset. Change the
+sidecar config, then restart the sidecar (or follow the existing lifecycle path) so the
+new values are loaded.
+
+### Local, API and host sources
+
+- **Local (assisted).** After a turn ends, the sidecar may generate a local plan with
+  the configured local model. `/context` only consumes a matching fresh plan: same cue
+  signature, or topic/entity Jaccard ≥0.8, TTL 60 s. First turn, new cue, expiry,
+  configuration change or mismatch returns `prefetched=false` plus heuristic. The cache
+  stores decision metadata only, never query text, details, prompts or tokens.
+  0.4.0 never makes the local model the authoritative planner; **local-authoritative is
+  a separate 0.4.2 line and is not in this release**.
+- **API (synchronous).** API is the only source allowed on the interactive decision
+  path, and only when it is explicitly configured and remote use is allowed. It has a
+  hard 1500 ms cap, shares the overall `/context` budget, and does not retry. Timeout,
+  invalid output or provider failure falls back to heuristic with `degraded:true`.
+- **Host (session-prior prefetch).** The adapter generates a plan after the previous
+  turn; `/context` validates and consumes it on the next turn (60 s TTL, host/agent/
+  thread/instance identity, basis-top-3, cue Jaccard ≥0.6 with follow-up/task/correction
+  exemptions). Missing, expired, replayed, malformed, wrong-scope and deterministic
+  planner plans are rejected; hard rules still win. The sidecar never calls the host
+  model on `/context`.
+- **Auto.** `auto` uses one total budget and the order above; it does not implicitly
+  contact a remote endpoint.
+
+### Deadline, planner queue and trace skip
+
+- `/context` has one absolute deadline, default **1500 ms** and clamped to
+  `[200, 1500]`. Response assembly reserves 150 ms and trace persistence reserves 50 ms;
+  with less than 200 ms left the planner is not started.
+- The intervention planner runs in an independent queue: concurrency 1, max queue 8,
+  high priority, **drop-oldest** on overflow. Queue timeout or overflow returns
+  heuristic immediately; an already-started model call is not cancelled. The queue only
+  wraps `planIntervention()` / host-plan validation, not ingest, extraction, checkpoint
+  or recall. Read-only metrics are exposed at `/status.policy.planner`.
+- If the deadline leaves no room to persist the trace, the response is still valid but
+  reports `tracePersisted=false`, `traceId=null` and `bindingToken=null` with
+  `trace_write_skipped_deadline`. Hosts must not report an outcome for that turn.
+
+### Adaptive thresholds
+
+Adaptive thresholds are production behavior, but only for `heuristic` decisions that
+actually took effect. For a domain with at least 20 samples the threshold moves by at
+most ±0.03 every 50 decisions or weekly, clamped to `[0.45, 0.80]`. `model` decisions,
+diagnostic `shadow`, `off` and gate/non-intervention turns only write diagnostic counts;
+they never feed the adaptive adjustment.
+
+The internal stage defaults to `shadow` (learn and observe, do not apply). `canary`
+applies only to a stable `(agentId, domain)` hash bucket; `on` applies to all heuristic
+decisions. These are internal settings, not Console controls. Reset clears the learned
+local state. Legacy `adaptive.enabled` / `adaptive.shadow` keys are compatibility input
+only and emit `adaptive_experimental_ignored`; they are not deleted or silently applied.
 
 ### Outcome binding (0.4.0 W4)
 
@@ -405,13 +500,15 @@ Hosts report what happened next to the trace:
 
 ```http
 POST /memory-runtime/v1/recall/:traceId/outcome
-{ "kind": "missed", "source": "host", "confidence": 0.7, "note": "short reason" }
+{ "kind": "missed", "source": "host", "confidence": 0.7, "bindingToken": "obt_…" }
 ```
 
 Kinds: `accepted`, `ignored`, `reasked`, `corrected`, `dismissed`, `missed`,
 `too_shallow`, `too_deep`. The same trace + kind is idempotent; a different kind
-updates the latest result and keeps up to five in `outcomeHistory`. `note` is capped
-at 200 characters and must not contain user text.
+updates the latest result and keeps up to five in `outcomeHistory`. The 0.4.0 protocol
+does not store notes: a note sent with a binding token returns
+`outcome_note_unsupported`; a legacy 0.3 no-token note returns
+`outcome_note_ignored` and is not persisted.
 
 The OpenCode plugin is the first host adapter. It records every `/context`, including
 silent responses, and attributes the next user turn: silent + explicit memory
@@ -425,18 +522,24 @@ host.
 
 ### Canary
 
-Use the order `off → shadow → heuristic → model`, one agent/domain at a time:
+Roll out one agent/domain at a time. `shadow` is an internal diagnostic state, not a
+user-selectable mode; production moves from `off` to `heuristic`, then to a model
+source.
 
-1. Run `shadow` for at least a week and compare `decision` with `applied`
-   (`wouldAction` / `wouldDepth`) on the Runtime page.
-2. Enable `heuristic` for a single agent/domain. Watch trace counts and outcomes in
-   the Console Runtime trace list; there is no new Console page.
-3. Only after the Go/No-Go metrics in the design document pass, consider `model`
-   (experimental) with a timeout and fallback.
+1. Keep `off` as the rollback position. It records baseline applied counts but applies
+   no policy advice and no adaptive offset.
+2. Use the internal diagnostic shadow stage to compare `decision` with `applied`
+   (`wouldAction` / `wouldDepth`) on the Runtime page before enabling rules.
+3. Set `model.source=heuristic` for a single agent/domain. Watch trace counts and
+   outcomes in the Console Runtime trace list; there is no new Console page.
+4. Only after the Go/No-Go metrics in the design document pass, opt into `local`,
+   `host` or `api` for that scope. These sources still have timeout/fallback and keep
+   adaptive thresholds at their default `shadow` stage.
 
-Phase 3 (`model`) and Phase 4 (adaptive thresholds) are **code complete with
-fake-gateway/unit evidence**, not a real-model quality gate. No real-model smoke or
-golden-set evaluation has run, so keep both experimental.
+The model planner and adaptive implementation have fake-gateway/unit coverage plus the
+W7 local/host plumbing evidence, not a real-model quality gate. No real-model smoke or
+golden-set evaluation has run; keep adaptive at `shadow` until it does. Local remains
+assisted/shadow in 0.4.0; authoritative local planning is the separate 0.4.2 line.
 
 The plugin's `alreadyInjectedIds` fragment-ID alias table is **process-local**: `mf_…`
 IDs sent back within a live sidecar session resolve to source records, but after a
@@ -451,8 +554,10 @@ detail bodies or tokens.
 
 ### Reset and rollback
 
-- Rollback: set `intervention.mode` back to `off`. Trace and policy statistics are
-  kept; no data migration runs.
+- Rollback: remove `model.source` from the sidecar config (or disable
+  `memoryRuntime.enabled`). Trace and policy statistics are kept; no data migration
+  runs. Setting the legacy `intervention.mode` to `off` alone no longer changes the
+  effective mode; it only emits the compatibility warning.
 - `POST /memory-runtime/v1/intervention/reset` clears **local policy statistics and
   in-memory runtime state** (silent streak, last decision, reset guard) and returns
   `{ reset, policyVersion, removedDomains }`. Console exposes the same action behind a

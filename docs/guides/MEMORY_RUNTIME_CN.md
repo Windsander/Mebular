@@ -138,6 +138,25 @@ Console 设置页控制记忆模式并显示 sidecar/模型状态；「高级」
 raw capture 或 trace retention 编辑器。支持的 sidecar 配置值直接写入
 `<home>/memory-runtime/config.json`；不存在 raw-capture 开关。
 
+## 首启：沉浸式披露
+
+只有真正空的 home（无 config、主密钥、store、identity、`runtime.json`、
+`memory-runtime/`、`net/`，且没有 `MEBULAR_CONFIG` / `MEBULAR_MEMORY_RUNTIME_HOME` /
+`MEBULAR_STORAGE_PATH` 覆盖）才会在现有首启页看到一次性披露。0.4.0 不新增页面，也不
+新增第二个模式。
+
+- marker 是 `<home>/first-run.json`（`0600`，原子写），只表达披露生命周期
+  （`pending` / `acked` / `done`），不是介入模式。
+- 已有 home 永不写 marker，也不会补做披露。
+- 只有用户点击建新/加入，且 Console 显式回传 `firstRunDisclosure=true` 和匹配的整数
+  披露版本时才启用沉浸式；缺失、非法或版本不符都不算确认。
+- 成功后，仅当 `<home>/memory-runtime/config.json` 不存在时 seed
+  `{"schema":1,"model":{"source":"auto"}}`，并把 `memoryRuntime.enabled=true` 合并进
+  `<home>/config.json`，保留其他字段；不写 `intervention.mode`，不重写已有
+  `model.source`，不迁移数据。
+- 写入失败则保持 `off` 并报告 `first_run_init_failed`；不回退 heuristic，也不阻塞
+  `mebular serve`。
+
 ## 关闭：managed、attached 与 manual
 
 sidecar 有三种所有权模式。它们共享一条规则：**干净关闭后，沉浸式集成不再产生新的
@@ -226,41 +245,100 @@ ContextCheckpoint 始终是 `task:<threadId>` 或 `default` 中的图对象；�
 长期记忆片段、带多深。本线仍在 0.4.0 目标阶段、**尚未发布**；这里写的是 0.4.0 目标
 契约，不是已发布的默认行为。
 
-默认不变：`intervention.mode` 为 `off`，升级不改变 0.3.x 行为。上下文顺序仍是
-`self → checkpoint → compact/fragment`，`self` / checkpoint 继续由现有路径自动注入；
-策略只裁剪/展开其中的 **memory fragments**。
+默认不变：sidecar 配置里没有 `model.source` 时生效模式为 `off`（0.3.x baseline），
+升级不改变 0.3.x 行为。上下文顺序仍是 `self → checkpoint → compact/fragment`，
+`self` / checkpoint 继续由现有路径自动注入；策略只裁剪/展开其中的 **memory fragments**。
 
 设计与边界见
 [0.4.0 介入策略设计](../design/0.4.0-intervention-policy.md)，验证证据见
 [0.4.0 介入验证](../quality/0.4.0-intervention/0.4.0-verification.md)。
 
-### 模式与配置
+### 生效模式与 `model.source`
 
-在 `<home>/memory-runtime/config.json` 中配置：
+0.4.0 只有**一个生产选择器**：`model.source`，不再有第二个持久化介入模式。在
+`<home>/memory-runtime/config.json` 中配置：
 
 ```jsonc
 {
+  "model": {
+    // 省略 source 即保持 0.3.x baseline（off）。
+    "source": "heuristic",     // heuristic | local | host | api | auto
+    "local": { "pack": "qwen3-4b-q4_k_m" },
+    "api": {
+      "baseUrl": "https://example.invalid/v1",
+      "model": "example-model",
+      "keyRef": "env:EXAMPLE_API_KEY",
+      "allowRemote": false
+    }
+  },
+  "context": { "deadlineMs": 1500 },
   "intervention": {
-    "mode": "off",          // off | shadow | heuristic | model
     "minConfidence": 0.55,
     "maxSilentStreak": 3,
     "explorationRate": 0.05,
     "outcomeWindowMs": 120000,
     "policyTtlDays": 30,
-    "modelTimeoutMs": 500
+    "modelTimeoutMs": 500,
+    "adaptive": { "stage": "shadow", "canaryRatio": 0.1 }
   }
 }
 ```
 
-| 模式 | 行为 |
+| `model.source` | 生效行为 |
 |---|---|
-| `off` | 默认。不改变策略行为；`/context` 仍返回 baseline `decision`，`enforced:false`。`off` 仍会把 baseline 的 **applied** spoken/silent 写进本机 policy 统计与 trace，但不应用策略建议，也不做阈值自适应。输入级 `defer_explicit` 仍返回 `defer`（`v0-baseline` / `enforced:false`），不产生策略警告。 |
-| `shadow` | 计算策略建议（`decision`），但实际注入保持 baseline；trace 带 `wouldAction` / `wouldDepth`。输入级 `defer_explicit` 是例外：实际注入 `defer`，不记录 baseline `wouldAction`。 |
-| `heuristic` | 启用本机规则策略；`must_speak` 仍是硬规则。 |
-| `model` | **实验性。** 用配置的模型做 `planIntervention()`；超时/非法输出/模型不可用回退 heuristic，并标 `degraded:true`。 |
+| 缺失 | `off`。`/context` 返回 `v0-baseline` 决策、`enforced:false`，稳定 warning 为 `model_source_missing`。缺失**不会**被当成显式 heuristic。 |
+| `heuristic` | 启用本机规则策略；`must_speak` 仍是硬规则，不调用模型。 |
+| `local` | 由上一轮结束后生成的 assisted 预取 plan 驱动模型 planner。0.4.0 的 local 是 **assisted/shadow**，不是权威 planner。 |
+| `host` | 由 adapter 在上一轮后生成的 session-prior host plan 驱动；`/context` 不调用宿主模型。 |
+| `api` | 唯一同步模型来源；必须显式配置 endpoint/model/`keyRef` 且 `allowRemote=true`，硬上限 1500ms，不重试。 |
+| `auto` | 按 host → 新鲜 local plan → 仅当 local 未配置才 API → heuristic 的顺序解析；已配置 local 的 miss 保持 heuristic，绝不回落到 API。 |
 
-Console 不编辑这些值，只展示 trace 决策并提供二次确认的 reset。修改模式需改 sidecar
-config 并按现有生命周期重启/重载，使新配置生效。
+旧的 `intervention.mode` 只作为兼容输入读取：文件里的值保留，但不决定生产行为；与派生
+模式不一致时发稳定 warning `legacy_intervention_mode_ignored`，显式 `off` 也不会被静默
+采纳。`shadow` 只是内部 diagnostic/canary 状态，不是用户可配置模式；不存在第二个持久化
+mode 字段。
+
+Console 不编辑这些值；它在「高级」显示 `model.source`，展示 sidecar/模型状态、trace
+决策，并提供二次确认的 reset。修改 sidecar config 后按现有生命周期重启/重载，使新值生效。
+
+### local、API 与 host 来源
+
+- **local（assisted）**：turn 结束后 sidecar 可用配置的本地模型生成 plan；`/context`
+  只消费匹配的新鲜 plan（同 cue signature，或 topic/entity Jaccard ≥0.8，TTL 60s）。
+  首轮、新 cue、过期、配置变化或不匹配都返回 `prefetched=false` + heuristic。缓存只
+  保存决策元数据，不保存 query 正文、detail、prompt 或 token。0.4.0 不会把本地模型
+  变成权威 planner；**local-authoritative 属于独立的 0.4.2 线，不在本版**。
+- **API（同步）**：只有显式配置且允许远端时才在交互路径调用；硬上限 1500ms，与
+  `/context` 总预算共用，不重试。超时、非法输出或 provider 失败回退 heuristic
+  并标 `degraded:true`。
+- **host（session-prior 预取）**：adapter 在上一轮后生成 plan，下一轮 `/context` 校验
+  并消费（TTL 60s，host/agent/thread/instance 身份、basis-top-3、cue Jaccard ≥0.6，
+  follow-up/task/correction 豁免）。缺失、过期、重放、非法、scope 不符和确定性 planner
+  一律拒绝；硬规则仍优先。sidecar 在 `/context` 不调用宿主模型。
+- **auto**：使用一个总预算按上述顺序解析，不会隐式联网。
+
+### Deadline、planner 队列与 trace skip
+
+- `/context` 只有一个绝对 deadline，默认 **1500ms**，clamp 到 `[200, 1500]`。响应组装
+  预留 150ms，trace 写入预留 50ms；剩余预算低于 200ms 时不启动 planner。
+- 介入 planner 在独立队列中运行：concurrency 1、max queue 8、高优先级、队列满时
+  **drop-oldest**。排队超时或 overflow 立即回退 heuristic；已经开始执行的模型调用不会
+  被取消。队列只包 `planIntervention()` / host-plan 校验，不包 ingest、extraction、
+  checkpoint 或 recall。只读指标在 `/status.policy.planner`。
+- deadline 来不及写 trace 时，响应仍有效，但返回 `tracePersisted=false`、
+  `traceId=null`、`bindingToken=null` 和 `trace_write_skipped_deadline`；宿主不得对该轮
+  上报 outcome。
+
+### 自适应阈值
+
+自适应阈值是正式行为，但只作用于实际生效的 `heuristic` 决策。域内至少 20 个样本后，
+每 50 次决策或每周最多调整 ±0.03，clamp 到 `[0.45, 0.80]`。`model` 决策、diagnostic
+`shadow`、`off` 以及 gate/非介入 turn 只写诊断计数，绝不参与自适应调整。
+
+内部 stage 默认 `shadow`（只学习观察，不应用）；`canary` 只对稳定的
+`(agentId, domain)` hash 桶应用；`on` 对全部 heuristic 决策应用。这些是内部配置，不是
+Console 控件。reset 会清除本机学习状态。旧 `adaptive.enabled` / `adaptive.shadow` 键
+只作为兼容输入，并发出 `adaptive_experimental_ignored`；不会删除，也不会被静默应用。
 
 ### Outcome binding（0.4.0 W4）
 
@@ -354,12 +432,14 @@ checkpoint 仍按现有路径注入。它不会伪造片段，也不会静默失
 
 ```http
 POST /memory-runtime/v1/recall/:traceId/outcome
-{ "kind": "missed", "source": "host", "confidence": 0.7, "note": "简短原因" }
+{ "kind": "missed", "source": "host", "confidence": 0.7, "bindingToken": "obt_…" }
 ```
 
 kind：`accepted`、`ignored`、`reasked`、`corrected`、`dismissed`、`missed`、
 `too_shallow`、`too_deep`。同一 trace + kind 幂等；不同 kind 更新最新结果，最多保留
-5 条 `outcomeHistory`。`note` 最多 200 字符，且不得包含用户正文。
+5 条 `outcomeHistory`。0.4.0 协议不保存 note：带 binding token 的 note 返回
+`outcome_note_unsupported`；旧 0.3 无 token 的 note 返回 `outcome_note_ignored`，
+不落盘。
 
 OpenCode 插件是第一个宿主适配器：记录每次 `/context`（包括 silent），并在下一轮用户
 turn 归因：silent + 显式记忆追问 → `missed`；speak + 重问 → `reasked`；纠正 →
@@ -370,16 +450,21 @@ shadow 的 `silent` 建议 + baseline `speak` 不会被当成实际沉默。默�
 
 ### Canary
 
-按 `off → shadow → heuristic → model` 的顺序，一次只对一个 agent/domain 开启：
+一次只对一个 agent/domain 推进。`shadow` 是内部 diagnostic 状态，不是用户可选模式；
+生产从 `off` 进入 `heuristic`，再进入某个模型来源。
 
-1. 至少跑一周 `shadow`，在 Runtime 页对比 `decision` 与 `applied`
+1. 保持 `off` 作为回滚位：它只记录 baseline applied 计数，不应用策略建议，也不做
+   自适应 offset。
+2. 先用内部 diagnostic shadow 阶段，在 Runtime 页对比 `decision` 与 `applied`
    （`wouldAction` / `wouldDepth`）。
-2. 对单个 agent/domain 开启 `heuristic`；在 Console Runtime trace 列表观察决策与
-   outcome。不新增 Console 页面。
-3. 设计文档中的 Go/No-Go 指标全部通过后，才考虑 `model`（实验性），并保留超时和回退。
+3. 对单个 agent/domain 设置 `model.source=heuristic`；在 Console Runtime trace 列表
+   观察决策与 outcome。不新增 Console 页面。
+4. 设计文档中的 Go/No-Go 指标全部通过后，才对该范围选择 `local`、`host` 或 `api`；
+   仍保留超时/回退，自适应阈值保持默认 `shadow` 阶段。
 
-Phase 3（`model`）和 Phase 4（自适应阈值）是**代码完成 + fake gateway/单测证据**，
-不是真实模型质量 Gate；真实模型 smoke 与 golden set 尚未运行，两者继续标 experimental。
+model planner 与自适应实现有 fake gateway/单测覆盖和 W7 local/host 管道证据，但不是
+真实模型质量 Gate；真实模型 smoke 与 golden set 尚未运行，自适应保持 `shadow`。
+0.4.0 的 local 仍是 assisted/shadow；权威 local planner 属于独立的 0.4.2 线。
 
 插件的 `alreadyInjectedIds` fragment ID 别名表是**进程内**的：同一次 sidecar 会话里
 回传的 `mf_…` 能解析到 source 记录，但 sidecar 重启后，重启前产生的旧 `mf_…` 可能
@@ -392,7 +477,9 @@ Phase 3（`model`）和 Phase 4（自适应阈值）是**代码完成 + fake gat
 
 ### 重置与回滚
 
-- 回滚：把 `intervention.mode` 改回 `off`。trace 与策略统计保留，不做数据迁移。
+- 回滚：从 sidecar config 移除 `model.source`（或关闭 `memoryRuntime.enabled`）。trace
+  与策略统计保留，不做数据迁移。只把旧 `intervention.mode` 改成 `off` 不再改变生效
+  模式，只产生兼容 warning。
 - `POST /memory-runtime/v1/intervention/reset` 只清空**本机策略统计与运行态**
   （沉默 streak、上一轮决策、reset guard），返回
   `{ reset, policyVersion, removedDomains }`。Console 通过二次确认提供同一动作。

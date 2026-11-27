@@ -3,7 +3,13 @@
 面向 `@mebular/*` npm 包与三平台桌面安装包的发布操作手册。核心约束：**分支名即版本号
 （SSOT）**、**先构建安装包再发 npm**、**幂等发布**、**按 ref 串行**。
 
-当前发布线 v0.3.5：
+当前**已发布**版本线 v0.3.5。0.4.0 只在
+`feat/0.4-w8-release-prep` 做发布准备（manifest/lock/版本源已为 `0.4.0`），尚未创建
+tag、push、发布或合并 `main`；W8 Go/No-Go 仍被真实 API/DSH/Hermes/OpenChamber
+Desktop/宿主模型证据阻断，见
+[`0.4.0 release readiness`](../quality/0.4.0-intervention/0.4.0-release-readiness.md)。
+
+v0.3.5 的发布对象：
 
 - **8 个 npm 包**统一为 `0.3.5`（单版本 umbrella）：`core` / `service` / `skill` / `mcp` /
   `fleet` / `memory-runtime` / `opencode-plugin` 七个 lockstep 包，加独立 npm job 的

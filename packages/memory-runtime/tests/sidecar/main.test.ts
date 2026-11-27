@@ -356,7 +356,7 @@ describe('memory-runtime sidecar process', () => {
 
   it('版本不兼容退出码 2，且不留下 discovery/host token', async () => {
     const home = await temp();
-    const capabilityUrl = await fakeCapability({ ...VERSION_OK, mcpVersion: '0.4.0' });
+    const capabilityUrl = await fakeCapability({ ...VERSION_OK, mcpVersion: '0.5.0' });
 
     await expect(startSidecar({
       home,
@@ -1183,7 +1183,7 @@ describe('memory-runtime sidecar process', () => {
       apiVersion: 1,
       capabilityApiVersion: 1,
       minMcpVersion: '0.3.0',
-      maxMcpVersion: '0.3.x',
+      maxMcpVersion: '0.4.x',
       mode: 'immersive',
       capabilities: { details: true },
       details: { stagingHours: 24, cacheDays: 30 },

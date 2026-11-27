@@ -59,7 +59,6 @@ import {
   writeProvisionRecord,
 } from './provision.mjs';
 import {
-  FIRST_RUN_DISCLOSURE_VERSION,
   FIRST_RUN_INIT_FAILED,
   firstRunPublicView,
   initializeFirstRunHome,
@@ -270,6 +269,7 @@ const CONSOLE_FILES = {
   'console.js': 'text/javascript; charset=utf-8',
   'host.js': 'text/javascript; charset=utf-8',
   'dropdown.mjs': 'text/javascript; charset=utf-8',
+  'first-run-disclosure.js': 'text/javascript; charset=utf-8',
   'assistants.js': 'text/javascript; charset=utf-8',
   'assistant-status.js': 'text/javascript; charset=utf-8',
   'deep-link.js': 'text/javascript; charset=utf-8',
@@ -4450,36 +4450,39 @@ export async function startHttpServer({
             // marker 保持 pending，不写 enabled=true（fail closed）；应用初始化失败时不会 ack。
             let firstRun = null;
             if (input.firstRunDisclosure === true) {
-              try {
-                const acked = await markFirstRunAcked({
-                  home,
-                  disclosureVersion: Number.isInteger(input.firstRunDisclosureVersion)
-                    ? input.firstRunDisclosureVersion
-                    : FIRST_RUN_DISCLOSURE_VERSION,
-                });
-                if (acked) {
-                  const initialized = await initializeFirstRunHome({ home, env: process.env });
-                  firstRun = {
-                    acknowledged: true,
-                    initialized: initialized.ok === true,
-                    ...(initialized.ok === true ? {} : { warning: FIRST_RUN_INIT_FAILED }),
-                  };
-                  if (initialized.ok !== true) {
-                    console.error(`FIRST_RUN_INIT_FAILED ${initialized.reason ?? 'unknown'}`);
-                  }
-                  if (initialized.ok === true && initialized.enabled === true) {
-                    // 同步路由可见的配置快照，让 supervisor/capability 看到 enabled=true。
-                    config = {
-                      ...config,
-                      memoryRuntime: { ...(config.memoryRuntime ?? {}), enabled: true },
+              // 披露版本必须由 Console 显式回传且为整数；缺失/非法一律拒绝 ack。
+              if (!Number.isInteger(input.firstRunDisclosureVersion)) {
+                firstRun = { acknowledged: false };
+              } else {
+                try {
+                  const acked = await markFirstRunAcked({
+                    home,
+                    disclosureVersion: input.firstRunDisclosureVersion,
+                  });
+                  if (acked) {
+                    const initialized = await initializeFirstRunHome({ home, env: process.env });
+                    firstRun = {
+                      acknowledged: true,
+                      initialized: initialized.ok === true && initialized.initialized === true,
+                      ...(initialized.ok === true ? {} : { warning: FIRST_RUN_INIT_FAILED }),
                     };
+                    if (initialized.ok !== true) {
+                      console.error(`FIRST_RUN_INIT_FAILED ${initialized.reason ?? 'unknown'}`);
+                    }
+                    if (initialized.ok === true && initialized.enabled === true) {
+                      // 同步路由可见的配置快照，让 supervisor/capability 看到 enabled=true。
+                      config = {
+                        ...config,
+                        memoryRuntime: { ...(config.memoryRuntime ?? {}), enabled: true },
+                      };
+                    }
+                  } else {
+                    firstRun = { acknowledged: false };
                   }
-                } else {
-                  firstRun = { acknowledged: false };
+                } catch (error) {
+                  console.error(`FIRST_RUN_INIT_FAILED ${error?.code ?? 'ERROR'}`);
+                  firstRun = { acknowledged: false, warning: FIRST_RUN_INIT_FAILED };
                 }
-              } catch (error) {
-                console.error(`FIRST_RUN_INIT_FAILED ${error?.code ?? 'ERROR'}`);
-                firstRun = { acknowledged: false, warning: FIRST_RUN_INIT_FAILED };
               }
             }
             // 同进程首次启用：准备 capability token 并启动 sidecar（与设置页开启走同一生命周期）。

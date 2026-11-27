@@ -15,6 +15,7 @@ import { reconcileAssistantUi } from './assistant-status.js';
 import { createConsoleHost, markEmbeddedDocument } from './host.js';
 import { t, getLocale, setLocale, onLocaleChange, applyStaticI18n, languageSettingsRowHtml, initI18n, reconcileDesktopLocale, LOCALE_STORAGE_KEY, formatDate as formatLocaleDate, formatDateTime as formatLocaleDateTime, formatExpiry } from './i18n.mjs';
 import { enhanceSelect, enhanceSelects } from './dropdown.mjs';
+import { firstRunDisclosureAcknowledgement } from './first-run-disclosure.js';
 
 const $ = (selector) => document.querySelector(selector);
 // 静态筛选器使用紧凑 variant；动态设置/邀请/助手表单在渲染后统一 enhance。
@@ -7870,9 +7871,11 @@ const ONBOARD_COACH_MS = 6000;
 let onboardBusy = false;
 let onboardCoachTimer = null;
 let onboardCoachHideTimer = null;
-// 0.4.0 W1b：首启披露是否真的展示成功；只有它为真时才在 create/join 请求里 ack。
-// DOM 被隐藏/缺失/渲染异常时保持 null → 服务端不会启用 immersive（fail closed）。
+// 0.4.0 W1b：首启披露的“当前确实可见”证据（只有可见确认后才非 null）。
+// 未确认 / 父层隐藏 / 被关闭时保持 null → 服务端不会启用 immersive（fail closed）。
 let firstRunDisclosure = null;
+// 用户在披露可见时点击「建新 / 加入」→ 打开弹窗前捕获；关闭弹窗或解锁时清空。
+let firstRunDisclosureAck = null;
 
 async function fetchProvisionStatus() {
   try {
@@ -7923,6 +7926,8 @@ function showOnboardingCoach() {
 }
 
 function dismissOnboardingCoach() {
+  // 关闭/隐藏披露：当前可见证据立即失效；已捕获的 ack 仅在“打开弹窗”路径中保留。
+  firstRunDisclosure = null;
   const el = $('#onboarding-coach');
   if (!el || el.hidden) return;
   if (onboardCoachTimer) { clearTimeout(onboardCoachTimer); onboardCoachTimer = null; }
@@ -7941,36 +7946,60 @@ function dismissOnboardingCoach() {
   }, 320);
 }
 
-/** 0.4.0 W1b：全新空 home 的首启披露；返回是否真的展示成功（失败即 fail closed）。 */
+/** 0.4.0 W1b：渲染披露内容；返回 disclosureVersion（是否“实际可见”由 confirm 判定）。 */
 function renderFirstRunDisclosure(status) {
   const el = $('#first-run-disclosure');
   const firstRun = status?.firstRun;
   const pending = firstRun?.pending === true;
   const version = firstRun?.disclosureVersion;
-  if (!pending || !Number.isInteger(version)) {
+  firstRunDisclosure = null;
+  if (!pending || !Number.isInteger(version) || version < 1) {
     if (el) el.hidden = true;
-    firstRunDisclosure = null;
-    return false;
+    return null;
   }
-  if (!el) {
-    firstRunDisclosure = null;
-    return false;
-  }
+  if (!el) return null;
   try {
     el.hidden = false;
     el.dataset.firstRunShown = '1';
     el.dataset.disclosureVersion = String(version);
-    firstRunDisclosure = { version, shown: true };
-    return true;
+    return version;
   } catch {
     el.hidden = true;
-    firstRunDisclosure = null;
-    return false;
+    return null;
+  }
+}
+
+const nextAnimationFrame = () => new Promise((resolve) => {
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => resolve());
+  else setTimeout(resolve, 0);
+});
+
+/**
+ * coach 的 is-visible 在 rAF 中挂上；再等一帧后按真实布局/父层可见性确认。
+ * 父层 hidden、CSS 隐藏、脱离布局都返回 null（不 ack）。
+ */
+async function confirmFirstRunDisclosureShown(version) {
+  await nextAnimationFrame();
+  await nextAnimationFrame();
+  const ack = firstRunDisclosureAcknowledgement({
+    pending: state.provision?.firstRun?.pending === true,
+    disclosureVersion: version,
+    element: $('#first-run-disclosure'),
+    container: $('#onboarding-coach'),
+    view: window,
+  });
+  firstRunDisclosure = ack ? { version: ack.version } : null;
+  // 确认可见后取消引导卡的自动淡出，保证披露持续可见到用户点击「建新 / 加入」。
+  if (firstRunDisclosure && onboardCoachTimer) {
+    clearTimeout(onboardCoachTimer);
+    onboardCoachTimer = null;
   }
 }
 
 function openOnboardCreate() {
   if (!state.locked) return;
+  // 打开弹窗会收起 coach：必须在收起前捕获“此刻披露可见”的 ack。
+  firstRunDisclosureAck = firstRunDisclosure;
   dismissOnboardingCoach();
   const modal = $('#onboard-create');
   const cloud = $('#onboard-create-cloud');
@@ -7986,6 +8015,7 @@ function openOnboardCreate() {
 
 function closeOnboardCreate() {
   if (onboardBusy) return;
+  firstRunDisclosureAck = null;
   const modal = $('#onboard-create');
   if (modal) modal.hidden = true;
   setOnboardError('#onboard-create-error', '');
@@ -7993,6 +8023,7 @@ function closeOnboardCreate() {
 
 function openOnboardJoin() {
   if (!state.locked) return;
+  firstRunDisclosureAck = firstRunDisclosure;
   dismissOnboardingCoach();
   const modal = $('#onboard-join');
   const device = $('#onboard-join-device');
@@ -8008,6 +8039,7 @@ function openOnboardJoin() {
 
 function closeOnboardJoin() {
   if (onboardBusy) return;
+  firstRunDisclosureAck = null;
   const modal = $('#onboard-join');
   if (modal) modal.hidden = true;
   setOnboardError('#onboard-join-error', '');
@@ -8020,6 +8052,7 @@ function closeOnboardJoin() {
 async function unlockConsole(kind) {
   onboardBusy = false;
   firstRunDisclosure = null;
+  firstRunDisclosureAck = null;
   const firstRunEl = $('#first-run-disclosure');
   if (firstRunEl) firstRunEl.hidden = true;
   const createModal = $('#onboard-create');
@@ -8076,9 +8109,9 @@ async function submitOnboard(kind) {
       method: 'POST',
       body: {
         confirm: true,
-        // 只有披露真的展示过才回传 ack；未展示 / 渲染失败 → 服务端保持 pending，不启用 immersive。
-        ...(firstRunDisclosure
-          ? { firstRunDisclosure: true, firstRunDisclosureVersion: firstRunDisclosure.version }
+        // 只有披露在被收起前确认“实际可见”才回传 ack；未展示 / 渲染失败 → 服务端保持 pending。
+        ...(firstRunDisclosureAck
+          ? { firstRunDisclosure: true, firstRunDisclosureVersion: firstRunDisclosureAck.version }
           : {}),
         ...(deviceName ? { deviceName } : {}),
         ...(isCreate && cloudName ? { cloudName } : {}),
@@ -8126,8 +8159,10 @@ async function enterLockedConsole(status) {
   setView('map');
   render();
   // 0.4.0 W1b：全新空 home 先展示一次性披露（不新增控制项），再显示现有上手引导。
-  renderFirstRunDisclosure(status);
+  const disclosureVersion = renderFirstRunDisclosure(status);
   showOnboardingCoach();
+  // 不阻塞首屏：可见性确认在 rAF 后异步完成；确认前用户操作则不带 ack（fail closed）。
+  if (disclosureVersion !== null) void confirmFirstRunDisclosureShown(disclosureVersion);
   if (status?.phase === 'INITIALIZING') {
     // 极端并发：初始化进行中，入口禁用并给出提示，等待用户重试。
     setOnboardError('#onboard-create-error', t('lock.settings.initializing'));

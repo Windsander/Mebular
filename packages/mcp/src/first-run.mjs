@@ -109,13 +109,16 @@ async function writeJsonAtomic(path, value) {
  * 极窄空 home 判定（契约 §2.4）：
  * - 无 config / 主密钥 / store / identity / runtime.json / memory-runtime/ / net/；
  * - 目录为空，或只含 `.DS_Store` / `Thumbs.db` / `first-run.json`；
- * - 设置了 `MEBULAR_CONFIG` 或 `MEBULAR_MEMORY_RUNTIME_HOME` 时一律不命中。
+ * - 设置了 `MEBULAR_CONFIG` / `MEBULAR_MEMORY_RUNTIME_HOME` / `MEBULAR_STORAGE_PATH` 时
+ *   一律不命中（外部存储可能在 home 之外已有 store，不能证明“首次安装”）。
  *
  * 非 ENOENT 的 readdir 错误不当作空 home（失败闭合）。
  */
 export async function detectFreshHome({ home, env = process.env } = {}) {
   if (typeof home !== 'string' || home.length === 0) return false;
-  if (stringOrNull(env?.MEBULAR_CONFIG) || stringOrNull(env?.MEBULAR_MEMORY_RUNTIME_HOME)) {
+  if (stringOrNull(env?.MEBULAR_CONFIG)
+    || stringOrNull(env?.MEBULAR_MEMORY_RUNTIME_HOME)
+    || stringOrNull(env?.MEBULAR_STORAGE_PATH)) {
     return false;
   }
   const root = resolve(home);
@@ -242,7 +245,9 @@ export async function initializeFirstRunHome({ home, env = process.env, now = Da
   const root = resolve(home);
   let marker = await readFirstRunMarker({ home: root });
   if (!marker) return { ok: false, reason: 'no_marker' };
-  if (marker.state === 'done') return { ok: true, skipped: 'done', enabled: false };
+  if (marker.state === 'done') {
+    return { ok: true, skipped: 'done', initialized: false, enabled: false };
+  }
   if (marker.state !== 'acked') return { ok: false, reason: 'not_acked' };
 
   const configFile = mcpConfigPath(root, env);
@@ -253,12 +258,16 @@ export async function initializeFirstRunHome({ home, env = process.env, now = Da
     marker = await readFirstRunMarker({ home: root });
     if (!marker || marker.state === 'done') {
       return marker?.state === 'done'
-        ? { ok: true, skipped: 'done', enabled: false }
+        ? { ok: true, skipped: 'done', initialized: false, enabled: false }
         : { ok: false, reason: 'no_marker' };
     }
     if (marker.state !== 'acked') return { ok: false, reason: 'not_acked' };
 
     const { config } = await readConfigObject(configFile);
+    // memoryRuntime 不是对象 = 用户配置损坏/未知形态：fail closed，绝不覆盖成 {enabled:true}。
+    if (config.memoryRuntime !== undefined && !isObject(config.memoryRuntime)) {
+      return { ok: false, reason: 'config_invalid', enabled: false };
+    }
     const explicitEnabled = isObject(config.memoryRuntime)
       && typeof config.memoryRuntime.enabled === 'boolean';
     if (explicitEnabled) {
@@ -268,6 +277,7 @@ export async function initializeFirstRunHome({ home, env = process.env, now = Da
       return {
         ok: true,
         skipped: enabled ? 'already_enabled' : 'explicit_disabled',
+        initialized: false,
         enabled,
       };
     }

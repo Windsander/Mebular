@@ -126,6 +126,27 @@ const useHome = (name) => {
   }
 }
 
+// ---------- B2) 披露版本缺失：拒绝 ack、不启用 ----------
+{
+  const home = useHome('missing-version');
+  const srv = await startServeServer({ host: '127.0.0.1', port: 0, auth: 'none' });
+  const base = 'http://127.0.0.1:' + srv.port;
+  try {
+    const auth = await csrf(base);
+    out.cases.missingVersion = {
+      create: await post(base, '/app/provision/create', {
+        confirm: true,
+        firstRunDisclosure: true,
+      }, auth),
+    };
+    out.cases.missingVersion.config = await readJson(join(home, 'config.json'));
+    out.cases.missingVersion.marker = await readJson(join(home, 'first-run.json'));
+    out.cases.missingVersion.sidecarExists = existsSync(join(home, 'memory-runtime', 'config.json'));
+  } finally {
+    await stop(srv);
+  }
+}
+
 // ---------- C) 披露成功：唯一一次 enabled + source=auto + effective=model ----------
 {
   const home = useHome('disclosed');
@@ -236,10 +257,81 @@ const useHome = (name) => {
   }
 }
 
+// ---------- F) 外部 storage path：不命中 first-run ----------
+{
+  const home = useHome('external-storage');
+  const externalStore = join(workspace, 'external-store.jsonl');
+  await writeFile(externalStore, '{"id":"existing"}\n', 'utf-8');
+  process.env.MEBULAR_STORAGE_PATH = externalStore;
+  const srv = await startServeServer({ host: '127.0.0.1', port: 0, auth: 'none' });
+  const base = 'http://127.0.0.1:' + srv.port;
+  try {
+    out.cases.externalStorage = {
+      status: await getJson(base, '/app/provision/status'),
+      markerExists: existsSync(join(home, 'first-run.json')),
+      fresh: await detectFreshHome({ home, env: process.env }),
+    };
+  } finally {
+    await stop(srv);
+    delete process.env.MEBULAR_STORAGE_PATH;
+  }
+}
+
+// ---------- G) acked 后初始化失败：不阻塞启动，保留 warning/重试 ----------
+{
+  const home = useHome('retry-failure');
+  const first = await startServeServer({ host: '127.0.0.1', port: 0, auth: 'none' });
+  const firstBase = 'http://127.0.0.1:' + first.port;
+  try {
+    const auth = await csrf(firstBase);
+    await post(firstBase, '/app/provision/create', { confirm: true }, auth);
+  } finally {
+    await stop(first);
+  }
+  const pending = await readJson(join(home, 'first-run.json'));
+  await writeFile(join(home, 'first-run.json'), JSON.stringify({
+    ...pending,
+    state: 'acked',
+    ackedAt: new Date().toISOString(),
+  }, null, 2), 'utf-8');
+  const configBefore = await readJson(join(home, 'config.json'));
+  const brokenConfig = { ...configBefore, memoryRuntime: 'broken' };
+  await writeFile(join(home, 'config.json'), JSON.stringify(brokenConfig, null, 2), 'utf-8');
+
+  const broken = await startServeServer({ host: '127.0.0.1', port: 0, auth: 'none' });
+  try {
+    out.cases.retryFailure = {
+      health: await getJson('http://127.0.0.1:' + broken.port, '/healthz'),
+      config: await readJson(join(home, 'config.json')),
+      marker: await readJson(join(home, 'first-run.json')),
+      sidecarExists: existsSync(join(home, 'memory-runtime', 'config.json')),
+    };
+  } finally {
+    await stop(broken);
+  }
+
+  const fixedConfig = await readJson(join(home, 'config.json'));
+  delete fixedConfig.memoryRuntime;
+  await writeFile(join(home, 'config.json'), JSON.stringify(fixedConfig, null, 2), 'utf-8');
+  const fixed = await startServeServer({ host: '127.0.0.1', port: 0, auth: 'none' });
+  try {
+    const source = await readMemoryRuntimeModelSource({ home, env: process.env });
+    out.cases.retryFailure.fixed = {
+      config: await readJson(join(home, 'config.json')),
+      sidecar: await readJson(join(home, 'memory-runtime', 'config.json')),
+      source,
+      marker: await readJson(join(home, 'first-run.json')),
+    };
+  } finally {
+    await stop(fixed);
+  }
+}
+
 await rm(workspace, { recursive: true, force: true });
 console.log('FIRST_RUN_RESULT ' + JSON.stringify(out));
 `;
 
+let harnessStderr = '';
 function runHarness() {
   const result = spawnSync(process.execPath, ['--input-type=module', '-e', HARNESS], {
     cwd: ROOT,
@@ -247,6 +339,7 @@ function runHarness() {
     timeout: 240_000,
     env: { ...process.env, FIRST_RUN_FLOW_ROOT: ROOT, NODE_NO_WARNINGS: '1' },
   });
+  harnessStderr = String(result.stderr ?? '');
   if (result.status !== 0) {
     throw new Error(`first-run flow harness failed (exit ${result.status}):\n${result.stderr}\n${result.stdout}`);
   }
@@ -284,6 +377,15 @@ describe('0.4.0 W1b first-run 披露与初始化', () => {
     expect(c.sidecarExists).toBe(false);
   });
 
+  it('披露版本缺失 → 拒绝 ack、不启用', () => {
+    const c = result.cases.missingVersion;
+    expect(c.create.status).toBe(200);
+    expect(c.create.body.firstRun).toEqual({ acknowledged: false });
+    expect(c.config.memoryRuntime).toBeUndefined();
+    expect(c.marker).toMatchObject({ state: 'pending' });
+    expect(c.sidecarExists).toBe(false);
+  });
+
   it('披露成功 → enabled + source=auto + sourcePresent + effective=model', () => {
     const c = result.cases.disclosed;
     expect(c.status.body.firstRun).toMatchObject({ pending: true, disclosureVersion: 1 });
@@ -313,6 +415,27 @@ describe('0.4.0 W1b first-run 披露与初始化', () => {
     expect(c.source).toMatchObject({ source: 'auto', sourcePresent: true });
     expect(c.effective.effective).toBe('model');
     expect(c.marker).toMatchObject({ state: 'done' });
+  });
+
+  it('acked 后初始化失败：不阻塞启动、配置不覆盖、修正后可重试', () => {
+    const c = result.cases.retryFailure;
+    expect(c.health.status).toBe(200);
+    expect(c.config.memoryRuntime).toBe('broken');
+    expect(c.marker).toMatchObject({ state: 'acked' });
+    expect(c.sidecarExists).toBe(false);
+    expect(harnessStderr).toContain('FIRST_RUN_INIT_FAILED config_invalid');
+    expect(c.fixed.config.memoryRuntime).toEqual({ enabled: true });
+    expect(c.fixed.sidecar).toEqual({ schema: 1, model: { source: 'auto' } });
+    expect(c.fixed.source).toMatchObject({ source: 'auto', sourcePresent: true });
+    expect(c.fixed.marker).toMatchObject({ state: 'done' });
+  });
+
+  it('外部 storage path：不写 marker、不披露', () => {
+    const c = result.cases.externalStorage;
+    expect(c.status.status).toBe(200);
+    expect(c.status.body.firstRun).toBeUndefined();
+    expect(c.markerExists).toBe(false);
+    expect(c.fresh).toBe(false);
   });
 
   it('已有用户：不出示、不写 marker、配置逐字保留', () => {

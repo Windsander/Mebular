@@ -233,6 +233,20 @@ describe('已有用户配置逐字保留', () => {
       expect(existsSync(join(home, 'first-run.json'))).toBe(false);
     }
   });
+
+  it('外部 MEBULAR_STORAGE_PATH（已有 store）→ 不写 marker、不披露、不启用', async () => {
+    const home = await makeHome();
+    const external = await makeHome();
+    const store = join(external, 'store.jsonl');
+    await writeFile(store, '{"id":"existing"}\n', 'utf-8');
+    const env = { MEBULAR_STORAGE_PATH: store };
+    expect(await detectFreshHome({ home, env })).toBe(false);
+    expect(await markFirstRunPending({ home, env })).toBeNull();
+    expect(existsSync(join(home, 'first-run.json'))).toBe(false);
+    expect(await initializeFirstRunHome({ home, env }))
+      .toMatchObject({ ok: false, reason: 'no_marker' });
+    expect(existsSync(join(home, 'config.json'))).toBe(false);
+  });
 });
 
 describe('失败闭合', () => {
@@ -274,10 +288,28 @@ describe('失败闭合', () => {
       config: { memoryRuntime: { enabled: false }, storagePath: '/tmp/store.jsonl' },
     });
     const init = await initializeFirstRunHome({ home, env: HOME_ENV });
-    expect(init).toMatchObject({ ok: true, skipped: 'explicit_disabled', enabled: false });
+    expect(init).toMatchObject({ ok: true, skipped: 'explicit_disabled', initialized: false, enabled: false });
     expect((await readJson(join(home, 'config.json'))).memoryRuntime).toEqual({ enabled: false });
     expect((await readFirstRunMarker({ home }))?.state).toBe('done');
     expect(existsSync(join(home, 'memory-runtime', 'config.json'))).toBe(false);
+  });
+
+  it('非对象 memoryRuntime → fail closed，不覆盖成 {enabled:true}；修正后可重试', async () => {
+    const home = await freshHomeWithAck({
+      config: { memoryRuntime: 'legacy-string', storagePath: '/tmp/store.jsonl' },
+    });
+    const raw = await readText(join(home, 'config.json'));
+    const failed = await initializeFirstRunHome({ home, env: HOME_ENV });
+    expect(failed).toMatchObject({ ok: false, reason: 'config_invalid', enabled: false });
+    expect(await readText(join(home, 'config.json'))).toBe(raw);
+    expect((await readFirstRunMarker({ home }))?.state).toBe('acked');
+    expect(existsSync(join(home, 'memory-runtime', 'config.json'))).toBe(false);
+
+    // 用户/修复流程把字段改回合法形态后，acked marker 允许幂等重试。
+    await writeFile(join(home, 'config.json'), JSON.stringify({ storagePath: '/tmp/store.jsonl' }), 'utf-8');
+    const retried = await initializeFirstRunHome({ home, env: HOME_ENV });
+    expect(retried).toMatchObject({ ok: true, initialized: true, enabled: true });
+    expect((await readFirstRunMarker({ home }))?.state).toBe('done');
   });
 
   it('没有 marker（已有用户）→ 绝不初始化', async () => {

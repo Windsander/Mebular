@@ -693,9 +693,9 @@ export class SettlementRuntime {
     return this.recall.handleRecall(request);
   }
 
-  async handleContext(request: unknown): Promise<RecallHttpResult<ContextResponse>> {
+  async handleContext(request: unknown, hostToken?: string): Promise<RecallHttpResult<ContextResponse>> {
     await this.reloadPolicy().catch(() => []);
-    return this.recall.handleContext(request);
+    return this.recall.handleContext(request, hostToken);
   }
 
   expandRecall(recallId: string, request: unknown) {
@@ -722,8 +722,12 @@ export class SettlementRuntime {
     return this.recall.submitFeedback(traceId, body);
   }
 
-  submitOutcome(traceId: string, body: unknown) {
-    return this.recall.submitOutcome(traceId, body);
+  submitOutcome(traceId: string, body: unknown, auth?: {
+    hostToken?: string;
+    console?: boolean;
+    internal?: boolean;
+  }) {
+    return this.recall.submitOutcome(traceId, body, auth);
   }
 
   /** Console/CLI reset 入口：清空本机策略统计；不影响记忆或 trace。 */

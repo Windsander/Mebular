@@ -366,7 +366,8 @@ export interface SidecarRecallApi {
     warnings: string[];
     degraded: boolean;
   }>;
-  handleContext(request: unknown): Promise<{
+  /** `hostToken` 只用于签发 outcome binding；不进入响应正文。 */
+  handleContext(request: unknown, hostToken?: string): Promise<{
     status: 200;
     data: unknown;
     warnings: string[];
@@ -402,7 +403,11 @@ export interface SidecarRecallApi {
     warnings: string[];
     degraded: boolean;
   }>;
-  submitOutcome(traceId: string, body: unknown): Promise<{
+  submitOutcome(traceId: string, body: unknown, auth?: {
+    hostToken?: string;
+    console?: boolean;
+    internal?: boolean;
+  }): Promise<{
     traceId: string;
     outcome: unknown | null;
     duplicate: boolean;
@@ -1718,7 +1723,8 @@ export class SidecarServer {
           if (hostApp.length > 0) contextBody.hostApp = hostApp;
           if (hostInstanceId.length > 0) contextBody.hostInstanceId = hostInstanceId;
         }
-        const result = await this.recall.handleContext(contextBody);
+        // W4：host token 只作为 outcome binding 的 HMAC key；不进入响应正文。
+        const result = await this.recall.handleContext(contextBody, this.hostToken);
         this.send(res, result.status, this.envelope(requestId, result.data, result.warnings, result.degraded));
         return;
       }
@@ -1759,7 +1765,18 @@ export class SidecarServer {
           return;
         }
         if (parts[2] === 'outcome') {
-          const result = await this.recall.submitOutcome(traceId, body);
+          // W4：host 通道用 host token 验 bindingToken。console 只允许 MCP admin
+          // 代理：必须显式带 admin channel 且不得带宿主身份 header，宿主 adapter
+          // 不得自报 console。`heuristic` 永不从 HTTP 通道放行。
+          const channel = req.headers['x-mebular-outcome-channel'];
+          const outcomeHostApp = req.headers['x-mebular-host-app'];
+          const consoleChannel = typeof channel === 'string'
+            && channel.trim().toLowerCase() === 'admin'
+            && (typeof outcomeHostApp !== 'string' || outcomeHostApp.trim().length === 0);
+          const result = await this.recall.submitOutcome(traceId, body, {
+            hostToken: this.hostToken,
+            console: consoleChannel,
+          });
           this.send(res, 200, this.envelope(requestId, result, result.warnings, result.degraded));
           return;
         }

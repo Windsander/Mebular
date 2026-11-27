@@ -284,13 +284,34 @@ class _Handler(BaseHTTPRequestHandler):
                 "degraded": False,
                 "warnings": [],
                 "silenceReason": None if blocks else "no_hits",
-                "traceId": "tr_test",
+                "traceId": fake.context_trace_id,
+                "bindingToken": fake.binding_token,
                 "timing": {"cueMs": 1, "fuzzyMs": 1, "expandMs": 1,
                            "assembleMs": 1, "totalMs": 4},
             }
             if isinstance(fake.context_meta, dict):
                 payload["interventionMeta"] = dict(fake.context_meta)
+            if isinstance(fake.context_decision, dict):
+                payload["decision"] = dict(fake.context_decision)
+            if isinstance(fake.context_applied, dict):
+                payload["applied"] = dict(fake.context_applied)
             self._send(200, self._envelope(payload))
+            return
+        if parsed.path.startswith(f"{API}/recall/") and parsed.path.endswith("/outcome"):
+            fake.outcomes.append({
+                "path": parsed.path,
+                "body": body,
+                "host_app": self.headers.get("X-Mebular-Host-App") or "",
+            })
+            self._send(200, self._envelope({
+                "traceId": parsed.path.split("/")[-2],
+                "outcome": {"kind": body.get("kind")},
+                "duplicate": False,
+                "recorded": True,
+                "withinWindow": True,
+                "warnings": [],
+                "degraded": False,
+            }))
             return
         if parsed.path == f"{API}/recall":
             if fake.mode == "slow":
@@ -381,6 +402,22 @@ class FakeSidecar:
         self.context_missing = False
         self.context_blocks: List[str] = []
         self.context_meta: Optional[Dict[str, Any]] = None
+        self.context_trace_id: Optional[str] = "tr_test"
+        self.binding_token: Optional[str] = "obt_test_binding"
+        self.context_decision: Optional[Dict[str, Any]] = {
+            "action": "speak",
+            "depth": "gist",
+            "confidence": 0.8,
+            "reason": "high_relevance",
+            "policyVersion": "v0-rules",
+            "enforced": True,
+        }
+        self.context_applied: Optional[Dict[str, Any]] = {
+            "action": "speak",
+            "depth": "gist",
+            "fragments": 1,
+        }
+        self.outcomes: List[Dict[str, Any]] = []
         self.fragments: List[Dict[str, Any]] = []
         self.recall_records: List[Dict[str, Any]] = []
         self.requests: List[Dict[str, Any]] = []
@@ -437,6 +474,18 @@ class FakeSidecar:
         self.context_missing = False
         self.context_blocks = []
         self.context_meta = None
+        self.context_trace_id = "tr_test"
+        self.binding_token = "obt_test_binding"
+        self.context_decision = {
+            "action": "speak",
+            "depth": "gist",
+            "confidence": 0.8,
+            "reason": "high_relevance",
+            "policyVersion": "v0-rules",
+            "enforced": True,
+        }
+        self.context_applied = {"action": "speak", "depth": "gist", "fragments": 1}
+        self.outcomes.clear()
         self.fragments = []
         self.recall_records = []
         self.requests.clear()
@@ -2877,3 +2926,70 @@ class HostPlanBridgeTests(BaseCase):
         )
         release.set()
         self.assertTrue(self.wait_until(self._plan_path().exists, timeout=2.0))
+
+
+class OutcomeAttributionTests(BaseCase):
+    """W4：Hermes 显式上报 outcome；不读宿主 session/log/私有存储。"""
+
+    def test_prefetch_attributes_previous_with_binding_token(self) -> None:
+        server = self.fake_server()
+        server.context_blocks = ["user prefers dark theme"]
+        provider = self.make_provider(server)
+
+        self.assertIn("dark theme", provider.prefetch("how do I change the theme"))
+        provider.prefetch("再说一遍，深色主题怎么设置")
+
+        self.assertTrue(self.wait_until(lambda: bool(server.outcomes)))
+        outcome = server.outcomes[0]
+        self.assertEqual(outcome["host_app"].lower(), "hermes")
+        self.assertEqual(outcome["body"].get("kind"), "reasked")
+        self.assertEqual(outcome["body"].get("source"), "host")
+        self.assertEqual(outcome["body"].get("host"), "hermes")
+        self.assertEqual(outcome["body"].get("bindingToken"), "obt_test_binding")
+        # 新协议绝不带 note。
+        self.assertNotIn("note", outcome["body"])
+        status = json.dumps(provider.get_status_config())
+        self.assertNotIn("obt_test_binding", status)
+        self.assertNotIn(self.host_token, status)
+
+    def test_sync_turn_schedules_ignored_with_same_token(self) -> None:
+        server = self.fake_server()
+        server.context_blocks = ["deploy status memory"]
+        provider = self.make_provider(server, outcome_ignored_delay=0.01)
+
+        self.assertIn("deploy status", provider.prefetch("deploy status"))
+        provider.sync_turn("deploy status", "noted", session_id="s1")
+
+        self.assertTrue(self.wait_until(lambda: bool(server.outcomes)))
+        outcome = server.outcomes[0]
+        self.assertEqual(outcome["body"].get("kind"), "ignored")
+        self.assertEqual(outcome["body"].get("bindingToken"), "obt_test_binding")
+        self.assertNotIn("note", outcome["body"])
+
+    def test_trace_null_reports_nothing(self) -> None:
+        server = self.fake_server()
+        server.context_blocks = ["deploy status memory"]
+        server.context_trace_id = None
+        server.binding_token = None
+        provider = self.make_provider(server, outcome_ignored_delay=0.01)
+
+        provider.prefetch("deploy status")
+        provider.prefetch("上次的部署流程")
+        provider.sync_turn("上次的部署流程", "noted", session_id="s1")
+        time.sleep(0.05)
+        self.assertEqual(server.outcomes, [])
+
+    def test_legacy_sidecar_without_token_uses_note_and_no_binding(self) -> None:
+        server = self.fake_server()
+        server.context_blocks = ["theme memory"]
+        server.binding_token = None
+        provider = self.make_provider(server)
+
+        provider.prefetch("how do I change the theme")
+        provider.prefetch("再说一遍，深色主题怎么设置")
+
+        self.assertTrue(self.wait_until(lambda: bool(server.outcomes)))
+        body = server.outcomes[0]["body"]
+        self.assertEqual(body.get("kind"), "reasked")
+        self.assertNotIn("bindingToken", body)
+        self.assertIn("note", body)

@@ -380,6 +380,10 @@ export interface RecallTrace {
   agentId: string;
   hostId: string;
   threadId?: string;
+  /** 0.4.0 W4：与 `/context` turnId 对齐，用于 outcome binding 跨 turn 校验。 */
+  turnId?: string;
+  /** 0.4.0 W4：显式 host 身份；只由 adapter header 注入。 */
+  hostApp?: 'opencode' | 'openchamber' | 'dsh' | 'hermes';
   at: number;
   queryHash: string; // sha256(query)
   queryPreview: string; // 脱敏后最多 200 字；可配置不存

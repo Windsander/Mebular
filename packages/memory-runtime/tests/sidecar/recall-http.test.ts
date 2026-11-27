@@ -1369,15 +1369,21 @@ describe('sidecar recall/context HTTP', () => {
       threadId: 'th_outcome',
       turnId: 'turn_outcome',
       query: '我的偏好是什么？',
-    });
+    }, { 'x-mebular-host-app': 'opencode' });
     const traceId = context.body.data.traceId as string;
+    const bindingToken = context.body.data.bindingToken as string;
     expect(traceId).toMatch(/^tr_/);
+    expect(bindingToken).toMatch(/^obt_/);
+    // token 是 opaque 的：不含 raw query，也不泄漏 host token。
+    expect(bindingToken).not.toContain('偏好');
+    expect(bindingToken).not.toContain('host-token');
 
     const first = await post(`${server.url}/recall/${traceId}/outcome`, {
       kind: 'accepted',
       source: 'host',
+      host: 'opencode',
+      bindingToken,
       confidence: 0.8,
-      note: 'user said thanks',
     });
     expect(first.status).toBe(200);
     expect(first.body.data).toMatchObject({ recorded: true, duplicate: false, degraded: false });
@@ -1385,14 +1391,22 @@ describe('sidecar recall/context HTTP', () => {
     const again = await post(`${server.url}/recall/${traceId}/outcome`, {
       kind: 'accepted',
       source: 'host',
+      host: 'opencode',
+      bindingToken,
     });
     expect(again.status).toBe(200);
     expect(again.body.data).toMatchObject({ recorded: false, duplicate: true });
 
-    const second = await post(`${server.url}/recall/${traceId}/outcome`, {
+    // console 只允许 admin 通道；普通 host 请求不能自报 console。
+    const consoleDenied = await post(`${server.url}/recall/${traceId}/outcome`, {
       kind: 'dismissed',
       source: 'console',
     });
+    expect(consoleDenied.status).toBe(403);
+    const second = await post(`${server.url}/recall/${traceId}/outcome`, {
+      kind: 'dismissed',
+      source: 'console',
+    }, { 'x-mebular-outcome-channel': 'admin' });
     expect(second.status).toBe(200);
     expect(second.body.data.recorded).toBe(true);
 
@@ -1400,6 +1414,8 @@ describe('sidecar recall/context HTTP', () => {
     const traceBody = await trace.json() as any;
     expect(traceBody.data.outcome).toMatchObject({ kind: 'dismissed', source: 'console' });
     expect(traceBody.data.outcomeHistory.map((entry: any) => entry.kind)).toEqual(['accepted', 'dismissed']);
+    // token 不落 trace。
+    expect(JSON.stringify(traceBody)).not.toContain(bindingToken);
 
     const stats = await runtime.policyStore!.snapshot();
     expect(stats.global.accepted).toBe(1);
@@ -1407,35 +1423,57 @@ describe('sidecar recall/context HTTP', () => {
 
     const invalid = await post(`${server.url}/recall/${traceId}/outcome`, { kind: 'nope', source: 'host' });
     expect(invalid.status).toBe(400);
-    const tooLongNote = await post(`${server.url}/recall/${traceId}/outcome`, {
+    const noteWithToken = await post(`${server.url}/recall/${traceId}/outcome`, {
+      kind: 'ignored',
+      source: 'host',
+      host: 'opencode',
+      bindingToken,
+      note: 'new protocol must reject note',
+    });
+    expect(noteWithToken.status).toBe(400);
+    expect(noteWithToken.body.error.code).toBe('outcome_note_unsupported');
+    const tooLongLegacyNote = await post(`${server.url}/recall/${traceId}/outcome`, {
       kind: 'ignored',
       source: 'host',
       note: 'x'.repeat(201),
     });
-    expect(tooLongNote.status).toBe(400);
-    const maxNote = await post(`${server.url}/recall/${traceId}/outcome`, {
+    expect(tooLongLegacyNote.status).toBe(400);
+    const legacyNote = await post(`${server.url}/recall/${traceId}/outcome`, {
       kind: 'ignored',
       source: 'host',
       note: 'y'.repeat(200),
     });
-    expect(maxNote.status).toBe(200);
-    const missing = await post(`${server.url}/recall/tr_missing/outcome`, { kind: 'missed', source: 'host' });
+    expect(legacyNote.status).toBe(200);
+    expect(legacyNote.body.data).toMatchObject({ recorded: false, duplicate: false });
+    expect(legacyNote.body.data.warnings).toEqual(['outcome_note_ignored']);
+    const missing = await post(`${server.url}/recall/tr_missing/outcome`, {
+      kind: 'missed',
+      source: 'host',
+      host: 'opencode',
+      bindingToken,
+    });
     expect(missing.status).toBe(404);
 
     const off = await setup({ trace: 'off' });
-    const offline = await post(`${off.server.url}/recall/tr_offline/outcome`, { kind: 'missed', source: 'host' });
-    expect(offline.status).toBe(200);
-    expect(offline.body.data).toMatchObject({ recorded: false, degraded: true });
-    expect(offline.body.data.warnings).toContain('trace_off');
-    const offStats = await off.runtime.policyStore!.snapshot();
-    expect(offStats.global).toMatchObject({ spoken: 0, silent: 0, missed: 0 });
     const offContext = await post(`${off.server.url}/context`, {
       agentId: 'opencode',
       threadId: 'th_off_no_learn',
       turnId: 'turn_off_no_learn',
       query: '我的偏好是什么？',
-    });
+    }, { 'x-mebular-host-app': 'opencode' });
+    // W4 只留 W5 seam：trace off 时不签发 token。
     expect(offContext.body.data.traceId).toBeNull();
+    expect(offContext.body.data.bindingToken).toBeNull();
+    const offlineLegacy = await post(`${off.server.url}/recall/tr_offline/outcome`, {
+      kind: 'missed',
+      source: 'host',
+      note: 'legacy client',
+    });
+    expect(offlineLegacy.status).toBe(200);
+    expect(offlineLegacy.body.data).toMatchObject({ recorded: false, degraded: true });
+    expect(offlineLegacy.body.data.warnings).toContain('trace_off');
+    const offStats = await off.runtime.policyStore!.snapshot();
+    expect(offStats.global).toMatchObject({ spoken: 0, silent: 0, missed: 0 });
     const offStatsAfter = await off.runtime.policyStore!.snapshot();
     expect(offStatsAfter.global).toMatchObject({ spoken: 0, silent: 0 });
   });
@@ -1447,16 +1485,27 @@ describe('sidecar recall/context HTTP', () => {
       threadId: 'th_seen_kinds',
       turnId: 'turn_seen_kinds',
       query: '我的偏好是什么？',
-    });
+    }, { 'x-mebular-host-app': 'opencode' });
     const traceId = context.body.data.traceId as string;
+    const bindingToken = context.body.data.bindingToken as string;
     const kinds = ['accepted', 'ignored', 'reasked', 'corrected', 'dismissed', 'missed', 'too_shallow', 'too_deep'];
     for (const kind of kinds) {
-      const result = await post(`${server.url}/recall/${traceId}/outcome`, { kind, source: 'host' });
+      const result = await post(`${server.url}/recall/${traceId}/outcome`, {
+        kind,
+        source: 'host',
+        host: 'opencode',
+        bindingToken,
+      });
       expect(result.status).toBe(200);
       expect(result.body.data.recorded).toBe(true);
     }
     // 早期 kind 已超出 history 上限，但 seenOutcomeKinds 仍能保证幂等。
-    const again = await post(`${server.url}/recall/${traceId}/outcome`, { kind: 'accepted', source: 'host' });
+    const again = await post(`${server.url}/recall/${traceId}/outcome`, {
+      kind: 'accepted',
+      source: 'host',
+      host: 'opencode',
+      bindingToken,
+    });
     expect(again.status).toBe(200);
     expect(again.body.data).toMatchObject({ recorded: false, duplicate: true });
     const trace = await fetch(`${server.url}/traces/${traceId}`, { headers: auth() });
@@ -1511,19 +1560,22 @@ describe('sidecar recall/context HTTP', () => {
       return context.body.data.traceId as string;
     };
 
+    // 窗口语义由 console admin 路径验证：host token 的 TTL 是 outcomeWindowMs，
+    // 超时后必须先被 binding 拒绝（见 outcome-binding.test.ts），不能绕过鉴权。
+    const admin = { 'x-mebular-outcome-channel': 'admin' };
     const first = await trace('th_window_1');
     now += 5 * 60 * 1000;
     const ignored = await post(`${server.url}/recall/${first}/outcome`, {
       kind: 'ignored',
-      source: 'host',
-    });
+      source: 'console',
+    }, admin);
     expect(ignored.body.data.withinWindow).toBe(true);
     expect(ignored.body.data.warnings).toEqual([]);
 
     const lateAccepted = await post(`${server.url}/recall/${first}/outcome`, {
       kind: 'accepted',
-      source: 'host',
-    });
+      source: 'console',
+    }, admin);
     expect(lateAccepted.body.data.withinWindow).toBe(false);
     expect(lateAccepted.body.data.warnings).toEqual(['outcome_outside_window']);
 
@@ -1531,8 +1583,8 @@ describe('sidecar recall/context HTTP', () => {
     now += 11 * 60 * 1000;
     const lateIgnored = await post(`${server.url}/recall/${second}/outcome`, {
       kind: 'ignored',
-      source: 'host',
-    });
+      source: 'console',
+    }, admin);
     expect(lateIgnored.body.data.withinWindow).toBe(false);
     expect(lateIgnored.body.data.warnings).toEqual(['outcome_outside_window']);
   });
@@ -1654,8 +1706,9 @@ describe('sidecar recall/context HTTP', () => {
       threadId: 'th_reset_late',
       turnId: 'turn_reset_late_old',
       query: '我的偏好是什么？',
-    });
+    }, { 'x-mebular-host-app': 'opencode' });
     const oldTraceId = oldContext.body.data.traceId as string;
+    const oldBindingToken = oldContext.body.data.bindingToken as string;
     now += 1000;
     const reset = await post(`${server.url}/intervention/reset`, {});
     expect(reset.status).toBe(200);
@@ -1663,7 +1716,12 @@ describe('sidecar recall/context HTTP', () => {
     expect(afterReset.global).toMatchObject({ spoken: 0, silent: 0 });
 
     now += 1000;
-    const late = await post(`${server.url}/recall/${oldTraceId}/outcome`, { kind: 'accepted', source: 'host' });
+    const late = await post(`${server.url}/recall/${oldTraceId}/outcome`, {
+      kind: 'accepted',
+      source: 'host',
+      host: 'opencode',
+      bindingToken: oldBindingToken,
+    });
     expect(late.status).toBe(200);
     expect(late.body.data).toMatchObject({ recorded: false, duplicate: false, degraded: false });
     expect(late.body.data.warnings).toContain('outcome_before_reset');
@@ -1681,9 +1739,14 @@ describe('sidecar recall/context HTTP', () => {
       threadId: 'th_reset_late',
       turnId: 'turn_reset_late_new',
       query: '我的偏好是什么？',
-    });
+    }, { 'x-mebular-host-app': 'opencode' });
     const freshTraceId = freshContext.body.data.traceId as string;
-    const fresh = await post(`${server.url}/recall/${freshTraceId}/outcome`, { kind: 'accepted', source: 'host' });
+    const fresh = await post(`${server.url}/recall/${freshTraceId}/outcome`, {
+      kind: 'accepted',
+      source: 'host',
+      host: 'opencode',
+      bindingToken: freshContext.body.data.bindingToken,
+    });
     expect(fresh.status).toBe(200);
     expect(fresh.body.data.recorded).toBe(true);
     const finalStats = await runtime.policyStore!.snapshot();

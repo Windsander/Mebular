@@ -2592,6 +2592,8 @@ export function createController(dependencies = {}) {
     const effective = applied ?? decision;
     lastContexts.set(key, {
       traceId,
+      // W4：sidecar 签发的 opaque binding token；只回传，不解析、不持久化。
+      bindingToken: asText(data?.bindingToken) || null,
       turnId: asText(meta.turnId) || asText(turn?.id) || null,
       cueFingerprint: Array.isArray(meta.cueFingerprint)
         ? meta.cueFingerprint.filter((entry) => typeof entry === 'string')
@@ -2645,12 +2647,26 @@ export function createController(dependencies = {}) {
       return;
     }
     stats.outcomes.attempted += 1;
-    const result = await requestJson(`/recall/${record.traceId}/outcome`, {
-      kind,
-      source: 'host',
-      ...(Number.isFinite(options.confidence) ? { confidence: options.confidence } : {}),
-      ...(asText(options.note) ? { note: truncateChars(asText(options.note), 200) } : {}),
-    }, { timeoutMs: config.outcomeTimeoutMs });
+    const bindingToken = asText(record.bindingToken);
+    // W4：新协议带 token + host，且绝不带 note（note 会被 400 拒绝）。
+    // 旧 sidecar（无 token）继续走 0.3 兼容路径：带 note，服务端忽略不落盘。
+    const payload = bindingToken
+      ? {
+        kind,
+        source: 'host',
+        host: config.hostApp,
+        bindingToken,
+        ...(Number.isFinite(options.confidence) ? { confidence: options.confidence } : {}),
+      }
+      : {
+        kind,
+        source: 'host',
+        ...(Number.isFinite(options.confidence) ? { confidence: options.confidence } : {}),
+        ...(asText(options.note) ? { note: truncateChars(asText(options.note), 200) } : {}),
+      };
+    const result = await requestJson(`/recall/${record.traceId}/outcome`, payload, {
+      timeoutMs: config.outcomeTimeoutMs,
+    });
     if (result.ok) {
       stats.outcomes.reported += 1;
       if (outcomeSupport === null) outcomeSupport = true;
@@ -2692,11 +2708,17 @@ export function createController(dependencies = {}) {
         note: 'no follow-up before the outcome window elapsed',
       });
     };
-    if (config.outcomeIgnoredDelayMs <= 0) {
+    // W4：binding token 的 TTL 是 sidecar 的 outcomeWindowMs；ignored 必须在
+    // token 过期前送达。取 min(配置延迟, 窗口 75%)，避免弱信号必然 403。
+    const tokenWindow = config.outcomeWindowMs > 0
+      ? Math.max(1000, Math.floor(config.outcomeWindowMs * 0.75))
+      : 0;
+    const delay = Math.min(config.outcomeIgnoredDelayMs, tokenWindow);
+    if (delay <= 0) {
       fire();
       return;
     }
-    record.ignoredTimer = setTimeoutFn(fire, config.outcomeIgnoredDelayMs);
+    record.ignoredTimer = setTimeoutFn(fire, delay);
     record.ignoredTimer?.unref?.();
   }
 

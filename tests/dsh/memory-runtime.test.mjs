@@ -4032,3 +4032,173 @@ describe('@mebular/dsh-plugin memory runtime：host plan bridge', () => {
     expect(adapter.getState().hostPlan.generated).toBe(0);
   });
 });
+
+describe('@mebular/dsh-plugin memory runtime：W4 outcome 归因', () => {
+  function waitForState(predicate, timeoutMs = 1000) {
+    return new Promise((resolve, reject) => {
+      const deadline = Date.now() + timeoutMs;
+      const tick = () => {
+        if (predicate()) return resolve(undefined);
+        if (Date.now() >= deadline) return reject(new Error('timeout waiting for outcome'));
+        setTimeout(tick, 10);
+      };
+      tick();
+    });
+  }
+
+  function outcomeContext(turn, token) {
+    return contextData({
+      traceId: `tr_dsh_${turn}`,
+      bindingToken: token,
+      decision: {
+        action: 'speak',
+        depth: 'gist',
+        confidence: 0.8,
+        reason: 'high_relevance',
+        policyVersion: 'v0-rules',
+        enforced: true,
+      },
+      applied: { action: 'speak', depth: 'gist', fragments: 1 },
+      interventionMeta: {
+        source: 'heuristic',
+        resolvedSource: 'heuristic',
+        configuredSource: 'heuristic',
+        prefetched: false,
+        turnId: `turn_dsh_${turn}`,
+        cueFingerprint: ['cue_dsh'],
+        candidateFingerprint: ['cand_dsh'],
+      },
+    });
+  }
+
+  it('下一轮 human turn 用 bindingToken + host=dsh 上报，且不带 note', async () => {
+    const ctx = fakeContext();
+    let contextCount = 0;
+    const outcomeCalls = [];
+    const fetch = installFetch((call) => {
+      if (call.url === `${BASE}/context`) {
+        contextCount += 1;
+        return jsonOk(outcomeContext(contextCount, `obt_dsh_${contextCount}.sig`));
+      }
+      if (call.url.includes('/outcome')) {
+        outcomeCalls.push(call);
+        return jsonOk({ traceId: 'tr_dsh', recorded: true });
+      }
+      return jsonOk({});
+    });
+    const surface = makeSurfaceSession({ id: 's_outcome' });
+    const { adapter } = adapterFor({
+      ctx,
+      config: { ingest: false, checkpoints: false, hideMemoryTools: false },
+      fetchImpl: fetch.fetchImpl,
+    });
+    const first = preStepPayload({
+      agent: makeAgent({ session: surface.session }),
+      text: 'how do I change the theme',
+      turn: 1,
+    });
+    await waterfall(ctx, 'agent/pre-step', first.payload, first.fallback);
+    const second = preStepPayload({
+      agent: makeAgent({ session: surface.session }),
+      text: '再说一遍，深色主题怎么设置',
+      turn: 2,
+    });
+    await waterfall(ctx, 'agent/pre-step', second.payload, second.fallback);
+    await waitForState(() => outcomeCalls.length > 0);
+    const call = outcomeCalls[0];
+    expect(call.url).toBe(`${BASE}/recall/tr_dsh_1/outcome`);
+    expect(call.init.headers['x-mebular-host-app']).toBe('dsh');
+    expect(call.body).toMatchObject({
+      kind: 'reasked',
+      source: 'host',
+      host: 'dsh',
+      bindingToken: 'obt_dsh_1.sig',
+    });
+    expect(call.body).not.toHaveProperty('note');
+    expect(adapter.getState().outcomes.reported).toBe(1);
+    // token 只回传，不进入状态/日志。
+    expect(JSON.stringify(adapter.getState())).not.toContain('obt_dsh_');
+    expect(contextCount).toBeGreaterThanOrEqual(2);
+  });
+
+  it('turn/end 后按 outcomeIgnoredDelayMs 上报一次 ignored', async () => {
+    const ctx = fakeContext();
+    const outcomeCalls = [];
+    const fetch = installFetch((call) => {
+      if (call.url === `${BASE}/context`) {
+        return jsonOk(outcomeContext(1, 'obt_dsh_ignored.sig'));
+      }
+      if (call.url.includes('/outcome')) {
+        outcomeCalls.push(call);
+        return jsonOk({ traceId: 'tr_dsh_1', recorded: true });
+      }
+      return jsonOk({});
+    });
+    const surface = makeSurfaceSession({ id: 's_outcome_ignored' });
+    const { adapter } = adapterFor({
+      ctx,
+      config: {
+        ingest: true,
+        checkpoints: false,
+        hideMemoryTools: false,
+        outcomeIgnoredDelayMs: 5,
+      },
+      fetchImpl: fetch.fetchImpl,
+    });
+    const first = preStepPayload({
+      agent: makeAgent({ session: surface.session }),
+      text: 'deploy status',
+      turn: 1,
+    });
+    await waterfall(ctx, 'agent/pre-step', first.payload, first.fallback);
+    handlerFor(ctx, 'session/event')(surface.session, event('turn/end', 5, {}));
+    await waitForState(() => outcomeCalls.length > 0);
+    expect(outcomeCalls[0].body).toMatchObject({
+      kind: 'ignored',
+      source: 'host',
+      host: 'dsh',
+      bindingToken: 'obt_dsh_ignored.sig',
+    });
+    handlerFor(ctx, 'session/event')(surface.session, event('turn/end', 6, {}));
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(outcomeCalls).toHaveLength(1);
+    expect(adapter.getState().outcomes.reported).toBe(1);
+  });
+
+  it('traceId null 时不记录 outcome，也不发请求', async () => {
+    const ctx = fakeContext();
+    const outcomeCalls = [];
+    const fetch = installFetch((call) => {
+      if (call.url === `${BASE}/context`) {
+        return jsonOk(contextData({ traceId: null, bindingToken: null }));
+      }
+      if (call.url.includes('/outcome')) {
+        outcomeCalls.push(call);
+        return jsonOk({});
+      }
+      return jsonOk({});
+    });
+    const surface = makeSurfaceSession({ id: 's_outcome_null' });
+    const { adapter } = adapterFor({
+      ctx,
+      config: { ingest: true, checkpoints: false, hideMemoryTools: false, outcomeIgnoredDelayMs: 5 },
+      fetchImpl: fetch.fetchImpl,
+    });
+    const first = preStepPayload({
+      agent: makeAgent({ session: surface.session }),
+      text: 'the deploy process',
+      turn: 1,
+    });
+    await waterfall(ctx, 'agent/pre-step', first.payload, first.fallback);
+    const second = preStepPayload({
+      agent: makeAgent({ session: surface.session }),
+      text: '上次的部署流程',
+      turn: 2,
+    });
+    await waterfall(ctx, 'agent/pre-step', second.payload, second.fallback);
+    handlerFor(ctx, 'session/event')(surface.session, event('turn/end', 9, {}));
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(outcomeCalls).toHaveLength(0);
+    expect(adapter.getState().outcomes.attempted).toBe(0);
+  });
+});

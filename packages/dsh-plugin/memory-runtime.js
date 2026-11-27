@@ -120,6 +120,11 @@ const DEFAULT_CONFIG = Object.freeze({
   memoryToolAllowlist: Object.freeze([]),
   hostPlanTimeoutMs: 10_000,
   hostPlanMaxTranscriptChars: 4_000,
+  // W4：显式 outcome 归因；默认开，旧 sidecar 无 token 时走兼容忽略路径。
+  outcomes: true,
+  outcomeTimeoutMs: 1500,
+  outcomeWindowMs: 120_000,
+  outcomeIgnoredDelayMs: 600_000,
   maintenance: Object.freeze({
     enabled: false,
     maxTokens: 512,
@@ -230,6 +235,50 @@ function normalizeAuthMode(value, warn) {
 
 function hashText(value) {
   return createHash('sha256').update(String(value ?? '')).digest('hex');
+}
+
+// W4：outcome 归因只用于本进程内的弱信号推断；不持久化、不写日志。
+const OUTCOME_FOLLOW_UP_RE = /记得|上次|之前|刚才|前面|说过|部署|earlier|remember|previous|last time|deploy/iu;
+const OUTCOME_REASK_RE = /再说一遍|重复|再讲|刚才说什么|重新说|say that again|repeat|re-?ask/iu;
+const OUTCOME_CORRECTION_RE = /不对|不是这个|错了|纠正|弄错|actually|that'?s wrong|not right|correct that/iu;
+const OUTCOME_DETAIL_RE = /具体|详细|展开|细节|多说|detail|elaborate|more detail/iu;
+const OUTCOME_SHALLOW_RE = /太长|简短|简单说|只给结论|tl;?dr|short(er)?|brief/iu;
+const OUTCOME_ACCEPTED_RE = /谢谢|有用|正好|就是这样|对，?就是|thanks|thank you|helpful|perfect/iu;
+const OUTCOME_STOPWORDS = new Set([
+  'the', 'and', 'for', 'with', 'that', 'this', 'you', 'your', 'what', 'how',
+  'please', 'can', 'could', 'would', 'about', 'from', 'have', 'has', 'are',
+]);
+
+/** 提取有界的比较词；只保留词本身，不保留整句。 */
+function outcomeTerms(value) {
+  const text = String(value ?? '').toLowerCase();
+  const terms = [];
+  for (const word of text.match(/[a-z][a-z0-9._:-]+/gu) ?? []) {
+    const cleaned = word.replace(/[._:-]+$/u, '');
+    if (cleaned.length < 2 || OUTCOME_STOPWORDS.has(cleaned)) continue;
+    terms.push(cleaned);
+  }
+  for (const run of text.match(/[\u4e00-\u9fff]+/gu) ?? []) {
+    if (run.length === 2) {
+      terms.push(run);
+      continue;
+    }
+    for (let index = 0; index < run.length - 1; index += 1) {
+      terms.push(run.slice(index, index + 2));
+    }
+  }
+  return uniqueStrings(terms, 32);
+}
+
+function hasOutcomeOverlap(currentTerms, previousTerms) {
+  const previous = new Set((previousTerms ?? []).filter((term) => typeof term === 'string'));
+  if (previous.size === 0) return false;
+  let matched = 0;
+  for (const term of currentTerms ?? []) {
+    if (previous.has(term)) matched += 1;
+  }
+  if (matched >= 2) return true;
+  return matched >= 1 && Math.min(currentTerms?.length ?? 0, previous.size) <= 2;
 }
 
 function truncateBytes(text, maxBytes) {
@@ -644,6 +693,15 @@ export function resolveMemoryRuntimeConfig(input = {}, options = {}) {
       DEFAULT_CONFIG.hostPlanMaxTranscriptChars,
       256,
       12_000,
+    ),
+    outcomes: raw.outcomes !== false,
+    outcomeTimeoutMs: asInt(raw.outcomeTimeoutMs, DEFAULT_CONFIG.outcomeTimeoutMs, 10, 10_000),
+    outcomeWindowMs: asInt(raw.outcomeWindowMs, DEFAULT_CONFIG.outcomeWindowMs, 0, 3_600_000),
+    outcomeIgnoredDelayMs: asInt(
+      raw.outcomeIgnoredDelayMs,
+      DEFAULT_CONFIG.outcomeIgnoredDelayMs,
+      0,
+      3_600_000,
     ),
     maintenance: {
       enabled: maintenanceEnabled,
@@ -1916,11 +1974,15 @@ export function createMemoryRuntimeAdapter(options = {}) {
       invalidated: 0,
       suppressedEvents: 0,
     },
+    outcomes: { attempted: 0, reported: 0, failed: 0, skipped: 0 },
   };
   const anchors = new Map();
   const recalls = new Map();
   // W3：session → 上一轮 /context 的 basis meta；只含 hash/枚举。
   const contextMetas = new Map();
+  // W4：session → 上一轮 /context 的 outcome binding；只含 ID/枚举/短词，不落盘。
+  const outcomeContexts = new Map();
+  const reportedOutcomes = new Set();
   const hostPlans = new Map();
   const plannerRecords = new Map();
   let lastHostPlanSource = null;
@@ -2512,6 +2574,9 @@ export function createMemoryRuntimeAdapter(options = {}) {
       stats.recall.skipped += 1;
       return null;
     }
+    const threadId = safeThreadId(agent?.session?.id);
+    // W4：下一轮 human turn 开始前归因上一轮；只读 payload 文本与内存记录。
+    attributePreviousContext(threadId, turn.query);
     const anchor = buildRecallAnchor(agent, turn.query, payload?.turn ?? 0);
     if (anchors.has(anchor)) {
       stats.recall.deduped += 1;
@@ -2519,7 +2584,6 @@ export function createMemoryRuntimeAdapter(options = {}) {
     }
     rememberAnchor(anchor);
     stats.recall.attempts += 1;
-    const threadId = safeThreadId(agent?.session?.id);
     const hostPlan = takeHostPlan(threadId);
     const body = {
       agentId: config.agentId,
@@ -2572,6 +2636,8 @@ export function createMemoryRuntimeAdapter(options = {}) {
     }
     recallCooldownUntil = 0;
     rememberContextMeta(threadId, result.data);
+    // W4：保存本轮 trace/token/action，供下一轮显式 outcome 或 idle ignored。
+    rememberOutcomeContext(threadId, turn.query, result.data);
     const message = buildContextMessage(result.data, config);
     if (message === null) {
       stats.recall.empty += 1;
@@ -2730,6 +2796,172 @@ export function createMemoryRuntimeAdapter(options = {}) {
       at: now(),
     });
     while (contextMetas.size > 64) contextMetas.delete(contextMetas.keys().next().value);
+  }
+
+  function clearOutcomeTimer(record) {
+    if (record?.ignoredTimer !== null && record?.ignoredTimer !== undefined) {
+      clearTimeoutFn(record.ignoredTimer);
+      record.ignoredTimer = null;
+    }
+  }
+
+  function clearOutcomeState() {
+    for (const record of outcomeContexts.values()) clearOutcomeTimer(record);
+    outcomeContexts.clear();
+    reportedOutcomes.clear();
+  }
+
+  /**
+   * W4：只保存 `/context` 响应里的 ID/枚举与本轮比较词；不保存正文、不落盘。
+   * 没有 traceId（trace off / W5 skip）时不记录，宿主也不得报 outcome。
+   */
+  function rememberOutcomeContext(threadId, query, data) {
+    if (!config.outcomes || !isObject(data)) return;
+    const traceId = typeof data.traceId === 'string' ? data.traceId : '';
+    if (!traceId) {
+      stats.outcomes.skipped += 1;
+      return;
+    }
+    const applied = isObject(data.applied) ? data.applied : null;
+    const decision = isObject(data.decision) ? data.decision : null;
+    const effective = applied ?? decision;
+    const action = typeof effective?.action === 'string' ? effective.action : '';
+    if (action.length === 0) {
+      stats.outcomes.skipped += 1;
+      return;
+    }
+    const meta = isObject(data.interventionMeta) ? data.interventionMeta : {};
+    const previous = outcomeContexts.get(threadId);
+    if (previous) clearOutcomeTimer(previous);
+    outcomeContexts.set(threadId, {
+      traceId,
+      bindingToken: typeof data.bindingToken === 'string' ? data.bindingToken : '',
+      turnId: typeof meta.turnId === 'string' ? meta.turnId : '',
+      action,
+      depth: typeof effective?.depth === 'string' ? effective.depth : '',
+      at: now(),
+      terms: outcomeTerms(query),
+      reported: new Set(),
+      ignoredTimer: null,
+    });
+    while (outcomeContexts.size > 64) {
+      const oldest = outcomeContexts.keys().next().value;
+      clearOutcomeTimer(outcomeContexts.get(oldest));
+      outcomeContexts.delete(oldest);
+    }
+  }
+
+  async function sendOutcome(record, kind, confidence) {
+    if (!config.outcomes || disposed || closing) {
+      stats.outcomes.skipped += 1;
+      return;
+    }
+    stats.outcomes.attempted += 1;
+    // 新协议：token + host，且不带 note。旧 sidecar：没有 token 时带 note，
+    // 由 sidecar 走 0.3 兼容路径忽略且不落盘。
+    const payload = record.bindingToken
+      ? {
+        kind,
+        source: 'host',
+        host: HOST_APP,
+        bindingToken: record.bindingToken,
+        ...(Number.isFinite(confidence) ? { confidence } : {}),
+      }
+      : {
+        kind,
+        source: 'host',
+        ...(Number.isFinite(confidence) ? { confidence } : {}),
+        note: 'legacy outcome',
+      };
+    const result = await runtimeRequest(`/recall/${encodeURIComponent(record.traceId)}/outcome`, payload, {
+      timeoutMs: config.outcomeTimeoutMs,
+      feature: 'recall',
+    });
+    if (result.ok) {
+      stats.outcomes.reported += 1;
+      return;
+    }
+    stats.outcomes.failed += 1;
+    // 旧 Runtime 未实现 outcome 时不反复重试，也不影响宿主。
+    if (result.status === 404 || result.status === 405 || result.status === 501) {
+      stats.outcomes.skipped += 1;
+    }
+  }
+
+  function reportOutcome(record, kind, confidence) {
+    if (!config.outcomes || !record || disposed || closing) return;
+    if (!/^tr_[A-Za-z0-9._:-]{1,128}$/.test(record.traceId)) return;
+    if (record.reported?.has(kind)) return;
+    const key = `${record.traceId}:${kind}`;
+    if (reportedOutcomes.has(key)) return;
+    record.reported?.add(kind);
+    reportedOutcomes.add(key);
+    while (reportedOutcomes.size > 512) reportedOutcomes.delete(reportedOutcomes.values().next().value);
+    void sendOutcome(record, kind, confidence).catch(() => {
+      stats.outcomes.failed += 1;
+    });
+  }
+
+  /** 下一轮 human turn 开始前归因上一轮；只读 payload 文本，不读宿主私有存储。 */
+  function attributePreviousContext(threadId, query) {
+    const record = outcomeContexts.get(threadId);
+    if (!record) return;
+    if (now() - record.at > config.outcomeWindowMs) {
+      clearOutcomeTimer(record);
+      outcomeContexts.delete(threadId);
+      stats.outcomes.skipped += 1;
+      return;
+    }
+    clearOutcomeTimer(record);
+    outcomeContexts.delete(threadId);
+    const text = String(query ?? '');
+    const terms = outcomeTerms(text);
+    const followUp = OUTCOME_FOLLOW_UP_RE.test(text) || hasOutcomeOverlap(terms, record.terms);
+    if (record.action === 'silent' || record.action === 'defer') {
+      if (followUp) reportOutcome(record, 'missed', OUTCOME_FOLLOW_UP_RE.test(text) ? 0.7 : 0.55);
+      return;
+    }
+    if (record.action !== 'speak') return;
+    if (OUTCOME_CORRECTION_RE.test(text)) {
+      reportOutcome(record, 'corrected', 0.7);
+      return;
+    }
+    if (record.depth === 'gist' && OUTCOME_DETAIL_RE.test(text)) {
+      reportOutcome(record, 'too_shallow', 0.65);
+      return;
+    }
+    if ((record.depth === 'detail' || record.depth === 'quote') && OUTCOME_SHALLOW_RE.test(text)) {
+      reportOutcome(record, 'too_deep', 0.65);
+      return;
+    }
+    if (OUTCOME_REASK_RE.test(text)) {
+      reportOutcome(record, 'reasked', 0.65);
+      return;
+    }
+    if (OUTCOME_ACCEPTED_RE.test(text)) {
+      reportOutcome(record, 'accepted', 0.6);
+    }
+  }
+
+  function scheduleIgnoredOutcome(threadId) {
+    if (!config.outcomes) return;
+    const record = outcomeContexts.get(threadId);
+    if (!record || !record.action || record.reported?.has('ignored') || record.ignoredTimer !== null) return;
+    const fire = () => {
+      record.ignoredTimer = null;
+      reportOutcome(record, 'ignored', 0.3);
+    };
+    // token TTL 是 sidecar 的 outcomeWindowMs；弱信号必须在过期前送达。
+    const window = config.outcomeWindowMs > 0
+      ? Math.max(1000, Math.floor(config.outcomeWindowMs * 0.75))
+      : 0;
+    const delay = Math.min(config.outcomeIgnoredDelayMs, window);
+    if (delay <= 0) {
+      fire();
+      return;
+    }
+    record.ignoredTimer = setTimeoutFn(fire, delay);
+    record.ignoredTimer?.unref?.();
   }
 
   function takeHostPlan(threadId) {
@@ -4167,6 +4399,10 @@ export function createMemoryRuntimeAdapter(options = {}) {
     if (event.type === 'assistant/message' || event.type === 'turn/end') {
       void scheduleHostPlan(session);
     }
+    // W4：turn 结束后给上一轮留弱信号 ignored；不依赖 maintenance 注册。
+    if (event.type === 'turn/end' && config.outcomes) {
+      scheduleIgnoredOutcome(safeThreadId(session?.id));
+    }
     if (!config.ingest) return;
     if (!runtimeAllows('ingest')) {
       // Light MCP / no discovery: never queue evidence that would be replayed
@@ -4584,8 +4820,13 @@ export function createMemoryRuntimeAdapter(options = {}) {
   }
 
   function onAgentStatus(payload) {
-    if (!config.maintenance.enabled) return;
     if (payload?.status !== 'idle') return;
+    // W4：idle 后给上一轮发弱信号 ignored；仍由内存记录去重。
+    const sessionId = payload?.agent?.session?.id;
+    if (typeof sessionId === 'string' && sessionId.length > 0) {
+      scheduleIgnoredOutcome(safeThreadId(sessionId));
+    }
+    if (!config.maintenance.enabled) return;
     scheduleMaintenance(payload?.agent);
   }
 
@@ -4769,6 +5010,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
         anchors.clear();
         recalls.clear();
         contextMetas.clear();
+        clearOutcomeState();
         hostPlans.clear();
         plannerRecords.clear();
         compactions.clear();
@@ -4803,6 +5045,12 @@ export function createMemoryRuntimeAdapter(options = {}) {
         hideMemoryTools: config.hideMemoryTools && runtimeActive(),
         maintenance: config.maintenance.enabled,
         hostPlan: runtimeAllows('recall'),
+        outcomes: config.outcomes && runtimeAllows('recall'),
+      },
+      outcomes: {
+        app: HOST_APP,
+        pending: outcomeContexts.size,
+        ...stats.outcomes,
       },
       hostPlan: {
         app: HOST_APP,

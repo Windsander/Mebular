@@ -610,6 +610,89 @@ describe('outcome attribution', () => {
     await controller.dispose();
   });
 
+  it('W4: reports bindingToken + host without note when /context signs one', async () => {
+    const fetchImpl = createFetch({
+      '/context': contextSequence([
+        {
+          ...HIT,
+          traceId: 'tr_bind_1',
+          bindingToken: 'obt_payload.signature',
+          decision: interventionDecision('speak'),
+        },
+        {
+          ...HIT,
+          traceId: 'tr_bind_2',
+          bindingToken: 'obt_payload_2.signature_2',
+          decision: interventionDecision('speak'),
+        },
+      ]),
+      'POST /recall/tr_bind_1/outcome': { traceId: 'tr_bind_1', outcome: { kind: 'reasked' } },
+    });
+    const { controller } = controllerWith({ fetchImpl });
+    await controller.handleContext(hookEvent([userTurn('u1', 'how do I change the theme')]));
+    await controller.handleContext(hookEvent([userTurn('u2', '再说一遍，深色主题怎么设置')]));
+    const call = await waitFor(() => fetchImpl.callsFor('/recall/tr_bind_1/outcome')[0]);
+    expect(call.body).toMatchObject({
+      kind: 'reasked',
+      source: 'host',
+      host: 'opencode',
+      bindingToken: 'obt_payload.signature',
+    });
+    expect(call.body).not.toHaveProperty('note');
+    expect(JSON.stringify(controller.getStatus())).not.toContain('obt_payload');
+    await controller.dispose();
+  });
+
+  it('W4: OpenChamber reports host=openchamber with the same token path', async () => {
+    const fetchImpl = createFetch({
+      '/context': contextSequence([
+        {
+          ...HIT,
+          traceId: 'tr_oc_bind_1',
+          bindingToken: 'obt_oc.signature',
+          decision: interventionDecision('speak'),
+        },
+        {
+          ...HIT,
+          traceId: 'tr_oc_bind_2',
+          bindingToken: 'obt_oc_2.signature',
+          decision: interventionDecision('speak'),
+        },
+      ]),
+      'POST /recall/tr_oc_bind_1/outcome': { traceId: 'tr_oc_bind_1', outcome: { kind: 'accepted' } },
+    });
+    const { controller } = controllerWith({ fetchImpl, config: { hostApp: 'openchamber' } });
+    await controller.handleContext(hookEvent([userTurn('u1', 'deploy status')]));
+    await controller.handleContext(hookEvent([userTurn('u2', '谢谢，很有用')]));
+    const call = await waitFor(() => fetchImpl.callsFor('/recall/tr_oc_bind_1/outcome')[0]);
+    expect(call.body).toMatchObject({
+      kind: 'accepted',
+      source: 'host',
+      host: 'openchamber',
+      bindingToken: 'obt_oc.signature',
+    });
+    expect(call.body).not.toHaveProperty('note');
+    await controller.dispose();
+  });
+
+  it('W4: traceId null means no outcome token and no report', async () => {
+    const fetchImpl = createFetch({
+      '/context': {
+        blocks: [],
+        traceId: null,
+        bindingToken: null,
+        decision: interventionDecision('silent'),
+      },
+    });
+    const { controller } = controllerWith({ fetchImpl });
+    await controller.handleContext(hookEvent([userTurn('u1', 'the deploy process')]));
+    await controller.handleContext(hookEvent([userTurn('u2', '上次的部署流程')]));
+    await sleep(25);
+    expect(fetchImpl.callsFor('/recall/tr_null/outcome')).toHaveLength(0);
+    expect(fetchImpl.calls.some((call) => call.path.endsWith('/outcome'))).toBe(false);
+    await controller.dispose();
+  });
+
   it('uses applied, not decision: shadow decision silent + applied speak does not report missed', async () => {
     const shadowApplied = {
       action: 'speak',

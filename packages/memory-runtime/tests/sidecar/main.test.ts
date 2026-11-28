@@ -1183,7 +1183,7 @@ describe('memory-runtime sidecar process', () => {
       apiVersion: 1,
       capabilityApiVersion: 1,
       minMcpVersion: '0.3.0',
-      maxMcpVersion: '0.4.x',
+      maxMcpVersion: '0.3.x',
       mode: 'immersive',
       capabilities: { details: true },
       details: { stagingHours: 24, cacheDays: 30 },

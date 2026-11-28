@@ -19,7 +19,7 @@ export const SIDECAR_RUNTIME_VERSION = '0.3.7';
 export const SIDECAR_API_VERSION = 1;
 export const SIDECAR_CAPABILITY_API_VERSION = 1;
 export const SIDECAR_MIN_MCP_VERSION = '0.3.0';
-export const SIDECAR_MAX_MCP_VERSION = '0.4.x';
+export const SIDECAR_MAX_MCP_VERSION = '0.3.x';
 export const SIDECAR_API_PREFIX = '/memory-runtime/v1';
 export const DEFAULT_SIDECAR_HOST = '127.0.0.1';
 export const DEFAULT_SIDECAR_PORT = 7341;
@@ -875,7 +875,7 @@ function compareVersion(a: ParsedVersion, b: ParsedVersion): number {
   return a.patch - b.patch;
 }
 
-/** MCP 版本是否落在 sidecar 支持的 [min, max] 区间；max 支持 `0.4.x` 形式。 */
+/** MCP 版本是否落在 sidecar 支持的 [min, max] 区间；max 支持 `0.3.x` 形式。 */
 export function isMcpVersionCompatible(
   mcpVersion: string,
   minVersion = SIDECAR_MIN_MCP_VERSION,

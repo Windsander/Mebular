@@ -119,12 +119,13 @@ simulated API or an adapter identity as a pass.
   honoured; they emit `adaptive_experimental_ignored`.
 - **Local-authoritative planning is not part of 0.3.7.** A local model never becomes the
   authoritative planner in this release; that remains a separate follow-up line.
-- **Version handshake.** There is no wire/schema change in 0.3.7. MCP and sidecar stay in
-  the same `0.3.x` window (`minMcpVersion=0.3.0`, upper bound `0.4.x`), so a 0.3.7 MCP
-  and a 0.3.7 sidecar interoperate. Upgrade both together; the supervisor reuses only
-  compatible instances and reports `version_incompatible` or `orphaned_sidecar_alive`
-  instead of terminating or replacing an older sidecar. Do not claim a released 0.4.0
-  line or automatic replacement.
+- **Version handshake.** There is no wire/schema change in 0.3.7. The 0.3.7 sidecar
+  accepts **only `0.3.x` MCP** (`minMcpVersion=0.3.0`, `maxMcpVersion=0.3.x`): a 0.3.7
+  MCP and a 0.3.7 sidecar interoperate, and a `0.4.x` MCP is rejected. There is no
+  forward-compatibility window for an unreleased 0.4 line. Upgrade both together; the
+  supervisor reuses only compatible instances and reports `version_incompatible` or
+  `orphaned_sidecar_alive` instead of terminating or replacing an older sidecar. Do not
+  claim a released 0.4.0 line or automatic replacement.
 
 ### Known limitations
 
@@ -165,11 +166,11 @@ simulated API or an adapter identity as a pass.
   (7 checks), `npm run check:architecture` and `npm run verify:release-version`
   (8 packages at `0.3.7`) all pass.
 - `tests/release`: 3 suites / 17 tests passed.
-- Memory Runtime / MCP / Console / OpenCode plugin / DSH / Hermes Jest: 160 suites /
-  2226 tests. Under a heavily loaded host 4 timing-bound tests failed; each passes
-  standalone on this branch and the performance-budget one fails identically on the
-  unmodified base, so they are recorded as environment artifacts, not passes or
-  regressions.
+- Memory Runtime / MCP / Console / OpenCode plugin / DSH / Hermes Jest: **160 suites /
+  2226 tests, all passing**. Also `tests/release` + the fleet routing e2e: 4 suites /
+  18 tests. (Earlier runs on a heavily loaded host showed 4 timing-bound failures that
+  each pass standalone; they are not counted as passes or as regressions, and no budget
+  or timeout threshold was changed.)
 - Hermes Python: 109 tests passed. `verify:dsh-plugin`: 215 checks. `verify:console`
   (E1) passed; `verify:console:ui` was skipped because no Chrome/Chromium is present.
 - Not run, and not filled with fakes: real API provider (deferred), DSH real host, Hermes

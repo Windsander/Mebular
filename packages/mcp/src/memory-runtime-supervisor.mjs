@@ -720,7 +720,7 @@ export class MemoryRuntimeSupervisor {
     return !mcpVersionCompatible(
       APP_VERSION,
       discovery.minMcpVersion ?? '0.3.0',
-      discovery.maxMcpVersion ?? '0.4.x',
+      discovery.maxMcpVersion ?? '0.3.x',
     );
   }
 
@@ -791,7 +791,7 @@ export class MemoryRuntimeSupervisor {
       apiVersion: 1,
       capabilityApiVersion: CAPABILITY_API_VERSION,
       minMcpVersion: '0.3.0',
-      maxMcpVersion: '0.4.x',
+      maxMcpVersion: '0.3.x',
       state: 'ready',
       mode: 'immersive',
       degraded: false,

@@ -249,18 +249,20 @@ describe('sidecar config', () => {
     expect(await resolveCapabilityBaseUrl({ home, env: {} })).toBe('http://127.0.0.1:7331/internal/memory/v1');
   });
 
-  it('版本握手只接受 capability major/schema 1 与 0.4.x MCP', () => {
+  it('版本握手只接受 capability major/schema 1 与 0.3.x MCP', () => {
     expect(isCapabilityVersionCompatible({ capabilityApiVersion: 1, schemaVersion: 1, mcpVersion: '0.3.0' })).toBe(true);
+    expect(isCapabilityVersionCompatible({ capabilityApiVersion: 1, schemaVersion: 1, mcpVersion: '0.3.7' })).toBe(true);
     expect(isCapabilityVersionCompatible({ capabilityApiVersion: 1, schemaVersion: 1, mcpVersion: '0.3.9' })).toBe(true);
-    expect(isCapabilityVersionCompatible({ capabilityApiVersion: 1, schemaVersion: 1, mcpVersion: '0.4.0' })).toBe(true);
-    expect(isCapabilityVersionCompatible({ capabilityApiVersion: 1, schemaVersion: 1, mcpVersion: '0.4.9' })).toBe(true);
-    expect(isCapabilityVersionCompatible({ capabilityApiVersion: 2, schemaVersion: 1, mcpVersion: '0.4.0' })).toBe(false);
-    expect(isCapabilityVersionCompatible({ capabilityApiVersion: 1, schemaVersion: 2, mcpVersion: '0.4.0' })).toBe(false);
+    expect(isCapabilityVersionCompatible({ capabilityApiVersion: 1, schemaVersion: 1, mcpVersion: '0.4.0' })).toBe(false);
+    expect(isCapabilityVersionCompatible({ capabilityApiVersion: 1, schemaVersion: 1, mcpVersion: '0.4.9' })).toBe(false);
+    expect(isCapabilityVersionCompatible({ capabilityApiVersion: 2, schemaVersion: 1, mcpVersion: '0.3.7' })).toBe(false);
+    expect(isCapabilityVersionCompatible({ capabilityApiVersion: 1, schemaVersion: 2, mcpVersion: '0.3.7' })).toBe(false);
     expect(isCapabilityVersionCompatible({ capabilityApiVersion: 1, schemaVersion: 1, mcpVersion: '0.2.9' })).toBe(false);
     expect(isCapabilityVersionCompatible({ capabilityApiVersion: 1, schemaVersion: 1, mcpVersion: '0.5.0' })).toBe(false);
     expect(isCapabilityVersionCompatible({ capabilityApiVersion: 1, schemaVersion: 1 })).toBe(false);
     expect(isMcpVersionCompatible('0.3.1')).toBe(true);
-    expect(isMcpVersionCompatible('0.4.0')).toBe(true);
+    expect(isMcpVersionCompatible('0.3.7')).toBe(true);
+    expect(isMcpVersionCompatible('0.4.0')).toBe(false);
     expect(isMcpVersionCompatible('0.5.0')).toBe(false);
   });
 

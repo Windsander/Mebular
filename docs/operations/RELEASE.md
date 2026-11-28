@@ -9,8 +9,9 @@ lock 与版本源均为 `0.3.7`，包含原 0.4.0 设计的完整实现；尚未
 0.3.7 发布门禁，见
 [`0.3.7 release readiness`](../quality/0.4.0-intervention/0.3.7-release-readiness.md)。
 
-0.3.7 没有 wire/schema 变化，MCP 与 sidecar 仍在同一 `0.3.x` 握手窗口
-（`minMcpVersion=0.3.0`，上界 `0.4.x`），因此 0.3.7 MCP 与 0.3.7 sidecar 互通。升级顺序：
+0.3.7 没有 wire/schema 变化，握手窗口收回为**只接受 `0.3.x` MCP**
+（`minMcpVersion=0.3.0`，`maxMcpVersion=0.3.x`）：0.3.7 MCP 与 0.3.7 sidecar 互通，
+`0.4.x` MCP 会被拒绝，不保留未验证的 0.4 forward-compat 窗口。升级顺序：
 
 1. 先用**旧 runtime/CLI/OS** 停止旧的 managed/attached/manual sidecar。不要依赖新
    supervisor 终止或替换旧实例。

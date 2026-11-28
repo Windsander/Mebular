@@ -132,7 +132,7 @@ export async function startFakeSidecar(options = {}) {
         apiVersion: 1,
         capabilityApiVersion: 1,
         minMcpVersion: '0.3.0',
-        maxMcpVersion: '0.4.x',
+        maxMcpVersion: '0.3.x',
         capabilities: {
           ingest: true,
           recall: true,
@@ -279,7 +279,7 @@ export async function startFakeSidecar(options = {}) {
     apiVersion: 1,
     capabilityApiVersion: 1,
     minMcpVersion: '0.3.0',
-    maxMcpVersion: '0.4.x',
+    maxMcpVersion: '0.3.x',
     state: 'ready',
     degraded: false,
     tokenFile,

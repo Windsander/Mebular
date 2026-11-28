@@ -18,7 +18,7 @@ the unified release train; no release ships the DSH plugin alone. `bump_version.
 all eight packages, and `verify:release-version` / the publish workflow enforce the same
 version. Signing, notarization, and auto-update are not part of this release.
 
-**v0.3.7** is the release candidate on `release/0.3.7`. It ships the complete Memory
+**v0.3.7** is the release candidate on `release/v0.3.7`. It ships the complete Memory
 Intervention Policy implementation (previously designed under the 0.4.0 label), and every
 manifest, lock file, MCP/sidecar/OpenCode version source and Hermes `plugin.yaml` is at
 `0.3.7`. There is no tag, push or publish yet. Real API provider validation is **deferred**

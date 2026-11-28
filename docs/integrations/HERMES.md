@@ -3,7 +3,7 @@
 [中文](HERMES_CN.md) · [Documentation index](../README.md) · [Memory Runtime guide](../guides/MEMORY_RUNTIME.md)
 
 > **Version status:** published release bundles pin **0.3.5**. **0.3.7** is the release
-> candidate on `release/0.3.7` (not yet tagged or published); the `v0.3.7` bundle/install
+> candidate on `release/v0.3.7` (not yet tagged or published); the `v0.3.7` bundle/install
 > commands are not available until the 0.3.7 gates pass.
 
 Hermes can use Mebular in two layers, and they can run together:

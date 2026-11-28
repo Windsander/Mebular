@@ -186,7 +186,7 @@ Runnable examples: [`examples/quickstart`](examples/quickstart/index.mjs) writes
 </details>
 
 **Release status.** v0.3.5 is the latest published release. v0.3.7 is the release
-candidate for the Memory Intervention Policy line (prepared on `release/0.3.7`, not yet
+candidate for the Memory Intervention Policy line (prepared on `release/v0.3.7`, not yet
 tagged or published) and ships the **complete implementation** of that design. Real API
 provider validation is **deferred**; DSH, Hermes, OpenChamber Desktop and real
 host-model runs remain release gates. The current real-evidence matrix stands at 6/20

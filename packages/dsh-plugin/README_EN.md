@@ -1,5 +1,5 @@
 > **Version status:** published installs pin **0.3.5**. **0.3.7** is the release candidate
-> on `release/0.3.7` (not yet tagged or published); keep `dsh plugin add` on `0.3.5` until
+> on `release/v0.3.7` (not yet tagged or published); keep `dsh plugin add` on `0.3.5` until
 > the 0.3.7 gates pass.
 
 <div align="center">

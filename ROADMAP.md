@@ -25,7 +25,7 @@ Current release: [v0.3.5](https://github.com/Windsander/Mebular/releases/tag/v0.
 
 The 0.3.7 line is the **Memory Intervention Policy** — the main theme is moving memory
 from recall to **timing**: when to bring a memory back, and how deep to bring it. It
-ships the complete implementation; the release is prepared on `release/0.3.7` and is
+ships the complete implementation; the release is prepared on `release/v0.3.7` and is
 **not tagged or published yet**. Real API provider validation is deferred; DSH, Hermes,
 OpenChamber Desktop and real host-model evidence remain release gates.
 

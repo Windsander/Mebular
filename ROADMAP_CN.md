@@ -24,7 +24,7 @@
 ## 当前 — v0.3.7（发布候选）
 
 0.3.7 的主线是**记忆介入策略（Memory Intervention Policy）**：把记忆从“召回”推进到
-**时机**——什么时候把记忆带回来、带多深。它包含完整实现，在 `release/0.3.7` 准备，
+**时机**——什么时候把记忆带回来、带多深。它包含完整实现，在 `release/v0.3.7` 准备，
 **尚未打 tag 或发布**。真实 API provider 校验延后；DSH、Hermes、OpenChamber Desktop 与
 真实宿主模型仍是发布门禁。
 

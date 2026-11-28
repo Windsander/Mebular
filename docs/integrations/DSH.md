@@ -3,7 +3,7 @@
 [中文](DSH_CN.md) · [Documentation index](../README.md)
 
 > **Version status:** the latest published installs pin **0.3.5**. **0.3.7** is the
-> release candidate on `release/0.3.7` (not yet tagged or published); keep install commands
+> release candidate on `release/v0.3.7` (not yet tagged or published); keep install commands
 > on `0.3.5` until the 0.3.7 gates pass.
 
 `@mebular/dsh-plugin` brings Mebular's memory and task graph into

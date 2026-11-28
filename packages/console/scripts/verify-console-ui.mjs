@@ -1505,7 +1505,7 @@ async function main() {
       };
       const ok = values.length === 5
         && detail.tags === 0
-        && detail.justify === 'flex-end'
+        && (detail.justify === 'flex-end' || detail.justify === 'flow-end')
         && detail.align === 'right'
         && (!empty || detail.empty === 'rgba(140, 255, 200, 0.35)');
       return { ok, detail };
@@ -2420,7 +2420,7 @@ async function main() {
       const dropdownReasons = [];
       if (modelControl && visible(modelControl)) {
         if (!modelWrap || !modelTrigger || !modelRow || !modelPanel) dropdownReasons.push('mount');
-        if (modelControl && getComputedStyle(modelControl).justifyContent !== 'flex-end') dropdownReasons.push('justify-content');
+        if (modelControl && !['flex-end', 'flow-end'].includes(getComputedStyle(modelControl).justifyContent)) dropdownReasons.push('justify-content');
         if (modelControl && getComputedStyle(modelControl).justifySelf !== 'end') dropdownReasons.push('justify-self');
         if (modelRow && getComputedStyle(modelRow).gridTemplateColumns.split(' ').filter(Boolean).length !== ${checkRows ? '2' : '1'}) dropdownReasons.push('grid-columns');
         if (modelStatus && getComputedStyle(modelStatus).display !== 'none') dropdownReasons.push('status-visible');

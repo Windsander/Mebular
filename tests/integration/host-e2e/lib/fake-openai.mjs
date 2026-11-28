@@ -34,10 +34,11 @@ function isSummaryRequest(body) {
 }
 
 /**
- * @param {{ reply?: string, summary?: string }} [options]
+ * @param {{ reply?: string, summary?: string, replyFor?: (body: any) => string | null | undefined }} [options]
  */
 export async function createFakeOpenAI(options = {}) {
   const reply = options.reply ?? 'OK';
+  const replyFor = typeof options.replyFor === 'function' ? options.replyFor : null;
   // OpenCode validates the summary template. Keep the required headings so the
   // real host reaches session.compaction.ended without a real model.
   const summary = options.summary ?? [
@@ -78,7 +79,10 @@ export async function createFakeOpenAI(options = {}) {
       return;
     }
     if (req.method === 'POST' && url.pathname.endsWith('/chat/completions')) {
-      const content = isSummaryRequest(body) ? summary : reply;
+      const override = replyFor?.(body);
+      const content = typeof override === 'string' && override.length > 0
+        ? override
+        : isSummaryRequest(body) ? summary : reply;
       state.requests.push({
         at: new Date().toISOString(),
         path: url.pathname,

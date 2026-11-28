@@ -2,6 +2,10 @@
 
 [English](OPENCHAMBER.md) · [返回文档索引](../README.md) · [Memory Runtime 指南](../guides/MEMORY_RUNTIME_CN.md)
 
+> **版本状态：** 最新已发布安装仍固定 **0.3.5**。**0.3.7** 是 `release/v0.3.7` 上的发布
+> 候选（尚未打 tag 或发布），包含记忆介入策略的完整实现；0.3.7 门禁通过前，已发布安装
+> 保持 `0.3.5`。
+
 OpenChamber 是基于 OpenCode 的桌面宿主。Mebular 通过两层接入：
 
 | 层 | 得到什么 | 默认 |

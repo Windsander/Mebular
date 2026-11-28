@@ -10,8 +10,10 @@
 //   turn 2:          an explicit memory re-ask must become `reasked`; it must
 //                    never become `missed`, even though the shadow decision
 //                    said silent.
-// The local policy counters must count the applied `spoken`, not the shadow
-// `silent`. Only the OpenAI-compatible provider is fake (same convention as
+// The local policy counters must record the applied `spoken` in `diagnostic`
+// (W6 keeps shadow/model out of the adaptive `global` bucket). The shadow
+// `silent` advice must never be counted as silent or missed. Only the
+// OpenAI-compatible provider is fake (same convention as
 // opencode-real-runtime.mjs). No sidecar/plugin behaviour is mocked.
 
 import { spawn } from 'node:child_process';
@@ -162,6 +164,27 @@ async function readPolicyState(path) {
   }
 }
 
+// W6 起 policy state 是 v2：adaptive 计数在 global，非 heuristic（shadow/model）
+// 只写 diagnostic。shadow E2E 的计数必须落在 diagnostic，global 必须保持 0。
+const POLICY_COUNT_KEYS = ['spoken', 'silent', 'accepted', 'ignored', 'reasked', 'corrected', 'dismissed', 'missed', 'too_shallow', 'too_deep'];
+
+function countOf(bucket, key) {
+  return (bucket && typeof bucket === 'object' ? bucket[key] : undefined) ?? 0;
+}
+
+function countsAllZero(bucket) {
+  return Boolean(bucket) && typeof bucket === 'object'
+    && POLICY_COUNT_KEYS.every((key) => key in bucket && countOf(bucket, key) === 0);
+}
+
+/** diagnostic 除 allow 列出的键必须为 0；逐项核对完整 10 个计数（键必须都在）。 */
+function diagnosticOnly(bucket, allowedKeys) {
+  if (!bucket || typeof bucket !== 'object') return false;
+  return POLICY_COUNT_KEYS.every((key) => key in bucket && (
+    allowedKeys.includes(key) ? countOf(bucket, key) >= 1 : countOf(bucket, key) === 0
+  ));
+}
+
 async function main() {
   const keep = process.argv.includes('--keep');
   const runRoot = join(tmpdir(), `mebular-intervention-shadow-e2e-${process.pid}-${Date.now()}`);
@@ -302,8 +325,16 @@ async function main() {
       const args = sessionID
         ? ['run', '--session', sessionID, '--server', serverUrl, '--format', 'json', prompt]
         : ['run', '--server', serverUrl, '--format', 'json', prompt];
-      const result = await runProcess(OPENCODE_BIN, args, { env: baseEnv, cwd: project, timeoutMs: 120000 });
-      const id = sessionID ?? parseSessionID(result.stdout);
+      // 同 outcome E2E：首轮可能和刚启动的 server 竞争，未拿到 sessionID 时重试。
+      const attempts = sessionID ? 1 : 3;
+      let result;
+      let id;
+      for (let attempt = 0; attempt < attempts; attempt += 1) {
+        result = await runProcess(OPENCODE_BIN, args, { env: baseEnv, cwd: project, timeoutMs: 120000 });
+        id = sessionID ?? parseSessionID(result.stdout);
+        if (result.code === 0 && !result.timedOut && typeof id === 'string' && id.startsWith('ses')) break;
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
+      }
       check(`真实 opencode turn 退出 0（${prompt.slice(0, 24)}…）`,
         result.code === 0 && !result.timedOut && typeof id === 'string' && id.startsWith('ses'),
         (result.stderr || result.stdout).slice(-400));
@@ -332,14 +363,15 @@ async function main() {
 
     const stateS1 = await waitFor(async () => {
       const state = await readPolicyState(policyStatePath);
-      const counts = state?.global ?? {};
-      return (counts.spoken ?? 0) >= 1 ? state : null;
+      return countOf(state?.diagnostic, 'spoken') >= 1 ? state : null;
     }, { timeoutMs: 10000 });
-    check('shadow 的本机 policy 统计按 applied 记 spoken 而不是 silent',
+    check('shadow 的本机 policy 统计写 diagnostic.spoken，global 保持 0（W6）',
       Boolean(stateS1)
-      && (stateS1.global.spoken ?? 0) >= 1
-      && (stateS1.global.silent ?? 0) === 0,
-      JSON.stringify(stateS1?.global));
+      && stateS1.version === 2
+      // applied=speak 与 shadow 建议 silent 不同：只有真实生效的 speak 被计数。
+      && diagnosticOnly(stateS1.diagnostic, ['spoken'])
+      && countsAllZero(stateS1.global),
+      JSON.stringify({ global: stateS1?.global, diagnostic: stateS1?.diagnostic }));
 
     // Explicit memory re-ask. With applied=speak this is `reasked`; if the host
     // attributed the shadow decision it would post `missed` instead.
@@ -361,14 +393,19 @@ async function main() {
 
     const stateS2 = await waitFor(async () => {
       const state = await readPolicyState(policyStatePath);
-      const counts = state?.global ?? {};
-      return (counts.reasked ?? 0) >= 1 ? state : null;
+      return countOf(state?.diagnostic, 'reasked') >= 1 ? state : null;
     }, { timeoutMs: 10000 });
-    check('shadow 的 outcome 也按 applied 归因写入本机统计',
+    check('shadow 的 outcome 也只写 diagnostic（reasked），global 保持 0 且无 missed',
       Boolean(stateS2)
-      && (stateS2.global.reasked ?? 0) >= 1
-      && (stateS2.global.missed ?? 0) === 0,
-      JSON.stringify(stateS2?.global));
+      && stateS2.version === 2
+      && countOf(stateS2.diagnostic, 'reasked') >= 1
+      && countOf(stateS2.diagnostic, 'spoken') >= 1
+      && countOf(stateS2.diagnostic, 'missed') === 0
+      // 其余 outcome 诊断计数必须为 0（完整核对，不只 missed）。
+      && ['accepted', 'ignored', 'corrected', 'dismissed', 'too_shallow', 'too_deep']
+        .every((key) => countOf(stateS2.diagnostic, key) === 0)
+      && countsAllZero(stateS2.global),
+      JSON.stringify({ global: stateS2?.global, diagnostic: stateS2?.diagnostic }));
 
     if (serve.exitCode !== null) {
       check('opencode serve 全程存活', false, `exit=${serve.exitCode} ${serveErr.slice(-300)}`);

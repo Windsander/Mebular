@@ -96,6 +96,63 @@ async function waitFor(predicate, { timeoutMs = 20000, intervalMs = 100 } = {}) 
   return null;
 }
 
+const sleep = (ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
+
+// `opencode run --server` 偶发在 server 刚打印 listening 时拿不到连接，退出码 1
+// 且 stderr 只有 "Could not reach server at ..."。这属于宿主启动竞争，不是产品
+// 断言失败；只对这种传输层症状做有界重试，其它失败立即交给最终 check 判定。
+const TRANSIENT_TRANSPORT_PATTERNS = [
+  /could not reach server/i,
+  /econnrefused/i,
+  /econnreset/i,
+  /connection refused/i,
+  /socket hang up/i,
+  /fetch failed/i,
+  /eai_again/i,
+  /etimedout/i,
+];
+
+function isTransientTransportFailure(stdout, stderr) {
+  const text = `${stdout ?? ''}\n${stderr ?? ''}`;
+  return TRANSIENT_TRANSPORT_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+/**
+ * Real readiness probe: use the same `opencode` CLI client path as
+ * `opencode run --server` and require a V2 `/api/info` JSON body. The serve
+ * log line alone only proves the listener started; it does not prove the CLI
+ * client can complete a request yet.
+ */
+async function waitForServerHealth(serverUrl, { env, cwd, timeoutMs = 30000, intervalMs = 250 } = {}) {
+  const startedAt = Date.now();
+  let attempts = 0;
+  let lastDetail = '';
+  while (Date.now() - startedAt < timeoutMs) {
+    attempts += 1;
+    const probe = await runProcess(OPENCODE_BIN, ['api', 'GET', '/api/info', '--server', serverUrl], {
+      env,
+      cwd,
+      timeoutMs: 8000,
+    });
+    const text = `${probe.stdout}\n${probe.stderr}`.trim();
+    if (probe.code === 0 && !probe.timedOut) {
+      try {
+        const info = JSON.parse(probe.stdout);
+        if (typeof info?.version === 'string' && info.version.length > 0) {
+          return { ok: true, attempts, elapsedMs: Date.now() - startedAt, version: info.version, detail: '' };
+        }
+        lastDetail = `unexpected /api/info payload: ${probe.stdout.slice(0, 200)}`;
+      } catch {
+        lastDetail = `unparseable /api/info payload: ${probe.stdout.slice(0, 200)}`;
+      }
+    } else {
+      lastDetail = text.slice(-300);
+    }
+    await sleep(intervalMs);
+  }
+  return { ok: false, attempts, elapsedMs: Date.now() - startedAt, version: null, detail: lastDetail };
+}
+
 function opencodeConfig({ providerUrl, pluginOptions }) {
   return {
     $schema: 'https://opencode.ai/config.json',
@@ -164,15 +221,18 @@ async function waitOutcome(discovery, traceId, kind, { timeoutMs = 20000 } = {})
 
 const POLICY_COUNT_KEYS = ['spoken', 'silent', 'accepted', 'ignored', 'reasked', 'corrected', 'dismissed', 'missed', 'too_shallow', 'too_deep'];
 
+/** 完整核对 10 个计数：键必须都在且值为 0（避免只查 3 个的旧断言）。 */
+function countsAllZero(counts) {
+  return Boolean(counts) && typeof counts === 'object'
+    && POLICY_COUNT_KEYS.every((key) => key in counts && (counts[key] ?? 0) === 0);
+}
+
 // W6 起 policy state 是 v2：adaptive 计数在 global，model/shadow/gate 只写
 // diagnostic。reset 必须同时清空三者，而不是只清 v1 的单层计数。
 function policyAllZero(state) {
   if (!state || state.version !== 2) return false;
-  const allZero = (counts) => counts
-    && typeof counts === 'object'
-    && POLICY_COUNT_KEYS.every((key) => (counts[key] ?? 0) === 0);
-  if (!allZero(state.global ?? {})) return false;
-  if (!allZero(state.diagnostic ?? {})) return false;
+  if (!countsAllZero(state.global ?? {})) return false;
+  if (!countsAllZero(state.diagnostic ?? {})) return false;
   return state.domains && typeof state.domains === 'object' && Object.keys(state.domains).length === 0;
 }
 
@@ -350,16 +410,77 @@ async function main() {
     const ready = await waitFor(() => /server listening on (http:\/\/\S+)/.test(serveOut), {
       timeoutMs: 30000,
     });
-    check('真实 opencode serve 启动', Boolean(ready), (serveOut || serveErr).slice(-500));
-    if (!ready) return 1;
+    if (!ready) {
+      check('真实 opencode serve 启动', false, (serveOut || serveErr).slice(-500));
+      return 1;
+    }
     const serverUrl = /server listening on (http:\/\/\S+)/.exec(serveOut)?.[1];
+
+    // 不只依赖 listening 日志：用真实 CLI 客户端探一次 V2 health，确认
+    // `opencode run --server` 走的客户端路径已经可用。
+    const health = await waitForServerHealth(serverUrl, { env: baseEnv, cwd: project });
+    console.log(`  · serve health /api/info：${health.ok ? 'ready' : 'not ready'}`
+      + `（${health.attempts} 次探测 / ${health.elapsedMs}ms${health.version ? `，v${health.version}` : ''}）`);
+    check('真实 opencode serve 启动', health.ok,
+      health.ok
+        ? `server listening + /api/info ${health.attempts} 次探测 / ${health.elapsedMs}ms`
+        : `health 未就绪：${health.attempts} 次探测 / ${health.elapsedMs}ms；${health.detail}`);
+    if (!health.ok) return 1;
+
+    // 可选的有界 warmup：首轮 `Could not reach server` 就是这条真实 run 路径与
+    // server 启动竞争。warmup 自身不是断言（保持 47 项契约不变），只吸收启动
+    // 抖动；上限 3 次、每次等待 120s、失败原因写日志，非传输类失败立即停止。
+    const parsedWarmupAttempts = Number.parseInt(process.env.MEBULAR_OUTCOME_WARMUP_ATTEMPTS ?? '3', 10);
+    const warmupAttempts = Number.isFinite(parsedWarmupAttempts)
+      ? Math.max(0, parsedWarmupAttempts)
+      : 3;
+    if (warmupAttempts === 0) {
+      console.log('  · warmup 已跳过（MEBULAR_OUTCOME_WARMUP_ATTEMPTS=0）');
+    }
+    for (let attempt = 1; attempt <= warmupAttempts; attempt += 1) {
+      const startedAt = Date.now();
+      const warmup = await runProcess(OPENCODE_BIN, [
+        'run', '--archived', '--server', serverUrl, '--format', 'json', 'hi',
+      ], { env: baseEnv, cwd: project, timeoutMs: 120000 });
+      const warmupSession = parseSessionID(warmup.stdout);
+      const warmupOk = warmup.code === 0 && !warmup.timedOut
+        && typeof warmupSession === 'string' && warmupSession.startsWith('ses');
+      console.log(`  · warmup run ${attempt}/${warmupAttempts}：${warmupOk ? 'ok' : 'failed'}`
+        + `（${Date.now() - startedAt}ms${warmupSession ? `，${warmupSession}` : ''}）`);
+      if (warmupOk) break;
+      if (!isTransientTransportFailure(warmup.stdout, warmup.stderr)) {
+        console.log(`  · warmup 非传输类失败，停止重试：${(warmup.stderr || warmup.stdout).slice(-200)}`);
+        break;
+      }
+      await sleep(500 * attempt);
+    }
 
     const turn = async (sessionID, prompt) => {
       const args = sessionID
         ? ['run', '--session', sessionID, '--server', serverUrl, '--format', 'json', prompt]
         : ['run', '--server', serverUrl, '--format', 'json', prompt];
-      const result = await runProcess(OPENCODE_BIN, args, { env: baseEnv, cwd: project, timeoutMs: 120000 });
-      const id = sessionID ?? parseSessionID(result.stdout);
+      // 首轮最多 3 次、后续轮最多 2 次；只有传输层症状才重试，真实断言失败
+      // 不在重试里被吞掉。最终仍由同一个 check 判定，断言数不变。
+      const maxAttempts = sessionID ? 2 : 3;
+      let result = null;
+      let id = sessionID ?? null;
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        result = await runProcess(OPENCODE_BIN, args, { env: baseEnv, cwd: project, timeoutMs: 120000 });
+        id = sessionID ?? parseSessionID(result.stdout);
+        const ok = result.code === 0 && !result.timedOut
+          && typeof id === 'string' && id.startsWith('ses');
+        if (ok) break;
+        if (!isTransientTransportFailure(result.stdout, result.stderr) || attempt === maxAttempts) {
+          if (attempt > 1) {
+            console.log(`  · turn 重试耗尽 ${attempt}/${maxAttempts}（${prompt.slice(0, 24)}…）：`
+              + `${(result.stderr || result.stdout).slice(-200)}`);
+          }
+          break;
+        }
+        console.log(`  · turn 传输失败重试 ${attempt}/${maxAttempts}（${prompt.slice(0, 24)}…）：`
+          + `${(result.stderr || result.stdout).slice(-200)}`);
+        await sleep(300 * attempt);
+      }
       check(`真实 opencode turn 退出 0（${prompt.slice(0, 24)}…）`,
         result.code === 0 && !result.timedOut && typeof id === 'string' && id.startsWith('ses'),
         (result.stderr || result.stdout).slice(-400));
@@ -401,11 +522,15 @@ async function main() {
     // ---- Scenario B: silent -> explicit memory follow-up => missed ----------
     const sessionB = await turn(null, '你好');
     const traceB1 = await findTrace(discovery, { threadId: sessionB, includes: '你好' });
-    check('B1 闲聊得到 silent 决策且未注入片段',
+    check('B1 闲聊得到 silent 决策且未注入片段（gate trace policyEligible=false）',
       traceB1?.decision?.action === 'silent'
       && traceB1?.decision?.reason === 'chitchat'
       && traceB1?.applied?.fragments === 0
-      && (traceB1?.counts?.injected ?? 0) === 0,
+      && (traceB1?.counts?.injected ?? 0) === 0
+      // W6：chitchat 是 gate/non-intervention，trace 必须显式标 policyEligible=false，
+      // 否则后续 missed 会被错误写进 policy global/diagnostic。
+      && traceB1?.applied?.policyEligible === false
+      && traceB1?.applied?.adaptiveEligible === undefined,
       JSON.stringify({ decision: traceB1?.decision, applied: traceB1?.applied }));
     await turn(sessionB, '你还记得刚才那个 deepwork 主题吗');
     const traceB1Missed = await waitOutcome(discovery, traceB1.id, 'missed');
@@ -466,10 +591,9 @@ async function main() {
       // W6：B1 是 gate/non-intervention（policyEligible=false），missed 只落
       // trace，不得进入 policy global/diagnostic；旧 0.3 断言要求 missed=1。
       && (stateBefore.global.missed ?? 0) === 0
-      // 本场景的 eligible 决策都是 heuristic/adaptive，diagnostic 必须为空。
-      && (stateBefore.diagnostic.spoken ?? 0) === 0
-      && (stateBefore.diagnostic.silent ?? 0) === 0
-      && (stateBefore.diagnostic.missed ?? 0) === 0
+      // 本场景的 eligible 决策都是 heuristic/adaptive，diagnostic 必须完整为空：
+      // 逐项核对 10 个计数（不只 spoken/silent/missed）。
+      && countsAllZero(stateBefore.diagnostic)
       && Object.keys(stateBefore.domains ?? {}).length > 0,
       JSON.stringify({
         global: stateBefore?.global,

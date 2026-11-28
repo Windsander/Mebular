@@ -128,6 +128,7 @@ async function readSidecarJsonLines(home, relativePath) {
  *   deviceName?: string,
  *   network?: Record<string, unknown> | null,
  *   sync?: Record<string, unknown> | null,
+ *   sidecarConfig?: Record<string, unknown> | null,
  * }} [options]
  */
 export async function startRealRuntime(options = {}) {
@@ -143,6 +144,15 @@ export async function startRealRuntime(options = {}) {
   const cloudRoot = join(root, 'cloud-root');
   await mkdir(home, { recursive: true });
   await mkdir(cloudRoot, { recursive: true });
+  if (options.sidecarConfig !== undefined && options.sidecarConfig !== null) {
+    const dataDir = join(home, 'memory-runtime');
+    await mkdir(dataDir, { recursive: true, mode: 0o700 });
+    await writeFile(
+      join(dataDir, 'config.json'),
+      `${JSON.stringify(options.sidecarConfig, null, 2)}\n`,
+      { encoding: 'utf8', mode: 0o600 },
+    );
+  }
 
   const master = options.master ?? await new IdentityManager().generateUserMasterKey();
   const deviceId = typeof options.deviceId === 'string' && options.deviceId.length > 0

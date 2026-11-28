@@ -1,0 +1,451 @@
+{
+  "evidenceLevel": "R-SM",
+  "host": "none (real sidecar HTTP; adapter two-round measured separately)",
+  "model": {
+    "id": "Qwen3-4B-Q4_K_M.gguf",
+    "sha256": "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
+    "engine": "llama.cpp b12017"
+  },
+  "samples": [
+    {
+      "sample": 0,
+      "threadId": "th_w7_local_0",
+      "seed": {
+        "records": 1,
+        "duplicates": 0,
+        "failed": 0
+      },
+      "first": {
+        "latencyMs": 84,
+        "meta": {
+          "source": "heuristic",
+          "resolvedSource": null,
+          "configuredSource": "local",
+          "prefetched": false,
+          "turnId": "turn_seed_0",
+          "cueFingerprint": [
+            "d0d7cd975516463f"
+          ],
+          "candidateFingerprint": [
+            "b25f5cdc8ad1c273"
+          ],
+          "fallbackReason": "prefetch_miss"
+        }
+      },
+      "hit": {
+        "latencyMs": 60,
+        "meta": {
+          "source": "local",
+          "resolvedSource": "local",
+          "configuredSource": "local",
+          "prefetched": true,
+          "turnId": "turn_hit_0_8",
+          "cueFingerprint": [
+            "d0d7cd975516463f"
+          ],
+          "candidateFingerprint": [
+            "b25f5cdc8ad1c273"
+          ]
+        },
+        "decision": {
+          "action": "speak",
+          "depth": "gist",
+          "confidence": 0.72,
+          "reason": "The untrusted data provides a specific instruction related to the 'deepwork' topic, which is targeted and does not require further clarification or deferment.注入",
+          "policyVersion": "model:db541249",
+          "enforced": true,
+          "scores": {
+            "top": 0.6995,
+            "specificity": 0.7,
+            "novelty": 1,
+            "recentUseless": 0,
+            "depthFit": 1
+          },
+          "planner": {
+            "configuredSource": "local",
+            "resolvedSource": "local",
+            "latencyMs": 0,
+            "fallbackReason": null,
+            "prefetched": true,
+            "prefetchState": "hit",
+            "planAgeMs": 391,
+            "planId": "lp_2b395d04377245c8989d211fe86ececc",
+            "cueMatched": true,
+            "model": "Qwen3-4B-Q4_K_M.gguf",
+            "attempts": [
+              {
+                "source": "local",
+                "outcome": "hit",
+                "latencyMs": 0
+              }
+            ]
+          }
+        },
+        "traceId": "tr_5f6ac3f0b7f84fe8a4e6b66ae8d53613"
+      },
+      "prefetchReadyMs": 46050,
+      "ok": true
+    },
+    {
+      "sample": 1,
+      "threadId": "th_w7_local_1",
+      "seed": {
+        "records": 1,
+        "duplicates": 0,
+        "failed": 0
+      },
+      "first": {
+        "latencyMs": 68,
+        "meta": {
+          "source": "heuristic",
+          "resolvedSource": null,
+          "configuredSource": "local",
+          "prefetched": false,
+          "turnId": "turn_seed_1",
+          "cueFingerprint": [
+            "d0d7cd975516463f"
+          ],
+          "candidateFingerprint": [
+            "2032fceeb7533657",
+            "b25f5cdc8ad1c273"
+          ],
+          "fallbackReason": "prefetch_miss"
+        }
+      },
+      "hit": {
+        "latencyMs": 68,
+        "meta": {
+          "source": "local",
+          "resolvedSource": "local",
+          "configuredSource": "local",
+          "prefetched": true,
+          "turnId": "turn_hit_1_7",
+          "cueFingerprint": [
+            "d0d7cd975516463f"
+          ],
+          "candidateFingerprint": [
+            "2032fceeb7533657",
+            "b25f5cdc8ad1c273"
+          ]
+        },
+        "decision": {
+          "action": "speak",
+          "depth": "gist",
+          "confidence": 0.72,
+          "reason": "The memory fragment indicates a preference for using a dark theme for the 'deepwork' topic, which is relevant to the current context.",
+          "policyVersion": "model:7fea43c6",
+          "enforced": true,
+          "scores": {
+            "top": 0.6995,
+            "specificity": 0.7,
+            "novelty": 1,
+            "recentUseless": 0,
+            "depthFit": 1
+          },
+          "planner": {
+            "configuredSource": "local",
+            "resolvedSource": "local",
+            "latencyMs": 1,
+            "fallbackReason": null,
+            "prefetched": true,
+            "prefetchState": "hit",
+            "planAgeMs": 2140,
+            "planId": "lp_79759ab1c4f346d5acb758b2fea304f2",
+            "cueMatched": true,
+            "model": "Qwen3-4B-Q4_K_M.gguf",
+            "attempts": [
+              {
+                "source": "local",
+                "outcome": "hit",
+                "latencyMs": 0
+              }
+            ]
+          }
+        },
+        "traceId": "tr_0beb9f3396df4ce9b4ed5d5fb068694e"
+      },
+      "prefetchReadyMs": 40537,
+      "ok": true
+    },
+    {
+      "sample": 2,
+      "threadId": "th_w7_local_2",
+      "seed": {
+        "records": 1,
+        "duplicates": 0,
+        "failed": 0
+      },
+      "first": {
+        "latencyMs": 45,
+        "meta": {
+          "source": "heuristic",
+          "resolvedSource": null,
+          "configuredSource": "local",
+          "prefetched": false,
+          "turnId": "turn_seed_2",
+          "cueFingerprint": [
+            "d0d7cd975516463f"
+          ],
+          "candidateFingerprint": [
+            "5c68e8bc05fb80a0",
+            "2032fceeb7533657",
+            "b25f5cdc8ad1c273"
+          ],
+          "fallbackReason": "prefetch_miss"
+        }
+      },
+      "hit": {
+        "latencyMs": 62,
+        "meta": {
+          "source": "local",
+          "resolvedSource": "local",
+          "configuredSource": "local",
+          "prefetched": true,
+          "turnId": "turn_hit_2_7",
+          "cueFingerprint": [
+            "d0d7cd975516463f"
+          ],
+          "candidateFingerprint": [
+            "5c68e8bc05fb80a0",
+            "2032fceeb7533657",
+            "b25f5cdc8ad1c273"
+          ]
+        },
+        "decision": {
+          "action": "speak",
+          "depth": "gist",
+          "confidence": 0.72,
+          "reason": "The top candidate has the highest confidence and is relevant to the 'deepwork' topic, indicating a consistent preference for dark themes in the deepwork context",
+          "policyVersion": "model:b9ba0482",
+          "enforced": true,
+          "scores": {
+            "top": 0.6995,
+            "specificity": 0.7,
+            "novelty": 1,
+            "recentUseless": 0,
+            "depthFit": 1
+          },
+          "planner": {
+            "configuredSource": "local",
+            "resolvedSource": "local",
+            "latencyMs": 0,
+            "fallbackReason": null,
+            "prefetched": true,
+            "prefetchState": "hit",
+            "planAgeMs": 975,
+            "planId": "lp_a25c5c6e9bf0496bb6135125083554cd",
+            "cueMatched": true,
+            "model": "Qwen3-4B-Q4_K_M.gguf",
+            "attempts": [
+              {
+                "source": "local",
+                "outcome": "hit",
+                "latencyMs": 0
+              }
+            ]
+          }
+        },
+        "traceId": "tr_a053d7e558d4420c9f4d8e701430ef9c"
+      },
+      "prefetchReadyMs": 40544,
+      "ok": true
+    },
+    {
+      "sample": 3,
+      "threadId": "th_w7_local_3",
+      "seed": {
+        "records": 1,
+        "duplicates": 0,
+        "failed": 0
+      },
+      "first": {
+        "latencyMs": 73,
+        "meta": {
+          "source": "heuristic",
+          "resolvedSource": null,
+          "configuredSource": "local",
+          "prefetched": false,
+          "turnId": "turn_seed_3",
+          "cueFingerprint": [
+            "d0d7cd975516463f"
+          ],
+          "candidateFingerprint": [
+            "4471913544d54591",
+            "5c68e8bc05fb80a0",
+            "2032fceeb7533657"
+          ],
+          "fallbackReason": "prefetch_miss"
+        }
+      },
+      "hit": {
+        "latencyMs": 82,
+        "meta": {
+          "source": "local",
+          "resolvedSource": "local",
+          "configuredSource": "local",
+          "prefetched": true,
+          "turnId": "turn_hit_3_7",
+          "cueFingerprint": [
+            "d0d7cd975516463f"
+          ],
+          "candidateFingerprint": [
+            "4471913544d54591",
+            "5c68e8bc05fb80a0",
+            "2032fceeb7533657"
+          ]
+        },
+        "decision": {
+          "action": "speak",
+          "depth": "gist",
+          "confidence": 0.72,
+          "reason": "The top candidate has the highest confidence and is relevant to the 'deepwork' topic, indicating a consistent preference for dark themes in the 'deepwork' topic",
+          "policyVersion": "model:2baac10f",
+          "enforced": true,
+          "scores": {
+            "top": 0.6995,
+            "specificity": 0.7,
+            "novelty": 1,
+            "recentUseless": 0,
+            "depthFit": 1
+          },
+          "planner": {
+            "configuredSource": "local",
+            "resolvedSource": "local",
+            "latencyMs": 0,
+            "fallbackReason": null,
+            "prefetched": true,
+            "prefetchState": "hit",
+            "planAgeMs": 275,
+            "planId": "lp_e398dd4332334b44a40a621b7f949d46",
+            "cueMatched": true,
+            "model": "Qwen3-4B-Q4_K_M.gguf",
+            "attempts": [
+              {
+                "source": "local",
+                "outcome": "hit",
+                "latencyMs": 0
+              }
+            ]
+          }
+        },
+        "traceId": "tr_c3b630f8f18d4c2795157edf7dc050f2"
+      },
+      "prefetchReadyMs": 40550,
+      "ok": true
+    },
+    {
+      "sample": 4,
+      "threadId": "th_w7_local_4",
+      "seed": {
+        "records": 1,
+        "duplicates": 0,
+        "failed": 0
+      },
+      "first": {
+        "latencyMs": 42,
+        "meta": {
+          "source": "heuristic",
+          "resolvedSource": null,
+          "configuredSource": "local",
+          "prefetched": false,
+          "turnId": "turn_seed_4",
+          "cueFingerprint": [
+            "d0d7cd975516463f"
+          ],
+          "candidateFingerprint": [
+            "7978e387f2aaa395",
+            "4471913544d54591",
+            "5c68e8bc05fb80a0"
+          ],
+          "fallbackReason": "prefetch_miss"
+        }
+      },
+      "hit": {
+        "latencyMs": 45,
+        "meta": {
+          "source": "local",
+          "resolvedSource": "local",
+          "configuredSource": "local",
+          "prefetched": true,
+          "turnId": "turn_hit_4_7",
+          "cueFingerprint": [
+            "d0d7cd975516463f"
+          ],
+          "candidateFingerprint": [
+            "7978e387f2aaa395",
+            "4471913544d54591",
+            "5c68e8bc05fb80a0"
+          ]
+        },
+        "decision": {
+          "action": "speak",
+          "depth": "gist",
+          "confidence": 0.72,
+          "reason": "The user has requested to use a dark theme for the deepwork topic, and the memory fragment provides a clear instruction that aligns with the current context.",
+          "policyVersion": "model:e4284694",
+          "enforced": true,
+          "scores": {
+            "top": 0.6995,
+            "specificity": 0.7,
+            "novelty": 1,
+            "recentUseless": 0,
+            "depthFit": 1
+          },
+          "planner": {
+            "configuredSource": "local",
+            "resolvedSource": "local",
+            "latencyMs": 0,
+            "fallbackReason": null,
+            "prefetched": true,
+            "prefetchState": "hit",
+            "planAgeMs": 762,
+            "planId": "lp_14262681d7ca48d8a3c1be4813f787fe",
+            "cueMatched": true,
+            "model": "Qwen3-4B-Q4_K_M.gguf",
+            "attempts": [
+              {
+                "source": "local",
+                "outcome": "hit",
+                "latencyMs": 0
+              }
+            ]
+          }
+        },
+        "traceId": "tr_329f97eaf1cf43d18da99d58c29d550f"
+      },
+      "prefetchReadyMs": 40396,
+      "ok": true
+    }
+  ],
+  "freshCue": {
+    "ok": true,
+    "meta": {
+      "source": "heuristic",
+      "resolvedSource": "heuristic",
+      "configuredSource": "local",
+      "prefetched": false,
+      "turnId": "turn_fresh",
+      "cueFingerprint": [
+        "0df8f75737ec8721",
+        "30e4e247e3e641ad",
+        "5ee8091a38eee188",
+        "7ad924a1c328e13c",
+        "7f5fab4d966e23f6",
+        "bd8dbd5724735390",
+        "c8b877f41c4f00c3",
+        "e751bca25e1fc515",
+        "f95c573777b426ca"
+      ],
+      "candidateFingerprint": []
+    }
+  },
+  "summary": {
+    "samples": 5,
+    "passed": 5,
+    "failed": 0,
+    "prefetchReadyP50Ms": 40544,
+    "prefetchReadyP95Ms": 46050,
+    "firstContextP95Ms": 84,
+    "hitContextP95Ms": 82
+  }
+}

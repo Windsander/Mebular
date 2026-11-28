@@ -10,10 +10,18 @@ The release operations for this repository live under `docs/operations/`:
 - [Changelog](CHANGELOG.md) — release notes; the `## [vX.Y.Z]` section is the source of the
   GitHub Release body.
 
-The current release line is **v0.3.5**: a single-version umbrella with eight npm packages at
-`0.3.5` (`core`, `service`, `skill`, `mcp`, `fleet`, `memory-runtime`,
+The current **published** release line is **v0.3.5**: a single-version umbrella with eight
+npm packages at `0.3.5` (`core`, `service`, `skill`, `mcp`, `fleet`, `memory-runtime`,
 `opencode-plugin`, `dsh-plugin`), and unsigned desktop installers for macOS, Windows and
 Linux. The DSH plugin is an isolated adapter published by its own npm job, but it follows
 the unified release train; no release ships the DSH plugin alone. `bump_version.sh` updates
 all eight packages, and `verify:release-version` / the publish workflow enforce the same
 version. Signing, notarization, and auto-update are not part of this release.
+
+**v0.3.7** is the release candidate on `release/v0.3.7`. It ships the complete Memory
+Intervention Policy implementation (previously designed under the 0.4.0 label), and every
+manifest, lock file, MCP/sidecar/OpenCode version source and Hermes `plugin.yaml` is at
+`0.3.7`. There is no tag, push or publish yet. Real API provider validation is **deferred**
+for this release; DSH, Hermes, OpenChamber Desktop and real host-model evidence remain
+0.3.7 release gates, and the 6/20 real-evidence matrix is **not** a pass. See the
+[0.3.7 release-readiness report](docs/quality/0.4.0-intervention/0.3.7-release-readiness.md).

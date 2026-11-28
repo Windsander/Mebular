@@ -1,0 +1,22 @@
+0.4.0 shadow attribution E2E（真实 opencode + 真实 sidecar + 真实插件）
+==========================================================================
+  ✓ 真实 sidecar discovery 写出 /memory-runtime/v1（http://127.0.0.1:60572/memory-runtime/v1）
+  ✓ host-token 文件包含真实 host token
+  ✓ /version 声明 shadow 能力且 mode=shadow（{"decision":true,"outcome":true,"shadow":true,"reset":true,"mode":"shadow","hostPlan":true,"hostPlanScopes":["session","turn"],"hostPlanTtlMs":60000,"configuredSource":"heuristic","sourcePresent":true,"planner":"heuristic","legacyModeIgnored":true,"legacyModeConflict":false,"diagnosticShadow":true,"deadline":1500,"warnings":["legacy_intervention_mode_ignored"]}）
+  ✓ 真实 capability 写入 user 域偏好 seed（{"records":1}）
+  ✓ opencode 可启动且 >= 2.2（opencode v2.4.1）
+  ✓ 真实 opencode serve 启动（server listening on http://127.0.0.1:60587
+）
+  ✓ 真实 opencode turn 退出 0（我的偏好…）（":"step_finish","timestamp":1795798936557,"sessionID":"ses_de20af804ffeQiMDYdQARHw0VW","part":{"id":"prt_21df52bed001a0TMhhMOFDJFVC","sessionID":"ses_de20af804ffeQiMDYdQARHw0VW","messageID":"msg_21df52aed00197FWb10Bt0l6dy","type":"step-finish","reason":"stop","snapshot":"8b3f82deacc9dd39f932c729c4d6ae3343180893","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}}}}
+）
+  ✓ S1 shadow 建议 silent，但真实注入按 baseline 发生（applied=speak）（{"decision":{"action":"silent","depth":"gist","confidence":0.6355,"reason":"low_confidence","policyVersion":"heuristic:6ad76d1e","enforced":false,"scores":{"top":0.6355,"specificity":0.7,"novelty":1,"recentUseless":0,"depthFit":1},"planner":{"configuredSource":"heuristic","resolvedSource":"heuristic","latencyMs":0,"fallbackReason":null,"prefetched":false}},"applied":{"action":"speak","depth":"gist","fragments":1,"domain":"user","wouldAction":"silent","wouldDepth":"gist","policyEligible":true},"counts":{"candidates":1,"expansions":1,"injected":1,"tokens":85}}）
+  ✓ S1 decision.action 与 applied.action 不同（{"decision":"silent","applied":"speak"}）
+  ✓ shadow 的本机 policy 统计写 diagnostic.spoken，global 保持 0（W6）（{"global":{"spoken":0,"silent":0,"accepted":0,"ignored":0,"reasked":0,"corrected":0,"dismissed":0,"missed":0,"too_shallow":0,"too_deep":0},"diagnostic":{"spoken":1,"silent":0,"accepted":0,"ignored":0,"reasked":0,"corrected":0,"dismissed":0,"missed":0,"too_shallow":0,"too_deep":0}}）
+  ✓ 真实 opencode turn 退出 0（再说一遍刚才那个偏好…）（":"step_finish","timestamp":1795798937145,"sessionID":"ses_de20af804ffeQiMDYdQARHw0VW","part":{"id":"prt_21df52e39001DfoBGxIMZsjpun","sessionID":"ses_de20af804ffeQiMDYdQARHw0VW","messageID":"msg_21df52d64001sHF9ERjq7zqvbw","type":"step-finish","reason":"stop","snapshot":"f65b989850c572c43f00a55f8b22fe6640305d66","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}}}}
+）
+  ✓ S2 下一轮显式记忆重问 → 真实 outcome 记录 reasked（{"kind":"reasked","at":1795798936940,"source":"host","confidence":0.65}）
+  ✓ S2 shadow 建议没有被当成实际沉默（无 missed）（{"outcome":{"kind":"reasked","at":1795798936940,"source":"host","confidence":0.65},"history":[{"kind":"reasked","at":1795798936940,"source":"host","confidence":0.65}]}）
+  ✓ shadow 的 outcome 也只写 diagnostic（reasked），global 保持 0 且无 missed（{"global":{"spoken":0,"silent":0,"accepted":0,"ignored":0,"reasked":0,"corrected":0,"dismissed":0,"missed":0,"too_shallow":0,"too_deep":0},"diagnostic":{"spoken":1,"silent":1,"accepted":0,"ignored":0,"reasked":1,"corrected":0,"dismissed":0,"missed":0,"too_shallow":0,"too_deep":0}}）
+  ✓ opencode serve 全程存活
+
+✓ Shadow attribution E2E：15 passed, 0 failed

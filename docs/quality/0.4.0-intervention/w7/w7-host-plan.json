@@ -1,0 +1,45 @@
+{
+  "evidenceLevel": "R-RS-synthetic-host-plan",
+  "host": "opencode",
+  "note": "host plan 由脚本按契约合成；只证明 sidecar 消费/拒绝，真实 adapter 两轮见 w7-intervention-evidence",
+  "passed": 6,
+  "failed": 0,
+  "checks": [
+    {
+      "id": "first",
+      "name": "无 plan 时 host source 立即 heuristic",
+      "ok": true,
+      "detail": "{\"source\":\"heuristic\",\"resolvedSource\":\"heuristic\",\"configuredSource\":\"host\",\"prefetched\":false,\"turnId\":\"turn_host_1\",\"hostApp\":\"opencode\",\"hostInstanceId\":\"hi_8f6010a6bd71424ab14e58d9ab6e05c8\",\"cueFingerprint\":[\"d0d7cd975516463f\"],\"candidateFingerprint\":[\"6ce2e316937570e6\"],\"fallbackReason\":\"host_plan_missing\"}"
+    },
+    {
+      "id": "hit",
+      "name": "真实 sidecar 消费合法 host plan",
+      "ok": true,
+      "detail": "{\"source\":\"host\",\"resolvedSource\":\"host\",\"configuredSource\":\"host\",\"prefetched\":true,\"turnId\":\"turn_host_2\",\"hostApp\":\"opencode\",\"hostInstanceId\":\"hi_8f6010a6bd71424ab14e58d9ab6e05c8\",\"cueFingerprint\":[\"d0d7cd975516463f\"],\"candidateFingerprint\":[\"6ce2e316937570e6\"],\"planId\":\"hp_e4c973bec5ab40c4bb1fe4ac8a7977ec\",\"planScope\":\"session\",\"cueMatched\":true,\"cueJaccard\":1}"
+    },
+    {
+      "id": "hit-not-fallback",
+      "name": "命中未触发 fallback",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "id": "expired",
+      "name": "过期 host plan 被拒绝并 fallback",
+      "ok": true,
+      "detail": "{\"source\":\"heuristic\",\"resolvedSource\":\"heuristic\",\"configuredSource\":\"host\",\"prefetched\":false,\"turnId\":\"turn_host_3\",\"hostApp\":\"opencode\",\"hostInstanceId\":\"hi_8f6010a6bd71424ab14e58d9ab6e05c8\",\"cueFingerprint\":[\"d0d7cd975516463f\"],\"candidateFingerprint\":[\"6ce2e316937570e6\"],\"fallbackReason\":\"host_plan_expired\"}"
+    },
+    {
+      "id": "cue-mismatch",
+      "name": "cue 不匹配的 host plan 未被消费",
+      "ok": true,
+      "detail": "{\"source\":\"heuristic\",\"resolvedSource\":\"heuristic\",\"configuredSource\":\"host\",\"prefetched\":false,\"turnId\":\"turn_host_4\",\"hostApp\":\"opencode\",\"hostInstanceId\":\"hi_8f6010a6bd71424ab14e58d9ab6e05c8\",\"cueFingerprint\":[\"30e4e247e3e641ad\",\"66530b7e43fe712c\",\"9b952dd4e3c8702d\",\"a2c81c5a9b9ded13\",\"a6525a1b2045fdf9\",\"bd8dbd5724735390\",\"c9174343f70d61ed\",\"e751bca25e1fc515\",\"f2632a784b0d7c93\"],\"candidateFingerprint\":[]}"
+    },
+    {
+      "id": "replay",
+      "name": "同一 planId 只允许消费一次",
+      "ok": true,
+      "detail": "{\"first\":{\"source\":\"host\",\"resolvedSource\":\"host\",\"configuredSource\":\"host\",\"prefetched\":true,\"turnId\":\"turn_host_5\",\"hostApp\":\"opencode\",\"hostInstanceId\":\"hi_8f6010a6bd71424ab14e58d9ab6e05c8\",\"cueFingerprint\":[\"d0d7cd975516463f\"],\"candidateFingerprint\":[\"6ce2e316937570e6\"],\"planId\":\"hp_e4a503c9c9e442cfaad72d3287a669ef\",\"planScope\":\"session\",\"cueMatched\":true,\"cueJaccard\":1},\"replay\":{\"source\":\"heuristic\",\"resolvedSource\":\"heuristic\",\"configuredSource\":\"host\",\"prefetched\":false,\"turnId\":\"turn_host_6\",\"hostApp\":\"opencode\",\"hostInstanceId\":\"hi_8f6010a6bd71424ab14e58d9ab6e05c8\",\"cueFingerprint\":[\"d0d7cd975516463f\"],\"candidateFingerprint\":[\"6ce2e316937570e6\"],\"fallbackReason\":\"host_plan_replayed\"}}"
+    }
+  ]
+}

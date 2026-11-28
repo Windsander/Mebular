@@ -21,29 +21,36 @@ Current release: [v0.3.5](https://github.com/Windsander/Mebular/releases/tag/v0.
 - **Runtime stability contract** — lifecycle, local data, detail evidence, checkpoint revisions, host failure states and diagnostics now match the documented contract; Fleet black-box orchestration and a unified executor/adapter layer with the public OpenChamber runner shipped alongside.
 - **Console settings v2** — a rebuilt settings shell (General, Security, Memory, Integrations, MCP, Advanced plus About device) with responsive layouts at 1440/1024/900/390, bilingual copy, accessible focus and reduced-motion behavior. No data, protocol or MCP-tool migration.
 
-## Now — v0.4.0 (in development)
+## Now — v0.3.7 (release candidate)
 
-The 0.4.0 line is the **Memory Intervention Policy** — the main theme is moving memory
-from recall to **timing**: when to bring a memory back, and how deep to bring it. It is
-**not released yet**; this section records the target scope, not a promised date.
+The 0.3.7 line is the **Memory Intervention Policy** — the main theme is moving memory
+from recall to **timing**: when to bring a memory back, and how deep to bring it. It
+ships the complete implementation; the release is prepared on `release/v0.3.7` and is
+**not tagged or published yet**. Real API provider validation is deferred; DSH, Hermes,
+OpenChamber Desktop and real host-model evidence remain release gates.
 
 - **Memory Intervention Policy** — from recall to timing; `when × how deep`; `speak` /
   `defer` / `silent` and `gist` / `detail` / `quote`, with `must_speak` hard rules and
   default `off`.
 - **Decision and outcome trace** — `decision` / `applied` / `outcome` on the existing
   local RecallTrace; outcome API and OpenCode attribution first.
-- **Shadow and canary** — `off → shadow → heuristic → model`; shadow records advice
-  without changing injection, so operators can compare before enabling.
+- **Effective mode and canary** — production has one selector, `model.source`; a missing
+  source stays `off`, `heuristic` runs local rules, and `local` / `host` / `api` / `auto`
+  select the model planner. `shadow` is an internal diagnostic/canary state, not a
+  user-selectable mode, and the old `intervention.mode` only emits a compatibility
+  warning.
 - **Console observability only** — decision/outcome/would* fields on Runtime traces and
-  a confirmed local policy reset. 0.4.0 is the intervention mechanism, not a Console UI
+  a confirmed local policy reset. 0.3.7 is the intervention mechanism, not a Console UI
   upgrade.
-- **Experimental follow-ups** — local model planner (`model`) and per-domain adaptive
-  thresholds remain flag-controlled and experimental.
+- **Model sources and adaptive** — local is assisted/shadow in 0.3.7 (authoritative local
+  planning is a separate follow-up line); API is the only synchronous source; host consumes
+  a session-prior plan. Per-domain adaptive thresholds apply only to `heuristic` decisions
+  and default to the internal `shadow` stage.
 
 Boundaries: default `off`; `self → checkpoint → compact/fragment` recovery semantics are
 unchanged; no desktop pop-ups, no cross-device policy sync and no visible proactive
-reminder UI in 0.4.0. Full design and limits:
-[0.4.0 Intervention Policy](https://github.com/Windsander/Mebular/blob/main/docs/design/0.4.0-intervention-policy.md).
+reminder UI in 0.3.7. Full design and limits (design file keeps its historical name):
+[Intervention Policy](https://github.com/Windsander/Mebular/blob/main/docs/design/0.4.0-intervention-policy.md).
 
 ## Now — v0.3.x
 

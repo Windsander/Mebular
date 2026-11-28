@@ -1,5 +1,8 @@
 # @mebular/opencode-plugin
 
+> **版本状态：** 已发布安装固定 **0.3.5**。**0.3.7** 是 `release/v0.3.7` 上的发布候选
+> （尚未打 tag 或发布）；0.3.7 门禁通过前，安装与文档保持 `0.3.5`。
+
 Mebular Memory Runtime 的 OpenCode V2 服务端插件（OpenChamber 使用），**自动跟随 sidecar discovery 模式**；没有逐宿主 `enabled` / `capture` 开关。
 
 它是 HTTP 薄客户端：只访问 sidecar 的 `/memory-runtime/v1`，不依赖

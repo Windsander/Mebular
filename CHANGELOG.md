@@ -16,11 +16,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 The GitHub Release body is extracted from this file: everything between the release's
 `## [vX.Y.Z]` heading and the next `## [` heading. Keep that section self-contained.
 
-## [v0.4.0] - Unreleased
+## [v0.3.7] - 2026-11-28
 
-Memory Intervention Policy. 0.4.0 moves immersive recall from “what to remember” to
-**when and how deeply to bring it back**. It is **not released**, the default remains
-`off`, and upgrading does not change 0.3.x recall behavior.
+Memory Intervention Policy. This release ships the **complete implementation** that was
+designed under the 0.4.0 label: immersive recall moves from “what to remember” to
+**when and how deeply to bring it back**. The release number is 0.3.7, the default remains
+`off`, and upgrading does not change existing recall behavior.
+
+Release gates that still need real hosts are listed under
+[Known limitations](#known-limitations): real API provider validation is **deferred**, and
+DSH, Hermes, OpenChamber Desktop and real host-model evidence are still required before
+the line can be declared fully verified. Nothing in this section treats a 6/20 matrix, a
+simulated API or an adapter identity as a pass.
 
 ### Added
 
@@ -36,17 +43,37 @@ Memory Intervention Policy. 0.4.0 moves immersive recall from “what to remembe
   never blocks MCP, and App startup/upgrade repairs already-connected hosts. MCP-only hosts
   (Claude Code, Claude Desktop, Cursor, generic) stay explicitly `unsupported`. No new
   public MCP tool and no Console/locale change.
-- **Memory Intervention Policy** — `intervention.mode` supports
-  `off | shadow | heuristic | model`; the policy decides `speak` / `defer` / `silent`
-  and `gist` / `detail` / `quote` for memory fragments only. `must_speak` is a hard
-  rule and `self → checkpoint → compact/fragment` recovery is unchanged.
+- **Memory Intervention Policy** — one effective mode derived from `model.source`; the
+  policy decides `speak` / `defer` / `silent` and `gist` / `detail` / `quote` for memory
+  fragments only. `must_speak` is a hard rule and
+  `self → checkpoint → compact/fragment` recovery is unchanged.
+- **First-run immersive disclosure** — a truly empty home shows the one-time disclosure in
+  the existing first-run Console page. Only an explicit Console acknowledgement with the
+  matching disclosure version enables immersive; it seeds
+  `memory-runtime/config.json` with `{"model":{"source":"auto"}}` only when that file does
+  not exist. An existing home, a failed write or a missing acknowledgement stays `off`;
+  no migration, no second persisted mode.
+- **Local assisted planning** — when `model.source=local`, the sidecar prefetches a plan
+  after the previous turn and consumes it on the next matching cue (60 s TTL, no model
+  call on the `/context` decision path). Local is **assisted/shadow** in 0.3.7, not an
+  authoritative planner.
+- **API and host-plan sources** — `model.source=api` is the only synchronous model planner
+  path (explicit `allowRemote`, no retries, 1500 ms cap); `model.source=host` consumes a
+  session-prior host plan produced by the adapter after the previous turn (60 s TTL,
+  identity and basis checks, no host call on `/context`). `auto` resolves
+  host → fresh local → configured API → heuristic without implicit network access.
 - **Decision, applied and outcome trace** — `/context` returns an additive `decision`;
   `RecallTrace` records `decision`, `applied`, `outcome` and bounded `outcomeHistory`
   without a schema bump.
+- **Outcome binding** — `/context` returns an opaque, TTL-scoped `bindingToken` bound to
+  one trace, agent, thread, turn and host app. `source=host` must present it; tampered,
+  cross-trace, expired and rotated-token reports are rejected. Console writes use an
+  independent MCP admin secret through `POST /admin/api/memory-runtime/outcome`; the
+  browser never receives the host token.
 - **Outcome API** — `POST /memory-runtime/v1/recall/:traceId/outcome` with
   `accepted / ignored / reasked / corrected / dismissed / missed / too_shallow /
-  too_deep`; same trace + kind is idempotent, and outcome notes are capped at 200
-  characters.
+  too_deep`; same trace + kind is idempotent, and new-protocol notes are rejected rather
+  than storing user text.
 - **OpenCode outcome attribution** — the plugin records every `/context` (including
   silent) and reports the next-turn signal: silent → `missed`, re-ask → `reasked`,
   correction → `corrected`, gist → `too_shallow`, detail/quote → `too_deep`,
@@ -56,31 +83,65 @@ Memory Intervention Policy. 0.4.0 moves immersive recall from “what to remembe
   observability only; there is no new page or intervention control panel.
 - **Local policy statistics** — `<home>/memory-runtime/policy/state.json` stores
   aggregate counts per `(agentId, domain)`, written atomically with a 30-day TTL.
-- **Experimental** — local model planner (`model`) with strict JSON, 500 ms timeout
-  and heuristic fallback; per-domain adaptive thresholds (local only, ±0.03, clamped).
+- **Bounded `/context`** — a single absolute deadline defaults to 1500 ms (configurable
+  down to 200 ms), with response/trace reserves. The intervention planner runs in an
+  independent queue (concurrency 1, max 8, drop-oldest); timeout or overflow falls back
+  to heuristic without cancelling an already-started call.
+- **Trace skip visibility** — if the deadline leaves no room to persist the trace, the
+  response reports `tracePersisted=false`, `traceId=null` and `bindingToken=null`; hosts
+  must not report an outcome for that turn.
+- **Adaptive thresholds (heuristic only)** — per-domain adjustment (±0.03, clamped
+  `[0.45, 0.80]`) applies only to `heuristic` decisions that actually took effect.
+  `model`, diagnostic `shadow`, `off` and gate decisions keep diagnostic counts only.
+  The internal stage defaults to `shadow` (learn and observe, do not apply); `canary` and
+  `on` are explicit internal settings, not a Console control.
 
 ### Changed
 
-- `off` remains the default and records a `v0-baseline` decision with
-  `enforced:false`; old hosts, old traces and `trace=off` keep 0.3.x behavior.
-  `off` changes no injection, but it **still persists the applied baseline
-  spoken/silent counts** in the local policy store and traces; it does not apply
-  policy advice or adapt thresholds.
+- **`model.source` is the only production intervention selector.** Effective mode is
+  derived from `memoryRuntime.enabled` plus `model.source`: missing source → `off`
+  (`model_source_missing`), `heuristic` → rules, and `local` / `host` / `api` / `auto` →
+  the model planner. The old `intervention.mode` value is kept in the file but ignored
+  with the stable warning `legacy_intervention_mode_ignored`; diagnostic `shadow` remains
+  internal-only. No second persisted mode field is added.
+- `off` records a `v0-baseline` decision with `enforced:false`; old hosts, old traces and
+  `trace=off` keep 0.3.x behavior. `off` changes no injection, but it **still persists the
+  applied baseline spoken/silent counts** in the local policy store and traces; it does not
+  apply policy advice or adapt thresholds.
 - Outcome attribution uses `applied`, not the policy `decision`: a shadow `silent`
-  advice with a baseline `speak` is never reported as `missed`. Outcome notes are
-  capped at 200 characters, `defer` remains distinguishable from `silent` in
-  `applied`, and reset clears policy statistics plus runtime streaks/last-decision
-  only, never memory or traces.
-- Model and adaptive modes are explicitly experimental and flag-controlled.
+  advice with a baseline `speak` is never reported as `missed`. `defer` remains
+  distinguishable from `silent` in `applied`, and reset clears policy statistics plus
+  runtime streaks/last-decision only, never memory or traces.
+- The former experimental framing is removed for 0.3.7: the local planner, API/host
+  sources and adaptive thresholds are documented features with their stated defaults and
+  boundaries. The **legacy experimental configuration keys remain compatibility input
+  only**: old `adaptive.enabled` / `adaptive.shadow` values are not deleted or silently
+  honoured; they emit `adaptive_experimental_ignored`.
+- **Local-authoritative planning is not part of 0.3.7.** A local model never becomes the
+  authoritative planner in this release; that remains a separate follow-up line.
+- **Version handshake.** There is no wire/schema change in 0.3.7. The 0.3.7 sidecar
+  accepts **only `0.3.x` MCP** (`minMcpVersion=0.3.0`, `maxMcpVersion=0.3.x`): a 0.3.7
+  MCP and a 0.3.7 sidecar interoperate, and a `0.4.x` MCP is rejected. There is no
+  forward-compatibility window for an unreleased 0.4 line. Upgrade both together; the
+  supervisor reuses only compatible instances and reports `version_incompatible` or
+  `orphaned_sidecar_alive` instead of terminating or replacing an older sidecar. Do not
+  claim a released 0.4.0 line or automatic replacement.
 
 ### Known limitations
 
+- **0.3.7 release gates are not all met.** The W7 real-evidence matrix passes 6 of 20
+  host × source cells, and the remaining cells (real API, DSH, Hermes, OpenChamber
+  Desktop, real host model) are `blocked_external`. **Real API provider validation is
+  explicitly deferred** for this release. 6/20 is not a pass, a simulated API is not a
+  pass, and no cell may be filled with a fake, stub or adapter identity. DSH, Hermes,
+  Desktop and real host-model runs remain 0.3.7 release gates. See the
+  [release-readiness report](docs/quality/0.4.0-intervention/0.3.7-release-readiness.md).
 - **`must_speak` is not 100% speak.** With no candidate it degrades to
   checkpoint-only: `action=silent`, `reason=must_speak_unavailable`,
   `degraded:true`, while `self`/checkpoint still inject.
-- **Phase 3/4 evidence is not a real-model gate.** `model` and adaptive thresholds are
-  code complete with fake-gateway/unit coverage only; real-model smoke and a golden-set
-  quality evaluation have not run.
+- **Model and adaptive quality are not yet proven.** They have fake-gateway/unit
+  coverage plus the W7 local/host plumbing evidence; real-model quality smoke and a
+  golden-set evaluation have not run. Keep adaptive at its default `shadow` stage.
 - **The `alreadyInjectedIds` fragment-ID alias table is process-local.** Old `mf_…` IDs
   from before a sidecar restart may not resolve; source/record IDs stay valid.
 
@@ -92,9 +153,29 @@ Memory Intervention Policy. 0.4.0 moves immersive recall from “what to remembe
   [Memory Runtime guide](docs/guides/MEMORY_RUNTIME.md),
   [OpenChamber](docs/integrations/OPENCHAMBER.md), [DSH](docs/integrations/DSH.md) and
   [Hermes](docs/integrations/HERMES.md) integration docs.
-- Added the [0.4.0 intervention design](docs/design/0.4.0-intervention-policy.md),
-  the intervention section in the Memory Runtime guide, and the
-  [0.4.0 verification report](docs/quality/0.4.0-intervention/0.4.0-verification.md).
+- Added the [intervention design](docs/design/0.4.0-intervention-policy.md) (design
+  documents keep their historical `0.4.0` naming), the intervention section in the
+  Memory Runtime guide, the
+  [implementation verification report](docs/quality/0.4.0-intervention/0.4.0-verification.md),
+  and the [0.3.7 release-readiness report](docs/quality/0.4.0-intervention/0.3.7-release-readiness.md)
+  with the 6/20 coverage matrix, the deferred API validation and the external blockers.
+
+### Verification
+
+- `npm run build`, `npm run lint`, `npm run check:i18n` (32 checks), `npm run check:docs`
+  (7 checks), `npm run check:architecture` and `npm run verify:release-version`
+  (8 packages at `0.3.7`) all pass.
+- `tests/release`: 3 suites / 17 tests passed.
+- Memory Runtime / MCP / Console / OpenCode plugin / DSH / Hermes Jest: **160 suites /
+  2226 tests, all passing**. Also `tests/release` + the fleet routing e2e: 4 suites /
+  18 tests. (Earlier runs on a heavily loaded host showed 4 timing-bound failures that
+  each pass standalone; they are not counted as passes or as regressions, and no budget
+  or timeout threshold was changed.)
+- Hermes Python: 109 tests passed. `verify:dsh-plugin`: 215 checks. `verify:console`
+  (E1) passed; `verify:console:ui` was skipped because no Chrome/Chromium is present.
+- Not run, and not filled with fakes: real API provider (deferred), DSH real host, Hermes
+  real host, OpenChamber Desktop and real host-model runs. They remain `blocked_external`
+  release gates; 6/20 is not a pass.
 
 ## [v0.3.5] - 2026-11-19
 
@@ -869,7 +950,7 @@ installers.
 - **范围** —— v0.1.0 不做签名、公证与自动更新，留到后续版本。
 
 [Unreleased]: https://github.com/Windsander/Mebular/compare/v0.2.0...HEAD
-[v0.4.0]: https://github.com/Windsander/Mebular/compare/v0.3.5...HEAD
+[v0.3.7]: https://github.com/Windsander/Mebular/compare/v0.3.5...v0.3.7
 [v0.3.5]: https://github.com/Windsander/Mebular/releases/tag/v0.3.5
 [v0.3.4]: https://github.com/Windsander/Mebular/releases/tag/v0.3.4
 [v0.2.0]: https://github.com/Windsander/Mebular/releases/tag/v0.2.0

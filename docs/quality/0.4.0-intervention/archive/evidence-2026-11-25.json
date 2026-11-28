@@ -1,0 +1,397 @@
+{
+  "archive": "historical 2026-11-25 snapshot; not current release evidence",
+  "release": "0.4.0",
+  "status": "unreleased",
+  "theme": "memory-intervention-policy",
+  "branch": "feat/0.4-verification",
+  "baseCommit": "b42212da6088decb7d6e2551c4ae61247b54771d",
+  "evidenceCommit": "0d67075",
+  "date": "2026-11-25",
+  "environment": {
+    "platform": "macOS 15.7.9",
+    "arch": "x86_64",
+    "node": "v26.8.1",
+    "npm": "11.19.0",
+    "opencode": "v2.4.1",
+    "opencodeSource": "@opencode/cli@2.4.1 installed to a temporary test-only prefix",
+    "chrome": "Google Chrome for Testing 156.0.8078.4",
+    "chromePath": "/Users/sobertli/Library/Caches/ms-playwright/chromium-1248/chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+    "model": "none (fake OpenAI-compatible provider only)",
+    "sidecar": "real @mebular/memory-runtime, temporary home, port 0",
+    "capability": "real /internal/memory/v1 + MemoryService/GraphStore/EventLog"
+  },
+  "commands": [
+    {
+      "name": "build",
+      "command": "npm run build",
+      "result": "passed"
+    },
+    {
+      "name": "architecture",
+      "command": "npm run check:architecture",
+      "result": "passed"
+    },
+    {
+      "name": "lint",
+      "command": "npm run lint",
+      "result": "passed"
+    },
+    {
+      "name": "memory-runtime",
+      "command": "node --experimental-vm-modules node_modules/jest/bin/jest.js packages/memory-runtime/tests --runInBand",
+      "result": "passed",
+      "suites": 42,
+      "tests": 469,
+      "durationMs": 126420
+    },
+    {
+      "name": "targeted",
+      "command": "node --experimental-vm-modules node_modules/jest/bin/jest.js tests/opencode-plugin tests/console/runtime-ui.test.mjs tests/mcp/memory-runtime-admin-proxy.test.mjs --runInBand",
+      "result": "passed",
+      "suites": 5,
+      "tests": 179,
+      "durationMs": 16060
+    },
+    {
+      "name": "intervention-e2e",
+      "command": "node tests/integration/host-e2e/opencode-intervention-outcome.mjs",
+      "result": "passed",
+      "passed": 46,
+      "failed": 0,
+      "exitCode": 0
+    },
+    {
+      "name": "intervention-shadow-e2e",
+      "command": "node tests/integration/host-e2e/opencode-intervention-shadow.mjs",
+      "result": "passed",
+      "passed": 15,
+      "failed": 0,
+      "exitCode": 0
+    },
+    {
+      "name": "opencode-host-e2e-regression",
+      "command": "node tests/integration/host-e2e/opencode-real-runtime.mjs",
+      "result": "passed",
+      "passed": 41,
+      "failed": 0,
+      "exitCode": 0
+    },
+    {
+      "name": "console",
+      "command": "npm run verify:console",
+      "result": "passed"
+    },
+    {
+      "name": "docs",
+      "command": "npm run check:docs",
+      "result": "passed",
+      "checks": 7
+    },
+    {
+      "name": "console-ui",
+      "command": "CHROME_PATH=... MEBULAR_SCREENSHOT_DIR=docs/quality/0.4.0-intervention/console npm run verify:console:ui",
+      "result": "passed",
+      "checks": 473
+    }
+  ],
+  "performance": {
+    "source": "base commit b42212d; not re-run in this verification session",
+    "ingest": {
+      "samples": 100,
+      "p50Ms": 181.99,
+      "p95Ms": 207.78,
+      "maxMs": 220.8,
+      "totalMs": 17804.8
+    },
+    "recall": {
+      "samples": 50,
+      "p50Ms": 29.05,
+      "p95Ms": 31.95,
+      "maxMs": 44.02
+    },
+    "contextIntervention": {
+      "rounds": 3,
+      "offP95Ms": [45.9, 63.99, 47.93],
+      "heuristicP95Ms": [46.19, 51.06, 51.14],
+      "p95OverheadMs": [0.3, -12.93, 3.21],
+      "p95OverheadMedianMs": 0.3,
+      "targetMs": 5
+    }
+  },
+  "e2eAssertions": [
+    {
+      "id": "E1",
+      "scenario": "capabilities",
+      "assertion": "/version intervention decision/outcome/shadow/reset=true and mode=heuristic",
+      "result": "passed"
+    },
+    {
+      "id": "E2",
+      "scenario": "seed",
+      "assertion": "real capability writes 3 user records + 2 detail records with explicit confirmation",
+      "result": "passed"
+    },
+    {
+      "id": "A1",
+      "scenario": "speak",
+      "assertion": "real /context decision.action=speak, depth=gist, applied.fragments=1",
+      "result": "passed"
+    },
+    {
+      "id": "A1b",
+      "scenario": "request-only-injection",
+      "assertion": "real plugin writes the memory block into the outgoing model request with trust=untrusted and purpose=background",
+      "result": "passed"
+    },
+    {
+      "id": "A2",
+      "scenario": "reasked",
+      "assertion": "next turn re-ask posts /recall/:traceId/outcome; trace outcome.kind=reasked, source=host",
+      "result": "passed"
+    },
+    {
+      "id": "B1",
+      "scenario": "silent",
+      "assertion": "chitchat decision.action=silent, reason=chitchat, applied.fragments=0",
+      "result": "passed"
+    },
+    {
+      "id": "B2",
+      "scenario": "missed",
+      "assertion": "explicit memory follow-up after silent trace records outcome.kind=missed, source=host",
+      "result": "passed"
+    },
+    {
+      "id": "C1",
+      "scenario": "gist",
+      "assertion": "broad cue produces speak/gist",
+      "result": "passed"
+    },
+    {
+      "id": "C2",
+      "scenario": "too_shallow",
+      "assertion": "detail request after gist records outcome.kind=too_shallow",
+      "result": "passed"
+    },
+    {
+      "id": "D1",
+      "scenario": "detail",
+      "assertion": "why/config cue produces speak/detail",
+      "result": "passed"
+    },
+    {
+      "id": "D2",
+      "scenario": "too_deep",
+      "assertion": "shorter request after detail records outcome.kind=too_deep",
+      "result": "passed"
+    },
+    {
+      "id": "R1",
+      "scenario": "policy-state",
+      "assertion": "policy/state.json persists spoken/silent/outcome counters before reset",
+      "result": "passed"
+    },
+    {
+      "id": "R2",
+      "scenario": "reset",
+      "assertion": "POST /intervention/reset returns reset=true, policyVersion=v0-rules, removedDomains=2",
+      "result": "passed"
+    },
+    {
+      "id": "R3",
+      "scenario": "reset-clear",
+      "assertion": "all 10 policy counters are 0 and domains={} after reset",
+      "result": "passed"
+    },
+    {
+      "id": "R4",
+      "scenario": "reset-status",
+      "assertion": "/status.policy is {degraded:false,lastError:null}",
+      "result": "passed"
+    },
+    {
+      "id": "R5",
+      "scenario": "reset-keeps-traces",
+      "assertion": "trace count 9 before and after reset; old traces still readable via GET /traces/:id",
+      "result": "passed"
+    },
+    {
+      "id": "R6",
+      "scenario": "reset-keeps-memory",
+      "assertion": "capability recall still returns the seed records after reset",
+      "result": "passed"
+    },
+    {
+      "id": "R7",
+      "scenario": "late-outcome-before-reset",
+      "assertion": "POST outcome for a pre-reset trace returns recorded=false with warning outcome_before_reset and leaves the old reasked outcome intact",
+      "result": "passed"
+    },
+    {
+      "id": "R8",
+      "scenario": "late-outcome-keeps-zero",
+      "assertion": "policy/state.json still has all 10 counters at 0 after the rejected late outcome",
+      "result": "passed"
+    },
+    {
+      "id": "R9",
+      "scenario": "post-reset-outcome",
+      "assertion": "a new post-reset trace records reasked/source=host and policy counters resume",
+      "result": "passed"
+    },
+    {
+      "id": "P1",
+      "scenario": "console-view",
+      "assertion": "real MCP admin proxy /admin/api/memory-runtime/traces returns 9 traces without exposing host token",
+      "result": "passed"
+    },
+    {
+      "id": "P2",
+      "scenario": "privacy",
+      "assertion": "policy state / trace / Console view exclude raw-query tail, detail body and host token",
+      "result": "passed"
+    },
+    {
+      "id": "P3",
+      "scenario": "raw-fields",
+      "assertion": "trace has no rawQuery/query body field; queryPreview is capped at 200 chars",
+      "result": "passed"
+    },
+    {
+      "id": "P4",
+      "scenario": "outcome-note",
+      "assertion": "outcome notes are fixed attribution strings, not user text",
+      "result": "passed"
+    }
+  ],
+  "shadowAssertions": [
+    {
+      "id": "S0",
+      "scenario": "capabilities",
+      "assertion": "/version intervention shadow=true and mode=shadow",
+      "result": "passed"
+    },
+    {
+      "id": "S1",
+      "scenario": "shadow-decision-vs-applied",
+      "assertion": "decision.action=silent, enforced=false, applied.action=speak, applied.wouldAction=silent, counts.injected>=1",
+      "result": "passed"
+    },
+    {
+      "id": "S1b",
+      "scenario": "decision-not-applied",
+      "assertion": "decision.action differs from applied.action (silent vs speak)",
+      "result": "passed"
+    },
+    {
+      "id": "S1c",
+      "scenario": "policy-counts-applied",
+      "assertion": "local policy counts spoken and does not count the shadow silent advice",
+      "result": "passed"
+    },
+    {
+      "id": "S2",
+      "scenario": "reasked-after-shadow-speak",
+      "assertion": "next explicit memory re-ask posts reasked/source=host",
+      "result": "passed"
+    },
+    {
+      "id": "S2b",
+      "scenario": "no-missed-from-shadow",
+      "assertion": "trace outcome and outcomeHistory never contain missed",
+      "result": "passed"
+    },
+    {
+      "id": "S2c",
+      "scenario": "outcome-counts-applied",
+      "assertion": "local policy records reasked>=1 and missed=0",
+      "result": "passed"
+    }
+  ],
+  "privacyChecks": [
+    {
+      "surface": "policy-state",
+      "forbidden": ["raw-query-tail", "detail-body", "host-token"],
+      "result": "absent"
+    },
+    {
+      "surface": "trace",
+      "forbidden": ["raw-query-tail", "detail-body", "host-token"],
+      "result": "absent"
+    },
+    {
+      "surface": "console-admin-view",
+      "forbidden": ["raw-query-tail", "detail-body", "host-token"],
+      "result": "absent"
+    },
+    {
+      "surface": "trace-fields",
+      "assertion": "no rawQuery/query body field; queryPreview <=200 chars",
+      "result": "passed"
+    }
+  ],
+  "screenshots": [
+    "docs/quality/0.4.0-intervention/console/u5-after-runtime-traces-1440.jpg",
+    "docs/quality/0.4.0-intervention/console/u5-after-runtime-traces-1024.jpg",
+    "docs/quality/0.4.0-intervention/console/u5-after-runtime-traces-900.jpg",
+    "docs/quality/0.4.0-intervention/console/u5-after-runtime-traces-390.jpg",
+    "docs/quality/0.4.0-intervention/console/u5-after-runtime-traces-en-1440.jpg",
+    "docs/quality/0.4.0-intervention/console/u5-after-runtime-traces-expanded-1440.jpg",
+    "docs/quality/0.4.0-intervention/console/u5-after-runtime-traces-reduced-motion-1440.jpg",
+    "docs/quality/0.4.0-intervention/console/u5-after-runtime-trace-decision-1440.jpg",
+    "docs/quality/0.4.0-intervention/console/u5-after-runtime-trace-decision-1024.jpg",
+    "docs/quality/0.4.0-intervention/console/u5-after-runtime-trace-decision-en-1024.jpg",
+    "docs/quality/0.4.0-intervention/console/u5-after-runtime-trace-markers-1440.jpg",
+    "docs/quality/0.4.0-intervention/console/u5-after-runtime-trace-shadow-detail-1440.jpg",
+    "docs/quality/0.4.0-intervention/console/u5-after-runtime-trace-off-detail-1440.jpg",
+    "docs/quality/0.4.0-intervention/console/u5-after-runtime-policy-reset-confirm-1440.jpg",
+    "docs/quality/0.4.0-intervention/console/u5-after-runtime-policy-reset-1440.jpg"
+  ],
+  "knownLimitations": [
+    "0.4.0 is unreleased; default intervention.mode=off and 0.3.x recall behavior is unchanged.",
+    "off changes no injection but still persists applied baseline spoken/silent counts in the local policy store and traces; it does not apply policy advice or adapt thresholds.",
+    "must_speak is an automatic policy floor, not an upper bound on explicit user intent. Hard rules short-circuit as defer_explicit -> conflict -> greeting/meta -> must_speak -> no_candidates -> no_novelty -> heuristic. Explicit defer, including cue-level user_negated, may override automatic must_speak, keeps self/checkpoint loaded, and records reason=defer_explicit plus applied.action=defer. This input-level defer applies in every mode: off records v0-baseline / enforced:false with no policy warning; shadow injects defer instead of baseline and records no baseline wouldAction.",
+    "must_speak is not a 100% speak guarantee: with no candidate it degrades to checkpoint-only (silent + must_speak_unavailable + degraded) while self/checkpoint still inject.",
+    "conflict requires an explicit which-is-right question plus a conflict-group candidate; exact intent uses quote, otherwise detail. Bare statements such as records disagree / 不一致 do not trigger. no_novelty is an anti-repeat exception that only silences when all candidates were already injected and does not weaken maxSilentStreak/exploration for fresh candidates.",
+    "The alreadyInjectedIds fragment-ID alias table is process-local; old mf_... IDs from before a sidecar restart may not resolve. Source/record IDs remain valid.",
+    "Phase 3 (model) and Phase 4 (adaptive thresholds) are code complete with fake-gateway/unit evidence only, not a real-model quality gate.",
+    "No real-model smoke or golden-set evaluation was run: no local model on this host; the model planner is covered by fake-gateway tests.",
+    "The E2E uses a fake OpenAI-compatible provider; sidecar, plugin, capability, host and HTTP paths are real.",
+    "Console screenshots come from verify:console:ui fixture data and prove UI state only; real-sidecar trace fields are asserted separately.",
+    "Attribution is heuristic; this report proves the designed signals fire and persist, not long-term answer quality.",
+    "Only OpenCode outcome attribution is covered; DSH/Hermes and cross-device policy sync are out of scope.",
+    "Performance numbers come from the base commit on one non-idle developer host and are regression evidence, not an SLA.",
+    "Outcome notes are capped at 200 characters; an explicit defer is recorded as reason=defer_explicit and applied.action=defer; reset clears policy statistics and runtime streak/last-decision state only, never memory, traces or outcome history.",
+    "Existing trace queryPreview (redacted, <=200 chars) is retained from 0.3.x; the new policy state stores no query text."
+  ],
+  "fixedProductionIssues": [
+    {
+      "id": "already-injected-id-contract",
+      "severity": "major",
+      "preExisting": true,
+      "since": "0.3.0",
+      "summary": "OpenCode plugin sends fragment IDs (mf_...) in alreadyInjectedIds, while the sidecar compared them with source/record IDs, so host-level already-injected dedupe could be ineffective.",
+      "fix": "buildCandidates() now matches sourceIds and fragment.id and keeps a bounded in-process fragment-ID alias table; noveltyOf() checks fragmentId and sourceIds.",
+      "fixCommit": "2c21325",
+      "residual": "The alias table is process-local; old mf_... IDs from before a sidecar restart may not resolve."
+    },
+    {
+      "id": "outcome-attributed-to-decision",
+      "severity": "major",
+      "preExisting": false,
+      "summary": "Outcomes and policy counters used the policy decision instead of the applied intervention, so shadow silent advice could be recorded as missed/silent even though baseline spoke.",
+      "fix": "Plugin attribution uses applied; /context exposes applied; policy counts are written once after assembly using applied action. Covered by the shadow E2E.",
+      "fixCommit": "dfc3082"
+    },
+    {
+      "id": "late-outcome-after-reset",
+      "severity": "major",
+      "preExisting": false,
+      "summary": "A delayed outcome for a pre-reset trace could re-dirty the policy counters right after reset.",
+      "fix": "submitOutcome() rejects traces created before policyResetAt with recorded=false and warning outcome_before_reset. Covered by R7/R8.",
+      "fixCommit": "dfc3082"
+    }
+  ],
+  "unfixedProductionIssues": [],
+  "productionCodeChanges": 0
+}

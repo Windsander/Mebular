@@ -3,7 +3,25 @@
 面向 `@mebular/*` npm 包与三平台桌面安装包的发布操作手册。核心约束：**分支名即版本号
 （SSOT）**、**先构建安装包再发 npm**、**幂等发布**、**按 ref 串行**。
 
-当前发布线 v0.3.5：
+当前**已发布**版本线 v0.3.5。**v0.3.7** 是 `release/v0.3.7` 上的发布候选：manifest、
+lock 与版本源均为 `0.3.7`，包含原 0.4.0 设计的完整实现；尚未创建 tag、push、发布或合并
+`main`。真实 API provider 校验**延后**，DSH/Hermes/OpenChamber Desktop/真实宿主模型仍是
+0.3.7 发布门禁，见
+[`0.3.7 release readiness`](../quality/0.4.0-intervention/0.3.7-release-readiness.md)。
+
+0.3.7 没有 wire/schema 变化，握手窗口收回为**只接受 `0.3.x` MCP**
+（`minMcpVersion=0.3.0`，`maxMcpVersion=0.3.x`）：0.3.7 MCP 与 0.3.7 sidecar 互通，
+`0.4.x` MCP 会被拒绝，不保留未验证的 0.4 forward-compat 窗口。升级顺序：
+
+1. 先用**旧 runtime/CLI/OS** 停止旧的 managed/attached/manual sidecar。不要依赖新
+   supervisor 终止或替换旧实例。
+2. 再将 MCP 与 sidecar 一起升级到同一 `0.3.7` 版本，然后启动 sidecar 与宿主。
+3. supervisor 只复用已兼容的实例；版本不匹配时返回 `version_incompatible`，旧
+   managed child 在父监督收尾后仍存活时返回 `orphaned_sidecar_alive`，两者都**不会**
+   停止或替换旧 sidecar。
+4. 不要宣称存在已发布的 0.4.0 线，也不要宣称自动替换。
+
+v0.3.5 的发布对象：
 
 - **8 个 npm 包**统一为 `0.3.5`（单版本 umbrella）：`core` / `service` / `skill` / `mcp` /
   `fleet` / `memory-runtime` / `opencode-plugin` 七个 lockstep 包，加独立 npm job 的

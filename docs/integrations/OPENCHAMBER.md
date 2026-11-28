@@ -2,6 +2,11 @@
 
 [中文](OPENCHAMBER_CN.md) · [Documentation index](../README.md) · [Memory Runtime guide](../guides/MEMORY_RUNTIME.md)
 
+> **Version status:** the latest published installs pin **0.3.5**. **0.3.7** is the
+> release candidate on `release/v0.3.7` (not yet tagged or published) and ships the complete
+> Memory Intervention Policy implementation; keep published installs on `0.3.5` until the
+> 0.3.7 gates pass.
+
 OpenChamber is an OpenCode-based desktop host. Mebular supports it in two layers:
 
 | Layer | What you get | Default |

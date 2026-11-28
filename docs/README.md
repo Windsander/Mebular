@@ -64,6 +64,7 @@ main [`README.md`](../README.md); this index only describes document structure.
 
 - [Adapter provisioning](design/adapter-provisioning.md) — host matrix, install/configure/activate/rollback, `adapters.json`, health/repair, security boundaries
 - [0.4.0 Memory Intervention Policy](design/0.4.0-intervention-policy.md) — when × how deep, decision/outcome, shadow/canary and boundaries
+- [0.4.0 W0.5 small-model candidate inventory](design/0.4.0-w0.5-candidate-inventory.md) — license/GGUF/hardware screen, recommended shortlist and blocked candidates
 - [Memory Runtime 0.3.2 stability contract](design/0.3.2-stability-contract.md) · [中文](design/0.3.2-stability-contract_CN.md) — data, failure, lifecycle and acceptance target
 - [Memory Runtime 0.3.0 contract](design/0.3.0-memory-runtime-contract-v2.md) — historical sidecar and capability contract (Chinese)
 - [Memory Runtime sidecar lifecycle](design/0.3.0-memory-runtime-sidecar.md) — historical process, discovery, token and local-data design (Chinese)

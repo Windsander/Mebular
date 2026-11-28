@@ -4,7 +4,10 @@
 `../evidence.json` 交叉核对。W7 基座为 `8e3005aa`（含 merge `96629f12`、B1 修复
 `a9937c3`）与 outcome 契约修复 `033bbc1`（merge `edb1f87`）。W8 review 在 `553e212`
 重跑了 `w7-host-plan.json` 与 `w7-openchamber-heuristic.json`，用于关闭 10 条
-`3bbd284` pass 的 provenance；其余文件仍是 W7 原始运行。文件包含 traceId、sessionId、
+`3bbd284` pass 的 provenance；其余文件仍是 W7 原始运行。W9 B6 在
+`feat/0.4-fix-outcome-harness`（基座 `663791b`）为 outcome E2E 加了真实 health 等待、
+有界 warmup 与传输层有界重试，并用官方命令连续重跑 3 次 47/0，刷新
+`opencode-outcome.txt`（第 3 次原始输出）。文件包含 traceId、sessionId、
 hostInstanceId 等运行标识，不含 raw query 尾部、detail 正文、token、Authorization 或 keyRef。
 
 | 文件 | 来源命令 | 结果 |
@@ -16,7 +19,7 @@ hostInstanceId 等运行标识，不含 raw query 尾部、detail 正文、token
 | `w7-openchamber-heuristic.json` | `w7-intervention-evidence.mjs --source heuristic --host openchamber` | **14/14**；OpenChamber adapter identity + heuristic + outcome（W8 `553e212` rerun） |
 | `w7-local-openchamber.json` | `w7-intervention-evidence.mjs --source local --host openchamber` | **16/16**；R-RSM，adapter identity（不是 Desktop UI） |
 | `w7-host-openchamber.json` | `w7-intervention-evidence.mjs --source host --host openchamber` | **16/16**；RH+RS+FM，adapter identity（不是 Desktop UI） |
-| `opencode-outcome.txt` | `node tests/integration/host-e2e/opencode-intervention-outcome.mjs` | **47/47**（0 failed）；W4 note + W6 policy v2 契约，见验证报告 §4.1/§4.2 |
+| `opencode-outcome.txt` | `node tests/integration/host-e2e/opencode-intervention-outcome.mjs` | **47/47**（0 failed）；W4 note + W6 policy v2 契约；W9 B6 连续 3 次 47/0，日志为第 3 次，见 [`../0.4.0-w9-review.md`](../0.4.0-w9-review.md) |
 | `opencode-shadow.txt` | `node tests/integration/host-e2e/opencode-intervention-shadow.mjs` | **15/15**（0 failed）；W6 计数落 `diagnostic`，`global` 全 0，见验证报告 §4.3 |
 
 复现时使用临时 home；不要把模型权重、引擎二进制或用户凭据复制进仓库。OpenChamber 证据只设置宿主显式身份（`MEBULAR_HOST_APP=openchamber`），没有启动 Desktop。

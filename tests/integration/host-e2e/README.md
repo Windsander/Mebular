@@ -41,6 +41,10 @@ node tests/integration/host-e2e/opencode-intervention-outcome.mjs
 npm run verify:opencode:intervention
 ```
 
+启动稳定性：脚本先等 `serve` 的 `/api/info` health 真正可用，再跑一次有界 warmup
+（`MEBULAR_OUTCOME_WARMUP_ATTEMPTS`，默认 3，`0` 关闭）；首轮传输层失败最多重试 3 次，
+非传输类失败立即交给断言判定。断言数仍为 47。
+
 覆盖：speak → 重问 = `reasked`；silent → 显式记忆追问 = `missed`；gist → 要细节 =
 `too_shallow`；detail → 要更短 = `too_deep`；`POST /intervention/reset` 清零本机策略
 统计但不删 trace/记忆；reset 前旧 trace 的迟到 outcome 被拒绝；reset 后新 trace 的

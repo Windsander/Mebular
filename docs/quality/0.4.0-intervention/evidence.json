@@ -3153,6 +3153,8 @@
       "passed": 47,
       "failed": 0,
       "total": 47,
+      "repeatRuns": 3,
+      "stable": true,
       "hostVersion": "OpenCode v2.4.1",
       "evidencePath": "docs/quality/0.4.0-intervention/w7/opencode-outcome.txt"
     },
@@ -3168,6 +3170,52 @@
       "p4Note": "New-protocol outcomes carry no note: token+note -> 400 outcome_note_unsupported; legacy 0.3 no-token note -> 200 outcome_note_ignored and not stored.",
       "policyV2": "policy/state.json version=2; heuristic/adaptive counts in global; model/shadow diagnostics in diagnostic; gate/non-intervention writes neither and its trace carries applied.policyEligible=false."
     }
+  },
+  "harnessStability": {
+    "issue": "B6",
+    "status": "closed",
+    "branch": "feat/0.4-fix-outcome-harness",
+    "baseCommit": "663791b",
+    "date": "2026-11-28",
+    "command": "OPENCODE_BIN=\"/private/var/folders/86/gpjtr2p94dg7mz24pbkrj8pw0000gn/T/mebular-e2e-tools/node_modules/.bin/opencode\" node tests/integration/host-e2e/opencode-intervention-outcome.mjs",
+    "result": "3/3 consecutive 47 passed / 0 failed",
+    "runs": [
+      {
+        "run": 1,
+        "exitCode": 0,
+        "durationSeconds": 124,
+        "passed": 47,
+        "failed": 0,
+        "healthProbes": 1,
+        "healthMs": 184,
+        "warmupAttempt": 1,
+        "warmupMs": 117085
+      },
+      {
+        "run": 2,
+        "exitCode": 0,
+        "durationSeconds": 64,
+        "passed": 47,
+        "failed": 0,
+        "healthProbes": 1,
+        "healthMs": 184,
+        "warmupAttempt": 1,
+        "warmupMs": 56538
+      },
+      {
+        "run": 3,
+        "exitCode": 0,
+        "durationSeconds": 75,
+        "passed": 47,
+        "failed": 0,
+        "healthProbes": 1,
+        "healthMs": 181,
+        "warmupAttempt": 1,
+        "warmupMs": 67533
+      }
+    ],
+    "evidencePath": "docs/quality/0.4.0-intervention/w7/opencode-outcome.txt",
+    "reviewPath": "docs/quality/0.4.0-intervention/0.4.0-w9-review.md"
   },
   "evidenceNote": "Per-cell SHA is provenance. The 10 former 3bbd284 pass rows were rerun at 553e212: OpenCode/OpenChamber host cue_mismatch, expired and replay use the real sidecar + synthetic host plan (no adapter alreadyInjected/candidate-window dependency); OpenChamber heuristic first_turn, new_cue, fallback and outcome use the real OpenCode v2.4.1 adapter identity. No pass row remains on 3bbd284. That SHA now covers only untouched blocked_external/unit_only/not_run carry-over. edb1f87a is the historical outcome-contract merge, not current acceptance. Only result=passed rows count; 30 pass rows remain. Outcome 47/0 and shadow 15/0 are real opencode v2.4.1 runs; no fake fill."
 }

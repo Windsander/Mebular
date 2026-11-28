@@ -32,7 +32,10 @@ import {
 import { useHeavyTimeout } from '../helpers/timeouts.js';
 
 // 覆盖率插桩 + 并行负载下，三机反熵/路由用例可能超过默认 15s；仍保持有界。
-useHeavyTimeout(60_000);
+// 用例内有三段收敛等待（每段 60s，见 `waitFor`）；外层预算必须覆盖「三段之和 + 物化/执行」，
+// 否则慢收敛会先撞上 jest 的 `Exceeded timeout`，看不到具体是哪一段没收敛。
+const SYNC_WAIT_MS = 60_000;
+useHeavyTimeout(SYNC_WAIT_MS * 3 + 60_000);
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 const A = { device: 'device-A', agent: 'planner' };
@@ -58,10 +61,10 @@ function fleetConfig(dir: string, device: string, capabilities: string[], peers:
 // Full-suite load boundary: under `npm test -- --runInBand` this file can run
 // after hundreds of suites and a live host-adapter suite. P2P anti-entropy then
 // occasionally needs more than the old 30 s budget while the process is under
-// GC/CPU pressure. Use the same 60 s bound as the outer `useHeavyTimeout` so a
-// slow sync is not misreported as a routing failure; a real hang still fails
-// within the test's bounded lifetime.
-async function waitFor(predicate: () => Promise<boolean>, timeoutMs = 60_000, pollMs = 50): Promise<boolean> {
+// GC/CPU pressure. Each wait gets its own 60 s bound so a slow sync is not
+// misreported as a routing failure; a real hang still fails within the test's
+// bounded lifetime (the outer budget covers all three waits).
+async function waitFor(predicate: () => Promise<boolean>, timeoutMs = SYNC_WAIT_MS, pollMs = 50): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await predicate()) return true;
@@ -119,8 +122,20 @@ describe('P3 三机 capability route E2E', () => {
     const a = mk(A.device);
     const b = mk(B.device);
     const c = mk(C.device);
+    // 反熵手动驱动：`intervalMs` 设成 1h 是为了不跑周期同步，但失败退避也用
+    // `intervalMs` 计算、上限同样是 1h——一次瞬时会话失败（默认 30s 会话超时）
+    // 就会让后续 `waitFor` 在整条用例里都等不到收敛。因此每轮反熵之后再对在线
+    // 对端做一次**公开 API**（`requestSession`，限频由触发路径合并/1s 节流）的唤醒，
+    // 走的仍是真实同步路径与既有安全判定；这只避免「一次抖动 = 整条用例超时」。
+    let lastNudgeAt = 0;
     const syncAll = async () => {
       await Promise.all([a.sync.runAntiEntropyCycle(), b.sync.runAntiEntropyCycle(), c.sync.runAntiEntropyCycle()]);
+      const now = Date.now();
+      if (now - lastNudgeAt < 1_000) return;
+      lastNudgeAt = now;
+      for (const [from, to] of [[a, B], [b, A], [b, C], [a, C], [c, A], [c, B]] as const) {
+        from.sync.requestSession(to.device);
+      }
     };
     try {
       await a.initialize();
@@ -227,8 +242,12 @@ describe('P3 三机 capability route E2E', () => {
       expect(reduceTaskEvents(await storeB.byTask(apiTaskId))?.status).toBe('done');
       expect(reduceTaskEvents(await storeC.byTask(uiTaskId))?.status).toBe('done');
       // 任务事件全 namespace 同步，但 worker 只执行 targetsMe 的任务。
-      expect(reduceTaskEvents(await storeB.byTask(uiTaskId))?.status).not.toBe('done');
-      expect(reduceTaskEvents(await storeC.byTask(apiTaskId))?.status).not.toBe('done');
+      // 「谁执行了」只能看本地 ExecutionLog：事件面会随同步收敛（B 的完成事件
+      // 1s 内就会到 C），用 reduceTaskEvents 断言「没执行」会与传播赛跑。
+      expect(logB.has(apiTaskId)).toBe(true);
+      expect(logC.has(uiTaskId)).toBe(true);
+      expect(logB.has(uiTaskId)).toBe(false);
+      expect(logC.has(apiTaskId)).toBe(false);
       expect(logB.size()).toBe(1);
       expect(logC.size()).toBe(1);
 

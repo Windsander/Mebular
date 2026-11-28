@@ -11,7 +11,12 @@
 //
 // 统计按 (agentId, domain) 分桶。域样本 < 20 时向全局池化收缩；达到 20
 // 后使用本域样本，并按 useless/missed 小幅调整下一轮阈值（±0.03，clamp）。
+//
+// W6：adaptive 只对 `planner=heuristic` 生效。model/shadow/off 的决策与 outcome
+// 仍可写 trace，也可写入本文件的 `diagnostic` 计数，但绝不进入 `tuneEntry()`；
+// 桶维度保持 (agentId, domain)，不增加 host/source。
 
+import { createHash } from 'node:crypto';
 import { dirname } from 'node:path';
 import { ensurePrivateDir, readJsonFile, writeJsonAtomic } from './atomic-json.js';
 import type { InterventionAction, RecallOutcomeKind } from '../runtime/types.js';
@@ -46,7 +51,10 @@ export interface PolicyCounts {
 interface PolicyDomainEntry {
   agentId: string;
   domain: string;
+  /** 参与 adaptive 调参的 heuristic 计数。 */
   counts: PolicyCounts;
+  /** 非 heuristic（model/shadow/off）的诊断计数；不参与 tuneEntry。 */
+  diagnostic: PolicyCounts;
   /** 相对 config.minConfidence 的调整量；只在样本足够后累积。 */
   thresholdOffset: number;
   updatedAt: number;
@@ -55,9 +63,12 @@ interface PolicyDomainEntry {
 }
 
 interface PolicyState {
-  version: 1;
+  /** v2：W6 拆分 adaptive/diagnostic；旧 v1 计数可能混入 model/shadow，读取时整体 reset。 */
+  version: 2;
   updatedAt: number;
   global: PolicyCounts;
+  /** 非 heuristic 诊断计数；与 adaptive 分开，避免污染阈值学习。 */
+  diagnostic: PolicyCounts;
   domains: Record<string, PolicyDomainEntry>;
 }
 
@@ -93,12 +104,31 @@ export interface PolicyDecisionInput {
   agentId: string;
   domain: string;
   action: InterventionAction;
+  /**
+   * 是否参与 adaptive 调参。缺省 true 保持旧调用语义；
+   * model/shadow/off 必须显式传 false（只记 diagnostic）。
+   */
+  adaptive?: boolean;
 }
 
 export interface PolicyOutcomeInput {
   agentId: string;
   domain: string;
   kind: RecallOutcomeKind;
+  /** 是否参与 adaptive 调参；缺省 true。 */
+  adaptive?: boolean;
+}
+
+/** adaptive 阈值的读取结果；shadow 阶段可读取建议但不应用。 */
+export interface AdaptiveThresholdResult {
+  /** 实际用于本次决策的阈值。 */
+  threshold: number;
+  /** 若应用 adaptive offset 会得到的阈值。 */
+  recommended: number;
+  /** 本域累计 offset。 */
+  offset: number;
+  /** threshold 是否真的包含 adaptive offset。 */
+  applied: boolean;
 }
 
 function emptyCounts(): PolicyCounts {
@@ -154,11 +184,30 @@ function outcomeKey(kind: RecallOutcomeKind): keyof PolicyCounts {
 
 function emptyState(now: number): PolicyState {
   return {
-    version: 1,
+    version: 2,
     updatedAt: now,
     global: emptyCounts(),
+    diagnostic: emptyCounts(),
     domains: {},
   };
+}
+
+/**
+ * W6 canary 分桶：只由 (agentId, domain) 决定，不含 host/source。
+ * 返回 [0, 1) 的稳定值；同一桶在重启、换宿主或换 source 后不变。
+ */
+export function adaptiveCanaryBucket(agentId: string, domain: string): number {
+  const digest = createHash('sha256')
+    .update(`${agentId}\u0000${domain}`, 'utf8')
+    .digest();
+  return digest.readUInt32BE(0) / 0x1_0000_0000;
+}
+
+/** canary 命中：bucket < ratio；ratio<=0 永不命中，ratio>=1 全量命中。 */
+export function adaptiveCanaryHit(agentId: string, domain: string, ratio: number): boolean {
+  if (!Number.isFinite(ratio) || ratio <= 0) return false;
+  if (ratio >= 1) return true;
+  return adaptiveCanaryBucket(agentId, domain) < ratio;
 }
 
 /**
@@ -216,6 +265,7 @@ function entryOf(state: PolicyState, agentId: string, domain: string, now: numbe
     agentId,
     domain,
     counts: emptyCounts(),
+    diagnostic: emptyCounts(),
     thresholdOffset: 0,
     updatedAt: now,
     tunedAt: now,
@@ -291,22 +341,32 @@ export class PolicyStore {
   }
 
   async snapshot(): Promise<{
-    version: 1;
+    version: 2;
     updatedAt: number;
     global: PolicyCounts;
-    domains: Array<{ agentId: string; domain: string; counts: PolicyCounts; thresholdOffset: number; updatedAt: number }>;
+    diagnostic: PolicyCounts;
+    domains: Array<{
+      agentId: string;
+      domain: string;
+      counts: PolicyCounts;
+      diagnostic: PolicyCounts;
+      thresholdOffset: number;
+      updatedAt: number;
+    }>;
   }> {
     return this.exclusive(async () => {
       await this.ensureLoaded();
       this.state = stateAfterTtl(this.state, this.now(), this.ttlDays);
       return {
-        version: 1,
+        version: 2,
         updatedAt: this.state.updatedAt,
         global: { ...this.state.global },
+        diagnostic: { ...this.state.diagnostic },
         domains: Object.values(this.state.domains).map((entry) => ({
           agentId: entry.agentId,
           domain: entry.domain,
           counts: { ...entry.counts },
+          diagnostic: { ...entry.diagnostic },
           thresholdOffset: entry.thresholdOffset,
           updatedAt: entry.updatedAt,
         })),
@@ -314,33 +374,45 @@ export class PolicyStore {
     });
   }
 
-  async recordDecision({ agentId, domain, action }: PolicyDecisionInput): Promise<void> {
+  async recordDecision({ agentId, domain, action, adaptive = true }: PolicyDecisionInput): Promise<void> {
     return this.exclusive(async () => {
       await this.ensureLoaded();
       const now = this.now();
       const state = stateAfterTtl(this.state, now, this.ttlDays);
       const key: keyof PolicyCounts = action === 'speak' ? 'spoken' : 'silent';
-      state.global[key] += 1;
       const entry = entryOf(state, agentId, domain, now);
-      entry.counts[key] += 1;
-      entry.decisionsSinceTune += 1;
+      if (adaptive) {
+        // 只有 heuristic 决策进入 adaptive 计数，并驱动 50 次/每周调权。
+        state.global[key] += 1;
+        entry.counts[key] += 1;
+        entry.decisionsSinceTune += 1;
+        tuneEntry(state, entry, now);
+      } else {
+        // model/shadow/off：保留诊断计数，但不参与 tuneEntry。
+        state.diagnostic[key] += 1;
+        entry.diagnostic[key] += 1;
+      }
       entry.updatedAt = now;
-      tuneEntry(state, entry, now);
       state.updatedAt = now;
       this.state = trimDomains(state, this.maxDomains);
       this.markDirty();
     });
   }
 
-  async recordOutcome({ agentId, domain, kind }: PolicyOutcomeInput): Promise<void> {
+  async recordOutcome({ agentId, domain, kind, adaptive = true }: PolicyOutcomeInput): Promise<void> {
     return this.exclusive(async () => {
       await this.ensureLoaded();
       const now = this.now();
       const state = stateAfterTtl(this.state, now, this.ttlDays);
       const key = outcomeKey(kind);
-      state.global[key] += 1;
       const entry = entryOf(state, agentId, domain, now);
-      entry.counts[key] += 1;
+      if (adaptive) {
+        state.global[key] += 1;
+        entry.counts[key] += 1;
+      } else {
+        state.diagnostic[key] += 1;
+        entry.diagnostic[key] += 1;
+      }
       entry.updatedAt = now;
       state.updatedAt = now;
       this.state = trimDomains(state, this.maxDomains);
@@ -360,15 +432,36 @@ export class PolicyStore {
   /**
    * 本次决策使用的阈值：config.minConfidence + 本域自适应 offset，
    * clamp 到 [0.45, 0.80]，避免学成过度沉默或过度话痨。
+   * W6：只有 heuristic 决策可以调用；model/shadow 不得读取。
    */
   async thresholdFor(agentId: string, domain: string, baseThreshold: number): Promise<number> {
+    const result = await this.adaptiveThresholdFor(agentId, domain, baseThreshold, { apply: true });
+    return result.threshold;
+  }
+
+  /**
+   * W6：读取 adaptive 建议；`apply=false` 用于 shadow 阶段（只观察不生效）。
+   * `recommended` 始终是 base+offset 的 clamp 值，便于 canary 对比。
+   */
+  async adaptiveThresholdFor(
+    agentId: string,
+    domain: string,
+    baseThreshold: number,
+    options: { apply: boolean },
+  ): Promise<AdaptiveThresholdResult> {
     return this.exclusive(async () => {
       await this.ensureLoaded();
       const state = stateAfterTtl(this.state, this.now(), this.ttlDays);
       const entry = state.domains[domainKey(agentId, domain)];
       const base = Number.isFinite(baseThreshold) ? baseThreshold : 0.55;
       const offset = entry ? entry.thresholdOffset : 0;
-      return clamp(base + offset, THRESHOLD_MIN, THRESHOLD_MAX);
+      const recommended = clamp(base + offset, THRESHOLD_MIN, THRESHOLD_MAX);
+      return {
+        threshold: options.apply ? recommended : clamp(base, THRESHOLD_MIN, THRESHOLD_MAX),
+        recommended,
+        offset,
+        applied: options.apply && offset !== 0,
+      };
     });
   }
 
@@ -486,11 +579,14 @@ export class PolicyStore {
 
   private async readState(): Promise<PolicyState> {
     const raw = await readJsonFile<Record<string, unknown>>(this.path);
-    if (!raw || raw.version !== 1) return emptyState(this.now());
+    // W6 迁移：v1 的 global 可能混入 model/shadow 决策，不能继续用于 adaptive；
+    // 0.4.0 未发布，直接 reset 旧计数最安全。未知版本同样 fail-open 为空。
+    if (!raw || raw.version !== 2) return emptyState(this.now());
     const state: PolicyState = {
-      version: 1,
+      version: 2,
       updatedAt: counterOf(raw.updatedAt) || this.now(),
       global: countsOf(raw.global),
+      diagnostic: countsOf(raw.diagnostic),
       domains: {},
     };
     const domains = isObject(raw.domains) ? raw.domains : {};
@@ -504,6 +600,7 @@ export class PolicyStore {
         agentId,
         domain,
         counts: countsOf(value.counts),
+        diagnostic: countsOf(value.diagnostic),
         thresholdOffset: clamp(
           typeof value.thresholdOffset === 'number' && Number.isFinite(value.thresholdOffset)
             ? value.thresholdOffset
@@ -550,12 +647,17 @@ function tuneEntry(state: PolicyState, entry: PolicyDomainEntry, now: number): v
   const stats = effectiveOf(state.global, entry.counts);
   if (stats.source === 'domain') {
     if (stats.uselessRate > USELESS_RATE_HIGH) {
-      entry.thresholdOffset = clamp(entry.thresholdOffset + THRESHOLD_STEP, -0.3, 0.3);
+      entry.thresholdOffset = roundOffset(entry.thresholdOffset + THRESHOLD_STEP);
     }
     if (stats.missedRate > MISSED_RATE_HIGH) {
-      entry.thresholdOffset = clamp(entry.thresholdOffset - THRESHOLD_STEP, -0.3, 0.3);
+      entry.thresholdOffset = roundOffset(entry.thresholdOffset - THRESHOLD_STEP);
     }
   }
   entry.tunedAt = now;
   entry.decisionsSinceTune = 0;
+}
+
+/** offset 只保留 4 位，避免 ±0.03 浮点漂移污染 trace/持久化。 */
+function roundOffset(value: number): number {
+  return Number(clamp(value, -0.3, 0.3).toFixed(4));
 }

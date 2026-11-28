@@ -2,7 +2,7 @@
 // capability URL/版本握手。
 
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -63,12 +63,14 @@ describe('sidecar config', () => {
     expect(defaults.trace).toBe('local');
     expect(defaults.intervention).toMatchObject({
       mode: 'off',
+      legacyModePresent: false,
+      diagnosticShadow: false,
       minConfidence: 0.55,
       maxSilentStreak: 3,
       explorationRate: 0.05,
       outcomeWindowMs: 120_000,
       policyTtlDays: 30,
-      modelTimeoutMs: 500,
+      modelTimeoutMs: 1500,
     });
     expect(defaults.detail.stagingHours).toBe(24);
     expect(defaults.detail.stagingBytes).toBe(268_435_456);
@@ -105,6 +107,11 @@ describe('sidecar config', () => {
   it('intervention 配置：默认 off；严格校验；旧配置兼容', () => {
     // 旧配置（无 intervention）保持默认 off。
     expect(normalizeSidecarConfig({ schema: 1 }).intervention.mode).toBe('off');
+    // W6：adaptive 默认先 shadow 观测，不直接应用到 heuristic。
+    expect(normalizeSidecarConfig({ schema: 1 }).intervention.adaptive).toEqual({
+      stage: 'shadow',
+      canaryRatio: 0.1,
+    });
     expect(normalizeSidecarConfig({
       intervention: {
         mode: 'heuristic',
@@ -117,6 +124,9 @@ describe('sidecar config', () => {
       },
     }).intervention).toEqual({
       mode: 'heuristic',
+      legacyModePresent: true,
+      diagnosticShadow: false,
+      adaptive: { stage: 'shadow', canaryRatio: 0.1 },
       minConfidence: 0.62,
       maxSilentStreak: 5,
       explorationRate: 0.1,
@@ -124,6 +134,32 @@ describe('sidecar config', () => {
       policyTtlDays: 7,
       modelTimeoutMs: 800,
     });
+    // 缺省（含默认 off）不能误报为“旧字段显式存在”。
+    const missingMode = normalizeSidecarConfig({ intervention: { minConfidence: 0.6 } }).intervention;
+    expect(missingMode.mode).toBe('off');
+    expect(missingMode.legacyModePresent).toBe(false);
+    expect(normalizeSidecarConfig({ intervention: { mode: 'off' } }).intervention.legacyModePresent).toBe(true);
+    expect(normalizeSidecarConfig({ intervention: { diagnosticShadow: true } }).intervention.diagnosticShadow).toBe(true);
+    expect(() => normalizeSidecarConfig({ intervention: { diagnosticShadow: 'yes' } })).toThrow(SidecarConfigError);
+
+    // W6：adaptive 阶段只接受内部枚举；旧 experimental 布尔/开关只 warning 且不改变 stage。
+    expect(normalizeSidecarConfig({
+      intervention: { adaptive: { stage: 'on', canaryRatio: 0.25 } },
+    }).intervention.adaptive).toEqual({ stage: 'on', canaryRatio: 0.25 });
+    expect(() => normalizeSidecarConfig({
+      intervention: { adaptive: { stage: 'always' } },
+    })).toThrow(SidecarConfigError);
+    const legacyAdaptiveWarnings: string[] = [];
+    const legacyAdaptive = normalizeSidecarConfig({
+      intervention: { adaptive: true },
+    }, { warnings: legacyAdaptiveWarnings });
+    expect(legacyAdaptive.intervention.adaptive.stage).toBe('shadow');
+    expect(legacyAdaptiveWarnings).toContain('adaptive_experimental_ignored');
+    const legacyAdaptiveShadowWarnings: string[] = [];
+    normalizeSidecarConfig({
+      intervention: { adaptive: { shadow: true } },
+    }, { warnings: legacyAdaptiveShadowWarnings });
+    expect(legacyAdaptiveShadowWarnings).toContain('adaptive_experimental_ignored');
 
     for (const bad of [
       { mode: 'always' },
@@ -240,6 +276,11 @@ describe('sidecar config', () => {
       threads: 6,
       enginePath: '/opt/llama-server',
     });
+    // missing source 与显式 heuristic 必须可区分（W1a B1）。
+    expect(defaultSidecarConfig().model.sourcePresent).toBe(false);
+    expect(normalizeSidecarConfig({}).model.sourcePresent).toBe(false);
+    expect(normalizeSidecarConfig({ model: { source: 'heuristic' } }).model.sourcePresent).toBe(true);
+    expect(normalizeSidecarConfig({ model: { source: null } }).model.sourcePresent).toBe(false);
     expect(normalized.model.api.keyRef).toBe('env:MODEL_KEY');
     expect(normalized.recall.queryPlan).toBe('model');
 
@@ -256,5 +297,45 @@ describe('sidecar config', () => {
       .toThrow(SidecarConfigError);
     expect(() => normalizeSidecarConfig({ model: { source: 'other' } })).toThrow(SidecarConfigError);
     expect(() => normalizeSidecarConfig({ recall: { queryPlan: 'always' } })).toThrow(SidecarConfigError);
+  });
+
+  it('W5：context.deadlineMs 默认 1500，范围 [200,1500]，超限 clamp + warning', () => {
+    expect(defaultSidecarConfig().context.deadlineMs).toBe(1500);
+    expect(defaultSidecarConfig().context.deadlineClamped).toBe(false);
+    expect(normalizeSidecarConfig({ context: { deadlineMs: 800 } }).context).toMatchObject({
+      deadlineMs: 800,
+      deadlineClamped: false,
+    });
+
+    const warnings: string[] = [];
+    expect(normalizeSidecarConfig({ context: { deadlineMs: 9000 } }, { warnings }).context)
+      .toMatchObject({ deadlineMs: 1500, deadlineClamped: true });
+    expect(warnings).toContain('context_deadline_clamped');
+
+    const lowWarnings: string[] = [];
+    expect(normalizeSidecarConfig({ context: { deadlineMs: 10 } }, { warnings: lowWarnings }).context)
+      .toMatchObject({ deadlineMs: 200, deadlineClamped: true });
+    expect(lowWarnings).toContain('context_deadline_clamped');
+
+    expect(() => normalizeSidecarConfig({ context: { deadlineMs: 1.5 } }))
+      .toThrow(SidecarConfigError);
+  });
+
+  it('旧 intervention.mode 逐字保留，加载不重写文件', async () => {
+    const paths = resolveSidecarPaths({ home, env: {} });
+    await mkdir(paths.dataDir, { recursive: true, mode: 0o700 });
+    const original = JSON.stringify({
+      schema: 1,
+      model: { source: 'heuristic' },
+      intervention: { mode: 'model' },
+    }, null, 2);
+    await writeFile(paths.configPath, original, { mode: 0o600 });
+
+    const loaded = await loadSidecarConfig({ paths, env: {} });
+    expect(loaded.intervention.mode).toBe('model');
+    expect(loaded.intervention.legacyModePresent).toBe(true);
+    expect(loaded.model.source).toBe('heuristic');
+    // 不迁移、不删除、不补字段。
+    expect(await readFile(paths.configPath, 'utf8')).toBe(original);
   });
 });

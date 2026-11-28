@@ -262,6 +262,75 @@ export interface InterventionScores {
   depthFit: number;
 }
 
+/**
+ * 0.4.0 介入 planner 的稳定 fallback 原因（W0-A §6.4）。
+ * 只记录枚举，不含 raw query/detail/token/endpoint。
+ */
+export type InterventionFallbackReason =
+  | 'none'
+  | 'deadline'
+  | 'prefetch_miss'
+  | 'source_unavailable'
+  | 'model_not_installed'
+  | 'allow_remote_false'
+  | 'host_plan_missing'
+  | 'host_plan_expired'
+  | 'host_plan_replayed'
+  | 'host_plan_invalid'
+  | 'host_plan_scope_mismatch'
+  | 'host_plan_cue_mismatch'
+  | 'invalid_output'
+  | 'timeout'
+  | 'planner_queue_overflow'
+  | 'error';
+
+/** 预取状态；first_turn/miss/expired/cue_mismatch 都是预期运行时状态。 */
+export type InterventionPrefetchState =
+  | 'hit'
+  | 'miss'
+  | 'expired'
+  | 'cue_mismatch'
+  | 'first_turn';
+
+export interface InterventionPlannerAttempt {
+  source: 'host' | 'local' | 'api';
+  outcome: 'hit' | 'miss' | 'timeout' | 'invalid' | 'unavailable' | 'remote_not_allowed' | 'error';
+  latencyMs: number;
+}
+
+/**
+ * 只读 planner 诊断（W0-A §6.4）。
+ * 只含枚举、布尔、计时与模型 id；不含 endpoint/keyRef/凭据/正文。
+ */
+export interface InterventionPlannerTrace {
+  configuredSource: 'heuristic' | 'local' | 'host' | 'api' | 'auto';
+  resolvedSource: 'heuristic' | 'local' | 'host' | 'api' | null;
+  latencyMs: number;
+  fallbackReason: InterventionFallbackReason | null;
+  prefetched: boolean;
+  prefetchState?: InterventionPrefetchState;
+  planAgeMs?: number;
+  planId?: string;
+  cueMatched?: boolean;
+  model?: string;
+  attempts?: InterventionPlannerAttempt[];
+  /**
+   * W6：仅 heuristic 决策带 adaptive 诊断；model/shadow 不读 adaptive，因此不出现。
+   * 只含阈值/阶段，不含 query 或正文。
+   */
+  adaptive?: {
+    stage: 'shadow' | 'canary' | 'on';
+    /** 本次 threshold 是否真的应用了 adaptive offset。 */
+    applied: boolean;
+    baseThreshold: number;
+    recommendedThreshold: number;
+    threshold: number;
+    offset: number;
+    /** 仅 canary 阶段出现。 */
+    canaryHit?: boolean;
+  };
+}
+
 export interface InterventionDecision {
   action: InterventionAction;
   depth: RecallDepth;
@@ -278,6 +347,8 @@ export interface InterventionDecision {
   mustSpeak?: boolean;
   /** 降级标记：must_speak 无候选/详情不可用，或 model 回退 heuristic。 */
   degraded?: boolean;
+  /** 0.4.0 additive 诊断：来源/预取/延迟/fallback；不含正文与凭据。 */
+  planner?: InterventionPlannerTrace;
 }
 
 /** 实际生效的介入结果；与 decision 在 shadow/off 下可能不同。 */
@@ -293,6 +364,17 @@ export interface AppliedIntervention {
   /** shadow 模式下策略建议但未生效的 action/depth。 */
   wouldAction?: InterventionAction;
   wouldDepth?: RecallDepth;
+  /**
+   * W6：本次实际生效决策是否来自 heuristic，可作为 adaptive 样本。
+   * model/shadow/off/gate 为 false/缺省；outcome 归因据此决定是否调参。
+   */
+  adaptiveEligible?: boolean;
+  /**
+   * W6：本次是否真的产生了可计入 policy 的介入决策。
+   * gate/non-intervention 路径（muted/chitchat/no_cue/...）为 false，
+   * 后续 outcome 不得写入 global 或 diagnostic。
+   */
+  policyEligible?: boolean;
   degraded?: boolean;
 }
 
@@ -324,6 +406,10 @@ export interface RecallTrace {
   agentId: string;
   hostId: string;
   threadId?: string;
+  /** 0.4.0 W4：与 `/context` turnId 对齐，用于 outcome binding 跨 turn 校验。 */
+  turnId?: string;
+  /** 0.4.0 W4：显式 host 身份；只由 adapter header 注入。 */
+  hostApp?: 'opencode' | 'openchamber' | 'dsh' | 'hermes';
   at: number;
   queryHash: string; // sha256(query)
   queryPreview: string; // 脱敏后最多 200 字；可配置不存

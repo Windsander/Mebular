@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // 0.4.0 shadow attribution E2E：real opencode >= 2.2 server + real
 // @mebular/opencode-plugin + real MCP daemon with the Memory Capability API +
-// real Memory Runtime sidecar configured with intervention.mode=shadow.
+// real Memory Runtime sidecar configured with internal intervention.diagnosticShadow=true.
 //
 // It proves the host attributes outcomes to the *applied* intervention, not to
 // the policy's shadow advice:
@@ -181,10 +181,12 @@ async function main() {
     trace: 'local',
     model: { source: 'heuristic' },
     intervention: {
+      // 0.4.0：旧 mode 不再启用 shadow；shadow 只能由内部 diagnostic 打开。
       // Shadow computes advice but keeps the baseline injection. A very high
       // minConfidence makes the advice silent for a broad/low-confidence cue
       // (the PolicyStore clamps the effective threshold to 0.80).
-      mode: 'shadow',
+      mode: 'off',
+      diagnosticShadow: true,
       minConfidence: 0.99,
       maxSilentStreak: 99,
       explorationRate: 0,

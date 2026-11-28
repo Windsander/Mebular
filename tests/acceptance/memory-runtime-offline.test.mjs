@@ -474,10 +474,12 @@ describe('0.3 离线恢复：outbox / Raw / capability 失败开放', () => {
     expect(offline.status).toBe(200);
     expect(offline.body.data.blocks).toEqual([]);
     expect(offline.body.data.degraded).toBe(true);
+    // W5：capability 不可达时 retry 会超过 `/context` 硬 deadline；此时必须
+    // 放弃等待并返回 deadline fallback，而不是让用户回合被拖过 1.5s。
     expect(offline.body.data.warnings).toEqual(expect.arrayContaining([
-      'self_stale',
-      'checkpoint_stale',
+      'context_deadline_exceeded',
     ]));
+    expect(offline.body.data.timing.totalMs).toBeLessThanOrEqual(1500);
     gate.up();
 
     const absent = await a.sidecar.context({

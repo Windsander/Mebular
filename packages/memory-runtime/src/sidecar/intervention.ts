@@ -3,9 +3,21 @@
 // 只决定「本次要不要带长期记忆片段」以及「带 gist/detail/quote」；
 // self/checkpoint 不经过这里，始终保持现有注入语义。
 //
-// - must_speak 是硬规则，任何策略都不能否决，且命中时不调用模型；
+// 规则优先级（v0-rules）：
+//   1. defer_explicit：用户/宿主明确“暂时不要提/先别用记忆” → defer；
+//      显式 defer 可以覆盖自动 must_speak，但 applied 仍保持 self/checkpoint 路径。
+//   2. conflict：用户明确问“哪个对/以哪条为准/记录冲突”，且候选带 conflict group
+//      → speak；exact intent 用 depthForCue() 的 quote，否则 detail。
+//   3. greeting / meta：整句寒暄、致谢、助手身份/能力/时间 → silent；整句锚定，
+//      混合了记忆请求的 turn 会继续落到 must_speak。
+//   4. must_speak：自动策略下限，不是用户显式意图的上限。命中后 heuristic 的
+//      阈值、负例率、novelty、探索/沉默上限都不能否决；无候选时仍是 checkpoint-only。
+//   5. no_candidates / no_novelty：无候选 silent；只有全部候选都已注入才 anti-repeat silent。
+//   6. heuristic：剩下的 turn 按 score / cue / novelty / 负例率决定。
+//
+// - must_speak 是硬规则，命中时不调用模型；
 // - heuristic 用 score.final / cue 具体度 / novelty / 近期负例率；
-// - maxSilentStreak 与 explorationRate 防止策略学成哑巴；
+// - no_novelty 是 anti-repeat 例外：不影响 maxSilentStreak / exploration 对新颖候选的作用；
 // - model 模式真实调用 SidecarInferenceProvider.planIntervention()：
 //   超时/非法/失败一律回退 heuristic + degraded + intervention_model_fallback。
 //
@@ -14,20 +26,31 @@
 // 两者都不读配置、不写 trace，便于单元测试。
 
 import { createHash } from 'node:crypto';
+import {
+  CONTEXT_RESPONSE_RESERVE_MS,
+  MIN_PLANNER_BUDGET_MS,
+} from './deadline.js';
 import type { Cue } from './cue.js';
 import type {
   InferenceInterventionCandidate,
   InferenceInterventionRequest,
   InferenceInterventionResult,
   InferenceInterventionStats,
-  SidecarOptionalModelSelection,
 } from './inference-provider.js';
 import type {
   InterventionAction,
   InterventionDecision,
+  InterventionFallbackReason,
+  InterventionPlannerAttempt,
+  InterventionPlannerTrace,
+  InterventionPrefetchState,
   InterventionScores,
   RecallDepth,
 } from '../runtime/types.js';
+import type { InterventionPlannerSource } from './effective.js';
+import type {
+  InterventionPrefetchPlan,
+} from './intervention-prefetch.js';
 
 const RULES_POLICY_VERSION = 'v0-rules';
 /** Console/宿主契约：策略规则版本；reset 响应也用这个值。 */
@@ -38,6 +61,8 @@ export type InterventionMode = 'off' | 'shadow' | 'heuristic' | 'model';
 
 export interface InterventionCandidateView {
   fragmentId: string;
+  /** 稳定候选键（优先 sourceIds[0]）；仅用于 host plan basis，不进入模型请求。 */
+  candidateKey?: string;
   sourceIds: string[];
   score: number;
   confidence: number;
@@ -78,12 +103,60 @@ function round4(value: number): number {
   return Number(clamp(value, 0, 1).toFixed(4));
 }
 
-const MEMORY_FOLLOW_UP_RE = /上次|之前|以前|记得|忘记|你忘了|不是说过|我说过|我说的是|原话|当时(?:说|讲|怎么)|last time|earlier|remember|forgot|you said/i;
+const MEMORY_FOLLOW_UP_RE = /上次|之前|以前|记得|忘记|你忘了|不是说过|我说过|我说的是|原话|当时(?:说|讲|怎么)|我的偏好是什么|last time|earlier|remember|forgot|you said|\brecall\b|\bremind me\b|\bwe (?:agreed|decided|settled)\b|\bwhat did (?:i|we) (?:say|decide|agree)\b/i;
 const CORRECTION_RE = /不对|不是(?:这个|这样|那条)?|错了|搞错|纠正|应该是|我说的是|准确(?:点|些)|重新说/i;
+
+// 显式 defer：用户要求本轮先不要回忆/注入旧上下文。
+// 与 Stage 0 的 test-only 口径一致；放在 must_speak 之前，避免「暂时不要提以前的方案」
+// 被 /以前/ 误判为显式回忆请求。
+const EXPLICIT_DEFER_RE = /(?:先|暂时|现在)?别(?:回忆|提|再提|注入|用记忆|提旧)|不要(?:回忆|提以前|用记忆)|不用(?:回忆|记)|先不(?:查|回忆|提|看历史)|先放一放|晚点再(?:聊|说|回顾)|下一轮再|等(?:我|你|把).{0,12}再(?:说|查|回顾|聊)|跳过(?:旧|以前|历史|旧上下文)|hold off|not (?:recall|bring up)|skip the memory|don'?t bring up|let'?s not recall|until i finish/i;
+
+// conflict 是独立硬规则：用户必须明确提出“哪个对/以哪条为准/该信哪个”。
+// 仅陈述“记录冲突/不一致/和以前不一样”不触发；候选还必须确实带 conflict group。
+// exact intent 用 depthForCue() 的 quote，否则 detail。
+const CONFLICT_QUERY_RE = /哪个对|哪条为准|以哪条为准|到底用哪个|到底哪个|信哪个|该信哪个|怎么处理|怎么办|如何取舍|which (?:one|record|.*?)\s+(?:is\s+)?(?:correct|right)|which (?:should i|to) trust/i;
+
+// 只匹配「整句寒暄/礼貌」；带实质请求的 turn 不会被这里吞掉。
+const GREETING_TOKEN = String.raw`(?:早上好|早安|早|上午好|中午好|下午好|晚上好|晚安|你好|您好|嗨|哈喽|在吗|收到|好的|好|嗯|谢谢|多谢|感谢|辛苦了|再见|拜拜|hi there|hello there|hi|hello|hey|good morning|good afternoon|good evening|good night|thanks|thank you|thankyou|bye|goodbye|ok|okay|got it|sure)`;
+const GREETING_RE = new RegExp(
+  `^${GREETING_TOKEN}(?:[\\s,，。.!！?？~～、]*${GREETING_TOKEN})*[\\s,，。.!！?？~～、呀啊哦啦呢吧]*$`,
+  'i',
+);
+
+// meta：问助手身份/能力/当前时间，不是长期记忆请求。
+const META_RE = /^(?:请问|打扰一下)?\s*(?:你是谁|你叫什么(?:名字)?|你是什么(?:模型|助手|东西)|你(?:能|会)(?:做|干)?什么|你有什么(?:能力|功能)|帮我解释(?:一下)?你的(?:能力|功能)|你(?:是)?怎么用|这个(?:东西)?怎么用|现在几点(?:了)?|今天几号|今天(?:是)?星期几|what model are you|who are you|what can you do|what are you|how do i use (?:this|it)|what time is it|what(?:'s| is) the (?:time|date)|what day is it)[\s!！。,.，？?~～]*$/i;
+
+// 英文精确值/引用词：与中文「端口/版本/路径/命令」对齐。
+// cue.ts 的 detailIntent 只覆盖中文词，这里补英文侧，避免同一意图在中英之间不对称。
+const EN_EXACT_INTENT_RE = /\b(?:exact|quote|verbatim|version|port|path|command|script|date)\b/i;
+
+function hasEnglishExactIntent(cue: Cue): boolean {
+  return cue.language === 'en' && EN_EXACT_INTENT_RE.test(cue.rawQuery);
+}
 
 /** 用户明确要求回忆/追问记忆。 */
 export function isExplicitMemoryRequest(cue: Cue): boolean {
   return MEMORY_FOLLOW_UP_RE.test(cue.rawQuery);
+}
+
+/** 用户明确要求本轮 defer（不注入记忆片段，但 checkpoint/self 照常）。 */
+export function isExplicitDefer(cue: Cue): boolean {
+  return EXPLICIT_DEFER_RE.test(cue.rawQuery)
+    || cue.detailIntent.reasons.includes('user_negated')
+    || cue.negations.includes('user_negated');
+}
+
+function isConflictRequest(cue: Cue): boolean {
+  return CONFLICT_QUERY_RE.test(cue.rawQuery);
+}
+
+function isGreeting(cue: Cue): boolean {
+  return cue.detailIntent.reasons.includes('chitchat')
+    || GREETING_RE.test(cue.rawQuery.trim());
+}
+
+function isMeta(cue: Cue): boolean {
+  return META_RE.test(cue.rawQuery.trim());
 }
 
 function isCorrection(cue: Cue): boolean {
@@ -94,7 +167,8 @@ function isCorrection(cue: Cue): boolean {
 function hasExactIntent(cue: Cue): boolean {
   return cue.detailIntent.reasons.includes('quote_request')
     || cue.detailIntent.reasons.includes('command_request')
-    || cue.detailIntent.reasons.includes('exact_value');
+    || cue.detailIntent.reasons.includes('exact_value')
+    || hasEnglishExactIntent(cue);
 }
 
 /** 命中即 must_speak 的原因；null 表示不强制。 */
@@ -116,9 +190,12 @@ export function mustSpeakReason(input: InterventionPlannerInput): string | null 
 /** 按 cue 意图选择深度：精确值/命令/引用 → quote；why/follow-up/task/entity/conflict → detail。 */
 export function depthForCue(cue: Cue): RecallDepth {
   const reasons = cue.detailIntent.reasons;
-  if (reasons.includes('quote_request')
+  const exactIntent = reasons.includes('quote_request')
     || reasons.includes('command_request')
-    || reasons.includes('exact_value')) {
+    || reasons.includes('exact_value');
+  // 冲突需要对照多条记录；但用户明确要精确值时，quote 仍然优先。
+  if (reasons.includes('conflict') && !exactIntent) return 'detail';
+  if (exactIntent || hasEnglishExactIntent(cue)) {
     return 'quote';
   }
   if (reasons.includes('why')
@@ -224,8 +301,67 @@ function mustSpeakDecision(
   };
 }
 
+interface RuleDecisionOptions {
+  action: InterventionAction;
+  reason: string;
+  depth: RecallDepth;
+  candidate: InterventionCandidateView | undefined;
+  novelty: number;
+  recentUselessRate: number;
+  degraded?: boolean;
+}
+
+/** 硬规则决策：与 must_speak 一样不依赖阈值/负例率，便于 trace 归因。 */
+function ruleDecision(
+  input: InterventionPlannerInput,
+  options: RuleDecisionOptions,
+): InterventionDecision {
+  const { action, reason, depth, candidate, novelty, recentUselessRate } = options;
+  return {
+    action,
+    depth,
+    confidence: 1,
+    reason,
+    policyVersion: RULES_POLICY_VERSION,
+    enforced: input.mode === 'heuristic' || input.mode === 'model',
+    scores: scoresOf(input.cue, candidate, novelty, recentUselessRate, depth),
+    ...(options.degraded ? { degraded: true } : {}),
+  };
+}
+
+/** 规则层已经决定的 reason；这些分支不再调用模型。 */
+const HARD_RULE_REASONS = new Set([
+  'defer_explicit',
+  'conflict',
+  'greeting',
+  'meta',
+  'no_candidates',
+  'no_novelty',
+]);
+
+export function decidedByRules(decision: InterventionDecision): boolean {
+  return decision.mustSpeak === true
+    || decision.action === 'defer'
+    || HARD_RULE_REASONS.has(decision.reason);
+}
+
 function planHeuristic(input: InterventionPlannerInput): InterventionDecision {
-  const candidate = input.candidates[0];
+  const freshCandidate = input.candidates.find(
+    (view) => noveltyOf(view, input.alreadyInjectedIds) > 0,
+  );
+  // 选第一个 novelty>0 的候选；只有全部已注入时才回落到 top-1 用于 no_novelty 归因。
+  const candidate = freshCandidate ?? input.candidates[0];
+  const allInjected = input.candidates.length > 0 && freshCandidate === undefined;
+  const conflictCandidates = input.candidates.filter((view) => view.conflict);
+  const freshConflictCandidate = conflictCandidates.find(
+    (view) => noveltyOf(view, input.alreadyInjectedIds) > 0,
+  );
+  // conflict 分支只使用 conflict 候选：
+  // - 优先第一个新鲜 conflict 候选；
+  // - 只有全部候选都已注入时，才用 top conflict 候选（conflict 优先于 anti-repeat）；
+  // - conflict 候选已注入但存在普通新鲜候选时，不进入 conflict 分支。
+  const conflictCandidate = freshConflictCandidate
+    ?? (allInjected ? conflictCandidates[0] : undefined);
   const topScore = clamp(candidate?.score ?? 0, 0, 1);
   const novelty = noveltyOf(candidate, input.alreadyInjectedIds);
   const threshold = clamp(input.threshold, 0, 1);
@@ -234,6 +370,60 @@ function planHeuristic(input: InterventionPlannerInput): InterventionDecision {
   const explorationRate = clamp(input.explorationRate ?? 0, 0, 1);
   const random = input.random ?? Math.random;
 
+  // 0) 显式 defer 优先于 must_speak：用户本轮明确不想看旧记忆。
+  //    放在最前，避免 /以前/ 之类的回忆触发词把 defer 误判成 must_speak。
+  if (isExplicitDefer(input.cue)) {
+    return ruleDecision(input, {
+      action: 'defer',
+      reason: 'defer_explicit',
+      depth: 'gist',
+      candidate,
+      novelty,
+      recentUselessRate,
+    });
+  }
+
+  // 1) conflict 也要先于 must_speak：冲突问句要对照多条记录。
+  //    exact intent 用 depthForCue() 的 quote；否则 detail；detail 不可用降 gist+degraded。
+  if (conflictCandidate && isConflictRequest(input.cue)) {
+    const intended = depthForCue(input.cue);
+    const requestedDepth: RecallDepth = intended === 'quote' ? 'quote' : 'detail';
+    const detailAvailable = conflictCandidate.detailAvailable;
+    return ruleDecision(input, {
+      action: 'speak',
+      reason: 'conflict',
+      depth: detailAvailable ? requestedDepth : 'gist',
+      candidate: conflictCandidate,
+      novelty: noveltyOf(conflictCandidate, input.alreadyInjectedIds),
+      recentUselessRate,
+      degraded: !detailAvailable,
+    });
+  }
+
+  // 2) 寒暄 / meta / 纯礼貌默认 silent；它们都是整句锚定，
+  //    带实质记忆请求的 turn 不会命中，因此不会压过真正的 must_speak。
+  if (isGreeting(input.cue)) {
+    return ruleDecision(input, {
+      action: 'silent',
+      reason: 'greeting',
+      depth: 'gist',
+      candidate,
+      novelty,
+      recentUselessRate,
+    });
+  }
+  if (isMeta(input.cue)) {
+    return ruleDecision(input, {
+      action: 'silent',
+      reason: 'meta',
+      depth: 'gist',
+      candidate,
+      novelty,
+      recentUselessRate,
+    });
+  }
+
+  // 3) must_speak 是硬规则，不能被阈值、负例率或 novelty 否决。
   const mustReason = mustSpeakReason(input);
   if (mustReason) {
     const intended = depthForCue(input.cue);
@@ -245,6 +435,7 @@ function planHeuristic(input: InterventionPlannerInput): InterventionDecision {
     );
   }
 
+  // 4) 无候选 → checkpoint-only。除 must_speak 外不再猜测记忆。
   if (!candidate) {
     return {
       action: 'silent',
@@ -255,6 +446,19 @@ function planHeuristic(input: InterventionPlannerInput): InterventionDecision {
       enforced: input.mode === 'heuristic' || input.mode === 'model',
       scores: scoresOf(input.cue, candidate, novelty, recentUselessRate, 'gist'),
     };
+  }
+
+  // 5) anti-repeat：只有所有候选都已注入时才 hard silent no_novelty。
+  //    maxSilentStreak / exploration 只对 novelty>0 的候选生效，不重复注入旧片段。
+  if (allInjected) {
+    return ruleDecision(input, {
+      action: 'silent',
+      reason: 'no_novelty',
+      depth: 'gist',
+      candidate,
+      novelty,
+      recentUselessRate,
+    });
   }
 
   const depth = depthForCue(input.cue);
@@ -306,20 +510,42 @@ export function planIntervention(input: InterventionPlannerInput): InterventionD
 const MODEL_REASON_MAX_CHARS = 160;
 const MODEL_GIST_MAX_CHARS = 240;
 
-/** 只依赖 provider 的这两个方法，测试可注入替身。 */
+/** 只依赖 provider 的模型入口；测试可注入替身。 */
 export interface InterventionModelPlanner {
-  selectOptionalSource(allowRemote: boolean): Promise<SidecarOptionalModelSelection>;
   planIntervention(
     request: InferenceInterventionRequest,
     options?: { timeoutMs?: number },
   ): Promise<InferenceInterventionResult>;
 }
 
+/**
+ * W2 首版 API 同步硬上限。W5 已把 `/context` 整体 deadline 硬化；
+ * 这里仍保证单次介入调用不会把用户回合拖过 1.5s。
+ */
+export const INTERVENTION_API_SYNC_DEADLINE_MS = 1500;
+/** 剩余预算低于该值时不再尝试模型（W0-A §6.1）。 */
+export { MIN_PLANNER_BUDGET_MS };
+/** 响应组装/序列化预留；与 `/context` 总 deadline 共用同一 seam。 */
+export const INTERVENTION_RESPONSE_RESERVE_MS = CONTEXT_RESPONSE_RESERVE_MS;
+
 export interface InterventionModelContext {
   planner: InterventionModelPlanner | null;
+  /** 配置的 model.source；决定 local/api/auto 解析。 */
+  configuredSource: InterventionPlannerSource;
+  /** 是否显式允许远端；生产只读 config.model.api.allowRemote。 */
   allowRemote: boolean;
-  /** 本次模型决策总预算（config.intervention.modelTimeoutMs）。 */
+  /** 本次模型决策预算（config.intervention.modelTimeoutMs）；上限 1500ms。 */
   timeoutMs: number;
+  /** W5 seam：绝对 deadline；提供后优先于 timeoutMs，并保留响应预留。 */
+  deadlineAt?: number;
+  /** 本地模型是否已配置（pack/path）；不在 `/context` 探测模型文件。 */
+  localConfigured: boolean;
+  /** API 是否已配置（baseUrl+model）；凭据在 provider 内校验。 */
+  apiConfigured: boolean;
+  /** 命中新鲜 local 预取 plan 时传入；W2 不会在 `/context` 同步调用本地模型。 */
+  prefetchedPlan?: InterventionPrefetchPlan | null;
+  prefetchState?: InterventionPrefetchState;
+  prefetchAgeMs?: number;
   stats: InferenceInterventionStats;
   hasCheckpoint: boolean;
   now?: () => number;
@@ -336,6 +562,153 @@ export interface InterventionPlanResult {
   modelFallback: boolean;
   warnings: string[];
   reasonCode?: string;
+  /** 0.4.0：是否消费了新鲜预取 plan。 */
+  prefetched: boolean;
+  /** 稳定 fallback 枚举；无 fallback 时为 null。 */
+  fallbackReason: InterventionFallbackReason | null;
+  /** 只读诊断；不含正文/凭据。 */
+  planner: InterventionPlannerTrace;
+}
+
+export interface InterventionSourceResolutionInput {
+  configuredSource: InterventionPlannerSource;
+  allowRemote: boolean;
+  localConfigured: boolean;
+  apiConfigured: boolean;
+  /** W3 seam：host plan 是否可用；W2 不实现 host bridge，生产恒为 false。 */
+  hostPlanAvailable?: boolean;
+  hasPrefetchedPlan: boolean;
+  prefetchState?: InterventionPrefetchState;
+}
+
+export interface InterventionSourceResolution {
+  source: 'host' | 'local' | 'api' | null;
+  prefetched: boolean;
+  fallbackReason: InterventionFallbackReason | null;
+  /** 预期运行时状态（首轮/未命中/过期/cue mismatch）不算 fallback/degraded。 */
+  expected: boolean;
+  warnings: string[];
+}
+
+/**
+ * 介入来源解析（与 extraction 的 selectOptionalSource 分离）。
+ *
+ * - local：只消费新鲜预取；miss/首轮/过期/cue mismatch 立即 heuristic；
+ * - api：唯一允许的同步模型来源，只有配置允许且 allowRemote 才尝试；
+ * - auto：host（W3）→ local（命中才用，未配置才继续）→ api → heuristic；
+ * - 任何分支都不在 `/context` 启动本地模型。
+ */
+export function resolveInterventionSource(
+  input: InterventionSourceResolutionInput,
+): InterventionSourceResolution {
+  const prefetchMiss = (): InterventionSourceResolution => ({
+    source: null,
+    prefetched: false,
+    fallbackReason: 'prefetch_miss',
+    expected: true,
+    warnings: [prefetchWarning(input.prefetchState)],
+  });
+
+  if (input.configuredSource === 'heuristic') {
+    return { source: null, prefetched: false, fallbackReason: null, expected: false, warnings: [] };
+  }
+
+  const resolveLocal = (): InterventionSourceResolution => {
+    if (!input.localConfigured) {
+      return {
+        source: null,
+        prefetched: false,
+        fallbackReason: 'model_not_installed',
+        expected: false,
+        warnings: ['model_unavailable'],
+      };
+    }
+    if (input.hasPrefetchedPlan) {
+      return { source: 'local', prefetched: true, fallbackReason: null, expected: false, warnings: [] };
+    }
+    return prefetchMiss();
+  };
+
+  const resolveApi = (): InterventionSourceResolution => {
+    if (!input.apiConfigured) {
+      return {
+        source: null,
+        prefetched: false,
+        fallbackReason: 'source_unavailable',
+        expected: false,
+        warnings: ['model_unavailable'],
+      };
+    }
+    if (!input.allowRemote) {
+      return {
+        source: null,
+        prefetched: false,
+        fallbackReason: 'allow_remote_false',
+        expected: false,
+        warnings: ['remote_not_allowed', 'model_unavailable'],
+      };
+    }
+    return { source: 'api', prefetched: false, fallbackReason: null, expected: false, warnings: [] };
+  };
+
+  if (input.configuredSource === 'local') return resolveLocal();
+  if (input.configuredSource === 'host') {
+    return input.hostPlanAvailable
+      ? { source: 'host', prefetched: true, fallbackReason: null, expected: false, warnings: [] }
+      : {
+        source: null,
+        prefetched: false,
+        fallbackReason: 'host_plan_missing',
+        expected: false,
+        warnings: ['host_plan_missing'],
+      };
+  }
+  if (input.configuredSource === 'api') return resolveApi();
+
+  // auto（W0-A §6.3，冻结）：local 已配置时，miss/失败也走 heuristic，绝不切 api；
+  // 只有 local 未配置才继续尝试 api。reviewer 的 miss→api 建议与契约冲突，不要改。
+  if (input.hostPlanAvailable) {
+    return { source: 'host', prefetched: true, fallbackReason: null, expected: false, warnings: [] };
+  }
+  if (input.localConfigured) return resolveLocal();
+  return resolveApi();
+}
+
+function prefetchWarning(state: InterventionPrefetchState | undefined): string {
+  if (state === 'expired') return 'intervention_prefetch_expired';
+  if (state === 'cue_mismatch') return 'intervention_prefetch_cue_mismatch';
+  if (state === 'first_turn') return 'intervention_prefetch_first_turn';
+  return 'intervention_prefetch_miss';
+}
+
+function plannerTrace(input: {
+  configuredSource: InterventionPlannerSource;
+  resolvedSource: 'heuristic' | 'local' | 'host' | 'api' | null;
+  latencyMs: number;
+  fallbackReason: InterventionFallbackReason | null;
+  prefetched: boolean;
+  prefetchState?: InterventionPrefetchState;
+  prefetchAgeMs?: number;
+  planId?: string;
+  cueMatched?: boolean;
+  model?: string;
+  attempts?: InterventionPlannerAttempt[];
+}): InterventionPlannerTrace {
+  return {
+    configuredSource: input.configuredSource,
+    resolvedSource: input.resolvedSource,
+    latencyMs: Math.max(0, Math.round(input.latencyMs)),
+    fallbackReason: input.fallbackReason,
+    prefetched: input.prefetched,
+    ...(input.prefetchState ? { prefetchState: input.prefetchState } : {}),
+    ...(input.prefetchAgeMs !== undefined ? { planAgeMs: Math.max(0, Math.round(input.prefetchAgeMs)) } : {}),
+    ...(input.planId ? { planId: input.planId } : {}),
+    ...(input.cueMatched !== undefined ? { cueMatched: input.cueMatched } : {}),
+    ...(input.model ? { model: input.model } : {}),
+    ...(input.attempts && input.attempts.length > 0
+      ? { attempts: input.attempts.slice(0, 4) }
+      : {}),
+  };
 }
 
 function dedupe(values: Iterable<string>): string[] {
@@ -398,18 +771,26 @@ export function buildInterventionInferenceRequest(
   };
 }
 
-function modelVersionOf(
-  request: InferenceInterventionRequest,
-  result: InferenceInterventionResult,
+/** policyVersion 的稳定 seed；只含聚合 cue/候选/统计与模型身份，不含正文。 */
+export function interventionVersionSeed(request: InferenceInterventionRequest): string {
+  return JSON.stringify([
+    // 模型身份与来源进入 hash：同一结果在不同模型/来源上必须可区分。
+    request.source,
+    request.cue,
+    request.candidates,
+    request.stats,
+  ]);
+}
+
+function modelVersionOfSeed(
+  seed: string,
+  result: Pick<InferenceInterventionResult, 'action' | 'depth' | 'confidence' | 'reason'>,
+  model: string | undefined,
 ): string {
   const digest = createHash('sha256')
     .update(JSON.stringify([
-      // 模型身份与来源进入 hash：同一结果在不同模型/来源上必须可区分。
-      request.source,
-      result.model ?? '',
-      request.cue,
-      request.candidates,
-      request.stats,
+      seed,
+      model ?? '',
       result.action,
       result.depth,
       result.confidence,
@@ -423,7 +804,7 @@ function modelDecisionOf(
   result: InferenceInterventionResult,
   input: InterventionPlannerInput,
   heuristic: InterventionDecision,
-  request: InferenceInterventionRequest,
+  version: (depth: RecallDepth) => string,
 ): { decision: InterventionDecision; warnings: string[] } | null {
   if (result.action !== 'speak' && result.action !== 'defer' && result.action !== 'silent') return null;
   if (result.depth !== 'gist' && result.depth !== 'detail' && result.depth !== 'quote') return null;
@@ -460,7 +841,7 @@ function modelDecisionOf(
       confidence: round4(result.confidence),
       reason: result.reason.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim()
         .slice(0, MODEL_REASON_MAX_CHARS),
-      policyVersion: modelVersionOf(request, { ...result, depth }),
+      policyVersion: version(depth),
       enforced: true,
       ...(scores ? { scores } : {}),
       ...(degraded ? { degraded: true } : {}),
@@ -470,100 +851,332 @@ function modelDecisionOf(
 }
 
 /**
- * model 模式入口：must_speak 不调用模型；其余按 cue + top-3 gist + 统计决策。
- * 任何失败（无模型/超时/非法/异常）都回退 heuristic，并标记 degraded + warning。
+ * W2 介入编排：
+ * - heuristic：规则层直接返回，不触模型；
+ * - local：只消费新鲜预取 plan，未命中立即 heuristic（不启动本地同步调用）；
+ * - api：唯一同步模型来源，受 1.5s 上限与剩余预算约束；
+ * - auto：一个总预算；host（W3 seam，0ms）→ local（命中才用）→ api（仅 local 未配置）；
+ * - 所有失败都 fail-open 到 heuristic，并记录稳定 fallbackReason。
  */
 export async function planInterventionAsync(
   input: InterventionPlannerInput,
   context: InterventionModelContext,
 ): Promise<InterventionPlanResult> {
   const heuristic = planIntervention({ ...input, mode: 'heuristic' });
-  const base: InterventionPlanResult = {
-    decision: heuristic,
-    source: 'heuristic',
+  const configuredSource = context.configuredSource;
+  const initialTrace = plannerTrace({
+    configuredSource,
+    resolvedSource: input.mode === 'model' ? null : 'heuristic',
     latencyMs: 0,
-    fromModel: false,
-    modelFallback: false,
-    warnings: [],
-  };
-  if (input.mode !== 'model') return base;
-  // 硬规则优先且省延迟；没有候选时模型也无法改变注入结果。
-  if (heuristic.mustSpeak || input.candidates.length === 0) return base;
+    fallbackReason: null,
+    prefetched: false,
+    ...(context.prefetchState ? { prefetchState: context.prefetchState } : {}),
+  });
+  if (input.mode !== 'model') {
+    return {
+      decision: { ...heuristic, planner: initialTrace },
+      source: 'heuristic',
+      latencyMs: 0,
+      fromModel: false,
+      modelFallback: false,
+      warnings: [],
+      prefetched: false,
+      fallbackReason: null,
+      planner: initialTrace,
+    };
+  }
+
+  // 硬规则优先且省延迟；规则层已决定时不再调用模型。
+  // no_novelty 例外：已有 local 预取 plan 时仍要消费它并记录 prefetched=true；
+  // 最终注入由调用方的 novelty guard 抑制，模型不能借此重复注入。没有预取 plan
+  // 的 api/no_novelty 继续省掉远端调用。
+  const prefetchReady = Boolean(context.prefetchedPlan);
+  const ruleShortCircuit = decidedByRules(heuristic)
+    && !(heuristic.reason === 'no_novelty' && prefetchReady);
+  if (ruleShortCircuit || input.candidates.length === 0) {
+    return {
+      decision: { ...heuristic, planner: initialTrace },
+      source: 'heuristic',
+      latencyMs: 0,
+      fromModel: false,
+      modelFallback: false,
+      warnings: [],
+      prefetched: false,
+      fallbackReason: null,
+      planner: initialTrace,
+    };
+  }
 
   const now = context.now ?? Date.now;
   const started = now();
   const elapsedNow = (): number => Math.max(0, now() - started);
-  const timeoutMs = Math.max(1, Math.floor(context.timeoutMs));
+
   const fallback = (
     reasonCode: string,
+    fallbackReason: InterventionFallbackReason,
     warnings: string[],
-    extra: { model?: string } = {},
-  ): InterventionPlanResult => ({
-    decision: { ...heuristic, degraded: true },
-    source: 'heuristic',
-    ...(extra.model ? { model: extra.model } : {}),
-    latencyMs: elapsedNow(),
-    fromModel: false,
-    modelFallback: true,
-    warnings: dedupe(['intervention_model_fallback', ...warnings]),
-    reasonCode,
+    options: {
+      model?: string;
+      expected?: boolean;
+      attempts?: InterventionPlannerAttempt[];
+      prefetchState?: InterventionPrefetchState;
+    } = {},
+  ): InterventionPlanResult => {
+    const expected = options.expected === true;
+    const trace = plannerTrace({
+      configuredSource,
+      resolvedSource: null,
+      latencyMs: elapsedNow(),
+      fallbackReason,
+      prefetched: false,
+      ...(options.prefetchState ? { prefetchState: options.prefetchState } : {}),
+      ...(options.model ? { model: options.model } : {}),
+      ...(options.attempts ? { attempts: options.attempts } : {}),
+    });
+    return {
+      decision: {
+        ...heuristic,
+        ...(expected ? {} : { degraded: true }),
+        planner: trace,
+      },
+      source: 'heuristic',
+      ...(options.model ? { model: options.model } : {}),
+      latencyMs: elapsedNow(),
+      fromModel: false,
+      modelFallback: !expected,
+      warnings: expected
+        ? dedupe(warnings)
+        : dedupe(['intervention_model_fallback', ...warnings]),
+      reasonCode,
+      prefetched: false,
+      fallbackReason,
+      planner: trace,
+    };
+  };
+
+  const resolution = resolveInterventionSource({
+    configuredSource,
+    allowRemote: context.allowRemote,
+    localConfigured: context.localConfigured,
+    apiConfigured: context.apiConfigured,
+    hasPrefetchedPlan: Boolean(context.prefetchedPlan),
+    ...(context.prefetchState ? { prefetchState: context.prefetchState } : {}),
   });
-
-  if (!context.planner) {
-    return fallback('model_unavailable', ['model_unavailable']);
-  }
-
-  const selection = await withinDeadline(
-    context.planner.selectOptionalSource(context.allowRemote),
-    timeoutMs,
-  );
-  if (!selection) return fallback('model_timeout', ['model_timeout']);
-  if (!selection.source) {
+  if (!resolution.source) {
     return fallback(
-      selection.reason ?? 'model_unavailable',
-      selection.warnings.length > 0 ? selection.warnings : ['model_unavailable'],
+      resolution.fallbackReason === 'prefetch_miss'
+        ? 'prefetch_miss'
+        : resolution.fallbackReason === 'allow_remote_false'
+          ? 'remote_not_allowed'
+          : resolution.fallbackReason === 'model_not_installed'
+            ? 'local_not_configured'
+            : 'model_unavailable',
+      resolution.fallbackReason ?? 'source_unavailable',
+      resolution.warnings.length > 0 ? resolution.warnings : ['model_unavailable'],
+      {
+        expected: resolution.expected,
+        ...(context.prefetchState ? { prefetchState: context.prefetchState } : {}),
+      },
     );
   }
 
-  const remaining = timeoutMs - elapsedNow();
-  if (remaining <= 0) return fallback('model_timeout', ['model_timeout']);
+  // 1) local：只消费预取 plan；绝不在 `/context` 调用本地模型。
+  if (resolution.source === 'local') {
+    const plan = context.prefetchedPlan;
+    if (!plan) {
+      return fallback('prefetch_miss', 'prefetch_miss', ['intervention_prefetch_miss'], {
+        expected: true,
+        ...(context.prefetchState ? { prefetchState: context.prefetchState } : {}),
+      });
+    }
+    const built = modelDecisionOf(
+      plan.result,
+      input,
+      heuristic,
+      (depth) => modelVersionOfSeed(
+        plan.versionSeed,
+        { ...plan.result, depth },
+        plan.result.model,
+      ),
+    );
+    if (!built) {
+      return fallback(
+        'invalid_model_response',
+        'invalid_output',
+        ['model_invalid_response', 'model_unavailable'],
+        { model: plan.result.model, prefetchState: 'hit' },
+      );
+    }
+    const trace = plannerTrace({
+      configuredSource,
+      resolvedSource: 'local',
+      latencyMs: elapsedNow(),
+      fallbackReason: null,
+      prefetched: true,
+      prefetchState: 'hit',
+      prefetchAgeMs: context.prefetchAgeMs,
+      planId: plan.planId,
+      cueMatched: true,
+      model: plan.result.model,
+      attempts: [{ source: 'local', outcome: 'hit', latencyMs: 0 }],
+    });
+    return {
+      decision: { ...built.decision, planner: trace },
+      source: 'local',
+      ...(plan.result.model ? { model: plan.result.model } : {}),
+      latencyMs: elapsedNow(),
+      fromModel: true,
+      modelFallback: false,
+      warnings: built.warnings,
+      prefetched: true,
+      fallbackReason: null,
+      planner: trace,
+    };
+  }
+
+  // 2) host：W3 才实现真实 bridge；W2 只保留 0ms 解析 seam，不伪造 host 结果。
+  if (resolution.source === 'host') {
+    return fallback('host_plan_missing', 'host_plan_missing', ['host_plan_missing'], {
+      attempts: [{ source: 'host', outcome: 'unavailable', latencyMs: 0 }],
+    });
+  }
+
+  if (!context.planner) {
+    return fallback('model_unavailable', 'source_unavailable', ['model_unavailable'], {
+      attempts: [{ source: 'api', outcome: 'unavailable', latencyMs: elapsedNow() }],
+    });
+  }
+
+  // 3) api：同步调用只允许这一条路径；硬上限 1.5s，且不重试。
+  const budget = resolveSyncBudget(context, now);
+  if (budget === null) {
+    return fallback('deadline', 'deadline', ['planner_deadline_exceeded'], {
+      attempts: [{ source: 'api', outcome: 'timeout', latencyMs: elapsedNow() }],
+    });
+  }
 
   const request = buildInterventionInferenceRequest(
     input,
     context.stats,
     context.hasCheckpoint,
-    selection.source,
+    'api',
     context.allowRemote,
   );
   const result = await withinDeadline(
-    context.planner.planIntervention(request, { timeoutMs: remaining }),
-    remaining,
+    context.planner.planIntervention(request, { timeoutMs: budget }),
+    budget,
   );
-  if (!result) return fallback('model_timeout', ['model_timeout']);
+  if (!result) {
+    return fallback('model_timeout', 'timeout', ['model_timeout'], {
+      attempts: [{ source: 'api', outcome: 'timeout', latencyMs: elapsedNow() }],
+    });
+  }
   if (!result.ok) {
+    const reasonCode = result.reasonCode ?? 'model_failed';
+    const mapped = fallbackReasonForProvider(reasonCode);
     return fallback(
-      result.reasonCode ?? 'model_failed',
+      reasonCode,
+      mapped,
       result.warnings.length > 0 ? result.warnings : ['model_unavailable'],
-      result.model ? { model: result.model } : {},
+      {
+        ...(result.model ? { model: result.model } : {}),
+        attempts: [{
+          source: 'api',
+          outcome: attemptOutcomeForFallback(mapped),
+          latencyMs: Math.max(0, Math.round(result.latencyMs)),
+        }],
+      },
     );
   }
 
-  const built = modelDecisionOf(result, input, heuristic, request);
+  const built = modelDecisionOf(
+    result,
+    input,
+    heuristic,
+    (depth) => modelVersionOfSeed(interventionVersionSeed(request), { ...result, depth }, result.model),
+  );
   if (!built) {
     return fallback(
       'invalid_model_response',
-      ['model_invalid_response'],
-      result.model ? { model: result.model } : {},
+      'invalid_output',
+      ['model_invalid_response', 'model_unavailable'],
+      {
+        ...(result.model ? { model: result.model } : {}),
+        attempts: [{
+          source: 'api',
+          outcome: 'invalid',
+          latencyMs: Math.max(0, Math.round(result.latencyMs)),
+        }],
+      },
     );
   }
 
+  const trace = plannerTrace({
+    configuredSource,
+    resolvedSource: 'api',
+    latencyMs: elapsedNow(),
+    fallbackReason: null,
+    prefetched: false,
+    ...(result.model ? { model: result.model } : {}),
+    attempts: [{
+      source: 'api',
+      outcome: 'hit',
+      latencyMs: Math.max(0, Math.round(result.latencyMs)),
+    }],
+  });
   return {
-    decision: built.decision,
-    source: selection.source,
+    decision: { ...built.decision, planner: trace },
+    source: 'api',
     ...(result.model ? { model: result.model } : {}),
     latencyMs: elapsedNow(),
     fromModel: true,
     modelFallback: false,
     warnings: built.warnings,
+    prefetched: false,
+    fallbackReason: null,
+    planner: trace,
   };
+}
+
+function resolveSyncBudget(
+  context: InterventionModelContext,
+  now: () => number,
+): number | null {
+  let budget = Math.max(1, Math.floor(context.timeoutMs));
+  if (context.deadlineAt !== undefined) {
+    const remaining = context.deadlineAt - now() - INTERVENTION_RESPONSE_RESERVE_MS;
+    // W5 会在这里硬化整体 `/context` deadline；W2 只保证不越过剩余预算。
+    if (remaining < MIN_PLANNER_BUDGET_MS) return null;
+    budget = Math.min(budget, Math.floor(remaining));
+  }
+  return Math.max(1, Math.min(budget, INTERVENTION_API_SYNC_DEADLINE_MS));
+}
+
+function fallbackReasonForProvider(reasonCode: string): InterventionFallbackReason {
+  if (reasonCode === 'model_timeout' || reasonCode === 'timeout') return 'timeout';
+  if (reasonCode === 'invalid_model_response'
+    || reasonCode === 'invalid_json'
+    || reasonCode === 'model_invalid_json'
+    || reasonCode === 'model_schema_mismatch') {
+    return 'invalid_output';
+  }
+  if (reasonCode === 'remote_not_allowed') return 'allow_remote_false';
+  if (reasonCode === 'credential_missing'
+    || reasonCode === 'model_credential_missing'
+    || reasonCode === 'api_not_configured'
+    || reasonCode === 'model_unavailable'
+    || reasonCode === 'no_candidates') {
+    return 'source_unavailable';
+  }
+  return 'error';
+}
+
+function attemptOutcomeForFallback(
+  reason: InterventionFallbackReason,
+): InterventionPlannerAttempt['outcome'] {
+  if (reason === 'timeout' || reason === 'deadline') return 'timeout';
+  if (reason === 'invalid_output') return 'invalid';
+  if (reason === 'allow_remote_false') return 'remote_not_allowed';
+  if (reason === 'source_unavailable' || reason === 'model_not_installed') return 'unavailable';
+  return 'error';
 }

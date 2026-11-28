@@ -162,11 +162,17 @@ async function waitOutcome(discovery, traceId, kind, { timeoutMs = 20000 } = {})
   }, { timeoutMs });
 }
 
+const POLICY_COUNT_KEYS = ['spoken', 'silent', 'accepted', 'ignored', 'reasked', 'corrected', 'dismissed', 'missed', 'too_shallow', 'too_deep'];
+
+// W6 起 policy state 是 v2：adaptive 计数在 global，model/shadow/gate 只写
+// diagnostic。reset 必须同时清空三者，而不是只清 v1 的单层计数。
 function policyAllZero(state) {
-  if (!state || state.version !== 1) return false;
-  const counts = state.global ?? {};
-  const keys = ['spoken', 'silent', 'accepted', 'ignored', 'reasked', 'corrected', 'dismissed', 'missed', 'too_shallow', 'too_deep'];
-  if (!keys.every((key) => counts[key] === 0)) return false;
+  if (!state || state.version !== 2) return false;
+  const allZero = (counts) => counts
+    && typeof counts === 'object'
+    && POLICY_COUNT_KEYS.every((key) => (counts[key] ?? 0) === 0);
+  if (!allZero(state.global ?? {})) return false;
+  if (!allZero(state.diagnostic ?? {})) return false;
   return state.domains && typeof state.domains === 'object' && Object.keys(state.domains).length === 0;
 }
 
@@ -449,16 +455,27 @@ async function main() {
       const state = await readPolicyState(policyStatePath);
       const counts = state?.global ?? {};
       return (counts.spoken ?? 0) > 0 && (counts.reasked ?? 0) > 0
-        && (counts.missed ?? 0) > 0 && (counts.too_shallow ?? 0) > 0
-        && (counts.too_deep ?? 0) > 0
+        && (counts.too_shallow ?? 0) > 0 && (counts.too_deep ?? 0) > 0
         ? state
         : null;
     }, { timeoutMs: 10000 });
-    check('本机 policy/state.json 持久化 spoken/silent 与 outcome 计数',
+    check('本机 policy/state.json 持久化 spoken 与 outcome 计数（gate 不进 diagnostic）',
       Boolean(stateBefore)
-      && (stateBefore.global.silent ?? 0) > 0
+      && stateBefore.version === 2
+      && (stateBefore.global.spoken ?? 0) > 0
+      // W6：B1 是 gate/non-intervention（policyEligible=false），missed 只落
+      // trace，不得进入 policy global/diagnostic；旧 0.3 断言要求 missed=1。
+      && (stateBefore.global.missed ?? 0) === 0
+      // 本场景的 eligible 决策都是 heuristic/adaptive，diagnostic 必须为空。
+      && (stateBefore.diagnostic.spoken ?? 0) === 0
+      && (stateBefore.diagnostic.silent ?? 0) === 0
+      && (stateBefore.diagnostic.missed ?? 0) === 0
       && Object.keys(stateBefore.domains ?? {}).length > 0,
-      JSON.stringify(stateBefore?.global));
+      JSON.stringify({
+        global: stateBefore?.global,
+        diagnostic: stateBefore?.diagnostic,
+        domains: Object.keys(stateBefore?.domains ?? {}),
+      }));
 
     // ---- Reset: stats cleared, traces + memory kept ------------------------
     const tracesBefore = await listTraces(discovery);
@@ -563,10 +580,80 @@ async function main() {
       && traceC1Full?.query === undefined
       && String(traceC1Full?.queryPreview ?? '').length <= 200,
       JSON.stringify({ queryPreviewLength: String(traceC1Full?.queryPreview ?? '').length }));
-    check('隐私：outcome note 是固定归因说明，不含用户正文',
-      traceA1Reasked?.outcome?.note === 'follow-up re-asked the previous turn'
-      && traceB1Missed?.outcome?.note === 'silent context followed by a memory follow-up',
-      JSON.stringify({ reasked: traceA1Reasked?.outcome?.note, missed: traceB1Missed?.outcome?.note }));
+    // 0.4.0 W4 协议：新协议不带 note（token 请求带 note → 400
+    // outcome_note_unsupported）；旧 0.3 无 token note 接受但忽略、不落盘。
+    // 旧断言要求 trace 上存在固定 note 字符串，属于 0.3 契约，已失效。
+    const noteProbeText = 'raw note must never be stored';
+    const noteProbe = await requestSidecar(discovery, '/context', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-mebular-host-app': 'opencode' },
+      body: JSON.stringify({
+        agentId: 'opencode',
+        threadId: `th_note_protocol_${suffix}`,
+        turnId: `turn_note_protocol_${suffix}`,
+        query: 'deepwork 主题',
+      }),
+    });
+    const noteTraceId = noteProbe.data?.traceId;
+    const noteBindingToken = noteProbe.data?.bindingToken;
+    const noteWithToken = await requestSidecar(
+      discovery,
+      `/recall/${encodeURIComponent(String(noteTraceId ?? 'tr_missing'))}/outcome`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          kind: 'accepted',
+          source: 'host',
+          host: 'opencode',
+          bindingToken: noteBindingToken,
+          note: noteProbeText,
+        }),
+      },
+    );
+    const noteTraceAfterReject = await fetchTrace(discovery, String(noteTraceId ?? ''));
+    check('隐私/协议：新协议 outcome 不含 note；带 token 的 note 被 400 outcome_note_unsupported',
+      noteProbe.status === 200
+      && typeof noteTraceId === 'string'
+      && typeof noteBindingToken === 'string' && noteBindingToken.length > 0
+      && traceA1Reasked?.outcome?.note === undefined
+      && traceB1Missed?.outcome?.note === undefined
+      && noteWithToken.status === 400
+      && noteWithToken.body?.error?.code === 'outcome_note_unsupported'
+      && (noteTraceAfterReject?.outcome ?? null) === null,
+      JSON.stringify({
+        storedReasked: traceA1Reasked?.outcome,
+        storedMissed: traceB1Missed?.outcome,
+        rejectStatus: noteWithToken.status,
+        rejectCode: noteWithToken.body?.error?.code,
+      }));
+    const legacyNote = await requestSidecar(
+      discovery,
+      `/recall/${encodeURIComponent(String(noteTraceId ?? 'tr_missing'))}/outcome`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          kind: 'accepted',
+          source: 'host',
+          note: noteProbeText,
+        }),
+      },
+    );
+    const noteTraceAfterLegacy = await fetchTrace(discovery, String(noteTraceId ?? ''));
+    check('协议：旧 0.3 无 token note 返回 200 ignored 且不落盘',
+      legacyNote.status === 200
+      && legacyNote.data?.recorded === false
+      && Array.isArray(legacyNote.data?.warnings)
+      && legacyNote.data.warnings.includes('outcome_note_ignored')
+      && (noteTraceAfterLegacy?.outcome ?? null) === null
+      && !JSON.stringify(noteTraceAfterLegacy ?? {}).includes(noteProbeText),
+      JSON.stringify({
+        status: legacyNote.status,
+        recorded: legacyNote.data?.recorded,
+        warnings: legacyNote.data?.warnings,
+        outcome: noteTraceAfterLegacy?.outcome ?? null,
+      }));
 
     // ---- Post-reset trace still records outcomes normally ------------------
     const sessionE = await turn(null, 'deepwork 主题');

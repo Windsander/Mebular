@@ -35,6 +35,7 @@ import {
   normalizeMemoryRuntimeModelSource,
   readMemoryRuntimeModelSource,
 } from './memory-runtime-config.mjs';
+import { resolveMemoryRuntimeEffectiveMode } from './memory-runtime-effective.mjs';
 import { APP_VERSION } from './version.mjs';
 import { acquireConfigFileLock } from './config-lock.mjs';
 import { resolveStaticAssetRoots } from './asset-roots.mjs';
@@ -57,6 +58,13 @@ import {
   snapshotProvisionState,
   writeProvisionRecord,
 } from './provision.mjs';
+import {
+  FIRST_RUN_INIT_FAILED,
+  firstRunPublicView,
+  initializeFirstRunHome,
+  markFirstRunAcked,
+  readFirstRunMarker,
+} from './first-run.mjs';
 import {
   acquireActiveLock,
   cloudError,
@@ -261,6 +269,7 @@ const CONSOLE_FILES = {
   'console.js': 'text/javascript; charset=utf-8',
   'host.js': 'text/javascript; charset=utf-8',
   'dropdown.mjs': 'text/javascript; charset=utf-8',
+  'first-run-disclosure.js': 'text/javascript; charset=utf-8',
   'assistants.js': 'text/javascript; charset=utf-8',
   'assistant-status.js': 'text/javascript; charset=utf-8',
   'deep-link.js': 'text/javascript; charset=utf-8',
@@ -908,6 +917,8 @@ export async function startHttpServer({
   afterConfigRename = null,
   // 引导态（空家目录）：只服务 /healthz + /console 引导页 + /app/provision/*；其余 409 provision_required
   provision: initialProvision = false,
+  // 0.4.0 W1b：首启初始化失败时给控制台的稳定 warning（不阻塞 READY）。
+  firstRunWarning = null,
   // P1：同一进程内热初始化。返回新的运行时上下文；成功后本 server 从 UNINITIALIZED → READY。
   initializeRuntime = null,
   // 关闭钩子：热初始化后由 server.mjs 关闭 app / join / 广播计时器（HTTP server 本身由本函数关闭）
@@ -1952,6 +1963,28 @@ export async function startHttpServer({
         const detail = memoryRuntimeSupervisor
           ? await memoryRuntimeSupervisor.readStatus().catch(() => null)
           : null;
+        // sidecar 可用时以 sidecar 的 effective 为准；轻量/未就绪时用同一张表纯推导。
+        const fallbackSource = detail?.intervention
+          ? null
+          : await readMemoryRuntimeModelSource({ home }).catch(() => null);
+        const effective = resolveMemoryRuntimeEffectiveMode({
+          config,
+          modelSource: detail?.model?.configured ?? fallbackSource?.source,
+          sourcePresent: fallbackSource?.sourcePresent
+            ?? (detail?.model?.configured !== undefined && detail?.model?.configured !== null),
+        });
+        const intervention = detail?.intervention ?? {
+          mode: effective.effective,
+          planner: effective.planner,
+          source: effective.source,
+          sourcePresent: effective.sourcePresent,
+          derivedMode: effective.derivedMode,
+          legacyModePresent: effective.legacyModePresent,
+          legacyModeIgnored: effective.legacyModeIgnored,
+          legacyModeConflict: effective.legacyModeConflict,
+          diagnosticShadow: effective.diagnosticShadow,
+          warnings: effective.warnings,
+        };
         // 进程、capability 与模型是独立观察；不得用进程存活伪造 capability ready。
         return sendJson(res, 200, {
           ...status,
@@ -1961,6 +1994,7 @@ export async function startHttpServer({
           capability: detail?.capability ?? null,
           capabilityError: detail?.error ?? null,
           model: detail?.model ?? null,
+          intervention,
         });
       }
       if (path === '/admin/api/memory-runtime/model-source') {
@@ -2197,6 +2231,8 @@ export async function startHttpServer({
     /^\/admin\/api\/(?:models|inference)\/(install|select|download|pause|resume|cancel|import|uninstall|remove|start|stop|test)$/,
     // 0.3 记忆运行时：召回反馈经 MCP 薄代理转发 sidecar；host token 不出服务端。
     /^\/admin\/api\/memory-runtime\/feedback$/,
+    // 0.4 W4：console outcome 经 MCP admin 代理；独立 admin secret 不出服务端。
+    /^\/admin\/api\/memory-runtime\/outcome$/,
     // 0.4 记忆介入策略：重置本机策略状态；同样经薄代理，sidecar 未启用时明确失败。
     /^\/admin\/api\/memory-runtime\/policy\/reset$/,
     // 0.3 高级模型来源：经 sidecar `/inference/settings` 或 `/models/:pack/activate`。
@@ -2797,6 +2833,32 @@ export async function startHttpServer({
       const traceId = typeof input.traceId === 'string' ? input.traceId : '';
       const result = memoryRuntimeSupervisor
         ? await memoryRuntimeSupervisor.submitRecallFeedback(traceId, input)
+        : {
+            statusCode: 409,
+            body: {
+              ok: false,
+              error: 'memory_runtime_disabled',
+              enabled: false,
+              state: 'stopped',
+              message: '记忆运行时未启用',
+            },
+          };
+      return sendJson(res, result.statusCode, result.body);
+    }
+
+    // 0.4 W4 console outcome：同 feedback 的鉴权/CSRF；MCP 只附加独立 admin
+    // secret，host token 不能冒充 console，note/raw 不接受。
+    if (path === '/admin/api/memory-runtime/outcome') {
+      const input = parseJsonBody(body);
+      if (!input) {
+        return sendJson(res, 400, { ok: false, error: 'bad_request', message: '需要 JSON 请求体' });
+      }
+      const traceId = typeof input.traceId === 'string' ? input.traceId : '';
+      const result = memoryRuntimeSupervisor
+        ? await memoryRuntimeSupervisor.submitRecallOutcome(traceId, {
+            kind: input.kind,
+            ...(input.confidence !== undefined ? { confidence: input.confidence } : {}),
+          })
         : {
             statusCode: 409,
             body: {
@@ -4289,11 +4351,14 @@ export async function startHttpServer({
           if (done !== false) return done;
         }
         if (path === '/app/provision/status' && req.method === 'GET') {
+          const firstRunMarker = await readFirstRunMarker({ home }).catch(() => null);
           return sendJson(res, 200, provisionStatus({
             home,
             mcpPort: boundPort,
             phase,
             provisioned: !isProvisionHome(home),
+            firstRun: firstRunPublicView(firstRunMarker),
+            firstRunWarning,
           }));
         }
         if (path === '/app/provision/create' || path === '/app/provision/join' || path === '/app/provision/restore') {
@@ -4408,11 +4473,63 @@ export async function startHttpServer({
                 }
               })
               .catch((error) => console.error(`CLIENT_ENDPOINT_RECONCILE_FAILED ${error?.code ?? 'ERROR'}`));
+            // 0.4.0 W1b：先确保 provision/应用本身成功，再 ack 披露并初始化 immersive。
+            // 披露成功（Console 显式回传且版本匹配）才写 enabled=true；未回传 / 版本不符 →
+            // marker 保持 pending，不写 enabled=true（fail closed）；应用初始化失败时不会 ack。
+            let firstRun = null;
+            if (input.firstRunDisclosure === true) {
+              // 披露版本必须由 Console 显式回传且为整数；缺失/非法一律拒绝 ack。
+              if (!Number.isInteger(input.firstRunDisclosureVersion)) {
+                firstRun = { acknowledged: false };
+              } else {
+                try {
+                  const acked = await markFirstRunAcked({
+                    home,
+                    disclosureVersion: input.firstRunDisclosureVersion,
+                  });
+                  if (acked) {
+                    const initialized = await initializeFirstRunHome({ home, env: process.env });
+                    firstRun = {
+                      acknowledged: true,
+                      initialized: initialized.ok === true && initialized.initialized === true,
+                      ...(initialized.ok === true ? {} : { warning: FIRST_RUN_INIT_FAILED }),
+                    };
+                    if (initialized.ok !== true) {
+                      console.error(`FIRST_RUN_INIT_FAILED ${initialized.reason ?? 'unknown'}`);
+                    }
+                    if (initialized.ok === true && initialized.enabled === true) {
+                      // 同步路由可见的配置快照，让 supervisor/capability 看到 enabled=true。
+                      config = {
+                        ...config,
+                        memoryRuntime: { ...(config.memoryRuntime ?? {}), enabled: true },
+                      };
+                    }
+                  } else {
+                    firstRun = { acknowledged: false };
+                  }
+                } catch (error) {
+                  console.error(`FIRST_RUN_INIT_FAILED ${error?.code ?? 'ERROR'}`);
+                  firstRun = { acknowledged: false, warning: FIRST_RUN_INIT_FAILED };
+                }
+              }
+            }
+            // 同进程首次启用：准备 capability token 并启动 sidecar（与设置页开启走同一生命周期）。
+            if (firstRun?.initialized === true && isMemoryRuntimeEnabled(config)) {
+              void enqueueMemoryRuntimeLifecycle(async () => {
+                await memoryCapability.prepare().catch(() => undefined);
+                if (memoryRuntimeSupervisor && isMemoryRuntimeEnabled(config)) {
+                  await memoryRuntimeSupervisor.start().catch((error) => {
+                    console.error(`MEMORY_RUNTIME_START_FAILED ${error?.code ?? 'ERROR'}`);
+                  });
+                }
+              }).catch((error) => console.error(`MEMORY_RUNTIME_START_FAILED ${error?.code ?? 'ERROR'}`));
+            }
             return sendJson(res, 200, {
               ok: true,
               ...result,
               initialized: true,
               phase: 'READY',
+              ...(firstRun ? { firstRun } : {}),
             });
           } catch (error) {
             // 回滚本次新建的落盘产物；home 锁仍由当前进程持有（不释放/不重抢）。

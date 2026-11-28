@@ -126,14 +126,14 @@ base；旧 `/runtime/v1` 路径会被拒绝（`runtime_url_legacy`）。非 loop
 | `hideMemoryTools` | `true` | 普通 agent 隐藏 `mebular_*` 工具 |
 | `governanceAgents` | `mebular-memory`、`mebular-governance` | 例外 agent（保留工具面） |
 | `modelSource` | `heuristic` | 仅 `host`/`current` 才调用 `ctx.session.generate` |
-| `recallTimeoutMs` | `800` | context 召回超时；失败/超时静默不注入 |
+| `recallTimeoutMs` | `2000` | context 召回超时；失败/超时静默不注入 |
 | `recallTokenBudget` | `2000` | Runtime context token 预算 |
 | `maxFragments` | `3` | 单次 context 最多片段数（1–3） |
 | `maxContextBytes` | `8192` | 注入块硬上限（不可超过 8 KiB） |
 | `outcomes` | `true` | 是否上报 `/context` 归因结果；旧 Runtime 无 `decision` 时不会产生任何请求 |
 | `outcomeTimeoutMs` | `1500` | 单次 outcome 上报超时；超时/网络失败静默丢弃 |
 | `outcomeWindowMs` | `120000` | 下一轮 user turn 归因窗口；超过后不再推断 missed/reasked/corrected |
-| `outcomeIgnoredDelayMs` | `600000` | `session.idle` / `session.execution.succeeded` 后等待多久上报弱信号 `ignored` |
+| `outcomeIgnoredDelayMs` | `600000` | `session.idle` / `session.execution.succeeded` 后等待多久上报弱信号 `ignored`；实际延迟还会被 `outcomeWindowMs` 的 75% 截断，避免 binding token 过期 |
 | `maxChunkBytes` | `16384` | 单个 ingest chunk 上限 |
 | `maxCaptureMessages` | `12` | 每次读取会话上下文时最多检查的最近消息数 |
 | `hostExtractTimeoutMs` | `15000` | `session.generate` 后台抽取超时 |

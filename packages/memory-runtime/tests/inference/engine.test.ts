@@ -36,12 +36,12 @@ function harness(options: {
   ignoreTerm?: boolean;
 } = {}) {
   const children: FakeChild[] = [];
-  const spawnCalls: Array<{ command: string; args: string[] }> = [];
+  const spawnCalls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv }> = [];
   const healthCalls: Array<{ url: string; token: string }> = [];
-  const spawn: SpawnLike = (command, args) => {
+  const spawn: SpawnLike = (command, args, spawnOptions) => {
     const child = new FakeChild(options.ignoreTerm ?? false);
     children.push(child);
-    spawnCalls.push({ command, args: [...args] });
+    spawnCalls.push({ command, args: [...args], env: spawnOptions?.env });
     return child as unknown as ChildProcessLike;
   };
   let now = 1000;
@@ -122,6 +122,23 @@ describe('LlamaServerEngine', () => {
     expect(h.engine.getStatus().state).toBe('stopped');
     await h.engine.stop();
     expect(h.children[0]!.kills).toEqual(['SIGTERM']);
+  });
+
+  it('W4：spawn llama-server 时不继承 MEBULAR_MEMORY_RUNTIME_ADMIN_TOKEN', async () => {
+    const previous = process.env.MEBULAR_MEMORY_RUNTIME_ADMIN_TOKEN;
+    process.env.MEBULAR_MEMORY_RUNTIME_ADMIN_TOKEN = 'admin-secret-must-not-leak';
+    process.env.MEBULAR_MEMORY_RUNTIME_TEST_KEEP = 'kept';
+    try {
+      const h = harness();
+      await h.engine.acquire();
+      expect(h.spawnCalls[0]!.env).not.toHaveProperty('MEBULAR_MEMORY_RUNTIME_ADMIN_TOKEN');
+      expect(h.spawnCalls[0]!.env?.MEBULAR_MEMORY_RUNTIME_TEST_KEEP).toBe('kept');
+      await h.engine.stop();
+    } finally {
+      if (previous === undefined) delete process.env.MEBULAR_MEMORY_RUNTIME_ADMIN_TOKEN;
+      else process.env.MEBULAR_MEMORY_RUNTIME_ADMIN_TOKEN = previous;
+      delete process.env.MEBULAR_MEMORY_RUNTIME_TEST_KEEP;
+    }
   });
 
   it('启动超时：杀掉子进程并进入 crashed，不留孤儿', async () => {

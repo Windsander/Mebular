@@ -26,6 +26,7 @@ const savedTracesFile = process.env.FAKE_SIDECAR_TRACES_FILE;
 const savedTraceDetailFile = process.env.FAKE_SIDECAR_TRACE_DETAIL_FILE;
 const savedInterventionStatus = process.env.FAKE_SIDECAR_INTERVENTION_STATUS;
 const savedInterventionOut = process.env.FAKE_SIDECAR_INTERVENTION_OUT;
+const savedOutcomeOut = process.env.FAKE_SIDECAR_OUTCOME_OUT;
 
 afterEach(async () => {
   while (servers.length > 0) await servers.pop().close().catch(() => undefined);
@@ -50,6 +51,8 @@ afterEach(async () => {
   else process.env.FAKE_SIDECAR_INTERVENTION_STATUS = savedInterventionStatus;
   if (savedInterventionOut === undefined) delete process.env.FAKE_SIDECAR_INTERVENTION_OUT;
   else process.env.FAKE_SIDECAR_INTERVENTION_OUT = savedInterventionOut;
+  if (savedOutcomeOut === undefined) delete process.env.FAKE_SIDECAR_OUTCOME_OUT;
+  else process.env.FAKE_SIDECAR_OUTCOME_OUT = savedOutcomeOut;
 });
 
 async function tempDir(prefix = 'memory-runtime-admin-') {
@@ -425,6 +428,74 @@ describe('MCP admin · Memory Runtime sidecar 只读代理', () => {
       method: 'POST',
       path: '/memory-runtime/v1/intervention/reset',
     });
+  }, 30000);
+
+  it('W4：MCP admin proxy 用独立 admin token 转发 console outcome；缺/错/host token 均 403', async () => {
+    const outDir = await tempDir('memory-runtime-admin-outcome-');
+    const outcomeOut = join(outDir, 'outcome.jsonl');
+    const { home, base } = await start({
+      enabled: true,
+      env: { FAKE_SIDECAR_OUTCOME_OUT: outcomeOut },
+    });
+    await readyStatus(base);
+    const hostToken = JSON.parse(
+      await readFile(join(home, 'memory-runtime', 'host-token'), 'utf-8'),
+    ).token;
+
+    const { token, cookie } = await csrf(base);
+    const response = await fetch(`${base}/admin/api/memory-runtime/outcome`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-mebular-csrf': token,
+        cookie,
+      },
+      body: JSON.stringify({ traceId: 'tr_fake_0001', kind: 'accepted', confidence: 0.7 }),
+    });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body).toMatchObject({
+      ok: true,
+      data: {
+        traceId: 'tr_fake_0001',
+        outcome: { kind: 'accepted', source: 'console' },
+      },
+    });
+    expect(JSON.stringify(body)).not.toContain(hostToken);
+
+    // fake sidecar 只记录布尔值：证明 MCP 真实附带了独立 admin secret，
+    // 且没有把 host token 当作 admin 凭据。
+    const lines = (await readFile(outcomeOut, 'utf-8'))
+      .trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+    expect(lines.at(-1)).toMatchObject({
+      traceId: 'tr_fake_0001',
+      source: 'console',
+      body: { kind: 'accepted', source: 'console', confidence: 0.7 },
+      adminTokenPresent: true,
+      adminTokenMatches: true,
+      hostApp: '',
+      channel: '',
+    });
+
+    // discovery/status 不暴露独立 admin secret。
+    const discovery = JSON.parse(await readFile(join(home, 'memory-runtime.json'), 'utf-8'));
+    expect(JSON.stringify(discovery)).not.toMatch(/adminToken|admin-token/i);
+    expect(JSON.stringify(await readyStatus(base))).not.toMatch(/adminToken|admin-token/i);
+
+    // 直连 sidecar：host token 无/错 admin secret、旧 channel header 都拒绝。
+    const sidecarUrl = String(discovery.url);
+    const direct = (headers) => fetch(`${sidecarUrl}/recall/tr_fake_0001/outcome`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${hostToken}`,
+        'content-type': 'application/json',
+        ...headers,
+      },
+      body: JSON.stringify({ kind: 'accepted', source: 'console' }),
+    });
+    expect((await direct({})).status).toBe(403);
+    expect((await direct({ 'x-mebular-admin-token': hostToken })).status).toBe(403);
+    expect((await direct({ 'x-mebular-outcome-channel': 'admin' })).status).toBe(403);
   }, 30000);
 
   it('trace view：off baseline 不外泄 would*，shadow 透出反事实建议，旧 trace 三字段为 null', async () => {

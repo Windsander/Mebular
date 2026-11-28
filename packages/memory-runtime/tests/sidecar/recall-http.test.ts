@@ -1,7 +1,7 @@
 // W4b host API 闭环：/recall /context /traces /feedback /status /version。
 // 使用 fake capability server；不启动真实 MCP/core。
 
-import { describe, it, expect, afterEach } from '@jest/globals';
+import { describe, it, expect, afterEach, jest } from '@jest/globals';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -61,8 +61,40 @@ function preference(): FakeMemoryRecord {
   };
 }
 
+function interventionCheckpoint(threadId: string, domain: string, goal: string) {
+  return {
+    id: '01JINPUTDEFERCKPT',
+    domain,
+    agentId: 'opencode',
+    threadId,
+    revision: 1,
+    state: {
+      schema: 2,
+      contentMode: 'structured',
+      task: { key: domain, threadId, fleetTaskId: null },
+      goal,
+      constraints: [],
+      decisions: [],
+      progress: { done: [], doing: [], blocked: [] },
+      nextSteps: [{ id: 'n1', text: 'continue' }],
+      files: [],
+      openQuestions: [],
+      references: { recordIds: [], detailIds: [], messageIds: [], fleetTaskId: null, urls: [] },
+    },
+    summary: null,
+    recordIds: [],
+    lease: null,
+    expiresAt: 0,
+  };
+}
+
 async function setup(options: {
   intervention?: Partial<ReturnType<typeof defaultSidecarConfig>['intervention']>;
+  modelSource?: ReturnType<typeof defaultSidecarConfig>['model']['source'];
+  /** 模拟 `recall.queryPlan='model'` 的 extraction 配置；只用于 B2 status warning。 */
+  recallQueryPlan?: ReturnType<typeof defaultSidecarConfig>['recall']['queryPlan'];
+  /** 模拟旧用户配置缺少 model.source；缺省按测试显式 source 处理。 */
+  sourceMissing?: boolean;
   trace?: 'off' | 'local';
   now?: () => number;
   withPolicy?: boolean;
@@ -84,7 +116,16 @@ async function setup(options: {
   const config = defaultSidecarConfig();
   config.http.port = 0;
   if (options.trace) config.trace = options.trace;
-  if (options.intervention) config.intervention = { ...config.intervention, ...options.intervention };
+  config.model.sourcePresent = options.sourceMissing !== true;
+  if (options.modelSource) config.model.source = options.modelSource;
+  if (options.recallQueryPlan) config.recall.queryPlan = options.recallQueryPlan;
+  if (options.intervention) {
+    config.intervention = { ...config.intervention, ...options.intervention };
+    // 真实文件里显式写 mode 会由 normalize 置 true；测试注入时按同样语义处理。
+    if (Object.prototype.hasOwnProperty.call(options.intervention, 'mode')) {
+      config.intervention.legacyModePresent = true;
+    }
+  }
   const runtime = new SettlementRuntime({
     config,
     local,
@@ -99,6 +140,7 @@ async function setup(options: {
   const server = new SidecarServer({
     config,
     hostToken: 'host-token',
+    adminToken: 'admin-token',
     identity,
     getStatus: () => runtime.statusSnapshot({
       mode: 'immersive',
@@ -175,7 +217,7 @@ describe('sidecar recall/context HTTP', () => {
       threadId: 'th_http_recall',
       turnId: 'turn_http_1',
       turnKind: 'human',
-      query: '我的偏好是什么？',
+      query: '你记得我的偏好吗？',
       maxFragments: 2,
       maxBytes: 4096,
       tokenBudget: 500,
@@ -541,7 +583,7 @@ describe('sidecar recall/context HTTP', () => {
       agentId: 'opencode',
       threadId: 'th_ckpt_ctx',
       turnId: 'turn_ckpt_1',
-      query: '继续上次任务',
+      query: '看看当前进度',
     });
     expect(context.status).toBe(200);
     expect(context.body.data.blocks[0]).toMatchObject({
@@ -566,7 +608,7 @@ describe('sidecar recall/context HTTP', () => {
       agentId: 'opencode',
       threadId: 'th_ckpt_ctx',
       turnId: 'turn_ckpt_budget',
-      query: '继续上次任务',
+      query: '看看当前进度',
       maxBytes: 520,
       maxTokens: 220,
     });
@@ -582,7 +624,7 @@ describe('sidecar recall/context HTTP', () => {
       agentId: 'opencode',
       threadId: 'th_ckpt_ctx',
       turnId: 'turn_ckpt_2',
-      query: '继续上次任务',
+      query: '看看当前进度',
       includeCheckpoint: false,
     });
     expect(noCheckpoint.body.data.blocks).toEqual([]);
@@ -612,7 +654,7 @@ describe('sidecar recall/context HTTP', () => {
       agentId: 'opencode',
       threadId: 'th_ckpt_ctx',
       turnId: 'turn_ckpt_3',
-      query: '继续上次任务',
+      query: '看看当前进度',
     });
     expect(summaryOnly.body.data.blocks[0]).toMatchObject({
       kind: 'checkpoint',
@@ -631,7 +673,7 @@ describe('sidecar recall/context HTTP', () => {
       agentId: 'opencode',
       threadId: 'th_ckpt_ctx',
       turnId: 'turn_ckpt_4',
-      query: '继续上次任务',
+      query: '看看当前进度',
     });
     expect(expired.body.data.blocks).toEqual([]);
     expect(expired.body.data.silenceReason).toBe('no_hits');
@@ -642,7 +684,7 @@ describe('sidecar recall/context HTTP', () => {
       agentId: 'opencode',
       threadId: 'th_ckpt_ctx',
       turnId: 'turn_ckpt_5',
-      query: '继续上次任务',
+      query: '看看当前进度',
     });
     expect(noSummary.body.data.blocks).toEqual([]);
     expect(noSummary.body.data.degraded).toBe(true);
@@ -691,7 +733,7 @@ describe('sidecar recall/context HTTP', () => {
       agentId: 'opencode',
       threadId: 'th_http_self',
       turnId: 'turn_http_self_1',
-      query: '我的偏好是什么？',
+      query: '你记得我的偏好吗？',
       includeSelf: true,
       includeCheckpoint: true,
     });
@@ -704,7 +746,7 @@ describe('sidecar recall/context HTTP', () => {
       agentId: 'opencode',
       threadId: 'th_http_self',
       turnId: 'turn_http_self_2',
-      query: '我的偏好是什么？',
+      query: '你记得我的偏好吗？',
       includeSelf: false,
       includeCheckpoint: true,
     });
@@ -730,7 +772,8 @@ describe('sidecar recall/context HTTP', () => {
   });
 
   it('/context includeSelf：SelfRecord 不存在时非 degraded 空且无 self 块', async () => {
-    const { server, fake } = await setup();
+    // 该用例只验证 self 缺失，不验证介入策略；用 baseline 避免 must_speak 降级噪声。
+    const { server, fake } = await setup({ sourceMissing: true });
     fake.selfRecords.length = 0;
     const context = await post(`${server.url}/context`, {
       agentId: 'opencode',
@@ -808,8 +851,11 @@ describe('sidecar recall/context HTTP', () => {
     expect(context.body.data.estimatedTokens).toBeLessThanOrEqual(1200);
   });
 
-  it('off 模式不改变 baseline 注入，但始终返回 decision/applied', async () => {
-    const { server, runtime } = await setup({ intervention: { mode: 'off', minConfidence: 0.95 } });
+  it('旧 intervention.mode=off 被忽略：production 由 model.source=heuristic 派生', async () => {
+    const { server, runtime } = await setup({
+      modelSource: 'heuristic',
+      intervention: { mode: 'off', minConfidence: 0.5, explorationRate: 0, maxSilentStreak: 99 },
+    });
     const context = await post(`${server.url}/context`, {
       agentId: 'opencode',
       threadId: 'th_off',
@@ -818,81 +864,242 @@ describe('sidecar recall/context HTTP', () => {
     });
     expect(context.status).toBe(200);
     expect(context.body.data.fragments.length).toBeGreaterThan(0);
-    expect(context.body.data.decision).toMatchObject({
-      action: 'speak',
-      policyVersion: 'v0-baseline',
-      reason: 'baseline',
-      enforced: false,
-    });
-    expect(context.body.data.applied).toMatchObject({
-      action: 'speak',
-      fragments: expect.any(Number),
-    });
-    // off 也记录实际 baseline，而不是未生效的建议。
-    const offStats = await runtime.policyStore!.snapshot();
-    expect(offStats.global.spoken).toBe(1);
-    expect(offStats.global.silent).toBe(0);
+    expect(context.body.data.decision.policyVersion).toMatch(/^heuristic:/);
+    expect(context.body.data.decision.enforced).toBe(true);
+    expect(context.body.data.applied.wouldAction).toBeUndefined();
+    const stats = await runtime.policyStore!.snapshot();
+    expect(stats.global.spoken).toBe(1);
     const trace = await fetch(`${server.url}/traces/${context.body.data.traceId}`, { headers: auth() });
     const traceBody = await trace.json() as any;
-    expect(traceBody.data.decision.action).toBe('speak');
-    expect(traceBody.data.applied).toMatchObject({ action: 'speak', fragments: expect.any(Number) });
+    expect(traceBody.data.decision.policyVersion).toMatch(/^heuristic:/);
     expect(traceBody.data.applied.wouldAction).toBeUndefined();
 
-    const recall = await post(`${server.url}/recall`, {
-      agentId: 'opencode',
-      threadId: 'th_off',
-      query: '今天天气怎么样',
+    const version = await fetch(`${server.url}/version`, { headers: auth() });
+    const versionBody = await version.json() as any;
+    expect(versionBody.data.capabilities.intervention).toMatchObject({
+      mode: 'heuristic',
+      configuredSource: 'heuristic',
+      sourcePresent: true,
+      legacyModeIgnored: true,
+      warnings: ['legacy_intervention_mode_ignored'],
     });
-    expect(recall.status).toBe(200);
-    expect(recall.body.data.decision).toMatchObject({ action: 'speak', reason: 'baseline' });
   });
 
-  it('shadow 只记录建议：注入块与 off 完全一致，并在 applied 记录 wouldAction/wouldDepth', async () => {
-    const off = await setup({ intervention: { mode: 'off' } });
-    const offContext = await post(`${off.server.url}/context`, {
+  it('enabled=true + model.source 缺失：保持 0.3 baseline，不静默 heuristic', async () => {
+    const { server } = await setup({
+      sourceMissing: true,
+      intervention: { minConfidence: 0.95, explorationRate: 0, maxSilentStreak: 99 },
+    });
+    const context = await post(`${server.url}/context`, {
       agentId: 'opencode',
-      threadId: 'th_shadow',
-      turnId: 'turn_shadow_1',
+      threadId: 'th_source_missing',
+      turnId: 'turn_source_missing_1',
+      query: '今天天气怎么样',
+    });
+    expect(context.status).toBe(200);
+    // baseline 会注入，但 decision 不是 heuristic。
+    expect(context.body.data.fragments.length).toBeGreaterThan(0);
+    expect(context.body.data.decision).toMatchObject({
+      policyVersion: 'v0-baseline',
+      enforced: false,
+    });
+    expect(context.body.data.applied.wouldAction).toBeUndefined();
+    const status = await fetch(`${server.url}/status`, { headers: auth() });
+    const statusBody = await status.json() as any;
+    expect(statusBody.data.intervention).toMatchObject({
+      mode: 'off',
+      planner: 'off',
+      sourcePresent: false,
+      legacyModeIgnored: false,
+    });
+    expect(statusBody.data.intervention.warnings).toContain('model_source_missing');
+  });
+
+  it('旧 mode=shadow 不启用 shadow；只有内部 diagnosticShadow 才生效', async () => {
+    const legacy = await setup({
+      modelSource: 'heuristic',
+      intervention: { mode: 'shadow', minConfidence: 0.5, explorationRate: 0, maxSilentStreak: 99 },
+    });
+    const legacyContext = await post(`${legacy.server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_shadow_legacy',
+      turnId: 'turn_shadow_legacy_1',
       query: '你记得我的喜好吗？',
     });
-    const shadow = await setup({ intervention: { mode: 'shadow' } });
+    expect(legacyContext.status).toBe(200);
+    expect(legacyContext.body.data.decision.enforced).toBe(true);
+    expect(legacyContext.body.data.applied.wouldAction).toBeUndefined();
+    const version = await fetch(`${legacy.server.url}/version`, { headers: auth() });
+    const versionBody = await version.json() as any;
+    expect(versionBody.data.capabilities.intervention).toMatchObject({
+      mode: 'heuristic',
+      configuredSource: 'heuristic',
+      planner: 'heuristic',
+      legacyModeIgnored: true,
+      diagnosticShadow: false,
+    });
+    expect(versionBody.data.capabilities.intervention.warnings)
+      .toContain('legacy_intervention_mode_ignored');
+  });
+
+  it('diagnostic shadow 只记录建议：applied 记录 wouldAction/wouldDepth', async () => {
+    const shadow = await setup({
+      modelSource: 'heuristic',
+      intervention: { diagnosticShadow: true, explorationRate: 0, maxSilentStreak: 99 },
+    });
     const shadowContext = await post(`${shadow.server.url}/context`, {
       agentId: 'opencode',
       threadId: 'th_shadow',
       turnId: 'turn_shadow_1',
       query: '你记得我的喜好吗？',
     });
-    expect(offContext.status).toBe(200);
     expect(shadowContext.status).toBe(200);
-    const shape = (blocks: any[]) => blocks.map((block) => ({
-      kind: block.kind,
-      content: block.content,
-      domain: block.domain,
-      format: block.format ?? null,
-      tokens: block.tokens,
-      bytes: block.bytes,
-    }));
-    expect(shape(shadowContext.body.data.blocks)).toEqual(shape(offContext.body.data.blocks));
-    const fragmentsShape = (fragments: any[]) => fragments.map((fragment) => ({
-      kind: fragment.kind,
-      gist: fragment.gist,
-      detail: fragment.detail?.format ?? null,
-    }));
-    expect(fragmentsShape(shadowContext.body.data.fragments)).toEqual(fragmentsShape(offContext.body.data.fragments));
     expect(shadowContext.body.data.decision.policyVersion).toMatch(/^(v0-rules|heuristic:)/);
     expect(shadowContext.body.data.decision.enforced).toBe(false);
-    expect(offContext.body.data.decision.enforced).toBe(false);
     const trace = await fetch(`${shadow.server.url}/traces/${shadowContext.body.data.traceId}`, { headers: auth() });
     const traceBody = await trace.json() as any;
     expect(traceBody.data.applied).toMatchObject({
       wouldAction: shadowContext.body.data.decision.action,
       wouldDepth: shadowContext.body.data.decision.depth,
     });
+    const version = await fetch(`${shadow.server.url}/version`, { headers: auth() });
+    const versionBody = await version.json() as any;
+    expect(versionBody.data.capabilities.intervention).toMatchObject({
+      mode: 'shadow',
+      diagnosticShadow: true,
+    });
+  });
+
+  it('off（model.source 缺失）+ user_negated：输入级 defer，不注入 memory，checkpoint 保留，无策略警告', async () => {
+    const { server, fake } = await setup({ sourceMissing: true, intervention: { minConfidence: 0.55 } });
+    fake.setRecords([preference()]);
+    fake.checkpoints.push(interventionCheckpoint(
+      'th_off_negated',
+      'task:th_off_negated',
+      'OFF-NEGATED-CHECKPOINT',
+    ) as any);
+    const context = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_off_negated',
+      turnId: 'turn_off_negated',
+      query: '别用记忆回答我的偏好',
+    });
+    expect(context.status).toBe(200);
+    expect(context.body.data.decision).toMatchObject({
+      action: 'defer',
+      depth: 'gist',
+      reason: 'defer_explicit',
+      policyVersion: 'v0-baseline',
+      enforced: false,
+    });
+    expect(context.body.data.fragments).toEqual([]);
+    expect(context.body.data.blocks.map((block: any) => block.kind)).toEqual(['checkpoint']);
+    expect(context.body.data.blocks[0].content).toContain('OFF-NEGATED-CHECKPOINT');
+    expect(context.body.data.warnings).not.toContain('intervention_defer');
+    expect(context.body.data.applied).toMatchObject({
+      action: 'defer',
+      depth: 'gist',
+      fragments: 0,
+    });
+
+    const trace = await fetch(`${server.url}/traces/${context.body.data.traceId}`, { headers: auth() });
+    const traceBody = await trace.json() as any;
+    expect(traceBody.data.decision).toMatchObject({
+      action: 'defer',
+      reason: 'defer_explicit',
+      policyVersion: 'v0-baseline',
+      enforced: false,
+    });
+    expect(traceBody.data.applied).toMatchObject({ action: 'defer', depth: 'gist', fragments: 0 });
+    expect(traceBody.data.applied.wouldAction).toBeUndefined();
+  });
+
+  it('shadow + user_negated：实际注入 defer，不走 baseline，不记录 wouldAction', async () => {
+    const { server, fake } = await setup({ intervention: { diagnosticShadow: true } });
+    fake.setRecords([preference()]);
+    fake.checkpoints.push(interventionCheckpoint(
+      'th_shadow_negated',
+      'task:th_shadow_negated',
+      'SHADOW-NEGATED-CHECKPOINT',
+    ) as any);
+    const context = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_shadow_negated',
+      turnId: 'turn_shadow_negated',
+      query: '别用记忆回答我的偏好',
+    });
+    expect(context.status).toBe(200);
+    expect(context.body.data.decision).toMatchObject({
+      action: 'defer',
+      depth: 'gist',
+      reason: 'defer_explicit',
+      policyVersion: 'v0-rules',
+      enforced: false,
+    });
+    expect(context.body.data.fragments).toEqual([]);
+    expect(context.body.data.blocks.map((block: any) => block.kind)).toEqual(['checkpoint']);
+    expect(context.body.data.blocks[0].content).toContain('SHADOW-NEGATED-CHECKPOINT');
+    expect(context.body.data.warnings).toContain('intervention_defer');
+    expect(context.body.data.applied).toMatchObject({
+      action: 'defer',
+      depth: 'gist',
+      fragments: 0,
+    });
+    // 输入级 defer 不是策略建议：shadow 不记录 baseline wouldAction，避免自相矛盾。
+    expect(context.body.data.applied.wouldAction).toBeUndefined();
+
+    const trace = await fetch(`${server.url}/traces/${context.body.data.traceId}`, { headers: auth() });
+    const traceBody = await trace.json() as any;
+    expect(traceBody.data.decision).toMatchObject({
+      action: 'defer',
+      reason: 'defer_explicit',
+      enforced: false,
+    });
+    expect(traceBody.data.applied).toMatchObject({ action: 'defer', depth: 'gist', fragments: 0 });
+    expect(traceBody.data.applied.wouldAction).toBeUndefined();
+  });
+
+  it('explicit heuristic + user_negated：输入级 defer 优先，规则决策但不注入 memory', async () => {
+    const { server, fake } = await setup({
+      modelSource: 'heuristic',
+      intervention: { explorationRate: 0, maxSilentStreak: 99 },
+    });
+    fake.setRecords([preference()]);
+    fake.checkpoints.push(interventionCheckpoint(
+      'th_heuristic_negated',
+      'task:th_heuristic_negated',
+      'HEURISTIC-NEGATED-CHECKPOINT',
+    ) as any);
+    const context = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_heuristic_negated',
+      turnId: 'turn_heuristic_negated',
+      query: '别用记忆回答我的偏好',
+    });
+    expect(context.status).toBe(200);
+    expect(context.body.data.decision).toMatchObject({
+      action: 'defer',
+      depth: 'gist',
+      reason: 'defer_explicit',
+      policyVersion: 'v0-rules',
+      enforced: true,
+    });
+    expect(context.body.data.fragments).toEqual([]);
+    expect(context.body.data.blocks.map((block: any) => block.kind)).toEqual(['checkpoint']);
+    expect(context.body.data.blocks[0].content).toContain('HEURISTIC-NEGATED-CHECKPOINT');
+    expect(context.body.data.warnings).toContain('intervention_defer');
+    expect(context.body.data.applied).toMatchObject({
+      action: 'defer',
+      depth: 'gist',
+      fragments: 0,
+    });
+    expect(context.body.data.applied.wouldAction).toBeUndefined();
   });
 
   it('shadow 的策略计数用 applied baseline：decision silent / applied speak 记 spoken 而不是 silent', async () => {
     const { server, runtime } = await setup({
-      intervention: { mode: 'shadow', minConfidence: 0.95, explorationRate: 0, maxSilentStreak: 99 },
+      modelSource: 'heuristic',
+      intervention: { diagnosticShadow: true, minConfidence: 0.95, explorationRate: 0, maxSilentStreak: 99 },
     });
     const context = await post(`${server.url}/context`, {
       agentId: 'opencode',
@@ -904,15 +1111,294 @@ describe('sidecar recall/context HTTP', () => {
     expect(context.body.data.decision).toMatchObject({ action: 'silent', enforced: false });
     expect(context.body.data.applied).toMatchObject({ action: 'speak', wouldAction: 'silent' });
     expect(context.body.data.fragments.length).toBeGreaterThan(0);
+    expect(context.body.data.decision.planner.adaptive).toBeUndefined();
     const stats = await runtime.policyStore!.snapshot();
-    expect(stats.global.spoken).toBe(1);
+    // W6：shadow 的实际 baseline 只记 diagnostic，不参与 adaptive 调参。
+    expect(stats.global.spoken).toBe(0);
     expect(stats.global.silent).toBe(0);
+    expect(stats.diagnostic.spoken).toBe(1);
     const trace = await fetch(`${server.url}/traces/${context.body.data.traceId}`, { headers: auth() });
     const traceBody = await trace.json() as any;
     expect(traceBody.data.applied).toMatchObject({ action: 'speak', wouldAction: 'silent' });
+    expect(traceBody.data.applied.adaptiveEligible).toBeUndefined();
   });
 
-  it('heuristic silent/defer：跳过 memory fragments，self/checkpoint 仍按原顺序注入', async () => {
+  it('W6：adaptive 只服务 heuristic；shadow 只观测、canary 未命中不生效、on 才应用', async () => {
+    const seedOffset = async (runtime: any) => {
+      for (let index = 0; index < 20; index += 1) {
+        await runtime.policyStore!.recordOutcome({
+          agentId: 'opencode', domain: 'user', kind: 'reasked',
+        });
+      }
+      for (let index = 0; index < 50; index += 1) {
+        await runtime.policyStore!.recordDecision({
+          agentId: 'opencode', domain: 'user', action: 'speak',
+        });
+      }
+    };
+    const base = { mode: 'heuristic' as const, minConfidence: 0.55, explorationRate: 0, maxSilentStreak: 99 };
+
+    const shadow = await setup({
+      modelSource: 'heuristic',
+      intervention: { ...base, adaptive: { stage: 'shadow', canaryRatio: 0.1 } },
+    });
+    await seedOffset(shadow.runtime);
+    const shadowContext = await post(`${shadow.server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_adaptive_shadow',
+      turnId: 'turn_adaptive_shadow',
+      query: '我的偏好是什么？',
+    });
+    expect(shadowContext.status).toBe(200);
+    expect(shadowContext.body.data.decision.planner.adaptive).toMatchObject({
+      stage: 'shadow',
+      applied: false,
+      baseThreshold: 0.55,
+      threshold: 0.55,
+      recommendedThreshold: 0.58,
+      offset: 0.03,
+    });
+
+    const canaryMiss = await setup({
+      modelSource: 'heuristic',
+      intervention: { ...base, adaptive: { stage: 'canary', canaryRatio: 0 } },
+    });
+    await seedOffset(canaryMiss.runtime);
+    const canaryContext = await post(`${canaryMiss.server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_adaptive_canary',
+      turnId: 'turn_adaptive_canary',
+      query: '我的偏好是什么？',
+    });
+    expect(canaryContext.status).toBe(200);
+    expect(canaryContext.body.data.decision.planner.adaptive).toMatchObject({
+      stage: 'canary',
+      applied: false,
+      canaryHit: false,
+      threshold: 0.55,
+      recommendedThreshold: 0.58,
+    });
+
+    const on = await setup({
+      modelSource: 'heuristic',
+      intervention: { ...base, adaptive: { stage: 'on', canaryRatio: 0.1 } },
+    });
+    await seedOffset(on.runtime);
+    const onContext = await post(`${on.server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_adaptive_on',
+      turnId: 'turn_adaptive_on',
+      query: '我的偏好是什么？',
+    });
+    expect(onContext.status).toBe(200);
+    expect(onContext.body.data.decision.planner.adaptive).toMatchObject({
+      stage: 'on',
+      applied: true,
+      threshold: 0.58,
+      offset: 0.03,
+    });
+    // heuristic 决策进入 adaptive 计数；总样本 = 种子 50 + 本次 1。
+    const stats = await on.runtime.policyStore!.snapshot();
+    expect(stats.global.spoken).toBe(51);
+  }, 30_000);
+
+  it('W6/B1：gate/non-intervention 不产生 adaptive 样本，也没有“无 decision 的 outcome”', async () => {
+    const { server, runtime } = await setup({ modelSource: 'heuristic' });
+    const cases = [
+      { thread: 'th_gate_chitchat', body: { query: '你好' } },
+      { thread: 'th_gate_muted', body: { query: '我的偏好是什么？', mute: true } },
+    ];
+    for (const entry of cases) {
+      const context = await post(`${server.url}/context`, {
+        agentId: 'opencode',
+        threadId: entry.thread,
+        turnId: `turn_${entry.thread}`,
+        ...entry.body,
+      }, { 'x-mebular-host-app': 'opencode' });
+      expect(context.status).toBe(200);
+      expect(context.body.data.applied.adaptiveEligible).toBeUndefined();
+      expect(context.body.data.applied.policyEligible).toBe(false);
+
+      const snapshot = await runtime.policyStore!.snapshot();
+      expect(snapshot.global.spoken + snapshot.global.silent).toBe(0);
+      expect(snapshot.diagnostic.spoken + snapshot.diagnostic.silent).toBe(0);
+
+      const traceId = context.body.data.traceId as string;
+      const token = context.body.data.bindingToken as string;
+      expect(traceId).toMatch(/^tr_/);
+      expect(token.length).toBeGreaterThan(0);
+      const outcome = await post(`${server.url}/recall/${traceId}/outcome`, {
+        kind: 'accepted',
+        source: 'host',
+        host: 'opencode',
+        bindingToken: token,
+      });
+      expect(outcome.status).toBe(200);
+      const after = await runtime.policyStore!.snapshot();
+      expect(after.global.accepted).toBe(0);
+      expect(after.diagnostic.accepted).toBe(0);
+      expect(after.domains).toEqual([]);
+    }
+  });
+
+  it('W6/B2：shadow / canary miss 不通过 recentUselessRate 改变行为', async () => {
+    const seedHighUseless = async (runtime: any) => {
+      for (let index = 0; index < 20; index += 1) {
+        await runtime.policyStore!.recordDecision({
+          agentId: 'opencode', domain: 'user', action: 'speak',
+        });
+      }
+      for (let index = 0; index < 20; index += 1) {
+        await runtime.policyStore!.recordOutcome({
+          agentId: 'opencode', domain: 'user', kind: 'reasked',
+        });
+      }
+    };
+    const decide = async (stage: 'off' | 'shadow' | 'canary' | 'on', ratio = 0) => {
+      const harness = await setup({
+        modelSource: 'heuristic',
+        intervention: {
+          mode: 'heuristic',
+          minConfidence: 0.55,
+          explorationRate: 0,
+          maxSilentStreak: 99,
+          adaptive: { stage, canaryRatio: ratio },
+        },
+      });
+      await seedHighUseless(harness.runtime);
+      const context = await post(`${harness.server.url}/context`, {
+        agentId: 'opencode',
+        threadId: `th_control_${stage}_${ratio}`,
+        turnId: `turn_control_${stage}_${ratio}`,
+        query: '今天天气怎么样',
+      });
+      expect(context.status).toBe(200);
+      return context.body.data.decision;
+    };
+
+    const off = await decide('off');
+    const shadow = await decide('shadow');
+    const canaryMiss = await decide('canary', 0);
+    // 干净控制组：没有 adaptive 时行为必须一致。
+    expect(off).toMatchObject({ action: 'speak', reason: 'high_relevance' });
+    expect(shadow).toMatchObject({ action: off.action, reason: off.reason });
+    expect(canaryMiss).toMatchObject({ action: off.action, reason: off.reason });
+    // treatment 仍可读 recentUselessRate：高负例率时沉默，证明差异来自 adaptive 应用。
+    const on = await decide('on');
+    expect(on).toMatchObject({ action: 'silent', reason: 'recent_false_alarm' });
+  }, 60_000);
+
+  it('W6：diagnostic shadow 不读也不写 adaptive；只记 diagnostic 计数', async () => {
+    const { server, runtime } = await setup({
+      modelSource: 'heuristic',
+      intervention: {
+        diagnosticShadow: true,
+        minConfidence: 0.55,
+        explorationRate: 0,
+        maxSilentStreak: 99,
+        adaptive: { stage: 'on', canaryRatio: 1 },
+      },
+    });
+    for (let index = 0; index < 20; index += 1) {
+      await runtime.policyStore!.recordOutcome({
+        agentId: 'opencode', domain: 'user', kind: 'reasked',
+      });
+    }
+    for (let index = 0; index < 50; index += 1) {
+      await runtime.policyStore!.recordDecision({
+        agentId: 'opencode', domain: 'user', action: 'speak',
+      });
+    }
+    const effectiveStatsSpy = jest.spyOn(runtime.policyStore!, 'effectiveStats');
+    const thresholdSpy = jest.spyOn(runtime.policyStore!, 'adaptiveThresholdFor');
+    const context = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_adaptive_shadow_mode',
+      turnId: 'turn_adaptive_shadow_mode',
+      query: '今天天气怎么样',
+    });
+    expect(context.status).toBe(200);
+    expect(context.body.data.decision.planner.adaptive).toBeUndefined();
+    expect(effectiveStatsSpy).not.toHaveBeenCalled();
+    expect(thresholdSpy).not.toHaveBeenCalled();
+    const stats = await runtime.policyStore!.snapshot();
+    // 种子 50 次是 adaptive；shadow 的 applied baseline 只进 diagnostic。
+    expect(stats.global.spoken).toBe(50);
+    expect(stats.diagnostic.spoken).toBe(1);
+    effectiveStatsSpy.mockRestore();
+    thresholdSpy.mockRestore();
+  }, 30_000);
+
+
+  it('W6：policy 桶只有 (agentId, domain)；host/source 不进入桶', async () => {
+    const { server, runtime } = await setup({ modelSource: 'heuristic' });
+    for (const host of ['opencode', 'dsh']) {
+      const context = await post(`${server.url}/context`, {
+        agentId: 'opencode',
+        threadId: `th_bucket_${host}`,
+        turnId: `turn_bucket_${host}`,
+        query: '我的偏好是什么？',
+      }, { 'x-mebular-host-app': host });
+      expect(context.status).toBe(200);
+    }
+    const snapshot = await runtime.policyStore!.snapshot();
+    expect(snapshot.domains).toHaveLength(1);
+    expect(Object.keys(snapshot.domains[0]!).sort()).toEqual([
+      'agentId',
+      'counts',
+      'diagnostic',
+      'domain',
+      'thresholdOffset',
+      'updatedAt',
+    ]);
+    expect(snapshot.domains[0]!.agentId).toBe('opencode');
+    expect(snapshot.domains[0]!.domain).toBe('user');
+  });
+
+  it('W6：outcome 归因只调 heuristic；model/shadow 只写 diagnostic', async () => {
+    const settle = async (
+      harness: Harness,
+      thread: string,
+    ): Promise<number> => {
+      const context = await post(`${harness.server.url}/context`, {
+        agentId: 'opencode',
+        threadId: thread,
+        turnId: `turn_${thread}`,
+        query: '我的偏好是什么？',
+      }, { 'x-mebular-host-app': 'opencode' });
+      expect(context.status).toBe(200);
+      const traceId = context.body.data.traceId as string;
+      const token = context.body.data.bindingToken as string;
+      const outcome = await post(`${harness.server.url}/recall/${traceId}/outcome`, {
+        kind: 'accepted',
+        source: 'host',
+        host: 'opencode',
+        bindingToken: token,
+      });
+      expect(outcome.status).toBe(200);
+      expect(outcome.body.data.recorded).toBe(true);
+      const stats = await harness.runtime.policyStore!.snapshot();
+      return stats.global.accepted;
+    };
+
+    const heuristic = await setup({ modelSource: 'heuristic' });
+    expect(await settle(heuristic, 'th_outcome_heuristic')).toBe(1);
+    expect((await heuristic.runtime.policyStore!.snapshot()).diagnostic.accepted).toBe(0);
+
+    // api 未配置 → 运行时 fallback heuristic，但 planner 仍是 model，不得调参。
+    const model = await setup({ modelSource: 'api' });
+    expect(await settle(model, 'th_outcome_model')).toBe(0);
+    expect((await model.runtime.policyStore!.snapshot()).diagnostic.accepted).toBe(1);
+
+    const shadow = await setup({
+      modelSource: 'heuristic',
+      intervention: { diagnosticShadow: true, minConfidence: 0.55, explorationRate: 0 },
+    });
+    expect(await settle(shadow, 'th_outcome_shadow')).toBe(0);
+    expect((await shadow.runtime.policyStore!.snapshot()).diagnostic.accepted).toBe(1);
+  }, 30_000);
+
+  it('heuristic silent/defer：跳过 memory fragments，self/checkpoint 仍按原顺序注入；user_negated=defer', async () => {
     const { server, fake } = await setup({
       intervention: { mode: 'heuristic', minConfidence: 0.95, explorationRate: 0, maxSilentStreak: 99 },
     });
@@ -959,6 +1445,54 @@ describe('sidecar recall/context HTTP', () => {
     expect(traceBody.data.applied).toMatchObject({ action: 'silent', fragments: 0 });
     expect(traceBody.data.applied.suppressed.length).toBeGreaterThan(0);
 
+    // 显式 defer：decision 与 applied 都必须是 defer，而不是 silent；
+    // checkpoint 仍按原路径注入，后续归因才能区分「主动推迟」与「策略沉默」。
+    const deferred = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_intervention',
+      turnId: 'turn_intervention_defer',
+      query: '这个先放一放，我们晚点再聊记忆。',
+    });
+    expect(deferred.status).toBe(200);
+    expect(deferred.body.data.decision).toMatchObject({
+      action: 'defer',
+      depth: 'gist',
+      reason: 'defer_explicit',
+      enforced: true,
+    });
+    expect(deferred.body.data.fragments).toEqual([]);
+    expect(deferred.body.data.blocks.map((block: any) => block.kind)).toEqual(['checkpoint']);
+    expect(deferred.body.data.warnings).toContain('intervention_defer');
+    const deferTrace = await fetch(`${server.url}/traces/${deferred.body.data.traceId}`, { headers: auth() });
+    const deferTraceBody = await deferTrace.json() as any;
+    expect(deferTraceBody.data.applied).toMatchObject({ action: 'defer', depth: 'gist', fragments: 0 });
+
+    // user_negated 也是显式 defer：不注入 memory fragments，但 checkpoint 仍加载；
+    // decision/applied 都必须是 defer，而不是 recall 层的 user_negated silent。
+    const negated = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_intervention',
+      turnId: 'turn_intervention_negated',
+      query: '别用记忆回答我的偏好',
+    });
+    expect(negated.status).toBe(200);
+    expect(negated.body.data.decision).toMatchObject({
+      action: 'defer',
+      depth: 'gist',
+      reason: 'defer_explicit',
+    });
+    expect(negated.body.data.fragments).toEqual([]);
+    expect(negated.body.data.blocks.map((block: any) => block.kind)).toEqual(['checkpoint']);
+    expect(negated.body.data.blocks[0].content).toContain('保持 self/checkpoint 注入');
+    expect(negated.body.data.warnings).toContain('intervention_defer');
+    const negatedTrace = await fetch(`${server.url}/traces/${negated.body.data.traceId}`, { headers: auth() });
+    const negatedTraceBody = await negatedTrace.json() as any;
+    expect(negatedTraceBody.data.decision).toMatchObject({
+      action: 'defer',
+      reason: 'defer_explicit',
+    });
+    expect(negatedTraceBody.data.applied).toMatchObject({ action: 'defer', fragments: 0 });
+
     // 没有 self/checkpoint 时，沉默原因必须保留策略原因而不是 budget_too_small。
     const bare = await post(`${server.url}/context`, {
       agentId: 'opencode',
@@ -968,6 +1502,49 @@ describe('sidecar recall/context HTTP', () => {
     });
     expect(bare.body.data.blocks).toEqual([]);
     expect(bare.body.data.silenceReason).toBe('intervention_silent');
+  });
+
+  it('novelty：top-1 已注入时选择 top-2 新鲜候选，trace scores/reason 一致', async () => {
+    const { server, fake } = await setup({
+      intervention: { mode: 'heuristic', minConfidence: 0.55, explorationRate: 0, maxSilentStreak: 99 },
+    });
+    const top = preference();
+    const fresh = {
+      ...preference(),
+      id: '01JHTTPPREF2',
+      content: { entity: 'user', preferenceType: 'theme', value: 'light', confidence: 0.82 },
+      text: '用户偏好：theme=light',
+      score: 0.8,
+    };
+    fake.setRecords([top, fresh]);
+
+    const context = await post(`${server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_novelty',
+      turnId: 'turn_novelty_fresh',
+      query: '深色主题',
+      alreadyInjectedIds: ['01JHTTPPREF1'],
+    });
+    expect(context.status).toBe(200);
+    const fragment = context.body.data.fragments[0];
+    expect(fragment.sourceIds).toContain('01JHTTPPREF2');
+    expect(context.body.data.decision).toMatchObject({
+      action: 'speak',
+      reason: 'high_relevance',
+      scores: { novelty: 1 },
+    });
+    expect(context.body.data.decision.scores.top).toBeCloseTo(fragment.score.final, 3);
+    expect(context.body.data.fragments).toHaveLength(1);
+
+    const trace = await fetch(`${server.url}/traces/${context.body.data.traceId}`, { headers: auth() });
+    const traceBody = await trace.json() as any;
+    expect(traceBody.data.decision).toMatchObject({
+      action: 'speak',
+      reason: 'high_relevance',
+      scores: { novelty: 1 },
+    });
+    expect(traceBody.data.decision.scores.top).toBe(context.body.data.decision.scores.top);
+    expect(traceBody.data.applied).toMatchObject({ action: 'speak', fragments: 1 });
   });
 
   it('must_speak 不能被低阈值/高负例率否决；gist 不生详情', async () => {
@@ -1072,15 +1649,21 @@ describe('sidecar recall/context HTTP', () => {
       threadId: 'th_outcome',
       turnId: 'turn_outcome',
       query: '我的偏好是什么？',
-    });
+    }, { 'x-mebular-host-app': 'opencode' });
     const traceId = context.body.data.traceId as string;
+    const bindingToken = context.body.data.bindingToken as string;
     expect(traceId).toMatch(/^tr_/);
+    expect(bindingToken).toMatch(/^obt_/);
+    // token 是 opaque 的：不含 raw query，也不泄漏 host token。
+    expect(bindingToken).not.toContain('偏好');
+    expect(bindingToken).not.toContain('host-token');
 
     const first = await post(`${server.url}/recall/${traceId}/outcome`, {
       kind: 'accepted',
       source: 'host',
+      host: 'opencode',
+      bindingToken,
       confidence: 0.8,
-      note: 'user said thanks',
     });
     expect(first.status).toBe(200);
     expect(first.body.data).toMatchObject({ recorded: true, duplicate: false, degraded: false });
@@ -1088,14 +1671,22 @@ describe('sidecar recall/context HTTP', () => {
     const again = await post(`${server.url}/recall/${traceId}/outcome`, {
       kind: 'accepted',
       source: 'host',
+      host: 'opencode',
+      bindingToken,
     });
     expect(again.status).toBe(200);
     expect(again.body.data).toMatchObject({ recorded: false, duplicate: true });
 
-    const second = await post(`${server.url}/recall/${traceId}/outcome`, {
+    // console 只允许 admin 通道；普通 host 请求不能自报 console。
+    const consoleDenied = await post(`${server.url}/recall/${traceId}/outcome`, {
       kind: 'dismissed',
       source: 'console',
     });
+    expect(consoleDenied.status).toBe(403);
+    const second = await post(`${server.url}/recall/${traceId}/outcome`, {
+      kind: 'dismissed',
+      source: 'console',
+    }, { 'x-mebular-admin-token': 'admin-token' });
     expect(second.status).toBe(200);
     expect(second.body.data.recorded).toBe(true);
 
@@ -1103,6 +1694,8 @@ describe('sidecar recall/context HTTP', () => {
     const traceBody = await trace.json() as any;
     expect(traceBody.data.outcome).toMatchObject({ kind: 'dismissed', source: 'console' });
     expect(traceBody.data.outcomeHistory.map((entry: any) => entry.kind)).toEqual(['accepted', 'dismissed']);
+    // token 不落 trace。
+    expect(JSON.stringify(traceBody)).not.toContain(bindingToken);
 
     const stats = await runtime.policyStore!.snapshot();
     expect(stats.global.accepted).toBe(1);
@@ -1110,35 +1703,57 @@ describe('sidecar recall/context HTTP', () => {
 
     const invalid = await post(`${server.url}/recall/${traceId}/outcome`, { kind: 'nope', source: 'host' });
     expect(invalid.status).toBe(400);
-    const tooLongNote = await post(`${server.url}/recall/${traceId}/outcome`, {
+    const noteWithToken = await post(`${server.url}/recall/${traceId}/outcome`, {
+      kind: 'ignored',
+      source: 'host',
+      host: 'opencode',
+      bindingToken,
+      note: 'new protocol must reject note',
+    });
+    expect(noteWithToken.status).toBe(400);
+    expect(noteWithToken.body.error.code).toBe('outcome_note_unsupported');
+    const tooLongLegacyNote = await post(`${server.url}/recall/${traceId}/outcome`, {
       kind: 'ignored',
       source: 'host',
       note: 'x'.repeat(201),
     });
-    expect(tooLongNote.status).toBe(400);
-    const maxNote = await post(`${server.url}/recall/${traceId}/outcome`, {
+    expect(tooLongLegacyNote.status).toBe(400);
+    const legacyNote = await post(`${server.url}/recall/${traceId}/outcome`, {
       kind: 'ignored',
       source: 'host',
       note: 'y'.repeat(200),
     });
-    expect(maxNote.status).toBe(200);
-    const missing = await post(`${server.url}/recall/tr_missing/outcome`, { kind: 'missed', source: 'host' });
+    expect(legacyNote.status).toBe(200);
+    expect(legacyNote.body.data).toMatchObject({ recorded: false, duplicate: false });
+    expect(legacyNote.body.data.warnings).toEqual(['outcome_note_ignored']);
+    const missing = await post(`${server.url}/recall/tr_missing/outcome`, {
+      kind: 'missed',
+      source: 'host',
+      host: 'opencode',
+      bindingToken,
+    });
     expect(missing.status).toBe(404);
 
     const off = await setup({ trace: 'off' });
-    const offline = await post(`${off.server.url}/recall/tr_offline/outcome`, { kind: 'missed', source: 'host' });
-    expect(offline.status).toBe(200);
-    expect(offline.body.data).toMatchObject({ recorded: false, degraded: true });
-    expect(offline.body.data.warnings).toContain('trace_off');
-    const offStats = await off.runtime.policyStore!.snapshot();
-    expect(offStats.global).toMatchObject({ spoken: 0, silent: 0, missed: 0 });
     const offContext = await post(`${off.server.url}/context`, {
       agentId: 'opencode',
       threadId: 'th_off_no_learn',
       turnId: 'turn_off_no_learn',
       query: '我的偏好是什么？',
-    });
+    }, { 'x-mebular-host-app': 'opencode' });
+    // W4 只留 W5 seam：trace off 时不签发 token。
     expect(offContext.body.data.traceId).toBeNull();
+    expect(offContext.body.data.bindingToken).toBeNull();
+    const offlineLegacy = await post(`${off.server.url}/recall/tr_offline/outcome`, {
+      kind: 'missed',
+      source: 'host',
+      note: 'legacy client',
+    });
+    expect(offlineLegacy.status).toBe(200);
+    expect(offlineLegacy.body.data).toMatchObject({ recorded: false, degraded: true });
+    expect(offlineLegacy.body.data.warnings).toContain('trace_off');
+    const offStats = await off.runtime.policyStore!.snapshot();
+    expect(offStats.global).toMatchObject({ spoken: 0, silent: 0, missed: 0 });
     const offStatsAfter = await off.runtime.policyStore!.snapshot();
     expect(offStatsAfter.global).toMatchObject({ spoken: 0, silent: 0 });
   });
@@ -1150,16 +1765,27 @@ describe('sidecar recall/context HTTP', () => {
       threadId: 'th_seen_kinds',
       turnId: 'turn_seen_kinds',
       query: '我的偏好是什么？',
-    });
+    }, { 'x-mebular-host-app': 'opencode' });
     const traceId = context.body.data.traceId as string;
+    const bindingToken = context.body.data.bindingToken as string;
     const kinds = ['accepted', 'ignored', 'reasked', 'corrected', 'dismissed', 'missed', 'too_shallow', 'too_deep'];
     for (const kind of kinds) {
-      const result = await post(`${server.url}/recall/${traceId}/outcome`, { kind, source: 'host' });
+      const result = await post(`${server.url}/recall/${traceId}/outcome`, {
+        kind,
+        source: 'host',
+        host: 'opencode',
+        bindingToken,
+      });
       expect(result.status).toBe(200);
       expect(result.body.data.recorded).toBe(true);
     }
     // 早期 kind 已超出 history 上限，但 seenOutcomeKinds 仍能保证幂等。
-    const again = await post(`${server.url}/recall/${traceId}/outcome`, { kind: 'accepted', source: 'host' });
+    const again = await post(`${server.url}/recall/${traceId}/outcome`, {
+      kind: 'accepted',
+      source: 'host',
+      host: 'opencode',
+      bindingToken,
+    });
     expect(again.status).toBe(200);
     expect(again.body.data).toMatchObject({ recorded: false, duplicate: true });
     const trace = await fetch(`${server.url}/traces/${traceId}`, { headers: auth() });
@@ -1214,19 +1840,22 @@ describe('sidecar recall/context HTTP', () => {
       return context.body.data.traceId as string;
     };
 
+    // 窗口语义由 console admin 路径验证：host token 的 TTL 是 outcomeWindowMs，
+    // 超时后必须先被 binding 拒绝（见 outcome-binding.test.ts），不能绕过鉴权。
+    const admin = { 'x-mebular-admin-token': 'admin-token' };
     const first = await trace('th_window_1');
     now += 5 * 60 * 1000;
     const ignored = await post(`${server.url}/recall/${first}/outcome`, {
       kind: 'ignored',
-      source: 'host',
-    });
+      source: 'console',
+    }, admin);
     expect(ignored.body.data.withinWindow).toBe(true);
     expect(ignored.body.data.warnings).toEqual([]);
 
     const lateAccepted = await post(`${server.url}/recall/${first}/outcome`, {
       kind: 'accepted',
-      source: 'host',
-    });
+      source: 'console',
+    }, admin);
     expect(lateAccepted.body.data.withinWindow).toBe(false);
     expect(lateAccepted.body.data.warnings).toEqual(['outcome_outside_window']);
 
@@ -1234,8 +1863,8 @@ describe('sidecar recall/context HTTP', () => {
     now += 11 * 60 * 1000;
     const lateIgnored = await post(`${server.url}/recall/${second}/outcome`, {
       kind: 'ignored',
-      source: 'host',
-    });
+      source: 'console',
+    }, admin);
     expect(lateIgnored.body.data.withinWindow).toBe(false);
     expect(lateIgnored.body.data.warnings).toEqual(['outcome_outside_window']);
   });
@@ -1244,11 +1873,13 @@ describe('sidecar recall/context HTTP', () => {
     const { server, runtime, home } = await setup({ intervention: { mode: 'heuristic' } });
     const statePath = join(home, 'memory-runtime', 'policy', 'state.json');
     await mkdir(statePath, { recursive: true });
+    // 用普通 turn：must_speak 无候选会按设计 degraded=true，属于召回语义，
+    // 不应混进「policy flush 恢复」的 degraded 断言。
     await post(`${server.url}/context`, {
       agentId: 'opencode',
       threadId: 'th_policy_fail',
       turnId: 'turn_policy_fail',
-      query: '我的偏好是什么？',
+      query: '深色主题',
     });
 
     expect(await runtime.flushPolicy()).toBe(false);
@@ -1266,7 +1897,7 @@ describe('sidecar recall/context HTTP', () => {
     expect(runtime.degraded).toBe(false);
     const recovered = await fetch(`${server.url}/status`, { headers: auth() });
     const recoveredBody = await recovered.json() as any;
-    expect(recoveredBody.data.policy).toEqual({ degraded: false, lastError: null });
+    expect(recoveredBody.data.policy).toMatchObject({ degraded: false, lastError: null });
   });
 
   it('PolicyStore init 失败后由后台 flush 恢复：/status 不残留 stale degraded', async () => {
@@ -1288,7 +1919,7 @@ describe('sidecar recall/context HTTP', () => {
       agentId: 'opencode',
       threadId: 'th_policy_recover',
       turnId: 'turn_policy_recover',
-      query: '我的偏好是什么？',
+      query: '深色主题',
     });
 
     const deadline = Date.now() + 3000;
@@ -1299,17 +1930,18 @@ describe('sidecar recall/context HTTP', () => {
     expect(runtime.degraded).toBe(false);
     const recovered = await fetch(`${server.url}/status`, { headers: auth() });
     const recoveredBody = await recovered.json() as any;
-    expect(recoveredBody.data.policy).toEqual({ degraded: false, lastError: null });
+    expect(recoveredBody.data.policy).toMatchObject({ degraded: false, lastError: null });
   });
 
   it('POST /intervention/reset：成功、重复 reset、未启用与错误路径', async () => {
     const { server, runtime } = await setup({ intervention: { mode: 'heuristic' } });
-    await post(`${server.url}/context`, {
+    const context = await post(`${server.url}/context`, {
       agentId: 'opencode',
       threadId: 'th_reset',
       turnId: 'turn_reset',
       query: '我的偏好是什么？',
     });
+    const traceId = context.body.data.traceId as string;
     const before = await runtime.policyStore!.snapshot();
     expect(before.global.spoken + before.global.silent).toBeGreaterThan(0);
 
@@ -1323,7 +1955,12 @@ describe('sidecar recall/context HTTP', () => {
     expect(reset.body.data.removedDomains).toBeGreaterThanOrEqual(1);
     const after = await runtime.policyStore!.snapshot();
     expect(after.global).toMatchObject({ spoken: 0, silent: 0 });
+    expect(after.diagnostic).toMatchObject({ spoken: 0, silent: 0 });
     expect(after.domains).toEqual([]);
+    // reset 只清 policy + 运行态，不删 trace / 记忆。
+    const traceAfterReset = await fetch(`${server.url}/traces/${traceId}`, { headers: auth() });
+    expect(traceAfterReset.status).toBe(200);
+    expect((await traceAfterReset.json() as any).data.id).toBe(traceId);
 
     const repeated = await post(`${server.url}/intervention/reset`, {});
     expect(repeated.status).toBe(200);
@@ -1355,8 +1992,9 @@ describe('sidecar recall/context HTTP', () => {
       threadId: 'th_reset_late',
       turnId: 'turn_reset_late_old',
       query: '我的偏好是什么？',
-    });
+    }, { 'x-mebular-host-app': 'opencode' });
     const oldTraceId = oldContext.body.data.traceId as string;
+    const oldBindingToken = oldContext.body.data.bindingToken as string;
     now += 1000;
     const reset = await post(`${server.url}/intervention/reset`, {});
     expect(reset.status).toBe(200);
@@ -1364,7 +2002,12 @@ describe('sidecar recall/context HTTP', () => {
     expect(afterReset.global).toMatchObject({ spoken: 0, silent: 0 });
 
     now += 1000;
-    const late = await post(`${server.url}/recall/${oldTraceId}/outcome`, { kind: 'accepted', source: 'host' });
+    const late = await post(`${server.url}/recall/${oldTraceId}/outcome`, {
+      kind: 'accepted',
+      source: 'host',
+      host: 'opencode',
+      bindingToken: oldBindingToken,
+    });
     expect(late.status).toBe(200);
     expect(late.body.data).toMatchObject({ recorded: false, duplicate: false, degraded: false });
     expect(late.body.data.warnings).toContain('outcome_before_reset');
@@ -1382,9 +2025,14 @@ describe('sidecar recall/context HTTP', () => {
       threadId: 'th_reset_late',
       turnId: 'turn_reset_late_new',
       query: '我的偏好是什么？',
-    });
+    }, { 'x-mebular-host-app': 'opencode' });
     const freshTraceId = freshContext.body.data.traceId as string;
-    const fresh = await post(`${server.url}/recall/${freshTraceId}/outcome`, { kind: 'accepted', source: 'host' });
+    const fresh = await post(`${server.url}/recall/${freshTraceId}/outcome`, {
+      kind: 'accepted',
+      source: 'host',
+      host: 'opencode',
+      bindingToken: freshContext.body.data.bindingToken,
+    });
     expect(fresh.status).toBe(200);
     expect(fresh.body.data.recorded).toBe(true);
     const finalStats = await runtime.policyStore!.snapshot();
@@ -1392,8 +2040,8 @@ describe('sidecar recall/context HTTP', () => {
     expect(finalStats.global.spoken + finalStats.global.silent).toBeGreaterThan(0);
   });
 
-  it('/version 暴露 intervention 能力位；旧字段保持兼容', async () => {
-    const { server } = await setup({ intervention: { mode: 'heuristic' } });
+  it('/version 暴露 effective intervention 能力位；旧字段保持兼容', async () => {
+    const { server } = await setup({ modelSource: 'heuristic', intervention: { mode: 'heuristic' } });
     const version = await fetch(`${server.url}/version`, { headers: auth() });
     const body = await version.json() as any;
     expect(version.status).toBe(200);
@@ -1409,7 +2057,54 @@ describe('sidecar recall/context HTTP', () => {
         shadow: true,
         reset: true,
         mode: 'heuristic',
+        configuredSource: 'heuristic',
+        planner: 'heuristic',
+        legacyModeIgnored: false,
+        diagnosticShadow: false,
+        warnings: [],
       },
     });
+  });
+
+  it('/status 返回 effective mode/source 与旧 mode warning；不泄漏密钥', async () => {
+    const { server } = await setup({
+      modelSource: 'api',
+      intervention: { mode: 'off' },
+    });
+    const response = await fetch(`${server.url}/status`, { headers: auth() });
+    const body = await response.json() as any;
+    expect(response.status).toBe(200);
+    expect(body.data.intervention).toMatchObject({
+      mode: 'model',
+      planner: 'model',
+      source: 'api',
+      derivedMode: 'model',
+      legacyModePresent: true,
+      legacyModeIgnored: true,
+      legacyModeConflict: true,
+      diagnosticShadow: false,
+      deadline: 1500,
+    });
+    expect(body.data.intervention.warnings).toContain('legacy_intervention_mode_ignored');
+    expect(body.warnings).toContain('legacy_intervention_mode_ignored');
+    expect(JSON.stringify(body)).not.toMatch(/keyRef|apiKey|authorization|bearer/i);
+  });
+
+  it('B2：local/auto + queryPlan=model 在 /status 给可见 warning；不改 extraction 语义', async () => {
+    const { server } = await setup({
+      modelSource: 'local',
+      recallQueryPlan: 'model',
+    });
+    const response = await fetch(`${server.url}/status`, { headers: auth() });
+    const body = await response.json() as any;
+    expect(response.status).toBe(200);
+    expect(body.data.intervention).toMatchObject({
+      source: 'local',
+      planner: 'model',
+      deadline: 1500,
+    });
+    expect(body.data.intervention.warnings).toContain('extraction_query_plan_local_sync');
+    // queryPlan 仍是配置原值；W2 不修改 extraction。
+    expect(body.data.intervention.warnings).not.toContain('model_source_missing');
   });
 });

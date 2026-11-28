@@ -28,6 +28,7 @@ import {
   type SidecarConfig,
   type SidecarPaths,
 } from './config.js';
+import { isDiagnosticShadowEnabled } from './effective.js';
 import {
   buildDiscovery,
   clearDiscovery,
@@ -128,6 +129,11 @@ export interface StartSidecarOptions {
   env?: NodeJS.ProcessEnv;
   /** 测试/嵌入用；正常 serve 由 ensureHostToken 生成。 */
   hostToken?: string;
+  /**
+   * MCP admin 代理持有的独立 secret；只用于 `source=console`。
+   * 正常由 MCP supervisor 通过 env 注入；不落盘、不写 discovery。
+   */
+  adminToken?: string;
   identity?: Partial<SidecarStatusIdentity>;
   heartbeatMs?: number;
   parentCheckMs?: number;
@@ -421,6 +427,12 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
     throw startupFromUnknown(error);
   }
 
+  // effective mode 只由 source presence/source 推导；旧 intervention.mode 仅产生稳定 warning。
+  // shadow 只允许内部 diagnostic（配置文件或进程内 env），不因旧配置自动生效。
+  // 推导本身在 RecallService/SidecarServer 中按当前 config 动态执行，支持 source 热切换。
+  const diagnosticShadow = config.intervention.diagnosticShadow === true
+    || isDiagnosticShadowEnabled(env.MEBULAR_INTERVENTION_DIAGNOSTIC_SHADOW);
+
   const lifecycle = new LifecycleGate();
   const localOptions: SidecarLocalLayerOptions = {
     root: paths.dataDir,
@@ -558,6 +570,8 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
     requireBinaryPath: true,
   });
   const inferenceHolder: { current: InferenceService | null } = { current: null };
+  /** inference service 先于 settlement 创建；reconfigure 通过 holder 通知介入预取失效。 */
+  const prefetchInvalidator: { current: (() => void) | null } = { current: null };
   const model = createSidecarInferenceProvider(config.model, {
     homeDir: paths.home,
     modelsDir: paths.modelsDir,
@@ -583,6 +597,7 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
     now,
     platform: process.platform,
     arch: process.arch,
+    onReconfigure: () => prefetchInvalidator.current?.(),
   });
   inferenceHolder.current = inferenceService;
   try {
@@ -622,6 +637,17 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
     );
   }
 
+  // 独立 admin secret：只接受 MCP supervisor 的 env/显式注入；不落盘、
+  // 不写入 discovery，宿主 adapter 不持有。缺省时 console 通道 fail closed。
+  const envAdminToken = typeof env?.MEBULAR_MEMORY_RUNTIME_ADMIN_TOKEN === 'string'
+    ? env.MEBULAR_MEMORY_RUNTIME_ADMIN_TOKEN.trim()
+    : '';
+  const adminToken = typeof options.adminToken === 'string' && options.adminToken.length > 0
+    ? options.adminToken
+    : envAdminToken.length > 0
+      ? envAdminToken
+      : undefined;
+
   let settlement: SettlementRuntime;
   let activeReplay: Promise<unknown> | null = null;
   try {
@@ -633,11 +659,13 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
       policyPath: paths.policyPath,
       policyStatePath: paths.policyStatePath,
       inference: model,
+      diagnosticShadow,
       lifecycle,
       diagnostics,
       ...(options.restartReason ? { restartReason: options.restartReason } : {}),
       now,
     });
+    prefetchInvalidator.current = () => settlement.recall.invalidateInterventionPrefetch();
     // main 拥有生命周期边界；不修改 replayer，也绝不为了等待而启动新 replay。
     const replayOnce = settlement.replayer.replayOnce.bind(settlement.replayer);
     settlement.replayer.replayOnce = () => {
@@ -748,9 +776,11 @@ async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<S
   const server = new SidecarServer({
     config,
     hostToken: hostToken.token,
+    ...(adminToken ? { adminToken } : {}),
     identity,
     getStatus: statusSnapshot,
     getModelStatus: () => model.status(),
+    diagnosticShadow,
     ingest: settlement,
     namespaces: settlement,
     recall: settlement,

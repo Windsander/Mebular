@@ -396,12 +396,17 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
     "extractor": "heuristic",
     "recall_limit": 8,
     "recall_token_budget": 2000,
-    "recall_timeout": 1.5,
+    "recall_timeout": 2.0,
     "ingest_timeout": 3.0,
     "archive_flush_timeout": 1.5,
     "checkpoint_timeout": 2.5,
     "sync_max_attempts": 12,
     "queue_limit": _QUEUE_LIMIT_DEFAULT,
+    # W4：显式 outcome 归因；旧 sidecar 无 token 时走 0.3 兼容忽略路径。
+    "outcomes": True,
+    "outcome_timeout": 1.5,
+    "outcome_window": 120.0,
+    "outcome_ignored_delay": 600.0,
 }
 
 _PERSISTED_KEYS = tuple(_DEFAULT_CONFIG.keys())
@@ -446,6 +451,74 @@ def _parse_retry_after(value: Any) -> Optional[float]:
 
 def _sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8", "replace")).hexdigest()
+
+
+# W4：outcome 归因只用于本进程内的弱信号推断；不持久化、不写日志。
+_OUTCOME_FOLLOW_UP_RE = re.compile(
+    r"记得|上次|之前|刚才|前面|说过|部署|earlier|remember|previous|last time|deploy",
+    re.IGNORECASE,
+)
+_OUTCOME_REASK_RE = re.compile(
+    r"再说一遍|重复|再讲|刚才说什么|重新说|say that again|repeat|re-?ask",
+    re.IGNORECASE,
+)
+_OUTCOME_CORRECTION_RE = re.compile(
+    r"不对|不是这个|错了|纠正|弄错|actually|that'?s wrong|not right|correct that",
+    re.IGNORECASE,
+)
+_OUTCOME_DETAIL_RE = re.compile(
+    r"具体|详细|展开|细节|多说|detail|elaborate|more detail",
+    re.IGNORECASE,
+)
+_OUTCOME_SHALLOW_RE = re.compile(
+    r"太长|简短|简单说|只给结论|tl;?dr|short(er)?|brief",
+    re.IGNORECASE,
+)
+_OUTCOME_ACCEPTED_RE = re.compile(
+    r"谢谢|有用|正好|就是这样|对，?就是|thanks|thank you|helpful|perfect",
+    re.IGNORECASE,
+)
+_OUTCOME_STOPWORDS = {
+    "the", "and", "for", "with", "that", "this", "you", "your", "what", "how",
+    "please", "can", "could", "would", "about", "from", "have", "has", "are",
+}
+
+
+def _outcome_terms(value: Any) -> List[str]:
+    """Extract bounded comparison terms; the turn text is never stored."""
+    text = str(value or "").lower()
+    terms: List[str] = []
+    for word in re.findall(r"[a-z][a-z0-9._:-]+", text):
+        cleaned = word.rstrip("._:-")
+        if len(cleaned) < 2 or cleaned in _OUTCOME_STOPWORDS:
+            continue
+        terms.append(cleaned)
+    for run in re.findall(r"[\u4e00-\u9fff]+", text):
+        if len(run) == 2:
+            terms.append(run)
+            continue
+        for index in range(len(run) - 1):
+            terms.append(run[index:index + 2])
+    seen: set[str] = set()
+    out: List[str] = []
+    for term in terms:
+        if term in seen:
+            continue
+        seen.add(term)
+        out.append(term)
+        if len(out) >= 32:
+            break
+    return out
+
+
+def _outcome_overlap(current: List[str], previous: List[str]) -> bool:
+    prior = {term for term in previous if isinstance(term, str)}
+    if not prior:
+        return False
+    matched = sum(1 for term in current if term in prior)
+    if matched >= 2:
+        return True
+    return matched >= 1 and min(len(current), len(prior)) <= 2
 
 
 def _clean_text(value: Any, limit: int = _MAX_CHUNK_CHARS) -> str:
@@ -1225,6 +1298,50 @@ def _fallback_hermes_home() -> Path:
         return Path.home() / ".hermes"
 
 
+_HOST_PLAN_TTL_MS = 60_000
+_MIN_HOST_PLAN_HERMES = (0, 21, 6)
+_HOST_PLAN_ACTIONS = frozenset({"speak", "defer", "silent"})
+_HOST_PLAN_DEPTHS = frozenset({"gist", "detail", "quote"})
+_HOST_PLAN_REASONS = frozenset({
+    "task_continuation", "explicit_memory_request", "correction_follow_up", "low_relevance",
+    "duplicate_context", "chitchat", "budget_pressure", "session_start", "unknown",
+    "high_relevance", "low_confidence", "no_candidates", "broad_cue", "no_novelty",
+    "recent_false_alarm", "task_continue", "after_silence", "user_requested_detail",
+    "user_requested_quote", "budget", "planner_timeout", "planner_unavailable",
+    "planner_invalid_output", "first_turn", "cue_changed", "candidates_changed",
+})
+
+
+def _host_plan_key(session_id: str) -> str:
+    return _sha256_text(str(session_id or "hermes-session"))[:16]
+
+
+def _host_plan_dir(hermes_home: Path) -> Path:
+    """Adapter-owned handoff only; never Hermes session/DB/log/spool."""
+    return Path(hermes_home) / "mebular-memory" / "hostplan"
+
+
+def _ensure_host_plan_dir(hermes_home: Path) -> Path:
+    directory = _host_plan_dir(hermes_home)
+    directory.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(directory, 0o700)
+    except OSError:
+        pass
+    return directory
+
+
+def _parse_version_tuple(value: Any) -> Optional[Tuple[int, int, int]]:
+    text = str(value or "").strip()
+    match = re.match(r"^[vV]?(\d+)\.(\d+)\.(\d+)", text)
+    if not match:
+        return None
+    try:
+        return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    except Exception:
+        return None
+
+
 def _atomic_write_json(path: Path, value: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f"{path.name}.tmp-{os.getpid()}")
@@ -1255,6 +1372,19 @@ def _coerce_float(value: Any, default: float, *, minimum: float, maximum: float)
     except Exception:
         return default
     return max(minimum, min(maximum, number))
+
+
+def _coerce_bool(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value if value is not None else "").strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
 
 
 def _valid_agent_id(value: Any) -> str:
@@ -1323,8 +1453,18 @@ def _load_plugin_config(hermes_home: Optional[Path]) -> Dict[str, Any]:
         config.get("recall_token_budget"), 2000, minimum=200, maximum=12000
     )
     config["recall_timeout"] = _coerce_float(
-        config.get("recall_timeout"), 1.5, minimum=0.2, maximum=10.0
+        config.get("recall_timeout"), 2.0, minimum=0.2, maximum=10.0
     )
+    # W5 / W0-A D5：宿主 transport 至少 2.0s；显式低值保留，但不作为能力通过证据。
+    explicit_recall_timeout = (
+        "recall_timeout" in raw
+        or bool(env.get("MEBULAR_MEMORY_RECALL_TIMEOUT", "").strip())
+    )
+    if explicit_recall_timeout and float(config["recall_timeout"]) < 1.6:
+        logger.warning(
+            "Mebular memory: host_timeout_below_deadline (recall_timeout<1.6s); "
+            "this configuration cannot count as capability evidence"
+        )
     config["ingest_timeout"] = _coerce_float(
         config.get("ingest_timeout"), 3.0, minimum=0.3, maximum=15.0
     )
@@ -1339,6 +1479,16 @@ def _load_plugin_config(hermes_home: Optional[Path]) -> Dict[str, Any]:
     )
     config["queue_limit"] = _coerce_int(
         config.get("queue_limit"), _QUEUE_LIMIT_DEFAULT, minimum=1, maximum=5000
+    )
+    config["outcomes"] = _coerce_bool(config.get("outcomes"), True)
+    config["outcome_timeout"] = _coerce_float(
+        config.get("outcome_timeout"), 1.5, minimum=0.1, maximum=10.0
+    )
+    config["outcome_window"] = _coerce_float(
+        config.get("outcome_window"), 120.0, minimum=0.0, maximum=3600.0
+    )
+    config["outcome_ignored_delay"] = _coerce_float(
+        config.get("outcome_ignored_delay"), 600.0, minimum=0.0, maximum=3600.0
     )
     return config
 
@@ -1624,6 +1774,7 @@ class _RuntimeClient:
     def __init__(self, base_url: str, token: str) -> None:
         self._base_url = base_url.rstrip("/")
         self._token = token
+        self._host_instance = ""
 
     @property
     def base_url(self) -> str:
@@ -1631,6 +1782,9 @@ class _RuntimeClient:
 
     def set_token(self, token: str) -> None:
         self._token = token
+
+    def set_host_instance(self, value: str) -> None:
+        self._host_instance = str(value or "")
 
     def post(self, path: str, payload: Dict[str, Any], *,
              timeout: float, idempotency_key: str = "") -> Dict[str, Any]:
@@ -1657,7 +1811,10 @@ class _RuntimeClient:
             "User-Agent": USER_AGENT,
             "X-Mebular-Adapter": ADAPTER_HEADER,
             "X-Mebular-Adapter-Api": "1",
+            "X-Mebular-Host-App": "hermes",
         }
+        if self._host_instance:
+            headers["X-Mebular-Host-Instance"] = self._host_instance
         if body is not None:
             headers["Content-Type"] = "application/json; charset=utf-8"
         if self._token:
@@ -3384,7 +3541,7 @@ class MebularMemoryProvider(MemoryProvider):
         self._spool: Optional[_Spool] = None
         self._spool_home: Optional[Path] = None
         self._queue_limit = _QUEUE_LIMIT_DEFAULT
-        self._recall_timeout = 1.5
+        self._recall_timeout = 2.0
         self._ingest_timeout = 3.0
         self._archive_flush_timeout = 1.5
         self._checkpoint_timeout = 2.5
@@ -3438,6 +3595,17 @@ class MebularMemoryProvider(MemoryProvider):
         self._last_sync_signature = ""
         self._last_sync_payload: Optional[Dict[str, Any]] = None
         self._last_sync_at = 0.0
+        # W3：session → 上一轮 /context turnId；host plan 只消费匹配的新鲜 plan。
+        self._last_context_turns: Dict[str, str] = {}
+        self._host_plan_status: Dict[str, Any] = {"state": "idle", "reason": "", "at": 0}
+        # W4：session → 上一轮 /context 的 outcome binding；只存内存，不落盘。
+        self._outcome_contexts: Dict[str, Dict[str, Any]] = {}
+        self._outcome_reported: set[str] = set()
+        self._outcome_timers: Dict[str, threading.Timer] = {}
+        self._outcomes_enabled = True
+        self._outcome_timeout = 1.5
+        self._outcome_window = 120.0
+        self._outcome_ignored_delay = 600.0
 
     # ------------------------------------------------------------------
     # Core lifecycle
@@ -3484,6 +3652,10 @@ class MebularMemoryProvider(MemoryProvider):
         self._recall_limit = int(self._config["recall_limit"])
         self._recall_token_budget = int(self._config["recall_token_budget"])
         self._queue_limit = int(self._config["queue_limit"])
+        self._outcomes_enabled = bool(self._config.get("outcomes", True))
+        self._outcome_timeout = float(self._config.get("outcome_timeout", 1.5))
+        self._outcome_window = float(self._config.get("outcome_window", 120.0))
+        self._outcome_ignored_delay = float(self._config.get("outcome_ignored_delay", 600.0))
 
         discovery = _discover_runtime(self._hermes_home)
         self._base_url = discovery["url"]
@@ -3599,6 +3771,9 @@ class MebularMemoryProvider(MemoryProvider):
             return ""
         try:
             sid = str(session_id or self._session_id)
+            # W4：新一轮 human query 到达时先归因上一轮；必须在 cache lookup
+            # 之前执行，cache hit 也要消费上一轮并取消 ignored timer。
+            self._attribute_previous_outcome(sid, query)
             key = (sid, _sha256_text(query.strip()))
             text = self._take_cached(key)
             if text is None:
@@ -3658,7 +3833,8 @@ class MebularMemoryProvider(MemoryProvider):
         text: Optional[str] = None
         try:
             if not self._recall_blocked() and self._mode_allows_work():
-                text = self._recall(query, sid)
+                # 背景预取只暖 cache；不能覆盖真实 turn 的 outcome context。
+                text = self._recall(query, sid, remember_outcome=False)
         except Exception as error:
             self._note_recall_failure(error)
         finally:
@@ -3674,8 +3850,305 @@ class MebularMemoryProvider(MemoryProvider):
             return None
         return RecallStatus("Mebular", int(self._last_recall_count))
 
-    def _recall(self, query: str, sid: str) -> str:
-        """Call the sidecar context endpoint; return a ready-to-inject block."""
+    def _clear_host_plan_state(self, sid: str) -> None:
+        with self._lock:
+            self._last_context_turns.pop(str(sid or ""), None)
+        if self._hermes_home is None:
+            return
+        key = _host_plan_key(str(sid or ""))
+        directory = _host_plan_dir(self._hermes_home)
+        for name in (f"plan-{key}.json", f"state-{key}.json"):
+            try:
+                (directory / name).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    @property
+    def host_plan_status(self) -> Dict[str, Any]:
+        with self._lock:
+            return dict(self._host_plan_status)
+
+    # ------------------------------------------------------------------
+    # W4 outcome attribution (adapter-owned, in-memory only)
+    # ------------------------------------------------------------------
+
+    def _remember_outcome_context(self, sid: str, query: str, data: Dict[str, Any]) -> None:
+        """Keep only IDs/enums/terms for the next explicit outcome report."""
+        if not self._outcomes_enabled or not isinstance(data, dict):
+            return
+        trace_id = str(data.get("traceId") or "").strip()
+        if not trace_id:
+            return
+        applied = data.get("applied") if isinstance(data.get("applied"), dict) else None
+        decision = data.get("decision") if isinstance(data.get("decision"), dict) else None
+        effective = applied or decision
+        if not isinstance(effective, dict):
+            return
+        action = str(effective.get("action") or "").strip()
+        if not action:
+            return
+        meta = data.get("interventionMeta") if isinstance(data.get("interventionMeta"), dict) else {}
+        record = {
+            "traceId": trace_id,
+            "bindingToken": str(data.get("bindingToken") or ""),
+            "turnId": str(meta.get("turnId") or ""),
+            "action": action,
+            "depth": str(effective.get("depth") or ""),
+            "at": time.monotonic(),
+            "terms": _outcome_terms(query),
+        }
+        with self._lock:
+            previous_timer = self._outcome_timers.pop(sid, None)
+            if previous_timer is not None:
+                try:
+                    previous_timer.cancel()
+                except Exception:
+                    pass
+            self._outcome_contexts[sid] = record
+
+    def _attribute_previous_outcome(self, sid: str, query: str) -> None:
+        """Before the next turn's recall, attribute the previous turn."""
+        with self._lock:
+            record = self._outcome_contexts.pop(sid, None)
+            timer = self._outcome_timers.pop(sid, None)
+        if timer is not None:
+            try:
+                timer.cancel()
+            except Exception:
+                pass
+        if not record:
+            return
+        if time.monotonic() - float(record.get("at") or 0.0) > self._outcome_window:
+            return
+        text = str(query or "")
+        terms = _outcome_terms(text)
+        follow_up = bool(_OUTCOME_FOLLOW_UP_RE.search(text)) or _outcome_overlap(terms, record["terms"])
+        action = str(record.get("action") or "")
+        if action in {"silent", "defer"}:
+            if follow_up:
+                self._report_outcome(record, "missed", 0.7 if _OUTCOME_FOLLOW_UP_RE.search(text) else 0.55)
+            return
+        if action != "speak":
+            return
+        depth = str(record.get("depth") or "")
+        if _OUTCOME_CORRECTION_RE.search(text):
+            self._report_outcome(record, "corrected", 0.7)
+        elif depth == "gist" and _OUTCOME_DETAIL_RE.search(text):
+            self._report_outcome(record, "too_shallow", 0.65)
+        elif depth in {"detail", "quote"} and _OUTCOME_SHALLOW_RE.search(text):
+            self._report_outcome(record, "too_deep", 0.65)
+        elif _OUTCOME_REASK_RE.search(text):
+            self._report_outcome(record, "reasked", 0.65)
+        elif _OUTCOME_ACCEPTED_RE.search(text):
+            self._report_outcome(record, "accepted", 0.6)
+
+    def _report_outcome(self, record: Dict[str, Any], kind: str,
+                        confidence: Optional[float] = None) -> None:
+        if not self._outcomes_enabled:
+            return
+        trace_id = str(record.get("traceId") or "")
+        if not trace_id:
+            return
+        key = f"{trace_id}:{kind}"
+        with self._lock:
+            if key in self._outcome_reported:
+                return
+            self._outcome_reported.add(key)
+            if len(self._outcome_reported) > 512:
+                for stale in list(self._outcome_reported)[:128]:
+                    self._outcome_reported.discard(stale)
+        try:
+            thread = _spawn_worker(
+                self._send_outcome_worker,
+                name="mebular-outcome",
+                args=(dict(record), kind, confidence),
+            )
+            thread.start()
+        except Exception as error:
+            logger.debug("Mebular outcome worker could not start: %s", type(error).__name__)
+
+    def _send_outcome_worker(self, record: Dict[str, Any], kind: str,
+                             confidence: Optional[float]) -> None:
+        client = self._client
+        if client is None or not self._ready() or not self._mode_allows_work():
+            return
+        try:
+            self._refresh_token_if_due()
+            trace_id = str(record.get("traceId") or "")
+            if not trace_id:
+                return
+            token = str(record.get("bindingToken") or "")
+            # 新协议：token + host，且绝不带 note。旧 sidecar：token 缺失时带
+            # note，由 sidecar 走 0.3 兼容路径忽略且不落盘。
+            payload: Dict[str, Any] = {"kind": kind, "source": "host"}
+            if token:
+                payload["host"] = "hermes"
+                payload["bindingToken"] = token
+            else:
+                payload["note"] = "legacy outcome"
+            if confidence is not None:
+                payload["confidence"] = float(confidence)
+            client.post(
+                f"/recall/{urlparse.quote(trace_id, safe=':-._')}/outcome",
+                payload,
+                timeout=self._outcome_timeout,
+            )
+        except Exception as error:
+            logger.debug("Mebular outcome report failed safely: %s", type(error).__name__)
+
+    def _schedule_ignored_outcome(self, sid: str) -> None:
+        if not self._outcomes_enabled or not sid:
+            return
+        with self._lock:
+            record = self._outcome_contexts.get(sid)
+            if not record or sid in self._outcome_timers:
+                return
+        delay = self._outcome_ignored_delay
+        if self._outcome_window > 0:
+            delay = min(delay, max(1.0, self._outcome_window * 0.75))
+        if delay <= 0:
+            self._fire_ignored_outcome(sid, record)
+            return
+        timer = threading.Timer(delay, self._fire_ignored_outcome, args=(sid, record))
+        timer.daemon = True
+        with self._lock:
+            if self._outcome_contexts.get(sid) is not record:
+                return
+            self._outcome_timers[sid] = timer
+        timer.start()
+
+    def _fire_ignored_outcome(self, sid: str, record: Dict[str, Any]) -> None:
+        with self._lock:
+            if self._outcome_contexts.get(sid) is not record:
+                return
+            self._outcome_timers.pop(sid, None)
+        self._report_outcome(record, "ignored", 0.3)
+
+    def _clear_outcome_state(self, sid: Optional[str] = None) -> None:
+        with self._lock:
+            if sid is None:
+                keys = list(self._outcome_contexts.keys())
+            else:
+                keys = [sid]
+            for key in keys:
+                timer = self._outcome_timers.pop(key, None)
+                if timer is not None:
+                    try:
+                        timer.cancel()
+                    except Exception:
+                        pass
+                self._outcome_contexts.pop(key, None)
+
+    def _remember_context_meta(
+        self, sid: str, thread_id: str, data: Dict[str, Any]
+    ) -> None:
+        """Persist the basis for the companion's next host plan (adapter-owned)."""
+        meta = data.get("interventionMeta") if isinstance(data, dict) else None
+        if not isinstance(meta, dict):
+            return
+        turn_id = str(meta.get("turnId") or "").strip()
+        cue = [str(item) for item in (meta.get("cueFingerprint") or []) if isinstance(item, str)][:32]
+        candidates = [
+            str(item) for item in (meta.get("candidateFingerprint") or [])
+            if isinstance(item, str)
+        ][:3]
+        if not turn_id or not cue:
+            return
+        with self._lock:
+            self._last_context_turns[sid] = turn_id
+        if self._hermes_home is None:
+            return
+        try:
+            directory = _ensure_host_plan_dir(self._hermes_home)
+            _atomic_write_json(
+                directory / f"state-{_host_plan_key(sid)}.json",
+                {
+                    "schema": 1,
+                    "threadId": thread_id,
+                    "agentId": self._agent_id,
+                    "turnId": turn_id,
+                    "cueFingerprint": cue,
+                    "candidateFingerprint": candidates,
+                    "configuredSource": str(meta.get("configuredSource") or ""),
+                    "at": _now_ms(),
+                },
+            )
+        except Exception as error:
+            logger.debug("Mebular host plan state write failed: %s", type(error).__name__)
+
+    def _take_host_plan(self, sid: str, thread_id: str) -> Optional[Dict[str, Any]]:
+        """Read and locally validate the adapter-owned plan; single use."""
+        if self._hermes_home is None:
+            return None
+        path = _host_plan_dir(self._hermes_home) / f"plan-{_host_plan_key(sid)}.json"
+        try:
+            raw = _read_json(path)
+            path.unlink(missing_ok=True)
+        except Exception:
+            return None
+        if not raw:
+            return None
+        reason = ""
+        now_ms = _now_ms()
+        plan_id = str(raw.get("planId") or "")
+        if raw.get("schema") != 1 or not re.fullmatch(r"hp_[A-Za-z0-9._:-]{1,124}", plan_id):
+            reason = "host_plan_invalid"
+        elif raw.get("host") != "hermes":
+            reason = "host_plan_scope_mismatch"
+        elif raw.get("agentId") != self._agent_id or raw.get("threadId") != thread_id:
+            reason = "host_plan_scope_mismatch"
+        elif raw.get("scope") != "session":
+            reason = "host_plan_scope_mismatch"
+        elif raw.get("basedOnTurnId") != self._last_context_turns.get(sid):
+            reason = "host_plan_scope_mismatch"
+        elif not isinstance(raw.get("expiresAt"), (int, float)) or raw.get("expiresAt") <= now_ms:
+            reason = "host_plan_expired"
+        elif not isinstance(raw.get("createdAt"), (int, float)) \
+                or raw.get("expiresAt") - raw.get("createdAt") > _HOST_PLAN_TTL_MS \
+                or raw.get("createdAt") > now_ms + 5_000:
+            reason = "host_plan_invalid"
+        elif str(raw.get("configuredSource") or "") not in {"host", "auto"}:
+            reason = "source_not_host"
+        elif raw.get("plannerKind") != "host-model":
+            reason = "host_plan_not_model"
+        elif raw.get("action") not in _HOST_PLAN_ACTIONS or raw.get("depth") not in _HOST_PLAN_DEPTHS:
+            reason = "host_plan_invalid"
+        elif raw.get("reasonCode") not in _HOST_PLAN_REASONS:
+            reason = "host_plan_invalid"
+        elif not isinstance(raw.get("confidence"), (int, float)) \
+                or not 0 <= float(raw.get("confidence")) <= 1:
+            reason = "host_plan_invalid"
+        elif not isinstance(raw.get("cueFingerprint"), list) or not raw.get("cueFingerprint"):
+            reason = "host_plan_invalid"
+        elif not isinstance(raw.get("basisCandidateFingerprint"), list):
+            reason = "host_plan_invalid"
+        else:
+            version = _parse_version_tuple(raw.get("hermesVersion"))
+            if version is None or version < _MIN_HOST_PLAN_HERMES:
+                reason = "hermes_version_unsupported"
+            elif raw.get("isolation") != "in_process":
+                reason = "hermes_isolation_unsupported"
+            elif raw.get("apiMode") == "codex_app_server":
+                reason = "hermes_api_mode_unsupported"
+        with self._lock:
+            self._host_plan_status = {
+                "state": "rejected" if reason else "consumed",
+                "reason": reason,
+                "planId": plan_id,
+                "at": now_ms,
+            }
+        if reason:
+            logger.debug("Mebular host plan discarded: %s", reason)
+            return None
+        return raw
+
+    def _recall(self, query: str, sid: str, *, remember_outcome: bool = True) -> str:
+        """Call the sidecar context endpoint; return a ready-to-inject block.
+
+        ``remember_outcome=False`` is used by background ``queue_prefetch``:
+        that response is not a real user turn and must never overwrite or
+        impersonate the previous turn's outcome binding.
+        """
         if self._client is None:
             raise _RuntimeError("runtime_unavailable", "sidecar URL is not configured")
         if not self._mode_allows_work():
@@ -3687,6 +4160,11 @@ class MebularMemoryProvider(MemoryProvider):
             )
         self._refresh_token_if_due()
         thread_id = self._thread_id(sid)
+        host_plan = self._take_host_plan(sid, thread_id)
+        if self._client is not None:
+            self._client.set_host_instance(
+                str(host_plan.get("hostInstanceId") or "") if host_plan is not None else ""
+            )
         payload: Dict[str, Any] = {
             "actor": {"type": "agent", "agentId": self._agent_id},
             "agentId": self._agent_id,
@@ -3703,11 +4181,18 @@ class MebularMemoryProvider(MemoryProvider):
         }
         if self._domain:
             payload["domains"] = [self._domain]
+        if host_plan is not None:
+            payload["hostPlan"] = host_plan
+            payload["previousTurnId"] = host_plan.get("basedOnTurnId")
 
         try:
             data = self._post_with_auth_retry(
                 "/context", payload, timeout=self._recall_timeout
             )
+            self._remember_context_meta(sid, thread_id, data)
+            # W4：只保留 trace/token/枚举/短词；背景预取不得写入 outcome context。
+            if remember_outcome:
+                self._remember_outcome_context(sid, query, data)
             text = self._format_context(data)
             if text:
                 return text
@@ -4077,6 +4562,9 @@ class MebularMemoryProvider(MemoryProvider):
                 messages=messages,
                 turn_author=turn_author,
             )
+            # W4：assistant 内容已知；若用户没有下一轮，idle 后补弱信号 ignored。
+            sid = str(session_id or self._session_id)
+            self._schedule_ignored_outcome(sid)
         except Exception as error:
             # Hermes must never see a memory-provider exception on a turn.
             logger.debug("Mebular sync_turn failed safely: %s", type(error).__name__)
@@ -4145,6 +4633,7 @@ class MebularMemoryProvider(MemoryProvider):
         """
         try:
             self._archive(messages, label="compress")
+            self._clear_host_plan_state(self._session_id)
             if self._spool is not None and self._client is not None:
                 self.flush(timeout=self._archive_flush_timeout)
             if (self._ready() and self._writes_enabled
@@ -4167,6 +4656,8 @@ class MebularMemoryProvider(MemoryProvider):
         except Exception as error:
             logger.debug("Mebular session-end snapshot skipped: %s", type(error).__name__)
         finally:
+            self._clear_host_plan_state(self._session_id)
+            self._clear_outcome_state(self._session_id)
             with self._lock:
                 self._prefetch_cache.clear()
                 self._last_recall_count = None
@@ -4195,6 +4686,8 @@ class MebularMemoryProvider(MemoryProvider):
                 self.flush(timeout=2.0)
         except Exception:
             pass
+        self._clear_host_plan_state(old_session_id)
+        self._clear_outcome_state(old_session_id)
         with self._lock:
             self._session_id = str(new_session_id or self._session_id)
             self._prefetch_cache.clear()
@@ -4230,6 +4723,7 @@ class MebularMemoryProvider(MemoryProvider):
         )
         self._stop.set()
         self._wake.set()
+        self._clear_outcome_state()
         deadline = time.monotonic() + 3.0
         worker = self._worker
         if worker is not None and worker.is_alive():

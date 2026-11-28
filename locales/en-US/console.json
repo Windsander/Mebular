@@ -117,6 +117,7 @@
     "onboard.coach.join": "Join cloud",
     "onboard.coach.dismiss": "Got it",
     "onboard.coach.closeTitle": "Dismiss guide",
+    "provision.firstRun.disclosure.body": "Mebular will start Memory Runtime on this device and capture conversation memories plus related session details and raw messages, organize them, and inject relevant background into new conversations. Memories stay on this device by default; if you enable cross-device or cloud sync, they sync to your other devices. Hosts such as OpenCode, OpenChamber, DSH, and Hermes may keep their own copies of sessions; Mebular does not read host private storage. Local prefetching may process memories on this device. They are sent to a remote API only if you explicitly allow it in Settings. You can switch to Lightweight anytime in Settings → Memory Runtime; continuing with Create or Join means you understand this.",
     "onboard.create.title": "New cloud",
     "onboard.create.tag": "This device is root",
     "onboard.create.desc": "Generates the root master key and initializes in this process. Sharing, Memories, Audit, and the device card unlock immediately; no restart needed.",

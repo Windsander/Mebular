@@ -272,7 +272,7 @@ class _Handler(BaseHTTPRequestHandler):
                  {"kind": "fragment", "content": text, "trust": "untrusted"})
                 for text in fake.context_blocks
             ]
-            self._send(200, self._envelope({
+            payload: Dict[str, Any] = {
                 "recallId": "rr_test",
                 "fragments": fake.fragments,
                 "blocks": blocks,
@@ -284,9 +284,33 @@ class _Handler(BaseHTTPRequestHandler):
                 "degraded": False,
                 "warnings": [],
                 "silenceReason": None if blocks else "no_hits",
-                "traceId": "tr_test",
+                "traceId": fake.context_trace_id,
+                "bindingToken": fake.binding_token,
                 "timing": {"cueMs": 1, "fuzzyMs": 1, "expandMs": 1,
                            "assembleMs": 1, "totalMs": 4},
+            }
+            if isinstance(fake.context_meta, dict):
+                payload["interventionMeta"] = dict(fake.context_meta)
+            if isinstance(fake.context_decision, dict):
+                payload["decision"] = dict(fake.context_decision)
+            if isinstance(fake.context_applied, dict):
+                payload["applied"] = dict(fake.context_applied)
+            self._send(200, self._envelope(payload))
+            return
+        if parsed.path.startswith(f"{API}/recall/") and parsed.path.endswith("/outcome"):
+            fake.outcomes.append({
+                "path": parsed.path,
+                "body": body,
+                "host_app": self.headers.get("X-Mebular-Host-App") or "",
+            })
+            self._send(200, self._envelope({
+                "traceId": parsed.path.split("/")[-2],
+                "outcome": {"kind": body.get("kind")},
+                "duplicate": False,
+                "recorded": True,
+                "withinWindow": True,
+                "warnings": [],
+                "degraded": False,
             }))
             return
         if parsed.path == f"{API}/recall":
@@ -377,6 +401,23 @@ class FakeSidecar:
         self.checkpoint_unconfirmed = False
         self.context_missing = False
         self.context_blocks: List[str] = []
+        self.context_meta: Optional[Dict[str, Any]] = None
+        self.context_trace_id: Optional[str] = "tr_test"
+        self.binding_token: Optional[str] = "obt_test_binding"
+        self.context_decision: Optional[Dict[str, Any]] = {
+            "action": "speak",
+            "depth": "gist",
+            "confidence": 0.8,
+            "reason": "high_relevance",
+            "policyVersion": "v0-rules",
+            "enforced": True,
+        }
+        self.context_applied: Optional[Dict[str, Any]] = {
+            "action": "speak",
+            "depth": "gist",
+            "fragments": 1,
+        }
+        self.outcomes: List[Dict[str, Any]] = []
         self.fragments: List[Dict[str, Any]] = []
         self.recall_records: List[Dict[str, Any]] = []
         self.requests: List[Dict[str, Any]] = []
@@ -411,6 +452,10 @@ class FakeSidecar:
             "body": body,
             "authorization": ((headers.get("Authorization") or "") if headers is not None else ""),
             "idempotency": ((headers.get("Idempotency-Key") or "") if headers is not None else ""),
+            "host_app": ((headers.get("X-Mebular-Host-App") or "") if headers is not None else ""),
+            "host_instance": (
+                (headers.get("X-Mebular-Host-Instance") or "") if headers is not None else ""
+            ),
         })
 
     def paths(self) -> List[str]:
@@ -428,6 +473,19 @@ class FakeSidecar:
         self.checkpoint_unconfirmed = False
         self.context_missing = False
         self.context_blocks = []
+        self.context_meta = None
+        self.context_trace_id = "tr_test"
+        self.binding_token = "obt_test_binding"
+        self.context_decision = {
+            "action": "speak",
+            "depth": "gist",
+            "confidence": 0.8,
+            "reason": "high_relevance",
+            "policyVersion": "v0-rules",
+            "enforced": True,
+        }
+        self.context_applied = {"action": "speak", "depth": "gist", "fragments": 1}
+        self.outcomes.clear()
         self.fragments = []
         self.recall_records = []
         self.requests.clear()
@@ -1115,6 +1173,30 @@ class ProviderTests(BaseCase):
         self.assertNotIn(self.host_token, serialized)
         self.assertEqual(status["apiVersion"], "1")
         self.assertEqual(status["features"]["checkpoints"], True)
+
+
+class HostTimeoutTests(BaseCase):
+    def test_recall_timeout_default_and_below_deadline_warning(self) -> None:
+        self.assertEqual(memory_plugin._DEFAULT_CONFIG["recall_timeout"], 2.0)
+        default_config = memory_plugin._load_plugin_config(self.hermes_home)
+        self.assertEqual(default_config["recall_timeout"], 2.0)
+
+        (self.hermes_home / "mebular-memory.json").write_text(
+            json.dumps({"recall_timeout": 0.8}), encoding="utf-8"
+        )
+        with mock.patch.object(memory_plugin.logger, "warning") as warning:
+            config = memory_plugin._load_plugin_config(self.hermes_home)
+        self.assertEqual(config["recall_timeout"], 0.8)
+        messages = [str(call.args[0]) for call in warning.call_args_list if call.args]
+        self.assertTrue(any("host_timeout_below_deadline" in item for item in messages))
+
+        (self.hermes_home / "mebular-memory.json").write_text(
+            json.dumps({"recall_timeout": 2.0}), encoding="utf-8"
+        )
+        with mock.patch.object(memory_plugin.logger, "warning") as warning:
+            memory_plugin._load_plugin_config(self.hermes_home)
+        messages = [str(call.args[0]) for call in warning.call_args_list if call.args]
+        self.assertFalse(any("host_timeout_below_deadline" in item for item in messages))
 
 
 class SpoolContractTests(BaseCase):
@@ -2456,6 +2538,8 @@ class CompanionTests(BaseCase):
         def __init__(self) -> None:
             self.llm = CompanionTests._Llm()
             self.hooks: Dict[str, Callable[..., Any]] = {}
+            self.version = "0.21.7"
+            self.config: Dict[str, Any] = {"plugins": {"isolation": "in_process"}}
 
         def register_hook(self, name: str, callback: Callable[..., Any]) -> None:
             self.hooks[name] = callback
@@ -2554,3 +2638,445 @@ class CompanionTests(BaseCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HostPlanBridgeTests(BaseCase):
+    """0.4.0 W3：Hermes companion 生成 plan、provider 消费 plan。"""
+
+    def _companion_config(self, server: Optional[FakeSidecar], enabled: bool = True) -> None:
+        config: Dict[str, Any] = {"enabled": enabled}
+        if server is not None:
+            config["runtime_url"] = server.url
+        (self.hermes_home / "mebular-companion.json").write_text(
+            json.dumps(config), encoding="utf-8"
+        )
+
+    def _plan_path(self, session_id: str = "s1") -> Path:
+        return memory_plugin._host_plan_dir(self.hermes_home) / (
+            f"plan-{memory_plugin._host_plan_key(session_id)}.json"
+        )
+
+    def _write_state(self, session_id: str = "s1", turn_id: str = "turn_1",
+                     thread_id: Optional[str] = None) -> None:
+        directory = memory_plugin._host_plan_dir(self.hermes_home)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / f"state-{memory_plugin._host_plan_key(session_id)}.json").write_text(
+            json.dumps({
+                "schema": 1,
+                "threadId": thread_id or f"th_{session_id}",
+                "agentId": "hermes",
+                "turnId": turn_id,
+                "cueFingerprint": ["aa11", "bb22"],
+                "candidateFingerprint": ["cc33", "dd44"],
+                "configuredSource": "host",
+                "at": int(time.time() * 1000),
+            }),
+            encoding="utf-8",
+        )
+
+    def _plan(self, **overrides: Any) -> Dict[str, Any]:
+        now = int(time.time() * 1000)
+        plan = {
+            "schema": 1,
+            "planId": "hp_01JHERMESPLAN0001",
+            "host": "hermes",
+            "hostInstanceId": "hi_hermes_test",
+            "agentId": "hermes",
+            "threadId": f"th_{memory_plugin._sha256_text('s1')[:32]}",
+            "scope": "session",
+            "basedOnTurnId": "turn_1",
+            "cueFingerprint": ["aa11", "bb22"],
+            "basisCandidateFingerprint": ["cc33", "dd44"],
+            "createdAt": now - 1000,
+            "expiresAt": now - 1000 + 60_000,
+            "action": "speak",
+            "depth": "gist",
+            "confidence": 0.74,
+            "reasonCode": "high_relevance",
+            "plannerKind": "host-model",
+            "plannerVersion": "hermes-companion:0.3.0",
+            "policyVersion": "host-plan:v1",
+            "hermesVersion": "0.21.7",
+            "isolation": "in_process",
+            "apiMode": "",
+            "configuredSource": "host",
+            "sessionModel": "host/model",
+        }
+        plan.update(overrides)
+        return plan
+
+    def _write_plan(self, **overrides: Any) -> Path:
+        path = self._plan_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(self._plan(**overrides)), encoding="utf-8")
+        return path
+
+    def test_provider_writes_state_and_consumes_fresh_plan(self) -> None:
+        server = self.fake_server()
+        server.context_blocks = ["[F1] user prefers dark theme"]
+        server.context_meta = {
+            "source": "heuristic",
+            "configuredSource": "host",
+            "prefetched": False,
+            "turnId": "turn_1",
+            "cueFingerprint": ["aa11", "bb22"],
+            "candidateFingerprint": ["cc33", "dd44"],
+        }
+        provider = self.make_provider(server)
+        provider.prefetch("theme", session_id="s1")
+        state_path = memory_plugin._host_plan_dir(self.hermes_home) / (
+            f"state-{memory_plugin._host_plan_key('s1')}.json"
+        )
+        self.assertTrue(state_path.exists())
+
+        plan = self._plan(threadId=provider._thread_id("s1"))
+        self._plan_path().write_text(json.dumps(plan), encoding="utf-8")
+        provider.prefetch("theme details", session_id="s1")
+        contexts = [entry for entry in server.requests if entry["path"] == f"{API}/context"]
+        self.assertEqual(len(contexts), 2)
+        self.assertEqual(contexts[1]["host_app"], "hermes")
+        self.assertEqual(
+            contexts[1]["host_instance"],
+            contexts[1]["body"]["hostPlan"]["hostInstanceId"],
+        )
+        self.assertEqual(contexts[1]["body"]["previousTurnId"], "turn_1")
+        self.assertEqual(contexts[1]["body"]["hostPlan"]["planId"], "hp_01JHERMESPLAN0001")
+        self.assertFalse(self._plan_path().exists())
+        self.assertEqual(provider.host_plan_status["state"], "consumed")
+
+    def test_unsupported_isolation_falls_back_and_does_not_send_plan(self) -> None:
+        server = self.fake_server()
+        server.context_blocks = ["[F1] user prefers dark theme"]
+        server.context_meta = {
+            "configuredSource": "host",
+            "turnId": "turn_1",
+            "cueFingerprint": ["aa11", "bb22"],
+            "candidateFingerprint": ["cc33", "dd44"],
+        }
+        provider = self.make_provider(server)
+        provider._last_context_turns["s1"] = "turn_1"
+        self._write_plan(threadId=provider._thread_id("s1"), isolation="host")
+        provider.prefetch("theme", session_id="s1")
+        contexts = [entry for entry in server.requests if entry["path"] == f"{API}/context"]
+        self.assertEqual(contexts[-1]["body"].get("hostPlan"), None)
+        self.assertEqual(provider.host_plan_status["reason"], "hermes_isolation_unsupported")
+
+    def test_companion_unsupported_version_or_isolation_registers_no_post_hook(self) -> None:
+        self._companion_config(None)
+        for version, isolation, reason in (
+            ("0.21.5", "in_process", "hermes_version_unsupported"),
+            ("0.21.7", "host", "hermes_isolation_unsupported"),
+            ("0.21.7", "in_process", "hermes_api_mode_unsupported"),
+        ):
+            ctx = CompanionTests._Ctx()
+            ctx.version = version
+            ctx.config = {"plugins": {"isolation": isolation}}
+            if reason == "hermes_api_mode_unsupported":
+                ctx.api_mode = "codex_app_server"
+            companion_plugin.register(ctx)
+            self.assertNotIn("post_llm_call", ctx.hooks)
+            self.assertFalse(companion_plugin.MebularCompanion(ctx).host_plan_status["supported"])
+
+    def test_companion_post_llm_call_writes_plan_without_raw_text(self) -> None:
+        server = self.fake_server()
+        self._companion_config(server)
+        self._write_state()
+        ctx = CompanionTests._Ctx()
+
+        class _PlanLlm:
+            def __init__(self) -> None:
+                self.calls: List[Dict[str, Any]] = []
+
+            def complete_structured(self, **kwargs: Any) -> Any:
+                self.calls.append(kwargs)
+                return types.SimpleNamespace(
+                    parsed={
+                        "action": "speak",
+                        "depth": "gist",
+                        "confidence": 0.71,
+                        "reasonCode": "high_relevance",
+                    },
+                    text="",
+                    model="host/test-model",
+                )
+
+        ctx.llm = _PlanLlm()
+        plugin = companion_plugin.MebularCompanion(ctx)
+        companion_plugin.register(ctx)
+        self.assertIn("post_llm_call", ctx.hooks)
+        ctx.hooks["post_llm_call"](
+            session_id="s1",
+            task_id="task-1",
+            turn_id="host-turn-1",
+            user_message="MY SECRET RAW QUERY 1234567890",
+            assistant_response="assistant answer must not be stored",
+            conversation_history=[],
+            model="host/model",
+            platform="cli",
+        )
+        path = self._plan_path()
+        self.assertTrue(self.wait_until(path.exists, timeout=2.0))
+        plan = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(plan["host"], "hermes")
+        self.assertEqual(plan["basedOnTurnId"], "turn_1")
+        self.assertEqual(plan["action"], "speak")
+        self.assertEqual(plan["hermesVersion"], "0.21.7")
+        self.assertEqual(plan["isolation"], "in_process")
+        self.assertNotIn("user_message", plan)
+        self.assertNotIn("assistant_response", plan)
+        raw = path.read_text(encoding="utf-8")
+        self.assertNotIn("MY SECRET RAW QUERY", raw)
+        self.assertNotIn("assistant answer must not be stored", raw)
+        # post_llm_call 只生成 plan；不得触发 ingest/event/checkpoint。
+        self.assertEqual(server.requests, [])
+
+    def test_companion_pre_llm_call_invalidates_plan_on_model_change(self) -> None:
+        server = self.fake_server()
+        self._companion_config(server)
+        self._write_plan()
+        ctx = CompanionTests._Ctx()
+        plugin = companion_plugin.MebularCompanion(ctx)
+        ctx.hooks["pre_llm_call"] = plugin.pre_llm_call
+        ctx.hooks["pre_llm_call"](
+            session_id="s1",
+            user_message="next",
+            conversation_history=[
+                {"role": "user", "content": "I prefer dark mode"},
+                {"role": "assistant", "content": "Noted."},
+            ],
+            model="host/other-model",
+        )
+        self.assertFalse(self._plan_path().exists())
+
+    def test_companion_post_llm_call_reentrancy_guard(self) -> None:
+        server = self.fake_server()
+        self._companion_config(server)
+        self._write_state()
+        ctx = CompanionTests._Ctx()
+        entered = threading.Event()
+        release = threading.Event()
+        calls: List[Dict[str, Any]] = []
+
+        class _BlockingLlm:
+            def complete_structured(self, **kwargs: Any) -> Any:
+                calls.append(kwargs)
+                entered.set()
+                release.wait(timeout=2.0)
+                return types.SimpleNamespace(
+                    parsed={
+                        "action": "speak",
+                        "depth": "gist",
+                        "confidence": 0.7,
+                        "reasonCode": "high_relevance",
+                    },
+                    text="",
+                    model="host/test-model",
+                )
+
+        ctx.llm = _BlockingLlm()
+        plugin = companion_plugin.MebularCompanion(ctx)
+        kwargs = {
+            "session_id": "s1",
+            "user_message": "u",
+            "assistant_response": "a",
+            "model": "host/model",
+        }
+        plugin.post_llm_call(**kwargs)
+        self.assertTrue(entered.wait(timeout=1.0))
+        plugin.post_llm_call(**kwargs)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(plugin.host_plan_status["reason"], "reentrant_call")
+        release.set()
+        self.assertTrue(self.wait_until(self._plan_path().exists, timeout=2.0))
+
+    def test_plan_with_non_host_source_is_not_consumed(self) -> None:
+        server = self.fake_server()
+        server.context_blocks = ["[F1] user prefers dark theme"]
+        server.context_meta = {
+            "configuredSource": "host",
+            "turnId": "turn_1",
+            "cueFingerprint": ["aa11", "bb22"],
+            "candidateFingerprint": ["cc33", "dd44"],
+        }
+        provider = self.make_provider(server)
+        provider._last_context_turns["s1"] = "turn_1"
+        self._write_plan(
+            threadId=provider._thread_id("s1"),
+            configuredSource="heuristic",
+        )
+        provider.prefetch("theme", session_id="s1")
+        contexts = [entry for entry in server.requests if entry["path"] == f"{API}/context"]
+        self.assertEqual(contexts[-1]["body"].get("hostPlan"), None)
+        self.assertEqual(provider.host_plan_status["reason"], "source_not_host")
+
+    def test_post_llm_call_does_not_swallow_real_sync_turn(self) -> None:
+        server = self.fake_server()
+        self._companion_config(server)
+        self._write_state()
+        ctx = CompanionTests._Ctx()
+        entered = threading.Event()
+        release = threading.Event()
+
+        class _BlockingLlm:
+            def complete_structured(self, **kwargs: Any) -> Any:
+                entered.set()
+                release.wait(timeout=2.0)
+                return types.SimpleNamespace(
+                    parsed={
+                        "action": "speak",
+                        "depth": "gist",
+                        "confidence": 0.7,
+                        "reasonCode": "high_relevance",
+                    },
+                    text="",
+                    model="host/test-model",
+                )
+
+        ctx.llm = _BlockingLlm()
+        plugin = companion_plugin.MebularCompanion(ctx)
+        plugin.post_llm_call(
+            session_id="s1",
+            user_message="planner input",
+            assistant_response="planner answer",
+            model="host/model",
+        )
+        self.assertTrue(entered.wait(timeout=1.0))
+        provider = self.make_provider(server)
+        provider.sync_turn("real user during planner", "real assistant during planner", session_id="s1")
+        self.assertTrue(provider.flush(timeout=2.0))
+        self.assertTrue(server.ingests)
+        self.assertTrue(
+            any("real user during planner" in json.dumps(item) for item in server.ingests)
+        )
+        release.set()
+        self.assertTrue(self.wait_until(self._plan_path().exists, timeout=2.0))
+
+
+class OutcomeAttributionTests(BaseCase):
+    """W4：Hermes 显式上报 outcome；不读宿主 session/log/私有存储。"""
+
+    def test_prefetch_attributes_previous_with_binding_token(self) -> None:
+        server = self.fake_server()
+        server.context_blocks = ["user prefers dark theme"]
+        provider = self.make_provider(server)
+
+        self.assertIn("dark theme", provider.prefetch("how do I change the theme"))
+        provider.prefetch("再说一遍，深色主题怎么设置")
+
+        self.assertTrue(self.wait_until(lambda: bool(server.outcomes)))
+        outcome = server.outcomes[0]
+        self.assertEqual(outcome["host_app"].lower(), "hermes")
+        self.assertEqual(outcome["body"].get("kind"), "reasked")
+        self.assertEqual(outcome["body"].get("source"), "host")
+        self.assertEqual(outcome["body"].get("host"), "hermes")
+        self.assertEqual(outcome["body"].get("bindingToken"), "obt_test_binding")
+        # 新协议绝不带 note。
+        self.assertNotIn("note", outcome["body"])
+        status = json.dumps(provider.get_status_config())
+        self.assertNotIn("obt_test_binding", status)
+        self.assertNotIn(self.host_token, status)
+
+    def test_sync_turn_schedules_ignored_with_same_token(self) -> None:
+        server = self.fake_server()
+        server.context_blocks = ["deploy status memory"]
+        provider = self.make_provider(server, outcome_ignored_delay=0.01)
+
+        self.assertIn("deploy status", provider.prefetch("deploy status"))
+        provider.sync_turn("deploy status", "noted", session_id="s1")
+
+        self.assertTrue(self.wait_until(lambda: bool(server.outcomes)))
+        outcome = server.outcomes[0]
+        self.assertEqual(outcome["body"].get("kind"), "ignored")
+        self.assertEqual(outcome["body"].get("bindingToken"), "obt_test_binding")
+        self.assertNotIn("note", outcome["body"])
+
+    def test_cache_hit_attributes_previous_and_cancels_ignored(self) -> None:
+        server = self.fake_server()
+        server.context_blocks = ["theme memory"]
+        server.binding_token = "obt_turn_token"
+        provider = self.make_provider(server, outcome_ignored_delay=0.2)
+
+        # 真实 turn：记录 outcome context，并在 sync_turn 后挂 ignored timer。
+        self.assertIn("theme memory", provider.prefetch("how do I change the theme"))
+        provider.sync_turn("how do I change the theme", "noted", session_id="s1")
+
+        # 后台 queue_prefetch 的 /context 是 silent，且 token 不同；若它覆盖
+        # outcome context，下一轮 cache hit 会被误判成 missed / worker token。
+        server.context_blocks = ["worker memory"]
+        server.binding_token = "obt_worker_token"
+        server.context_decision = {
+            "action": "silent",
+            "depth": "gist",
+            "confidence": 0.2,
+            "reason": "low_confidence",
+            "policyVersion": "v0-rules",
+            "enforced": True,
+        }
+        server.context_applied = {"action": "silent", "depth": "gist", "fragments": 0}
+        provider.queue_prefetch("再说一遍，深色主题怎么设置", session_id="s1")
+        key = ("s1", memory_plugin._sha256_text("再说一遍，深色主题怎么设置"))
+        self.assertTrue(self.wait_until(
+            lambda: key in provider._prefetch_cache and key not in provider._prefetch_inflight
+        ))
+        # 后台预取不得写入 outcome context。
+        self.assertEqual(
+            provider._outcome_contexts["s1"]["bindingToken"], "obt_turn_token"
+        )
+
+        # cache hit 仍然归因上一轮，并取消 sync_turn 留下的 ignored timer。
+        self.assertIn("worker memory", provider.prefetch(
+            "再说一遍，深色主题怎么设置", session_id="s1"
+        ))
+        self.assertTrue(self.wait_until(lambda: bool(server.outcomes)))
+        time.sleep(0.3)  # 超过 outcome_ignored_delay；timer 应已被取消
+        kinds = [entry["body"].get("kind") for entry in server.outcomes]
+        self.assertEqual(kinds, ["reasked"])
+        self.assertEqual(server.outcomes[0]["body"].get("bindingToken"), "obt_turn_token")
+        self.assertEqual(
+            [entry for entry in server.requests if entry["path"] == f"{API}/context"].__len__(),
+            2,
+        )
+
+    def test_queue_prefetch_never_overwrites_real_outcome_context(self) -> None:
+        server = self.fake_server()
+        server.context_blocks = ["real turn memory"]
+        server.binding_token = "obt_real_turn"
+        provider = self.make_provider(server)
+        provider.prefetch("real turn query")
+
+        server.binding_token = "obt_background"
+        provider.queue_prefetch("background warm query", session_id="s1")
+        key = ("s1", memory_plugin._sha256_text("background warm query"))
+        self.assertTrue(self.wait_until(
+            lambda: key in provider._prefetch_cache and key not in provider._prefetch_inflight
+        ))
+        self.assertEqual(provider._outcome_contexts["s1"]["bindingToken"], "obt_real_turn")
+        self.assertEqual(provider._outcome_contexts["s1"]["turnId"], "")
+
+    def test_trace_null_reports_nothing(self) -> None:
+        server = self.fake_server()
+        server.context_blocks = ["deploy status memory"]
+        server.context_trace_id = None
+        server.binding_token = None
+        provider = self.make_provider(server, outcome_ignored_delay=0.01)
+
+        provider.prefetch("deploy status")
+        provider.prefetch("上次的部署流程")
+        provider.sync_turn("上次的部署流程", "noted", session_id="s1")
+        time.sleep(0.05)
+        self.assertEqual(server.outcomes, [])
+
+    def test_legacy_sidecar_without_token_uses_note_and_no_binding(self) -> None:
+        server = self.fake_server()
+        server.context_blocks = ["theme memory"]
+        server.binding_token = None
+        provider = self.make_provider(server)
+
+        provider.prefetch("how do I change the theme")
+        provider.prefetch("再说一遍，深色主题怎么设置")
+
+        self.assertTrue(self.wait_until(lambda: bool(server.outcomes)))
+        body = server.outcomes[0]["body"]
+        self.assertEqual(body.get("kind"), "reasked")
+        self.assertNotIn("bindingToken", body)
+        self.assertIn("note", body)

@@ -341,7 +341,9 @@ describe('P1 单进程热初始化生命周期', () => {
     expect(c.failed.body).toMatchObject({ error: 'STORAGE_INIT_FAILED', phase: 'UNINITIALIZED' });
     // runtime.json 是「HTTP 监听成功后」的发现文件，失败回滚不会停止仍在运行的 server。
     expect(c.filesAfterFailure).toContain('runtime.json');
-    expect(c.filesAfterFailure.filter((name) => name !== 'runtime.json')).toEqual(['lock']);
+    // 本用例设置了外部 MEBULAR_STORAGE_PATH（W1b：外部存储不命中 first-run），
+    // 因此失败回滚后只应留下 home 锁，不会出现 first-run.json / config / 主密钥。
+    expect(c.filesAfterFailure.filter((name) => name !== 'runtime.json').sort()).toEqual(['lock']);
     expect(c.configAfterFailure).toBeNull();
     expect(c.keyAfterFailure).toBeNull();
     expect(c.registryAfterFailure).toBeNull();

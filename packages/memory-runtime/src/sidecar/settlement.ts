@@ -11,6 +11,7 @@ import { readFile } from 'node:fs/promises';
 import type { CapabilityClient } from './capability-client.js';
 import type { SidecarConfig } from './config.js';
 import type { DiagnosticLog } from './diagnostic-log.js';
+import type { EffectiveInterventionResolution } from './effective.js';
 import {
   agentDomain,
   canReadDomain,
@@ -58,6 +59,10 @@ export interface SettlementRuntimeOptions {
   identity: SettlementIdentity;
   policy?: SidecarPolicy | null;
   inference?: SidecarInferenceProvider | null;
+  /** 测试/嵌入式覆盖；生产不传，RecallService 按当前 config 动态推导。 */
+  effectiveIntervention?: EffectiveInterventionResolution;
+  /** main 解析的 internal diagnostic shadow（config 或 env）。 */
+  diagnosticShadow?: boolean;
   policyPath?: string;
   /** `<dataDir>/policy/state.json`；缺省不启用本机策略学习。 */
   policyStatePath?: string;
@@ -495,6 +500,8 @@ export class SettlementRuntime {
       checkpointSource: this.objects,
       policyStore,
       ...(this.inference ? { inference: this.inference } : {}),
+      ...(options.effectiveIntervention ? { effectiveIntervention: options.effectiveIntervention } : {}),
+      ...(options.diagnosticShadow !== undefined ? { diagnosticShadow: options.diagnosticShadow } : {}),
       ...(options.lifecycle ? { lifecycle: options.lifecycle } : {}),
       ...(options.now ? { now: options.now } : {}),
     });
@@ -686,9 +693,9 @@ export class SettlementRuntime {
     return this.recall.handleRecall(request);
   }
 
-  async handleContext(request: unknown): Promise<RecallHttpResult<ContextResponse>> {
+  async handleContext(request: unknown, hostToken?: string): Promise<RecallHttpResult<ContextResponse>> {
     await this.reloadPolicy().catch(() => []);
-    return this.recall.handleContext(request);
+    return this.recall.handleContext(request, hostToken);
   }
 
   expandRecall(recallId: string, request: unknown) {
@@ -715,8 +722,12 @@ export class SettlementRuntime {
     return this.recall.submitFeedback(traceId, body);
   }
 
-  submitOutcome(traceId: string, body: unknown) {
-    return this.recall.submitOutcome(traceId, body);
+  submitOutcome(traceId: string, body: unknown, auth?: {
+    hostToken?: string;
+    console?: boolean;
+    internal?: boolean;
+  }) {
+    return this.recall.submitOutcome(traceId, body, auth);
   }
 
   /** Console/CLI reset 入口：清空本机策略统计；不影响记忆或 trace。 */
@@ -968,6 +979,7 @@ export class SettlementRuntime {
       policy: {
         degraded: this.policyStore?.isDegraded === true,
         lastError: this.policyStore?.lastError ?? null,
+        planner: { last: recall.lastPlanner, queue: recall.plannerQueue },
       },
     };
   }

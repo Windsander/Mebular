@@ -254,13 +254,37 @@ ContextCheckpoint 始终是 `task:<threadId>` 或 `default` 中的图对象；�
 
 | 模式 | 行为 |
 |---|---|
-| `off` | 默认。不改变策略行为；`/context` 仍返回 baseline `decision`，`enforced:false`。`off` 仍会把 baseline 的 **applied** spoken/silent 写进本机 policy 统计与 trace，但不应用策略建议，也不做阈值自适应。 |
-| `shadow` | 计算策略建议（`decision`），但实际注入保持 baseline；trace 带 `wouldAction` / `wouldDepth`。 |
+| `off` | 默认。不改变策略行为；`/context` 仍返回 baseline `decision`，`enforced:false`。`off` 仍会把 baseline 的 **applied** spoken/silent 写进本机 policy 统计与 trace，但不应用策略建议，也不做阈值自适应。输入级 `defer_explicit` 仍返回 `defer`（`v0-baseline` / `enforced:false`），不产生策略警告。 |
+| `shadow` | 计算策略建议（`decision`），但实际注入保持 baseline；trace 带 `wouldAction` / `wouldDepth`。输入级 `defer_explicit` 是例外：实际注入 `defer`，不记录 baseline `wouldAction`。 |
 | `heuristic` | 启用本机规则策略；`must_speak` 仍是硬规则。 |
 | `model` | **实验性。** 用配置的模型做 `planIntervention()`；超时/非法输出/模型不可用回退 heuristic，并标 `degraded:true`。 |
 
 Console 不编辑这些值，只展示 trace 决策并提供二次确认的 reset。修改模式需改 sidecar
 config 并按现有生命周期重启/重载，使新配置生效。
+
+### Outcome binding（0.4.0 W4）
+
+`/context` 成功写本地 trace 时会同时返回 opaque `bindingToken`；`traceId:null`
+（trace 关闭或 W5 deadline skip）时返回 `bindingToken:null`，宿主不得上报 outcome。
+
+- token 是 **TTL 内绑定单个 trace 的 bearer，不是单次 nonce**：同一 trace 可以上报
+  不同 kind，同 kind 重复仍保持幂等。
+- 绑定 `traceId + agentId + threadId + turnId + hostApp`；`source=host` 必须带 token
+  和 `opencode|openchamber|dsh|hermes`。跨 trace、跨 session/agent/thread/turn、
+  tamper、过期、host token 轮换后的 token 一律拒绝。
+- HMAC key 是当前 host token。这是本机同用户信任边界：已经持有 host token 的进程
+  可以为该 trace 自签/重放 binding；binding 主要防跨 trace/scope/无 token 上报，
+  不是防恶意 host token 持有者。
+- `source=console` 必须使用 MCP admin 代理持有的独立 admin secret
+  （`x-mebular-admin-token`），不能用 host token 或客户端 channel header 冒充。
+  Console 写入经 `POST /admin/api/memory-runtime/outcome`，MCP 在服务端附加 secret，
+  secret 不进入浏览器。`source=heuristic` 只允许 sidecar 内部。
+- token 不落盘、不写 trace/policy/log。新协议带 `note` 返回
+  `outcome_note_unsupported`；无 token 的旧 0.3 客户端带 note 返回
+  `outcome_note_ignored`，note 不落盘。
+- host `ignored` 弱信号约在 outcome window 的 75% 调度，确保 token 过期前送达；
+  迟到的 host outcome 返回 `outcome_binding_expired`。console admin 路径保留更长的
+  迟到窗口，用于诊断/policy 回放。
 
 ### 决策、深度与 `must_speak`
 
@@ -280,23 +304,47 @@ config 并按现有生命周期重启/重载，使新配置生效。
 - `action`：`speak | defer | silent`。`defer` 表示本轮不注入 memory fragments，保留
   既有 `self`/checkpoint 路径，并在 `applied` 中与 `silent` 区分，供后续归因。
 - `depth`：`gist → detail → quote`；默认 speak/gist，`silent` 是最后手段。
-- `reason`：`must_speak:*`、`high_relevance`、`low_confidence`、`broad_cue`、
-  `no_novelty`、`recent_false_alarm`、`no_candidates`、`max_silent_streak`、
-  `exploration` 等。
+- `reason`：`must_speak:*`、`defer_explicit`、`conflict`、`greeting`、`meta`、
+  `high_relevance`、`low_confidence`、`broad_cue`、`no_novelty`、`recent_false_alarm`、
+  `no_candidates`、`max_silent_streak`、`exploration` 等。
 - `policyVersion`：off/baseline 为 `v0-baseline`，另有 `v0-rules`、
   `heuristic:<hash>`、`model:<hash>`。
 - `enforced`：`off`/`shadow` 为 `false`；真正改变注入时为 `true`。
 - `applied`：实际 action/depth/片段数、被裁掉的 fragment ID，以及 shadow 的
   `wouldAction` / `wouldDepth`。
 
-策略不可否决的硬规则：显式记忆追问（“上次/之前/记得/你忘了”）、高置信 exact 意图、
-任务续接/checkpoint follow-up、上一轮 silent/defer 后的追问或纠正、指向刚注入片段的
-follow-up。
+硬规则优先级（先命中先返回）：
+
+1. `defer_explicit`：用户/宿主明确“暂时不要提 / 先别用记忆”，包括 cue 层的
+   `user_negated`。这是主动 `defer`，可以覆盖自动 `must_speak`；`self`/checkpoint
+   仍按原路径注入，trace 记录 `applied.action=defer`。
+2. `conflict`：只有用户明确问“哪个对 / 以哪条为准 / 该信哪个”，且候选确实属于
+   conflict group 时才触发。exact 意图用 `depthForCue()` → `quote`，否则 `detail`；
+   detail 不可用降为 `gist` + `degraded`。仅陈述“记录不一致 / 记录打架”不触发。
+3. `greeting` / `meta`：整句寒暄、致谢、助手身份/能力/时间 → `silent`。正则整句
+   锚定，混合了真实记忆请求的 turn 会继续落到 `must_speak`。
+4. `must_speak`：自动策略下限，不是用户显式意图的上限。heuristic 的阈值、负例率、
+   novelty、探索和沉默上限都不能否决。
+5. `no_candidates`：`silent`。
+6. `no_novelty`：anti-repeat 例外——只有**全部**候选都已注入时才 `silent`；它不影响
+   `maxSilentStreak` / exploration 对新颖候选的作用，且 `must_speak` 同时命中时仍优先。
+7. heuristic：其余 turn。
+
+显式记忆追问（“上次/之前/记得/你忘了/last time/remember/recall”）、高置信 exact
+意图、任务续接/checkpoint follow-up、上一轮 silent/defer 后的追问或纠正、指向刚注入
+片段的 follow-up，都会进入自动 `must_speak` 下限。
 
 `must_speak` 是硬规则，但不是 100% `speak` 的保证：有候选时会说（请求的 detail 不可用
 则降为 gist）；**完全没有候选**时降级为 checkpoint-only：`action=silent`、
 `reason=must_speak_unavailable`、`degraded:true`、`applied.fragments=0`，`self`/
 checkpoint 仍按现有路径注入。它不会伪造片段，也不会静默失败。
+
+`defer_explicit` 不是策略沉默：trace 同时保留 `reason=defer_explicit` 与
+`applied.action=defer`，后续归因可以区分“用户/宿主主动推迟”和 `silent`。
+
+输入级 `defer_explicit`（包括 `user_negated`）适用于**所有** mode：`off` 记录
+`policyVersion=v0-baseline` / `enforced:false`，不产生策略警告；`shadow` 的实际注入
+是 `defer` 而不是 baseline，也不记录 baseline `wouldAction`，因为这不是策略建议。
 
 `trace=off` 时不做归因与策略学习；不读取 `decision` 的旧宿主看到的字段与 0.3.x 一致。
 
@@ -361,7 +409,9 @@ Phase 3（`model`）和 Phase 4（自适应阈值）是**代码完成 + fake gat
   实体/主题和 decision/outcome 元数据；不保存 raw query 正文、detail 正文或 token。
 - `model` 策略只看 cue 聚合、top-3 gist、分数和聚合统计，不看 raw query、detail 正文、
   checkpoint 内容或 token。
-- outcome note 由宿主适配器使用固定归因说明，不复制用户正文。
+- 新协议 outcome 不带 `note`：带 binding token 的 note 会被
+  `outcome_note_unsupported` 拒绝；旧 0.3 无 token 的 note 返回
+  `outcome_note_ignored` 但不落盘。用户正文不会复制进 outcome。
 - 0.4.0 不同步策略状态到其他设备。
 
 ## 详情、证据与保留

@@ -15,6 +15,12 @@ import { reconcileAssistantUi } from './assistant-status.js';
 import { createConsoleHost, markEmbeddedDocument } from './host.js';
 import { t, getLocale, setLocale, onLocaleChange, applyStaticI18n, languageSettingsRowHtml, initI18n, reconcileDesktopLocale, LOCALE_STORAGE_KEY, formatDate as formatLocaleDate, formatDateTime as formatLocaleDateTime, formatExpiry } from './i18n.mjs';
 import { enhanceSelect, enhanceSelects } from './dropdown.mjs';
+import {
+  bindFirstRunCoachActions,
+  confirmFirstRunDisclosure,
+  firstRunDisclosureAckFor,
+  firstRunDisclosureSubmitPayload,
+} from './first-run-disclosure.js';
 
 const $ = (selector) => document.querySelector(selector);
 // 静态筛选器使用紧凑 variant；动态设置/邀请/助手表单在渲染后统一 enhance。
@@ -6253,13 +6259,16 @@ for (const [embedId, sourceId] of [
 ]) {
   $(embedId)?.addEventListener('click', () => $(sourceId)?.click());
 }
-$('#coach-create')?.addEventListener('click', () => {
-  dismissOnboardingCoach();
-  openOnboardCreate();
-});
-$('#coach-join')?.addEventListener('click', () => {
-  dismissOnboardingCoach();
-  openOnboardJoin();
+// 0.4.0 W1b：coach CTA 的真实点击路径（捕获可见 ack → keepAck 收起 coach）。
+// CTA 内 stopPropagation，容器忽略 action buttons，避免冒泡二次 dismiss 清掉刚捕获的 ack。
+bindFirstRunCoachActions({
+  coach: $('#onboarding-coach'),
+  create: $('#coach-create'),
+  join: $('#coach-join'),
+  dismiss: $('#coach-dismiss'),
+  openCreate: openOnboardCreate,
+  openJoin: openOnboardJoin,
+  onDismiss: () => dismissOnboardingCoach(),
 });
 $('#onboard-create-close')?.addEventListener('click', () => closeOnboardCreate());
 $('#onboard-create-cancel')?.addEventListener('click', () => closeOnboardCreate());
@@ -7870,6 +7879,13 @@ const ONBOARD_COACH_MS = 6000;
 let onboardBusy = false;
 let onboardCoachTimer = null;
 let onboardCoachHideTimer = null;
+// 0.4.0 W1b：首启披露的“当前确实可见”证据（只有可见确认后才非 null）。
+// 未确认 / 父层隐藏 / 被关闭时保持 null → 服务端不会启用 immersive（fail closed）。
+let firstRunDisclosure = null;
+// 用户在披露可见时点击「建新 / 加入」→ 打开弹窗前捕获；关闭弹窗或解锁时清空。
+let firstRunDisclosureAck = null;
+// 每次渲染/关闭/打开弹窗都递增；在途 confirm 只有 generation 仍相同才允许置位。
+let firstRunDisclosureGeneration = 0;
 
 async function fetchProvisionStatus() {
   try {
@@ -7910,11 +7926,20 @@ function showOnboardingCoach() {
   el.classList.remove('is-leaving');
   positionOnboardingCoach();
   requestAnimationFrame(() => el.classList.add('is-visible'));
+  // 首启披露必须一直可见到用户点击「建新 / 加入」；不能因为引导卡自动淡出而变成“未披露”。
+  if (firstRunDisclosure) {
+    if (onboardCoachTimer) { clearTimeout(onboardCoachTimer); onboardCoachTimer = null; }
+    return;
+  }
   if (onboardCoachTimer) clearTimeout(onboardCoachTimer);
   onboardCoachTimer = setTimeout(() => dismissOnboardingCoach(), ONBOARD_COACH_MS);
 }
 
-function dismissOnboardingCoach() {
+function dismissOnboardingCoach({ keepAck = false } = {}) {
+  // 关闭/隐藏披露：当前可见证据立即失效；在途 confirm 因 generation 变化而作废。
+  firstRunDisclosureGeneration += 1;
+  firstRunDisclosure = null;
+  if (!keepAck) firstRunDisclosureAck = null;
   const el = $('#onboarding-coach');
   if (!el || el.hidden) return;
   if (onboardCoachTimer) { clearTimeout(onboardCoachTimer); onboardCoachTimer = null; }
@@ -7933,9 +7958,82 @@ function dismissOnboardingCoach() {
   }, 320);
 }
 
+/** 0.4.0 W1b：渲染披露内容；返回 disclosureVersion（是否“实际可见”由 confirm 判定）。 */
+function renderFirstRunDisclosure(status) {
+  const el = $('#first-run-disclosure');
+  const firstRun = status?.firstRun;
+  const pending = firstRun?.pending === true;
+  const version = firstRun?.disclosureVersion;
+  firstRunDisclosureGeneration += 1;
+  const generation = firstRunDisclosureGeneration;
+  firstRunDisclosure = null;
+  firstRunDisclosureAck = null;
+  if (!pending || !Number.isInteger(version) || version < 1) {
+    if (el) el.hidden = true;
+    return null;
+  }
+  if (!el) return null;
+  try {
+    el.hidden = false;
+    el.dataset.firstRunShown = '1';
+    el.dataset.disclosureVersion = String(version);
+    return { version, generation };
+  } catch {
+    el.hidden = true;
+    return null;
+  }
+}
+
+const nextAnimationFrame = () => new Promise((resolve) => {
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => resolve());
+  else setTimeout(resolve, 0);
+});
+
+/**
+ * coach 的 is-visible 在 rAF 中挂上；再等一帧后按真实布局/父层可见性确认。
+ * 父层 hidden、CSS 隐藏、脱离布局都返回 null（不 ack）。
+ */
+async function confirmFirstRunDisclosureShown(version, generation) {
+  await nextAnimationFrame();
+  await nextAnimationFrame();
+  const coach = $('#onboarding-coach');
+  const ack = confirmFirstRunDisclosure({
+    pending: state.provision?.firstRun?.pending === true,
+    disclosureVersion: version,
+    generation,
+    currentGeneration: firstRunDisclosureGeneration,
+    coachLeaving: coach?.classList?.contains('is-leaving') === true,
+    element: $('#first-run-disclosure'),
+    container: coach,
+    view: window,
+  });
+  // generation 变化（dismiss/open/重新渲染）后，在途 confirm 不得重新置位。
+  if (generation !== firstRunDisclosureGeneration) return;
+  firstRunDisclosure = ack;
+  // 确认可见后取消引导卡的自动淡出，保证披露持续可见到用户点击「建新 / 加入」。
+  if (firstRunDisclosure && onboardCoachTimer) {
+    clearTimeout(onboardCoachTimer);
+    onboardCoachTimer = null;
+  }
+}
+
+/** 打开 create/join 前捕获 ack：只接受当前 generation 且此刻仍实际可见的证据。 */
+function captureFirstRunDisclosureAck() {
+  firstRunDisclosureAck = firstRunDisclosureAckFor({
+    current: firstRunDisclosure,
+    currentGeneration: firstRunDisclosureGeneration,
+    element: $('#first-run-disclosure'),
+    container: $('#onboarding-coach'),
+    view: window,
+  });
+}
+
 function openOnboardCreate() {
   if (!state.locked) return;
-  dismissOnboardingCoach();
+  // 打开弹窗会收起 coach：必须在收起前捕获“此刻披露可见”的 ack，并作废在途 confirm。
+  captureFirstRunDisclosureAck();
+  firstRunDisclosureGeneration += 1;
+  dismissOnboardingCoach({ keepAck: true });
   const modal = $('#onboard-create');
   const cloud = $('#onboard-create-cloud');
   const device = $('#onboard-create-device');
@@ -7950,6 +8048,7 @@ function openOnboardCreate() {
 
 function closeOnboardCreate() {
   if (onboardBusy) return;
+  firstRunDisclosureAck = null;
   const modal = $('#onboard-create');
   if (modal) modal.hidden = true;
   setOnboardError('#onboard-create-error', '');
@@ -7957,7 +8056,9 @@ function closeOnboardCreate() {
 
 function openOnboardJoin() {
   if (!state.locked) return;
-  dismissOnboardingCoach();
+  captureFirstRunDisclosureAck();
+  firstRunDisclosureGeneration += 1;
+  dismissOnboardingCoach({ keepAck: true });
   const modal = $('#onboard-join');
   const device = $('#onboard-join-device');
   const token = $('#onboard-join-token');
@@ -7972,6 +8073,7 @@ function openOnboardJoin() {
 
 function closeOnboardJoin() {
   if (onboardBusy) return;
+  firstRunDisclosureAck = null;
   const modal = $('#onboard-join');
   if (modal) modal.hidden = true;
   setOnboardError('#onboard-join-error', '');
@@ -7983,6 +8085,11 @@ function closeOnboardJoin() {
  */
 async function unlockConsole(kind) {
   onboardBusy = false;
+  firstRunDisclosureGeneration += 1;
+  firstRunDisclosure = null;
+  firstRunDisclosureAck = null;
+  const firstRunEl = $('#first-run-disclosure');
+  if (firstRunEl) firstRunEl.hidden = true;
   const createModal = $('#onboard-create');
   const joinModal = $('#onboard-join');
   if (createModal) createModal.hidden = true;
@@ -8037,6 +8144,8 @@ async function submitOnboard(kind) {
       method: 'POST',
       body: {
         confirm: true,
+        // 只有披露在被收起前确认“实际可见”才回传 ack；未展示 / 渲染失败 → 服务端保持 pending。
+        ...firstRunDisclosureSubmitPayload(firstRunDisclosureAck),
         ...(deviceName ? { deviceName } : {}),
         ...(isCreate && cloudName ? { cloudName } : {}),
         ...(!isCreate ? { token } : {}),
@@ -8082,7 +8191,11 @@ async function enterLockedConsole(status) {
   stage.start();
   setView('map');
   render();
+  // 0.4.0 W1b：全新空 home 先展示一次性披露（不新增控制项），再显示现有上手引导。
+  const disclosure = renderFirstRunDisclosure(status);
   showOnboardingCoach();
+  // 不阻塞首屏：可见性确认在 rAF 后异步完成；确认前用户操作则不带 ack（fail closed）。
+  if (disclosure) void confirmFirstRunDisclosureShown(disclosure.version, disclosure.generation);
   if (status?.phase === 'INITIALIZING') {
     // 极端并发：初始化进行中，入口禁用并给出提示，等待用户重试。
     setOnboardError('#onboard-create-error', t('lock.settings.initializing'));
@@ -8178,10 +8291,7 @@ async function enterNormalConsoleOnce() {
   }, POLL_MS);
 }
 
-// 引导遮罩：点击任意处/知道了关闭；ESC 在无弹层时关闭。
-$('#onboarding-coach')?.addEventListener('click', () => {
-  dismissOnboardingCoach();
-});
+// 引导遮罩：点击说明文字/背景关闭；action buttons 由 bindFirstRunCoachActions 处理，不再二次 dismiss。
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape' || event.defaultPrevented) return;
   if (visibleModalElements().length > 0) return;

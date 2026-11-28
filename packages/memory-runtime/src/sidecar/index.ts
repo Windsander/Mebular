@@ -16,6 +16,8 @@ export * from './cue.js';
 export * from './text.js';
 export * from './recall.js';
 export * from './intervention.js';
+export * from './intervention-prefetch.js';
+export * from './effective.js';
 export * from './policy-store.js';
 export * from './candidates.js';
 export * from './errors.js';

@@ -78,6 +78,8 @@ async function setup(options: {
   const client = new CapabilityClient({ baseUrl: fake.baseUrl, token: 'cap-token', retries: 0, retryDelayMs: 0 });
   const config = defaultSidecarConfig();
   config.http.port = 0;
+  // 这些用例验证召回/组装机制，不验证介入策略；缺失 source 保持 0.3 baseline/off。
+  config.model.sourcePresent = false;
   options.mutateConfig?.(config);
   const service = new RecallService({
     config,
@@ -143,6 +145,47 @@ function preferenceRecord(): FakeMemoryRecord {
       at: NOW - 86_400_000,
     },
   });
+}
+
+function freshFactRecord(): FakeMemoryRecord {
+  return record({
+    id: '01JFRESH0001',
+    type: 'fact',
+    kind: 'fact',
+    domain: 'user',
+    content: { subject: 'user', predicate: 'theme', object: 'fresh' },
+    text: '用户偏好：深色主题 新鲜候选',
+    score: 0.5,
+  });
+}
+
+function conflictPreferenceRecord(
+  id: string,
+  value: string,
+  score: number,
+): FakeMemoryRecord {
+  return record({
+    id,
+    type: 'fact',
+    kind: 'preference',
+    domain: 'user',
+    content: { entity: 'user', preferenceType: 'theme', value, confidence: 0.9 },
+    text: `用户偏好：深色主题 ${value}`,
+    score,
+  });
+}
+
+function heuristicConfig(minConfidence = 0.55): (config: SidecarConfig) => void {
+  return (config) => {
+    config.model.source = 'heuristic';
+    config.model.sourcePresent = true;
+    config.intervention = {
+      ...config.intervention,
+      minConfidence,
+      maxSilentStreak: 99,
+      explorationRate: 0,
+    };
+  };
 }
 
 describe('RecallService', () => {
@@ -830,6 +873,157 @@ describe('RecallService', () => {
     expect(response.data.fragments).toEqual([]);
     expect(response.data.blocks).toEqual([]);
     expect(response.data.silenceReason).toBe('already_injected');
+  });
+
+  it('heuristic planner：alreadyInjectedIds 在 planner 之后生效，记录 no_novelty 且不剪掉候选', async () => {
+    const { service } = await setup({
+      records: [preferenceRecord()],
+      mutateConfig: (config) => {
+        config.model.source = 'heuristic';
+        config.model.sourcePresent = true;
+        config.intervention = {
+          ...config.intervention,
+          minConfidence: 0.55,
+          maxSilentStreak: 99,
+          explorationRate: 0,
+        };
+      },
+    });
+    const response = await service.handleContext({
+      agentId: 'opencode',
+      threadId: 'th_recall',
+      query: '深色主题',
+      turnKind: 'human',
+      alreadyInjectedIds: ['01JPREF0001'],
+    });
+    expect(response.data.fragments).toEqual([]);
+    expect(response.data.blocks).toEqual([]);
+    expect(response.data.decision).toMatchObject({ action: 'silent', reason: 'no_novelty' });
+    expect(response.data.applied).toMatchObject({ action: 'silent', fragments: 0 });
+
+    const trace = await service.getTrace(response.data.traceId!);
+    // 候选没有在 planner 之前被标成 already_injected；它作为 novelty 输入进入决策。
+    expect(trace?.candidates?.find((entry) => entry.id === '01JPREF0001')?.filteredReason).toBeUndefined();
+  });
+
+  it('已注入高分 + 新鲜低分 + maxFragments=1：planner 窗口保留新鲜候选并注入它', async () => {
+    const { service } = await setup({
+      records: [{ ...preferenceRecord(), score: 0.99 }, freshFactRecord()],
+      mutateConfig: heuristicConfig(0.4),
+    });
+    const response = await service.handleContext({
+      agentId: 'opencode',
+      threadId: 'th_recall',
+      query: '深色主题',
+      turnKind: 'human',
+      maxFragments: 1,
+      alreadyInjectedIds: ['01JPREF0001'],
+    });
+    expect(response.data.decision).toMatchObject({ action: 'speak' });
+    expect(response.data.decision?.reason).not.toBe('no_novelty');
+    expect(response.data.fragments).toHaveLength(1);
+    expect(response.data.fragments[0]!.citations[0]!.id).toBe('01JFRESH0001');
+    expect(response.data.applied).toMatchObject({ action: 'speak', fragments: 1 });
+  });
+
+  it('全部已注入 + maxFragments=2：planner 后 silent/no_novelty，不重复', async () => {
+    const { service } = await setup({
+      records: [
+        { ...preferenceRecord(), score: 0.99 },
+        { ...conflictPreferenceRecord('01JALLINJECTED2', 'light', 0.8) },
+      ],
+      mutateConfig: heuristicConfig(0.4),
+    });
+    const response = await service.handleContext({
+      agentId: 'opencode',
+      threadId: 'th_recall',
+      query: '深色主题',
+      turnKind: 'human',
+      maxFragments: 2,
+      alreadyInjectedIds: ['01JPREF0001', '01JALLINJECTED2'],
+    });
+    expect(response.data.decision).toMatchObject({ action: 'silent', reason: 'no_novelty' });
+    expect(response.data.fragments).toEqual([]);
+    expect(response.data.blocks).toEqual([]);
+    expect(response.data.applied).toMatchObject({ action: 'silent', fragments: 0 });
+  });
+
+  it('must_speak + 混合候选：优先新鲜候选，不因允许重复而忽略它', async () => {
+    const { service } = await setup({
+      records: [{ ...preferenceRecord(), score: 0.99 }, freshFactRecord()],
+      mutateConfig: heuristicConfig(0.99),
+    });
+    const response = await service.handleContext({
+      agentId: 'opencode',
+      threadId: 'th_recall',
+      query: '你记得深色主题吗？',
+      turnKind: 'human',
+      maxFragments: 1,
+      alreadyInjectedIds: ['01JPREF0001'],
+    });
+    expect(response.data.decision).toMatchObject({ action: 'speak', mustSpeak: true });
+    expect(response.data.fragments).toHaveLength(1);
+    expect(response.data.fragments[0]!.citations[0]!.id).toBe('01JFRESH0001');
+  });
+
+  it('conflict + 混合候选：新鲜冲突候选进入最终注入，旧候选仍可用于成对对照', async () => {
+    const { service } = await setup({
+      records: [
+        conflictPreferenceRecord('01JCONFLICTOLD', 'dark', 0.99),
+        conflictPreferenceRecord('01JCONFLICTNEW', 'light', 0.8),
+      ],
+      mutateConfig: heuristicConfig(0.4),
+    });
+    const response = await service.handleContext({
+      agentId: 'opencode',
+      threadId: 'th_recall',
+      query: '深色主题到底哪个对？',
+      turnKind: 'human',
+      maxFragments: 2,
+      alreadyInjectedIds: ['01JCONFLICTOLD'],
+    });
+    expect(response.data.decision).toMatchObject({ action: 'speak', reason: 'conflict' });
+    const sourceIds = response.data.fragments.flatMap((fragment) => (
+      fragment.citations.map((citation) => citation.id)
+    ));
+    expect(sourceIds).toContain('01JCONFLICTNEW');
+    expect(sourceIds).toContain('01JCONFLICTOLD');
+  });
+
+  it('shadow 仍走旧去重路径：已注入高分被剔除，只注入新鲜候选', async () => {
+    const { service } = await setup({
+      records: [{ ...preferenceRecord(), score: 0.99 }, freshFactRecord()],
+      mutateConfig: (config) => {
+        heuristicConfig(0.4)(config);
+        config.intervention.diagnosticShadow = true;
+      },
+    });
+    const response = await service.handleContext({
+      agentId: 'opencode',
+      threadId: 'th_recall',
+      query: '深色主题',
+      turnKind: 'human',
+      maxFragments: 1,
+      alreadyInjectedIds: ['01JPREF0001'],
+    });
+    expect(response.data.fragments).toHaveLength(1);
+    expect(response.data.fragments[0]!.citations[0]!.id).toBe('01JFRESH0001');
+  });
+
+  it('/recall 仍走旧去重路径：已注入高分被剔除，只返回新鲜候选', async () => {
+    const { service } = await setup({
+      records: [{ ...preferenceRecord(), score: 0.99 }, freshFactRecord()],
+      mutateConfig: heuristicConfig(0.4),
+    });
+    const response = await service.handleRecall({
+      agentId: 'opencode',
+      threadId: 'th_recall',
+      query: '深色主题',
+      maxFragments: 1,
+      alreadyInjectedIds: ['01JPREF0001'],
+    });
+    expect(response.data.records).toHaveLength(1);
+    expect(response.data.records[0]!.id).toBe('01JFRESH0001');
   });
 
   it('alreadyInjectedIds 中的无关 ID 不影响召回', async () => {

@@ -12,6 +12,7 @@ import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, join, resolve, sep } from 'node:path';
 import { readJsonFile } from './atomic-json.js';
+import { clampContextDeadline } from './deadline.js';
 
 export const SIDECAR_PACKAGE_NAME = '@mebular/memory-runtime';
 export const SIDECAR_RUNTIME_VERSION = '0.3.5';
@@ -73,6 +74,11 @@ export interface SidecarDetailSettings {
 
 export interface InferenceSettings {
   source: 'heuristic' | 'local' | 'host' | 'api' | 'auto';
+  /**
+   * `source` 是否真的出现在配置文件中。
+   * 缺失 ≠ 显式 heuristic：缺失时 0.4.0 保持 0.3 baseline/off，不能静默开启介入。
+   */
+  sourcePresent: boolean;
   local: {
     pack: string | null;
     path: string | null;
@@ -110,11 +116,45 @@ export interface SidecarRecallSettings {
 export interface SidecarContextSettings {
   maxTokens: number;
   maxFragments: number;
+  /**
+   * `/context` 单次绝对 deadline，默认 1500ms，允许范围 [200,1500]。
+   * 配置超出范围时 clamp 并记 `context_deadline_clamped`；W5 只允许调低。
+   */
+  deadlineMs: number;
+  /** `deadlineMs` 是否在归一化时被 clamp；用于稳定 warning，不参与决策。 */
+  deadlineClamped: boolean;
 }
 
-/** 0.4.0 记忆介入策略；默认 off，不改变 0.3.x 行为。 */
+/**
+ * 0.4.0 W6 adaptive 上线阶段。
+ *
+ * - `off`：不读不写 adaptive 阈值；
+ * - `shadow`：heuristic 仍记录/学习，但只读建议、不应用（默认，先观测）；
+ * - `canary`：只对 `(agentId, domain)` 的稳定 hash 桶应用；
+ * - `on`：heuristic 全量应用 adaptive offset。
+ *
+ * 仅内部配置，不是用户 UI 选项；model/shadow 决策无论 stage 都不读 adaptive。
+ */
+export interface SidecarAdaptiveSettings {
+  stage: 'off' | 'shadow' | 'canary' | 'on';
+  /** canary 生效比例（0..1）；只由 (agentId, domain) 决定，不含 host/source。 */
+  canaryRatio: number;
+}
+
+/**
+ * 0.4.0 记忆介入策略。
+ *
+ * `mode` 是 0.3.x 的旧字段：0.4.0 起不再参与 production 决策，只保留文件原值并做
+ * diagnostic warning；effective mode 由 `model.source` 推导（见 effective.ts）。
+ */
 export interface SidecarInterventionSettings {
   mode: 'off' | 'shadow' | 'heuristic' | 'model';
+  /** 旧 `mode` 是否真的出现在配置文件中；用于区分“缺省 off”与“显式 off”。 */
+  legacyModePresent: boolean;
+  /** 仅内部 diagnostic/canary；不是用户 mode，不进入 Console schema。 */
+  diagnosticShadow: boolean;
+  /** W6：adaptive 阶段与 canary 比例。 */
+  adaptive: SidecarAdaptiveSettings;
   /** heuristic 说话最低 top score；adaptive 阈值以此为基准。 */
   minConfidence: number;
   /** 连续沉默上限；达到后强制至少注入一条 gist，避免学成哑巴。 */
@@ -201,6 +241,7 @@ export function defaultSidecarConfig(): SidecarConfig {
     },
     model: {
       source: 'heuristic',
+      sourcePresent: false,
       local: { pack: null, path: null, threads: 4, enginePath: null },
       api: {
         baseUrl: null,
@@ -224,15 +265,25 @@ export function defaultSidecarConfig(): SidecarConfig {
       timeoutMs: 800,
       queryPlan: 'heuristic',
     },
-    context: { maxTokens: 12_000, maxFragments: 3 },
+    context: {
+      maxTokens: 12_000,
+      maxFragments: 3,
+      deadlineMs: 1500,
+      deadlineClamped: false,
+    },
     intervention: {
       mode: 'off',
+      legacyModePresent: false,
+      diagnosticShadow: false,
+      // W6：先 shadow 观测，W7 canary 证据通过后才由 W8 切 on。
+      adaptive: { stage: 'shadow', canaryRatio: 0.1 },
       minConfidence: 0.55,
       maxSilentStreak: 3,
       explorationRate: 0.05,
       outcomeWindowMs: 120_000,
       policyTtlDays: 30,
-      modelTimeoutMs: 500,
+      // W2：API 是唯一同步模型来源；首版 sync 预算 1500ms（W5 硬化整体 deadline）。
+      modelTimeoutMs: 1500,
     },
     queue: { concurrency: 1 },
     http: { host: DEFAULT_SIDECAR_HOST, port: DEFAULT_SIDECAR_PORT },
@@ -482,6 +533,14 @@ export function collectConfigDeprecations(raw: Record<string, unknown>): string[
   if ('capture' in raw || 'rawCapture' in raw) warnings.push('legacy_capture_ignored');
   const retention = objectOf(raw.retention);
   if ('rawDays' in retention) warnings.push('legacy_retention_raw_days_ignored');
+  // W6：旧 experimental adaptive 开关只 warning，不静默改变当前 stage。
+  const intervention = objectOf(raw.intervention);
+  const adaptive = intervention.adaptive;
+  if (adaptive !== undefined && adaptive !== null && !isObject(adaptive)) {
+    warnings.push('adaptive_experimental_ignored');
+  } else if (isObject(adaptive) && ('enabled' in adaptive || 'shadow' in adaptive)) {
+    warnings.push('adaptive_experimental_ignored');
+  }
   return warnings;
 }
 
@@ -509,6 +568,7 @@ export function normalizeSidecarConfig(raw: unknown, options: { warnings?: strin
   const recall = objectOf(raw.recall);
   const context = objectOf(raw.context);
   const intervention = objectOf(raw.intervention);
+  const adaptive = objectOf(intervention.adaptive);
   const queue = objectOf(raw.queue);
   const http = objectOf(raw.http);
   const capability = objectOf(raw.capability);
@@ -541,6 +601,8 @@ export function normalizeSidecarConfig(raw: unknown, options: { warnings?: strin
     },
     model: {
       source: enumOf(model, 'source', ['heuristic', 'local', 'host', 'api', 'auto'] as const, defaults.model.source),
+      // presence 必须看原始输入，而不是归一化后的默认 heuristic。
+      sourcePresent: model.source !== undefined && model.source !== null,
       local: {
         pack: stringOrNullOf(local, 'pack', defaults.model.local.pack),
         path: stringOrNullOf(local, 'path', defaults.model.local.path),
@@ -569,10 +631,28 @@ export function normalizeSidecarConfig(raw: unknown, options: { warnings?: strin
       timeoutMs: intOf(recall, 'timeoutMs', defaults.recall.timeoutMs, { min: 1 }),
       queryPlan: enumOf(recall, 'queryPlan', ['heuristic', 'model'] as const, defaults.recall.queryPlan),
     },
-    context: {
-      maxTokens: intOf(context, 'maxTokens', defaults.context.maxTokens, { min: 1 }),
-      maxFragments: intOf(context, 'maxFragments', defaults.context.maxFragments, { min: 1 }),
-    },
+    context: (() => {
+      const configured = context.deadlineMs;
+      let deadlineMs = defaults.context.deadlineMs;
+      let deadlineClamped = false;
+      if (configured !== undefined && configured !== null) {
+        if (typeof configured !== 'number' || !Number.isInteger(configured)) {
+          throw new SidecarConfigError('config_invalid', 'context.deadlineMs 必须是整数毫秒');
+        }
+        deadlineMs = clampContextDeadline(configured);
+        deadlineClamped = deadlineMs !== configured;
+        if (deadlineClamped && options.warnings
+          && !options.warnings.includes('context_deadline_clamped')) {
+          options.warnings.push('context_deadline_clamped');
+        }
+      }
+      return {
+        maxTokens: intOf(context, 'maxTokens', defaults.context.maxTokens, { min: 1 }),
+        maxFragments: intOf(context, 'maxFragments', defaults.context.maxFragments, { min: 1 }),
+        deadlineMs,
+        deadlineClamped,
+      };
+    })(),
     intervention: {
       mode: enumOf(
         intervention,
@@ -580,6 +660,27 @@ export function normalizeSidecarConfig(raw: unknown, options: { warnings?: strin
         ['off', 'shadow', 'heuristic', 'model'] as const,
         defaults.intervention.mode,
       ),
+      // presence 必须看原始输入，而不是归一化后的默认 off。
+      legacyModePresent: intervention.mode !== undefined && intervention.mode !== null,
+      diagnosticShadow: boolOf(
+        intervention,
+        'diagnosticShadow',
+        defaults.intervention.diagnosticShadow,
+      ),
+      adaptive: {
+        stage: enumOf(
+          adaptive,
+          'stage',
+          ['off', 'shadow', 'canary', 'on'] as const,
+          defaults.intervention.adaptive.stage,
+        ),
+        canaryRatio: numberOf(
+          adaptive,
+          'canaryRatio',
+          defaults.intervention.adaptive.canaryRatio,
+          { min: 0, max: 1 },
+        ),
+      },
       minConfidence: numberOf(
         intervention,
         'minConfidence',

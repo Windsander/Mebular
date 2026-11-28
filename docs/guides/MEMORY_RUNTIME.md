@@ -286,14 +286,43 @@ Configure the sidecar in `<home>/memory-runtime/config.json`:
 
 | Mode | Behavior |
 |---|---|
-| `off` | Default. No policy change; `/context` still returns a baseline `decision` with `enforced:false`. `off` still records the **applied** baseline counts in the local policy store and traces, but does not apply policy advice or adapt thresholds. |
-| `shadow` | Computes policy advice (`decision`) but injects the baseline result; traces carry `wouldAction` / `wouldDepth`. |
+| `off` | Default. No policy change; `/context` still returns a baseline `decision` with `enforced:false`. `off` still records the **applied** baseline counts in the local policy store and traces, but does not apply policy advice or adapt thresholds. Input-level `defer_explicit` still returns `defer` with `v0-baseline` / `enforced:false` and no policy warning. |
+| `shadow` | Computes policy advice (`decision`) but injects the baseline result; traces carry `wouldAction` / `wouldDepth`. Input-level `defer_explicit` is the exception: it applies as `defer` and records no baseline `wouldAction`. |
 | `heuristic` | Applies the local rule-based policy; `must_speak` remains a hard rule. |
 | `model` | **Experimental.** Uses the configured model for `planIntervention()`; timeout/invalid output/provider failure falls back to `heuristic` with `degraded:true`. |
 
 Console does not edit these values; it only shows trace decisions and offers a
 confirmed reset. Change the mode in the sidecar config, then restart the sidecar (or
 follow the existing lifecycle path) so the new mode is loaded.
+
+### Outcome binding (0.4.0 W4)
+
+When `/context` writes a local trace it also returns an opaque `bindingToken`;
+`traceId:null` (trace disabled, or the W5 deadline skip) returns `bindingToken:null`
+and hosts must not report an outcome.
+
+- The token is a **TTL-scoped bearer bound to one trace**, not a single-use nonce:
+  the same trace may report different kinds, and same-kind repeats stay idempotent.
+- It binds `traceId + agentId + threadId + turnId + hostApp`; `source=host` must
+  present it together with one of `opencode|openchamber|dsh|hermes`. Cross-trace,
+  cross-session/agent/thread/turn, tampered, expired, and rotated-host-token tokens
+  are rejected.
+- The HMAC key is the current host token. This is a local same-user trust boundary:
+  a process that already holds the host token can mint or replay a binding for that
+  trace. Binding mainly prevents cross-trace/scope/no-token reports, not a hostile
+  holder of the host token.
+- `source=console` requires the independent admin secret held by the MCP admin proxy
+  (`x-mebular-admin-token`), never the host token or a client-side channel header.
+  Console writes enter through `POST /admin/api/memory-runtime/outcome`; MCP attaches
+  the secret server-side, so it never reaches the browser. `source=heuristic` is
+  internal to the sidecar only.
+- Tokens are never written to disk, traces, policy, or logs. A new protocol request
+  with `note` is rejected with `outcome_note_unsupported`; legacy 0.3 clients without
+  a token are accepted with `outcome_note_ignored` and the note is not stored.
+- Host `ignored` weak signals are scheduled at about 75% of the outcome window so
+  they arrive before the token expires. A late host outcome is rejected with
+  `outcome_binding_expired`; the console admin path keeps the longer late-outcome
+  window for diagnostics/policy replay.
 
 ### Decision, depth and `must_speak`
 
@@ -315,9 +344,9 @@ follow the existing lifecycle path) so the new mode is loaded.
   in `applied` for later attribution.
 - `depth`: `gist → detail → quote`; speak/gist is the default, `silent` is the last
   resort.
-- `reason`: `must_speak:*`, `high_relevance`, `low_confidence`, `broad_cue`,
-  `no_novelty`, `recent_false_alarm`, `no_candidates`, `max_silent_streak`,
-  `exploration`, and related reasons.
+- `reason`: `must_speak:*`, `defer_explicit`, `conflict`, `greeting`, `meta`,
+  `high_relevance`, `low_confidence`, `broad_cue`, `no_novelty`, `recent_false_alarm`,
+  `no_candidates`, `max_silent_streak`, `exploration`, and related reasons.
 - `policyVersion`: `v0-baseline` for off/baseline, `v0-rules`, `heuristic:<hash>` or
   `model:<hash>`.
 - `enforced`: `false` for `off` and `shadow`; `true` when the decision changed the
@@ -325,16 +354,47 @@ follow the existing lifecycle path) so the new mode is loaded.
 - `applied`: actual action/depth/fragment count, suppressed fragment IDs, and shadow
   `wouldAction` / `wouldDepth`.
 
-Hard rules that the policy cannot veto: an explicit memory request (“上次 / 之前 /
-记得 / 你忘了”), a high-confidence exact intent, task continuation/checkpoint
-follow-up, a follow-up or correction after the previous silent/defer, and a follow-up
-reference to the last fragment.
+Hard-rule priority (first match wins):
+
+1. `defer_explicit`: the user/host explicitly says “not now / hold off / don't use
+   memory”, including cue-level `user_negated`. This is a deliberate `defer`; it may
+   override an automatic `must_speak`, keeps `self`/checkpoint on the existing path,
+   and records `applied.action=defer`.
+2. `conflict`: only when the user explicitly asks which record is right and a
+   candidate belongs to a conflict group. Exact intent uses `depthForCue()` → `quote`;
+   otherwise `detail`; unavailable detail falls back to `gist` + `degraded`. Bare
+   statements such as “records disagree / 不一致” do not trigger conflict.
+3. `greeting` / `meta`: whole-turn greeting, thanks, assistant identity/capability/time
+   → `silent`. The regex is anchored to the whole turn; a mixed turn with a real memory
+   request falls through to `must_speak`.
+4. `must_speak`: an automatic policy floor, not an upper bound on explicit user intent.
+   The heuristic threshold, negative rate, novelty, exploration and max-silent-streak
+   cannot veto it.
+5. `no_candidates`: `silent`.
+6. `no_novelty`: the anti-repeat exception — `silent` only when **all** candidates are
+   already injected. It does not disable `maxSilentStreak` / exploration for fresh
+   candidates, and `must_speak` still wins when both apply.
+7. heuristic: the remaining turns.
+
+An explicit memory request (“上次 / 之前 / 记得 / 你忘了 / last time / remember / recall”),
+a high-confidence exact intent, task continuation/checkpoint follow-up, a follow-up or
+correction after the previous silent/defer, and a follow-up reference to the last
+fragment feed the automatic `must_speak` floor.
 
 `must_speak` is a hard rule, not a 100% `speak` guarantee. With a candidate it speaks
 (using `gist` if the requested detail is unavailable). With **no candidate at all** it
 degrades to checkpoint-only: `action=silent`, `reason=must_speak_unavailable`,
 `degraded:true`, `applied.fragments=0`; `self`/checkpoint still inject through the
 existing path. It never invents a fragment or fails silently.
+
+`defer_explicit` is not policy silence: the trace keeps `reason=defer_explicit` and
+`applied.action=defer`, so later attribution can tell a deliberate user/host deferral
+from a `silent` decision.
+
+Input-level `defer_explicit` (including `user_negated`) applies in **every** mode. In
+`off` it records `policyVersion=v0-baseline` / `enforced:false` and emits no policy
+warning; in `shadow` the actual injection is `defer`, not the baseline, and no baseline
+`wouldAction` is recorded because the defer is not a policy suggestion.
 
 `trace=off` disables attribution and policy learning; a host that does not read
 `decision` sees the same response fields it saw in 0.3.x.
@@ -411,8 +471,9 @@ detail bodies or tokens.
   not store raw query bodies, detail bodies or tokens.
 - The `model` strategy sees cue aggregates, top-3 gists, scores and aggregate stats.
   It does not see raw query text, detail text, checkpoint content or tokens.
-- Outcome notes are fixed attribution strings from the host adapter; user text is not
-  copied into the outcome.
+- New-protocol outcomes carry no `note`: a note sent with a binding token is rejected
+  with `outcome_note_unsupported`, and a legacy 0.3 no-token note is accepted with
+  `outcome_note_ignored` but never stored. User text is not copied into the outcome.
 - Policy state is not synced across devices in 0.4.0.
 
 ## Details, evidence and retention

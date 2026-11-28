@@ -2,7 +2,7 @@
 // 覆盖 model 模式的 silent / speak+detail / defer / must_speak / timeout /
 // 非法输出 / 隐私 / policyVersion / status.policy / reset。
 
-import { describe, it, expect, afterEach } from '@jest/globals';
+import { describe, it, expect, afterEach, jest } from '@jest/globals';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -135,6 +135,8 @@ async function setup(options: {
   reply: () => Reply;
   timeoutMs?: number;
   checkpoint?: boolean;
+  allowRemote?: boolean;
+  credentialMissing?: boolean;
 }): Promise<Harness> {
   const home = await mkdtemp(join(tmpdir(), 'mebular-intervention-model-http-'));
   const local = new SidecarLocalLayer({ root: join(home, 'memory-runtime'), now: () => NOW });
@@ -191,7 +193,7 @@ async function setup(options: {
         baseUrl: 'https://api.example.test/v1',
         model: 'test-model',
         keyRef: 'env:TEST_INTERVENTION_KEY',
-        allowRemote: true,
+        allowRemote: options.allowRemote ?? true,
         timeoutMs: 5_000,
       },
     },
@@ -208,7 +210,7 @@ async function setup(options: {
   const { calls, fetchImpl } = beginFetch(options.reply);
   const model = createSidecarInferenceProvider(config.model, {
     homeDir: home,
-    env: { TEST_INTERVENTION_KEY: TOKEN_SECRET },
+    env: options.credentialMissing ? {} : { TEST_INTERVENTION_KEY: TOKEN_SECRET },
     fetch: fetchImpl,
     now: () => NOW,
   });
@@ -304,8 +306,11 @@ describe('intervention model HTTP path', () => {
     expect(prompt).not.toContain(CHECKPOINT_SECRET);
     expect(prompt).not.toContain(TOKEN_SECRET);
     expect(JSON.stringify(request)).not.toContain(TOKEN_SECRET);
-    // 最多 3 个候选 gist 进入 prompt。
-    expect((prompt.match(/<untrusted_data>/g) ?? []).length).toBeLessThanOrEqual(3);
+    // prompt 仍只渲染 top-3 候选 gist；candidate 段之外还有一个 cue 的
+    // untrusted 块，因此总块数最多 4。
+    const candidateSection = prompt.split('candidates (top', 2)[1] ?? '';
+    expect((candidateSection.match(/<untrusted_data>/g) ?? []).length).toBeLessThanOrEqual(3);
+    expect((prompt.match(/<untrusted_data>/g) ?? []).length).toBeLessThanOrEqual(4);
   });
 
   it('模型 speak/detail：按模型深度展开 detail，prompt 仍然只含 gist', async () => {
@@ -426,6 +431,10 @@ describe('intervention model HTTP path', () => {
     expect(took).toBeLessThan(260);
     expect(context.body.data.decision).toMatchObject({ action: 'speak', degraded: true });
     expect(context.body.data.decision.policyVersion).toMatch(/^heuristic:/);
+    expect(context.body.data.decision.planner).toMatchObject({
+      fallbackReason: 'timeout',
+      prefetched: false,
+    });
     expect(context.body.data.warnings).toEqual(expect.arrayContaining([
       'intervention_model_fallback',
       'model_timeout',
@@ -461,21 +470,31 @@ describe('intervention model HTTP path', () => {
     expect(context.body.data.decision.action).toBe('speak');
     expect(context.body.data.decision.degraded).toBe(true);
     expect(context.body.data.decision.policyVersion).toMatch(/^heuristic:/);
+    expect(context.body.data.decision.planner).toMatchObject({
+      prefetched: false,
+      fallbackReason: 'invalid_output',
+    });
     expect(context.body.data.warnings).toContain('intervention_model_fallback');
     expect(context.body.data.fragments.length).toBeGreaterThan(0);
   });
 
-  it('remote_not_allowed：没有 allowRemote 时不把正文发给远端，回退 heuristic', async () => {
-    const harness = await setup({ reply: () => ({ content: SPEAK_GIST }) });
+  it('remote_not_allowed：config 未允许远端时不把正文发给远端，回退 heuristic', async () => {
+    const harness = await setup({ reply: () => ({ content: SPEAK_GIST }), allowRemote: false });
     const context = await post(`${harness.server.url}/context`, {
       agentId: 'opencode',
       threadId: 'th_model_http',
       turnId: 'turn_model_remote',
       query: '深色主题',
-      allowRemote: false,
+      // 即使 `/context` body 声明 allowRemote，也不得越过 config 闸门。
+      allowRemote: true,
     });
     expect(context.status).toBe(200);
     expect(context.body.data.decision.policyVersion).toMatch(/^heuristic:/);
+    expect(context.body.data.decision.planner).toMatchObject({
+      configuredSource: 'api',
+      fallbackReason: 'allow_remote_false',
+      prefetched: false,
+    });
     expect(context.body.data.warnings).toEqual(expect.arrayContaining([
       'intervention_model_fallback',
       'remote_not_allowed',
@@ -483,27 +502,78 @@ describe('intervention model HTTP path', () => {
     expect(harness.calls).toHaveLength(0);
   });
 
-  it('Phase 4：model 决策后 /status.policy 可读，reset 清空统计并保留可用状态', async () => {
+  it('缺凭据：不发远端请求，heuristic + prefetched=false + source_unavailable', async () => {
+    const harness = await setup({
+      reply: () => ({ content: SPEAK_GIST }),
+      credentialMissing: true,
+    });
+    const context = await post(`${harness.server.url}/context`, {
+      agentId: 'opencode',
+      threadId: 'th_model_http',
+      turnId: 'turn_model_credential',
+      query: '深色主题',
+    });
+    expect(context.status).toBe(200);
+    expect(context.body.data.decision.policyVersion).toMatch(/^heuristic:/);
+    expect(context.body.data.decision.planner).toMatchObject({
+      configuredSource: 'api',
+      resolvedSource: null,
+      prefetched: false,
+      fallbackReason: 'source_unavailable',
+    });
+    expect(context.body.data.warnings).toEqual(expect.arrayContaining([
+      'intervention_model_fallback',
+      'model_credential_missing',
+    ]));
+    expect(harness.calls).toHaveLength(0);
+  });
+
+  it('Phase 4：model 决策只写 diagnostic；/status.policy 可读，reset 清空统计', async () => {
     const harness = await setup({ reply: () => ({ content: SPEAK_GIST }) });
-    await post(`${harness.server.url}/context`, {
+    const statsSpy = jest.spyOn(harness.runtime.policyStore!, 'effectiveStats');
+    const thresholdSpy = jest.spyOn(harness.runtime.policyStore!, 'adaptiveThresholdFor');
+    const context = await post(`${harness.server.url}/context`, {
       agentId: 'opencode',
       threadId: 'th_model_http',
       turnId: 'turn_model_policy',
       query: '深色主题',
       allowRemote: true,
     });
+    // W6：model 决策不读 adaptive，也不进入 adaptive 计数。
+    expect(context.body.data.decision.planner.adaptive).toBeUndefined();
+    expect(statsSpy).not.toHaveBeenCalled();
+    expect(thresholdSpy).not.toHaveBeenCalled();
     const before = await harness.runtime.policyStore!.snapshot();
-    expect(before.global.spoken).toBeGreaterThan(0);
+    expect(before.global.spoken).toBe(0);
+    expect(before.diagnostic.spoken).toBeGreaterThan(0);
 
     const status = await fetch(`${harness.server.url}/status`, { headers: auth() });
     const statusBody = await status.json() as any;
-    expect(statusBody.data.policy).toEqual({ degraded: false, lastError: null });
+    expect(statusBody.data.policy).toMatchObject({ degraded: false, lastError: null });
+    expect(statusBody.data.policy.planner.last).toMatchObject({
+      configuredSource: 'api',
+      resolvedSource: 'api',
+      prefetched: false,
+      fallbackReason: null,
+    });
+    // W5：独立 planner 队列只读指标进入 /status.policy.planner。
+    expect(statusBody.data.policy.planner.queue).toMatchObject({
+      concurrency: 1,
+      maxQueue: 8,
+      priority: 'high',
+      running: 0,
+    });
+    expect(statusBody.data.policy.planner.queue.completed).toBeGreaterThanOrEqual(1);
+    expect(statusBody.data.policy.planner.queue.queued).toBe(0);
 
     const reset = await post(`${harness.server.url}/intervention/reset`, {});
     expect(reset.status).toBe(200);
     expect(reset.body.data).toMatchObject({ reset: true, policyVersion: 'v0-rules' });
     const after = await harness.runtime.policyStore!.snapshot();
     expect(after.global).toMatchObject({ spoken: 0, silent: 0 });
+    expect(after.diagnostic).toMatchObject({ spoken: 0, silent: 0 });
     expect(after.domains).toEqual([]);
+    statsSpy.mockRestore();
+    thresholdSpy.mockRestore();
   });
 });

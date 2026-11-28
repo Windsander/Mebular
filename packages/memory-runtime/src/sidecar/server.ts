@@ -27,6 +27,13 @@ import {
   type SidecarConfig,
 } from './config.js';
 import type { SidecarMode, SidecarState } from './discovery.js';
+import {
+  resolveEffectiveIntervention,
+  type EffectiveInterventionMode,
+  type EffectiveInterventionPlanner,
+  type EffectiveInterventionResolution,
+  type InterventionPlannerSource,
+} from './effective.js';
 import type {
   IngestExtractionResult,
   IngestExtractionView,
@@ -40,6 +47,8 @@ import {
   type InferenceApi,
   type InferenceStatusView,
 } from './inference/types.js';
+import type { InterventionPlannerTrace } from '../runtime/types.js';
+import type { InterventionPlannerQueueMetrics } from './intervention-queue.js';
 
 const REQUEST_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
@@ -88,6 +97,30 @@ export interface SidecarStatusModel {
   };
   /** 本设备当前可用的模型来源。 */
   sources?: string[];
+}
+
+/**
+ * 0.4.0 介入 effective mode 的只读诊断视图。
+ * 只含枚举/布尔/稳定 warning code；不含 token、keyRef、endpoint 或配置正文。
+ */
+export interface SidecarStatusIntervention {
+  /** 实际生效的介入模式；shadow 仅内部 diagnostic。 */
+  mode: EffectiveInterventionMode;
+  /** recall 使用的 planner。 */
+  planner: EffectiveInterventionPlanner;
+  /** 归一化后的 model.source（缺失时为默认 heuristic，但由 sourcePresent 区分）。 */
+  source: InterventionPlannerSource;
+  /** model.source 是否显式存在；false 表示 0.3 baseline/off。 */
+  sourcePresent: boolean;
+  /** 仅由 source presence/source 推导的 production 模式。 */
+  derivedMode: EffectiveInterventionPlanner;
+  legacyModePresent: boolean;
+  legacyModeIgnored: boolean;
+  legacyModeConflict: boolean;
+  diagnosticShadow: boolean;
+  /** W5：`/context` 单次绝对 deadline（毫秒）；已按 [200,1500] clamp。 */
+  deadline: number;
+  warnings: string[];
 }
 
 export interface SidecarStatusCounts {
@@ -277,6 +310,8 @@ export interface SidecarStatusSnapshot {
   identity: SidecarStatusIdentity;
   capability: SidecarStatusCapability;
   model: SidecarStatusModel;
+  /** 0.4.0 effective intervention；旧 intervention.mode 不参与推导。 */
+  intervention?: SidecarStatusIntervention;
   counts: SidecarStatusCounts;
   details: SidecarStatusDetails;
   outbox: SidecarStatusOutbox;
@@ -288,6 +323,12 @@ export interface SidecarStatusSnapshot {
   policy?: {
     degraded: boolean;
     lastError: { code: string; at: number } | null;
+    /** 最近一次介入 planner 诊断；只含枚举/计时/model id。 */
+    planner?: {
+      last: InterventionPlannerTrace | null;
+      /** W5：独立 planner 队列只读指标。 */
+      queue?: InterventionPlannerQueueMetrics;
+    };
   };
   /** 模型安装/引擎/推荐状态；不包含 token/path。 */
   inference?: InferenceStatusView;
@@ -328,7 +369,8 @@ export interface SidecarRecallApi {
     warnings: string[];
     degraded: boolean;
   }>;
-  handleContext(request: unknown): Promise<{
+  /** `hostToken` 只用于签发 outcome binding；不进入响应正文。 */
+  handleContext(request: unknown, hostToken?: string): Promise<{
     status: 200;
     data: unknown;
     warnings: string[];
@@ -364,7 +406,11 @@ export interface SidecarRecallApi {
     warnings: string[];
     degraded: boolean;
   }>;
-  submitOutcome(traceId: string, body: unknown): Promise<{
+  submitOutcome(traceId: string, body: unknown, auth?: {
+    hostToken?: string;
+    console?: boolean;
+    internal?: boolean;
+  }): Promise<{
     traceId: string;
     outcome: unknown | null;
     duplicate: boolean;
@@ -378,10 +424,19 @@ export interface SidecarRecallApi {
 export interface SidecarServerOptions {
   config: SidecarConfig;
   hostToken: string;
+  /**
+   * 0.4.0 W4：MCP admin 代理持有的独立 secret，只用于 `source=console`。
+   * 不写 discovery/磁盘/日志；缺省或与 hostToken 相同时 console 通道关闭。
+   */
+  adminToken?: string;
   identity?: Partial<SidecarStatusIdentity>;
   getStatus?: () => SidecarStatusSnapshot | Promise<SidecarStatusSnapshot>;
   /** `/version` 的模型状态；缺省从 getStatus().model 读取。 */
   getModelStatus?: () => SidecarStatusModel | Promise<SidecarStatusModel>;
+  /** 测试/嵌入式覆盖；生产不传，按当前 config 动态推导。 */
+  effectiveIntervention?: EffectiveInterventionResolution;
+  /** main 解析的 internal diagnostic shadow（config 或 env）；缺省读 config。 */
+  diagnosticShadow?: boolean;
   ingest?: SidecarIngestApi;
   namespaces?: SidecarNamespacesApi;
   recall?: SidecarRecallApi;
@@ -411,6 +466,26 @@ export interface SidecarListenResult {
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+/** 只暴露枚举/布尔/稳定 code；绝不把 config 正文带进状态面。 */
+export function interventionStatusView(
+  resolution: EffectiveInterventionResolution,
+  deadlineMs: number,
+): SidecarStatusIntervention {
+  return {
+    mode: resolution.mode,
+    planner: resolution.planner,
+    source: resolution.source,
+    sourcePresent: resolution.sourcePresent,
+    derivedMode: resolution.derivedMode,
+    legacyModePresent: resolution.legacyModePresent,
+    legacyModeIgnored: resolution.legacyModeIgnored,
+    legacyModeConflict: resolution.legacyModeConflict,
+    diagnosticShadow: resolution.diagnosticShadow,
+    deadline: deadlineMs,
+    warnings: [...resolution.warnings],
+  };
 }
 
 function requestIdOf(req: IncomingMessage): string {
@@ -537,7 +612,28 @@ export class SidecarServer {
   mode: SidecarMode = 'immersive';
 
   private readonly identity: SidecarStatusIdentity;
+  /** 独立 admin secret；host token 永远不能冒充 console。 */
+  private readonly adminToken: string | null;
+  private readonly effectiveInterventionOverride?: EffectiveInterventionResolution;
+  private readonly diagnosticShadowOverride?: boolean;
+
+  private get diagnosticShadow(): boolean {
+    return this.diagnosticShadowOverride
+      ?? (this.config.intervention.diagnosticShadow === true);
+  }
   private readonly getStatus?: () => SidecarStatusSnapshot | Promise<SidecarStatusSnapshot>;
+
+  /** 动态推导，保证 model.source 热切换后 /status、/version 立即反映。 */
+  private get effectiveIntervention(): EffectiveInterventionResolution {
+    return this.effectiveInterventionOverride ?? resolveEffectiveIntervention({
+      source: this.config.model.source,
+      sourcePresent: this.config.model.sourcePresent,
+      legacyMode: this.config.intervention.mode,
+      legacyModePresent: this.config.intervention.legacyModePresent,
+      diagnosticShadow: this.diagnosticShadow,
+      queryPlan: this.config.recall.queryPlan,
+    });
+  }
   private readonly getModelStatus?: () => SidecarStatusModel | Promise<SidecarStatusModel>;
   private readonly ingest?: SidecarIngestApi;
   private readonly namespaces?: SidecarNamespacesApi;
@@ -558,11 +654,19 @@ export class SidecarServer {
   constructor(options: SidecarServerOptions) {
     this.config = options.config;
     this.hostToken = options.hostToken;
+    // fail closed：缺省、空值或与 host token 相同都不提供 console 通道。
+    this.adminToken = typeof options.adminToken === 'string'
+      && options.adminToken.length > 0
+      && !safeTokenEqual(options.adminToken, options.hostToken)
+      ? options.adminToken
+      : null;
     this.identity = {
       cloudId: options.identity?.cloudId ?? null,
       profileId: options.identity?.profileId ?? null,
       hostId: options.identity?.hostId ?? null,
     };
+    this.effectiveInterventionOverride = options.effectiveIntervention;
+    this.diagnosticShadowOverride = options.diagnosticShadow;
     this.getStatus = options.getStatus;
     this.getModelStatus = options.getModelStatus;
     this.ingest = options.ingest;
@@ -860,6 +964,7 @@ export class SidecarServer {
         credential: { configured: false, source: null },
         sources: ['heuristic', 'host'],
       },
+      intervention: interventionStatusView(this.effectiveIntervention, this.config.context.deadlineMs),
       counts: {
         stagingChunks: 0,
         localStagingChunks: 0,
@@ -922,8 +1027,16 @@ export class SidecarServer {
       ...snapshot,
       mode: this.mode,
       model: { ...fallback.model, ...(snapshot.model ?? {}) },
+      intervention: {
+        ...(fallback.intervention ?? interventionStatusView(this.effectiveIntervention, this.config.context.deadlineMs)),
+        ...(snapshot.intervention ?? {}),
+      },
       counts: { ...fallback.counts, ...(snapshot.counts ?? {}) },
       details: { ...fallback.details, ...(snapshot.details ?? {}) },
+      warnings: [...new Set([
+        ...(snapshot.warnings ?? []),
+        ...this.effectiveIntervention.warnings,
+      ])],
       state: this.state,
       degraded: this.currentDegraded(),
       pid: process.pid,
@@ -1061,7 +1174,20 @@ export class SidecarServer {
               outcome: this.mode === 'immersive' && Boolean(this.recall),
               shadow: Boolean(this.recall),
               reset: this.mode === 'immersive' && Boolean(this.intervention),
-              mode: this.config.intervention.mode,
+              // 0.4.0：mode 是 effective；旧 intervention.mode 只作为诊断。
+              mode: this.effectiveIntervention.mode,
+              // W3：host plan 只由 adapter 显式上报；这里仅声明 /context 契约。
+              hostPlan: this.mode === 'immersive' && Boolean(this.recall),
+              hostPlanScopes: ['session', 'turn'],
+              hostPlanTtlMs: 60_000,
+              configuredSource: this.effectiveIntervention.source,
+              sourcePresent: this.effectiveIntervention.sourcePresent,
+              planner: this.effectiveIntervention.planner,
+              legacyModeIgnored: this.effectiveIntervention.legacyModeIgnored,
+              legacyModeConflict: this.effectiveIntervention.legacyModeConflict,
+              diagnosticShadow: this.effectiveIntervention.diagnosticShadow,
+              deadline: this.config.context.deadlineMs,
+              warnings: [...this.effectiveIntervention.warnings],
             },
             models: {
               install: this.mode === 'immersive' && modelCapabilities.install,
@@ -1080,7 +1206,7 @@ export class SidecarServer {
             quotaBytesCloud: this.config.detail.quotaBytesCloud,
             retentionDays: { conversation: 30, tool_output: 7, document_slice: 90 },
           },
-        }, [], this.currentDegraded()));
+        }, [...this.effectiveIntervention.warnings], this.currentDegraded()));
         return;
       }
 
@@ -1599,7 +1725,23 @@ export class SidecarServer {
           return;
         }
         const body = await readJsonBody(req);
-        const result = await this.recall.handleContext(body);
+        // W3：host identity 只接受显式 header。body 里的 hostApp/hostInstanceId
+        // 一律丢弃，防止普通请求体伪造来源。
+        const hostAppHeader = req.headers['x-mebular-host-app'];
+        const hostInstanceHeader = req.headers['x-mebular-host-instance'];
+        const hostApp = typeof hostAppHeader === 'string' ? hostAppHeader.trim() : '';
+        const hostInstanceId = typeof hostInstanceHeader === 'string'
+          ? hostInstanceHeader.trim()
+          : '';
+        const contextBody = isObject(body) ? { ...body } : body;
+        if (isObject(contextBody)) {
+          delete contextBody.hostApp;
+          delete contextBody.hostInstanceId;
+          if (hostApp.length > 0) contextBody.hostApp = hostApp;
+          if (hostInstanceId.length > 0) contextBody.hostInstanceId = hostInstanceId;
+        }
+        // W4：host token 只作为 outcome binding 的 HMAC key；不进入响应正文。
+        const result = await this.recall.handleContext(contextBody, this.hostToken);
         this.send(res, result.status, this.envelope(requestId, result.data, result.warnings, result.degraded));
         return;
       }
@@ -1640,7 +1782,17 @@ export class SidecarServer {
           return;
         }
         if (parts[2] === 'outcome') {
-          const result = await this.recall.submitOutcome(traceId, body);
+          // W4：host 通道用 host token 验 bindingToken。console 只允许持有独立
+          // admin secret 的 MCP admin 代理；客户端 header 本身不是凭据，宿主
+          // 仅凭 host token 不能自报 console。`heuristic` 永不从 HTTP 放行。
+          const adminHeader = req.headers['x-mebular-admin-token'];
+          const adminVerified = typeof adminHeader === 'string'
+            && this.adminToken !== null
+            && safeTokenEqual(adminHeader.trim(), this.adminToken);
+          const result = await this.recall.submitOutcome(traceId, body, {
+            hostToken: this.hostToken,
+            console: adminVerified,
+          });
           this.send(res, 200, this.envelope(requestId, result, result.warnings, result.degraded));
           return;
         }

@@ -626,6 +626,7 @@ export class MemoryRuntimeSupervisor {
 
     this.child = null;
     this.childToken = null;
+    this.adminToken = null;
     this.childSecrets = [];
     this.managedInstance = null;
     this.dormantLock = null;
@@ -1161,6 +1162,7 @@ export class MemoryRuntimeSupervisor {
         degraded: result.state === 'degraded',
         capability: null,
         model: null,
+        intervention: null,
       };
     }
     const data = result.body?.data ?? result.body ?? {};
@@ -1200,6 +1202,23 @@ export class MemoryRuntimeSupervisor {
           }
         : null,
       model,
+      // 0.4.0 effective intervention：sidecar 已经是唯一推导源，这里只做白名单。
+      intervention: isObject(data.intervention)
+        ? {
+            mode: typeof data.intervention.mode === 'string' ? data.intervention.mode : null,
+            planner: typeof data.intervention.planner === 'string' ? data.intervention.planner : null,
+            source: typeof data.intervention.source === 'string' ? data.intervention.source : null,
+            sourcePresent: data.intervention.sourcePresent === true,
+            derivedMode: typeof data.intervention.derivedMode === 'string' ? data.intervention.derivedMode : null,
+            legacyModePresent: data.intervention.legacyModePresent === true,
+            legacyModeIgnored: data.intervention.legacyModeIgnored === true,
+            legacyModeConflict: data.intervention.legacyModeConflict === true,
+            diagnosticShadow: data.intervention.diagnosticShadow === true,
+            warnings: Array.isArray(data.intervention.warnings)
+              ? data.intervention.warnings.filter((warning) => typeof warning === 'string')
+              : [],
+          }
+        : null,
     };
   }
 
@@ -1516,6 +1535,83 @@ export class MemoryRuntimeSupervisor {
   }
 
   /**
+   * Console 侧 outcome 归因（sidecar `POST /recall/:traceId/outcome`）。
+   *
+   * 只允许 MCP admin 代理：请求必须由 MCP admin 写端点进入，并在此附加
+   * supervisor 持有的独立 admin secret；host token 不能冒充 console。
+   * 不接受 note/raw/bindingToken，source 固定为 console。
+   */
+  async submitRecallOutcome(traceId, outcome) {
+    const id = typeof traceId === 'string' ? traceId.trim() : '';
+    if (!/^tr_[A-Za-z0-9._:-]{1,128}$/.test(id)) {
+      return { statusCode: 400, body: { ok: false, error: 'invalid_trace_id', message: 'trace id 格式非法' } };
+    }
+    if (!isObject(outcome)) {
+      return { statusCode: 400, body: { ok: false, error: 'invalid_outcome', message: 'outcome 必须是对象' } };
+    }
+    const kinds = new Set([
+      'accepted', 'ignored', 'reasked', 'corrected',
+      'dismissed', 'missed', 'too_shallow', 'too_deep',
+    ]);
+    const kind = typeof outcome.kind === 'string' ? outcome.kind : '';
+    if (!kinds.has(kind)) {
+      return { statusCode: 400, body: { ok: false, error: 'invalid_outcome', message: 'outcome.kind 非法' } };
+    }
+    const body = { kind, source: 'console' };
+    if (outcome.confidence !== undefined && outcome.confidence !== null) {
+      if (typeof outcome.confidence !== 'number' || !Number.isFinite(outcome.confidence)
+        || outcome.confidence < 0 || outcome.confidence > 1) {
+        return { statusCode: 400, body: { ok: false, error: 'invalid_outcome', message: 'outcome.confidence 必须是 0..1 的数字' } };
+      }
+      body.confidence = outcome.confidence;
+    }
+    // 独立 admin secret 只在 supervisor 启动 managed child 时存在；
+    // attached/external sidecar 或旧 MCP 没有它时明确 fail closed。
+    if (typeof this.adminToken !== 'string' || this.adminToken.length === 0) {
+      return {
+        statusCode: 409,
+        body: {
+          ok: false,
+          error: 'admin_channel_unavailable',
+          message: 'console outcome 通道未启用',
+        },
+      };
+    }
+    const result = await this.#proxyHostApi(`recall/${encodeURIComponent(id)}/outcome`, {
+      method: 'POST',
+      body,
+      admin: true,
+    });
+    if (!result.available) {
+      return {
+        statusCode: result.disabled === true ? 409 : 503,
+        body: {
+          ok: false,
+          error: result.disabled === true ? 'memory_runtime_disabled' : 'sidecar_unavailable',
+          enabled: result.enabled,
+          state: result.state,
+          message: result.disabled === true
+            ? '记忆运行时未启用'
+            : 'Memory Runtime sidecar 未就绪',
+          ...(result.error ? { details: result.error } : {}),
+        },
+      };
+    }
+    const data = result.body?.data ?? result.body ?? null;
+    if (!result.ok) {
+      return {
+        statusCode: result.statusCode ?? 502,
+        body: {
+          ok: false,
+          error: data?.error?.code ?? result.body?.error?.code ?? 'outcome_failed',
+          message: proxyErrorMessage(data, proxyErrorMessage(result.body, '召回结果上报失败')),
+        },
+      };
+    }
+    return { statusCode: 200, body: result.body ?? { ok: true, data } };
+  }
+
+  /**
    * 重置本机介入策略状态（sidecar `POST /intervention/reset`）。
    *
    * 与 feedback 共用 host token 代理；轻量模式/未就绪返回明确 disabled/503，
@@ -1678,7 +1774,12 @@ export class MemoryRuntimeSupervisor {
     return sameDiscoveryInstance(await readDiscovery(this.paths.discoveryPath), discovery);
   }
 
-  async #proxyHostApi(pathname, { method = 'GET', body = null, timeoutMs = 2500 } = {}) {
+  async #proxyHostApi(pathname, {
+    method = 'GET',
+    body = null,
+    timeoutMs = 2500,
+    admin = false,
+  } = {}) {
     await this.status().catch(() => undefined);
     if (!this.isEnabled()) {
       return {
@@ -1741,6 +1842,11 @@ export class MemoryRuntimeSupervisor {
           accept: 'application/json',
           authorization: `Bearer ${token}`,
           'x-request-id': requestId,
+          // W4 B1：console outcome 只在 MCP 进程内附加独立 admin secret；
+          // feedback/reset 等普通代理不发送该 header。
+          ...(admin && typeof this.adminToken === 'string' && this.adminToken.length > 0
+            ? { 'x-mebular-admin-token': this.adminToken }
+            : {}),
         };
         const init = { method, headers, signal: controller.signal };
         if (body !== null && body !== undefined) {
@@ -2072,7 +2178,11 @@ export class MemoryRuntimeSupervisor {
 
     const hostToken = stringOrNull(this.env?.MEBULAR_MEMORY_RUNTIME_TOKEN)
       ?? randomBytes(32).toString('base64url');
-    this.childSecrets = [token, hostToken];
+    // W4：独立 admin secret 只注入 sidecar child；宿主 adapter 不持有，
+    // discovery/日志/状态都不暴露。console outcome 只走这个通道。
+    const adminToken = randomBytes(32).toString('base64url');
+    this.adminToken = adminToken;
+    this.childSecrets = [token, hostToken, adminToken];
     const spec = commandSpec(resolved.command);
     const args = [
       ...spec.args,
@@ -2086,6 +2196,7 @@ export class MemoryRuntimeSupervisor {
       MEBULAR_MEMORY_RUNTIME_HOME: this.paths.dataDir,
       MEBULAR_CAPABILITY_TOKEN: token,
       MEBULAR_MEMORY_RUNTIME_TOKEN: hostToken,
+      MEBULAR_MEMORY_RUNTIME_ADMIN_TOKEN: adminToken,
       ...(stringOrNull(this.getMcpUrl()) ? { MEBULAR_MCP_URL: stringOrNull(this.getMcpUrl()) } : {}),
     };
 

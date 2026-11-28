@@ -117,7 +117,7 @@ node tests/integration/host-e2e/hermes-real-runtime.mjs
 ## 当前风险 / 未完成
 
 - sidecar 未启动或不可达时 recall 返回空、ingest 留在 spool、checkpoint 保持 pending；这是失败开放，不是已提交。
-- `prefetch` 首次同步召回最多等 `recall_timeout`（默认 1.5s）；后台预热可避免下一轮等待。
+- `prefetch` 首次同步召回最多等 `recall_timeout`（默认 2.0s）；后台预热可避免下一轮等待。
 - spool 是单进程 JSONL，不做跨进程锁；同一 `HERMES_HOME` 不应跑两个 Hermes 写者。
 - companion 同步调用宿主模型，增加延迟/成本，默认关闭；不做图片抽取。
 - 0.3.x wire contract 以 `docs/design/0.3.0-memory-runtime-contract.md` 为准；v0.3.2 的生命周期/状态收口见 `docs/design/0.3.2-stability-contract.md`。

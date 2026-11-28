@@ -7,18 +7,23 @@ import { describe, it, expect } from '@jest/globals';
 import { extractCue, type Cue } from '../../src/sidecar/cue.js';
 import {
   buildInterventionInferenceRequest,
+  interventionVersionSeed,
   planInterventionAsync,
   type InterventionCandidateView,
   type InterventionModelPlanner,
   type InterventionPlannerInput,
 } from '../../src/sidecar/intervention.js';
 import {
+  createLocalPrefetchPlan,
+  cueScopeOf,
+  type InterventionPrefetchPlan,
+} from '../../src/sidecar/intervention-prefetch.js';
+import {
   buildInterventionPrompt,
   createSidecarInferenceProvider,
   type InferenceInterventionRequest,
   type InferenceInterventionResult,
   type InferenceInterventionStats,
-  type SidecarOptionalModelSelection,
 } from '../../src/sidecar/inference-provider.js';
 import type { InferenceSettings } from '../../src/sidecar/config.js';
 import type {
@@ -106,21 +111,17 @@ function modelResult(overrides: Partial<InferenceInterventionResult> = {}): Infe
 }
 
 class FakePlanner implements InterventionModelPlanner {
-  selections = 0;
   requests: InferenceInterventionRequest[] = [];
-  selectResult: SidecarOptionalModelSelection = { source: 'local', warnings: [], degraded: false };
+  timeouts: Array<number | undefined> = [];
   result: InferenceInterventionResult = modelResult();
   delayMs = 0;
 
-  async selectOptionalSource(): Promise<SidecarOptionalModelSelection> {
-    this.selections += 1;
-    return this.selectResult;
-  }
-
   async planIntervention(
     request: InferenceInterventionRequest,
+    options: { timeoutMs?: number } = {},
   ): Promise<InferenceInterventionResult> {
     this.requests.push(request);
+    this.timeouts.push(options.timeoutMs);
     if (this.delayMs > 0) {
       await new Promise((resolve) => setTimeout(resolve, this.delayMs));
     }
@@ -132,15 +133,47 @@ function context(planner: InterventionModelPlanner | null, overrides: {
   timeoutMs?: number;
   allowRemote?: boolean;
   hasCheckpoint?: boolean;
+  configuredSource?: 'heuristic' | 'local' | 'host' | 'api' | 'auto';
+  localConfigured?: boolean;
+  apiConfigured?: boolean;
+  prefetchedPlan?: InterventionPrefetchPlan | null;
+  prefetchState?: 'hit' | 'miss' | 'expired' | 'cue_mismatch' | 'first_turn';
+  prefetchAgeMs?: number;
+  deadlineAt?: number;
+  now?: () => number;
 } = {}) {
   return {
     planner,
+    configuredSource: overrides.configuredSource ?? 'api',
     allowRemote: overrides.allowRemote ?? true,
     timeoutMs: overrides.timeoutMs ?? 500,
+    ...(overrides.deadlineAt !== undefined ? { deadlineAt: overrides.deadlineAt } : {}),
+    localConfigured: overrides.localConfigured ?? false,
+    apiConfigured: overrides.apiConfigured ?? true,
+    ...(overrides.prefetchedPlan !== undefined ? { prefetchedPlan: overrides.prefetchedPlan } : {}),
+    ...(overrides.prefetchState ? { prefetchState: overrides.prefetchState } : {}),
+    ...(overrides.prefetchAgeMs !== undefined ? { prefetchAgeMs: overrides.prefetchAgeMs } : {}),
     stats: stats(),
     hasCheckpoint: overrides.hasCheckpoint ?? true,
-    now: () => NOW,
+    now: overrides.now ?? (() => NOW),
   };
+}
+
+function prefetchedPlan(result: InferenceInterventionResult = modelResult()): InterventionPrefetchPlan {
+  const request = buildInterventionInferenceRequest(
+    input(),
+    stats(),
+    true,
+    'local',
+    false,
+  );
+  return createLocalPrefetchPlan({
+    scope: cueScopeOf(input().cue),
+    result,
+    versionSeed: interventionVersionSeed(request),
+    localFingerprint: 'pack-a',
+    now: NOW,
+  });
 }
 
 describe('planInterventionAsync (model controller)', () => {
@@ -153,7 +186,9 @@ describe('planInterventionAsync (model controller)', () => {
     );
     expect(planned.fromModel).toBe(true);
     expect(planned.modelFallback).toBe(false);
-    expect(planned.source).toBe('local');
+    expect(planned.source).toBe('api');
+    expect(planned.prefetched).toBe(false);
+    expect(planned.fallbackReason).toBeNull();
     expect(planned.decision).toMatchObject({
       action: 'speak',
       depth: 'detail',
@@ -164,7 +199,12 @@ describe('planInterventionAsync (model controller)', () => {
     expect(planned.decision.policyVersion).toMatch(/^model:[0-9a-f]{8}$/);
     expect(planned.decision.degraded).toBeUndefined();
     expect(planned.warnings).toEqual([]);
-    expect(planner.selections).toBe(1);
+    expect(planned.decision.planner).toMatchObject({
+      configuredSource: 'api',
+      resolvedSource: 'api',
+      prefetched: false,
+      fallbackReason: null,
+    });
     expect(planner.requests).toHaveLength(1);
   });
 
@@ -200,18 +240,19 @@ describe('planInterventionAsync (model controller)', () => {
       input({ cue: cue('你还记得我的喜好吗？') }),
       context(planner),
     );
-    expect(planner.selections).toBe(0);
     expect(planner.requests).toHaveLength(0);
     expect(planned.decision).toMatchObject({ action: 'speak', mustSpeak: true, enforced: true });
     expect(planned.decision.reason).toMatch(/^must_speak:/);
     expect(planned.decision.policyVersion).toBe('v0-rules');
     expect(planned.modelFallback).toBe(false);
+    expect(planned.prefetched).toBe(false);
+    expect(planned.fallbackReason).toBeNull();
   });
 
   it('没有候选时不调用模型（模型无法改变“无可注入内容”）', async () => {
     const planner = new FakePlanner();
     const planned = await planInterventionAsync(input({ candidates: [] }), context(planner));
-    expect(planner.selections).toBe(0);
+    expect(planner.requests).toHaveLength(0);
     expect(planned.decision).toMatchObject({ action: 'silent', reason: 'no_candidates' });
     expect(planned.modelFallback).toBe(false);
   });
@@ -222,17 +263,16 @@ describe('planInterventionAsync (model controller)', () => {
     expect(noPlanner.decision).toMatchObject({ action: 'speak', degraded: true, enforced: true });
     expect(noPlanner.decision.policyVersion).toMatch(/^heuristic:/);
     expect(noPlanner.warnings).toContain('intervention_model_fallback');
+    expect(noPlanner.fallbackReason).toBe('source_unavailable');
 
     const planner = new FakePlanner();
-    planner.selectResult = {
-      source: null,
-      warnings: ['remote_not_allowed', 'model_unavailable'],
-      degraded: true,
-      reason: 'remote_not_allowed',
-    };
-    const planned = await planInterventionAsync(input(), context(planner));
+    const planned = await planInterventionAsync(
+      input(),
+      context(planner, { allowRemote: false }),
+    );
     expect(planned.modelFallback).toBe(true);
     expect(planned.reasonCode).toBe('remote_not_allowed');
+    expect(planned.fallbackReason).toBe('allow_remote_false');
     expect(planned.warnings).toEqual(expect.arrayContaining([
       'intervention_model_fallback',
       'remote_not_allowed',
@@ -252,6 +292,7 @@ describe('planInterventionAsync (model controller)', () => {
     const planned = await planInterventionAsync(input(), context(planner));
     expect(planned.modelFallback).toBe(true);
     expect(planned.reasonCode).toBe('model_timeout');
+    expect(planned.fallbackReason).toBe('timeout');
     expect(planned.decision.degraded).toBe(true);
     expect(planned.decision.policyVersion).toMatch(/^heuristic:/);
     expect(planned.warnings).toContain('model_timeout');
@@ -284,26 +325,268 @@ describe('planInterventionAsync (model controller)', () => {
     const planned = await planInterventionAsync(input(), context(planner));
     expect(planned.modelFallback).toBe(true);
     expect(planned.reasonCode).toBe('invalid_model_response');
+    expect(planned.fallbackReason).toBe('invalid_output');
     expect(planned.decision.policyVersion).toMatch(/^heuristic:/);
     expect(planned.decision.degraded).toBe(true);
   });
 
   it('policyVersion 纳入模型身份/来源：不同模型可区分，同一输入稳定', async () => {
-    const localPlanner = new FakePlanner();
-    localPlanner.result = modelResult({ model: 'model-a' });
-    const local = await planInterventionAsync(input(), context(localPlanner));
+    const modelA = new FakePlanner();
+    modelA.result = modelResult({ model: 'model-a' });
+    const first = await planInterventionAsync(input(), context(modelA));
 
-    const apiPlanner = new FakePlanner();
-    apiPlanner.selectResult = { source: 'api', warnings: [], degraded: false };
-    apiPlanner.result = modelResult({ model: 'model-b' });
-    const api = await planInterventionAsync(input(), context(apiPlanner));
+    const modelB = new FakePlanner();
+    modelB.result = modelResult({ model: 'model-b' });
+    const second = await planInterventionAsync(input(), context(modelB));
 
-    expect(local.decision.policyVersion).toMatch(/^model:[0-9a-f]{8}$/);
-    expect(api.decision.policyVersion).toMatch(/^model:[0-9a-f]{8}$/);
-    expect(local.decision.policyVersion).not.toBe(api.decision.policyVersion);
+    expect(first.decision.policyVersion).toMatch(/^model:[0-9a-f]{8}$/);
+    expect(second.decision.policyVersion).toMatch(/^model:[0-9a-f]{8}$/);
+    expect(first.decision.policyVersion).not.toBe(second.decision.policyVersion);
 
-    const again = await planInterventionAsync(input(), context(localPlanner));
-    expect(again.decision.policyVersion).toBe(local.decision.policyVersion);
+    const again = await planInterventionAsync(input(), context(modelA));
+    expect(again.decision.policyVersion).toBe(first.decision.policyVersion);
+  });
+
+  // ---------- W2：source 矩阵与预取/deadline ----------
+
+  it('heuristic source：不触模型，planner trace 记录 heuristic', async () => {
+    const planner = new FakePlanner();
+    const planned = await planInterventionAsync(
+      input({ mode: 'heuristic' }),
+      context(planner, { configuredSource: 'heuristic' }),
+    );
+    expect(planned.source).toBe('heuristic');
+    expect(planned.prefetched).toBe(false);
+    expect(planned.fallbackReason).toBeNull();
+    expect(planned.decision.planner).toMatchObject({
+      configuredSource: 'heuristic',
+      resolvedSource: 'heuristic',
+      prefetched: false,
+    });
+    expect(planner.requests).toHaveLength(0);
+  });
+
+  it('local 未命中：立即 heuristic，prefetched=false，不启动本地同步调用', async () => {
+    const planner = new FakePlanner();
+    const planned = await planInterventionAsync(
+      input(),
+      context(planner, {
+        configuredSource: 'local',
+        localConfigured: true,
+        prefetchState: 'first_turn',
+      }),
+    );
+    expect(planned.source).toBe('heuristic');
+    expect(planned.fromModel).toBe(false);
+    expect(planned.modelFallback).toBe(false);
+    expect(planned.prefetched).toBe(false);
+    expect(planned.fallbackReason).toBe('prefetch_miss');
+    expect(planned.decision.degraded).toBeUndefined();
+    expect(planned.warnings).toEqual(['intervention_prefetch_first_turn']);
+    expect(planned.decision.planner).toMatchObject({
+      configuredSource: 'local',
+      resolvedSource: null,
+      prefetched: false,
+      prefetchState: 'first_turn',
+      fallbackReason: 'prefetch_miss',
+    });
+    expect(planner.requests).toHaveLength(0);
+  });
+
+  it('local 预取命中：直接消费 plan，不重新调用 provider', async () => {
+    const planner = new FakePlanner();
+    const plan = prefetchedPlan(modelResult({ action: 'speak', depth: 'gist', reason: 'prefetched_hit' }));
+    const planned = await planInterventionAsync(
+      input(),
+      context(planner, {
+        configuredSource: 'local',
+        localConfigured: true,
+        prefetchedPlan: plan,
+        prefetchState: 'hit',
+        prefetchAgeMs: 1200,
+      }),
+    );
+    expect(planned.source).toBe('local');
+    expect(planned.fromModel).toBe(true);
+    expect(planned.prefetched).toBe(true);
+    expect(planned.fallbackReason).toBeNull();
+    expect(planned.decision).toMatchObject({ action: 'speak', reason: 'prefetched_hit' });
+    expect(planned.decision.policyVersion).toMatch(/^model:/);
+    expect(planned.decision.planner).toMatchObject({
+      configuredSource: 'local',
+      resolvedSource: 'local',
+      prefetched: true,
+      prefetchState: 'hit',
+      planAgeMs: 1200,
+      fallbackReason: null,
+    });
+    expect(planned.decision.planner?.planId).toMatch(/^lp_/);
+    expect(planner.requests).toHaveLength(0);
+  });
+
+  it('local 预取 plan 非法：丢弃并回退 heuristic，prefetched=false', async () => {
+    const planner = new FakePlanner();
+    const plan = prefetchedPlan(modelResult({ confidence: 1.5 }));
+    const planned = await planInterventionAsync(
+      input(),
+      context(planner, {
+        configuredSource: 'local',
+        localConfigured: true,
+        prefetchedPlan: plan,
+        prefetchState: 'hit',
+      }),
+    );
+    expect(planned.source).toBe('heuristic');
+    expect(planned.prefetched).toBe(false);
+    expect(planned.fallbackReason).toBe('invalid_output');
+    expect(planned.decision.degraded).toBe(true);
+    expect(planner.requests).toHaveLength(0);
+  });
+
+  it('local 未配置：显式 local 回退 heuristic；auto 才继续到 api', async () => {
+    const explicit = new FakePlanner();
+    const local = await planInterventionAsync(
+      input(),
+      context(explicit, {
+        configuredSource: 'local',
+        localConfigured: false,
+        apiConfigured: true,
+      }),
+    );
+    expect(local.source).toBe('heuristic');
+    expect(local.fallbackReason).toBe('model_not_installed');
+    expect(explicit.requests).toHaveLength(0);
+
+    const auto = new FakePlanner();
+    const automatic = await planInterventionAsync(
+      input(),
+      context(auto, {
+        configuredSource: 'auto',
+        localConfigured: false,
+        apiConfigured: true,
+      }),
+    );
+    expect(automatic.source).toBe('api');
+    expect(auto.requests).toHaveLength(1);
+  });
+
+  it('auto_local_miss_no_api：local 已配置但未命中 → heuristic，不串行切 api', async () => {
+    const planner = new FakePlanner();
+    const planned = await planInterventionAsync(
+      input(),
+      context(planner, {
+        configuredSource: 'auto',
+        localConfigured: true,
+        apiConfigured: true,
+        prefetchState: 'miss',
+      }),
+    );
+    expect(planned.source).toBe('heuristic');
+    expect(planned.prefetched).toBe(false);
+    expect(planned.fallbackReason).toBe('prefetch_miss');
+    expect(planned.modelFallback).toBe(false);
+    expect(planner.requests).toHaveLength(0);
+  });
+
+  it('auto：local 预取命中优先于 api', async () => {
+    const planner = new FakePlanner();
+    const plan = prefetchedPlan(modelResult({ reason: 'auto_local' }));
+    const planned = await planInterventionAsync(
+      input(),
+      context(planner, {
+        configuredSource: 'auto',
+        localConfigured: true,
+        apiConfigured: true,
+        prefetchedPlan: plan,
+        prefetchState: 'hit',
+      }),
+    );
+    expect(planned.source).toBe('local');
+    expect(planned.prefetched).toBe(true);
+    expect(planner.requests).toHaveLength(0);
+  });
+
+  it('api 硬上限 1500ms：配置更大预算也只按 1500ms 调用', async () => {
+    const planner = new FakePlanner();
+    await planInterventionAsync(
+      input(),
+      context(planner, { configuredSource: 'api', timeoutMs: 5_000 }),
+    );
+    expect(planner.timeouts).toEqual([1500]);
+  });
+
+  it('W5 seam：剩余预算 < 200ms 时不启动 api，fallbackReason=deadline', async () => {
+    const planner = new FakePlanner();
+    const planned = await planInterventionAsync(
+      input(),
+      context(planner, {
+        configuredSource: 'api',
+        timeoutMs: 1500,
+        deadlineAt: NOW + 150,
+      }),
+    );
+    expect(planned.source).toBe('heuristic');
+    expect(planned.fallbackReason).toBe('deadline');
+    expect(planned.decision.degraded).toBe(true);
+    expect(planner.requests).toHaveLength(0);
+  });
+
+  it('W5 seam：planner 预算 = deadlineAt - now - 150ms response reserve', async () => {
+    const planner = new FakePlanner();
+    await planInterventionAsync(
+      input(),
+      context(planner, {
+        configuredSource: 'api',
+        timeoutMs: 1500,
+        deadlineAt: NOW + 500,
+        now: () => NOW,
+      }),
+    );
+    expect(planner.timeouts).toEqual([350]);
+  });
+
+  it('auto 一个总 deadline：api 只拿剩余预算，不串行累加', async () => {
+    const planner = new FakePlanner();
+    planner.delayMs = 600;
+    const started = Date.now();
+    const planned = await planInterventionAsync(
+      input(),
+      context(planner, {
+        configuredSource: 'auto',
+        localConfigured: false,
+        apiConfigured: true,
+        timeoutMs: 1500,
+        deadlineAt: NOW + 500,
+        now: () => NOW + (Date.now() - started),
+      }),
+    );
+    const took = Date.now() - started;
+    expect(planned.fallbackReason).toBe('timeout');
+    // 剩余预算约 350ms；不得等到 1500ms 或串行叠加。
+    expect(took).toBeLessThan(500);
+    expect(planner.timeouts[0]).toBeLessThanOrEqual(350);
+  });
+
+  it('api 缺凭据/超时/非法 JSON 统一映射稳定 fallbackReason', async () => {
+    const cases: Array<[string, string, string]> = [
+      ['credential_missing', 'source_unavailable', 'model_credential_missing'],
+      ['model_timeout', 'timeout', 'model_timeout'],
+      ['invalid_model_response', 'invalid_output', 'model_invalid_response'],
+    ];
+    for (const [reasonCode, fallbackReason, warning] of cases) {
+      const planner = new FakePlanner();
+      planner.result = {
+        ok: false,
+        degraded: true,
+        reasonCode,
+        warnings: [warning, 'model_unavailable'],
+        latencyMs: 5,
+      };
+      const planned = await planInterventionAsync(input(), context(planner));
+      expect(planned.fallbackReason).toBe(fallbackReason);
+      expect(planned.decision.degraded).toBe(true);
+      expect(planned.warnings).toContain('intervention_model_fallback');
+    }
   });
 
   it('隐私：请求只含 cue + top-3 候选 gist + 统计，不含 detail/正文/checkpoint/token', async () => {
@@ -351,6 +634,7 @@ describe('planInterventionAsync (model controller)', () => {
 function settings(): InferenceSettings {
   return {
     source: 'api',
+    sourcePresent: true,
     local: { pack: null, path: null, threads: 1, enginePath: null },
     api: {
       baseUrl: 'https://api.example.test/v1',

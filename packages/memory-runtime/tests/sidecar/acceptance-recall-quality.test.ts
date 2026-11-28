@@ -511,9 +511,9 @@ function scenarios(): QualityScenario[] {
       expected: { relevant: [], silence: ['chitchat'], detail: 'none', maxFragments: 0 },
     },
     {
-      id: 'Q16', name: '否定 → 沉默', query: '别用记忆回答我的偏好',
+      id: 'Q16', name: '否定 → 显式 defer', query: '别用记忆回答我的偏好',
       records: [prefTheme],
-      expected: { relevant: [], silence: ['user_negated'], detail: 'none', maxFragments: 0 },
+      expected: { relevant: [], silence: ['intervention_defer'], detail: 'none', maxFragments: 0 },
     },
     {
       id: 'Q17', name: '过期事实 → 排除', query: '旧端口是多少？',

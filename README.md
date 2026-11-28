@@ -185,12 +185,13 @@ Runnable examples: [`examples/quickstart`](examples/quickstart/index.mjs) writes
 
 </details>
 
-**Release status.** v0.3.5 is the current stable release. v0.4.0 (Memory
-Intervention Policy) is in release preparation and remains **unreleased**: its W8
-Go/No-Go waits for real API, DSH, Hermes, OpenChamber Desktop and host-model evidence.
-The current real-evidence matrix stands at 6/20 cells; external cells stay
-`blocked_external` and are never filled with fakes or stubs. See the
-[release-readiness report](docs/quality/0.4.0-intervention/0.4.0-release-readiness.md).
+**Release status.** v0.3.5 is the latest published release. v0.3.7 is the release
+candidate for the Memory Intervention Policy line (prepared on `release/0.3.7`, not yet
+tagged or published) and ships the **complete implementation** of that design. Real API
+provider validation is **deferred**; DSH, Hermes, OpenChamber Desktop and real
+host-model runs remain release gates. The current real-evidence matrix stands at 6/20
+cells; external cells stay `blocked_external` and are never filled with fakes or stubs.
+See the [0.3.7 release-readiness report](docs/quality/0.4.0-intervention/0.3.7-release-readiness.md).
 
 <div align="center">
 

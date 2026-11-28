@@ -142,7 +142,7 @@ raw capture 或 trace retention 编辑器。支持的 sidecar 配置值直接写
 
 只有真正空的 home（无 config、主密钥、store、identity、`runtime.json`、
 `memory-runtime/`、`net/`，且没有 `MEBULAR_CONFIG` / `MEBULAR_MEMORY_RUNTIME_HOME` /
-`MEBULAR_STORAGE_PATH` 覆盖）才会在现有首启页看到一次性披露。0.4.0 不新增页面，也不
+`MEBULAR_STORAGE_PATH` 覆盖）才会在现有首启页看到一次性披露。0.3.7 不新增页面，也不
 新增第二个模式。
 
 - marker 是 `<home>/first-run.json`（`0600`，原子写），只表达披露生命周期
@@ -239,10 +239,10 @@ ContextCheckpoint 始终是 `task:<threadId>` 或 `default` 中的图对象；�
   宿主已停止。revision/lease 是本地乐观并发加跨同步副本的协作提示，不是强跨设备一致性或
   agent 认证。
 
-## 介入策略（Intervention policy，0.4.0）
+## 介入策略（Intervention policy，0.3.7）
 
-0.4.0 在现有“粗到细”召回之上增加可选的**记忆介入策略**：由 sidecar 决定这一轮是否要带
-长期记忆片段、带多深。本线仍在 0.4.0 目标阶段、**尚未发布**；这里写的是 0.4.0 目标
+0.3.7 在现有“粗到细”召回之上**完整实现**了可选的**记忆介入策略**：由 sidecar 决定这一轮是否要带
+长期记忆片段、带多深。默认仍不开启，已有 home 的召回行为不变；这里写的是 0.3.7 已实现
 契约，不是已发布的默认行为。
 
 默认不变：sidecar 配置里没有 `model.source` 时生效模式为 `off`（0.3.x baseline），
@@ -250,12 +250,13 @@ ContextCheckpoint 始终是 `task:<threadId>` 或 `default` 中的图对象；�
 `self` / checkpoint 继续由现有路径自动注入；策略只裁剪/展开其中的 **memory fragments**。
 
 设计与边界见
-[0.4.0 介入策略设计](../design/0.4.0-intervention-policy.md)，验证证据见
-[0.4.0 介入验证](../quality/0.4.0-intervention/0.4.0-verification.md)。
+[介入策略设计](../design/0.4.0-intervention-policy.md)（设计与证据文件沿用历史 `0.4.0`
+命名），验证证据见[介入验证](../quality/0.4.0-intervention/0.4.0-verification.md)与
+[0.3.7 发布准备报告](../quality/0.4.0-intervention/0.3.7-release-readiness.md)。
 
 ### 生效模式与 `model.source`
 
-0.4.0 只有**一个生产选择器**：`model.source`，不再有第二个持久化介入模式。在
+0.3.7 只有**一个生产选择器**：`model.source`，不再有第二个持久化介入模式。在
 `<home>/memory-runtime/config.json` 中配置：
 
 ```jsonc
@@ -288,7 +289,7 @@ ContextCheckpoint 始终是 `task:<threadId>` 或 `default` 中的图对象；�
 |---|---|
 | 缺失 | `off`。`/context` 返回 `v0-baseline` 决策、`enforced:false`，稳定 warning 为 `model_source_missing`。缺失**不会**被当成显式 heuristic。 |
 | `heuristic` | 启用本机规则策略；`must_speak` 仍是硬规则，不调用模型。 |
-| `local` | 由上一轮结束后生成的 assisted 预取 plan 驱动模型 planner。0.4.0 的 local 是 **assisted/shadow**，不是权威 planner。 |
+| `local` | 由上一轮结束后生成的 assisted 预取 plan 驱动模型 planner。0.3.7 的 local 是 **assisted/shadow**，不是权威 planner。 |
 | `host` | 由 adapter 在上一轮后生成的 session-prior host plan 驱动；`/context` 不调用宿主模型。 |
 | `api` | 唯一同步模型来源；必须显式配置 endpoint/model/`keyRef` 且 `allowRemote=true`，硬上限 1500ms，不重试。 |
 | `auto` | 按 host → 新鲜 local plan → 仅当 local 未配置才 API → heuristic 的顺序解析；已配置 local 的 miss 保持 heuristic，绝不回落到 API。 |
@@ -306,8 +307,8 @@ Console 不编辑这些值；它在「高级」显示 `model.source`，展示 si
 - **local（assisted）**：turn 结束后 sidecar 可用配置的本地模型生成 plan；`/context`
   只消费匹配的新鲜 plan（同 cue signature，或 topic/entity Jaccard ≥0.8，TTL 60s）。
   首轮、新 cue、过期、配置变化或不匹配都返回 `prefetched=false` + heuristic。缓存只
-  保存决策元数据，不保存 query 正文、detail、prompt 或 token。0.4.0 不会把本地模型
-  变成权威 planner；**local-authoritative 属于独立的 0.4.2 线，不在本版**。
+  保存决策元数据，不保存 query 正文、detail、prompt 或 token。0.3.7 不会把本地模型
+  变成权威 planner；**local-authoritative 属于后续独立线，不在本版**。
 - **API（同步）**：只有显式配置且允许远端时才在交互路径调用；硬上限 1500ms，与
   `/context` 总预算共用，不重试。超时、非法输出或 provider 失败回退 heuristic
   并标 `degraded:true`。
@@ -340,7 +341,7 @@ Console 不编辑这些值；它在「高级」显示 `model.source`，展示 si
 Console 控件。reset 会清除本机学习状态。旧 `adaptive.enabled` / `adaptive.shadow` 键
 只作为兼容输入，并发出 `adaptive_experimental_ignored`；不会删除，也不会被静默应用。
 
-### Outcome binding（0.4.0 W4）
+### Outcome binding（W4）
 
 `/context` 成功写本地 trace 时会同时返回 opaque `bindingToken`；`traceId:null`
 （trace 关闭或 W5 deadline skip）时返回 `bindingToken:null`，宿主不得上报 outcome。
@@ -437,7 +438,7 @@ POST /memory-runtime/v1/recall/:traceId/outcome
 
 kind：`accepted`、`ignored`、`reasked`、`corrected`、`dismissed`、`missed`、
 `too_shallow`、`too_deep`。同一 trace + kind 幂等；不同 kind 更新最新结果，最多保留
-5 条 `outcomeHistory`。0.4.0 协议不保存 note：带 binding token 的 note 返回
+5 条 `outcomeHistory`。0.3.7 协议不保存 note：带 binding token 的 note 返回
 `outcome_note_unsupported`；旧 0.3 无 token 的 note 返回 `outcome_note_ignored`，
 不落盘。
 
@@ -464,7 +465,7 @@ shadow 的 `silent` 建议 + baseline `speak` 不会被当成实际沉默。默�
 
 model planner 与自适应实现有 fake gateway/单测覆盖和 W7 local/host 管道证据，但不是
 真实模型质量 Gate；真实模型 smoke 与 golden set 尚未运行，自适应保持 `shadow`。
-0.4.0 的 local 仍是 assisted/shadow；权威 local planner 属于独立的 0.4.2 线。
+0.3.7 的 local 仍是 assisted/shadow；权威 local planner 属于后续独立线。
 
 插件的 `alreadyInjectedIds` fragment ID 别名表是**进程内**的：同一次 sidecar 会话里
 回传的 `mf_…` 能解析到 source 记录，但 sidecar 重启后，重启前产生的旧 `mf_…` 可能
@@ -499,7 +500,7 @@ model planner 与自适应实现有 fake gateway/单测覆盖和 W7 local/host �
 - 新协议 outcome 不带 `note`：带 binding token 的 note 会被
   `outcome_note_unsupported` 拒绝；旧 0.3 无 token 的 note 返回
   `outcome_note_ignored` 但不落盘。用户正文不会复制进 outcome。
-- 0.4.0 不同步策略状态到其他设备。
+- 0.3.7 不同步策略状态到其他设备。
 
 ## 详情、证据与保留
 

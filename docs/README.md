@@ -11,7 +11,7 @@ main [`README.md`](../README.md); this index only describes document structure.
 
 - [README](../README.md) · [中文 README](../README_CN.md)
 - [Quickstart](getting-started/QUICKSTART.md) · [快速上手](getting-started/QUICKSTART_CN.md)
-- [Memory Runtime guide (0.4.0)](guides/MEMORY_RUNTIME.md) · [Memory Runtime 用户指南（0.4.0）](guides/MEMORY_RUNTIME_CN.md)
+- [Memory Runtime guide (0.3.7)](guides/MEMORY_RUNTIME.md) · [Memory Runtime 用户指南（0.3.7）](guides/MEMORY_RUNTIME_CN.md)
 - [Roadmap](../ROADMAP.md) · [路线图](../ROADMAP_CN.md) — public themes, current focus and exploration
 - [Contributing & quality gates](../CONTRIBUTING.md)
 - [Security policy](../SECURITY.md)
@@ -63,7 +63,7 @@ main [`README.md`](../README.md); this index only describes document structure.
 ## Design
 
 - [Adapter provisioning](design/adapter-provisioning.md) — host matrix, install/configure/activate/rollback, `adapters.json`, health/repair, security boundaries
-- [0.4.0 Memory Intervention Policy](design/0.4.0-intervention-policy.md) — when × how deep, decision/outcome, shadow/canary and boundaries
+- [Memory Intervention Policy design](design/0.4.0-intervention-policy.md) — historical design name (shipped as 0.3.7): when × how deep, decision/outcome, shadow/canary and boundaries
 - [Memory Runtime 0.3.2 stability contract](design/0.3.2-stability-contract.md) · [中文](design/0.3.2-stability-contract_CN.md) — data, failure, lifecycle and acceptance target
 - [Memory Runtime 0.3.0 contract](design/0.3.0-memory-runtime-contract-v2.md) — historical sidecar and capability contract (Chinese)
 - [Memory Runtime sidecar lifecycle](design/0.3.0-memory-runtime-sidecar.md) — historical process, discovery, token and local-data design (Chinese)
@@ -74,8 +74,8 @@ main [`README.md`](../README.md); this index only describes document structure.
 ## Quality and release evidence
 
 - [Adapter provisioning verification](quality/adapter-provisioning/adapter-provisioning-verification.md) — real OpenCode v2.4.1 adapter E2E, DSH/Hermes boundaries and no-UI-diff evidence
-- [v0.4.0 intervention verification](quality/0.4.0-intervention/0.4.0-verification.md) — real sidecar + real OpenCode plugin outcome E2E, privacy and Console evidence; W7 matrix at 6/20
-- [v0.4.0 release readiness](quality/0.4.0-intervention/0.4.0-release-readiness.md) — version/docs prep, full gate results and the explicit `blocked_external` Go/No-Go
+- [Intervention implementation verification](quality/0.4.0-intervention/0.4.0-verification.md) — real sidecar + real OpenCode plugin outcome E2E, privacy and Console evidence; W7 matrix at 6/20 (evidence files keep the historical 0.4.0 design name)
+- [v0.3.7 release readiness](quality/0.4.0-intervention/0.3.7-release-readiness.md) — version/docs prep for 0.3.7, full gate results, deferred API validation and the explicit `blocked_external` gates
 - [v0.3.4 verification](quality/0.3.4-verification.md) — Console settings redesign scope, SSOT/build/lint/docs checks and release dry-run
 - [v0.3.2 verification matrix](quality/0.3.2-verification.md) — final test counts, host boundaries, scale/model evidence and explicit pending items
 - [v0.3.2 scale benchmark](quality/0.3.2-scale-benchmark.md) — 1k/2k/10k count audits, performance, resources, failure injection and preserved 10k failure history

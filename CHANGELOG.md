@@ -16,11 +16,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 The GitHub Release body is extracted from this file: everything between the release's
 `## [vX.Y.Z]` heading and the next `## [` heading. Keep that section self-contained.
 
-## [v0.4.0] - Unreleased
+## [v0.3.7] - 2026-11-28
 
-Memory Intervention Policy. 0.4.0 moves immersive recall from “what to remember” to
-**when and how deeply to bring it back**. It is **not released**, the default remains
-`off`, and upgrading does not change 0.3.x recall behavior.
+Memory Intervention Policy. This release ships the **complete implementation** that was
+designed under the 0.4.0 label: immersive recall moves from “what to remember” to
+**when and how deeply to bring it back**. The release number is 0.3.7, the default remains
+`off`, and upgrading does not change existing recall behavior.
+
+Release gates that still need real hosts are listed under
+[Known limitations](#known-limitations): real API provider validation is **deferred**, and
+DSH, Hermes, OpenChamber Desktop and real host-model evidence are still required before
+the line can be declared fully verified. Nothing in this section treats a 6/20 matrix, a
+simulated API or an adapter identity as a pass.
 
 ### Added
 
@@ -48,7 +55,7 @@ Memory Intervention Policy. 0.4.0 moves immersive recall from “what to remembe
   no migration, no second persisted mode.
 - **Local assisted planning** — when `model.source=local`, the sidecar prefetches a plan
   after the previous turn and consumes it on the next matching cue (60 s TTL, no model
-  call on the `/context` decision path). Local is **assisted/shadow** in 0.4.0, not an
+  call on the `/context` decision path). Local is **assisted/shadow** in 0.3.7, not an
   authoritative planner.
 - **API and host-plan sources** — `model.source=api` is the only synchronous model planner
   path (explicit `allowRemote`, no retries, 1500 ms cap); `model.source=host` consumes a
@@ -105,30 +112,29 @@ Memory Intervention Policy. 0.4.0 moves immersive recall from “what to remembe
   advice with a baseline `speak` is never reported as `missed`. `defer` remains
   distinguishable from `silent` in `applied`, and reset clears policy statistics plus
   runtime streaks/last-decision only, never memory or traces.
-- The former experimental framing is removed for 0.4.0 release-prep behaviour: the local
-  planner, API/host sources and adaptive thresholds are documented features with their
-  stated defaults and boundaries. 0.4.0 remains **Unreleased** and the W8 readiness
-  report remains **No-Go**. The **legacy experimental configuration keys remain
-  compatibility input only**: old `adaptive.enabled` / `adaptive.shadow` values are not
-  deleted or silently honoured; they emit `adaptive_experimental_ignored`.
-- **Local-authoritative planning is not part of 0.4.0.** A local model never becomes the
-  authoritative planner in this release; that remains a separate 0.4.2 line.
-- **One-way version handshake window.** The 0.4.0 sidecar accepts MCP `>=0.3.0` through
-  the `0.4.x` line, so a 0.3 MCP can talk to a 0.4 sidecar. The reverse is **not**
-  compatible: a 0.4 MCP talking to a 0.3 sidecar is rejected because that sidecar still
-  advertises `maxMcpVersion=0.3.x`. There is no wire/schema change. Stop the old sidecar
-  with its own runtime/CLI/OS first, then upgrade MCP and sidecar together. The 0.4
-  supervisor reuses only compatible instances; it reports `version_incompatible` or
-  `orphaned_sidecar_alive` instead of terminating or replacing the old sidecar. Do not
-  claim bidirectional 0.3/0.4 compatibility or automatic replacement.
+- The former experimental framing is removed for 0.3.7: the local planner, API/host
+  sources and adaptive thresholds are documented features with their stated defaults and
+  boundaries. The **legacy experimental configuration keys remain compatibility input
+  only**: old `adaptive.enabled` / `adaptive.shadow` values are not deleted or silently
+  honoured; they emit `adaptive_experimental_ignored`.
+- **Local-authoritative planning is not part of 0.3.7.** A local model never becomes the
+  authoritative planner in this release; that remains a separate follow-up line.
+- **Version handshake.** There is no wire/schema change in 0.3.7. MCP and sidecar stay in
+  the same `0.3.x` window (`minMcpVersion=0.3.0`, upper bound `0.4.x`), so a 0.3.7 MCP
+  and a 0.3.7 sidecar interoperate. Upgrade both together; the supervisor reuses only
+  compatible instances and reports `version_incompatible` or `orphaned_sidecar_alive`
+  instead of terminating or replacing an older sidecar. Do not claim a released 0.4.0
+  line or automatic replacement.
 
 ### Known limitations
 
-- **0.4.0 release evidence is incomplete.** The current W7 real-evidence matrix passes
-  6 of 20 host × source cells; API, DSH, Hermes, OpenChamber Desktop and real host-model
-  cells remain `blocked_external`. W8 Go/No-Go must wait for that external evidence and
-  must not fill cells with fakes or stubs. See the
-  [release-readiness report](docs/quality/0.4.0-intervention/0.4.0-release-readiness.md).
+- **0.3.7 release gates are not all met.** The W7 real-evidence matrix passes 6 of 20
+  host × source cells, and the remaining cells (real API, DSH, Hermes, OpenChamber
+  Desktop, real host model) are `blocked_external`. **Real API provider validation is
+  explicitly deferred** for this release. 6/20 is not a pass, a simulated API is not a
+  pass, and no cell may be filled with a fake, stub or adapter identity. DSH, Hermes,
+  Desktop and real host-model runs remain 0.3.7 release gates. See the
+  [release-readiness report](docs/quality/0.4.0-intervention/0.3.7-release-readiness.md).
 - **`must_speak` is not 100% speak.** With no candidate it degrades to
   checkpoint-only: `action=silent`, `reason=must_speak_unavailable`,
   `degraded:true`, while `self`/checkpoint still inject.
@@ -146,11 +152,29 @@ Memory Intervention Policy. 0.4.0 moves immersive recall from “what to remembe
   [Memory Runtime guide](docs/guides/MEMORY_RUNTIME.md),
   [OpenChamber](docs/integrations/OPENCHAMBER.md), [DSH](docs/integrations/DSH.md) and
   [Hermes](docs/integrations/HERMES.md) integration docs.
-- Added the [0.4.0 intervention design](docs/design/0.4.0-intervention-policy.md),
-  the intervention section in the Memory Runtime guide, the
-  [0.4.0 verification report](docs/quality/0.4.0-intervention/0.4.0-verification.md),
-  and the [0.4.0 release-readiness report](docs/quality/0.4.0-intervention/0.4.0-release-readiness.md)
-  with the 6/20 coverage matrix and the external blockers.
+- Added the [intervention design](docs/design/0.4.0-intervention-policy.md) (design
+  documents keep their historical `0.4.0` naming), the intervention section in the
+  Memory Runtime guide, the
+  [implementation verification report](docs/quality/0.4.0-intervention/0.4.0-verification.md),
+  and the [0.3.7 release-readiness report](docs/quality/0.4.0-intervention/0.3.7-release-readiness.md)
+  with the 6/20 coverage matrix, the deferred API validation and the external blockers.
+
+### Verification
+
+- `npm run build`, `npm run lint`, `npm run check:i18n` (32 checks), `npm run check:docs`
+  (7 checks), `npm run check:architecture` and `npm run verify:release-version`
+  (8 packages at `0.3.7`) all pass.
+- `tests/release`: 3 suites / 17 tests passed.
+- Memory Runtime / MCP / Console / OpenCode plugin / DSH / Hermes Jest: 160 suites /
+  2226 tests. Under a heavily loaded host 4 timing-bound tests failed; each passes
+  standalone on this branch and the performance-budget one fails identically on the
+  unmodified base, so they are recorded as environment artifacts, not passes or
+  regressions.
+- Hermes Python: 109 tests passed. `verify:dsh-plugin`: 215 checks. `verify:console`
+  (E1) passed; `verify:console:ui` was skipped because no Chrome/Chromium is present.
+- Not run, and not filled with fakes: real API provider (deferred), DSH real host, Hermes
+  real host, OpenChamber Desktop and real host-model runs. They remain `blocked_external`
+  release gates; 6/20 is not a pass.
 
 ## [v0.3.5] - 2026-11-19
 
@@ -925,7 +949,7 @@ installers.
 - **范围** —— v0.1.0 不做签名、公证与自动更新，留到后续版本。
 
 [Unreleased]: https://github.com/Windsander/Mebular/compare/v0.2.0...HEAD
-[v0.4.0]: https://github.com/Windsander/Mebular/compare/v0.3.5...HEAD
+[v0.3.7]: https://github.com/Windsander/Mebular/compare/v0.3.5...v0.3.7
 [v0.3.5]: https://github.com/Windsander/Mebular/releases/tag/v0.3.5
 [v0.3.4]: https://github.com/Windsander/Mebular/releases/tag/v0.3.4
 [v0.2.0]: https://github.com/Windsander/Mebular/releases/tag/v0.2.0

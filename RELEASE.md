@@ -18,8 +18,10 @@ the unified release train; no release ships the DSH plugin alone. `bump_version.
 all eight packages, and `verify:release-version` / the publish workflow enforce the same
 version. Signing, notarization, and auto-update are not part of this release.
 
-v0.4.0 is only in release preparation on `feat/0.4-w8-release-prep`: package manifests,
-locks and version sources are at `0.4.0`, but there is no tag, push, publish or `main`
-merge. W8 Go/No-Go remains blocked on real API, DSH, Hermes, OpenChamber Desktop and
-host-model evidence; see the
-[0.4.0 release-readiness report](docs/quality/0.4.0-intervention/0.4.0-release-readiness.md).
+**v0.3.7** is the release candidate on `release/0.3.7`. It ships the complete Memory
+Intervention Policy implementation (previously designed under the 0.4.0 label), and every
+manifest, lock file, MCP/sidecar/OpenCode version source and Hermes `plugin.yaml` is at
+`0.3.7`. There is no tag, push or publish yet. Real API provider validation is **deferred**
+for this release; DSH, Hermes, OpenChamber Desktop and real host-model evidence remain
+0.3.7 release gates, and the 6/20 real-evidence matrix is **not** a pass. See the
+[0.3.7 release-readiness report](docs/quality/0.4.0-intervention/0.3.7-release-readiness.md).

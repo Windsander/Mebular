@@ -3,22 +3,22 @@
 面向 `@mebular/*` npm 包与三平台桌面安装包的发布操作手册。核心约束：**分支名即版本号
 （SSOT）**、**先构建安装包再发 npm**、**幂等发布**、**按 ref 串行**。
 
-当前**已发布**版本线 v0.3.5。0.4.0 只在
-`feat/0.4-w8-release-prep` 做发布准备（manifest/lock/版本源已为 `0.4.0`），尚未创建
-tag、push、发布或合并 `main`；W8 Go/No-Go 仍被真实 API/DSH/Hermes/OpenChamber
-Desktop/宿主模型证据阻断，见
-[`0.4.0 release readiness`](../quality/0.4.0-intervention/0.4.0-release-readiness.md)。
+当前**已发布**版本线 v0.3.5。**v0.3.7** 是 `release/0.3.7` 上的发布候选：manifest、
+lock 与版本源均为 `0.3.7`，包含原 0.4.0 设计的完整实现；尚未创建 tag、push、发布或合并
+`main`。真实 API provider 校验**延后**，DSH/Hermes/OpenChamber Desktop/真实宿主模型仍是
+0.3.7 发布门禁，见
+[`0.3.7 release readiness`](../quality/0.4.0-intervention/0.3.7-release-readiness.md)。
 
-0.4.0 的 MCP/sidecar 握手是**单向**窗口：0.3 MCP 可以连接 0.4 sidecar；0.4 MCP **不能**
-连接仍声明 `maxMcpVersion=0.3.x` 的 0.3 sidecar。升级顺序：
+0.3.7 没有 wire/schema 变化，MCP 与 sidecar 仍在同一 `0.3.x` 握手窗口
+（`minMcpVersion=0.3.0`，上界 `0.4.x`），因此 0.3.7 MCP 与 0.3.7 sidecar 互通。升级顺序：
 
-1. 先用**旧 runtime/CLI/OS** 停止旧的 managed/attached/manual sidecar。不要依赖 0.4
-   supervisor 终止或替换不兼容的旧实例。
-2. 再将 MCP 与 sidecar 一起升级到同一 `0.4.0` 版本，然后启动 sidecar 与宿主。
-3. 0.4 supervisor 只复用已兼容的实例；版本不匹配时返回 `version_incompatible`，旧
+1. 先用**旧 runtime/CLI/OS** 停止旧的 managed/attached/manual sidecar。不要依赖新
+   supervisor 终止或替换旧实例。
+2. 再将 MCP 与 sidecar 一起升级到同一 `0.3.7` 版本，然后启动 sidecar 与宿主。
+3. supervisor 只复用已兼容的实例；版本不匹配时返回 `version_incompatible`，旧
    managed child 在父监督收尾后仍存活时返回 `orphaned_sidecar_alive`，两者都**不会**
    停止或替换旧 sidecar。
-4. 不要宣称双向 0.3/0.4 兼容；混合版本窗口仍不作为支持承诺。
+4. 不要宣称存在已发布的 0.4.0 线，也不要宣称自动替换。
 
 v0.3.5 的发布对象：
 

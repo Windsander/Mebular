@@ -15,7 +15,7 @@ import { readJsonFile } from './atomic-json.js';
 import { clampContextDeadline } from './deadline.js';
 
 export const SIDECAR_PACKAGE_NAME = '@mebular/memory-runtime';
-export const SIDECAR_RUNTIME_VERSION = '0.4.0';
+export const SIDECAR_RUNTIME_VERSION = '0.3.7';
 export const SIDECAR_API_VERSION = 1;
 export const SIDECAR_CAPABILITY_API_VERSION = 1;
 export const SIDECAR_MIN_MCP_VERSION = '0.3.0';

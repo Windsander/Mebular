@@ -2,8 +2,9 @@
 
 [中文](DSH_CN.md) · [Documentation index](../README.md)
 
-> **Version status:** published installs pin **0.3.5**. The `0.4.0` release-prep line is
-> **not published**; keep install commands on `0.3.5` until 0.4.0 is Go.
+> **Version status:** the latest published installs pin **0.3.5**. **0.3.7** is the
+> release candidate on `release/0.3.7` (not yet tagged or published); keep install commands
+> on `0.3.5` until the 0.3.7 gates pass.
 
 `@mebular/dsh-plugin` brings Mebular's memory and task graph into
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH), and
